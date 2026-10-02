@@ -1229,6 +1229,13 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
+  /** Structural installation capabilities; absent on older deployments means both disabled. */
+  canvasFeatures?: {
+    /** The composition UI may be offered to workspace builders. Never grants resource authority. */
+    composableViews: boolean;
+    /** Saved definitions are available only when both installation flags are enabled. */
+    durableViews: boolean;
+  };
   /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
   defaultTheme?: DefaultThemeMode;
   /** Workshop listing density; omitted means comfortable. Gadget layouts are independent. */

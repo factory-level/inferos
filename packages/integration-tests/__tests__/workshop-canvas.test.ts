@@ -10,6 +10,7 @@ it.each([[undefined, undefined], ['true', 'false'], ['false', 'true']])("denies 
   } });
   try {
     using api = connect(harness.url);
+    expect((await api.getServerConfig()).canvasFeatures).toEqual({ composableViews: composable === "true", durableViews: false });
     using owner = await signUp(api, "canvasdisabled");
     using workspace = await owner.newGadget();
     await expect(workspace.listCanvases()).rejects.toThrow(/disabled/);
@@ -29,6 +30,7 @@ it("stores workspace-scoped compositions with atomic revisions, reconnect recove
   } });
   try {
     using api = connect(harness.url);
+    expect((await api.getServerConfig()).canvasFeatures).toEqual({ composableViews: true, durableViews: true });
     using owner = await signUp(api, "canvasowner");
     using collaborator = await signUp(api, "canvasbuilder");
     using viewer = await signUp(api, "canvasviewer");

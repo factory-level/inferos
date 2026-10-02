@@ -48,6 +48,10 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
+    canvasFeatures: {
+      composableViews: env.COMPOSABLE_VIEWS === "true",
+      durableViews: env.COMPOSABLE_VIEWS === "true" && env.DURABLE_VIEWS === "true",
+    },
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),
