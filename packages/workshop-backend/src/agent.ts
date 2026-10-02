@@ -4,6 +4,7 @@ import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type Code
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger } from "./observability";
+import { CanvasConflictError, type CanvasCatalog, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { Type, toToolDeclaration } from "@earendil-works/pi-ai";
 import type {
   AssistantMessage, ImageContent, Message, TSchema, TextContent, ThinkingContent, ToolCall, Usage,
@@ -744,6 +745,24 @@ export interface AgentHooks {
    */
   fetchBlueprint(blueprintId: string)
       : Promise<{files: Record<string, string>, notes: string, output?: BlueprintOutput}>;
+
+  /**
+   * The workspace's saved canvases and the deployment's composition catalog, or null when the
+   * installation has durable views disabled (the canvas tools are then not offered).
+   */
+  getCanvasAccess(): AgentCanvasAccess | null;
+}
+
+/**
+ * The canvas tools' view of a workspace's saved canvases. It routes to the same store the builder
+ * UI edits through, so the agent's edits obey the same revision checks and catalog limits.
+ */
+export interface AgentCanvasAccess {
+  /** What the deployment offers for composition. */
+  catalog: CanvasCatalog;
+  list(): CanvasDefinition[];
+  create(content: CanvasContent): CanvasDefinition;
+  edit(id: string, expectedRevision: string, operations: CanvasOperation[]): CanvasDefinition;
 }
 
 // =======================================================================================
@@ -1050,6 +1069,27 @@ let LIST_BLUEPRINTS_TOOL_DESCRIPTION = `
 List the blueprints available to the user: their own published blueprints, their blueprint library, and this deployment's featured blueprints. A blueprint is a shareable snapshot of a Gadget's code; instantiate one as a new Gadget by passing its \`blueprintId\` to \`createGadget\`. There is no search — read the list and pick the best match yourself.
 `.trim();
 
+let LIST_CANVASES_TOOL_DESCRIPTION = `
+List this workspace's canvases (saved screens that lay out widgets in sections) with their sections, widgets and current revisions, plus what this installation lets you place on them: enabled widget kinds, blueprints offered as widgets, and screen templates. Call this before \`editCanvas\`.
+`.trim();
+
+let EDIT_CANVAS_TOOL_DESCRIPTION = `
+Create a canvas or change one. Canvases are the user's screens: ordered sections (1–3 columns) of widgets. Edits apply immediately and the user sees them live.
+
+To create one, omit \`canvasId\` and pass \`title\`, optionally with \`templateId\` (from listCanvases) to start from a configured layout; any \`operations\` then apply to the new canvas. To change one, pass \`canvasId\` and the \`expectedRevision\` listCanvases (or your last edit) returned. A stale revision is rejected with the current one: re-list, then retry against the current content.
+
+\`operations\` (at most 32, applied atomically) are objects with a \`type\`:
+- \`{type:"addSection", index, section:{id, title, columns:1|2|3, widgets:[]}}\`
+- \`{type:"addWidget", sectionId, index, widget}\`, \`{type:"moveWidget", widgetId, sectionId, index}\`, \`{type:"removeWidget", widgetId}\`, \`{type:"configureWidget", widget}\`
+- \`{type:"rename", title}\`, \`{type:"configureSection", sectionId, title, columns}\`, \`{type:"moveSection", sectionId, index}\`, \`{type:"removeSection", sectionId}\`
+
+IDs are yours to choose (letters, digits, \`_\`, \`-\`; unique within the canvas). A widget is \`{id, kind, version:1, targetRef, size:"normal"|"wide"|"full", params}\`:
+- \`kind:"inferos.gadget"\`: shows a gadget from this workspace. \`targetRef\` is \`gadget:<gadgetId>\` (the id createGadget returned), \`params\` is \`{}\`. A gadget created in this chat appears once the user accepts the chat's changes.
+- \`kind:"inferops.project-board"\`: a reference to an InferOps board, \`targetRef\` \`inferops://<host>/project/board/<KEY>\`, \`params\` \`{workflow:"software"|"content", showCompleted:boolean}\`.
+
+Only kinds listCanvases reports as enabled are accepted. A blueprint offered as a widget (for example an InferOps Kanban board) is placed by creating a gadget from it with createGadget, wiring the binding its notes describe (requesting the connection first if needed), then adding it here as an \`inferos.gadget\` widget. Removing a widget never deletes the gadget or any data.
+`.trim();
+
 let WRITE_FILE_TOOL_DESCRIPTION = `
 Write a complete file, creating it if it doesn't exist, or replacing it if it does.
 `.trim();
@@ -1205,6 +1245,19 @@ function findEditPos(content: string, textToReplace: string): number {
 
 // Renders a JSON-structured tool result as the exact text the model sees. Used by both the live
 // tools and history replay so the two can never drift.
+/** A canvas as the canvas tools report it: its layout and revision, nothing else. */
+function summarizeCanvas(canvas: CanvasDefinition) {
+  return {
+    id: canvas.id,
+    title: canvas.title,
+    revision: canvas.revision,
+    sections: canvas.sections.map(({id, title, columns, widgets}) => ({
+      id, title, columns,
+      widgets: widgets.map(({id, kind, targetRef, size, params}) => ({id, kind, targetRef, size, params})),
+    })),
+  };
+}
+
 function jsonToolResultText(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -2256,6 +2309,12 @@ async function runAgentPass(
                 case "listBlueprints":
                 case "listConnectableResources":
                 case "requestConnection":
+                case "listCanvases":
+                  toolOutput = {text: toolCall.output ?? ""};
+                  break;
+                case "editCanvas":
+                  // Recorded rather than re-run: the edit was applied when the call ran, and the
+                  // canvas may have changed since.
                   toolOutput = {text: toolCall.output ?? ""};
                   break;
                 default:
@@ -2921,6 +2980,12 @@ async function runAgentPass(
     details: notes,
   });
 
+  let requireCanvasAccess = () => {
+    let access = hooks.getCanvasAccess();
+    if (!access) throw new Error("Saved canvases are not enabled for this installation.");
+    return access;
+  };
+
   // Schema fragment for the file tools' workpiece reference. Note that although historical logs
   // allow these tool calls to omit this param, is is required in all new tool calls, hence we do
   // not describe it as optional here.
@@ -3487,6 +3552,94 @@ async function runAgentPass(
       }
     }),
 
+    listCanvases: defineTool({
+      name: "listCanvases",
+      label: "List canvases",
+      description: LIST_CANVASES_TOOL_DESCRIPTION,
+      parameters: Type.Object({}),
+      execute: async (toolCallId) => {
+        try {
+          let access = requireCanvasAccess();
+          let output = jsonToolResultText({
+            canvases: access.list().map(summarizeCanvas),
+            catalog: {
+              widgetKinds: access.catalog.widgetKinds,
+              blueprints: access.catalog.blueprints,
+              screenTemplates: access.catalog.screens.map(({id, content}) => ({id, title: content.title})),
+            },
+          });
+          return toolResult(output, { output });
+        } catch (error) {
+          toolCallNotes.set(toolCallId, { error: toolErrorText(error) });
+          throw error;
+        }
+      }
+    }),
+
+    editCanvas: defineTool({
+      name: "editCanvas",
+      label: "Edit canvas",
+      description: EDIT_CANVAS_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        canvasId: Type.Optional(Type.String({
+          description: "The canvas to change. Omit to create a new canvas.",
+        })),
+        expectedRevision: Type.Optional(Type.String({
+          description: "The canvas revision your edit is based on. Required with canvasId.",
+        })),
+        title: Type.Optional(Type.String({
+          description: "Title for a new canvas. Required when creating without a template.",
+        })),
+        templateId: Type.Optional(Type.String({
+          description: "Screen template to start a new canvas from (see listCanvases).",
+        })),
+        operations: Type.Array(Type.Object({type: Type.String()}, {additionalProperties: true}), {
+          description: "Edits to apply, in order. May be empty when creating.",
+        }),
+      }),
+      execute: async (toolCallId, {canvasId, expectedRevision, title, templateId, operations}) => {
+        try {
+          let store = requireCanvasAccess();
+          let {catalog} = store;
+          // The engine validates every operation's shape; this tool only routes them.
+          let ops = operations as CanvasOperation[];
+          let canvas: CanvasDefinition;
+          if (canvasId === undefined) {
+            if (expectedRevision !== undefined) {
+              throw new Error("expectedRevision applies only to an existing canvas (pass canvasId).");
+            }
+            let template = templateId === undefined ? undefined
+                : catalog.screens.find(screen => screen.id === templateId);
+            if (templateId !== undefined && !template) {
+              throw new Error(`No screen template "${templateId}". Use listCanvases to see the templates.`);
+            }
+            let content = template ? structuredClone(template.content) : {title: "", sections: []};
+            if (title !== undefined) content.title = title;
+            canvas = store.create(content);
+            if (ops.length > 0) canvas = store.edit(canvas.id, canvas.revision, ops);
+          } else {
+            if (expectedRevision === undefined) {
+              throw new Error("Pass expectedRevision (from listCanvases or your last edit) with canvasId.");
+            }
+            if (templateId !== undefined || title !== undefined) {
+              throw new Error("title and templateId apply only when creating; use a rename operation instead.");
+            }
+            canvas = store.edit(canvasId, expectedRevision, ops);
+          }
+          let output = jsonToolResultText({success: true, canvas: summarizeCanvas(canvas)});
+          return toolResult(output, { output });
+        } catch (error) {
+          let message = error instanceof CanvasConflictError
+              ? `${error.message}. The current revision is ${error.currentRevision}; call ` +
+                  `listCanvases to see the current content before retrying.`
+              : toolErrorText(error);
+          toolCallNotes.set(toolCallId, { error: message });
+          if (error instanceof CanvasConflictError) throw new Error(message);
+          throw error;
+        }
+      }
+    }),
+
     executeCode: defineTool({
       name: "executeCode",
       label: "Execute code",
@@ -3622,6 +3775,12 @@ async function runAgentPass(
       }
     }),
   };
+
+  if (!hooks.getCanvasAccess()) {
+    // Durable views are off for this installation: there is nothing to list or edit.
+    tools = Object.fromEntries(Object.entries(tools)
+        .filter(([name]) => name !== "listCanvases" && name !== "editCanvas"));
+  }
 
   if (agentContext.spawnerConfig) {
     // Restrict sub-agents to a narrower set of tools. No user is present to approve changes, so

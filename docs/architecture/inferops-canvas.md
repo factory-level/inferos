@@ -13,9 +13,13 @@ covers:
   - scripts/consumer/views.ts
   - packages/workshop-backend/src/overseer.ts
   - packages/workshop-backend/src/canvas-store.ts
+  - packages/workshop-backend/src/canvas-catalog.ts
+  - packages/workshop-backend/src/deployment-config.ts
+  - packages/workshop-backend/src/agent.ts
+  - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # InferOps canvas and transactional widgets
@@ -75,7 +79,7 @@ Bootstrap writes `views/operations.json` with the configured target reference. `
 
 The existing Overseer durable object's typed storage now has a `canvases` collection. `WorkspaceCanvasStore` uses that collection and the object's synchronous transaction mechanism; it does not introduce a separate database or domain-data cache. Owner/build sessions expose list, get, create, edit and delete methods on the existing Overseer capability. The use-only surface explicitly denies all five methods, covered by the exhaustive use-role suite. Unrelated users still fail the native workspace-open authorization, and IDs are resolved only inside the current workspace's collection.
 
-Every storage operation requires deployment bindings `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` to equal the string `true`. These are structural installation switches, separate from admin soft settings and rollout flags. Disabling either denies reads and mutations without deleting stored records. The consumer launcher maps the corresponding config flags to these bindings. Public server configuration exposes effective flags; the frontend hides the editor's Canvas button and the Canvas page explains that composition is disabled. Agent canvas tools and the board data adapter remain pending.
+Every storage operation requires deployment bindings `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` to equal the string `true`. These are structural installation switches, separate from admin soft settings and rollout flags. Disabling either denies reads and mutations without deleting stored records. The consumer launcher maps the corresponding config flags to these bindings. Public server configuration exposes effective flags; the frontend hides the editor's Canvas button and the Canvas page explains that composition is disabled. The board data adapter remains pending.
 
 Creation accepts content only, mints a new UUID and starts at revision zero. It enforces 64 active definitions per workspace. Imports/recreation never reuse the deleted view's identity, avoiding stale-edit confusion. Edit and delete compare expected revisions in the same synchronous transaction as the write. Invalid edit batches leave persisted content unchanged. Delete removes only the definition; underlying InferOps data is untouched. Unknown stored schema versions fail validation rather than being silently rewritten.
 
@@ -91,6 +95,30 @@ Outside edit mode the active view renders read-only. Sections are size container
 
 Edit mode uses Kumo controls and the shared guarded operation engine. Sections can be renamed. Each section adds a board by reference or an accepted gadget from a picker. A separate move form selects a widget and destination section, appends it there, and returns focus to the source selector. This avoids removing the focused control along with a moved card. Existing upward ordering and undo can refine or reverse the move. It supports temporary in-memory views or saved definitions through the existing Overseer capability. Temporary views are labelled unsaved and last only while the page stays open. Saved changes compare revisions; rejected writes retain the displayed snapshot and offer an explicit reload. Undo restores prior content with a new revision and retains up to 20 session-local snapshots per view. Import validates bounded JSON and sends only content, so stored identities and workspace authority are never imported.
 
-Async responses from an earlier workspace are ignored. A slow file read cannot initiate a create against a workspace that has since been left. Layout controls do not load or mutate domain records or gadget code. Board data, gadget console logs in chat, agent canvas tools, individual sharing and performance benchmarks remain follow-up work.
+Async responses from an earlier workspace are ignored. A slow file read cannot initiate a create against a workspace that has since been left. Layout controls do not load or mutate domain records or gadget code. Board data, gadget console logs in chat, individual sharing and performance benchmarks remain follow-up work.
 
 Export revalidates the active definition and uses the existing browser file-download helper. The JSON contains only the strict portable schema, including required resource references. It contains no ownership, grants, credentials or transactional rows. The filename uses the validated view ID rather than the display title. Import preserves section/widget identities within the new composition but creates a fresh view ID and revision zero; it never carries authority from the source workspace. Exporting a temporary view is allowed, and does not implicitly save it to the server. Exported views that contain gadget widgets are rejected by the consumer starter validator, because gadget references are workspace-local.
+
+## Composition catalog
+
+`CanvasCatalog` (in `@gadgets/workshop-shared/canvas`) is what an installation offers for composition: the widget kinds people and agents may add, blueprints offered as widgets (instantiated as gadgets, placed as `inferos.gadget`), and screen templates new canvases may start from. Templates hold layout and `inferops.project-board` references only, since gadget IDs are workspace-local; `parseCanvasCatalog` reuses the definition parser, so IDs, limits and widget rules match saved canvases exactly.
+
+The deployer sets it through the `CANVAS_CATALOG` JSON binding. `readCanvasCatalog` (`canvas-catalog.ts`) treats an unset binding as every registered kind with no blueprints or templates, and a malformed one as an empty catalog, logged at `error`: a catalog only ever narrows composition, so failing closed loses nothing it could grant. `getServerConfig` publishes it as `canvasFeatures.catalog`.
+
+`applyCanvasOperations` takes an optional `allowedKinds`. Every widget an add, configure, add-section or restore brings in must be of an allowed kind; widgets already on the canvas are left alone, so narrowing the catalog never strands a composition. `WorkspaceCanvasStore` passes the catalog's kinds to every edit and checks created content the same way, so the builder UI and the agent are held to one rule.
+
+The catalog grants nothing. It does not resolve a board reference or bind a gadget to a resource, and enabling a kind is not permission to read the data it shows.
+
+## Agent canvas tools
+
+When durable views are enabled the chat agent has two tools, `listCanvases` and `editCanvas`, which reach the workspace's canvases through the `AgentHooks.getCanvasAccess` hook. That hook returns the same `WorkspaceCanvasStore` paths the builder UI uses, so the agent's edits obey the same revision checks, limits and catalog. With durable views off the tools are not offered at all, and spawned sub-agents never get them.
+
+`listCanvases` returns each canvas's layout and revision plus the catalog (kinds, blueprint widgets, template titles). `editCanvas` creates a canvas (optionally from a template) or applies a batch of the engine's own operations against an expected revision; a stale revision returns the current one so the agent re-lists before retrying. Edits apply when the call runs rather than riding the chat's proposed changes: a canvas holds references and layout, not code or domain data, and the builder UI applies the same edits immediately. Replay returns the recorded output and never re-applies an edit.
+
+A blueprint widget such as the InferOps Kanban board is placed in three steps the tool description spells out: `createGadget` from the blueprint, wire the binding its notes describe (requesting the connection first), then add it with `editCanvas` as an `inferos.gadget` widget. A gadget created in the chat renders on the canvas once the user accepts the chat's changes.
+
+## Canvas configuration CLI
+
+`scripts/consumer/canvas.ts` configures composition before any custom code is written, in this repository (`pnpm canvas <command>`) or in a consumer wrapper (`pnpm canvas <command>`, through the wrapper runtime). It reads and writes `inferos.canvas.json` at that root: enabled widget kinds, blueprint widgets, screen templates, and which `custom-gatekeepers/` packages run. `list` shows what the checkout builds beside what is enabled; `enable`/`disable`, `add-screen`/`remove-screen` and `gatekeeper enable|disable|all` edit the file, re-validating before every write so the CLI never writes a configuration the Workshop would reject. Names the checkout does not build are errors rather than being dropped, and a blueprint widget requires the gadget kind it is placed as.
+
+`pnpm dev-server` (and `run-local`) reads the same file — from `--consumer-root`, or this checkout's root — and passes the resolved catalog as `CANVAS_CATALOG` and binds only the selected custom gatekeepers. In-repo there is no `inferos.config.json` to carry feature flags, so the presence of `inferos.canvas.json` turns composable and durable views on; a wrapper's own flags always take precedence.

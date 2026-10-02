@@ -23,7 +23,7 @@
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
-import type { CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
+import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
@@ -1235,6 +1235,11 @@ export type ServerConfig = {
     composableViews: boolean;
     /** Saved definitions are available only when both installation flags are enabled. */
     durableViews: boolean;
+    /**
+     * What composition offers: addable widget kinds, blueprint widgets and screen templates.
+     * Absent on older deployments, which offer every kind and nothing else.
+     */
+    catalog?: CanvasCatalog;
   };
   /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
   defaultTheme?: DefaultThemeMode;
@@ -3694,6 +3699,33 @@ export type AiToolCall = {
      * bindings lack it.
      */
     bindingName?: string;
+  };
+  output?: string;
+} | {
+  /**
+   * List the workspace's saved canvases and the deployment's composition catalog. The formatted
+   * output is recorded so replay doesn't re-read.
+   */
+  toolName: "listCanvases";
+  input: {};
+  output?: string;
+} | {
+  /**
+   * Create a canvas (no `canvasId`) or apply revision-checked operations to one. Applied when the
+   * call runs; replay returns the recorded output rather than re-applying.
+   */
+  toolName: "editCanvas";
+  input: {
+    canvasId?: string;
+    expectedRevision?: string;
+    title?: string;
+    templateId?: string;
+    /**
+     * The model's operations as sent, each carrying the remaining fields of its `CanvasOperation`
+     * variant. Typed by discriminant only: the canvas engine validates them, and a rejected call is
+     * logged with its input as received.
+     */
+    operations: {type: CanvasOperation["type"]}[];
   };
   output?: string;
 });
