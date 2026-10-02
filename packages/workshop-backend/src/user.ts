@@ -2,7 +2,7 @@ import { RpcStub } from "capnweb";
 import { openAiCommand } from './openai-plugin.js';
 import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
 import { localApiModels } from './local-api-models.js';
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind } from '@gadgets/workshop-shared/api';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -1106,6 +1106,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error("No such workspace belonging to user.");
     }
     record.title = title;
+    this.storage.gadgets.put(record);
+  }
+
+  async updateKind(gadgetId: string, kind: WorkspaceKind) {
+    let record = this.storage.gadgets.get(gadgetId);
+    if (!record) {
+      throw new Error("No such workspace belonging to user.");
+    }
+    record.kind = kind;
     this.storage.gadgets.put(record);
   }
 

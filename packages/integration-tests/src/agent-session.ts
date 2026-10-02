@@ -2,6 +2,7 @@ import type { RpcPromise, RpcStub } from "capnweb";
 import type {
   ActionHistoryFilter, ActionHistoryPage, AiChatAuthorInfo, AiChatHistoryPage, AiChatMessage,
   AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiModelConfig, AuthenticatedApi, GadgetClient,
+  WorkspaceKind,
   Overseer, PublicApi, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber,
 } from "@gadgets/workshop-shared/api";
 import type { CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -29,6 +30,8 @@ export type AgentTurnOptions = {
 export type AgentSessionOptions = {
   modelId: string;
   userModel?: UserModel;
+  /** The kind of workspace to create; omitted, the default (an app). */
+  workspaceKind?: WorkspaceKind;
   ambientVendorIds?: readonly string[];
   usernamePrefix?: string;
   turnTimeoutMs?: number;
@@ -1028,7 +1031,7 @@ export async function openAgentSession(
       accounts.set(vendorId, account);
     }
 
-    workspace = await authenticated.newGadget();
+    workspace = await authenticated.newGadget(options.workspaceKind);
     const { id: workspaceId } = await workspace.getMetadata();
     session = new WorkshopAgentSessionImpl({
       username,

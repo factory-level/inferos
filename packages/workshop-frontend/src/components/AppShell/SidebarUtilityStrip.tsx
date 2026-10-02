@@ -79,7 +79,7 @@ export default function SidebarUtilityStrip({ collapsed = false }: { collapsed?:
       className={[
         // shrink-0 + solid base so the strip is visually pinned above the scrolling rail body
         // and content can't bleed through it. Flat treatment — no top shadow.
-        'shrink-0 flex items-center gap-1 border-t border-kumo-line bg-kumo-elevated px-3 py-2',
+        'shrink-0 flex items-center gap-1 bg-kumo-elevated px-3 py-2',
         collapsed ? 'flex-col justify-center gap-2 px-1.5' : '',
       ].join(' ')}
     >

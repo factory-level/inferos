@@ -22,6 +22,8 @@ import {
 import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
+import { useChatLayout } from "../features/chat-layouts/chatLayout";
+import { FlaggedChatLayout } from "../features/chat-layouts/FlaggedChatLayout";
 
 type HomeSearch = { prompt?: string };
 
@@ -44,6 +46,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
 
   const { authenticatedApi, currentUser } = useAuthenticatedApi();
   const navigate = useNavigate();
+  const layout = useChatLayout();
   const toasts = useKumoToastManager();
 
   const [models, setModels] = useState<AiChatAuthorInfo[]>([]);
@@ -151,6 +154,40 @@ export function HomePageContent({ prompt }: HomeSearch) {
     [ensureProvisionalGadget],
   );
 
+  const composer = (
+    <ChatComposer
+      createCapsuleGatekeeper={createCapsuleGatekeeper}
+      getOverseer={getOverseer}
+      onSend={handleSend}
+      isAgentActive={false}
+      models={models}
+      selectedModel={selectedModel === null ? null : { id: selectedModel }}
+      onModelChange={handleModelChange}
+      newChat
+      offerFormats
+      autoFocus
+      minRows={3}
+      seedText={seed?.text}
+      seedNonce={seed?.nonce}
+      draftStorageKey={currentUser
+        ? composerDraftStorageKey(currentUser.id, "home")
+        : undefined}
+    />
+  );
+
+  // Picking a suggestion seeds the composer.
+  const suggestions = (
+    <HomeTaskSuggestions
+      onPick={(suggestion) =>
+        setSeed((prev) => ({ text: suggestion, nonce: (prev?.nonce ?? 0) + 1 }))
+      }
+    />
+  );
+
+  if (layout !== "default") {
+    return <FlaggedChatLayout layout={layout} composer={composer} suggestions={suggestions} />;
+  }
+
   return (
     // Flat enterprise treatment: no mesh, no watermark hexagon, no prompt-glow. The AppShell's
     // <main> already supplies a faint dotted grid as the page background.
@@ -181,31 +218,10 @@ export function HomePageContent({ prompt }: HomeSearch) {
         </header>
 
         {/* Composer */}
-        <ChatComposer
-          createCapsuleGatekeeper={createCapsuleGatekeeper}
-          getOverseer={getOverseer}
-          onSend={handleSend}
-          isAgentActive={false}
-          models={models}
-          selectedModel={selectedModel === null ? null : { id: selectedModel }}
-          onModelChange={handleModelChange}
-          newChat
-          offerFormats
-          autoFocus
-          minRows={3}
-          seedText={seed?.text}
-          seedNonce={seed?.nonce}
-          draftStorageKey={currentUser
-            ? composerDraftStorageKey(currentUser.id, "home")
-            : undefined}
-        />
+        {composer}
 
         {/* A few example work tasks to spark ideas. Picking one seeds the composer above. */}
-        <HomeTaskSuggestions
-          onPick={(suggestion) =>
-            setSeed((prev) => ({ text: suggestion, nonce: (prev?.nonce ?? 0) + 1 }))
-          }
-        />
+        {suggestions}
       </div>
     </div>
   );
