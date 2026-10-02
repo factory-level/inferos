@@ -10,7 +10,7 @@ Tracking epic: [#7](https://github.com/factory-level/inferos/issues/7); roadmap:
 
 ## Purpose
 
-InferOS has two modes. Build is where people author software: apps, widgets and workflows, each in its own workspace. Operate is where people run their operations through a chat that uses that software. Operate is an operational platform, not a build platform. Its chat works your systems (InferOps and other gatekeepers) through the apps and widgets you published, and it never edits their code.
+InferOS has two modes. Build is where people author software: apps, widgets and workflows, each in its own workspace. Operate is where people run their operations through a chat that uses that software. Operate is an operational platform, not a build platform. The target is collaborative domain software such as EMR (electronic medical records) and operations software: many people working the same authoritative records at once, often with regulated data. Its chat works your systems (InferOps and other gatekeepers) through the apps and widgets you published, and it never edits their code.
 
 ## Requirements
 
@@ -22,6 +22,12 @@ InferOS has two modes. Build is where people author software: apps, widgets and 
 - A **page state machine** owns the full Operate page state. User actions, the operate agent and the URL all change it through the same validated events. The state is serializable, so a reload or link restores it.
 - The operate chat is a kernel **chat mode**. Its agent may use the space's installed gadgets and connected gatekeepers through `executeCode`, read screens and views, and send page events. It has no authoring tools (`readFile`, `writeFile`, `editFile`, `createGadget`, `createWorktree`, `setGadgetBinding`). Writes still go through gatekeeper approvals, and InferOps stays authoritative.
 - Installed workflows run inside the operate space on their timed (scheduler) and event (hook) triggers. Their approvals and results surface in the operate session.
+
+- Operate views can be bound to a **subject**: a reference such as a patient, an encounter or a board. The subject is part of the page state. The operate chat works in that subject's context, and the subject's authoritative system decides who may see or change it. A subject reference identifies a target but never authorizes it.
+- Collaboration is on records, not sessions. Several people can have the same subject open; each sees the others' presence, and every write carries the expected revision so a concurrent change becomes a visible conflict, never a silent overwrite.
+- Every read and write the operate agent performs is attributable and auditable: who asked, which subject, which tool or gatekeeper, and what was approved. Observations already record reads; actions already record approvals. Operate surfaces that record per subject.
+- What the operate agent may do follows the person's role in the operate space and in the subject's system, not the published app's wishes. Approval requirements can depend on role and on the data involved.
+- Regulated data (for example PHI) never enters logs, analytics, error reports or unapproved model providers. A space that holds such data marks it, which already forces manual approval of every action and blocks public web fetches (`containsRestrictedData`), and it may only use model providers the deployment allows for that data.
 
 ## Behavior
 
@@ -66,7 +72,11 @@ The operate agent changes the page through a page-event tool that sends the same
 
 ### Single session
 
-Each person has one operate session per operate space. The session is the continuous operate chat plus that person's page state. Opening a shared view adds it to your session; it does not join someone else's. Collaborators' presence can be shown, but their page state is never applied to yours.
+Each person has one operate session per operate space. An operate space is the unit a team works in (for example a clinic, a ward or an ops team). The session is the continuous operate chat plus that person's page state. Opening a shared view, or a subject someone else has open, adds it to your session; it does not join theirs. Presence shows who else is on the same subject, but their page state is never applied to yours. Handing work over (a shift change, an escalation) is an explicit action that shares a subject and a note, not a shared session.
+
+### Subjects
+
+A view may declare a subject type (for example `patient`). Opening it requires a subject reference, which becomes part of the page state and the URL. Every screen and widget in the view receives the subject as input, and the operate chat receives it as context ("this patient"). Switching subject is an event (`openSubject`), like any other page change. The view stores no copy of the subject's data: widgets read it through gatekeepers under the viewer's own authority.
 
 ## Non-Goals
 
@@ -77,11 +87,18 @@ Each person has one operate session per operate space. The session is the contin
 
 ## Open Questions
 
-- Is the single session per operate space, or one per person across every operate space they can open?
-- Which view layouts are needed first (tabs, primary + secondary, grid of screens)?
-- How does an installed app render full-page inside a view: through the existing sandboxed gadget host at view size, or as a dedicated app region?
-- Should Publish to Operate require the workspace's kind to be set explicitly first, or publish the default `app`?
-- Retention of page state: URL only, or also restored per person when they return to the space?
+Proposed answers, to confirm:
+
+- **Session scope:** one session per person per operate space, where a space is the team's unit of work. A person in several spaces has one session in each.
+- **First layouts:** a primary region with a secondary one (a chart beside a side panel), and tabs. A grid of screens later.
+- **Apps in views:** render through the existing sandboxed gadget host, sized to the region. A dedicated app region would weaken isolation, which matters more with regulated data.
+- **Publishing:** require the kind to be set explicitly before publishing. Publishing creates a new pinned version, and upgrading what a space runs is a separate, explicit step, so changes to live operations are controlled.
+
+Still open:
+
+- Which subject types come first, and where their authoritative data lives (InferOps, or another system behind a gatekeeper).
+- How roles map from the subject's system into Operate (per space, per subject, or both).
+- Which model providers a deployment may use with regulated data, and how a space declares that it holds it.
 
 ## Related
 
