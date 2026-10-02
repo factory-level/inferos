@@ -242,7 +242,7 @@ function AppWithConnection() {
   }, [serverConfig]);
 
   return (
-    <ThemeProvider>
+    <ThemeProvider defaultMode={serverConfig?.defaultTheme ?? 'system'}>
       <RpcContext.Provider value={rpcState}>
         <ServerConfigErrorContext.Provider value={serverConfigError}>
           <ServerConfigContext.Provider value={serverConfig}>

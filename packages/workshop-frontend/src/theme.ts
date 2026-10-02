@@ -12,8 +12,9 @@
 // validates the seed before interpolating it into CSS values.
 
 import { applyAccentColor as applyAccentColorToStyle } from '@gadgets/workshop-shared/theme'
+import type { DefaultThemeMode } from '@gadgets/workshop-shared/api'
 
-export type ThemeMode = 'light' | 'dark' | 'system'
+export type ThemeMode = DefaultThemeMode
 export type ResolvedThemeMode = 'light' | 'dark'
 
 const THEME_MODE_STORAGE_KEY = 'gadgets:theme-mode'
@@ -26,13 +27,17 @@ export function getSystemThemeMode(): ResolvedThemeMode {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
-export function readThemeMode(): ThemeMode {
+export function readThemePreference(): ThemeMode | null {
   try {
     const stored = window.localStorage.getItem(THEME_MODE_STORAGE_KEY)
-    return isThemeMode(stored) ? stored : 'system'
+    return isThemeMode(stored) ? stored : null
   } catch {
-    return 'system'
+    return null
   }
+}
+
+export function readThemeMode(): ThemeMode {
+  return readThemePreference() ?? 'system'
 }
 
 export function writeThemeMode(mode: ThemeMode): void {
