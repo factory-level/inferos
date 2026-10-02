@@ -7,7 +7,8 @@ import { WorkshopButton, WorkshopInput } from '../../components/WorkshopControls
 import { useServerConfig } from '../../ServerConfigContext'
 import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import { useDocumentTitle } from '../../useDocumentTitle'
-import { MAX_SCREEN_WORKSPACES, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
+import { MAX_SCREEN_WORKSPACES, invalidateWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
+import { useOperateSession } from '../../features/operate/OperateSessionContext'
 
 // Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
 const BLANK_TEMPLATE = ':blank'
@@ -60,6 +61,7 @@ export const InferOpsCanvasHome = () => {
   const catalog = canvasFeatures?.catalog ?? DEFAULT_CANVAS_CATALOG
   const durableViews = canvasFeatures?.durableViews === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
+  const operate = useOperateSession()
   const selectPortalContainer = useDialogSelectPortalContainer()
   const [workspaceId, setWorkspaceId] = useState('')
   const [template, setTemplate] = useState(BLANK_TEMPLATE)
@@ -79,7 +81,10 @@ export const InferOpsCanvasHome = () => {
     const overseer = authenticatedApi.openGadget(workspaceId)
     try {
       const created = await overseer.createCanvas(content)
-      navigate({ to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, search: { view: created.id } })
+      invalidateWorkspaceScreens()
+      // In Operate the new screen opens into the person's session; otherwise on its workspace page.
+      if (operate) await operate.dispatch({ type: 'open', ref: { type: 'screen', workspaceId, screenId: created.id } })
+      else navigate({ to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, search: { view: created.id } })
     } catch {
       setCreateFailed(true)
     } finally {
