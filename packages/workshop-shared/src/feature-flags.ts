@@ -6,8 +6,11 @@ type UiFeatureFlagDefinition = {
 
 /** UI feature flags resolved by `workshop-backend` for `workshop-frontend`. */
 export const UI_FEATURE_FLAGS = [
-  // Replace this placeholder with the first real feature flag.
-  { key: "placeholder-flag", dev: false, default: false },
+  // Home chat layouts. With none on, Home is the plain chat launcher. If several are on, the first
+  // in this order wins (see `resolveChatLayout` in workshop-frontend).
+  { key: "chat-layout-dashboard", dev: false, default: false },
+  { key: "chat-layout-thread", dev: false, default: false },
+  { key: "chat-layout-copilot", dev: false, default: false },
 ] as const satisfies readonly UiFeatureFlagDefinition[];
 
 type UiFeatureFlag = (typeof UI_FEATURE_FLAGS)[number];

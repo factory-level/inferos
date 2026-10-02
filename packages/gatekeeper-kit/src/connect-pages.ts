@@ -83,31 +83,32 @@ export function connectMutationError(
 export const PAGE_STYLE = `
   :root {
     color-scheme: light dark;
-    --font: "FT Kunst Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-            "Helvetica Neue", sans-serif;
-    --base: #fcfcfb;
+    --font: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+            sans-serif;
+    --base: #f6f5fb;
     --control: #ffffff;
-    --line: #e8e7e4;
-    --text: #1c1a18;
-    --strong: #100f0d;
-    --subtle: oklch(52% 0.006 60);
-    --brand: #ff4801;
-    --danger: oklch(63.7% 0.237 25.331);
+    --line: #e0dded;
+    --text: #141223;
+    --strong: #0f0e1a;
+    --subtle: #5c5875;
+    --brand: #1d4ed8;
+    --danger: #c0384f;
     /* Kumo's primary button is "contrast": near-black in light mode, the accent in dark. */
-    --contrast: #14110f;
+    --contrast: #0f0e1a;
     --on-contrast: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --base: oklch(0.115 0.012 285);
-      --control: oklch(0.155 0.011 285);
-      --line: oklch(0.34 0.022 285);
-      --text: oklch(0.92 0.01 285);
-      --strong: oklch(0.92 0.01 285);
-      --subtle: oklch(0.66 0.02 285);
-      --brand: #b84e00;
-      --danger: oklch(70.4% 0.191 22.216);
-      --contrast: #b84e00;
+      --base: #030208;
+      --control: #0a0912;
+      --line: #93c5fd1f;
+      --text: #eceaf6;
+      --strong: #eceaf6;
+      --subtle: #9b98b5;
+      --brand: #60a5fa;
+      --danger: #f7768e;
+      --contrast: #60a5fa;
+      --on-contrast: #030208;
     }
   }
 

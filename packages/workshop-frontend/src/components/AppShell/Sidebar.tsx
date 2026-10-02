@@ -51,9 +51,9 @@ export default function Sidebar({
     <aside
       aria-label="Primary"
       className={[
-        // Sidebar is the app chrome: a hair greyer than the (lighter) content canvas so the two
-        // surfaces read as distinct without a heavy divider.
-        'flex h-full flex-col border-r border-kumo-line bg-kumo-elevated',
+        // Sidebar is the app chrome. It separates from the content canvas by tone alone (elevated
+        // over base), with no divider, per the InferOS design system.
+        'flex h-full flex-col bg-kumo-elevated',
         collapsed ? 'w-[56px]' : 'w-[min(320px,100vw)] md:w-[260px]',
         'shrink-0 transition-[width] duration-200 ease-out',
       ].join(' ')}
@@ -61,7 +61,7 @@ export default function Sidebar({
       {/* Brand row */}
       <div
         className={[
-          'flex h-14 shrink-0 items-center border-b border-kumo-line',
+          'flex h-14 shrink-0 items-center',
           collapsed ? 'justify-center px-1.5' : 'justify-between gap-2 px-3',
         ].join(' ')}
       >
