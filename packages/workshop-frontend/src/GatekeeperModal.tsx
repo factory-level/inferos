@@ -36,6 +36,7 @@ import { reportIssue } from './errorReporting'
 import { useSiteName } from './ServerConfigContext'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
+import { refreshGatekeeperApps } from './useGatekeeperApps'
 import { openConnectWindow } from './connectHandoff'
 
 export interface GatekeeperModalProps {
@@ -587,8 +588,15 @@ export default function GatekeeperModal({
   const handleConnectAccount = async (vendorId: string, resourceUrlPatterns?: string[]) => {
     setConnectingVendor(vendorId)
     try {
-      openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns))
-      toasts.add({ title: 'Complete the account connection in the pop-up window.', variant: 'success' })
+      if (vendors.find(vendor => vendor.id === vendorId)?.description.autoProvisionsAccount) {
+        // Opt-in gatekeepers have no sign-in flow: the account is minted directly and arrives
+        // through the connected-accounts subscription.
+        await authenticatedApi.provisionAmbientAccount(vendorId)
+        refreshGatekeeperApps(authenticatedApi)
+      } else {
+        openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns))
+        toasts.add({ title: 'Complete the account connection in the pop-up window.', variant: 'success' })
+      }
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       reportIssue('gatekeeper.connect-start', error, { gatekeeperVendorId: vendorId })
@@ -825,6 +833,7 @@ export default function GatekeeperModal({
                     reconnectingAccountId={reconnectingAccountId}
                     requiredResourceUrlPatterns={requiredResourceUrlPatterns(selectedConnection)}
                     grantingAccountId={grantingAccountId}
+                    singleAccount={!!vendors.find(vendor => vendor.id === selectedConnection.vendorId)?.description.autoProvisionsAccount}
                     onSelect={setSelectedAccountId}
                     onConnect={() => {
                       if (!selectedConnection.vendorId) return
