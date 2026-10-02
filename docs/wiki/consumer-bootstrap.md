@@ -12,16 +12,16 @@ Create a wrapper with pinned InferOS code and explicit InferOps/profile/feature 
 Run from this InferOS checkout with Node 22.18 or later:
 
 ```bash
-node scripts/consumer/bootstrap.ts /tmp/my-inferos https://github.com/factory-level/inferos 1045d2e1ceac7be29e1a6f056c936fb31aa00851
+node scripts/consumer/bootstrap.ts /tmp/my-inferos https://github.com/factory-level/inferos 0e282e2144edbac404bcb83d52a5c814121be9e8
 cd /tmp/my-inferos
 pnpm inferos:check
-pnpm setup
-pnpm doctor
+pnpm run setup
+pnpm run doctor
 pnpm blueprints:check
 pnpm dev
 ```
 
-The example pins the inspected baseline, not a moving branch. Select a reviewed commit from your own fork when appropriate. For local development/testing, supply an absolute local Git repository path instead of the HTTPS URL. The destination must be new or an existing wrapper created by this command. The command does not overwrite an arbitrary existing repo.
+The example pins the consumer implementation, not a moving branch. Select a reviewed commit from your own fork when appropriate. For local development/testing, supply an absolute local Git repository path instead of the HTTPS URL. The destination must be new or an existing wrapper created by this command. The command does not overwrite an arbitrary existing repo.
 
 Review and commit the wrapper files and staged gitlink before publishing it. Another developer can then use `git clone --recurse-submodules` on the wrapper. Use the wrapper's pinned pnpm version. `.dev.vars` and local state remain uncommitted.
 
@@ -46,11 +46,11 @@ Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable 
 
 ## Local preflight
 
-`pnpm doctor` emits JSON and exits nonzero when configuration/pins, required native scripts, the pinned pnpm version, local build-tool resolution, port availability or requested unsupported features prevent startup. It does not install dependencies or start Workers. A dirty submodule is a warning rather than a rejection so intentional local experiments remain possible.
+`pnpm run doctor` emits JSON and exits nonzero when configuration/pins, required native scripts, the pinned pnpm version, local build-tool resolution, port availability or requested unsupported features prevent startup. It does not install dependencies or start Workers. A dirty submodule is a warning rather than a rejection so intentional local experiments remain possible.
 
-`ok: true` means the local preflight passed. `runtimeReady: false` explicitly records that the complete InferOps experience remains pending. Neither field proves application health, provider access or cloud parity. The dependency check resolves local tools; `pnpm setup` and the native builds still validate the complete dependency graph. A port check does not reserve the port, and an already running server produces a conflict rather than being terminated. Doctor is for pre-start diagnosis, not a running-service health endpoint.
+`ok: true` means the local preflight passed. `runtimeReady: false` explicitly records that the complete InferOps experience remains pending. Neither field proves application health, provider access or cloud parity. The dependency check resolves local tools; `pnpm run setup` and the native builds still validate the complete dependency graph. A port check does not reserve the port, and an already running server produces a conflict rather than being terminated. Doctor is for pre-start diagnosis, not a running-service health endpoint.
 
-The native launcher in this working tree uses `pnpm install --frozen-lockfile` so starting development cannot silently rewrite dependency resolution. A consumer pinned to an older revision retains that revision's launcher behavior.
+The native launcher at the example pin uses `pnpm install --frozen-lockfile` so starting development cannot silently rewrite dependency resolution. A consumer pinned to an older revision retains that revision's launcher behavior.
 
 ## Customize native applications
 
@@ -75,7 +75,7 @@ unset INFEROS_ADMIN_SESSION
 
 The command applies the configured `styling.siteName` (maximum 40 characters), instructions selected by `profile`, and the fallback theme from `styling.theme`. It connects only to the configured local port. Results are `initialized`, `preserved` (existing name, instructions or non-system theme won), or `already-initialized`. Reruns do not update settings; use the normal admin UI for later name/instruction changes, or the admin API for the default theme. Reload the Workshop to pick up branding. The initialization marker lives with the authoritative settings, not in a wrapper file, so a wrapper rerun or changed config cannot reset it.
 
-This initializes branding, instructions and the deployment fallback theme. Density, starter views, remote InferOps data and profile-specific component catalogs remain pending. The baseline commit in the bootstrap example predates this operator and is rejected by `profile:init`; use a reviewed commit containing these changes once published. Cloud application needs a separate explicit deployment-origin contract.
+This initializes branding, instructions and the deployment fallback theme. Density, starter views, remote InferOps data and profile-specific component catalogs remain pending. Cloud application needs a separate explicit deployment-origin contract.
 
 ## Theme preference precedence
 
@@ -85,6 +85,6 @@ The deployment theme is a fallback, not an enforced setting. A browser's saved `
 
 ## Current limits
 
-`dev` launches native Workshop through run-local. It does not yet render the included InferOps fixture, automatically initialize the profile, apply density, load wrapper Workers or implement durable view storage. It uses the pinned native runner's local state and asset-serving behavior. The working tree now includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
+`dev` launches native Workshop through run-local. It does not yet render the included InferOps fixture, automatically initialize the profile, apply density, load wrapper Workers or implement durable view storage. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
 
 The tests cover fresh creation, recursive clone, paths with spaces, customized rerun, revision drift, Git failure cleanup and all flag combinations. No cloud deployment or live provider login is performed by bootstrap or those tests.

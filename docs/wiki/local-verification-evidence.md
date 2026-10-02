@@ -45,7 +45,7 @@ The source run-local flow now derives ASSETS ownership, SPA fallback and worker-
 | Semi-configured InferOps data model | Synthetic wire fixture exists; runtime data adapter still missing |
 | Composable views | Configuration/design/issues exist; runtime feature missing |
 | Durable views | Configuration/design/issues exist; scoped storage/recovery feature missing |
-| Applied profile and styling | Inputs validate; deployment profile/style adapter missing |
+| Applied profile and styling | Local profile initialization and theme fallback verified through RPC/jsdom; density remains pending |
 | Wrapper-owned custom Cloudflare code | Design/issues exist; manifest discovery and wiring missing |
 | Live InferOps gatekeeper | Contract and implementation issues remain open |
 | Agent authoring and activity | Native mechanisms researched; reusable authoring/canvas activity work remains |
@@ -73,3 +73,9 @@ The real Workers/RPC integration suite exercises `AdminApi.initializeProfile` wi
 ## Deployment fallback theme
 
 Profile initialization now sends the consumer theme and the public server config returns the persisted default. Four real Workers/RPC tests passed, including invalid theme input and preservation of a prior non-system deployment theme. Ten frontend theme/editor tests passed: delayed deployment configuration applies without writing a browser preference; explicit system/light/dark choices win; system-theme changes update the DOM; invalid/unavailable storage falls back correctly; session choices survive storage failures. The 14 admin-config tests, workspace build, final affected-package type checks and focused lint passed. This is RPC and jsdom evidence, not a new browser visual/contrast audit. Density and the admin-panel default-theme control remain pending.
+
+## Committed consumer verification
+
+A fresh wrapper at `/tmp/inferos-committed-consumer-proof` was created from implementation commit `0e282e2144edbac404bcb83d52a5c814121be9e8`, with local port 18789. Frozen dependency installation succeeded, pin validation reported `modifiedUpstream: false`, the consumer preflight passed, and the pinned native compiler validated all three wrapper-owned blueprints. No source overlay was applied. This proves clean-pin setup and preflight, not a new browser launch or cloud deployment.
+
+Use `pnpm run doctor` explicitly: bare `pnpm doctor` selects pnpm’s built-in diagnostics. The generated instructions now use explicit `run` for both setup and doctor. The preflight continues to report `runtimeReady: false` because InferOps data/view adapters remain pending.
