@@ -24,6 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
+import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
@@ -2100,6 +2101,18 @@ export interface Overseer extends RpcTarget {
   editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition>;
   /** Delete a definition at its expected revision with build access and both flags. Reimport creates a new identity. */
   deleteCanvas(id: string, expectedRevision: string): Promise<void>;
+
+  /**
+   * List this workspace's flows: ordered lists of its canvases that an operate session runs one
+   * screen at a time. Flow methods require build access and both view flags, like canvases.
+   */
+  listFlows(): Promise<OperateFlow[]>;
+  /** Create a flow under a server-minted ID and revision zero. Its steps must be canvases of this workspace; limit 32 per workspace. */
+  createFlow(content: OperateFlowContent): Promise<OperateFlow>;
+  /** Replace a flow's content at its expected revision. Sessions already running it keep the steps they started with. */
+  replaceFlow(id: string, expectedRevision: string, content: OperateFlowContent): Promise<OperateFlow>;
+  /** Delete a flow at its expected revision. */
+  deleteFlow(id: string, expectedRevision: string): Promise<void>;
 
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;

@@ -102,4 +102,32 @@ describe("operate session", () => {
     await workspace.newChat("operate chat", null);
     expect((await authenticated.listGadgets()).map(gadget => gadget.id)).not.toContain(id);
   });
+
+  it("carries a running flow's step to every connection", async () => {
+    using first = await connect();
+    const token = await createAccount(first);
+    using second = await connect();
+    using tabA = await first.authenticate(token);
+    using tabB = await second.authenticate(token);
+    using sessionA = await tabA.getOperateSession();
+    using sessionB = await tabB.getOperateSession();
+
+    let sawStep = () => {};
+    const stepped = new Promise<void>(resolve => { sawStep = resolve; });
+    let latest: OperateSessionUpdate | undefined;
+    using _subscription = await sessionB.subscribe((update: OperateSessionUpdate) => {
+      latest = update;
+      if (update.seq === 2) sawStep();
+    });
+
+    await sessionA.dispatch(
+        { type: "startFlow", workspaceId: "ws1", flowId: "intake", title: "Intake", steps: ["a", "b"] }, 0);
+    await sessionA.dispatch({ type: "goToStep", index: 1 }, 1);
+    await stepped;
+    expect(latest?.state.flow).toMatchObject({ flowId: "intake", index: 1, steps: ["a", "b"] });
+
+    expect(await rejectionCode(sessionA.dispatch({ type: "goToStep", index: 2 }, 2)))
+        .toBe(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    expect((await sessionA.dispatch({ type: "exitFlow" }, 2)).state.flow).toBeNull();
+  });
 });
