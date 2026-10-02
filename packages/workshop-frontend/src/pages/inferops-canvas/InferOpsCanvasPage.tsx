@@ -13,6 +13,8 @@ import { useServerConfig } from '../../ServerConfigContext'
 import { useResizableSplit } from '../../hooks/useResizableSplit'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
+import { getStoredSelectedModel } from '../../modelSelection'
+import { DEFAULT_CANVAS_CATALOG } from '@gadgets/workshop-shared/canvas'
 
 const noConsoleLogs = () => ''
 const ignore = () => {}
@@ -20,8 +22,8 @@ const ignore = () => {}
 const Centered = ({ children }: { children: React.ReactNode }) =>
   <div className="flex min-h-full flex-col items-center justify-center gap-4 bg-kumo-base px-6 text-center">{children}</div>
 
-/** A workspace's composed views beside its chat: gadgets and InferOps widgets on one page. */
-export const CanvasPage = ({ workspaceId, chatId }: { workspaceId: string; chatId: number | null }) => {
+/** A workspace's InferOps Canvas: composed views beside its chat, gadgets and InferOps widgets on one page. */
+export const InferOpsCanvasPage = ({ workspaceId, chatId, viewId }: { workspaceId: string; chatId: number | null; viewId: string | null }) => {
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
   const { authenticatedApi } = useAuthenticatedApi()
@@ -32,7 +34,7 @@ export const CanvasPage = ({ workspaceId, chatId }: { workspaceId: string; chatI
     id: workspaceId,
     authenticatedApi,
     onMetadata: ignore,
-    onShareKeyConsumed: () => navigate({ to: '/workspace/$id/canvas', params: { id: workspaceId }, search: {}, replace: true }),
+    onShareKeyConsumed: () => navigate({ to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, search: {}, replace: true }),
     onInvalidShareKey: () => toasts.add({ title: 'Invalid or expired share link.', variant: 'error' }),
   })
   const { workpieces, ready } = useWorkspaceWorkpieces(overseer, workspaceId)
@@ -40,8 +42,25 @@ export const CanvasPage = ({ workspaceId, chatId }: { workspaceId: string; chatI
   for (const workpiece of workpieces.values()) if (workpiece.type === 'gadget') gadgets.set(workpiece.id, workpiece)
 
   const goToWorkspaces = () => navigate({ to: '/workspaces' })
+  const selectView = (view: string | null) => navigate({
+    to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, replace: true,
+    search: (prev: Record<string, unknown>) => ({ ...prev, view: view ?? undefined }),
+  })
+  // Blueprint widgets are built by the agent (create the gadget, wire its connection, place it),
+  // so the canvas hands the request to a new chat with the user's last-chosen model.
+  const askAgent = async (request: string) => {
+    if (!overseer) return
+    const modelId = getStoredSelectedModel(await overseer.stub.listModels())
+    if (!modelId) {
+      toasts.add({ title: 'Choose a model in the chat first, then try again.', variant: 'error' })
+      return
+    }
+    const chat = await overseer.stub.newChat(request, modelId)
+    setMobilePane('chat')
+    navigateToChat(chat)
+  }
   const navigateToChat = (chat: number | null, options?: { replace?: boolean }) => navigate({
-    to: '/workspace/$id/canvas', params: { id: workspaceId }, replace: options?.replace,
+    to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, replace: options?.replace,
     search: (prev: Record<string, unknown>) => ({ ...prev, chat: chat ?? undefined }),
   })
 
@@ -70,7 +89,8 @@ export const CanvasPage = ({ workspaceId, chatId }: { workspaceId: string; chatI
       <Link to="/workspace/$id" params={{ id: workspaceId }} className="flex min-w-0 items-center gap-2 text-sm text-kumo-subtle hover:text-kumo-default">
         <ArrowLeft size={16} aria-hidden /><span className="truncate">{metadata.title}</span>
       </Link>
-      <span className="text-sm font-medium text-kumo-default">Canvas</span>
+      <span className="text-sm font-medium text-kumo-default">InferOps Canvas</span>
+      <Link to="/inferops-canvas" className="text-sm text-kumo-subtle hover:text-kumo-default max-md:hidden">All screens</Link>
       <div role="group" aria-label="Show pane" className="ml-auto flex gap-1 md:hidden">
         {(['chat', 'canvas'] as const).map(pane => <WorkshopButton key={pane} tone={mobilePane === pane ? 'primary' : 'secondary'}
           aria-pressed={mobilePane === pane} onClick={() => setMobilePane(pane)}>{pane === 'chat' ? 'Chat' : 'Canvas'}</WorkshopButton>)}
@@ -92,6 +112,8 @@ export const CanvasPage = ({ workspaceId, chatId }: { workspaceId: string; chatI
       </div>
       <main className={`min-h-0 min-w-0 flex-1 ${mobilePane === 'canvas' ? '' : 'max-md:hidden'}`}>
         <CanvasWorkspacePane key={workspaceId} overseer={overseer.stub} gadgets={gadgets}
+          catalog={canvasFeatures.catalog ?? DEFAULT_CANVAS_CATALOG} viewId={viewId} onViewChange={selectView}
+          onAskAgent={askAgent}
           storage={canvasFeatures.durableViews ? { kind: 'durable', api: overseer.stub } : { kind: 'temporary' }} />
       </main>
     </div>

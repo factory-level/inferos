@@ -3,8 +3,10 @@ title: InferOps canvas and transactional widgets
 covers:
   - packages/workshop-frontend/src/GadgetUI.tsx
   - packages/workshop-frontend/src/features/canvas
-  - packages/workshop-frontend/src/pages/canvas
-  - packages/workshop-frontend/src/routes/workspace_.$id.canvas.tsx
+  - packages/workshop-frontend/src/pages/inferops-canvas
+  - packages/workshop-frontend/src/routes/workspace_.$id.inferops-canvas.tsx
+  - packages/workshop-frontend/src/routes/inferops-canvas.tsx
+  - packages/workshop-frontend/src/components/AppShell/Sidebar.tsx
   - packages/workshop-frontend/src/hooks/useWorkspaceWorkpieces.ts
   - packages/workshop-frontend/src/hooks/useResizableSplit.ts
   - packages/workshop-frontend/src/components/GadgetPresence.tsx
@@ -33,7 +35,8 @@ Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa
 | Path | Responsibility |
 | --- | --- |
 | `packages/workshop-frontend/src/GadgetUI.tsx` | Sandboxed iframe host and RPC handshake; also hosts gadget widgets on the canvas page. |
-| `packages/workshop-frontend/src/pages/canvas/CanvasPage.tsx` | Canvas page at `/workspace/$id/canvas`: workspace chat beside the composed views. |
+| `packages/workshop-frontend/src/pages/inferops-canvas/InferOpsCanvasPage.tsx` | InferOps Canvas page at `/workspace/$id/inferops-canvas`: workspace chat beside the composed views. |
+| `packages/workshop-frontend/src/pages/inferops-canvas/InferOpsCanvasHome.tsx` | Top-level InferOps Canvas page at `/inferops-canvas` (sidebar entry): screens across workspaces and screen creation. |
 | `packages/workshop-frontend/src/features/canvas/` | View picker, read-only renderer, gadget widget host and layout editor. |
 | `packages/workshop-frontend/src/hooks/` | Workpiece-list subscription and chat/pane split shared with the workspace editor. |
 | `packages/workshop-frontend/src/components/GadgetPresence.tsx` | Existing human presence display. |
@@ -89,7 +92,7 @@ Real Workers/RPC tests cover concurrent revision conflicts, rollback, scope isol
 
 ## Canvas page and builder composition UI
 
-`/workspace/$id/canvas` is a fullscreen page (the root already treats every `/workspace/` path as chrome-free). It opens the workspace through the same `useWorkspaceOpen` flow as the editor, so share keys, observer confirmation and open failures behave identically, and use-only collaborators are redirected to the editor route, which shows them only the deployed gadget UI. The workspace's chat runs in a resizable left column (`ChatInterface`, with the remembered width shared with the editor) and the canvas fills the rest; on narrow screens a Chat/Canvas toggle shows one at a time. Chat selection lives in the `chat` search parameter. Opening a gadget from chat navigates to the editor with that gadget selected. The editor's Canvas button now navigates to this page instead of opening a dialog.
+`/workspace/$id/inferops-canvas` is a fullscreen page (the root already treats every `/workspace/` path as chrome-free). It opens the workspace through the same `useWorkspaceOpen` flow as the editor, so share keys, observer confirmation and open failures behave identically, and use-only collaborators are redirected to the editor route, which shows them only the deployed gadget UI. The workspace's chat runs in a resizable left column (`ChatInterface`, with the remembered width shared with the editor) and the canvas fills the rest; on narrow screens a Chat/Canvas toggle shows one at a time. Chat selection lives in the `chat` search parameter. Opening a gadget from chat navigates to the editor with that gadget selected. The editor's InferOps Canvas button navigates to this page. The selected view lives in the `view` search parameter, so a screen can be linked to directly.
 
 Outside edit mode the active view renders read-only. Sections are size containers, so column counts follow the canvas pane's width rather than the viewport: two- and three-column sections collapse to one column below 48rem, and three-column sections show two columns until 64rem. Gadget widgets resolve their reference against the live workpiece list and open a `GadgetClient` through the workspace's `Overseer` (`getGadget`), disposing it when the widget goes away. They then render through the existing sandboxed `GadgetUI` host, keyed by the gadget's head commit so an accepted change reloads it. A widget does not load its bundle until it has been within 200px of the screen. Missing gadgets and drafts that are still pending in a conversation are never opened; each shows an explanatory state instead. Board widgets show their reference and the explicit unconnected state.
 
@@ -122,3 +125,9 @@ A blueprint widget such as the InferOps Kanban board is placed in three steps th
 `scripts/consumer/canvas.ts` configures composition before any custom code is written, in this repository (`pnpm canvas <command>`) or in a consumer wrapper (`pnpm canvas <command>`, through the wrapper runtime). It reads and writes `inferos.canvas.json` at that root: enabled widget kinds, blueprint widgets, screen templates, and which `custom-gatekeepers/` packages run. `list` shows what the checkout builds beside what is enabled; `enable`/`disable`, `add-screen`/`remove-screen` and `gatekeeper enable|disable|all` edit the file, re-validating before every write so the CLI never writes a configuration the Workshop would reject. Names the checkout does not build are errors rather than being dropped, and a blueprint widget requires the gadget kind it is placed as.
 
 `pnpm dev-server` (and `run-local`) reads the same file — from `--consumer-root`, or this checkout's root — and passes the resolved catalog as `CANVAS_CATALOG` and binds only the selected custom gatekeepers. In-repo there is no `inferos.config.json` to carry feature flags, so the presence of `inferos.canvas.json` turns composable and durable views on; a wrapper's own flags always take precedence.
+
+## First-class InferOps Canvas page
+
+When composable views are enabled the sidebar shows **InferOps Canvas**, linking to `/inferops-canvas`. That page lists saved screens across the user's most recently active build workspaces (at most 24): screens are stored per workspace, so it opens each workspace once with a pipelined `openGadget(id).listCanvases()` and disposes the stub right away. A workspace that needs observer setup before it can be opened is listed without its screens. The page also creates a screen in a chosen workspace, blank or from a catalog template, and opens it.
+
+On a workspace's page the pane offers only the catalog's widget kinds. Catalog blueprint widgets appear as buttons that start a new chat (with the user's last-chosen model) asking the agent to build and place that widget, since doing so means creating a gadget and wiring a connection. Saved views are re-read every five seconds while the page is visible and no operation is in flight, so the agent's edits show up without a reload.

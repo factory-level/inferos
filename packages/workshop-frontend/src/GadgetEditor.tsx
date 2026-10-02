@@ -1375,7 +1375,7 @@ export default function GadgetEditor() {
           )}
         </div>
 
-        {canvasFeatures?.composableViews && <WorkshopButton onClick={() => navigate({ to: '/workspace/$id/canvas', params: { id: id! }, search: {} })}>Canvas</WorkshopButton>}
+        {canvasFeatures?.composableViews && <WorkshopButton onClick={() => navigate({ to: '/workspace/$id/inferops-canvas', params: { id: id! }, search: {} })}>InferOps Canvas</WorkshopButton>}
 
         {/* Right: presence, cost, workspace, share, blueprints */}
         <div className="hidden flex-shrink-0 items-center gap-1 md:flex">

@@ -1,7 +1,9 @@
-import { useState } from 'react'
-import { Button, Input } from '@cloudflare/kumo'
+import { useEffect, useState } from 'react'
+import { Button, Input, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
+import type { CanvasCatalog, CanvasContent } from '@gadgets/workshop-shared/canvas'
+import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import DeleteConfirmationDialog from '../../components/DeleteConfirmationDialog'
 import { CanvasMoveWidgetForm } from './CanvasMoveWidgetForm'
 import { CanvasSectionEditor } from './CanvasSectionEditor'
@@ -9,14 +11,31 @@ import { CanvasView } from './CanvasView'
 import { exportCanvas } from './exportCanvas'
 import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 
-export const CanvasWorkspacePane = ({ storage, overseer, gadgets }: {
+const BLANK_TEMPLATE = ''
+
+export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, onAskAgent }: {
   storage: CanvasStorage
   overseer: RpcStub<Overseer>
   /** Every gadget in the workspace, drafts included, keyed by workpiece ID. */
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
+  /** What the deployment offers: addable widget kinds, blueprint widgets and screen templates. */
+  catalog: CanvasCatalog
+  /** The view to open first, when it exists. */
+  viewId: string | null
+  /** Reports the selected view so the page can keep it in its URL. */
+  onViewChange: (viewId: string | null) => void
+  /** Hands a request to the chat agent. */
+  onAskAgent: (request: string) => Promise<void>
 }) => {
-  const canvas = useCanvasWorkspace(storage)
+  const canvas = useCanvasWorkspace(storage, viewId)
+  const selectPortalContainer = useDialogSelectPortalContainer()
+  const [template, setTemplate] = useState(BLANK_TEMPLATE)
   const [editing, setEditing] = useState(false)
+  const activeId = canvas.active?.id ?? null
+  // The URL is the external system here: keep it naming the view on screen.
+  useEffect(() => {
+    if (activeId !== viewId && !canvas.busy) onViewChange(activeId)
+  }, [activeId, viewId, canvas.busy, onViewChange])
   const [confirmDelete, setConfirmDelete] = useState(false)
   const active = canvas.active
   const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined).toSorted((a, b) => a.id - b.id)
@@ -25,10 +44,18 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets }: {
     <form className="flex flex-wrap items-end gap-2" onSubmit={event => {
       event.preventDefault()
       const title = String(new FormData(event.currentTarget).get('title') ?? '').trim()
-      void canvas.create({ title, sections: [{ id: crypto.randomUUID(), title: 'Overview', columns: 2, widgets: [] }] })
-        .then(success => { if (success) setEditing(true) })
+      const screen = catalog.screens.find(item => item.id === template)
+      const content: CanvasContent = screen ? { ...structuredClone(screen.content), title }
+        : { title, sections: [{ id: crypto.randomUUID(), title: 'Overview', columns: 2, widgets: [] }] }
+      void canvas.create(content).then(success => { if (success) setEditing(!screen) })
     }}>
       <Input label="New view title" name="title" required maxLength={120} defaultValue="Operations" disabled={canvas.busy} />
+      {catalog.screens.length > 0 && <Select container={selectPortalContainer} label="Start from" value={template}
+        disabled={canvas.busy} onValueChange={value => setTemplate(String(value ?? BLANK_TEMPLATE))}
+        renderValue={value => catalog.screens.find(item => item.id === value)?.content.title ?? 'Blank view'}>
+        <Select.Option value={BLANK_TEMPLATE}>Blank view</Select.Option>
+        {catalog.screens.map(screen => <Select.Option key={screen.id} value={screen.id}>{screen.content.title}</Select.Option>)}
+      </Select>}
       <Button type="submit" disabled={canvas.busy}>Create view</Button>
     </form>
     <Input label="Import view definition" type="file" accept=".json,application/json" disabled={canvas.busy}
@@ -50,7 +77,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets }: {
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
       {canvas.error && <p role="alert" className="text-sm text-kumo-danger">{canvas.error}</p>}
       {!active && <div className="space-y-4">
-        <p className="text-kumo-subtle">Compose gadgets and InferOps boards into a page. Choose a view, create one, or import a definition from your repository.</p>
+        <p className="text-kumo-subtle">Compose gadgets and InferOps boards into a page. Choose a view, create one, or import a definition from your repository. You can also ask the agent in chat to build a screen for you.</p>
         {createForm}
       </div>}
       {active && !editing && <>
@@ -76,6 +103,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets }: {
         </form>
         {active.sections.map((section, index) => <CanvasSectionEditor key={section.id} section={section} busy={canvas.busy}
           first={index === 0} gadgets={gadgets} acceptedGadgets={acceptedGadgets} onEdit={canvas.edit}
+          catalog={catalog} viewTitle={active.title} onAskAgent={onAskAgent}
           onMoveUp={() => void canvas.edit([{ type: 'moveSection', sectionId: section.id, index: index - 1 }])} />)}
         {active.sections.length > 1 && <CanvasMoveWidgetForm key={active.id} sections={active.sections} gadgets={gadgets}
           busy={canvas.busy} onEdit={canvas.edit} />}

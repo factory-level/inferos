@@ -7,7 +7,13 @@ export type CanvasStorage = { kind: 'temporary' } | {
   api: Pick<Overseer, 'listCanvases' | 'createCanvas' | 'editCanvas' | 'deleteCanvas'>
 }
 
-export const useCanvasWorkspace = (storage: CanvasStorage) => {
+/** How often saved views are re-read so edits made elsewhere (the chat agent, another tab) appear. */
+export const CANVAS_REFRESH_MS = 5000
+
+const sameViews = (a: CanvasDefinition[], b: CanvasDefinition[]) =>
+  a.length === b.length && a.every((view, index) => view.id === b[index].id && view.revision === b[index].revision)
+
+export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string | null = null) => {
   const api = storage.kind === 'durable' ? storage.api : null
   const [views, setViews] = useState<CanvasDefinition[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -26,7 +32,7 @@ export const useCanvasWorkspace = (storage: CanvasStorage) => {
       api.listCanvases().then(result => {
         if (generation.current !== current) return
         const parsed = result.map(parseCanvasDefinition)
-        setViews(parsed); setActiveId(parsed[0]?.id ?? null)
+        setViews(parsed); setActiveId((parsed.find(view => view.id === initialViewId) ?? parsed[0])?.id ?? null)
       }).catch(() => {
         if (generation.current === current) setError('Could not load views. Check your connection and access, then reload.')
       }).finally(() => {
@@ -34,6 +40,26 @@ export const useCanvasWorkspace = (storage: CanvasStorage) => {
       })
     }
     return () => { generation.current++ }
+    // The initial view only seeds the first load; later selections are this hook's own state.
+  }, [api])
+
+  // Saved views can change outside this page: the chat agent edits them while the user watches.
+  // A quiet re-read between the user's own operations picks those edits up; it never interrupts an
+  // operation in flight, and is skipped while the page is hidden.
+  useEffect(() => {
+    if (!api) return
+    let stopped = false
+    const timer = setInterval(() => {
+      if (pending.current || document.visibilityState !== 'visible') return
+      const current = generation.current
+      api.listCanvases().then(result => {
+        if (stopped || generation.current !== current || pending.current) return
+        const loaded = result.map(parseCanvasDefinition)
+        setViews(previous => sameViews(previous, loaded) ? previous : loaded)
+        setActiveId(id => loaded.some(view => view.id === id) ? id : loaded[0]?.id ?? null)
+      }).catch(() => {})
+    }, CANVAS_REFRESH_MS)
+    return () => { stopped = true; clearInterval(timer) }
   }, [api])
 
   const run = async (task: () => Promise<() => void>) => {
