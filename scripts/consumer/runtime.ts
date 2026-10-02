@@ -52,6 +52,16 @@ export async function assertLocalPortAvailable(port: number): Promise<void> {
   }
 }
 
+const featureSources = {
+  composableViews: "packages/workshop-frontend/src/features/canvas/CanvasDialog.tsx",
+  durableViews: "packages/workshop-backend/src/canvas-store.ts",
+  customCloudflareCode: "scripts/consumer/extensions.ts",
+} as const;
+
+const unavailableFeatures = (config: ReturnType<typeof parseConsumerConfig>, upstream: string) =>
+  (Object.keys(featureSources) as (keyof typeof featureSources)[])
+    .filter(name => config.features[name] && !existsSync(join(upstream, featureSources[name])));
+
 /** Check the actual submodule pin; configuration alone is not proof of the running revision. */
 export function checkConsumer(root: string) {
   const config = parseConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
@@ -66,8 +76,8 @@ export function checkConsumer(root: string) {
     throw new Error("Upstream does not declare its pnpm version");
   }
   const pending = ["InferOps fixture/remote adapter", "profile initialization not checked"];
-  for (const [name, enabled] of Object.entries(config.features)) if (enabled && name !== "customCloudflareCode") pending.push(name);
-  if (config.features.customCloudflareCode && !existsSync(join(upstream, "scripts/consumer/extensions.ts"))) pending.push("customCloudflareCode");
+  pending.push(...unavailableFeatures(config, upstream));
+  if (config.features.composableViews) pending.push("agent canvas tools");
   return { config, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
 }
 
@@ -134,7 +144,7 @@ export async function diagnoseConsumer(root: string) {
     await assertLocalPortAvailable(config.local.port);
     add("port", "pass", `Port ${config.local.port} is available now; this check does not reserve it`);
   } catch (error) { add("port", "error", (error as Error).message); }
-  const unsupported = Object.entries(config.features).filter(([name, enabled]) => enabled && name !== "customCloudflareCode").map(([name]) => name);
+  const unsupported: string[] = unavailableFeatures(config, upstream);
   if (config.features.customCloudflareCode) {
     const extensionScript = join(upstream, "scripts/consumer/extensions.ts");
     try {
@@ -147,7 +157,7 @@ export async function diagnoseConsumer(root: string) {
   if (config.inferops.mode === "remote") unsupported.push("remote InferOps");
   add("runtime", unsupported.length ? "error" : "warning", unsupported.length
     ? `Startup is blocked by unavailable adapters: ${unsupported.join(", ")}`
-    : "InferOps data and view adapters are pending; profile:init separately initializes branding/instructions on a supported pin");
+    : "InferOps board data and agent canvas tools are pending; profile:init separately initializes branding/instructions on a supported pin");
   return { ok: !checks.some(check => check.status === "error"), checks, runtimeReady: false, pending };
 }
 
@@ -196,7 +206,7 @@ async function main() {
     console.log(JSON.stringify({ ok: true, operation: "setup", pending }));
     return;
   }
-  const requested = Object.entries(config.features).filter(([name, enabled]) => enabled && name !== "customCloudflareCode").map(([name]) => name);
+  const requested = unavailableFeatures(config, upstream);
   if (requested.length || config.inferops.mode === "remote") {
     throw new Error("Requested consumer runtime adapters are not implemented; use check for details. No server was started.");
   }
@@ -205,12 +215,12 @@ async function main() {
   }
   await assertLocalPortAvailable(config.local.port);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
-  console.error("Starting the native Workshop baseline. InferOps data and view adapters are pending; profile:init is a separate administrator operation.");
+  console.error("Starting the native Workshop baseline. InferOps board data and agent canvas tools are pending; profile:init is a separate administrator operation.");
   const env: NodeJS.ProcessEnv = { ...process.env, VITE_BACKEND_HOST: `localhost:${config.local.port}` };
   const blueprints = consumerBlueprintDirectory(root);
   if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;
   else delete env.BUNDLED_BLUEPRINTS_DIR;
-  const child = spawn(process.execPath, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...(config.features.customCloudflareCode ? ["--consumer-root", root] : [])], {
+  const child = spawn(process.execPath, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...(Object.values(config.features).some(Boolean) ? ["--consumer-root", root] : [])], {
     cwd: upstream, stdio: "inherit", env,
   });
   const { relayTermination } = await import(pathToFileURL(join(upstream, "scripts/relay-termination.ts")).href);

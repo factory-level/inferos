@@ -33,7 +33,7 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 | `inferos/` | Pinned Git submodule |
 | `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
-| `views/operations.json` | Guarded starter composition referencing the configured InferOps project; not yet rendered |
+| `views/operations.json` | Guarded starter composition; import it from the workspace Canvas dialog on supporting pins |
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
@@ -43,7 +43,7 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 
 `pnpm inferos:check` validates settings, the actual submodule HEAD and the wrapper's staged gitlink. It reports `pending` adapters and `modifiedUpstream`. A true modifiedUpstream means the run includes local experiments and is not an exact-pinned-revision proof. An `ok` result proves configuration/pin consistency only; it is not proof that data/views/style are applied or that a server is healthy. A pin mismatch must be resolved deliberately, not bypassed by editing the validator.
 
-Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Composable/durable view adapters remain unavailable and enabling either causes `dev` to fail explicitly. Pins containing the custom Worker adapter support `customCloudflareCode` locally. This prevents a config file from falsely advertising running features.
+Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Pins containing the Canvas dialog support `composableViews` locally; `durableViews` additionally requires the native canvas store. The launcher passes both switches to the backend, whose public configuration controls the builder UI. Unsupported pins fail startup explicitly. Pins containing the custom Worker adapter support `customCloudflareCode` locally. This prevents a config file from falsely advertising running features.
 
 ## Local preflight
 
@@ -86,7 +86,7 @@ The deployment theme is a fallback, not an enforced setting. A browser's saved `
 
 ## Current limits
 
-`dev` launches native Workshop through run-local. It does not yet render the included InferOps fixture, automatically initialize the profile, implement durable view storage. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
+`dev` launches native Workshop through run-local. It does not yet load the included InferOps fixture into board widgets or automatically initialize the profile. Supporting pins persist compositions in the native workspace store when both view flags are enabled. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
 
 The tests cover fresh creation, recursive clone, paths with spaces, customized rerun, revision drift, Git failure cleanup and all flag combinations. No cloud deployment or live provider login is performed by bootstrap or those tests.
 
@@ -104,6 +104,6 @@ Consumer cloud release packaging, input validation and deployment wiring remain 
 
 ## Guarded starter views
 
-New wrappers contain `views/operations.json`: one `inferops.project-board` widget with the initial configured target reference. On a pin containing the canvas contract, `pnpm views:check` validates regular JSON definitions, unique identities, registered widget parameters and layout limits. It rejects linked/oversized files, unknown fields, arbitrary renderers and unsupported schema versions. It does not install a view, read a board or grant resource authority. `runtimeReady` remains false, and composable/durable view flags still reject startup until their runtime adapters are implemented.
+New wrappers contain `views/operations.json`: one `inferops.project-board` widget with the initial configured target reference. On a pin containing the canvas contract, `pnpm views:check` validates regular JSON definitions, unique identities, registered widget parameters and layout limits. It rejects linked/oversized files, unknown fields, arbitrary renderers and unsupported schema versions. It does not install a view, read a board or grant resource authority. `runtimeReady` remains false because the InferOps data adapter and agent canvas tools remain pending. On supporting pins, builders can open Canvas in a workspace and import this definition. With only `composableViews`, edits remain in memory and are discarded on reload or leaving the workspace. With both view flags, compositions are saved under the workspace build capability, with revision-checked writes and explicit reload after conflicts. Imported definitions receive a new view identity. The dialog supports creation, renaming, sections, curated widths/columns, ordering, removal and session-local undo. Board cards explicitly show “Not connected”; no transactional records are loaded or mutated. Disabling the flags hides the UI and denies storage calls without deleting saved definitions.
 
 Views are wrapper-owned source. Bootstrap reruns preserve edits; changing `inferos.targetRef` later does not silently rewrite existing view references. Edit them deliberately and revalidate. Ownership, sharing, credentials and transactional rows do not belong in view files. A target reference must be rebound to authorized resources when the runtime loader is implemented. Older pins without `scripts/consumer/views.ts` fail the command explicitly.

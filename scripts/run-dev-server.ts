@@ -26,6 +26,7 @@ import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
+import { parseConsumerConfig } from "./consumer/config.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
 
@@ -111,6 +112,8 @@ const consumerOptions = process.argv.flatMap((arg, index) => arg === "--consumer
 if (consumerOptions.length > 1 || (consumerOptions.length && (!consumerOptions[0] || consumerOptions[0].startsWith("--")))) {
   throw new Error("--consumer-root requires one wrapper directory");
 }
+const consumerConfig = consumerOptions.length
+  ? parseConsumerConfig(JSON.parse(readFileSync(join(consumerOptions[0], "inferos.config.json"), "utf8"))) : null;
 const consumerWorkers = consumerOptions.length ? await prepareConsumerWorkers(consumerOptions[0]) : [];
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
@@ -556,6 +559,8 @@ for (const gk of gatekeepers) {
   // For local testing, create an account named "admin" to test admin features.
   config.vars = config.vars || {};
   config.vars.ADMINS = ["admin"];
+  config.vars.COMPOSABLE_VIEWS = consumerConfig?.features.composableViews ? "true" : "false";
+  config.vars.DURABLE_VIEWS = consumerConfig?.features.durableViews ? "true" : "false";
 
   // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
   // environment, so you can run e.g.

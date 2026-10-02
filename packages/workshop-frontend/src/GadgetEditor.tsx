@@ -1,3 +1,5 @@
+import { CanvasDialog } from './features/canvas/CanvasDialog'
+import { useServerConfig } from './ServerConfigContext'
 import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
@@ -438,6 +440,8 @@ function NoGadgetPlaceholder({ height }: { height: string }) {
 // ─── component ────────────────────────────────────────────────────────────────
 
 export default function GadgetEditor() {
+  const canvasFeatures = useServerConfig()?.canvasFeatures
+  const [canvasOpen, setCanvasOpen] = useState(false)
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id
   const navigate = useNavigate()
@@ -1466,6 +1470,8 @@ export default function GadgetEditor() {
   // ── always render the full two-pane edit layout; preview overlays on top ──────
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
+      {canvasFeatures?.composableViews && <CanvasDialog key={metadata.id} open={canvasOpen} onOpenChange={setCanvasOpen}
+        storage={canvasFeatures.durableViews ? { kind: 'durable', api: overseer.stub } : { kind: 'temporary' }} />}
       {/* ═══ SHARED TOP BAR (visible in both modes) ════════════════════════════ */}
       <div
         className="relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3"
@@ -1540,6 +1546,8 @@ export default function GadgetEditor() {
             </span>
           )}
         </div>
+
+        {canvasFeatures?.composableViews && <WorkshopButton onClick={() => setCanvasOpen(true)}>Canvas</WorkshopButton>}
 
         {/* Right: presence, cost, workspace, share, blueprints */}
         <div className="hidden flex-shrink-0 items-center gap-1 md:flex">
