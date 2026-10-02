@@ -53,7 +53,8 @@ export async function assertLocalPortAvailable(port: number): Promise<void> {
 }
 
 const featureSources = {
-  composableViews: "packages/workshop-frontend/src/features/canvas/CanvasDialog.tsx",
+  // The composition contract, not a UI file: UI files are renamed as the page evolves.
+  composableViews: "packages/workshop-shared/src/canvas.ts",
   durableViews: "packages/workshop-backend/src/canvas-store.ts",
   customCloudflareCode: "scripts/consumer/extensions.ts",
 } as const;
