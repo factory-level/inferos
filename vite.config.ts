@@ -110,7 +110,7 @@ export default defineConfig({
       {
         // Gatekeeper configurator UIs use a classic JSX runtime with the `h`
         // pragma rather than the automatic react-jsx runtime.
-        files: ['packages/gatekeeper-*/**/*.tsx'],
+        files: ['packages/gatekeeper-*/**/*.tsx', 'custom-gatekeepers/gatekeeper-*/**/*.tsx'],
         plugins: ['typescript', 'unicorn', 'oxc', 'import', 'react'],
         env: {
           browser: true,
@@ -123,6 +123,7 @@ export default defineConfig({
           'packages/workshop-backend/**/*.ts',
           'packages/router/**/*.ts',
           'packages/gatekeeper-*/src/**/*.ts',
+          'custom-gatekeepers/gatekeeper-*/src/**/*.ts',
           'packages/workshop-shared/**/*.ts',
           'packages/typed-storage/**/*.ts',
         ],
@@ -136,6 +137,7 @@ export default defineConfig({
         // file), so nothing resolves their imports for it.
         files: [
           'packages/gatekeeper-*/src/*types.d.ts',
+          'custom-gatekeepers/gatekeeper-*/src/*types.d.ts',
           'packages/mcp-shared/src/types.d.ts',
           'packages/workshop-backend/src/*-binding.d.ts',
         ],

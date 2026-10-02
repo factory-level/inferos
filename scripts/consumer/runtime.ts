@@ -53,7 +53,8 @@ export async function assertLocalPortAvailable(port: number): Promise<void> {
 }
 
 const featureSources = {
-  composableViews: "packages/workshop-frontend/src/features/canvas/CanvasDialog.tsx",
+  // The composition contract, not a UI file: UI files are renamed as the page evolves.
+  composableViews: "packages/workshop-shared/src/canvas.ts",
   durableViews: "packages/workshop-backend/src/canvas-store.ts",
   customCloudflareCode: "scripts/consumer/extensions.ts",
 } as const;
@@ -77,7 +78,6 @@ export function checkConsumer(root: string) {
   }
   const pending = ["InferOps fixture/remote adapter", "profile initialization not checked"];
   pending.push(...unavailableFeatures(config, upstream));
-  if (config.features.composableViews) pending.push("agent canvas tools");
   return { config, provenance, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
 }
 
@@ -171,14 +171,14 @@ export async function diagnoseConsumer(root: string) {
   if (config.inferops.mode === "remote") unsupported.push("remote InferOps");
   add("runtime", unsupported.length ? "error" : "warning", unsupported.length
     ? `Startup is blocked by unavailable adapters: ${unsupported.join(", ")}`
-    : "InferOps board data and agent canvas tools are pending; profile:init separately initializes branding/instructions on a supported pin");
+    : "InferOps board data is mocked by the InferOps gatekeeper (no real InferOps adapter yet); profile:init separately initializes branding/instructions on a supported pin");
   return { ok: !checks.some(check => check.status === "error"), checks, runtimeReady: false, pending };
 }
 
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|profile|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -195,6 +195,12 @@ async function main() {
     const script = join(upstream, "scripts/consumer/views.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support starter view validation");
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
+  if (command === "canvas") {
+    const script = join(upstream, "scripts/consumer/canvas.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision does not support canvas configuration");
+    execFileSync(process.execPath, [script, root, ...process.argv.slice(3)], { cwd: upstream, stdio: "inherit" });
     return;
   }
   if (command === "extensions") {
@@ -235,7 +241,7 @@ async function main() {
   await validateConsumerFixture(root, upstream);
   await assertLocalPortAvailable(config.local.port);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
-  console.error("Starting the native Workshop baseline. InferOps board data and agent canvas tools are pending; profile:init is a separate administrator operation.");
+  console.error("Starting the native Workshop baseline. InferOps board data is mocked by the InferOps gatekeeper; profile:init is a separate administrator operation.");
   const env: NodeJS.ProcessEnv = { ...process.env, VITE_BACKEND_HOST: `localhost:${config.local.port}` };
   const blueprints = consumerBlueprintDirectory(root);
   if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;

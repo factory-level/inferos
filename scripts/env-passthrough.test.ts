@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { describe, it } from "node:test";
+import { workerPackageDirs } from "./worker-dirs.ts";
 
 /**
  * A cached `vp` run executes each task in a clean environment: only a built-in set (`PATH`, `HOME`,
@@ -192,9 +193,7 @@ const matches = (name: string, pattern: string) =>
 describe("build-time env passthrough", () => {
   // These double as the keys compared against EXPECTED, so they are built with `/` rather than
   // `join`, whose separator is platform-dependent. Forward slashes still resolve as paths on Windows.
-  const areas = ["scripts", ...readdirSync("packages", { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .map(entry => `packages/${entry.name}`)];
+  const areas = ["scripts", ...workerPackageDirs(".").map(dir => relative(".", dir).replaceAll("\\", "/"))];
 
   it("uses only known categories", () => {
     for (const [area, groups] of Object.entries(EXPECTED)) {

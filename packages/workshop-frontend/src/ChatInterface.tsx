@@ -52,6 +52,7 @@ import {
   Question,
   ArrowUpRight,
   Blueprint,
+  SquaresFour,
   GitBranch,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
@@ -648,6 +649,10 @@ function getToolCallSummary(
       return { verb: "Listed connectable resources", target: tc.input.vendorId };
     case "requestConnection":
       return { verb: "Requested connection", target: tc.input.vendorId };
+    case "listCanvases":
+      return { verb: "Listed canvases" };
+    case "editCanvas":
+      return { verb: tc.input.canvasId ? "Edited canvas" : "Created canvas", target: tc.input.title };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
@@ -747,6 +752,10 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Listed connectable resources`;
     case "requestConnection":
       return count === 1 ? "Requested a connection" : `Requested ${count} connections`;
+    case "listCanvases":
+      return "Listed canvases";
+    case "editCanvas":
+      return count === 1 ? "Edited a canvas" : `Made ${count} canvas edits`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -781,6 +790,9 @@ function getToolIcon(
       return GitBranch;
     case "listBlueprints":
       return Blueprint;
+    case "listCanvases":
+    case "editCanvas":
+      return SquaresFour;
     case "observeUserChanges":
       return MagnifyingGlass;
     case "giveUp":
@@ -849,6 +861,8 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return "Requesting a connection";
+    case "listCanvases": return "Listing canvases";
+    case "editCanvas": return "Editing canvas";
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -875,6 +889,8 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return `Requesting ${pluralize(count, "connection")}`;
+    case "listCanvases": return "Listing canvases";
+    case "editCanvas": return `Making ${pluralize(count, "canvas edit")}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;

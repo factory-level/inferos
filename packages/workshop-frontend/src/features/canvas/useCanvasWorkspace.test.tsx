@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
+import { CANVAS_REFRESH_MS, useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 
 let root: Root
 let container: HTMLDivElement
@@ -17,12 +17,14 @@ const api = () => ({
   editCanvas: vi.fn<Overseer['editCanvas']>(async () => ({ ...initial(), revision: '1', title: 'Edited' })),
   deleteCanvas: vi.fn<Overseer['deleteCanvas']>(async () => {}),
 })
-const Probe = ({ storage }: { storage: CanvasStorage }) => {
-  canvas = useCanvasWorkspace(storage)
+const Probe = ({ storage, initialViewId = null }: { storage: CanvasStorage; initialViewId?: string | null }) => {
+  canvas = useCanvasWorkspace(storage, initialViewId)
   return <div><span>{canvas.active?.title ?? 'No view'}</span><output>{canvas.busy ? 'Busy' : 'Ready'}</output>
     {canvas.error && <p role="alert">{canvas.error}</p>}</div>
 }
-const render = async (storage: CanvasStorage) => { await act(async () => root.render(<Probe storage={storage} />)) }
+const render = async (storage: CanvasStorage, initialViewId: string | null = null) => {
+  await act(async () => root.render(<Probe storage={storage} initialViewId={initialViewId} />))
+}
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
@@ -101,4 +103,26 @@ it('moves a board between sections, undoes the move and imports with a fresh vie
   expect(canvas.active!.id).not.toBe(originalId)
   expect(canvas.active!.revision).toBe('0')
   expect(canvas.active!.sections).toEqual(JSON.parse(portable).sections)
+})
+
+it('opens the requested view first when it exists', async () => {
+  const storage = api()
+  storage.listCanvases.mockResolvedValue([initial(), { ...initial(), id: 'second', title: 'Second' }])
+  await render({ kind: 'durable', api: storage }, 'second')
+  expect(canvas.active?.title).toBe('Second')
+})
+
+it('picks up saved views edited elsewhere, such as by the chat agent', async () => {
+  vi.useFakeTimers()
+  try {
+    const storage = api()
+    await render({ kind: 'durable', api: storage })
+    expect(canvas.active?.title).toBe('Saved')
+    storage.listCanvases.mockResolvedValue([{ ...initial(), revision: '4', title: 'Agent edited' }])
+    await act(async () => { await vi.advanceTimersByTimeAsync(CANVAS_REFRESH_MS) })
+    expect(canvas.active?.title).toBe('Agent edited')
+    expect(canvas.active?.revision).toBe('4')
+  } finally {
+    vi.useRealTimers()
+  }
 })

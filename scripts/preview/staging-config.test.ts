@@ -12,7 +12,7 @@ import {
 } from "../release/manifest-lib.ts";
 import {
   MAX_PREVIEW_NAME_LENGTH,
-  PACKAGES_DIR,
+  ROOT,
   R2_MAX_BUCKET_NAME_LENGTH,
   backendSecrets,
   buildPreviewConfigs,
@@ -106,7 +106,7 @@ function previewsOf(configs: Map<string, StagingConfig>, name: string): PreviewO
 }
 
 function buildAll() {
-  const packages = readDeployablePackages(PACKAGES_DIR);
+  const packages = readDeployablePackages(ROOT);
   const configs = buildPreviewConfigs({
     previewName: PREVIEW_NAME,
     packages,
@@ -511,7 +511,7 @@ test("a gatekeeper's OAuth app is optional, but never half of one", () => {
 test("every gatekeeper handed an OAuth app is a package that exists, and reads that pair", () => {
   // The map is keyed by package name, and preview.ts looks each gatekeeper up in it by that name —
   // so a renamed or deleted package makes the upload silently stop happening rather than fail.
-  const names = new Set(readDeployablePackages(PACKAGES_DIR).map((pkg) => pkg.name));
+  const names = new Set(readDeployablePackages(ROOT).map((pkg) => pkg.name));
   for (const [pkgName, secrets] of GATEKEEPER_SECRETS) {
     assert.ok(names.has(pkgName),
         `resolveGatekeeperSecrets names ${pkgName}, which is not a deployable package`);

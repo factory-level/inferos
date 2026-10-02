@@ -12,12 +12,12 @@
 //   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
 
 import {
-  existsSync, readFileSync, writeFileSync, readdirSync, statSync,
+  existsSync, readFileSync, writeFileSync, statSync,
 } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import { constants } from "node:os";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
@@ -29,6 +29,8 @@ import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
 import { parseConsumerConfig } from "./consumer/config.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
+import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
+import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SCRIPTS_DIR, "..");
@@ -85,28 +87,23 @@ try {
 // ---------------------------------------------------------------------------
 // Discover gatekeeper packages.
 // ---------------------------------------------------------------------------
-function findGatekeepers(parentDir: string): Gatekeeper[] {
-  try {
-    return readdirSync(parentDir)
-        .filter(name => name.startsWith("gatekeeper-"))
-        .filter(name => {
-      try {
-        return statSync(join(parentDir, name, "wrangler.jsonc")).isFile();
-      } catch {
-        return false;
-      }
-    })
-        .map(name => ({ name, dir: join(parentDir, name) }));
-  } catch {
-    return [];
-  }
+function findGatekeepers(root: string): Gatekeeper[] {
+  return workerPackageDirs(root)
+      .map(dir => ({ name: basename(dir), dir }))
+      .filter(({ name }) => name.startsWith("gatekeeper-"))
+      .filter(({ dir }) => {
+    try {
+      return statSync(join(dir, "wrangler.jsonc")).isFile();
+    } catch {
+      return false;
+    }
+  });
 }
 
 // The committed wrangler.jsonc files are generated from cloudflare.config.ts; regenerate them so a
 // TypeScript edit reaches `pnpm dev-server` without a separate step.
 await generateWorkerConfigs({ check: false });
 
-const gatekeepers = findGatekeepers(PACKAGES_DIR);
 
 const consumerOptions = process.argv.flatMap((arg, index) => arg === "--consumer-root" ? [process.argv[index + 1]] : []);
 if (consumerOptions.length > 1 || (consumerOptions.length && (!consumerOptions[0] || consumerOptions[0].startsWith("--")))) {
@@ -115,6 +112,19 @@ if (consumerOptions.length > 1 || (consumerOptions.length && (!consumerOptions[0
 const consumerConfig = consumerOptions.length
   ? parseConsumerConfig(JSON.parse(readFileSync(join(consumerOptions[0], "inferos.config.json"), "utf8"))) : null;
 const consumerWorkers = consumerOptions.length ? await prepareConsumerWorkers(consumerOptions[0]) : [];
+
+// Composition config: the wrapper's inferos.canvas.json, or this checkout's own when run in-repo.
+// It narrows what canvases offer and which custom gatekeepers run; it never grants access.
+const canvasRoot = consumerOptions[0] ?? ROOT;
+const canvasInventoryForRoot = canvasInventory(canvasRoot);
+const canvasConfig = readCanvasConfig(canvasRoot, canvasInventoryForRoot);
+const enabledCustomGatekeepers = new Set(selectedCustomGatekeepers(canvasConfig?.config, canvasInventoryForRoot));
+const gatekeepers = findGatekeepers(ROOT).filter(({ dir, name }) =>
+  basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustomGatekeepers.has(name));
+// In-repo there is no inferos.config.json to carry feature flags, so a canvas config is the switch
+// that turns composition (with saved views) on. A wrapper's own flags always take precedence.
+const canvasFeatures = consumerConfig?.features
+    ?? { composableViews: canvasConfig !== null, durableViews: canvasConfig !== null };
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -559,8 +569,9 @@ for (const gk of gatekeepers) {
   // For local testing, create an account named "admin" to test admin features.
   config.vars = config.vars || {};
   config.vars.ADMINS = ["admin"];
-  config.vars.COMPOSABLE_VIEWS = consumerConfig?.features.composableViews ? "true" : "false";
-  config.vars.DURABLE_VIEWS = consumerConfig?.features.durableViews ? "true" : "false";
+  config.vars.COMPOSABLE_VIEWS = canvasFeatures.composableViews ? "true" : "false";
+  config.vars.DURABLE_VIEWS = canvasFeatures.durableViews ? "true" : "false";
+  if (canvasConfig) config.vars.CANVAS_CATALOG = JSON.stringify(canvasConfig.catalog);
 
   // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
   // environment, so you can run e.g.

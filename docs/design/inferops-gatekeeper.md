@@ -74,6 +74,8 @@ The scoped board projection omits other workspace projects and initial lease/run
 
 **Review status: proposed, not approved or implemented.** The repository's write-gatekeeper skill requires review of the concrete API before implementing a new gatekeeper. The existing high-level design approval did not specify these methods or projection trade-offs.
 
+**Divergence (2026-10-02):** the operator approved this API for a first implementation over mock data. `custom-gatekeepers/gatekeeper-inferops` ships the declaration verbatim, backed by an auto-provisioned per-user demo data source instead of InferOps authentication and APIs; see [Current architecture](../architecture/inferops-gatekeeper.md#divergences-from-design). The open questions below still gate live data.
+
 - Agree the external InferOps authentication and API contract, including service versus user authority.
 - Does the existing transition endpoint provide sufficient idempotency for approved action retries, or is a companion InferOps change required?
 

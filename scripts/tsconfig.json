@@ -27,8 +27,10 @@
     "**/*.ts",
     "../packages/workshop-backend/scripts/*.ts",
     "../packages/gatekeeper-*/build-app.ts",
+    "../custom-gatekeepers/gatekeeper-*/build-app.ts",
     "../cloudflare.config.ts",
     "../packages/*/cloudflare.config.ts",
+    "../custom-gatekeepers/*/cloudflare.config.ts",
     "../packages/integration-tests/fixtures/*/cloudflare.config.ts"
   ]
 }

@@ -16,6 +16,7 @@
     "preview:sweep": "node scripts/preview/preview.ts sweep",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
     "dev-server": "node scripts/run-dev-server.ts",
+    "canvas": "node scripts/consumer/canvas.ts .",
     "clean": "node scripts/vp/run.ts --filter=!cloudflare-os clean",
     "docs:check": "scripts/check-docs.sh",
     "lint:check": "vp lint",

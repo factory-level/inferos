@@ -1,8 +1,8 @@
 /** Registered, renderer-owned project board. A target reference never grants resource access. */
-export interface CanvasWidget {
+export interface CanvasProjectBoardWidget {
   /** Stable instance ID, unique across this definition. */
   id: string;
-  /** The only registered v1 widget kind; arbitrary renderers are rejected. */
+  /** Registered InferOps board kind; arbitrary renderers are rejected. */
   kind: "inferops.project-board";
   /** Widget parameter schema version. */
   version: 1;
@@ -18,6 +18,41 @@ export interface CanvasWidget {
     showCompleted: boolean;
   };
 }
+
+/**
+ * A gadget in the workspace that owns the canvas, rendered in the existing sandboxed gadget host.
+ * The reference is workspace-local and resolved only through that workspace's already-authorized
+ * session; it grants nothing on its own and is meaningless in another workspace.
+ */
+export interface CanvasGadgetWidget {
+  /** Stable instance ID, unique across this definition. */
+  id: string;
+  /** Registered gadget kind; the gadget's own sandboxed UI bundle is the only renderer. */
+  kind: "inferos.gadget";
+  /** Widget parameter schema version. */
+  version: 1;
+  /** `gadget:<workpieceId>` within the owning workspace. */
+  targetRef: string;
+  /** Curated column span; the renderer clamps it to the section's column count. */
+  size: "normal" | "wide" | "full";
+  /**
+   * No parameters are defined for v1. The parser rejects any key; the type stays an empty object
+   * literal because RPC validation cannot express `never`-valued records.
+   */
+  params: {};
+}
+
+/** Registered widget instance; unknown kinds and versions are rejected. */
+export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget;
+
+/** A registered widget kind name. */
+export type CanvasWidgetKind = CanvasWidget["kind"];
+
+/** Every registered widget kind, in display order. */
+export const CANVAS_WIDGET_KINDS: readonly CanvasWidgetKind[] = ["inferops.project-board", "inferos.gadget"];
+
+/** Workspace-local gadget reference syntax accepted by `inferos.gadget` widgets. */
+export const CANVAS_GADGET_REF = /^gadget:(0|[1-9][0-9]{0,15})$/;
 
 /** Ordered group of widgets with a curated responsive column count. */
 export interface CanvasSection {
@@ -100,9 +135,16 @@ const position = (value: unknown, length: number): number => typeof value === "n
 
 function widget(value: unknown): CanvasWidget {
   const w = record(value, ["id", "kind", "version", "targetRef", "size", "params"], "widget");
-  if (w.kind !== "inferops.project-board" || w.version !== 1) return invalid("widget kind/version");
-  if (typeof w.targetRef !== "string" || w.targetRef.length > 512 || !/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
+  if (w.version !== 1) return invalid("widget kind/version");
   if (w.size !== "normal" && w.size !== "wide" && w.size !== "full") return invalid("widget size");
+  if (typeof w.targetRef !== "string" || w.targetRef.length > 512) return invalid("target reference");
+  if (w.kind === "inferos.gadget") {
+    if (!CANVAS_GADGET_REF.test(w.targetRef)) return invalid("target reference");
+    record(w.params, [], "widget parameters");
+    return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: {} };
+  }
+  if (w.kind !== "inferops.project-board") return invalid("widget kind/version");
+  if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
   const params = record(w.params, ["workflow", "showCompleted"], "widget parameters");
   if (params.workflow !== "software" && params.workflow !== "content") return invalid("workflow");
   if (typeof params.showCompleted !== "boolean") return invalid("completed filter");
@@ -143,9 +185,18 @@ export function parseCanvasDefinition(value: unknown): CanvasDefinition {
  * Preview/apply up to 32 edits atomically to a detached snapshot, advancing one revision per batch.
  * This function performs no I/O or authorization. A storage caller must check installation flags,
  * workspace edit authority and resource bindings, then compare/persist in the same transaction.
+ *
+ * When `allowedKinds` is given, every widget an operation adds, reconfigures or restores must be
+ * of one of those kinds. Widgets already on the canvas are left alone, so narrowing the catalog
+ * never strands an existing composition.
  */
-export function applyCanvasOperations(current: unknown, expectedRevision: unknown, operations: unknown): CanvasDefinition {
+export function applyCanvasOperations(current: unknown, expectedRevision: unknown, operations: unknown,
+    allowedKinds?: readonly CanvasWidgetKind[]): CanvasDefinition {
   let result = parseCanvasDefinition(current);
+  const allowed = (item: CanvasWidget): CanvasWidget => {
+    if (allowedKinds && !allowedKinds.includes(item.kind)) throw new Error(`Widget kind ${item.kind} is not enabled for this installation`);
+    return item;
+  };
   if (revision(expectedRevision) !== result.revision) throw new CanvasConflictError(result.revision);
   if (!Array.isArray(operations) || operations.length < 1 || operations.length > 32) return invalid("operation batch");
   const findSection = (sectionId: unknown) => {
@@ -170,7 +221,9 @@ export function applyCanvasOperations(current: unknown, expectedRevision: unknow
       }
       case "addSection": {
         const op = record(input, ["type", "index", "section"], "add section");
-        result.sections.splice(position(op.index, result.sections.length), 0, section(op.section)); break;
+        const added = section(op.section);
+        added.widgets.forEach(allowed);
+        result.sections.splice(position(op.index, result.sections.length), 0, added); break;
       }
       case "removeSection": case "moveSection": {
         const op = record(input, type === "moveSection" ? ["type", "sectionId", "index"] : ["type", "sectionId"], "section edit");
@@ -186,7 +239,7 @@ export function applyCanvasOperations(current: unknown, expectedRevision: unknow
       case "addWidget": {
         const op = record(input, ["type", "sectionId", "index", "widget"], "add widget");
         const selected = findSection(op.sectionId);
-        selected.widgets.splice(position(op.index, selected.widgets.length), 0, widget(op.widget)); break;
+        selected.widgets.splice(position(op.index, selected.widgets.length), 0, allowed(widget(op.widget))); break;
       }
       case "removeWidget": case "moveWidget": {
         const op = record(input, type === "moveWidget" ? ["type", "widgetId", "sectionId", "index"] : ["type", "widgetId"], "widget edit");
@@ -200,11 +253,15 @@ export function applyCanvasOperations(current: unknown, expectedRevision: unknow
       }
       case "configureWidget": {
         const op = record(input, ["type", "widget"], "configure widget");
-        const selected = widget(op.widget);
+        const selected = allowed(widget(op.widget));
         const { parent, index } = findWidget(selected.id); parent.widgets[index] = selected; break;
       }
       case "restore": {
-        const op = record(input, ["type", "content"], "restore"); result = { ...result, ...content(op.content) }; break;
+        const op = record(input, ["type", "content"], "restore");
+        const restored = content(op.content);
+        const existing = new Set(result.sections.flatMap(entry => entry.widgets.map(item => item.id)));
+        restored.sections.forEach(entry => entry.widgets.filter(item => !existing.has(item.id)).forEach(allowed));
+        result = { ...result, ...restored }; break;
       }
       default: return invalid("operation type");
     }
@@ -212,4 +269,74 @@ export function applyCanvasOperations(current: unknown, expectedRevision: unknow
     result = parseCanvasDefinition(result);
   }
   return { ...result, revision: revision((BigInt(result.revision) + 1n).toString()) };
+}
+
+/** A blueprint the installation offers as a widget: instantiated as a gadget, placed as `inferos.gadget`. */
+export interface CanvasCatalogBlueprint {
+  /** Blueprint ID passed to gadget creation, e.g. `inferops.kanban`. */
+  blueprintId: string;
+  /** Short label shown in widget pickers, at most 120 characters. */
+  label: string;
+  /** One-line description shown in widget pickers and to the agent, at most 512 characters. */
+  description: string;
+}
+
+/** A starting layout new canvases may be created from. Templates carry references, never gadget IDs. */
+export interface CanvasScreenTemplate {
+  /** Stable template ID, unique across the catalog. */
+  id: string;
+  /** Layout copied into a new canvas; it may contain only `inferops.project-board` widgets. */
+  content: CanvasContent;
+}
+
+/**
+ * What an installation offers for composition, configured by the deployment (never by a user or
+ * agent). It narrows which widgets may be added; it grants no access to any resource.
+ */
+export interface CanvasCatalog {
+  /** Widget kinds people and agents may add. */
+  widgetKinds: CanvasWidgetKind[];
+  /** Blueprints offered as widgets; meaningful only when `inferos.gadget` is enabled. */
+  blueprints: CanvasCatalogBlueprint[];
+  /** Screen templates, in display order. */
+  screens: CanvasScreenTemplate[];
+}
+
+/** The catalog of an installation that configures none: every kind, no blueprints or templates. */
+export const DEFAULT_CANVAS_CATALOG: CanvasCatalog = { widgetKinds: [...CANVAS_WIDGET_KINDS], blueprints: [], screens: [] };
+
+const text = (value: unknown, max: number, field: string): string =>
+  typeof value === "string" && value.trim().length > 0 && value.length <= max ? value.trim() : invalid(field);
+
+/** Validate and detach a catalog; rejects unknown kinds, duplicate IDs and gadget references in templates. */
+export function parseCanvasCatalog(value: unknown): CanvasCatalog {
+  const c = record(value, ["widgetKinds", "blueprints", "screens"], "catalog");
+  if (!Array.isArray(c.widgetKinds) || !Array.isArray(c.blueprints) || !Array.isArray(c.screens)) return invalid("catalog");
+  if (c.blueprints.length > 32 || c.screens.length > 64) return invalid("catalog size");
+  const requested: unknown[] = c.widgetKinds;
+  const widgetKinds = CANVAS_WIDGET_KINDS.filter(kind => requested.includes(kind));
+  if (widgetKinds.length !== new Set(requested).size) return invalid("widget kind");
+  const blueprintIds = new Set<string>();
+  const blueprints = c.blueprints.map((entry): CanvasCatalogBlueprint => {
+    const b = record(entry, ["blueprintId", "label", "description"], "catalog blueprint");
+    const blueprintId = text(b.blueprintId, 128, "blueprint ID");
+    if (blueprintIds.has(blueprintId)) return invalid("duplicate blueprint");
+    blueprintIds.add(blueprintId);
+    return { blueprintId, label: text(b.label, 120, "blueprint label"), description: text(b.description, 512, "blueprint description") };
+  });
+  const screenIds = new Set<string>();
+  const screens = c.screens.map((entry): CanvasScreenTemplate => {
+    const t = record(entry, ["id", "content"], "screen template");
+    const templateId = id(t.id);
+    if (screenIds.has(templateId)) return invalid("duplicate screen template");
+    screenIds.add(templateId);
+    // Parse as a definition so stable IDs are checked for uniqueness exactly as on a saved canvas.
+    const parsed = parseCanvasDefinition({ ...record(t.content, ["title", "sections"], "screen content"), schemaVersion: 1, id: templateId, revision: "0" });
+    // Gadget IDs are workspace-local, so a template that names one would be meaningless elsewhere.
+    if (parsed.sections.some(entry => entry.widgets.some(item => item.kind !== "inferops.project-board"))) {
+      return invalid("screen template widget");
+    }
+    return { id: templateId, content: { title: parsed.title, sections: parsed.sections } };
+  });
+  return { widgetKinds, blueprints, screens };
 }

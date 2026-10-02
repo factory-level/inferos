@@ -88,7 +88,7 @@ Bootstrap creates a disabled public hello example, manifest, validation command 
 
 ## Durable-view server boundary
 
-The native Overseer capability now offers workspace-scoped definition storage behind exact-string `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` deployment bindings. Owner/build sessions can use it; use-only sessions cannot. The consumer launcher maps view flags to these bindings. Public server configuration advertises the effective flags to the builder Canvas dialog. Starter definitions are imported explicitly; no automatic installation or board data access occurs. See [canvas architecture](inferops-canvas.md) for transaction, sharing and resource-authorization boundaries.
+The native Overseer capability now offers workspace-scoped definition storage behind exact-string `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` deployment bindings. Owner/build sessions can use it; use-only sessions cannot. The consumer launcher maps view flags to these bindings. Public server configuration advertises the effective flags to the builder Canvas page. Starter definitions are imported explicitly; no automatic installation or board data access occurs. See [canvas architecture](inferops-canvas.md) for transaction, sharing and resource-authorization boundaries.
 
 ## Profile resolution and provenance
 

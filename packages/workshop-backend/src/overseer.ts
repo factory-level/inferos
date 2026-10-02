@@ -1,4 +1,5 @@
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
+import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -31,7 +32,7 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, CHAT_CHANGE_MESSAGE_BUDGET, ChatBindingEntry, SeedBindingInfo, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type CompactionCheckpoint, type StoredAssistantMessage, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
+import { AgentCanvasAccess, AgentGadgetInfo, AgentHooks, AiChatAgentContext, CHAT_CHANGE_MESSAGE_BUDGET, ChatBindingEntry, SeedBindingInfo, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type CompactionCheckpoint, type StoredAssistantMessage, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
 import { GitImpl } from "./git-binding";
 import { scanWorkpieceForGrep, type GrepScan } from "./grep";
@@ -9108,6 +9109,17 @@ class OverseerImpl implements AgentHooks {
   // bindings the blueprint's code expects the agent to wire up, for instantiation as a new gadget
   // by the agent's createGadget tool. Blueprint ids are bearer capabilities (like blueprint share
   // links), so possession of the id is sufficient to read it. Throws agent-readable errors.
+  getCanvasAccess(): AgentCanvasAccess | null {
+    if (this.env.COMPOSABLE_VIEWS !== "true" || this.env.DURABLE_VIEWS !== "true") return null;
+    let store = new WorkspaceCanvasStore(this.ctx.storage, this.storage, this.env);
+    return {
+      catalog: readCanvasCatalog(this.env),
+      list: () => store.list(),
+      create: content => store.create(content),
+      edit: (id, expectedRevision, operations) => store.edit(id, expectedRevision, operations),
+    };
+  }
+
   async fetchBlueprint(blueprintId: string)
       : Promise<{files: Record<string, string>, notes: string, output?: BlueprintOutput}> {
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);

@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "../packages/workshop-shared/src/canvas.ts";
+import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasDefinition, type CanvasProjectBoardWidget, type CanvasWidget } from "../packages/workshop-shared/src/canvas.ts";
 
 const board = (id = "board-a"): CanvasWidget => ({ id, kind: "inferops.project-board", version: 1,
   targetRef: "inferops://demo.local/project/board/DEMO", size: "full", params: { workflow: "software", showCompleted: false } });
+const gadget = (id = "gadget-a", targetRef = "gadget:7"): CanvasWidget => ({ id, kind: "inferos.gadget", version: 1,
+  targetRef, size: "normal", params: {} });
 const initial = (): CanvasDefinition => ({ schemaVersion: 1, id: "operations", revision: "0", title: "Operations",
   sections: [{ id: "work", title: "Work", columns: 2, widgets: [board(), board("board-b")] },
     { id: "other", title: "Other", columns: 1, widgets: [] }] });
@@ -11,8 +13,8 @@ const initial = (): CanvasDefinition => ({ schemaVersion: 1, id: "operations", r
 test("snapshots are detached and accept only registered content, never authority or executable styling", () => {
   const input = initial();
   const parsed = parseCanvasDefinition(input);
-  parsed.sections[0].widgets[0].params.showCompleted = true;
-  assert.equal(input.sections[0].widgets[0].params.showCompleted, false);
+  (parsed.sections[0].widgets[0] as CanvasProjectBoardWidget).params.showCompleted = true;
+  assert.equal((input.sections[0].widgets[0] as CanvasProjectBoardWidget).params.showCompleted, false);
   for (const change of [
     { owner: "someone-else" }, { sharing: "public" }, { schemaVersion: 2 }, { revision: "01" }, { revision: 1 },
     { revision: "-1" }, { revision: "9".repeat(65) }, { title: " " }, { title: "x".repeat(121) },
@@ -85,4 +87,15 @@ test("bounded layout and exact operation schemas reject ambiguous edits", () => 
   assert.throws(() => parseCanvasDefinition({ ...input, sections: Array.from({ length: 13 }, (_, i) => ({ id: `s-${i}`, title: "Section", columns: 1, widgets: [] })) }), /sections/);
   assert.throws(() => parseCanvasDefinition({ ...input, sections: [{ ...input.sections[0], widgets: Array.from({ length: 49 }, (_, i) => board(`board-${i}`)) }] }), /widgets/);
   assert.throws(() => parseCanvasDefinition({ ...input, sections: input.sections.map((s, i) => ({ ...s, widgets: Array.from({ length: 25 }, (_, j) => board(`board-${i}-${j}`)) })) }), /widget count/);
+});
+
+test("gadget widgets carry only a workspace-local reference and no parameters", () => {
+  const input = initial();
+  const added = applyCanvasOperations(input, "0", [{ type: "addWidget", sectionId: "other", index: 0, widget: gadget() }]);
+  assert.deepEqual(added.sections[1].widgets, [gadget()]);
+  for (const change of [{ targetRef: "gadget:" }, { targetRef: "gadget:07" }, { targetRef: "gadget:-1" }, { targetRef: "gadget:1.5" },
+    { targetRef: "inferops://demo.local/project/board/DEMO" }, { params: { title: "x" } }, { params: null }, { version: 2 }]) {
+    assert.throws(() => applyCanvasOperations(input, "0", [{ type: "addWidget", sectionId: "other", index: 0, widget: { ...gadget(), ...change } }]), /Invalid canvas/);
+  }
+  assert.throws(() => applyCanvasOperations(added, "1", [{ type: "configureWidget", widget: { ...board("gadget-a"), targetRef: "gadget:7" } }]), /target reference/);
 });

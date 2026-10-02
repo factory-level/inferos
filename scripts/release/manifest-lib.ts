@@ -16,10 +16,11 @@
 // The placeholder list is closed: the deploy-side renderer fails on any `$` token it doesn't
 // recognize, so this file and the renderer must evolve together (manifestVersion guards that).
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
 import { parse } from "jsonc-parser";
 import type { AssetManifestEntry, CollectedAssets, CollectedModule } from "./hash-lib.ts";
+import { workerPackageDirs } from "../worker-dirs.ts";
 
 /** Manifest version the deploy-side renderer must agree with (see header comment). */
 export const MANIFEST_VERSION = 1;
@@ -263,6 +264,7 @@ const ARTIFACTS_CUT_ALLOWED = new Set(["gatekeeper-context"]);
 const NO_DEFAULT_CRED_INPUTS = new Set([
   "gatekeeper-context",       // no third-party service; uses its own storage
   "gatekeeper-homeassistant", // users connect their own Home Assistant URL + token in-app
+  "gatekeeper-inferops",      // auto-provisioned; mock InferOps data, no third-party OAuth app
   "gatekeeper-scheduler",     // auto-provisioned; no third-party OAuth app
   "gatekeeper-mcp",           // MCP OAuth uses dynamic client registration, not a static app
   "gatekeeper-mcp-portal",    // same MCP OAuth chain as gatekeeper-mcp
@@ -299,6 +301,7 @@ const SINGLETON = new Set([
   "gatekeeper-context",       // (1) ambient ContextLibrary
   "gatekeeper-scheduler",     // (1) ambient ScheduleSession
   "gatekeeper-homeassistant", // (2) no inputs; users connect their own URL + token in-app
+  "gatekeeper-inferops",      // (2) no inputs; auto-provisioned accounts over mock data
   "gatekeeper-mcp",           // (2) no inputs; users paste their own endpoints in-app
   "gatekeeper-mcp-portal",    // (2) no inputs; the one portal comes from the deployment's vars
 ]);
@@ -319,21 +322,22 @@ export const DEFAULT_CRED_INPUTS: DeployInput[] = [
 
 const GATEKEEPER_PREFIX = "gatekeeper-";
 
-/** Read every deployable package and its Wrangler configuration, sorted by package name. */
-export function readDeployablePackages(packagesDir: string): DeployablePackage[] {
-  return readdirSync(packagesDir)
-      .filter((name) => {
+/**
+ * Read every deployable package under the worker package roots of `root` (see `worker-dirs.ts`)
+ * and its Wrangler configuration, sorted by package name.
+ */
+export function readDeployablePackages(root: string): DeployablePackage[] {
+  return workerPackageDirs(root)
+      .filter((dir) => {
     try {
-      return statSync(join(packagesDir, name, "wrangler.jsonc")).isFile();
+      return statSync(join(dir, "wrangler.jsonc")).isFile();
     } catch {
       return false;
     }
   })
-      .toSorted()
-      .map((name) => {
-    const dir = join(packagesDir, name);
+      .map((dir) => {
     const config = parse(readFileSync(join(dir, "wrangler.jsonc"), "utf8")) as WranglerConfig;
-    return { name, dir, config };
+    return { name: basename(dir), dir, config };
   });
 }
 
