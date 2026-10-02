@@ -8891,6 +8891,10 @@ class OverseerImpl implements AgentHooks {
     return promise;
   }
 
+  getWorkspaceKind(): WorkspaceKind {
+    return this.storage.kind.get();
+  }
+
   async getInstanceInstructions(): Promise<string> {
     try {
       // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.

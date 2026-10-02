@@ -12,6 +12,7 @@ covers:
   - packages/workshop-frontend/src/components/GadgetPresence.tsx
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/canvas.ts
+  - packages/workshop-shared/src/workspace-kind.ts
   - scripts/consumer/views.ts
   - packages/workshop-backend/src/overseer.ts
   - packages/workshop-backend/src/canvas-store.ts
@@ -138,4 +139,12 @@ Each workspace stores an explicit kind, `WorkspaceKind` in `workshop-shared/src/
 
 The kind is deterministic. The Overseer's `kind` singleton changes only through `Overseer.setKind()`, which is build-role only (the use-role capability denies it). Nothing infers it from the workspace's code. Workspaces stored before kinds existed read the default `app`. The Overseer sends the kind in `getMetadata()` and `subscribeToMetadata()` to both roles, because it decides how a use-role viewer is shown the workspace. `setKind` also mirrors the kind into the owner's workspace list (`User.updateKind`), so `listGadgets()` can group workspaces by kind without opening each one. Older list records have no `kind`, which also means `app`.
 
-The kind does not yet change presentation. The frontend surfaces that act on it (the Build/Operate toggle, the kind switch, and kind-specific canvas tiles) are separate, flag-gated work. Creating a workspace with a kind, and an agent tool to change it, are not implemented.
+The kind decides what the workspace builds, through three pure functions in `workshop-shared/src/workspace-kind.ts` that the kernel, the agent and the UI share:
+
+- `workspaceKindContract(kind)` is the kind's rules as a section of the builder agent's system prompt. It goes in the project-specific slot, so the cached static slot is unchanged. An app has no contract: it is what the agent builds by default.
+- `workspaceKindStarter(kind)` is the files a new gadget starts from. The agent's `createGadget` copies them in when no blueprint is given, as one change that rides the chat's proposed changes like a blueprint copy, and reports them as `starterNotes`. A widget starts from `client.js` and `server.js`; a workflow from `server.js` with a `run(input)` method. An app starts empty, as before.
+- `checkWorkspaceKind(kind, filenames)` returns how a gadget's files fail to fit the kind: an app or widget with no `client.js`, a widget or workflow with no `server.js`, a workflow with a `client.js`. Nothing in the kernel calls it yet; it is there for the UI.
+
+The agent's `writeFile` and `editFile` refuse `client.js` in a workflow workspace's gadgets (`workspaceKindAllowsFile`), so a workflow cannot gain a UI through the agent. Worktrees are exempt. The agent reads the kind once per turn through the `getWorkspaceKind` hook.
+
+`AuthenticatedApi.newGadget(kind?)` creates a workspace of a kind, storing it before the workspace is returned. `newGadgetFromBlueprint()` does not take or carry a kind, so a workspace installed from a blueprint is an app until switched. The frontend surfaces that act on the kind (the Build/Operate toggle, the kind switch, and kind-specific canvas tiles) are separate, flag-gated work. An agent tool to change the kind, publishing to Operate and the operate chat are not implemented.
