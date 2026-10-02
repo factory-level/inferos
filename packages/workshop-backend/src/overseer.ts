@@ -1,3 +1,5 @@
+import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
+import { WorkspaceCanvasStore } from "./canvas-store";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
@@ -1171,6 +1173,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
     },
 
     collections: {
+      canvases: collection<CanvasDefinition>()({ primaryKey: "id" }),
       // READ-ONLY LEGACY: the pre-git-storage incremental code log, tightly-packed from version 1
       // (there's no entry for version 0, the starting empty state). Nothing writes it anymore --
       // mainline code lives in `gitObjects` as commits -- and it is read only by the git-storage
@@ -10758,6 +10761,19 @@ function joinSessionPresence(
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
 
+  #canvasStore(): WorkspaceCanvasStore {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceCanvasStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
+  }
+
+  async listCanvases(): Promise<CanvasDefinition[]> { return this.#canvasStore().list(); }
+  async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.#canvasStore().get(id); }
+  async createCanvas(content: CanvasContent): Promise<CanvasDefinition> { return this.#canvasStore().create(content); }
+  async editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition> {
+    return this.#canvasStore().edit(id, expectedRevision, operations);
+  }
+  async deleteCanvas(id: string, expectedRevision: string): Promise<void> { this.#canvasStore().delete(id, expectedRevision); }
+
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,
@@ -12348,6 +12364,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // whether "use" callers may invoke it.
 @validateRpc()
 class UseOverseerInterface extends RpcTarget implements Overseer {
+  async listCanvases(): Promise<CanvasDefinition[]> { this.#deny(); }
+  async getCanvas(_id: string): Promise<CanvasDefinition | null> { this.#deny(); }
+  async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
+  async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
+  async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,

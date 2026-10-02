@@ -23,6 +23,7 @@
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
+import type { CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
@@ -1947,6 +1948,17 @@ export type AgentSpawnerConfig = {
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
+  /** List stored composition definitions in this workspace. Requires build access and both view flags. */
+  listCanvases(): Promise<CanvasDefinition[]>;
+  /** Read a composition with build access and both view flags; never resolves or grants domain resources. */
+  getCanvas(id: string): Promise<CanvasDefinition | null>;
+  /** Create content under a server-minted ID and revision zero. Requires build access and both flags; limit 64 per workspace. */
+  createCanvas(content: CanvasContent): Promise<CanvasDefinition>;
+  /** Compare revision and apply a batch atomically with build access and both flags. Never mutates domain rows. */
+  editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition>;
+  /** Delete a definition at its expected revision with build access and both flags. Reimport creates a new identity. */
+  deleteCanvas(id: string, expectedRevision: string): Promise<void>;
+
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
 

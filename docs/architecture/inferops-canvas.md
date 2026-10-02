@@ -7,6 +7,8 @@ covers:
   - packages/workshop-shared/src/canvas.ts
   - scripts/consumer/views.ts
   - packages/workshop-backend/src/overseer.ts
+  - packages/workshop-backend/src/canvas-store.ts
+  - packages/workshop-backend/src/env.d.ts
   - packages/ui
 updated: 2026-10-01
 ---
@@ -37,7 +39,7 @@ Current board widget freshness is 60 seconds. The InferOps board hook pauses pol
 
 ## Divergences from Design
 
-A guarded composition schema and pure edit engine now exist; authorized persistence, an InferOS widget host/data adapter, live agent activity and measured Kanban performance are unimplemented. Importing the existing React component alone would not resolve authentication, styling, iframe or sharing boundaries.
+A guarded composition schema and pure edit engine now exist; workspace-authorized definition storage now exists; an InferOS widget host/data adapter, live agent activity and measured Kanban performance remain unimplemented. Importing the existing React component alone would not resolve authentication, styling, iframe or sharing boundaries.
 
 ## Open Questions
 
@@ -60,3 +62,15 @@ Edits add/remove/move/configure sections or widgets, rename the view, or restore
 This engine performs no storage, authorization or feature enforcement. Its result is suitable for preview. Before persisting, a server caller must check installation flags and workspace edit authority, resolve resource capabilities independently, and compare/write inside one storage transaction. A test of this pure engine is not evidence that concurrent durable writes are safe.
 
 Bootstrap writes `views/operations.json` with the configured target reference. `views:check` runs the pinned validator, bounds file count/size, rejects links/executable files and duplicate view IDs, and reports runtime readiness false. It does not load the InferOps fixture, connect a provider or publish a view. The composable/durable flags continue to fail startup while their adapters are absent.
+
+## Workspace-scoped definition storage
+
+The existing Overseer durable object's typed storage now has a `canvases` collection. `WorkspaceCanvasStore` uses that collection and the object's synchronous transaction mechanism; it does not introduce a separate database or domain-data cache. Owner/build sessions expose list, get, create, edit and delete methods on the existing Overseer capability. The use-only surface explicitly denies all five methods, covered by the exhaustive use-role suite. Unrelated users still fail the native workspace-open authorization, and IDs are resolved only inside the current workspace's collection.
+
+Every storage operation requires deployment bindings `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` to equal the string `true`. These are structural installation switches, separate from admin soft settings and rollout flags. Disabling either denies reads and mutations without deleting stored records. The consumer launcher does not yet map or enable them: it still rejects view flags until the renderer/data integration exists. No browser or agent composition UI is implied by these server methods.
+
+Creation accepts content only, mints a new UUID and starts at revision zero. It enforces 64 active definitions per workspace. Imports/recreation never reuse the deleted view's identity, avoiding stale-edit confusion. Edit and delete compare expected revisions in the same synchronous transaction as the write. Invalid edit batches leave persisted content unchanged. Delete removes only the definition; underlying InferOps data is untouched. Unknown stored schema versions fail validation rather than being silently rewritten.
+
+Definitions inherit the native workspace build-access boundary; they do not yet have independent sharing controls. The existing sharing manager's session/revocation behavior remains authoritative. Reading a definition is not reading a referenced board: no target is resolved and no resource grant is created by this API. The future renderer/data adapter must separately obtain authorized capabilities before loading any referenced data. Existing InferOps personal pins remain untouched.
+
+Real Workers/RPC tests cover concurrent revision conflicts, rollback, scope isolation, build/use roles, quota and recreation identity. A harness configuration update reloads Workers with durable views disabled, proves access is denied, then reenables them and reads the original definition. This demonstrates Worker-reload retention, not a cloud rollout, OS crash recovery, schema migration or completed consumer view experience.
