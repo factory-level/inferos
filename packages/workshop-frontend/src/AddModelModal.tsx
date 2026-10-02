@@ -5,6 +5,7 @@ import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { ExtraHeadersEditor } from './features/ai-models/ExtraHeadersEditor'
 import { StoredSecretInput } from './features/ai-models/StoredSecretInput'
+import { ChatGptModelModal } from './features/openai/ChatGptModelModal'
 import {
   headerRowsFromRecord, headerRowsToRecord, validateHeaderRows, type HeaderRow,
 } from './features/ai-models/extraHeaders'
@@ -129,6 +130,18 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // the modal (with a `key`) to switch source.
   const source = mode.type === 'add' ? null : mode.source
   const editing = mode.type === 'edit'
+  const [planEnabled, setPlanEnabled] = useState(false)
+  const [usePlan, setUsePlan] = useState(source?.config.billing === 'chatgpt-plan')
+  useEffect(() => {
+    let cancelled = false
+    if (visible && mode.type === 'add') void (async () => {
+      try {
+        const flags = await authenticatedApi.getUiFeatureFlags()
+        if (!cancelled) setPlanEnabled(flags['openai-chatgpt-plan-usage'])
+      } catch { /* A missing capability leaves the default-off control hidden. */ }
+    })()
+    return () => { cancelled = true }
+  }, [authenticatedApi, visible, mode.type])
 
   const [loading, setLoading] = useState(false)
   const [selection, setSelection] = useState<SelectionType | null>(
@@ -138,7 +151,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // Form fields (used for custom models). A null secret keeps the source's withheld value.
   const [modelId, setModelId] = useState(editing ? source!.config.model : '')
   const [displayName, setDisplayName] = useState(editing ? source!.profile.name : '')
-  const [apiToken, setApiToken] = useState<string | null>(source ? source.config.apiToken : '')
+  const [apiToken, setApiToken] = useState<string | null>(source ? source.config.apiToken ?? null : '')
   const [accountId, setAccountId] = useState(source?.config.accountId ?? '')
   const [apiUrl, setApiUrl] = useState(source?.config.apiUrl ?? '')
   const [headerRows, setHeaderRows] = useState<HeaderRow[]>(() => headerRowsFromRecord(source?.config.extraHeaders))
@@ -329,6 +342,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   }
 
   return (
+    usePlan ? <ChatGptModelModal authenticatedApi={authenticatedApi} visible={visible} mode={mode}
+      onCancel={onCancel} onSuccess={onSuccess} /> :
     <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) onCancel() }}>
       <Dialog className="responsive-dialog overflow-y-auto p-6" size="lg">
         <Dialog.Title className="text-lg font-semibold mb-4">
@@ -336,6 +351,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         </Dialog.Title>
 
         <div className="space-y-4">
+          {planEnabled && mode.type === 'add' && <Button onClick={() => setUsePlan(true)}>Use ChatGPT plan</Button>}
           {/* Model / Provider selection */}
           {source ? (
             <Input

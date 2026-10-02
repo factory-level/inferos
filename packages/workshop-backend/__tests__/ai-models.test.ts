@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelConfig,
 } from "@gadgets/workshop-shared/api";
@@ -17,6 +17,118 @@ const INITIATOR: AiChatAuthorInfo = {
   id: "user-123",
   name: "User",
 };
+
+describe('ChatGPT plan routing through the real pi Responses adapter', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const config: AiModelConfig = { provider: 'openai', billing: 'chatgpt-plan', model: 'gpt-5.4', registrationId: 'registration' };
+  const localEnv = () => env({ ENABLE_OPENAI_ASSISTANT_PLUGIN: 'true', OPENAI_ASSISTANT_PLUGIN_URL: 'http://127.0.0.1:1456', OPENAI_ASSISTANT_PLUGIN_SECRET: 'bridge-secret' });
+
+  it('fails closed when disabled, even when an API gateway is available', () => {
+    expect(() => getModel(env(), config, INITIATOR)).toThrow('disabled');
+  });
+
+  it('uses only the companion with namespaced sandbox tools and carries safe usage errors', async () => {
+    const sent: CapturedRequest[] = [];
+    const failure = { status: 429, code: 'subscription_sharing_usage_limit_exceeded', message: 'Review ChatGPT Usage settings.', recovery: 'usage', requestId: 'req-plan' };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({ url: String(input), headers: new Headers(init?.headers), body: String(init?.body) });
+      return Response.json({ error: failure }, { status: 429 });
+    });
+    const handle = getModel(localEnv(), config, INITIATOR, {
+      background: false,
+      userGateway: { accountId: 'paid-account', apiKey: 'paid-secret' },
+    });
+    const stream = await handle.stream(handle.model, {
+      systemPrompt: 'Sandbox instructions',
+      messages: [{ role: 'user', content: 'hello', timestamp: 0 }],
+      tools: [{ name: 'execute', description: 'Run a sandbox tool', parameters: { type: 'object', properties: {} } }],
+    });
+    const message = await stream.result();
+    expect(message.stopReason).toBe('error');
+    expect(sent, message.errorMessage).toHaveLength(1);
+    expect(sent[0].url).toBe('http://127.0.0.1:1456/responses');
+    expect(sent[0].headers.get('authorization')).toBe('Bearer bridge-secret');
+    expect(sent[0].headers.get('x-inferos-user')).toBe('user-123');
+    expect(sent[0].headers.get('x-inferos-background')).toBe('false');
+    const body = JSON.parse(sent[0].body);
+    expect(body).toMatchObject({ model: 'gpt-5.4', store: false, stream: true, tools: [{ type: 'namespace', name: 'inferos' }] });
+    expect(body).not.toHaveProperty('max_output_tokens');
+    expect(body).not.toHaveProperty('temperature');
+    expect(body.input.some((item: { role?: string }) => item.role === 'system')).toBe(false);
+    expect(handle.planError).toEqual(failure);
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+  });
+
+  it('treats mid-stream failures as errors without executing incomplete tool calls', async () => {
+    const failure = { type: 'error', status: 200, code: 'response_incomplete', message: 'Incomplete ChatGPT response.', recovery: 'none' };
+    const fetch = vi.fn(async () => new Response([
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc_partial', call_id: 'partial', name: 'execute', namespace: 'inferos', arguments: '' } },
+      { type: 'response.function_call_arguments.delta', output_index: 0, delta: '{"code":' },
+      failure,
+    ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetch);
+    const handle = getModel(localEnv(), config, INITIATOR);
+    const stream = await handle.stream(handle.model, { messages: [{ role: 'user', content: 'hello', timestamp: 0 }] });
+    const message = await stream.result();
+    expect(message.stopReason).toBe('error');
+    expect(handle.planError?.code, message.errorMessage).toBe('response_incomplete');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('completes a text response and a namespaced sandbox tool round trip', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const call = { type: 'function_call', id: 'fc_test', call_id: 'call_test', name: 'execute', namespace: 'inferos', arguments: '{"code":"1 + 1"}', status: 'completed' };
+    const text = { type: 'message', id: 'msg_test', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: '2', annotations: [] }] };
+    const reply = (item: typeof call | typeof text) => new Response([
+      { type: 'response.created', response: { id: 'resp_test', status: 'in_progress' } },
+      { type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '', content: [] } },
+      ...(item.type === 'function_call'
+        ? [{ type: 'response.function_call_arguments.delta', output_index: 0, delta: call.arguments }]
+        : [{ type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: '2' }]),
+      { type: 'response.output_item.done', output_index: 0, item },
+      { type: 'response.completed', response: { id: 'resp_test', status: 'completed', output: [item], usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 } } },
+    ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } });
+    vi.stubGlobal('fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('http://127.0.0.1:1456/responses');
+      bodies.push(JSON.parse(String(init?.body)));
+      return reply(bodies.length === 1 ? call : text);
+    });
+    const handle = getModel(localEnv(), config, INITIATOR, { background: false });
+    const user = { role: 'user' as const, content: 'Calculate one plus one.', timestamp: 0 };
+    const tools = [{ name: 'execute', description: 'Sandbox', parameters: { type: 'object', properties: { code: { type: 'string' } } } }];
+    const first = await (await handle.stream(handle.model, { messages: [user], tools })).result();
+    expect(first.stopReason, first.errorMessage).toBe('toolUse');
+    expect(first.content).toMatchObject([{ type: 'toolCall', name: 'execute', namespace: 'inferos', arguments: { code: '1 + 1' } }]);
+    const second = await (await handle.stream(handle.model, { tools, messages: [user, first,
+      { role: 'toolResult', toolCallId: 'call_test|fc_test', toolName: 'execute', content: [{ type: 'text', text: '2' }], isError: false, timestamp: 1 },
+    ] })).result();
+    expect(second.stopReason, second.errorMessage).toBe('stop');
+    expect(second.content).toMatchObject([{ type: 'text', text: '2' }]);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].input).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'function_call', namespace: 'inferos', name: 'execute' }),
+      expect.objectContaining({ type: 'function_call_output', output: '2' }),
+    ]));
+    expect(bodies[1]).not.toHaveProperty('previous_response_id');
+    expect(handle.planError).toBeUndefined();
+  });
+
+  it.each([
+    { name: 'scheduled/resumed', initiator: INITIATOR, options: { background: true }, expected: 'true' },
+    { name: 'gadget', initiator: { ...INITIATOR, type: 'gadget' as const }, options: {}, expected: 'true' },
+    { name: 'auxiliary', initiator: INITIATOR, options: {}, expected: 'true' },
+    { name: 'foreground', initiator: INITIATOR, options: { background: false }, expected: 'false' },
+  ])('marks $name requests for the companion spending check', async ({ initiator, options, expected }) => {
+    let background: string | null = null;
+    vi.stubGlobal('fetch', async (_url: RequestInfo | URL, init?: RequestInit) => {
+      background = new Headers(init?.headers).get('x-inferos-background');
+      return new Response('denied', { status: 403 });
+    });
+    const handle = getModel(localEnv(), config, initiator, options);
+    await (await handle.stream(handle.model, { messages: [{ role: 'user', content: 'Hi', timestamp: 0 }] })).result();
+    expect(background).toBe(expected);
+  });
+});
 
 const GADGET_INITIATOR: AiChatAuthorInfo = {
   type: "gadget",
@@ -80,6 +192,16 @@ async function captureRequest(
 describe("getModel AI Gateway routing", () => {
   beforeEach(() => {
     capturedRequests.length = 0;
+  });
+
+  it('uses the explicit API-key fallback directly even when a gateway is configured', async () => {
+    const handle = getModel(env(), { provider: 'anthropic', billing: 'api-key', model: 'claude-sonnet-4-5', apiToken: 'chosen-key' }, INITIATOR,
+      { userGateway: { accountId: 'other-account', apiKey: 'gateway-key' } });
+    const sent = await captureRequest(handle);
+    expect(sent.url).toContain('https://api.anthropic.com/');
+    expect(sent.headers.get('x-api-key')).toBe('chosen-key');
+    expect(sent.headers.has('cf-aig-authorization')).toBe(false);
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
   });
 
   it("routes non-Workers providers through the platform gateway", async () => {

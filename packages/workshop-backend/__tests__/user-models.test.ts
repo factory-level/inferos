@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { AiModelConfig } from "@gadgets/workshop-shared/api";
 import type { UserDurableObject } from "../src/user.js";
+import type { OpenAiPluginState } from '@gadgets/workshop-shared/openai-plugin';
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -114,6 +115,103 @@ describe("UserDurableObject model editing", () => {
     const clone = { type: "agent" as const, id: "clone", name: "Clone" };
     await expect(user.addModel(clone, { ...CONFIG, apiToken: null })).rejects.toThrow("required");
   });
+});
+
+describe('ChatGPT model ownership and disconnected fallback', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const plan = { provider: 'openai' as const, billing: 'chatgpt-plan' as const, model: 'gpt-test', registrationId: 'owned' };
+  const profile = { type: 'agent' as const, id: 'plan', name: 'ChatGPT' };
+  function inPlanUser(run: (user: UserDurableObject, config: Cloudflare.Env) => Promise<void>) {
+    const stub = env.TEST_USER.getByName(`plan-models-${++userCounter}`);
+    return runInDurableObject(stub, user => {
+      const impl = user as unknown as { env: Cloudflare.Env };
+      impl.env = { ...impl.env, DEV: true, ENABLE_OPENAI_ASSISTANT_PLUGIN: 'true',
+        OPENAI_ASSISTANT_PLUGIN_URL: 'http://127.0.0.1:1456', OPENAI_ASSISTANT_PLUGIN_SECRET: 'test-bridge' };
+      return run(user, impl.env);
+    });
+  }
+  function mockCompanion(status: OpenAiPluginState['accounts'][number]['status'] = 'ready') {
+    const state: OpenAiPluginState = { accounts: [{ id: 'owned', label: 'Owner', status, allowBackground: false }],
+      activeAccountId: 'owned', needsWelcome: false };
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const command = JSON.parse(String(init?.body));
+      expect(new Headers(init?.headers).get('x-inferos-user')).toBe('user@example.com');
+      if (command.operation === 'state') return Response.json(state);
+      return command.accountId === 'owned' ? Response.json([{ slug: 'gpt-test', displayName: 'GPT Test' }])
+        : Response.json({ error: { status: 404, code: 'account_not_found', message: 'ChatGPT account not found.', recovery: 'none' } }, { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetch);
+    return { state, fetch };
+  }
+  it('persists and edits plan models without secrets and rejects a foreign registration', () => inPlanUser(async user => {
+    mockCompanion();
+    await user.addModel(profile, plan);
+    expect(await user.getModelConfig('plan')).toEqual({ profile: { ...profile, billing: 'chatgpt-plan' }, config: plan });
+    await user.updateModel({ ...profile, name: 'Renamed' }, plan);
+    await expect(user.addModel({ ...profile, id: 'foreign' }, { ...plan, registrationId: 'foreign' })).rejects.toThrow('not found');
+    await expect(user.updateModel(profile, { ...CONFIG, model: plan.model })).rejects.toThrow("can't be changed");
+  }));
+  it.each(['apiToken', 'apiUrl', 'extraHeaders', 'accountId'])('rejects %s on a plan record', field => inPlanUser(async user => {
+    mockCompanion();
+    const invalid = { ...plan };
+    Reflect.set(invalid, field, field === 'extraHeaders' ? { Authorization: 'secret' } : 'override');
+    await expect(user.addModel(profile, invalid)).rejects.toThrow('cannot contain');
+  }));
+  it.each(['signed-out', 'missing'] as const)('uses only the selected API-key model when the account is %s', status => inPlanUser(async user => {
+    const { state } = mockCompanion();
+    await user.addModel(profile, plan);
+    await user.addModel(PROFILE, CONFIG);
+    await user.setChatGptFallback(PROFILE.id);
+    if (status === 'missing') state.accounts = [];
+    else state.accounts[0].status = status;
+    const fallback = (await user.getChatContext('plan')).aiModel!;
+    expect(fallback).toEqual({ profile: { ...PROFILE, fallbackForModelId: 'plan' }, config: { ...CONFIG, billing: 'api-key' } });
+    expect((await user.getModelConfig('plan')).config).toEqual(plan);
+    state.accounts = [{ id: 'owned', label: 'Connected', status: 'ready', allowBackground: false }];
+    expect((await user.getChatContext(fallback.profile.fallbackForModelId!)).aiModel?.config).toEqual(plan);
+    await user.setChatGptFallback(null);
+    expect((await user.getChatContext('plan')).aiModel?.config).toEqual(plan);
+  }));
+  it.each(['ready', 'usage-paused', 'plan-disabled'] as const)('does not change billing for %s accounts', status => inPlanUser(async user => {
+    const { state } = mockCompanion();
+    await user.addModel(profile, plan);
+    await user.addModel(PROFILE, CONFIG);
+    await user.setChatGptFallback(PROFILE.id);
+    state.accounts[0].status = status;
+    expect((await user.getChatContext('plan')).aiModel?.config).toEqual(plan);
+  }));
+  it('does not treat a companion outage as a disconnected account', () => inPlanUser(async user => {
+    const { fetch } = mockCompanion();
+    await user.addModel(profile, plan);
+    await user.addModel(PROFILE, CONFIG);
+    await user.setChatGptFallback(PROFILE.id);
+    fetch.mockRejectedValue(new Error('offline'));
+    await expect(user.getChatContext('plan')).rejects.toThrow('unavailable');
+  }));
+  it('requires an existing keyed model and fails clearly if the selected fallback was deleted', () => inPlanUser(async user => {
+    const { state } = mockCompanion();
+    await user.addModel(profile, plan);
+    await expect(user.setChatGptFallback('plan')).rejects.toThrow('API-key');
+    await expect(user.setChatGptFallback('someone-elses-model')).rejects.toThrow('API-key');
+    await user.addModel(PROFILE, CONFIG);
+    await user.setChatGptFallback(PROFILE.id);
+    await user.deleteModel(PROFILE.id);
+    state.accounts[0].status = 'signed-out';
+    await expect(user.getChatContext('plan')).rejects.toThrow('fallback is unavailable');
+  }));
+  it('offers the local Anthropic key only in DEV and never includes it in public metadata', () => inPlanUser(async (user, config) => {
+    config.ANTHROPIC_API_KEY = 'local-private-key';
+    const choices = await user.getChatGptFallback();
+    expect(choices.models.length).toBeGreaterThan(0);
+    expect(JSON.stringify(choices)).not.toContain('local-private-key');
+    expect(choices.modelId).toBeNull();
+    const id = choices.models[0].id;
+    await user.setChatGptFallback(id);
+    expect((await user.getChatContext(id)).aiModel?.config).toMatchObject({ provider: 'anthropic', apiToken: 'local-private-key', billing: 'api-key' });
+    await expect(user.deleteModel(id)).rejects.toThrow('managed');
+    config.DEV = false;
+    expect((await user.getChatGptFallback()).models).toEqual([]);
+  }));
 });
 
 describe("UserDurableObject hidden gateway models", () => {

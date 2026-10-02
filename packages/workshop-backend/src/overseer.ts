@@ -912,7 +912,7 @@ type ActiveAgentRecord = {
   // Hex durable object ID of the initiator's user DO, used to re-resolve the model config and for
   // billing.
   initiatorUserId: string;
-  // Model ID, used to re-resolve the model config (matches `chatMeta.activeAgent.id`).
+  // Requested model ID, used to re-resolve the config even when the last response used a fallback.
   modelId: string;
   // Who initiated this turn (a user, or a gadget for spawner/callback turns).
   initiator: AiChatAuthorInfo;
@@ -1952,7 +1952,8 @@ class OverseerImpl implements AgentHooks {
     }
 
     await this.#runAgentTurn(
-        record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat);
+        record.chatId, aiModel, record.initiator,
+        aiModel.config.billing === 'chatgpt-plan' || record.callbackInitiated, liveChat);
   }
 
   // The hand-off once a chat's turn is over and its running-agent state has been torn down: drop
@@ -7196,7 +7197,7 @@ class OverseerImpl implements AgentHooks {
     this.storage.activeAgents.put({
       chatId,
       initiatorUserId,
-      modelId: aiModel.profile.id,
+      modelId: aiModel.profile.fallbackForModelId ?? aiModel.profile.id,
       initiator,
       callbackInitiated,
     });
@@ -7261,7 +7262,7 @@ class OverseerImpl implements AgentHooks {
         // (This runs inside the try so the `finally` below still clears the active-agent state and
         // emits a stream "clear" — otherwise the UI would spin forever on a block.)
         let byokRouting: UserGatewayRouting | undefined;
-        if (this.ownerId) {
+        if (this.ownerId && aiModel.config.billing === undefined) {
           let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
           let usage = await checkUsageAndBalance(this.env, ownerStub);
           if (!usage.allowed) {
@@ -7289,6 +7290,7 @@ class OverseerImpl implements AgentHooks {
             this.env, aiModel.config, initiator, {
               sessionAffinity,
               userGateway: byokRouting,
+              background: callbackInitiated || initiator.type !== 'user',
               metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
             });
         turn.setModel(chosenModel.model);
@@ -7336,7 +7338,7 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
 
-      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage, apiError?.planError?.code);
     } finally {
       // If this turn billed the user's own Cloudflare account, refresh their cached balance now (in
       // the background) so the next turn's billing decision reflects the spend just incurred. Runs
@@ -10184,7 +10186,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // Continue existing chats with the most recent agent model used in that chat.
       for (let msg of this.impl.storage.chats.list({ prefix: `${keyString(externalChat.chatId)}.`, reverse: true })) {
         if (msg.author.type === "agent") {
-          modelId = msg.author.id;
+          modelId = msg.author.fallbackForModelId ?? msg.author.id;
           break;
         }
       }
@@ -11587,11 +11589,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
 
     // Recover the model this thread was using. getChatContext(null) does NOT resolve a model, so we
-    // find the id from the most recent agent-authored message (its author.id is the model id).
+    // find the original model choice from the most recent agent-authored message.
     let modelId: string | null = null;
     for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
       if (msg.author.type === "agent") {
-        modelId = msg.author.id;
+        modelId = msg.author.fallbackForModelId ?? msg.author.id;
         break;
       }
     }

@@ -22,6 +22,11 @@ import { traceChat } from "./agent-tracing.js";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
+import { openAiBridgeRequest } from './openai-plugin.js';
+import { errorSchema, isOpenAiPluginEnabled } from '@gadgets/assistant-plugin-openai/protocol';
+import { preparePlanPayload } from '@gadgets/assistant-plugin-openai/payload';
+import type { OpenAiPluginError } from '@gadgets/workshop-shared/openai-plugin';
+import type { ApiKeyModelConfig } from '@gadgets/workshop-shared/api';
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -52,6 +57,7 @@ type GatewayMetadataContext = {
 };
 
 type ModelRoutingOptions = {
+  background?: boolean;
   sessionAffinity?: string;
   userGateway?: UserGatewayRouting;
   metadata?: GatewayMetadataContext;
@@ -78,6 +84,8 @@ export type ModelStreamOptions = SimpleStreamOptions & {
  * failures; failures surface as a final AssistantMessage with stopReason "error"/"aborted".
  */
 export type ModelHandle = {
+  /** Safe structured ChatGPT failure, retained even when pi normalizes failures to text. */
+  planError?: OpenAiPluginError;
   /** pi model descriptor (plain data; pi dispatches purely on `model.api`). */
   model: Model<Api>;
 
@@ -262,6 +270,7 @@ function getHeader(headers: Record<string, string>, name: string): string | unde
 }
 
 type HandleArgs = {
+  plan?: { env: Cloudflare.Env; owner: string; accountId: string; background: boolean };
   model: Model<Api>;
   // Provider auth: a plain API key (pi turns it into the SDK's native auth) and/or headers.
   // A null header value suppresses a default header ({Authorization: null, "x-api-key": null}
@@ -308,6 +317,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
     stream: (model, context, { thinking = true, ...options } = {}) => {
       // Never let a failed request read a previous request's response metadata.
       handle.lastResponse = undefined;
+      handle.planError = undefined;
       // This request's own response metadata: concurrent requests on one handle overwrite
       // `lastResponse`, but not this.
       let received: ModelHandle["lastResponse"];
@@ -332,6 +342,31 @@ function makeHandle(args: HandleArgs): ModelHandle {
                 : {}),
         ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
         ...options,
+        ...(args.plan ? {
+          maxRetries: 0,
+          cacheRetention: 'none' as const,
+          fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+            const request = new Request(input, init);
+            if (request.url !== 'https://api.openai.com/v1/responses' || request.method !== 'POST') {
+              throw new Error('Unsupported ChatGPT plan request route.');
+            }
+            const plan = args.plan!;
+            const response = await openAiBridgeRequest(plan.env, plan.owner, '/responses', {
+              method: 'POST', body: await request.text(), signal: request.signal,
+              headers: { 'x-inferos-account': plan.accountId,
+                'x-inferos-background': String(plan.background) },
+            });
+            received = { status: response.status };
+            handle.lastResponse = received;
+            if (!response.ok) {
+              const body: unknown = await response.clone().json().catch(() => null);
+              const parsed = errorSchema.safeParse(
+                typeof body === 'object' && body !== null && 'error' in body ? body.error : null);
+              if (parsed.success) handle.planError = parsed.data;
+            }
+            return response;
+          },
+        } : {}),
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
@@ -348,7 +383,15 @@ function makeHandle(args: HandleArgs): ModelHandle {
         // document blocks (no-op for payloads without one; see chat-attachment-pdf.ts).
         onPayload: async (payload, payloadModel) => {
           const replaced = await options.onPayload?.(payload, payloadModel);
-          return bridgePdfAttachments(args.model.api, replaced ?? payload) ?? replaced;
+          const bridged = bridgePdfAttachments(args.model.api, replaced ?? payload) ?? replaced ?? payload;
+          return args.plan ? preparePlanPayload(bridged) : bridged;
+        },
+        onProviderStreamEvent: async (event, responseModel) => {
+          if (args.plan && typeof event === 'object' && event !== null && 'type' in event && event.type === 'error') {
+            const parsed = errorSchema.safeParse(event);
+            if (parsed.success) handle.planError = parsed.data;
+          }
+          await options.onProviderStreamEvent?.(event, responseModel);
         },
       };
       return traceChat(model, () => received,
@@ -367,6 +410,25 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  if (config.billing === 'chatgpt-plan') {
+    if (!isOpenAiPluginEnabled(env)) throw new Error('ChatGPT plan usage is disabled on this deployment.');
+    const catalog = catalogModel('openai', config.model);
+    return makeHandle({
+      model: { id: config.model, name: catalog?.name ?? config.model,
+        api: 'openai-responses', provider: 'openai', baseUrl: 'https://api.openai.com/v1',
+        reasoning: catalog?.reasoning ?? true, input: catalog?.input ?? ['text', 'image'],
+        cost: ZERO_COST, ...modelTokenWindow(config, catalog),
+        thinkingLevelMap: catalog?.thinkingLevelMap,
+        compat: { ...catalog?.compat, supportsMaxOutputTokens: false, supportsLongCacheRetention: false,
+          supportsAdditionalTools: false, supportsToolSearch: false, supportsDeveloperRole: true },
+      },
+      // A non-secret marker selects pi's SIWC payload behavior; only Bun obtains the real token.
+      apiKey: 'inferos-chatgpt-plan',
+      plan: { env, owner: initiator.id, accountId: config.registrationId,
+        background: options.background ?? (initiator.type !== 'user' || options.metadata?.source !== 'chat') },
+    });
+  }
+  if (config.billing === 'api-key') return getModelDirect(config, options.sessionAffinity);
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -520,14 +582,14 @@ function getModelViaGateway(
 // the config's extraHeaders instead (AI Gateway only injects its stored provider key into requests
 // that don't already carry one). The SDKs insist on *some* key, so they get a placeholder, while a
 // null default header deletes the header they derive from it; extra headers still override.
-function directAuth(config: AiModelConfig, keyHeader: string): Pick<HandleArgs, "apiKey" | "headers"> {
+function directAuth(config: ApiKeyModelConfig, keyHeader: string): Pick<HandleArgs, "apiKey" | "headers"> {
   return config.apiToken === ""
       ? { apiKey: "unused", headers: { [keyHeader]: null, ...config.extraHeaders } }
       : { apiKey: config.apiToken, headers: config.extraHeaders };
 }
 
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
-function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
+function getModelDirect(config: ApiKeyModelConfig, sessionAffinity?: string): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {

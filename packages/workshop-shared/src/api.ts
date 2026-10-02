@@ -28,6 +28,7 @@ import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -47,7 +48,8 @@ export const SERVICE_SALT = new Uint8Array([
  * a connect's after CONNECT_FLOW_LIFETIME_MS (30 minutes, server-side), a sign-in's with its
  * `PendingLogin` attempt.
  */
-export type ConnectFlowStart = { url: string; nonce: string };
+export type { ConnectFlowStart } from './connect-flow.js';
+import type { ConnectFlowStart } from './connect-flow.js';
 
 /**
  * A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
@@ -519,6 +521,15 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Resolve UI feature flags for the authenticated user. */
   getUiFeatureFlags(): Promise<UiFeatureFlags>;
+
+  /** Obtain the local ChatGPT plan capability, or null when the deployment has disabled it. */
+  getOpenAiAssistantPlugin(): Promise<OpenAiAssistantPluginApi | null>;
+
+  /** Read the selected disconnected-ChatGPT fallback and the user's eligible API-key models. */
+  getChatGptFallback(): Promise<{ modelId: string | null; models: AiChatAuthorInfo[] }>;
+
+  /** Choose an API-key model used only when a ChatGPT registration is disconnected; null disables fallback. */
+  setChatGptFallback(modelId: string | null): Promise<void>;
 
   /**
    * Get the user's preferred model, chosen during onboarding. Returns null if the user has not
@@ -1348,7 +1359,9 @@ export type AiGatewayInfo = {
 };
 
 /** Configuration specifying how to connect to an AI model provider. */
-export type AiModelConfig = {
+export type ApiKeyModelConfig = {
+  /** Explicit api-key billing bypasses gateways; absent on legacy provider/gateway configurations. */
+  billing?: "api-key";
   /** Which AI provider hosts the model? */
   provider: AiModelProvider;
 
@@ -1397,6 +1410,33 @@ export type AiModelConfig = {
   outputLimit?: number;
 };
 
+/** An OpenAI model billed only to one explicitly selected ChatGPT registration. */
+export type ChatGptPlanModelConfig = {
+  /** Explicit plan routing, evaluated before gateway routing. */
+  billing: "chatgpt-plan";
+  /** ChatGPT plan usage supports the OpenAI Responses provider. */
+  provider: "openai";
+  /** Slug from this registration's model catalog. */
+  model: string;
+  /** Opaque registration owned by the initiating Workshop user. */
+  registrationId: string;
+  /** Optional local context budget; never sent as an API output cap. */
+  contextWindow?: number;
+  /** Local space reserved for the response; never sent to OpenAI. */
+  outputLimit?: number;
+  /** OAuth credentials cannot be embedded in model records. */
+  apiToken?: never;
+  /** Plan requests always target OpenAI through the local companion. */
+  apiUrl?: never;
+  /** Caller-supplied credentials or headers are prohibited on this route. */
+  extraHeaders?: never;
+  /** Cloudflare billing accounts do not apply to ChatGPT plans. */
+  accountId?: never;
+};
+
+/** Explicit model connection, with legacy provider configurations remaining valid unchanged. */
+export type AiModelConfig = ApiKeyModelConfig | ChatGptPlanModelConfig;
+
 /**
  * An `AiModelConfig` whose secrets may be withheld, so that a stored configuration can be shown
  * and edited without the client ever receiving its secrets. As returned by
@@ -1404,13 +1444,13 @@ export type AiModelConfig = {
  * passed to `AuthenticatedApi.updateModel()` or `addModel()`, a `null` secret keeps (or copies)
  * the stored value.
  */
-export type RedactedAiModelConfig = Omit<AiModelConfig, "apiToken" | "extraHeaders"> & {
+export type RedactedAiModelConfig = ChatGptPlanModelConfig | (Omit<ApiKeyModelConfig, "apiToken" | "extraHeaders"> & {
   /** `AiModelConfig.apiToken`, or null if withheld. */
   apiToken: string | null;
 
   /** `AiModelConfig.extraHeaders`, with each value null if withheld. */
   extraHeaders?: Record<string, string | null>;
-};
+});
 
 /**
  * Workers AI adds the response cap to the prompt and rejects a request whose total exceeds the
@@ -2967,7 +3007,14 @@ export type ActionHistoryPage = {
   nextBeforeId?: number;
 };
 
+/** Lightweight attribution for a chat participant or configured model. */
 export type AiChatAuthorInfo = {
+  /** Original model choice when this author answered as its fallback; retry that choice next turn. */
+  fallbackForModelId?: string;
+  /** Model configuration is managed by the local runtime and cannot be edited or deleted in the UI. */
+  managed?: boolean;
+  /** Explicit subscription billing, when this model spends a connected ChatGPT allowance. */
+  billing?: 'chatgpt-plan';
   /**
    * Is the author a human, AI, or Gadget?
    *
