@@ -1,5 +1,5 @@
 import { useRouterState } from '@tanstack/react-router'
-import { LayoutIcon, PlusIcon } from '@phosphor-icons/react'
+import { LayoutIcon, PathIcon, PlusIcon } from '@phosphor-icons/react'
 import type { GatekeeperAppInfo } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useServerConfig } from '../../ServerConfigContext'
@@ -42,6 +42,11 @@ export const OperateSidebarNav = ({ collapsed, gatekeeperApps }: {
   const listed = screens.status === 'ready'
     ? screens.workspaces.flatMap(({ workspace, screens: saved }) =>
       (saved ?? []).map(screen => ({ workspaceId: workspace.id, screen })))
+    : []
+
+  const flows = screens.status === 'ready'
+    ? screens.workspaces.flatMap(({ workspace, flows: authored }) =>
+      authored.map(flow => ({ workspaceId: workspace.id, flow })))
     : []
 
   return (
@@ -87,6 +92,28 @@ export const OperateSidebarNav = ({ collapsed, gatekeeperApps }: {
           collapsed={collapsed}
         />
       </div>
+
+      {operate && flows.length > 0 && (
+        <div className="flex flex-col gap-0.5">
+          {!collapsed && <Eyebrow>Flows</Eyebrow>}
+          <nav aria-label="Flows" className="flex flex-col gap-0.5">
+            {flows.map(({ workspaceId, flow }) => (
+              <SidebarItem
+                key={`${workspaceId}/${flow.id}`}
+                to={OPERATE_HOME}
+                onClick={() => {
+                  operate.dispatch({ type: 'startFlow', workspaceId, flowId: flow.id, title: flow.title, steps: flow.steps })
+                    .catch(caught => console.error('Failed to start the flow:', caught))
+                }}
+                active={false}
+                label={flow.title}
+                icon={<PathIcon size={14} weight="regular" />}
+                collapsed={collapsed}
+              />
+            ))}
+          </nav>
+        </div>
+      )}
 
       {gatekeeperApps.length > 0 && (
         <div className="flex flex-col gap-0.5">

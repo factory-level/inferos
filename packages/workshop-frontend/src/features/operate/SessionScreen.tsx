@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG } from '@gadgets/workshop-shared/canvas'
@@ -32,22 +33,36 @@ export const SessionScreen = ({ workspaceId, screenId, onShowScreen, onClose }: 
     onInvalidShareKey: ignore,
   })
   const { workpieces, ready } = useWorkspaceWorkpieces(overseer, workspaceId)
+  // Whether the screen is still in its workspace; null until checked. The pane would otherwise show
+  // some other view in its place, and the session would follow it there.
+  const [exists, setExists] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!overseer) return
+    let cancelled = false
+    overseer.stub.getCanvas(screenId).then(
+      value => { if (!cancelled) setExists(value !== null) },
+      () => { if (!cancelled) setExists(false) },
+    )
+    return () => { cancelled = true }
+  }, [overseer, screenId])
   const gadgets = new Map<WorkpieceId, GadgetSummary>()
   for (const workpiece of workpieces.values()) if (workpiece.type === 'gadget') gadgets.set(workpiece.id, workpiece)
 
-  if (error || metadata?.role === 'use') return (
+  if (error || metadata?.role === 'use' || exists === false) return (
     <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
       <p className="text-sm text-kumo-subtle">This screen is unavailable. You may no longer have access to its workspace.</p>
       <WorkshopButton tone="secondary" onClick={onClose}>Close it</WorkshopButton>
     </div>
   )
-  if (!overseer || !metadata || !ready || !canvasFeatures) return (
+  if (!overseer || !metadata || !ready || !canvasFeatures || exists === null) return (
     <p role="status" className="p-6 text-sm text-kumo-subtle">Loading screen…</p>
   )
   return (
     <CanvasWorkspacePane key={workspaceId} overseer={overseer.stub} gadgets={gadgets}
       catalog={canvasFeatures.catalog ?? DEFAULT_CANVAS_CATALOG} viewId={screenId}
-      onViewChange={view => { if (view) onShowScreen(view) }}
+      // The pane also reports the view it opened with, and falls back to another view when this
+      // one is gone. Only a different view chosen while this screen exists is a move.
+      onViewChange={view => { if (view && view !== screenId && exists) onShowScreen(view) }}
       onAskAgent={async () => {
         toasts.add({ title: 'Ask the operate chat beside this screen instead.' })
       }}
