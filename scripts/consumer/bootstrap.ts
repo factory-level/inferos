@@ -49,7 +49,7 @@ export function bootstrapConsumer(target: string, repository: string, revision: 
     writeFileSync(join(staging, ".gitignore"), "node_modules/\n.wrangler/\n.env*\n.dev.vars*\n.inferos/state/\nwrangler.consumer.jsonc\n");
     writeFileSync(join(staging, "inferos.extensions.json"), json({ schemaVersion: 1, workers: [{ id: "hello", directory: "workers/hello" }] }));
     mkdirSync(join(staging, "workers/hello"));
-    writeFileSync(join(staging, "workers/hello/cloudflare.config.ts"), `import { defineGadgetsWorker } from "../../../inferos/scripts/worker-config.ts";\n\nexport default defineGadgetsWorker({ name: "consumer-hello", entrypoint: "src.ts" });\n`);
+    writeFileSync(join(staging, "workers/hello/cloudflare.config.ts"), `import { defineGadgetsWorker } from "../../inferos/scripts/worker-config.ts";\n\nexport default defineGadgetsWorker({ name: "consumer-hello", entrypoint: "src.ts" });\n`);
     writeFileSync(join(staging, "workers/hello/src.ts"), `// Public demonstration endpoint. Add application authentication before serving private data.\nexport default { fetch() { return Response.json({ message: "Hello from the consumer Worker" }); } };\n`);
     writeFileSync(join(staging, "fixtures/project-board.json"), readFileSync(join(here, "project-board.json")));
     for (const directory of ["gatekeepers", "profiles"]) writeFileSync(join(staging, directory, ".gitkeep"), "");

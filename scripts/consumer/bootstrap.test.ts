@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { createServer } from "node:net";
 import { bootstrapConsumer } from "./bootstrap.ts";
 import { initialConsumerConfig, parseConsumerConfig } from "./config.ts";
@@ -30,6 +31,8 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
   try {
     execFileSync("git", ["init", "--quiet", source]);
     writeFileSync(join(source, "package.json"), JSON.stringify({ packageManager: "pnpm@11.17.0" }));
+    mkdirSync(join(source, "scripts"));
+    writeFileSync(join(source, "scripts/worker-config.ts"), "export const defineGadgetsWorker = (worker: unknown) => worker;\n");
     const blueprintSource = join(source, "packages/bundled-blueprints/blueprints/example/files");
     mkdirSync(blueprintSource, { recursive: true });
     writeFileSync(join(blueprintSource, "client.js"), "// upstream blueprint\n");
@@ -38,6 +41,10 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     const revision = git(source, "rev-parse", "HEAD");
     assert.equal(bootstrapConsumer(target, source, revision).created, true);
     assert.ok(existsSync(join(target, ".agents/skills/bootstrap-inferos/SKILL.md")));
+    const customConfig = await import(pathToFileURL(join(target, "workers/hello/cloudflare.config.ts")).href);
+    assert.equal(customConfig.default.name, "consumer-hello");
+    const customSource = join(target, "workers/hello/src.ts");
+    writeFileSync(customSource, "// wrapper-owned worker customization\n");
     const blueprint = join(target, "blueprints/example/files/client.js");
     assert.equal(readFileSync(blueprint, "utf8"), "// upstream blueprint\n");
     writeFileSync(blueprint, "// consumer customization\n");
@@ -48,6 +55,7 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     writeFileSync(configPath, JSON.stringify(config));
     assert.equal(bootstrapConsumer(target, source, revision).created, false);
     assert.equal(readFileSync(blueprint, "utf8"), "// consumer customization\n");
+    assert.equal(readFileSync(customSource, "utf8"), "// wrapper-owned worker customization\n");
     assert.equal(checkConsumer(target).config.styling.siteName, "My changed profile");
     assert.equal(checkConsumer(target).config.local.port, 9123);
     git(target, "add", ".");
@@ -56,6 +64,7 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     execFileSync("git", ["-c", "protocol.file.allow=always", "clone", "--recurse-submodules", target, clone], { stdio: "pipe" });
     assert.equal(checkConsumer(clone).config.upstream.revision, revision);
     assert.equal(readFileSync(join(clone, "blueprints/example/files/client.js"), "utf8"), "// consumer customization\n");
+    assert.equal(readFileSync(join(clone, "workers/hello/src.ts"), "utf8"), "// wrapper-owned worker customization\n");
     const report = JSON.parse(execFileSync(process.execPath, [join(clone, ".inferos/runtime.ts"), "check"], { encoding: "utf8" }));
     assert.equal(report.ok, true);
     assert.equal(report.modifiedUpstream, false);
