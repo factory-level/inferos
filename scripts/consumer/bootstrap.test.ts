@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { readConsumerViews } from "./views.ts";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:net";
 import { bootstrapConsumer } from "./bootstrap.ts";
@@ -30,7 +31,7 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
   const target = join(root, "consumer with spaces");
   try {
     execFileSync("git", ["init", "--quiet", source]);
-    writeFileSync(join(source, "package.json"), JSON.stringify({ packageManager: "pnpm@11.17.0" }));
+    writeFileSync(join(source, "package.json"), JSON.stringify({ type: "module", packageManager: "pnpm@11.17.0" }));
     mkdirSync(join(source, "scripts"));
     writeFileSync(join(source, "scripts/worker-config.ts"), "export const defineGadgetsWorker = (worker: unknown) => worker;\n");
     const blueprintSource = join(source, "packages/bundled-blueprints/blueprints/example/files");
@@ -41,6 +42,11 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     const revision = git(source, "rev-parse", "HEAD");
     assert.equal(bootstrapConsumer(target, source, revision).created, true);
     assert.ok(existsSync(join(target, ".agents/skills/bootstrap-inferos/SKILL.md")));
+    const [starter] = readConsumerViews(target);
+    assert.equal(starter.sections[0].widgets[0].targetRef, checkConsumer(target).config.inferops.targetRef);
+    assert.equal(starter.revision, "0");
+    starter.title = "My customized view";
+    writeFileSync(join(target, "views/operations.json"), JSON.stringify(starter));
     const customConfig = await import(pathToFileURL(join(target, "workers/hello/cloudflare.config.ts")).href);
     assert.equal(customConfig.default.name, "consumer-hello");
     const customSource = join(target, "workers/hello/src.ts");
@@ -52,17 +58,20 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     config.styling.siteName = "My changed profile";
     config.local.port = 9123;
+    config.inferops.targetRef = "inferops://demo.local/project/board/OTHER";
     writeFileSync(configPath, JSON.stringify(config));
     assert.equal(bootstrapConsumer(target, source, revision).created, false);
     assert.equal(readFileSync(blueprint, "utf8"), "// consumer customization\n");
     assert.equal(readFileSync(customSource, "utf8"), "// wrapper-owned worker customization\n");
     assert.equal(checkConsumer(target).config.styling.siteName, "My changed profile");
     assert.equal(checkConsumer(target).config.local.port, 9123);
+    assert.deepEqual(readConsumerViews(target), [starter]);
     git(target, "add", ".");
     git(target, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "consumer");
     const clone = join(root, "fresh-clone");
     execFileSync("git", ["-c", "protocol.file.allow=always", "clone", "--recurse-submodules", target, clone], { stdio: "pipe" });
     assert.equal(checkConsumer(clone).config.upstream.revision, revision);
+    assert.deepEqual(readConsumerViews(clone), [starter]);
     assert.equal(readFileSync(join(clone, "blueprints/example/files/client.js"), "utf8"), "// consumer customization\n");
     assert.equal(readFileSync(join(clone, "workers/hello/src.ts"), "utf8"), "// wrapper-owned worker customization\n");
     const report = JSON.parse(execFileSync(process.execPath, [join(clone, ".inferos/runtime.ts"), "check"], { encoding: "utf8" }));

@@ -33,6 +33,7 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 | `inferos/` | Pinned Git submodule |
 | `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
+| `views/operations.json` | Guarded starter composition referencing the configured InferOps project; not yet rendered |
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
@@ -100,3 +101,9 @@ The native multi-Worker launcher binds each entry to the router as `CONSUMER_<ID
 Local service bindings may target other listed consumer Workers only. Remote resource bindings are rejected; configure local emulation/fixtures in canonical configs. Inputs/secrets stay in the Worker's ignored `.dev.vars`; the manifest contains no secret values. Dependencies and custom build commands are owned by the wrapper and must be installed explicitly. Entry points must exist before validation. Restart after manifest/config changes; ordinary Worker source changes use Wrangler's watcher.
 
 Consumer cloud release packaging, input validation and deployment wiring remain pending. The platform release reserves these routes but does not deploy custom Workers or enable them. The example pin above includes this adapter. Older pins without `scripts/consumer/extensions.ts` reject activation explicitly.
+
+## Guarded starter views
+
+New wrappers contain `views/operations.json`: one `inferops.project-board` widget with the initial configured target reference. On a pin containing the canvas contract, `pnpm views:check` validates regular JSON definitions, unique identities, registered widget parameters and layout limits. It rejects linked/oversized files, unknown fields, arbitrary renderers and unsupported schema versions. It does not install a view, read a board or grant resource authority. `runtimeReady` remains false, and composable/durable view flags still reject startup until their runtime adapters are implemented.
+
+Views are wrapper-owned source. Bootstrap reruns preserve edits; changing `inferos.targetRef` later does not silently rewrite existing view references. Edit them deliberately and revalidate. Ownership, sharing, credentials and transactional rows do not belong in view files. A target reference must be rebound to authorized resources when the runtime loader is implemented. Older pins without `scripts/consumer/views.ts` fail the command explicitly.

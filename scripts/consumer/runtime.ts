@@ -154,7 +154,7 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|profile|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "views", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|views|profile|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -162,6 +162,12 @@ async function main() {
     return;
   }
   const { config, upstream, packageManager, pending, modifiedUpstream } = checkConsumer(root);
+  if (command === "views") {
+    const script = join(upstream, "scripts/consumer/views.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision does not support starter view validation");
+    execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
   if (command === "extensions") {
     const script = join(upstream, "scripts/consumer/extensions.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support custom Workers");

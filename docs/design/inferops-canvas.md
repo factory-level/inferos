@@ -24,7 +24,7 @@ Make operational data easy to load, compose and act on through a simple canvas, 
 
 ## Behavior
 
-Proposed v1 Canvas stores id, scope, owner/sharing policy, revision, sections and widget instances. Each instance has a stable id, registered kind/version, targetRef, schema-validated params and an allowed size. Composition operations add/remove/move/configure instances against an expected canvas revision; preview and undo operate on composition changes, not on silently reversing domain writes. No free-form CSS, absolute pixel placement or arbitrary executable renderer arrives through this interface. Existing InferOps personal pins require explicit migration/import, not silent conversion to shared canvases.
+The v1 portable definition stores id, revision, sections and widget instances. The future authoritative storage record separately owns scope and sharing policy; imports cannot assert either. Each instance has a stable id, registered kind/version, targetRef, schema-validated params and an allowed size. Composition operations add/remove/move/configure instances against an expected canvas revision; preview and undo operate on composition changes, not on silently reversing domain writes. No free-form CSS, absolute pixel placement or arbitrary executable renderer arrives through this interface. Existing InferOps personal pins require explicit migration/import, not silent conversion to shared canvases.
 
 The data adapter keys caches by principal/capability scope plus kind, version, canonical target and normalized params. It rejects cross-scope targets, coalesces duplicate in-flight reads, bounds concurrency and supports cancellation. It must not claim batching where the domain exposes only independent board reads. Board revisions prevent stale snapshots from overwriting newer optimistic changes. Transition actions use the gatekeeper approval path, show pending status and reconcile from authoritative data; failed writes restore or reload the affected board.
 
@@ -104,3 +104,9 @@ Tracking issue: [#29](https://github.com/factory-level/inferos/issues/29) (`canv
 - [Pillars](platform-pillars.md)
 - [Roadmap and issues](../wiki/implementation-roadmap.md)
 - [Research evidence](../wiki/research-sources.md)
+
+## V1 composition contract decisions
+
+The shared implementation in `packages/workshop-shared/src/canvas.ts` defines the first registered widget and curated layout/edit grammar. Plain-text titles are limited to 120 characters, stable IDs to 64 characters, sections to 12, total widgets to 48 and edit batches to 32. These are conservative validation limits awaiting measured performance evidence. Unknown schema versions reject rather than being guessed or silently migrated.
+
+Storage integration must place definitions under an authorized native workspace capability, preserving existing personal InferOps pins separately. Ownership/sharing metadata must be minted and checked by the storage layer, never accepted as portable composition fields. A view reference must not widen access to any bound InferOps resource. The implementation currently supplies only validation and atomic in-memory preview/edit semantics; persistence, capability checks, feature enforcement and the renderer remain acceptance work.
