@@ -28,7 +28,7 @@ export const Route = createFileRoute('/providers')({ component: ProvidersPage })
 const PROVIDER_ORDER = Object.keys(SUGGESTED_MODELS) as AiModelProvider[]
 
 const PRIMARY_BTN =
-  'press inline-flex h-9 shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-kumo-brand px-3.5 text-[13px] font-medium tracking-[-0.25px] text-white transition-colors hover:bg-kumo-brand-hover'
+  'press inline-flex h-9 shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-md bg-kumo-brand px-3.5 text-[14px] font-medium text-kumo-inverse transition-colors hover:bg-kumo-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring'
 
 // ─── model row ─────────────────────────────────────────────────────────────────
 
@@ -63,32 +63,33 @@ function ModelRow({
         }
       }}
       title={isQuick ? 'Quick model. Click to clear' : 'Click to set as quick model'}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
+      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-control focus-visible:bg-kumo-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
     >
-      {/* Neutral monogram — matches the sidebar/workspaces treatment */}
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-[12px] font-medium text-kumo-subtle">
+      {/* Neutral monogram — matches the sidebar/workspaces treatment; it steps up a tone on hover so
+          it stays distinct from the row's own hover fill. */}
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-kumo-control text-[12px] font-medium text-kumo-subtle transition-colors group-hover:bg-kumo-fill-hover group-hover:text-kumo-default">
         {model.name[0]?.toUpperCase()}
       </div>
 
       {/* Info */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">
+          <span className="truncate text-sm font-medium text-kumo-default">
             {model.name}
           </span>
           {isBuiltIn && (
-            <span className="shrink-0 rounded-full bg-kumo-tint px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.4px] text-kumo-subtle">
+            <span className="shrink-0 rounded-full bg-kumo-fill px-1.5 py-0.5 text-[10px] leading-3 font-semibold uppercase tracking-[0.04em] text-kumo-subtle">
               built-in
             </span>
           )}
           {isQuick && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[rgba(255,72,1,0.10)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.4px] text-kumo-brand">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-kumo-info-tint px-1.5 py-0.5 text-[10px] leading-3 font-semibold uppercase tracking-[0.04em] text-kumo-brand">
               <Lightning size={9} weight="fill" />
               quick
             </span>
           )}
         </div>
-        <span className="mt-0.5 block truncate font-mono text-[12px] tracking-[-0.1px] text-kumo-inactive">
+        <span className="mt-0.5 block truncate font-mono text-[12px] leading-4 text-kumo-inactive">
           {model.id}
         </span>
       </div>
@@ -100,7 +101,7 @@ function ModelRow({
             render={
               <button
                 aria-label="Provider actions"
-                className="cursor-pointer rounded-md p-1.5 text-kumo-subtle transition-colors hover:bg-kumo-fill hover:text-kumo-default focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                className="grid h-8 w-8 cursor-pointer place-items-center rounded-md text-kumo-subtle transition-colors hover:bg-kumo-fill-hover hover:text-kumo-default focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring sm:opacity-0 sm:group-hover:opacity-100"
               >
                 <DotsThreeVertical size={16} />
               </button>
@@ -138,7 +139,7 @@ function ModelRow({
 
 function Notice({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-kumo-line bg-kumo-tint px-4 py-3 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+    <div className="flex items-start gap-3 rounded-xl bg-kumo-elevated px-4 py-3 text-[14px] leading-5 text-kumo-subtle">
       {children}
     </div>
   )
@@ -251,14 +252,14 @@ function ProvidersPage() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-3 sm:px-10">
-      <header className="flex flex-col items-stretch gap-4 px-3 pb-3 pt-6 sm:flex-row sm:items-end sm:justify-between sm:pt-10">
+      <header className="flex flex-col items-stretch gap-4 px-3 pb-3 pt-6 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">AI providers</h1>
-          <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+          <h1 className="text-[18px] leading-[26px] font-semibold text-kumo-default">AI providers</h1>
+          <p className="mt-1 text-[14px] leading-5 text-kumo-subtle">
             Configure the AI models available to your workspaces.
           </p>
         </div>
-        <button type="button" onClick={openAdd} className={`${PRIMARY_BTN} h-11 justify-center text-[14px] sm:h-9 sm:text-[13px]`}>
+        <button type="button" onClick={openAdd} className={`${PRIMARY_BTN} h-11 justify-center sm:h-9`}>
           <Plus size={14} weight="bold" />
           Add provider
         </button>
@@ -268,13 +269,14 @@ function ProvidersPage() {
       {!loading && !loadError && models.length > 0 && (
         <div className="mb-3 px-3">
           <div className="relative">
-            <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
+            <MagnifyingGlass size={16} aria-hidden className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search providers…"
-              className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+              aria-label="Search providers"
+              className="h-9 w-full rounded-md border-0 bg-kumo-control pl-9 pr-4 text-[14px] text-kumo-default placeholder:text-kumo-inactive transition-shadow duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
             />
           </div>
         </div>
@@ -326,12 +328,12 @@ function ProvidersPage() {
           </div>
         ) : models.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-3 py-16 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-info-tint text-kumo-brand">
               <Lightning size={18} />
             </div>
             <div>
               <p className="text-sm font-medium text-kumo-default">No AI providers yet</p>
-              <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
+              <p className="mt-1 text-[14px] leading-5 text-kumo-subtle">
                 Add a provider to start building workspaces with AI.
               </p>
             </div>

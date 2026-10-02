@@ -77,14 +77,14 @@ function AppRow({
     <Link
       to="/workspace/$id"
       params={{ id: gadget.id }}
-      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint ${compact ? "sm:py-1" : ""}`}
+      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-control focus-visible:bg-kumo-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${compact ? "sm:py-1" : ""}`}
       onClick={(e) => {
         // Prevent navigation when renaming or clicking the menu
         if (isRenaming) e.preventDefault()
       }}
     >
       {/* Neutral monogram */}
-      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-[12px] font-medium text-kumo-subtle">
+      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-control text-[12px] font-medium text-kumo-subtle transition-colors group-hover:bg-kumo-fill-hover group-hover:text-kumo-default group-focus-visible:bg-kumo-fill-hover group-focus-visible:text-kumo-default">
         {initials(gadget.title)}
       </div>
 
@@ -120,7 +120,7 @@ function AppRow({
       </div>
 
       {/* Time */}
-      <span className="hidden lg:flex items-center gap-1 text-xs text-kumo-inactive flex-shrink-0">
+      <span className="hidden flex-shrink-0 items-center gap-1 text-xs text-kumo-inactive lg:flex">
         <Clock size={10} />
         {formatRelativeTime(gadget.lastActive)}
       </span>
@@ -131,7 +131,8 @@ function AppRow({
         <DropdownMenu.Trigger
           render={
             <button
-              className="p-1.5 text-kumo-subtle hover:text-kumo-default rounded-md hover:bg-kumo-fill transition-colors sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
+              aria-label="Workspace actions"
+              className="grid h-8 w-8 place-items-center rounded-md text-kumo-subtle transition-colors hover:bg-kumo-fill-hover hover:text-kumo-default focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring sm:opacity-0 sm:group-hover:opacity-100"
             >
               <DotsThreeVertical size={16} />
             </button>
@@ -350,18 +351,19 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
 
       {/* Search — hidden when the user has no gadgets */}
       {!loading && gadgets.length > 0 && (
-        <div className="mb-4 px-3">
+        <div className="px-3 pb-4 pt-1">
           <div className="relative">
             <MagnifyingGlass
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
             />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search workspaces…"
-              className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+              aria-label="Search workspaces"
+              className="h-9 w-full rounded-md border-0 bg-kumo-control pl-9 pr-4 text-[13px] leading-[18px] text-kumo-default placeholder:text-kumo-inactive transition-shadow duration-150 ease-out focus:outline-none focus:ring-2 focus:ring-kumo-ring"
             />
           </div>
         </div>
@@ -374,7 +376,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
         {loading ? (
           <>
             {[1, 2, 3].map((i) => (
-              <div key={i} className="h-[56px] rounded-xl bg-kumo-elevated animate-pulse" />
+              <div key={i} className="h-[56px] animate-pulse rounded-lg bg-kumo-elevated" />
             ))}
           </>
         ) : loadError ? (
@@ -493,12 +495,12 @@ function HomeFeaturedBlueprintCard({
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 1)
 
   return (
-    <div className="themed-card-hover-shadow group relative isolate flex min-h-[190px] flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill active:scale-[0.995]">
+    <div className="group relative isolate flex min-h-[190px] flex-col overflow-hidden rounded-xl bg-kumo-elevated text-left transition-[background-color,transform] duration-150 ease-out hover:-translate-y-px hover:bg-kumo-control active:scale-[0.995]">
       <Link
         to="/blueprint/$id"
         params={{ id: blueprint.id }}
         aria-label={`Open blueprint ${blueprint.metadata.title}`}
-        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
+        className="absolute inset-0 z-10 rounded-xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-ring"
       />
       <div className="pointer-events-none relative z-20 flex flex-1 flex-col p-2.5">
         <BlueprintPreviewImage
@@ -558,7 +560,7 @@ function FeaturedBlueprintsGallery() {
       <div className="px-2 py-8">
         <div className="grid grid-cols-2 gap-3">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-[108px] rounded-xl bg-kumo-base animate-pulse" />
+            <div key={i} className="h-[108px] animate-pulse rounded-xl bg-kumo-elevated" />
           ))}
         </div>
       </div>
@@ -575,8 +577,8 @@ function FeaturedBlueprintsGallery() {
   return (
     <div className="py-4 pr-4 sm:pr-6">
       <div className="mb-5">
-        <h3 className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-          Start from a featured blueprint.
+        <h3 className="m-0 text-[12px] leading-4 font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+          Start from a featured blueprint
         </h3>
       </div>
 

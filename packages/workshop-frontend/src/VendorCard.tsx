@@ -21,8 +21,8 @@ export default function VendorCard({
   return (
     <div
       onClick={disabled ? undefined : onClick}
-      className={`flex items-center gap-4 p-4 border border-kumo-line rounded-lg transition-all ${
-        disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:border-kumo-brand hover:bg-kumo-tint'
+      className={`flex items-center gap-4 rounded-xl bg-kumo-elevated p-4 transition-colors ${
+        disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-kumo-control'
       } ${disabled && !loading ? 'opacity-50' : ''}`}
     >
       <Avatar

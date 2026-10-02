@@ -1,6 +1,6 @@
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useId } from 'react'
 import { AiChatAuthorInfo, validateCommitEmail } from '@gadgets/workshop-shared/api'
 import { hashPassword } from './passwordHash'
 import { CF_ACCESS_MODE } from './useAuth'
@@ -15,15 +15,20 @@ import { isImeComposing } from './keyboardEvent'
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
 // system rather than a stack of default Kumo cards.
 const PRIMARY_BTN =
-  'press inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-kumo-brand px-3.5 text-[13px] font-medium tracking-[-0.25px] text-white transition-colors hover:bg-kumo-brand-hover disabled:cursor-not-allowed disabled:opacity-60'
+  'press inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-md bg-kumo-brand px-3.5 text-[14px] font-medium text-kumo-inverse transition-colors hover:bg-kumo-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring disabled:cursor-not-allowed disabled:opacity-60'
 const ICON_BTN =
-  'press grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default'
+  'press grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-md text-kumo-subtle transition-colors hover:bg-kumo-fill hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring'
+// Filled, borderless input: tone separates it from the card, and focus draws the accent ring. The
+// 16px text below `sm` keeps iOS Safari from zooming the page on focus.
 const INPUT =
-  'h-10 w-full rounded-lg border border-kumo-line bg-kumo-base px-3 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[14px]'
+  'h-10 w-full rounded-md border-0 bg-kumo-control px-3 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring sm:h-9 sm:text-[14px]'
+const INPUT_ERROR = 'ring-2 ring-kumo-danger focus-visible:ring-kumo-danger'
+// Card rows sit inset (margin, not padding) so the card's divide-y hairlines stop short of its edges.
+const ROW = 'mx-5 flex items-end gap-2 py-4'
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
+function SectionLabel({ id, children }: { id: string; children: React.ReactNode }) {
   return (
-    <h2 className="px-1 text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+    <h2 id={id} className="px-1 text-[12px] leading-4 font-medium uppercase tracking-[0.08em] text-kumo-inactive">
       {children}
     </h2>
   )
@@ -31,7 +36,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="text-[12px] font-medium tracking-[-0.1px] text-kumo-subtle">{children}</p>
+    <p className="text-[12px] leading-4 font-medium text-kumo-subtle">{children}</p>
   )
 }
 
@@ -55,31 +60,38 @@ function PasswordField({
   autoComplete?: string
 }) {
   const [show, setShow] = useState(false)
+  const inputId = useId()
+  const hintId = useId()
   return (
     <div>
-      <FieldLabel>{label}</FieldLabel>
+      <label htmlFor={inputId} className="block text-[12px] leading-4 font-medium text-kumo-subtle">
+        {label}
+      </label>
       <div className="relative mt-1.5">
         <input
+          id={inputId}
+          aria-describedby={error || description ? hintId : undefined}
+          aria-invalid={error ? true : undefined}
           type={show ? 'text' : 'password'}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           autoComplete={autoComplete}
-          className={`${INPUT} pr-10 ${error ? 'border-kumo-danger focus:border-kumo-danger' : ''}`}
+          className={`${INPUT} pr-10 ${error ? INPUT_ERROR : ''}`}
         />
         <button
           type="button"
           onClick={() => setShow((s) => !s)}
           aria-label={show ? 'Hide password' : 'Show password'}
-          className="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-kumo-inactive transition-colors hover:text-kumo-default"
+          className="absolute right-0.5 top-1/2 grid h-8 w-8 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-kumo-inactive transition-colors hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
         >
           {show ? <EyeSlash size={15} /> : <Eye size={15} />}
         </button>
       </div>
       {error ? (
-        <p className="mt-1 text-[12px] tracking-[-0.1px] text-kumo-danger">{error}</p>
+        <p id={hintId} className="mt-1 text-[12px] leading-4 text-kumo-danger">{error}</p>
       ) : description ? (
-        <p className="mt-1 text-[12px] tracking-[-0.1px] text-kumo-subtle">{description}</p>
+        <p id={hintId} className="mt-1 text-[12px] leading-4 text-kumo-subtle">{description}</p>
       ) : null}
     </div>
   )
@@ -126,7 +138,7 @@ const CommitEmailRow = ({ initialCommitEmail }: { initialCommitEmail?: string })
   }
 
   return (
-    <div className="flex items-end gap-2 px-5 py-4">
+    <div className={ROW}>
       <div className="min-w-0 flex-1">
         <FieldLabel>Commit email</FieldLabel>
         {isEditing ? (
@@ -144,16 +156,17 @@ const CommitEmailRow = ({ initialCommitEmail }: { initialCommitEmail?: string })
               aria-label="Commit email"
               autoComplete="email"
               autoFocus
-              className={`mt-1.5 ${INPUT} ${error ? 'border-kumo-danger focus:border-kumo-danger' : ''}`}
+              aria-invalid={error ? true : undefined}
+              className={`mt-1.5 ${INPUT} ${error ? INPUT_ERROR : ''}`}
             />
-            <p className={`mt-1 text-[12px] tracking-[-0.1px] ${error ? 'text-kumo-danger' : 'text-kumo-subtle'}`}>
+            <p className={`mt-1 text-[12px] leading-4 ${error ? 'text-kumo-danger' : 'text-kumo-subtle'}`}>
               {error ?? 'Leave blank to use an address based on your user ID.'}
             </p>
           </>
         ) : commitEmail ? (
-          <p className="mt-1 truncate text-[14px] tracking-[-0.25px] text-kumo-default">{commitEmail}</p>
+          <p className="mt-1 truncate text-[14px] leading-5 text-kumo-default">{commitEmail}</p>
         ) : (
-          <p className="mt-1 text-[14px] tracking-[-0.25px] text-kumo-inactive">
+          <p className="mt-1 text-[14px] leading-5 text-kumo-inactive">
             Not set — commits use an address based on your user ID
           </p>
         )}
@@ -356,38 +369,41 @@ export default function SettingsPage() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-2xl flex-col px-4 pb-16 sm:px-10">
-      <header className="px-1 pb-2 pt-6 sm:pt-10">
-        <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Profile</h1>
-        <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+      <header className="px-1 pb-2 pt-6">
+        <h1 className="text-[18px] leading-[26px] font-semibold text-kumo-default">Profile</h1>
+        <p className="mt-1 text-[14px] leading-5 text-kumo-subtle">
           Manage your account details, avatar, and security.
         </p>
       </header>
 
       <div className="mt-6 flex flex-col gap-9">
         {/* Account */}
-        <section className="flex flex-col gap-3">
-          <SectionLabel>Account</SectionLabel>
-          <div className="divide-y divide-kumo-line overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+        <section aria-labelledby="profile-account" className="flex flex-col gap-3">
+          <SectionLabel id="profile-account">Account</SectionLabel>
+          <div className="divide-y divide-kumo-line overflow-hidden rounded-xl bg-kumo-elevated">
             {/* Avatar */}
-            <div className="flex items-center gap-4 px-5 py-4">
+            <div className="mx-5 flex items-center gap-4 py-4">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={avatarUploading}
-                className="press group relative flex h-16 w-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-full bg-kumo-fill disabled:cursor-wait"
+                aria-label="Upload a new avatar"
+                className="press relative h-16 w-16 shrink-0 cursor-pointer rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring disabled:cursor-wait"
               >
-                {displayAvatarUrl ? (
-                  <img src={displayAvatarUrl} alt="Avatar" className="h-full w-full object-cover" />
-                ) : (
-                  <User size={28} className="text-kumo-subtle" />
-                )}
-                <div className="absolute inset-0 flex items-center justify-center rounded-full bg-black/40 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
-                  <Camera size={18} className="text-white" />
-                </div>
+                <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-full bg-kumo-control">
+                  {displayAvatarUrl ? (
+                    <img src={displayAvatarUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <User size={28} className="text-kumo-brand" />
+                  )}
+                </span>
+                <span className="absolute -bottom-0.5 -right-0.5 grid h-6 w-6 place-items-center rounded-full bg-kumo-fill-hover text-kumo-default">
+                  <Camera size={13} />
+                </span>
                 {avatarUploading && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-kumo-base/80">
-                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
-                  </div>
+                  <span className="absolute inset-0 flex items-center justify-center rounded-full bg-kumo-base/80">
+                    <span className="h-5 w-5 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
+                  </span>
                 )}
               </button>
               <input
@@ -402,17 +418,17 @@ export default function SettingsPage() {
                 }}
               />
               <div className="min-w-0">
-                <p className="truncate text-[15px] font-medium tracking-[-0.25px] text-kumo-default">
+                <p className="truncate text-[16px] leading-[22px] font-medium text-kumo-default">
                   {userInfo?.name}
                 </p>
-                <p className="mt-0.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+                <p className="mt-0.5 text-[12px] leading-4 text-kumo-subtle">
                   Click the avatar to upload a new photo
                 </p>
               </div>
             </div>
 
             {/* Display name */}
-            <div className="flex items-end gap-2 px-5 py-4">
+            <div className={ROW}>
               <div className="min-w-0 flex-1">
                 <FieldLabel>Display name</FieldLabel>
                 {isEditingName ? (
@@ -425,11 +441,12 @@ export default function SettingsPage() {
                       if (e.key === 'Escape') handleCancelEdit()
                     }}
                     placeholder="Enter display name"
+                    aria-label="Display name"
                     autoFocus
                     className={`mt-1.5 ${INPUT}`}
                   />
                 ) : (
-                  <p className="mt-1 text-[14px] tracking-[-0.25px] text-kumo-default">
+                  <p className="mt-1 text-[14px] leading-5 text-kumo-default">
                     {userInfo?.name}
                   </p>
                 )}
@@ -470,10 +487,10 @@ export default function SettingsPage() {
             <CommitEmailRow initialCommitEmail={userInfo?.commitEmail} />
 
             {/* User ID */}
-            <div className="flex items-center gap-2 px-5 py-4">
+            <div className="mx-5 flex items-center gap-2 py-4">
               <div className="min-w-0 flex-1">
                 <FieldLabel>User ID</FieldLabel>
-                <p className="mt-1 truncate font-mono text-[12px] tracking-[-0.1px] text-kumo-subtle">
+                <p className="mt-1 truncate font-mono text-[12px] leading-4 text-kumo-subtle">
                   {userInfo?.id}
                 </p>
               </div>
@@ -494,9 +511,16 @@ export default function SettingsPage() {
 
         {/* Security — only for password accounts (hidden under CF Access or gatekeeper sign-in) */}
         {!CF_ACCESS_MODE && hasPassword === true && (
-          <section className="flex flex-col gap-3">
-            <SectionLabel>Security</SectionLabel>
-            <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
+          <section aria-labelledby="profile-security" className="flex flex-col gap-3">
+            <SectionLabel id="profile-security">Security</SectionLabel>
+            <form
+              aria-label="Change password"
+              onSubmit={(e) => {
+                e.preventDefault()
+                if (!passwordLoading) handleChangePassword()
+              }}
+              className="rounded-xl bg-kumo-elevated p-5"
+            >
               <div className="flex max-w-sm flex-col gap-4">
                 <PasswordField
                   label="Current password"
@@ -526,8 +550,7 @@ export default function SettingsPage() {
 
                 <div className="pt-1">
                   <button
-                    type="button"
-                    onClick={handleChangePassword}
+                    type="submit"
                     disabled={passwordLoading || !currentPassword || !newPassword || !confirmPassword}
                     className={PRIMARY_BTN}
                   >
@@ -536,7 +559,7 @@ export default function SettingsPage() {
                   </button>
                 </div>
               </div>
-            </div>
+            </form>
           </section>
         )}
       </div>

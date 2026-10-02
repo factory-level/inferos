@@ -51,7 +51,7 @@ function VendorIconTile({
   color,
   fallback,
   size = 28,
-  className = 'h-12 w-12 rounded-2xl',
+  className = 'h-12 w-12 rounded-xl',
 }: {
   logoUrl?: string
   color?: string
@@ -62,7 +62,7 @@ function VendorIconTile({
   return (
     <div
       className={`relative grid shrink-0 place-items-center ${className}`}
-      style={{ backgroundColor: color ?? 'var(--color-kumo-tint)' }}
+      style={{ backgroundColor: color ?? 'var(--color-kumo-control)' }}
     >
       {logoUrl ? (
         <img src={logoUrl} alt="" className="object-contain" style={{ width: size, height: size }} />
@@ -115,12 +115,12 @@ function ConnectorCard({
   const statusDot =
     state === 'connected' ? (
       <span
-        className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-kumo-success ring-2 ring-kumo-base"
+        className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-kumo-success ring-2 ring-kumo-elevated"
         aria-hidden
       />
     ) : state === 'expired' ? (
       <span
-        className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-kumo-danger ring-2 ring-kumo-base"
+        className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-kumo-danger ring-2 ring-kumo-elevated"
         aria-hidden
       />
     ) : null
@@ -129,8 +129,8 @@ function ConnectorCard({
     <span
       className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] leading-3 font-semibold uppercase tracking-[0.4px] ${
         badge.tone === 'new'
-          ? 'bg-[rgba(255,72,1,0.10)] text-kumo-brand'
-          : 'bg-kumo-tint text-kumo-subtle'
+          ? 'bg-kumo-info-tint text-kumo-brand'
+          : 'bg-kumo-control text-kumo-subtle'
       }`}
     >
       {badge.label}
@@ -146,7 +146,7 @@ function ConnectorCard({
           if (!reconnectBusy) onReconnect()
         }}
         disabled={reconnectBusy}
-        className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-kumo-line bg-kumo-base px-3 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default transition-[background-color,border-color,opacity,transform] duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
+        className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md bg-kumo-control px-3 text-[12px] leading-4 font-medium text-kumo-default transition-[background-color,opacity,transform] duration-150 ease-out hover:bg-kumo-fill-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
       >
         <ArrowsClockwise size={12} weight="bold" />
         {reconnectBusy ? 'Opening...' : 'Reconnect'}
@@ -168,7 +168,7 @@ function ConnectorCard({
         tabIndex={0}
         onClick={onClick}
         onKeyDown={handleKeyDown}
-        className="group flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-150 ease-out hover:bg-kumo-tint"
+        className="group flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-150 ease-out hover:bg-kumo-elevated focus-visible:bg-kumo-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
       >
         <div className="relative shrink-0">
           <VendorIconTile
@@ -204,7 +204,7 @@ function ConnectorCard({
       tabIndex={0}
       onClick={onClick}
       onKeyDown={handleKeyDown}
-      className="themed-card-hover-shadow group grid w-full cursor-pointer grid-cols-[48px_1fr_auto] items-center gap-4 rounded-2xl border border-kumo-line bg-kumo-base px-5 py-5 text-left transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill active:scale-[0.995]"
+      className="group grid w-full cursor-pointer grid-cols-[48px_1fr_auto] items-center gap-4 rounded-xl bg-kumo-elevated p-5 text-left transition-[background-color,transform] duration-150 ease-out hover:-translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring active:scale-[0.995]"
     >
       <div className="self-start">
         <div className="relative">
@@ -215,18 +215,18 @@ function ConnectorCard({
 
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="truncate text-[15px] leading-5 font-medium tracking-[-0.25px] text-kumo-default">
+          <span className="truncate text-[15px] leading-5 font-medium text-kumo-default">
             {name}
           </span>
           {badgeEl}
         </div>
         {metaLine && (
-          <div className="mt-0.5 flex items-center gap-1.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+          <div className="mt-0.5 flex items-center gap-1.5 text-[12px] leading-4 font-normal text-kumo-subtle">
             {metaLine}
           </div>
         )}
         {tagline && (
-          <p className="mt-2 line-clamp-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+          <p className="mt-2 line-clamp-2 text-[13px] leading-[18px] font-normal text-kumo-subtle">
             {tagline}
           </p>
         )}
@@ -237,15 +237,15 @@ function ConnectorCard({
   )
 }
 
-function SectionEyebrow({ label, count }: { label: string; count?: number }) {
+function SectionEyebrow({ id, label, count }: { id: string; label: string; count?: number }) {
   return (
     <div className="mb-3.5 flex items-center gap-3 px-1">
-      <h2 className="m-0 text-[11px] leading-4 font-semibold uppercase tracking-[0.9px] text-kumo-subtle">
+      <h2 id={id} className="m-0 text-[12px] leading-4 font-semibold uppercase tracking-[0.07em] text-kumo-subtle">
         {label}
       </h2>
       <div className="h-px flex-1 bg-kumo-line" />
       {typeof count === 'number' && (
-        <span className="text-[11px] leading-4 font-semibold tracking-[-0.1px] text-kumo-inactive">
+        <span className="text-[12px] leading-4 font-semibold text-kumo-inactive">
           {count}
         </span>
       )}
@@ -375,14 +375,14 @@ function ConnectorsHeroDiagram({
             onMouseLeave={() => setHoveredSource(null)}
             onFocus={() => setHoveredSource(index)}
             onBlur={() => setHoveredSource(null)}
-            className={`themed-card-hover-shadow absolute grid h-11 w-11 place-items-center rounded-2xl border border-kumo-line bg-kumo-base transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill ${sourceNodes[index].className}`}
+            className={`absolute grid h-11 w-11 place-items-center rounded-xl bg-kumo-elevated transition-transform duration-150 ease-out hover:-translate-y-px ${sourceNodes[index].className}`}
           >
             <VendorIconTile
               logoUrl={node.logoUrl}
               color={node.color}
               fallback={node.fallback}
               size={18}
-              className="h-8 w-8 rounded-xl"
+              className="h-8 w-8 rounded-lg"
             />
           </div>
         ))
@@ -393,7 +393,7 @@ function ConnectorsHeroDiagram({
               key={index}
               onMouseEnter={() => setHoveredSource(index)}
               onMouseLeave={() => setHoveredSource(null)}
-              className={`themed-card-hover-shadow absolute h-11 w-11 rounded-2xl border border-kumo-line bg-kumo-elevated transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill ${node.className}`}
+              className={`absolute h-11 w-11 rounded-xl bg-kumo-elevated transition-transform duration-150 ease-out hover:-translate-y-px ${node.className}`}
             />
           ))}
         </>
@@ -402,14 +402,14 @@ function ConnectorsHeroDiagram({
       <div className="group absolute left-[176px] top-[58px] z-20">
         <button
           type="button"
-          className="themed-card-hover-shadow grid h-[52px] w-[52px] place-items-center rounded-2xl border border-kumo-line bg-kumo-base text-kumo-brand transition-[border-color,box-shadow] hover:border-kumo-fill focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base"
+          className="grid h-[52px] w-[52px] place-items-center rounded-xl bg-kumo-elevated text-kumo-brand transition-colors hover:bg-kumo-control focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base"
           aria-label="Gatekeeper keeps Gadget access limited to connected resources"
         >
           <ShieldCheck size={21} weight="duotone" />
         </button>
-        <div className="themed-floating-shadow-lg pointer-events-none absolute left-1/2 top-[-108px] z-30 w-[228px] origin-bottom -translate-x-1/2 translate-y-1 scale-[0.98] rounded-2xl border border-kumo-line bg-kumo-base p-3 text-left opacity-0 transition-[opacity,transform] delay-0 duration-150 ease-out group-hover:translate-y-0 group-hover:scale-100 group-hover:opacity-100 group-hover:delay-100 group-focus-within:translate-y-0 group-focus-within:scale-100 group-focus-within:opacity-100 group-focus-within:delay-100">
+        <div className="themed-floating-shadow-lg pointer-events-none absolute left-1/2 top-[-108px] z-30 w-[228px] origin-bottom -translate-x-1/2 translate-y-1 scale-[0.98] rounded-xl bg-kumo-overlay p-3 text-left opacity-0 transition-[opacity,transform] delay-0 duration-150 ease-out group-hover:translate-y-0 group-hover:scale-100 group-hover:opacity-100 group-hover:delay-100 group-focus-within:translate-y-0 group-focus-within:scale-100 group-focus-within:opacity-100 group-focus-within:delay-100">
           <div className="flex items-start gap-2.5">
-            <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-kumo-tint text-kumo-brand">
+            <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-kumo-info-tint text-kumo-brand">
               <ShieldCheck size={16} weight="duotone" />
             </div>
             <div className="min-w-0">
@@ -421,12 +421,12 @@ function ConnectorsHeroDiagram({
               </p>
             </div>
           </div>
-          <span className="absolute left-1/2 bottom-[-5px] h-2.5 w-2.5 -translate-x-1/2 rotate-45 border-b border-r border-kumo-line bg-kumo-base" />
+          <span className="absolute left-1/2 bottom-[-5px] h-2.5 w-2.5 -translate-x-1/2 rotate-45 bg-kumo-overlay" />
         </div>
       </div>
 
-      <div className="absolute left-[268px] top-[58px] z-10 flex h-[52px] w-[172px] items-center gap-2 rounded-2xl border border-kumo-line bg-kumo-elevated pl-2 pr-4">
-        <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-kumo-base text-kumo-brand">
+      <div className="absolute left-[268px] top-[58px] z-10 flex h-[52px] w-[172px] items-center gap-2 rounded-xl bg-kumo-overlay pl-2 pr-4">
+        <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-kumo-elevated text-kumo-brand">
           <Hexagon size={17} weight="bold" />
         </div>
         <span className="relative -top-px min-w-0 truncate text-base leading-5 font-semibold tracking-tight text-kumo-default">
@@ -713,13 +713,13 @@ function ConnectorsPage() {
 
   return (
     <div className="h-full overflow-y-auto bg-kumo-base">
-      <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-8 sm:py-14">
-        <header className="mb-8 grid gap-8 lg:grid-cols-[minmax(0,540px)_444px] lg:items-center lg:justify-between">
+      <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-8 sm:pt-10">
+        <header className="mb-8 grid gap-8 lg:grid-cols-[minmax(0,460px)_444px] lg:items-center lg:justify-between">
           <div>
-            <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-kumo-default sm:text-[34px]">
+            <h1 className="m-0 text-[18px] leading-[26px] font-semibold tracking-[-0.01em] text-kumo-default">
               Gatekeepers
             </h1>
-            <p className="mt-2 text-[14px] leading-[20px] font-normal tracking-[-0.25px] text-kumo-subtle">
+            <p className="mt-2 text-[14px] leading-[20px] font-normal text-kumo-subtle">
               Add the apps and accounts your workspaces can use. Connect once, then wire
               them into anything you build.
             </p>
@@ -738,14 +738,15 @@ function ConnectorsPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search gatekeepers…"
-              className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+              aria-label="Search gatekeepers"
+              className="h-10 w-full rounded-md border-0 bg-kumo-control pl-9 pr-4 text-[14px] leading-5 text-kumo-default placeholder:text-kumo-inactive transition-shadow focus:outline-none focus:ring-2 focus:ring-kumo-ring"
             />
           </div>
           <ViewToggle view={view} onChange={setView} />
         </div>
 
         {loadError && (
-          <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-6 text-center">
+          <div className="rounded-xl bg-kumo-elevated px-4 py-6 text-center">
             <p className="m-0 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
               Something went wrong loading your gatekeepers.
             </p>
@@ -756,14 +757,14 @@ function ConnectorsPage() {
         )}
 
         {initialLoading && (
-          <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+          <div className="rounded-xl bg-kumo-elevated px-4 py-8 text-center text-[13px] leading-[18px] font-normal text-kumo-subtle">
             Loading gatekeepers...
           </div>
         )}
 
         {filteredAccounts.length > 0 && (
-          <section className="mb-10">
-            <SectionEyebrow label="Connected" count={filteredAccounts.length} />
+          <section aria-labelledby="gk-connected" className="mb-10">
+            <SectionEyebrow id="gk-connected" label="Connected" count={filteredAccounts.length} />
             <div className={sectionGridClass}>
               {filteredAccounts.map((account) => {
                 const displayName =
@@ -803,8 +804,8 @@ function ConnectorsPage() {
         )}
 
         {filteredAvailable.length > 0 && (
-          <section className="mb-10">
-            <SectionEyebrow label="Available" />
+          <section aria-labelledby="gk-available" className="mb-10">
+            <SectionEyebrow id="gk-available" label="Available" />
             <div className={sectionGridClass}>
 
               {filteredAvailable.map((vendor) => (

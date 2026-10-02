@@ -107,30 +107,17 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
   const passwordAuthEnabled = serverConfig.passwordAuthEnabled && signupsEnabled;
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col items-center justify-start overflow-y-auto bg-kumo-base px-4 py-8">
-      {/* Dot grid — fades from top to bottom */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          backgroundImage:
-            "radial-gradient(circle, var(--color-kumo-line) 1px, transparent 1px)",
-          backgroundSize: "24px 24px",
-          maskImage:
-            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 70%)",
-          WebkitMaskImage:
-            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 70%)",
-        }}
-      />
+    <div className="flex h-full min-h-0 flex-col items-center justify-start overflow-y-auto bg-kumo-base px-4 py-8">
 
-      <div className="relative my-auto w-full max-w-sm">
+      <div className="themed-floating-shadow-lg my-auto w-full max-w-sm rounded-2xl bg-kumo-elevated px-6 pb-8 pt-10 sm:px-8">
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <SiteLogo size={40} className="mb-3">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-kumo-brand mb-3">
-              <Hexagon size={20} className="text-white" weight="bold" />
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-kumo-info-tint mb-3">
+              <Hexagon size={20} className="text-kumo-brand" weight="bold" />
             </div>
           </SiteLogo>
-          <h1 className="text-xl font-semibold text-kumo-default">
+          <h1 className="text-[18px] leading-[26px] font-semibold text-kumo-default">
             {siteName}
           </h1>
           <p className="text-sm text-kumo-subtle mt-1">Create your account</p>

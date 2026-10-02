@@ -97,7 +97,7 @@ export function BindingBadge({
   }
 
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-kumo-fill px-2 py-[3px] text-[11px] font-medium leading-none tracking-[-0.1px] text-kumo-subtle">
+    <span className="inline-flex items-center gap-1 rounded-full bg-kumo-control px-2 py-[3px] text-[11px] font-medium leading-none tracking-[-0.1px] text-kumo-subtle">
       <span className="flex items-center text-kumo-inactive">{icon}</span>
       {vendorDescription?.displayName ?? badge.label}
     </span>
@@ -118,7 +118,7 @@ export function BlueprintCard({
   const badges = uniqueBindingBadges(metadata.bindings);
 
   return (
-    <div className="themed-card-hover-shadow group relative isolate flex min-h-[150px] flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill active:scale-[0.995]">
+    <div className="themed-card-hover-shadow group relative isolate flex min-h-[150px] flex-col overflow-hidden rounded-2xl bg-kumo-elevated text-left transition-[background-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:bg-kumo-overlay active:scale-[0.995]">
       {featured && (
         <Star
           size={72}
@@ -130,7 +130,7 @@ export function BlueprintCard({
         to="/blueprint/$id"
         params={{ id }}
         aria-label={`Open blueprint ${metadata.title}`}
-        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
+        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-kumo-ring"
       />
       <div className="pointer-events-none relative z-20 flex flex-1 flex-col p-4">
         <div className="flex items-start gap-3">
