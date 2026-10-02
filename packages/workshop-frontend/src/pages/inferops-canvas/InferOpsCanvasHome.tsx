@@ -8,7 +8,8 @@ import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalConta
 import { useDocumentTitle } from '../../useDocumentTitle'
 import { MAX_SCREEN_WORKSPACES, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
 
-const BLANK_TEMPLATE = ''
+// Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
+const BLANK_TEMPLATE = ':blank'
 
 const widgetCount = (screen: CanvasDefinition) => screen.sections.reduce((sum, section) => sum + section.widgets.length, 0)
 
