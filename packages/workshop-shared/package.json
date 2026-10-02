@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "exports": {
+    "./openai-plugin": {
+      "types": "./src/openai-plugin.ts",
+      "import": "./src/openai-plugin.ts"
+    },
     "./api": {
       "types": "./src/api.ts",
       "import": "./src/api.ts"

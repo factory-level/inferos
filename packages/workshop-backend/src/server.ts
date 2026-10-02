@@ -28,6 +28,8 @@ import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
+import { OpenAiAssistantPluginApiImpl } from './openai-plugin.js';
+import { isOpenAiPluginEnabled } from '@gadgets/assistant-plugin-openai/protocol';
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
@@ -184,6 +186,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   getPreferredModel(): Promise<string | null> {
     return retryOnDoReset(() => this.#user.getPreferredModel());
   }
+  getChatGptFallback(): Promise<{ modelId: string | null; models: AiChatAuthorInfo[] }> {
+    return retryOnDoReset(() => this.#user.getChatGptFallback());
+  }
+  setChatGptFallback(modelId: string | null): Promise<void> {
+    return this.#user.setChatGptFallback(modelId);
+  }
   setPreferredModel(id: string | null): Promise<void> {
     return this.#user.setPreferredModel(id);
   }
@@ -247,6 +255,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   getUiFeatureFlags(): Promise<UiFeatureFlags> {
     return resolveUiFeatureFlags(this.env, this.#userId.name!);
+  }
+
+  async getOpenAiAssistantPlugin() {
+    return isOpenAiPluginEnabled(this.env)
+      ? new OpenAiAssistantPluginApiImpl(this.env, this.#userId.name!) : null;
   }
 
   async #openGadgetInternal(id: string, shareKey?: string,

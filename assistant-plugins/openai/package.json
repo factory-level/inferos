@@ -1,0 +1,22 @@
+{
+  "name": "@gadgets/assistant-plugin-openai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { "./protocol": "./src/protocol.ts", "./payload": "./src/payload.ts" },
+  "scripts": {
+    "start": "bun src/main.ts",
+    "test:run": "bun test src",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@gadgets/workshop-shared": "workspace:*",
+    "jose": "^6.2.12",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@gadgets/scripts": "workspace:*",
+    "@types/bun": "1.3.11",
+    "typescript": "catalog:"
+  }
+}

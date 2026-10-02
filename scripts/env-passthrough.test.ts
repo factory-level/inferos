@@ -82,6 +82,10 @@ const EXPECTED: Record<string, ExpectedArea> = {
     // Operator command invoked directly by the consumer runtime, never inside a cached build.
     external: ["INFEROS_ADMIN_SESSION"],
   },
+  // Read by the Bun companion at runtime, never during a cached build.
+  "assistant-plugins/openai": {
+    external: ["INFEROS_CONFIG_DIR", "INFEROS_WORKSHOP_ORIGIN", "OPENAI_ASSISTANT_PLUGIN_SECRET"],
+  },
   // `build-gatekeeper-configurator.ts` is covered in detail by
   // build-gatekeeper-configurator.test.ts, which pins its reads against the shared task's `env`.
   // `build-release.ts`, `run-local.ts` and `preview/` are invoked directly, never as vp tasks.
@@ -93,6 +97,9 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "CF_ACCESS_AUD", "CF_ACCESS_ISS", "CF_AI_GATEWAY", "CF_AI_GATEWAY_ACCOUNT_ID",
       "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_USE_BINDING",
       "CI_COMMIT_SHA", "CI_PIPELINE_IID", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
+      // run-dev-server.ts starts the companion at runtime; the frontend reads its flag over RPC.
+      "ENABLE_OPENAI_ASSISTANT_PLUGIN",
+      "ANTHROPIC_API_KEY",
       "GITHUB_REPOSITORY", "GITHUB_TOKEN", "PREVIEW_ADMINS", "PREVIEW_GITHUB_CLIENT_ID",
       "PREVIEW_GITHUB_CLIENT_SECRET", "PREVIEW_NAME", "PREVIEW_PR_NUMBER",
       "PREVIEW_WORKERS_DEV_HOST", "PREVIEW_WRANGLER", "VITE_BACKEND_HOST",
@@ -193,7 +200,10 @@ const matches = (name: string, pattern: string) =>
 describe("build-time env passthrough", () => {
   // These double as the keys compared against EXPECTED, so they are built with `/` rather than
   // `join`, whose separator is platform-dependent. Forward slashes still resolve as paths on Windows.
-  const areas = ["scripts", ...workerPackageDirs(".").map(dir => relative(".", dir).replaceAll("\\", "/"))];
+  const areas = ["scripts", ...workerPackageDirs(".").map(dir => relative(".", dir).replaceAll("\\", "/")),
+    ...readdirSync("assistant-plugins", { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => `assistant-plugins/${entry.name}`)];
 
   it("uses only known categories", () => {
     for (const [area, groups] of Object.entries(EXPECTED)) {
