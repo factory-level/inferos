@@ -12,7 +12,7 @@ Create a wrapper with pinned InferOS code and explicit InferOps/profile/feature 
 Run from this InferOS checkout with Node 22.18 or later:
 
 ```bash
-node scripts/consumer/bootstrap.ts /tmp/my-inferos https://github.com/factory-level/inferos e3033598d5535bde51ab76bd35939a381589ae13
+node scripts/consumer/bootstrap.ts /tmp/my-inferos https://github.com/factory-level/inferos 02d6d3b2327904426e0c190caf559f5741bee419
 cd /tmp/my-inferos
 pnpm inferos:check
 pnpm run setup
