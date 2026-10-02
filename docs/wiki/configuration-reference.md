@@ -1,6 +1,6 @@
 ---
 title: Configuration ownership and required settings
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # Configuration ownership and required settings
@@ -35,6 +35,9 @@ A starting settings inventory for the setup skills, grounded in current code.
 | Context sharingDomain | Deployer; gatekeeper binding props | Context Library | Isolation namespace; dev default is dev, choose production domain deliberately |
 | METRICS / ERROR_REPORTER | Deployer; optional bindings | Observability enabled | Routing/configuration separate from payload; logs must exclude prompts/tokens/data |
 | VITE_FRONTEND_ERROR_REPORTING | Builder; frontend env | Optional client reports, default off | Build-time flag; backend reporter/rate limiter bindings also required |
+| COMPOSABLE_VIEWS / DURABLE_VIEWS | Deployer; wrapper `features`, or in-repo the presence of `inferos.canvas.json` | Canvas composition and saved views; default off | Structural switches, never grants |
+| CANVAS_CATALOG | Deployer; `inferos.canvas.json` via `pnpm canvas` | Optional; unset offers every widget kind | Nonsecret JSON of enabled widget kinds, blueprint widgets and screen templates; malformed fails closed |
+| Custom gatekeeper selection | Deployer; `inferos.canvas.json` `customGatekeepers` | Default: every `custom-gatekeepers/` package with a `wrangler.jsonc` | Chooses which fork-owned gatekeepers the dev server binds; does not provision accounts |
 | Local ports and state directory | Developer/wrapper | Every local instance | Distinct per wrapper; future reset must name exact local target |
 | .dev.vars | Developer; local uncommitted input | Local secrets/configuration as needed | Shell overrides; never commit credentials or use production as fixtures |
 
