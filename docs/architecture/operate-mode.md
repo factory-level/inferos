@@ -5,6 +5,8 @@ covers:
   - packages/workshop-shared/src/api.ts
   - packages/workshop-backend/src/user.ts
   - packages/workshop-backend/src/server.ts
+  - packages/workshop-shared/src/operate-flow.ts
+  - packages/workshop-backend/src/flow-store.ts
 updated: 2026-10-02
 ---
 
@@ -21,6 +23,8 @@ The operate session is implemented in the kernel: one per person, holding a page
 | `packages/workshop-shared/src/operate-session.ts` | The page state machine: `OperatePageState`, `OperateEvent`, `OperateRef`, and the pure `applyOperateEvent` / `replayOperateEvents`. Shared so the kernel, clients and (later) the agent derive the same page from the same log. |
 | `packages/workshop-shared/src/api.ts` | The `OperateSession` capability, `AuthenticatedApi.getOperateSession()`, `OperateSessionUpdate`, and the coded `OPERATE_SESSION_ERROR_CODES` (`conflict`, `invalidEvent`). |
 | `packages/workshop-backend/src/user.ts` | Session state in the user Durable Object: the `operateEvents` log, the `operatePage` snapshot, and `operateSessionWorkspaceId`. `dispatchOperateEvent`, `subscribeOperateSession`, `listOperateEvents`, `claimOperateSessionWorkspace`. |
+| `packages/workshop-shared/src/operate-flow.ts` | An authored flow (`OperateFlow`: title and ordered canvas ids) and `parseOperateFlowContent`, which checks its limits. |
+| `packages/workshop-backend/src/flow-store.ts` | `WorkspaceFlowStore`: a workspace's flows in its Overseer, behind `Overseer.listFlows` / `createFlow` / `replaceFlow` / `deleteFlow`. |
 | `packages/workshop-backend/src/server.ts` | `OperateSessionImpl` (`@validateRpc`), which forwards to the user DO with a fresh stub per call and opens the session workspace. |
 
 ## Data and Control Flow
@@ -35,6 +39,8 @@ The session lives in the user Durable Object, which already exists once per pers
 
 A session can run a **flow**: `startFlow` copies an ordered list of one workspace's screen ids into the page state (`flow`), `goToStep` moves the index within it, and `exitFlow` clears it. While `flow` is set the page is meant to show only that step (the full-canvas state); the working set and focus are untouched, so they return on exit. Because the steps are copied in, the reducer validates a step from the event alone and a run is unaffected by later edits to the flow it started from.
 
+Flows are authored per workspace and stored in its Overseer (`flows` collection), next to the canvases whose ids are a flow's steps. The flow methods need build access and both view flags, exactly like the canvas methods, and the use-role capability denies them. A flow is saved only over canvases that exist in that workspace, in the author's order; a step may repeat. Replacing or deleting compares the revision and rejects a stale one with the canvas conflict error. The store never touches a session: a client reads a flow and dispatches `startFlow` with its steps, so the kernel does not check that a run's steps match a stored flow, and a step whose canvas was deleted later is for the client to show as unavailable.
+
 A stored snapshot may predate a page-state field. The user DO fills missing fields from `INITIAL_OPERATE_PAGE` whenever it reads the snapshot, so such a session reads as if it always had the field.
 
 References in the page state (`screen`, `workspace`, and a flow's workspace and steps) identify targets only. The session never opens them and grants no access.
@@ -47,6 +53,7 @@ None. Limits are constants in `operate-session.ts`: references and screen ids up
 
 Against [the design](../design/operate-mode.md):
 
+- A flow is a single ordered list of one workspace's screens. Views that lay out several screens at once, steps from other workspaces, and steps that must be completed before moving on are not implemented.
 - Views, subject-bound views, approvals in the page state and handover events are not implemented. The page state covers the working set, focus, subject, chat panel, app presentation and a running flow.
 - The session workspace exposes the full `Overseer`, including authoring methods. The operate-only chat mode is the next step.
 - The URL mirror, presence, and agent-dispatched events (`actor: "agent"`) are not implemented.
