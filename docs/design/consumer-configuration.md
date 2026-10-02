@@ -16,7 +16,7 @@ Make a forkable consuming repository semi-configured for InferOps operations: pi
 
 - `inferos.config.json` is a versioned, nonsecret consumer contract. Validate unknown keys, types, version, Git pin, URL credentials and incompatible flags before starting or deploying.
 - The wrapper owns its files and custom code; `inferos/` is a pinned submodule. A bootstrap rerun preserves edits and does not perform an implicit upgrade.
-- Explicit flags are `composableViews`, `durableViews` and `customCloudflareCode`. Defaults are false. Custom Worker local activation is implemented; composable/durable view adapters remain pending. The operations profile will enable supported view defaults explicitly when that implementation exists.
+- Explicit flags are `composableViews`, `durableViews` and `customCloudflareCode`. Base defaults are false. The operations profile enables composable and durable layouts; custom Cloudflare code remains opt-in. New wrappers materialize these resolved defaults explicitly. Board data and agent view adapters remain pending.
 - `durableViews` requires `composableViews`. Reject an incompatible combination instead of silently enabling a dependency. Flags are deployment choices, never credentials or permission grants.
 - Resolve defaults → selected profile → explicit wrapper overrides and report provenance. Existing Flagship rollout resolution must remain separate from structural installation capabilities: a rollout cannot activate a feature absent from the installation.
 - Enforce disabled features at server operation boundaries as well as UI discovery. Account, tenant, workspace and project authorization is always enforced independently.
@@ -60,7 +60,7 @@ No generic entity database, automatic copying of a live InferOps tenant, unrestr
 
 ## Open Questions
 
-- Choose the smallest native storage/API extension for durable shared view definitions after the canvas contract review.
+- Complete resource binding and agent integration on the existing native workspace definition store.
 - Resolve external InferOps authentication and credential storage through the gatekeeper contract.
 - Define profile migrations and field-level ownership between declarative initialization and later AdminConfig edits.
 

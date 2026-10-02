@@ -10,10 +10,10 @@ export interface ConsumerConfig {
     | { mode: "remote"; baseUrl: string; targetRef: string };
 }
 
-const object = (value: unknown, keys: string[], path: string): Record<string, unknown> => {
+const object = (value: unknown, keys: string[], path: string, partial = false): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}: expected object`);
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some(key => !keys.includes(key)) || keys.some(key => !(key in record))) {
+  if (Object.keys(record).some(key => !keys.includes(key)) || (!partial && keys.some(key => !Object.hasOwn(record, key)))) {
     throw new Error(`${path}: expected exactly ${keys.join(", ")}`);
   }
   return record;
@@ -28,6 +28,39 @@ const string = (value: unknown, path: string): string => {
   if (typeof value !== "string" || !value.trim() || value.length > 2048) throw new Error(`${path}: expected nonempty string`);
   return value;
 };
+
+/** Origin of a resolved installation setting; administrator state is managed separately. */
+export type SettingSource = "default" | "profile" | "override";
+
+/** Resolution sources for the settings that profiles can customize. */
+export interface ConsumerProvenance {
+  features: Record<keyof ConsumerConfig["features"], SettingSource>;
+  styling: Record<keyof ConsumerConfig["styling"], SettingSource>;
+}
+
+const defaults: Pick<ConsumerConfig, "features" | "styling"> = {
+  features: { composableViews: false, durableViews: false, customCloudflareCode: false },
+  styling: { siteName: "My Workspace", density: "comfortable", theme: "system" },
+};
+const profiles: Record<ConsumerConfig["profile"], {
+  features: Partial<ConsumerConfig["features"]>;
+  styling: Partial<ConsumerConfig["styling"]>;
+}> = {
+  personal: { features: {}, styling: {} },
+  "inferops-operations": {
+    features: { composableViews: true, durableViews: true },
+    styling: { siteName: "InferOps Workspace", density: "compact" },
+  },
+};
+
+function resolveGroup<T extends object>(base: T, profile: Partial<T>, overrides: Record<string, unknown>) {
+  // Only known own properties participate; false is an override, never a missing value.
+  const value = { ...base, ...profile, ...overrides };
+  const provenance = Object.fromEntries(Object.keys(base).map(key => [key,
+    Object.hasOwn(overrides, key) ? "override" : Object.hasOwn(profile, key) ? "profile" : "default",
+  ])) as Record<keyof T, SettingSource>;
+  return { value, provenance };
+}
 
 /** Reject credentials in committed repository and API URLs. Local repository paths are explicit inputs. */
 export function validateRepository(value: unknown): string {
@@ -51,7 +84,7 @@ function validateHttpsUrl(value: unknown, path: string): string {
 }
 
 /** Validate untrusted configuration without echoing rejected values, which may contain secrets. */
-export function parseConsumerConfig(input: unknown): ConsumerConfig {
+export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig; provenance: ConsumerProvenance } {
   const root = object(input, ["schemaVersion", "upstream", "profile", "features", "styling", "local", "inferops"], "config");
   if (root.schemaVersion !== 1) throw new Error("schemaVersion: only version 1 is supported");
   const upstream = object(root.upstream, ["repository", "revision"], "upstream");
@@ -59,12 +92,17 @@ export function parseConsumerConfig(input: unknown): ConsumerConfig {
   if (typeof upstream.revision !== "string" || !/^[a-f0-9]{40}$/.test(upstream.revision)) {
     throw new Error("upstream.revision: expected full lowercase Git commit SHA");
   }
-  const features = object(root.features, ["composableViews", "durableViews", "customCloudflareCode"], "features");
+  const profile = choice(root.profile, ["personal", "inferops-operations"], "profile");
+  const featureOverrides = object(root.features, ["composableViews", "durableViews", "customCloudflareCode"], "features", true);
+  const resolvedFeatures = resolveGroup(defaults.features, profiles[profile].features, featureOverrides);
+  const features = resolvedFeatures.value;
   for (const key of Object.keys(features)) {
-    if (typeof features[key] !== "boolean") throw new Error(`features.${key}: expected boolean`);
+    if (typeof features[key as keyof typeof features] !== "boolean") throw new Error(`features.${key}: expected boolean`);
   }
   if (features.durableViews && !features.composableViews) throw new Error("durableViews requires composableViews");
-  const styling = object(root.styling, ["siteName", "density", "theme"], "styling");
+  const styleOverrides = object(root.styling, ["siteName", "density", "theme"], "styling", true);
+  const resolvedStyle = resolveGroup(defaults.styling, profiles[profile].styling, styleOverrides);
+  const styling = resolvedStyle.value;
   // Native AdminApi.setSiteName and initializeProfile enforce the same public limit.
   if (string(styling.siteName, "styling.siteName").length > 40) throw new Error("styling.siteName: maximum 40 characters");
   const local = object(root.local, ["port"], "local");
@@ -78,10 +116,10 @@ export function parseConsumerConfig(input: unknown): ConsumerConfig {
   if (!/^inferops:\/\/[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\/project\/board\/[a-zA-Z0-9_-]+$/.test(targetRef)) {
     throw new Error("inferops.targetRef: expected tenant.workspace/project/board/project reference");
   }
-  return {
+  const config: ConsumerConfig = {
     schemaVersion: 1,
     upstream: { repository, revision: upstream.revision },
-    profile: choice(root.profile, ["personal", "inferops-operations"], "profile"),
+    profile,
     features: {
       composableViews: features.composableViews as boolean,
       durableViews: features.durableViews as boolean,
@@ -97,14 +135,19 @@ export function parseConsumerConfig(input: unknown): ConsumerConfig {
       ? { mode: "remote", baseUrl: validateHttpsUrl(data.baseUrl, "inferops.baseUrl"), targetRef }
       : { mode: choice(data.mode, ["fixture"], "inferops.mode"), fixture: choice(data.fixture, ["fixtures/project-board.json"], "inferops.fixture"), targetRef },
   };
+  return { config, provenance: { features: resolvedFeatures.provenance, styling: resolvedStyle.provenance } };
 }
 
-/** Initial explicit settings; optional runtime features remain disabled until their adapters ship. */
+/** Resolve and validate configuration; omitted profile-controlled fields inherit defaults. */
+export function parseConsumerConfig(input: unknown): ConsumerConfig {
+  return resolveConsumerConfig(input).config;
+}
+
+/** Initial explicit settings; materialize the operations profile so later profile changes cannot silently alter a wrapper. */
 export function initialConsumerConfig(repository: string, revision: string): ConsumerConfig {
   return parseConsumerConfig({
     schemaVersion: 1, upstream: { repository, revision }, profile: "inferops-operations",
-    features: { composableViews: false, durableViews: false, customCloudflareCode: false },
-    styling: { siteName: "InferOps Workspace", density: "comfortable", theme: "system" },
+    features: {}, styling: {},
     local: { port: 8787 },
     inferops: { mode: "fixture", fixture: "fixtures/project-board.json", targetRef: "inferops://demo.local/project/board/DEMO" },
   });

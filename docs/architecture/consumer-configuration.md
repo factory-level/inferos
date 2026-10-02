@@ -23,7 +23,7 @@ updated: 2026-10-01
 
 ## Overview
 
-The working tree now contains a dependency-free Node bootstrap command and strict consumer configuration parser. It can create a pinned, recursively cloneable wrapper and validate its actual gitlink. It also initializes the consumer site name and profile instructions through the administrator capability. The deployment fallback theme is also applied. Listing density is also applied to workspace rows and Explore listings. View/data adapters remain pending.
+The working tree now contains a dependency-free Node bootstrap command and strict consumer configuration parser. It can create a pinned, recursively cloneable wrapper and validate its actual gitlink. It also initializes the consumer site name and profile instructions through the administrator capability. The deployment fallback theme is also applied. Listing density is also applied to workspace rows and Explore listings. Canvas composition and durable layout storage are available; board data and agent tools remain pending.
 
 ## Components
 
@@ -62,11 +62,11 @@ The profile operator sends `styling.theme` as `defaultTheme`; `AdminSettings` pe
 
 ## Configuration
 
-The initial profile is inferops-operations, with all three optional features disabled. The configured site name can be initialized through the operator; theme is applied as a deployment fallback; density applies curated desktop workspace/Explore listing spacing. Fixture path is fixed to a wrapper-owned synthetic board. Remote mode accepts a noncredentialed HTTPS base URL but cannot launch until its adapter exists. Git sources support HTTPS or explicitly supplied absolute local paths. No cloud resources or production credentials are created. Custom Worker local support is described below.
+The initial profile is inferops-operations, with composable and durable views enabled and custom Cloudflare code disabled. New wrappers materialize compact density, system theme and InferOps Workspace branding as explicit values. The configured site name can be initialized through the operator; theme is applied as a deployment fallback; density applies curated desktop workspace/Explore listing spacing. Fixture path is fixed to a wrapper-owned synthetic board. Remote mode accepts a noncredentialed HTTPS base URL but cannot launch until its adapter exists. Git sources support HTTPS or explicitly supplied absolute local paths. No cloud resources or production credentials are created. Custom Worker local support is described below.
 
 ## Divergences from Design
 
-The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Initial site name, profile instructions and fallback theme are implemented so far; the remaining adapters are unimplemented. The native development runner's state/topology and lifecycle limitations remain. Bootstrap is not yet an upgrade/recovery service and does not copy production domain storage.
+The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Site name, profile instructions, fallback theme, listing density, local custom Workers and canvas layout persistence are implemented. Authorized InferOps data, agent composition tools, complete view-sharing and cloud extension deployment remain pending. The native development runner's state/topology and lifecycle limitations remain. Bootstrap is not yet an upgrade/recovery service and does not copy production domain storage.
 
 ## Open Questions
 
@@ -89,3 +89,9 @@ Bootstrap creates a disabled public hello example, manifest, validation command 
 ## Durable-view server boundary
 
 The native Overseer capability now offers workspace-scoped definition storage behind exact-string `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` deployment bindings. Owner/build sessions can use it; use-only sessions cannot. The consumer launcher maps view flags to these bindings. Public server configuration advertises the effective flags to the builder Canvas dialog. Starter definitions are imported explicitly; no automatic installation or board data access occurs. See [canvas architecture](inferops-canvas.md) for transaction, sharing and resource-authorization boundaries.
+
+## Profile resolution and provenance
+
+The v1 parser accepts partial `features` and `styling` objects, while keeping those objects and all other top-level fields required. Unknown keys, explicit null/undefined and invalid values fail validation. Each field resolves base default → selected profile → own explicit override; false is an override. Dependency validation runs after resolution, so disabling only composableViews in the operations profile fails while inherited durableViews remains enabled. No dependent flag is silently changed.
+
+The personal profile inherits disabled features, My Workspace branding, comfortable density and system theme. Operations overrides both view flags to true, branding to InferOps Workspace and density to compact. The custom Worker flag and theme remain base defaults. `inferos:check` reports resolved features/style and per-field default/profile/override provenance. Bootstrap writes a fully explicit snapshot of the operations profile so switching the profile name alone does not reset choices. Existing fully explicit wrappers retain their values. To opt back into inheritance, remove only the selected nested fields after reviewing the pinned parser support. All native launch/profile/extension consumers use the same parser. This resolution does not overwrite initialized AdminConfig or alter authentication, grants or rollout flags.

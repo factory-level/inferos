@@ -77,6 +77,9 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     const report = JSON.parse(execFileSync(process.execPath, [join(clone, ".inferos/runtime.ts"), "check"], { encoding: "utf8" }));
     assert.equal(report.ok, true);
     assert.equal(report.modifiedUpstream, false);
+    assert.deepEqual(report.features, { composableViews: true, durableViews: true, customCloudflareCode: false });
+    assert.equal(report.styling.siteName, "My changed profile");
+    assert.equal(report.provenance.features.durableViews, "override");
     assert.ok(report.pending.includes("InferOps fixture/remote adapter"));
     const unsupportedProfile = spawnSync(process.execPath, [join(clone, ".inferos/runtime.ts"), "profile"], { encoding: "utf8" });
     assert.equal(unsupportedProfile.status, 1);

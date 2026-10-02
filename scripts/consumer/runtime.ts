@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseConsumerConfig } from "./config.ts";
+import { parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
 
 /** Select the wrapper's complete format set, retaining upstream defaults for older empty wrappers. */
 export function consumerBlueprintDirectory(root: string): string | undefined {
@@ -64,7 +64,7 @@ const unavailableFeatures = (config: ReturnType<typeof parseConsumerConfig>, ups
 
 /** Check the actual submodule pin; configuration alone is not proof of the running revision. */
 export function checkConsumer(root: string) {
-  const config = parseConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
+  const { config, provenance } = resolveConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
   const upstream = join(root, "inferos");
   const head = execFileSync("git", ["-C", upstream, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (head !== config.upstream.revision) throw new Error("Submodule HEAD differs from configured upstream.revision");
@@ -78,7 +78,7 @@ export function checkConsumer(root: string) {
   const pending = ["InferOps fixture/remote adapter", "profile initialization not checked"];
   pending.push(...unavailableFeatures(config, upstream));
   if (config.features.composableViews) pending.push("agent canvas tools");
-  return { config, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
+  return { config, provenance, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
 }
 
 /** Read-only preflight results; passing checks do not prove application or cloud health. */
@@ -171,7 +171,7 @@ async function main() {
     if (!report.ok) process.exitCode = 1;
     return;
   }
-  const { config, upstream, packageManager, pending, modifiedUpstream } = checkConsumer(root);
+  const { config, provenance, upstream, packageManager, pending, modifiedUpstream } = checkConsumer(root);
   if (command === "views") {
     const script = join(upstream, "scripts/consumer/views.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support starter view validation");
@@ -196,7 +196,7 @@ async function main() {
     return;
   }
   if (command === "check") {
-    console.log(JSON.stringify({ ok: true, revision: config.upstream.revision, modifiedUpstream, packageManager, profile: config.profile, features: config.features, pending }, null, 2));
+    console.log(JSON.stringify({ ok: true, revision: config.upstream.revision, modifiedUpstream, packageManager, profile: config.profile, features: config.features, styling: config.styling, provenance, pending }, null, 2));
     return;
   }
   const { pnpmCommand } = await import(pathToFileURL(join(upstream, "scripts/pnpm-command.ts")).href);
