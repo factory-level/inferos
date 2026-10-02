@@ -15,36 +15,6 @@ import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
 import { getBackendHost } from './connectHandoff';
 
-// ---------------------------------------------------------------------------
-// Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
-// with the dev account before React renders, so you never see the login page.
-// ---------------------------------------------------------------------------
-async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
-  if (import.meta.env.VITE_DEV_AUTO_LOGIN !== 'true') return
-  if (localStorage.getItem('authToken')) return  // already logged in
-
-  const username = import.meta.env.VITE_DEV_USERNAME ?? 'dev'
-  const password = import.meta.env.VITE_DEV_PASSWORD ?? 'devpassword'
-
-  // Derive the passwordHash the same way the app does (argon2id via hashPassword),
-  // but here we use the same SERVICE_SALT + SHA-256 shortcut that wrangler dev accepts
-  // in local mode. We import hashPassword from the existing util.
-  const { hashPassword } = await import('./passwordHash')
-  const passwordHash = await hashPassword(username, password)
-
-  // Try createAccount first — works on a fresh backend. Returns null if already exists.
-  let token = await stub.createAccount(username, username, passwordHash)
-
-  // If null, account already exists — just log in.
-  if (!token) {
-    token = await stub.login(username, passwordHash)
-  }
-
-  if (token) {
-    localStorage.setItem('authToken', token)
-  }
-}
-
 // WebSocket RPC connection management.
 //
 // React's useEffect / useState machinery is kind of obnoxious in that, in dev mode, it runs
@@ -264,12 +234,6 @@ const root = createRoot(document.getElementById('root')!, {
     handled: false, severity: 'fatal', captureMechanism: 'react',
   }),
 })
-
-// Kick off dev auto-login in the background. If it completes before
-// useAuth checks the token, the user skips the login page. If the backend
-// is unreachable, the app still renders immediately (showing a connection
-// banner or login page) instead of hanging on a blank screen.
-devAutoLogin(currentStub).catch(() => {})
 
 root.render(
   <StrictMode>
