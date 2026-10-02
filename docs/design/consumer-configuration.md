@@ -46,7 +46,7 @@ Disabling durable views preserves saved definitions while denying the disabled s
 
 `personal` and `inferops-operations` are initial profile names. A profile selects defaults for offered components, starter views, instructions and semantic appearance; later vertical profiles compose the same schema. It never changes authentication policy, grants a resource or asserts ambience.
 
-Initial styling fields are `siteName`, `density` (comfortable/compact) and `theme` (system/light/dark). Additional branding must map to existing AdminConfig/Kumo semantics after review, not an arbitrary style object. The explicit post-login `profile:init` step initializes site name, instructions and fallback theme once through the administrator capability. Existing custom values are preserved; density application remains pending. Later administrator edits are authoritative unless an explicit configuration update resolves the difference. Rerun/upgrade cannot silently reset branding or profile changes.
+Initial styling fields are `siteName`, `density` (comfortable/compact) and `theme` (system/light/dark). Additional branding must map to existing AdminConfig/Kumo semantics after review, not an arbitrary style object. The explicit post-login `profile:init` step initializes site name, instructions, fallback theme and listing density once through the administrator capability. Existing custom values are preserved. Compact density reduces desktop workspace-row and Explore card/list spacing; mobile spacing and gadget-owned layouts remain unchanged. Later administrator edits are authoritative unless an explicit configuration update resolves the difference. Rerun/upgrade cannot silently reset branding or profile changes.
 
 ### Custom Cloudflare code
 

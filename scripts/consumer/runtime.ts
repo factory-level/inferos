@@ -65,7 +65,7 @@ export function checkConsumer(root: string) {
   if (typeof packageJson.packageManager !== "string" || !packageJson.packageManager.startsWith("pnpm@")) {
     throw new Error("Upstream does not declare its pnpm version");
   }
-  const pending = ["InferOps fixture/remote adapter", "profile initialization not checked", "density defaults"];
+  const pending = ["InferOps fixture/remote adapter", "profile initialization not checked"];
   for (const [name, enabled] of Object.entries(config.features)) if (enabled) pending.push(name);
   return { config, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
 }
@@ -180,7 +180,7 @@ async function main() {
   }
   await assertLocalPortAvailable(config.local.port);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
-  console.error("Starting the native Workshop baseline. InferOps data and density adapters are pending; profile:init is a separate administrator operation.");
+  console.error("Starting the native Workshop baseline. InferOps data and view adapters are pending; profile:init is a separate administrator operation.");
   const env: NodeJS.ProcessEnv = { ...process.env, VITE_BACKEND_HOST: `localhost:${config.local.port}` };
   const blueprints = consumerBlueprintDirectory(root);
   if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;

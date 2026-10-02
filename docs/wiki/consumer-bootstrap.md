@@ -75,7 +75,7 @@ unset INFEROS_ADMIN_SESSION
 
 The command applies the configured `styling.siteName` (maximum 40 characters), instructions selected by `profile`, and the fallback theme from `styling.theme`. It connects only to the configured local port. Results are `initialized`, `preserved` (existing name, instructions or non-system theme won), or `already-initialized`. Reruns do not update settings; use the normal admin UI for later name/instruction changes, or the admin API for the default theme. Reload the Workshop to pick up branding. The initialization marker lives with the authoritative settings, not in a wrapper file, so a wrapper rerun or changed config cannot reset it.
 
-This initializes branding, instructions and the deployment fallback theme. Density, starter views, remote InferOps data and profile-specific component catalogs remain pending. Cloud application needs a separate explicit deployment-origin contract.
+This initializes branding, instructions and the deployment fallback theme. Pins containing the density extension also initialize curated listing spacing: compact reduces desktop workspace-row and Explore card/list spacing. Mobile touch targets and gadget-owned layouts remain unchanged. Starter views, remote InferOps data and profile-specific component catalogs remain pending. Cloud application needs a separate explicit deployment-origin contract.
 
 ## Theme preference precedence
 
@@ -85,6 +85,6 @@ The deployment theme is a fallback, not an enforced setting. A browser's saved `
 
 ## Current limits
 
-`dev` launches native Workshop through run-local. It does not yet render the included InferOps fixture, automatically initialize the profile, apply density, load wrapper Workers or implement durable view storage. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
+`dev` launches native Workshop through run-local. It does not yet render the included InferOps fixture, automatically initialize the profile, load wrapper Workers or implement durable view storage. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
 
 The tests cover fresh creation, recursive clone, paths with spaces, customized rerun, revision drift, Git failure cleanup and all flag combinations. No cloud deployment or live provider login is performed by bootstrap or those tests.
