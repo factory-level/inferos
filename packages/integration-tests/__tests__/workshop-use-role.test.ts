@@ -93,6 +93,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   replaceFlow: ws => ws.replaceFlow("flow", "0", { title: "Flow", steps: ["view"] }),
   deleteFlow: ws => ws.deleteFlow("flow", "0"),
   setTitle: ws => ws.setTitle("Title"),
+  setKind: ws => ws.setKind("workflow"),
   setPinned: ws => ws.setPinned(true),
   deleteSelf: ws => ws.deleteSelf(),
   createGadget: ws => ws.createGadget("App"),

@@ -676,9 +676,12 @@ export interface AuthenticatedApi extends RpcTarget {
    *   into a gadget), so provisional gadgets are useful to allow the user to write an initial
    *   chat message without explicitly creating a new gadget.
    *
+   * `kind` is what the workspace builds (see `WorkspaceKind`); omitted, it is the default, an app.
+   * It is stored before the workspace is returned, so its first chat already builds that kind.
+   *
    * TODO(multi-gadget): This should be renamed to newWorkspace().
    */
-  newGadget(): Promise<RpcStub<Overseer>>;
+  newGadget(kind?: WorkspaceKind): Promise<RpcStub<Overseer>>;
 
   /**
    * List metadata about all the user's Gadgets. Used to display the front-page listing.
@@ -1706,10 +1709,30 @@ export type GadgetMetadata = {
    */
   defaultGadgetId?: WorkpieceId;
 
+  /**
+   * How the workspace runs and where it appears (see `WorkspaceKind`). Absent means "app": every
+   * workspace created before kinds existed, and records the owner's list stored before then.
+   */
+  kind?: WorkspaceKind;
+
   // TODO:
   // - created / modified / activity times
   // - icon? thumbnail?
 }
+
+/**
+ * What a workspace is, which decides exactly how it runs and where it is presented: an "app" is a
+ * full-screen gadget its users open (with a chat/app toggle), a "widget" is a small gadget shown as
+ * a tile on InferOps Canvas screens, and a "workflow" has no UI and runs on timed or event
+ * triggers. The kind changes only through an explicit `Overseer.setKind()`; nothing infers it.
+ */
+export type WorkspaceKind = "app" | "widget" | "workflow";
+
+/** Every `WorkspaceKind`, in the order they are offered. */
+export const WORKSPACE_KINDS: readonly WorkspaceKind[] = ["app", "widget", "workflow"];
+
+/** The kind a workspace has when none was ever set. */
+export const DEFAULT_WORKSPACE_KIND: WorkspaceKind = "app";
 
 /**
  * GadgetMetadata extended with timestamps. These are available when listing gadgets from the
@@ -2114,6 +2137,9 @@ export interface Overseer extends RpcTarget {
 
   /** Change the workspace title. */
   setTitle(title: string): Promise<void>;
+
+  /** Change the workspace kind (see `WorkspaceKind`). Build role only. */
+  setKind(kind: WorkspaceKind): Promise<void>;
 
   /** Pin or unpin this workspace in the user's list. */
   setPinned(pinned: boolean): Promise<void>;
@@ -3708,8 +3734,13 @@ export type AiToolCall = {
    * `blueprintNotes` is present for blueprint instantiations: formatted text describing the files
    * copied in and the bindings the blueprint expects the agent to wire up. Recorded so replay
    * doesn't have to re-fetch the blueprint (whose content may have changed since).
+   *
+   * `starterNotes` is present when the gadget started from its workspace kind's starter files
+   * instead (see `workspaceKindStarter`), naming the files copied in.
    */
-  output?: {gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string};
+  output?: {
+    gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string, starterNotes?: string,
+  };
 } | {
   /**
    * Create a new worktree workpiece: a file tree rooted at a git commit, private to the creating

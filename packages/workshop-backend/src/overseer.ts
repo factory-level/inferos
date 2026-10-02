@@ -5,7 +5,7 @@ import { WorkspaceFlowStore } from "./flow-store";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -1119,6 +1119,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
       title: "Untitled Workspace",
+
+      // The workspace kind (see WorkspaceKind). Workspaces stored before kinds existed read the
+      // default.
+      kind: <WorkspaceKind>DEFAULT_WORKSPACE_KIND,
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -8891,6 +8895,10 @@ class OverseerImpl implements AgentHooks {
     return promise;
   }
 
+  getWorkspaceKind(): WorkspaceKind {
+    return this.storage.kind.get();
+  }
+
   async getInstanceInstructions(): Promise<string> {
     try {
       // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.
@@ -10898,6 +10906,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let result: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       totalCost: this.impl.storage.totalCost.get(),
       containsRestrictedData: this.impl.storage.containsRestrictedData.get(),
       ownerInvitesOnly: this.impl.storage.ownerInvitesOnly.get(),
@@ -10923,6 +10932,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let metadata: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       totalCost: this.impl.storage.totalCost.get(),
       containsRestrictedData: this.impl.storage.containsRestrictedData.get(),
       ownerInvitesOnly: this.impl.storage.ownerInvitesOnly.get(),
@@ -10934,6 +10944,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let titleSubscriber = {
       update(value: string) {
         metadata.title = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+    let kindSubscriber = {
+      update(value: WorkspaceKind) {
+        metadata.kind = value;
         callback(metadata).catch(unsubscribe);
       }
     };
@@ -10958,6 +10974,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
+      this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
       this.impl.storage.containsRestrictedData.unsubscribe(restrictedDataSubscriber);
       this.impl.storage.ownerInvitesOnly.unsubscribe(ownerInvitesOnlySubscriber);
@@ -10965,6 +10982,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
+    this.impl.storage.kind.subscribe(kindSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
     this.impl.storage.containsRestrictedData.subscribe(restrictedDataSubscriber);
     this.impl.storage.ownerInvitesOnly.subscribe(ownerInvitesOnlySubscriber);
@@ -10987,6 +11005,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async setTitle(title: string): Promise<void> {
     this.impl.storage.title.put(title);
     await this.#owner.updateTitle(this.impl.ctx.id.toString(), title);
+  }
+
+  async setKind(kind: WorkspaceKind): Promise<void> {
+    this.impl.storage.kind.put(kind);
+    await this.#owner.updateKind(this.impl.ctx.id.toString(), kind);
   }
 
   async setPinned(pinned: boolean): Promise<void> {
@@ -12378,7 +12401,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
 // Restricted capability handed to "use"-role collaborators. It implements the full `Overseer`
 // interface but permits only the handful of methods needed to render and interact with the
-// gadgets' deployed UIs: getMetadata() (restricted to id/title/owner), a restricted
+// gadgets' deployed UIs: getMetadata() (restricted to id/title/kind/owner), a restricted
 // subscribeToMetadata(), subscribeToPresence(), subscribeToWorkpieces(), and getGadget()
 // (returning a restricted, mainline-only UseGadgetClientInterface). Presence includes active
 // viewers' names, profile IDs, and roles. Every other
@@ -12469,6 +12492,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
@@ -12486,6 +12510,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     let metadata: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       owner,
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
@@ -12497,13 +12522,21 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
         callback(metadata).catch(unsubscribe);
       }
     };
+    let kindSubscriber = {
+      update(value: WorkspaceKind) {
+        metadata.kind = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
 
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
+      this.impl.storage.kind.unsubscribe(kindSubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
+    this.impl.storage.kind.subscribe(kindSubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -12541,6 +12574,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // --- Denied methods (build-only) ---
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
+  async setKind(_kind: WorkspaceKind): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
