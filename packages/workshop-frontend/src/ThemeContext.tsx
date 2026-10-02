@@ -1,9 +1,9 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import {
   applyThemeMode,
-  readThemeMode,
-  resolveThemeMode,
+  readThemePreference,
+  getSystemThemeMode,
   writeThemeMode,
   type ResolvedThemeMode,
   type ThemeMode,
@@ -17,38 +17,28 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null)
 
-function getInitialThemeState() {
-  const themeMode = readThemeMode()
-  return { themeMode, resolvedThemeMode: resolveThemeMode(themeMode) }
+const subscribeSystemTheme = (onChange: () => void) => {
+  const query = window.matchMedia('(prefers-color-scheme: dark)')
+  query.addEventListener('change', onChange)
+  return () => query.removeEventListener('change', onChange)
 }
 
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [themeState, setThemeState] = useState(getInitialThemeState)
-  const { themeMode, resolvedThemeMode } = themeState
+export const ThemeProvider = ({ children, defaultMode = 'system' }: { children: ReactNode; defaultMode?: ThemeMode }) => {
+  const [preference, setPreference] = useState(readThemePreference)
+  const systemMode = useSyncExternalStore(subscribeSystemTheme, getSystemThemeMode)
+  const themeMode = preference ?? defaultMode
+  const resolvedThemeMode = themeMode === 'system' ? systemMode : themeMode
 
   useEffect(() => {
-    if (themeMode !== 'system') {
-      applyThemeMode(themeMode)
-      return
-    }
-
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-    const handleChange = () => {
-      const nextResolved = applyThemeMode('system')
-      setThemeState((prev) => prev.resolvedThemeMode === nextResolved
-        ? prev
-        : { ...prev, resolvedThemeMode: nextResolved })
-    }
-    mediaQuery.addEventListener('change', handleChange)
-    return () => mediaQuery.removeEventListener('change', handleChange)
-  }, [themeMode])
+    applyThemeMode(resolvedThemeMode)
+  }, [resolvedThemeMode])
 
   const value = useMemo<ThemeContextValue>(() => ({
     themeMode,
     resolvedThemeMode,
     setThemeMode: (mode) => {
       writeThemeMode(mode)
-      setThemeState({ themeMode: mode, resolvedThemeMode: applyThemeMode(mode) })
+      setPreference(mode)
     },
   }), [themeMode, resolvedThemeMode])
 

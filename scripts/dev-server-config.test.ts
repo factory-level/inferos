@@ -1,10 +1,34 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { parse } from "jsonc-parser";
 
 import {
   getDevServerConfig,
+  getDevRouterAssets,
   getWranglerPortFromBackendHost,
 } from "./dev-server-config.ts";
+
+describe("run-local asset topology", () => {
+  it("uses production routing precedence and resolves assets from the router package", () => {
+    const dir = resolve("packages/router");
+    const production = parse(readFileSync(resolve(dir, "wrangler.jsonc"), "utf8"));
+    const original = structuredClone(production);
+    const assets = getDevRouterAssets(production, dir);
+    assert.equal(assets.binding, "ASSETS");
+    assert.equal(assets.directory, resolve("packages/workshop-frontend/dist"));
+    assert.deepEqual(assets.run_worker_first, production.assets.run_worker_first);
+    assert.ok(assets.run_worker_first?.includes("/gatekeeper/*"));
+    assert.equal(assets.not_found_handling, "single-page-application");
+    assert.deepEqual(production, original);
+  });
+
+  it("fails rather than silently serving assets through a different worker", () => {
+    assert.throws(() => getDevRouterAssets({}, "/router"), /ASSETS/);
+    assert.throws(() => getDevRouterAssets({ assets: { directory: "dist" } }, "/router"), /ASSETS/);
+  });
+});
 
 describe("getWranglerPortFromBackendHost", () => {
   it("extracts a port from a localhost backend host", () => {

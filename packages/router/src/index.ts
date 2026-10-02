@@ -14,6 +14,8 @@ type EmailEntrypoint = CloudflareWorkersModule.WorkerEntrypoint &
 
 export interface Env {
   WORKSHOP_BACKEND: Fetcher;
+  /** Deployer-controlled switch; custom service bindings alone do not enable extension routes. */
+  CUSTOM_CLOUDFLARE_CODE?: string;
   /** Present in production (wrangler.jsonc assets stanza); absent in dev. */
   ASSETS?: Fetcher;
   /** Dormant until custom domains + Email Routing exist; the handler ships anyway. */
@@ -24,6 +26,19 @@ export interface Env {
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+
+    if (url.pathname === "/extensions" || url.pathname.startsWith("/extensions/")) {
+      const id = url.pathname.split("/")[2];
+      if (env.CUSTOM_CLOUDFLARE_CODE !== "true" || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id ?? "")) {
+        return new Response("Not found", { status: 404 });
+      }
+      const service = env[`CONSUMER_${id.replaceAll("-", "_").toUpperCase()}`];
+      if (!service || typeof service !== "object" || !("fetch" in service) || typeof service.fetch !== "function") {
+        return new Response("Not found", { status: 404 });
+      }
+      // These are explicitly public deployer-owned routes. The Worker owns endpoint authentication.
+      return service.fetch(req);
+    }
 
     for (const key of Object.keys(env)) {
       if (!key.startsWith("GATEKEEPER_")) continue;
@@ -50,9 +65,8 @@ export default {
 
     // Dev only: with no assets binding here, everything else goes to the backend.
     //
-    // In `run-local` mode the backend has a static `assets` binding configured (with
-    // `run_worker_first` for the API routes), so it serves the pre-built single-page app for these
-    // frontend requests. In normal dev mode the backend has no assets and frontend requests aren't
+    // In `run-local` mode this router has the same ASSETS binding and route precedence as
+    // production. In normal dev mode there are no assets and frontend requests aren't
     // expected here -- run the Vite dev server with `pnpm dev-client` and open localhost:3000
     // directly instead. (We don't try to forward to localhost:3000 becaues it doesn't work well:
     // Vite's HMR socket gets disconnected every time wrangler restarts workerd.)

@@ -21,11 +21,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
-import { getDevServerConfig } from "./dev-server-config.ts";
+import { getDevRouterAssets, getDevServerConfig } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
+import { parseConsumerConfig } from "./consumer/config.ts";
+import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -65,7 +67,7 @@ loadDevVars();
 
 const useWorkersAi = process.argv.includes("--use-workers-ai-binding");
 
-// In `run-local` mode the backend serves the pre-built frontend bundle as static assets (there is no
+// In `run-local` mode the router serves the pre-built frontend bundle as static assets (there is no
 // Vite dev server). In normal dev mode we leave assets unconfigured so the frontend is served by
 // Vite on :3000 and no `vite build` is required to start the dev server.
 const serveFrontendAssets = process.argv.includes("--serve-frontend-assets");
@@ -105,6 +107,14 @@ function findGatekeepers(parentDir: string): Gatekeeper[] {
 await generateWorkerConfigs({ check: false });
 
 const gatekeepers = findGatekeepers(PACKAGES_DIR);
+
+const consumerOptions = process.argv.flatMap((arg, index) => arg === "--consumer-root" ? [process.argv[index + 1]] : []);
+if (consumerOptions.length > 1 || (consumerOptions.length && (!consumerOptions[0] || consumerOptions[0].startsWith("--")))) {
+  throw new Error("--consumer-root requires one wrapper directory");
+}
+const consumerConfig = consumerOptions.length
+  ? parseConsumerConfig(JSON.parse(readFileSync(join(consumerOptions[0], "inferos.config.json"), "utf8"))) : null;
+const consumerWorkers = consumerOptions.length ? await prepareConsumerWorkers(consumerOptions[0]) : [];
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -450,10 +460,22 @@ function devBuildConfig(build: WranglerBuild | undefined, pkgDir: string): Wrang
   const srcPath = join(ROOT, "wrangler.jsonc");
   const config = parse(readFileSync(srcPath, "utf8"));
 
+  if (serveFrontendAssets) {
+    const routerDirectory = join(PACKAGES_DIR, "router");
+    const productionRouter = parse(readFileSync(join(routerDirectory, "wrangler.jsonc"), "utf8"));
+    config.assets = getDevRouterAssets(productionRouter, routerDirectory);
+  }
+
   config.services = config.services || [];
   for (const gk of gatekeepers) {
     config.services.push({ binding: bindingName(gk), service: gk.name });
   }
+
+  for (const worker of consumerWorkers) {
+    if (config.services.some((service: ServiceBinding) => service.binding === worker.binding)) throw new Error("Consumer router binding collision");
+    config.services.push({ binding: worker.binding, service: worker.name });
+  }
+  config.vars = { ...config.vars, CUSTOM_CLOUDFLARE_CODE: consumerWorkers.length ? "true" : "false" };
 
   const outPath = join(ROOT, "wrangler.dev.jsonc");
   writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");
@@ -537,6 +559,8 @@ for (const gk of gatekeepers) {
   // For local testing, create an account named "admin" to test admin features.
   config.vars = config.vars || {};
   config.vars.ADMINS = ["admin"];
+  config.vars.COMPOSABLE_VIEWS = consumerConfig?.features.composableViews ? "true" : "false";
+  config.vars.DURABLE_VIEWS = consumerConfig?.features.durableViews ? "true" : "false";
 
   // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
   // environment, so you can run e.g.
@@ -562,7 +586,7 @@ for (const gk of gatekeepers) {
 
   // Account connect flows post their completion ticket to the Workshop *origin* named here (see
   // packages/workshop-backend/src/connect-handoff.ts), so the backend refuses to complete one without
-  // it. Default to wherever the frontend is served from: Vite in normal dev, the backend itself in
+  // it. Default to wherever the frontend is served from: Vite in normal dev, the public router in
   // run-local mode.
   if (config.vars.PUBLIC_BASE_URL === undefined) {
     config.vars.PUBLIC_BASE_URL =
@@ -587,18 +611,6 @@ for (const gk of gatekeepers) {
     config.ai = { binding: "WORKERS_AI" };
   }
 
-  // In run-local mode, serve the pre-built frontend bundle as static assets directly from the
-  // backend Worker (mirrors the production layout). The dev-router forwards all non-gatekeeper
-  // requests here; `run_worker_first` ensures the Worker handles the API routes while everything
-  // else falls back to the single-page app.
-  if (serveFrontendAssets) {
-    config.assets = {
-      directory: "../workshop-frontend/dist",
-      not_found_handling: "single-page-application",
-      run_worker_first: ["/api", "/api/*", "/blueprint-screenshot/*"],
-    };
-  }
-
   config.build = devBuildConfig(config.build, WORKSHOP_BACKEND_DIR);
 
   const outPath = join(ROOT, "packages", "workshop-backend", "wrangler.dev.jsonc");
@@ -612,6 +624,7 @@ for (const gk of gatekeepers) {
 
 const configs = [
   "wrangler.dev.jsonc",
+  ...consumerWorkers.map(worker => worker.configPath),
   join("packages", "workshop-backend", "wrangler.dev.jsonc"),
   ...gatekeepers.map(gk => join(gk.dir, "wrangler.dev.jsonc")),
 ];

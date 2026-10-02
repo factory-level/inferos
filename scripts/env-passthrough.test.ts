@@ -78,6 +78,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
   },
   "packages/workshop-backend": {
     uncached: ["BUNDLED_BLUEPRINTS_DIR"],
+    // Operator command invoked directly by the consumer runtime, never inside a cached build.
+    external: ["INFEROS_ADMIN_SESSION"],
   },
   // `build-gatekeeper-configurator.ts` is covered in detail by
   // build-gatekeeper-configurator.test.ts, which pins its reads against the shared task's `env`.

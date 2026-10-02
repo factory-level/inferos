@@ -13,6 +13,7 @@ import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { bundledBlueprintsManifestVersion, installBundledBlueprints } from './bundled-blueprints.js';
 import { BUNDLED_BLUEPRINTS } from './generated/bundled-blueprints.js';
+import type { DefaultThemeMode, DeploymentProfile, DisplayDensity } from '@gadgets/workshop-shared/api';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -298,6 +299,22 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     return this.#mutateAdminConfig(config => ({ ...config, ...patch }));
   }
 
+  /** Initialize soft settings once, in the same serialized/rollback-capable write as the marker. */
+  async initializeProfile(profile: DeploymentProfile): ReturnType<AdminApi['initializeProfile']> {
+    let result: Awaited<ReturnType<AdminApi['initializeProfile']>> = 'already-initialized';
+    await this.#mutateAdminConfig(config => {
+      if (config.profileInitialized) return config;
+      if (config.siteName !== '' || config.instanceInstructions !== '' || config.defaultTheme !== 'system' || config.displayDensity !== 'comfortable') {
+        result = 'preserved';
+        return { ...config, profileInitialized: true };
+      }
+      result = 'initialized';
+      return { ...config, siteName: profile.siteName, instanceInstructions: profile.instanceInstructions,
+        defaultTheme: profile.defaultTheme ?? 'system', displayDensity: profile.displayDensity ?? 'comfortable', profileInitialized: true };
+    });
+    return result;
+  }
+
   /**
    * Read all admin-managed settings for the admin UI in one call: the stored config plus the live
    * resource catalog (every bound gatekeeper's resource types annotated with their enabled state).
@@ -313,6 +330,8 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       signupsEnabled: config.signupsEnabled,
       userSearchEnabled: config.userSearchEnabled,
       siteName: config.siteName,
+      defaultTheme: config.defaultTheme,
+      displayDensity: config.displayDensity,
       siteLogo: siteLogoImage(config.siteLogoConfigured),
       instanceInstructions: config.instanceInstructions,
       announcement: config.announcement,
@@ -573,6 +592,32 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   getSettings(): Promise<AdminSettingsView> {
     return this.admin.getSettings(this.adminUserId);
+  }
+
+  async initializeProfile(profile: DeploymentProfile): ReturnType<AdminApi['initializeProfile']> {
+    if (profile.displayDensity !== undefined && !['comfortable', 'compact'].includes(profile.displayDensity)) {
+      throw new Error('Invalid display density.');
+    }
+    if (profile.defaultTheme !== undefined && !['system', 'light', 'dark'].includes(profile.defaultTheme)) {
+      throw new Error('Invalid default theme.');
+    }
+    if (profile.siteName.length > MAX_SITE_NAME_LENGTH) {
+      throw new Error(`Site name too long (max ${MAX_SITE_NAME_LENGTH} characters).`);
+    }
+    if (profile.instanceInstructions.length > MAX_INSTANCE_INSTRUCTIONS_LENGTH) {
+      throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
+    }
+    return this.admin.initializeProfile(profile);
+  }
+
+  async setDisplayDensity(density: DisplayDensity): Promise<void> {
+    if (!['comfortable', 'compact'].includes(density)) throw new Error('Invalid display density.');
+    await this.admin.updateAdminConfig({ displayDensity: density });
+  }
+
+  async setDefaultTheme(mode: DefaultThemeMode): Promise<void> {
+    if (!['system', 'light', 'dark'].includes(mode)) throw new Error('Invalid default theme.');
+    await this.admin.updateAdminConfig({ defaultTheme: mode });
   }
 
   async setSignupsEnabled(enabled: boolean): Promise<void> {

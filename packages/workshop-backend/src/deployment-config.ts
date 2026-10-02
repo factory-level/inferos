@@ -48,12 +48,18 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
+    canvasFeatures: {
+      composableViews: env.COMPOSABLE_VIEWS === "true",
+      durableViews: env.COMPOSABLE_VIEWS === "true" && env.DURABLE_VIEWS === "true",
+    },
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),
     signupsEnabled: config.signupsEnabled,
     userSearchEnabled: config.userSearchEnabled,
     siteName: config.siteName,
+    defaultTheme: config.defaultTheme,
+    displayDensity: config.displayDensity,
     siteLogo: siteLogoImage(config.siteLogoConfigured),
     announcement: config.announcement,
     banner: config.banner.text,
