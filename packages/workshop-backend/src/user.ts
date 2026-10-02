@@ -2,7 +2,8 @@ import { RpcStub } from "capnweb";
 import { openAiCommand } from './openai-plugin.js';
 import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
 import { localApiModels } from './local-api-models.js';
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, WorkspaceKind } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, WorkspaceKind, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError } from '@gadgets/workshop-shared/api';
+import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -270,6 +271,11 @@ function makeUserStorage(storage: DurableObjectStorage) {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
       }),
+      // The operate session's event log (see OperateSession). Keyed by the zero-padded sequence
+      // number so listing is in log order.
+      operateEvents: collection<OperateEventRecord>()({
+        primaryKey: record => operateEventKey(record.seq),
+      }),
     },
     singletons: {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
@@ -315,9 +321,24 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // (-1 = never, which also lazily backfills users created before the
       // directory existed). See #syncDirectory().
       directoryRev: -1,
+
+      // The owner-only workspace behind this person's operate session, once claimed. Never listed
+      // by listGadgets().
+      operateSessionWorkspaceId: <string | null>null,
+
+      // The operate session's page as of its latest event, with that event. Always the replay of
+      // `operateEvents` (applyOperateEvent), maintained by dispatchOperateEvent().
+      operatePage: <OperateSessionUpdate>{ seq: 0, state: INITIAL_OPERATE_PAGE },
     }
   });
 }
+
+function operateEventKey(seq: number): string {
+  return String(seq).padStart(15, "0");
+}
+
+/** Most entries one OperateSession.listEvents() call returns. */
+const MAX_OPERATE_EVENTS_PAGE = 200;
 
 type UserStorage = ReturnType<typeof makeUserStorage>;
 
@@ -984,12 +1005,93 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     let result: GadgetMetadataWithTimestamps[] = [];
+    let operateSessionWorkspaceId = this.storage.operateSessionWorkspaceId.get();
     for (let gadget of this.storage.gadgets.list()) {
-      if (isFullyCreated(gadget)) {
+      if (isFullyCreated(gadget) && gadget.id !== operateSessionWorkspaceId) {
         result.push(gadget);
       }
     }
     return result;
+  }
+
+  // --- Operate session (see OperateSession in workshop-shared/api.ts) ---
+  //
+  // Each method runs synchronously against storage, so concurrent calls (two tabs, or a tab and the
+  // agent) are serialized by the Durable Object and never interleave.
+
+  /**
+   * Returns the operate session's workspace id, registering `candidateId` (a fresh Overseer id the
+   * caller has not opened yet) if there is none, or if the recorded one was deleted. An unused
+   * candidate costs nothing.
+   */
+  async claimOperateSessionWorkspace(candidateId: string): Promise<string> {
+    let existing = this.storage.operateSessionWorkspaceId.get();
+    if (existing && this.storage.gadgets.get(existing)) return existing;
+    this.storage.gadgets.put({ id: candidateId, title: "Operate session", created: new Date() });
+    this.storage.operateSessionWorkspaceId.put(candidateId);
+    return candidateId;
+  }
+
+  /** Appends an operate event if `expectedSeq` is current; see OperateSession.dispatch(). */
+  async dispatchOperateEvent(event: OperateEvent, expectedSeq: number, actor: OperateEventActor)
+      : Promise<OperateSessionSnapshot> {
+    let current = this.storage.operatePage.get();
+    if (expectedSeq !== current.seq) {
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);
+    }
+    let state;
+    try {
+      state = applyOperateEvent(current.state, event);
+    } catch (err) {
+      if (err instanceof OperateEventError) {
+        throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+      }
+      throw err;
+    }
+    let record: OperateEventRecord = { seq: current.seq + 1, event, actor, at: new Date() };
+    this.storage.operateEvents.put(record);
+    this.storage.operatePage.put({ seq: record.seq, state, record });
+    return { seq: record.seq, state };
+  }
+
+  /** See OperateSession.subscribe(). */
+  async subscribeOperateSession(subscriber: RpcStub<(update: OperateSessionUpdate) => void>)
+      : Promise<RpcStub<{}>> {
+    subscriber = subscriber.dup();  // keep stub after return
+    let page = this.storage.operatePage;
+    let disposed = false;
+    let pageSubscriber = {
+      update(update: OperateSessionUpdate) {
+        subscriber(update).catch(unsubscribe);
+      }
+    };
+    let unsubscribe = () => {
+      if (disposed) return;
+      disposed = true;
+      page.unsubscribe(pageSubscriber);
+      subscriber[Symbol.dispose]();
+    };
+
+    // Snapshot and subscribe with no await between, so no event can fall in the gap.
+    let { seq, state } = page.get();
+    subscriber({ seq, state }).catch(unsubscribe);
+    page.subscribe(pageSubscriber);
+
+    return new RpcStub<{}>({
+      [Symbol.dispose]() {
+        unsubscribe();
+      }
+    });
+  }
+
+  /** See OperateSession.listEvents(). */
+  async listOperateEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]> {
+    let count = Math.max(0, Math.min(Math.floor(limit), MAX_OPERATE_EVENTS_PAGE));
+    if (count === 0) return [];
+    return [...this.storage.operateEvents.list({
+      startAfter: operateEventKey(Math.max(0, Math.floor(afterSeq))),
+      limit: count,
+    })];
   }
 
   async updateTitle(gadgetId: string, title: string) {

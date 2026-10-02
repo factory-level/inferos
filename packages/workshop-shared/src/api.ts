@@ -27,6 +27,7 @@ import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
+import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from "./operate-session.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
@@ -403,6 +404,68 @@ export const createAuthError = authErrors.create;
 
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
+
+/**
+ * A person's operate session (docs/design/operate-mode.md, "Sessions"): one continuous operate
+ * chat plus a page state that is the replay of an ordered event log. The person's tabs, devices and
+ * (later) the operate agent all change the page through `dispatch()`, applied by the shared
+ * `applyOperateEvent`. The session holds references only and grants no access.
+ */
+export interface OperateSession extends RpcTarget {
+  /**
+   * Calls `subscriber` with the current snapshot, then again after every event, with the event that
+   * produced it. Dispose the returned stub to stop.
+   */
+  subscribe(subscriber: RpcStub<(update: OperateSessionUpdate) => void>): Promise<RpcStub<{}>>;
+
+  /**
+   * Appends `event` if `expectedSeq` is the session's current sequence number, and returns the new
+   * snapshot. Rejects with `OPERATE_SESSION_ERROR_CODES.conflict` when another change landed first,
+   * and with `invalidEvent` when the event doesn't apply to the current page. Either way nothing
+   * changes.
+   */
+  dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot>;
+
+  /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
+  listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
+
+  /**
+   * The owner-only workspace behind the session, where its operate chat runs. It is created on first
+   * call and is never listed by `listGadgets()`.
+   */
+  getWorkspace(): Promise<RpcStub<Overseer>>;
+}
+
+/** What `OperateSession.subscribe()` delivers: a snapshot, plus the event that produced it. */
+export type OperateSessionUpdate = OperateSessionSnapshot & {
+  /** The appended entry that produced this snapshot; absent on the first, current-state call. */
+  record?: OperateEventRecord;
+};
+
+/** Machine-readable codes for expected `OperateSession.dispatch()` failures. */
+export const OPERATE_SESSION_ERROR_CODES = {
+  /** Another tab or the agent appended an event first; resubscribe or retry at the new seq. */
+  conflict: "OPERATE_SESSION_CONFLICT",
+  /** The event is invalid in the session's current page state (see `applyOperateEvent`). */
+  invalidEvent: "OPERATE_SESSION_INVALID_EVENT",
+} as const;
+
+/** An expected `OperateSession.dispatch()` failure code. */
+export type OperateSessionErrorCode =
+    typeof OPERATE_SESSION_ERROR_CODES[keyof typeof OPERATE_SESSION_ERROR_CODES];
+
+const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
+  [OPERATE_SESSION_ERROR_CODES.conflict]:
+      "The operate session changed since you last saw it. Retry from the latest state.",
+  [OPERATE_SESSION_ERROR_CODES.invalidEvent]:
+      "That change is not valid for the operate session's current page.",
+});
+
+/** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */
+export const createOperateSessionError = operateSessionErrors.create;
+
+/** Reads the machine-readable code from an `OperateSession.dispatch()` failure. */
+export const getOperateSessionErrorCode = operateSessionErrors.getCode;
 
 /**
  * One user as listed in the deployment-wide user directory (see
@@ -852,6 +915,12 @@ export interface AuthenticatedApi extends RpcTarget {
    * managed here; it stays env-var driven.)
    */
   getAdminApi(): Promise<RpcStub<AdminApi> | null>;
+
+  /**
+   * Returns the caller's operate session: exactly one per person, created on first use and shared
+   * live by every tab and device they open. See `OperateSession`.
+   */
+  getOperateSession(): Promise<RpcStub<OperateSession>>;
 
   // TODO:
   // - Edit permissions on a connected account.
