@@ -12,7 +12,7 @@ updated: 2026-10-01
 
 ## Overview
 
-Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa00851`. Proposed work is recorded in the [design](../design/repo-setup-skills.md), not asserted as implemented here.
+InferOS supplies a bootstrap skill and deterministic consumer scripts. They create a pinned wrapper, validate its configuration and synthetic board, and run native local development. The remaining maintenance and cloud workflows are tracked in the [design](../design/repo-setup-skills.md).
 
 ## Components
 
@@ -21,11 +21,12 @@ Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa
 | `scripts/run-dev-server.ts` | Existing local startup orchestration. |
 | `scripts/generate-worker-configs.ts` | Generated config synchronization. |
 | `scripts/release/manifest-lib.ts` | Deployable discovery and inputs. |
-| `.agents/skills` | Existing project skills. |
+| `.agents/skills/bootstrap-inferos` | Consumer setup, configuration and evidence guidance. |
+| `scripts/consumer` | Atomic scaffolding, profile resolution, preflight and fixture/view/extension validation. |
 
 ## Data and Control Flow
 
-InferOS has internal project skills and runnable development scripts. The upstream cloudflare-os-starter demonstrates a wrapper/submodule deployment and operator skill, but that is an external project, not an already-shipped InferOS consuming-repository setup suite. Current worker discovery and deploy inputs constrain how wrapper extensions can integrate.
+Bootstrap generates an exact submodule gitlink, copied command helpers and skill, explicit profile settings, synthetic data, starter views and editable extension directories. Generated commands delegate to the pinned native implementation. Checks report configuration provenance, dirty upstream state and pending runtime adapters; setup uses frozen dependencies. See [consumer configuration](consumer-configuration.md) for current implementation details. The external cloudflare-os-starter remains a research reference, not a dependency of this scaffolder.
 
 ## Configuration
 
@@ -33,7 +34,7 @@ Use the repo-pinned pnpm and lockfile. Do not edit generated wrangler.jsonc. Ins
 
 ## Divergences from Design
 
-A first bootstrap skill and strict versioned wrapper configuration now exist in the working tree; see [consumer configuration](consumer-configuration.md). Full configure/verify/upgrade/recover behavior, runtime adapters and cloud parity remain backlog work.
+Bootstrap, local startup, profile/style initialization, fixture validation and guarded canvas layouts have local evidence. General lifecycle/health verification, reviewed upgrade/recovery automation, authorized InferOps data loading and consumer cloud deployment remain backlog work. Native fixture/schema checks must not be described as a completed board read/approve/refresh flow.
 
 ## Open Questions
 
