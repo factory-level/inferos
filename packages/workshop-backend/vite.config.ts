@@ -73,6 +73,7 @@ export default {
         command: [
           'tsc',
           'tsc --project tsconfig.browser.json',
+          'tsc --project tsconfig.operator.json',
         ],
         dependsOn: ['build:bundled-blueprints', 'build:browser-runtime'],
         cache: false,

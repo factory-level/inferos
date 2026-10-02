@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "@cloudflare/workers-types"],
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "paths": { "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"] }
+  },
+  "include": ["scripts/initialize-consumer-profile.ts"]
+}

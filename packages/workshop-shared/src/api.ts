@@ -987,6 +987,8 @@ export const MAX_SITE_LOGO_DIMENSION = 512;
 
 /** All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI. */
 export type AdminSettingsView = {
+  /** Fallback theme for browsers without an explicit preference; absent on older deployments. */
+  defaultTheme?: DefaultThemeMode;
   /** Whether new account signups are allowed. */
   signupsEnabled: boolean;
   /** Whether users may search the user directory to find collaborators. */
@@ -1052,6 +1054,19 @@ export type AdminFormat = {
   bundled: boolean;
 };
 
+/** Deployment fallback used when a browser has no explicit theme preference. */
+export type DefaultThemeMode = "system" | "light" | "dark";
+
+/** Initial soft settings for a deployment; this never configures authentication or resource grants. */
+export interface DeploymentProfile {
+  /** Display name, at most MAX_SITE_NAME_LENGTH characters; empty keeps the default name. */
+  siteName: string;
+  /** Agent instructions, at most MAX_INSTANCE_INSTRUCTIONS_LENGTH characters. */
+  instanceInstructions: string;
+  /** Initial fallback theme; omitted means system. Browser preferences take precedence. */
+  defaultTheme?: DefaultThemeMode;
+}
+
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
@@ -1062,6 +1077,17 @@ export type AdminFormat = {
 export interface AdminApi {
   /** Read all admin-managed settings for the admin UI in one call. */
   getSettings(): Promise<AdminSettingsView>;
+
+  /**
+   * Initialize deployment branding/instructions once. Returns "initialized" when applied,
+   * "preserved" when a target setting was already customized, or "already-initialized" on rerun.
+   * Existing customizations are never overwritten. All outcomes consume initialization; later
+   * changes use the ordinary admin setters. Rejects the same length limits as those setters.
+   */
+  initializeProfile(profile: DeploymentProfile): Promise<"initialized" | "preserved" | "already-initialized">;
+
+  /** Set the fallback theme for browsers without a saved preference. Applies on their next connection. */
+  setDefaultTheme(mode: DefaultThemeMode): Promise<void>;
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
@@ -1192,6 +1218,8 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
+  /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
+  defaultTheme?: DefaultThemeMode;
   /**
    * Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
    * configured (password-only).

@@ -11,8 +11,13 @@
 import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { ADMIN_CONFIG_KEY, BlueprintKvEnv, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive.js";
+import type { DefaultThemeMode } from "@gadgets/workshop-shared/api";
 
 export type AdminConfig = {
+  /** Fallback appearance for browsers without a saved theme preference. */
+  defaultTheme: DefaultThemeMode;
+  /** One-time profile initialization has been consumed, including when existing customizations won. */
+  profileInitialized?: true;
   /**
    * Whether new account signups are allowed (default true). Note: this is an access toggle, not
    * authentication config — which auth providers exist and whether password login is on stay
@@ -86,6 +91,7 @@ export type FormatCuration = {
 };
 
 export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
+  defaultTheme: "system",
   signupsEnabled: true,
   userSearchEnabled: false,
   siteName: "",
@@ -310,6 +316,8 @@ export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
     ? p.signupsEnabled
     : DEFAULT_ADMIN_CONFIG.signupsEnabled;
   return {
+    ...(p.profileInitialized === true ? { profileInitialized: true as const } : {}),
+    defaultTheme: p.defaultTheme === "light" || p.defaultTheme === "dark" ? p.defaultTheme : "system",
     signupsEnabled,
     userSearchEnabled: typeof p.userSearchEnabled === "boolean"
       ? p.userSearchEnabled
