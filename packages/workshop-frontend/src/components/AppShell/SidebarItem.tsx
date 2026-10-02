@@ -50,7 +50,7 @@ export default function SidebarItem({
       className={[
         'group relative flex h-11 items-center gap-2.5 rounded-lg px-2.5 text-[14px] leading-5 transition-colors md:h-8 md:text-[13px] md:leading-[18px]',
         isActive
-          ? 'bg-kumo-fill font-medium text-kumo-strong'
+          ? 'bg-kumo-info-tint font-medium text-kumo-brand'
           : 'font-normal text-kumo-default hover:bg-kumo-tint',
       ].join(' ')}
     >
