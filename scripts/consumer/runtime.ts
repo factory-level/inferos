@@ -52,6 +52,9 @@ export async function assertLocalPortAvailable(port: number): Promise<void> {
   }
 }
 
+/** The skills.sh CLI version `skills:install` runs, pinned so installs are reproducible. */
+export const SKILLS_CLI = "skills@1.7.0";
+
 const featureSources = {
   // The composition contract, not a UI file: UI files are renamed as the page evolves.
   composableViews: "packages/workshop-shared/src/canvas.ts",
@@ -168,6 +171,19 @@ export async function diagnoseConsumer(root: string) {
       add("extensions", "pass", `${workers.length} explicit custom Workers; run pnpm extensions:check to validate canonical configs`);
     } catch { add("extensions", "error", "Cannot validate custom Workers; check the manifest, contained paths and supported pin"); }
   }
+  const skillScript = join(upstream, "scripts/consumer/skills.ts");
+  if (existsSync(join(root, "inferos.skills.json")) && existsSync(skillScript)) {
+    try {
+      const { checkConsumerSkills } = await import(pathToFileURL(skillScript).href);
+      const { packs, warnings } = checkConsumerSkills(root);
+      const skills = packs.reduce((total: number, pack: { skills: unknown[] }) => total + pack.skills.length, 0);
+      add("skills", warnings.length ? "warning" : "pass", warnings.length ? warnings.join("; ")
+        : `${skills} skills in ${packs.length} packs validate; run pnpm skills:upload against a running Workshop to publish them`);
+    } catch (error) {
+      add("skills", "error", error instanceof Error && error.message.includes("Cannot find package")
+        ? "Run pnpm run setup before validating skill packs" : `Skill packs are invalid: ${(error as Error).message}`);
+    }
+  }
   if (config.inferops.mode === "remote") unsupported.push("remote InferOps");
   add("runtime", unsupported.length ? "error" : "warning", unsupported.length
     ? `Startup is blocked by unavailable adapters: ${unsupported.join(", ")}`
@@ -178,7 +194,7 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|skills|skills-upload|skills-install|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -215,6 +231,12 @@ async function main() {
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
     return;
   }
+  if (command === "skills" || command === "skills-upload") {
+    const script = join(upstream, command === "skills" ? "scripts/consumer/skills.ts" : "packages/workshop-backend/scripts/upload-consumer-skills.ts");
+    if (!existsSync(script)) throw new Error("Pinned InferOS revision does not support skill packs; use a reviewed newer pin");
+    execFileSync(process.execPath, [script, root, ...(command === "skills" ? [] : process.argv.slice(3))], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
   if (command === "blueprints") {
     validateConsumerBlueprints(root, upstream);
     console.log(JSON.stringify({ ok: true, operation: "blueprints", source: consumerBlueprintDirectory(root) ? "wrapper" : "upstream" }));
@@ -225,6 +247,14 @@ async function main() {
     return;
   }
   const { pnpmCommand } = await import(pathToFileURL(join(upstream, "scripts/pnpm-command.ts")).href);
+  if (command === "skills-install") {
+    // The skills.sh CLI, pinned, writes .agents/skills/<name>, agent links and skills-lock.json in the
+    // wrapper. Packs publish those copies through their `include` lists; nothing is vendored twice.
+    const source = process.argv.length > 3 ? process.argv.slice(3) : ["anthropics/skills", "--skill", "skill-creator"];
+    const [binary, args] = pnpmCommand(["dlx", SKILLS_CLI, "add", ...source, "--yes"]);
+    execFileSync(binary, args, { cwd: root, stdio: "inherit" });
+    return;
+  }
   if (command === "setup") {
     const [binary, args] = pnpmCommand(["install", "--frozen-lockfile"]);
     execFileSync(binary, args, { cwd: upstream, stdio: "inherit" });

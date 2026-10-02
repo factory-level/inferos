@@ -10,6 +10,7 @@ import { createServer } from "node:net";
 import { bootstrapConsumer } from "./bootstrap.ts";
 import { initialConsumerConfig, parseConsumerConfig } from "./config.ts";
 import { assertLocalPortAvailable, checkConsumer, diagnoseConsumer } from "./runtime.ts";
+import { checkConsumerSkills } from "./skills.ts";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
 
@@ -42,6 +43,12 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     const revision = git(source, "rev-parse", "HEAD");
     assert.equal(bootstrapConsumer(target, source, revision).created, true);
     assert.ok(existsSync(join(target, ".agents/skills/bootstrap-inferos/SKILL.md")));
+    assert.ok(existsSync(join(target, ".agents/skills/skill-upload/SKILL.md")));
+    const skills = checkConsumerSkills(target);
+    assert.deepEqual(skills.packs.map(pack => pack.id), ["operate", "build", "shared"]);
+    assert.ok(skills.packs.every(pack => pack.skills.length > 0));
+    assert.deepEqual(skills.warnings, ["build: .agents/skills/skill-creator is not installed; run pnpm skills:install"]);
+    assert.ok(JSON.parse(readFileSync(join(target, "package.json"), "utf8")).scripts["skills:upload"]);
     const [starter] = readConsumerViews(target);
     assert.equal(starter.sections[0].widgets[0].targetRef, checkConsumer(target).config.inferops.targetRef);
     assert.equal(starter.revision, "0");

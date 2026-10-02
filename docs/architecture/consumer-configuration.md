@@ -16,7 +16,8 @@ covers:
   - packages/router
   - scripts/consumer
   - .agents/skills/bootstrap-inferos
-updated: 2026-10-01
+  - .agents/skills/skill-upload
+updated: 2026-10-02
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -35,10 +36,11 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 | `scripts/consumer/project-board.json` | Synthetic fixture matching inspected InferOps board wire fields |
 | `scripts/consumer/bootstrap.test.ts` | Fresh recursive clone, rerun preservation, drift rejection, failure cleanup and configuration failures |
 | `.agents/skills/bootstrap-inferos` | Coding-agent setup guidance with honest readiness reporting |
+| `.agents/skills/skill-upload` | Coding-agent guidance for installing, authoring and publishing wrapper skill packs, copied into wrappers |
 
 ## Data and Control Flow
 
-The bootstrap accepts destination, repository and full commit SHA. It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
+The bootstrap accepts destination, repository and full commit SHA. It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers, the `bootstrap-inferos` and `skill-upload` skills and the starter skill packs (`skills/`, with a default `inferos.skills.json`; see [repo setup skills](repo-setup-skills.md#skill-packs)) into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
 
 The copied wrapper runtime loads configuration and compares the actual submodule HEAD and staged gitlink. `check` reports configuration readiness, pending adapters and whether the submodule has local modifications; a matching HEAD alone is not an exact-revision proof. `setup` installs dependencies with the frozen upstream lockfile. `dev` checks IPv4/IPv6 loopback port availability before delegating to native run-local with the configured port. A busy port fails with a configuration instruction and does not stop the other listener. It rejects features absent from the pinned source and remote InferOps mode; it reports pending fixture/data and agent canvas adapters and requires the separate administrator profile initialization even in baseline mode.
 
