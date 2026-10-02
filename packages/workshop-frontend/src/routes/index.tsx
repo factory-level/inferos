@@ -10,6 +10,8 @@ import { RpcStub } from "capnweb";
 import {
   Overseer,
   AiChatAuthorInfo,
+  DEFAULT_WORKSPACE_KIND,
+  WorkspaceKind,
   CapsuleSpecifier,
   ChatAttachmentHandle,
   MessageFormatRef,
@@ -24,6 +26,8 @@ import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
 import { useChatLayout } from "../features/chat-layouts/chatLayout";
 import { FlaggedChatLayout } from "../features/chat-layouts/FlaggedChatLayout";
+import { useUiFeatureFlags } from "../FeatureFlagsContext";
+import { WorkspaceKindPicker } from "../features/workspace-kind/WorkspaceKindPicker";
 
 type HomeSearch = { prompt?: string };
 
@@ -89,6 +93,8 @@ export function HomePageContent({ prompt }: HomeSearch) {
   // Pre-create a provisional gadget as soon as the user starts interacting, so that navigation
   // after submit is instant. Same pattern as before — disposed on unmount if never consumed.
   const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer> } | null>(null);
+  const kindsAvailable = useUiFeatureFlags().flags['operate-mode'];
+  const [kind, setKind] = useState<WorkspaceKind>(DEFAULT_WORKSPACE_KIND);
 
   const ensureProvisionalGadget = useCallback(() => {
     if (!provisionalOverseerRef.current) {
@@ -115,10 +121,14 @@ export function HomePageContent({ prompt }: HomeSearch) {
       try {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
+        // The kind is set ahead of the first chat in the same batch, so that chat's agent already
+        // builds the chosen kind. The provisional workspace may predate the choice.
+        const kindSet = kind === DEFAULT_WORKSPACE_KIND ? undefined : overseer.setKind(kind);
         // Pipeline both independent calls in one batch, but settle both before releasing the stub.
         const [chat, {id}] = await Promise.all([
           overseer.newChat(message, modelId, capsules, attachments, formats),
           overseer.getMetadata(),
+          kindSet,
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
@@ -138,7 +148,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
         throw err;
       }
     },
-    [ensureProvisionalGadget, navigate, toasts],
+    [ensureProvisionalGadget, navigate, toasts, kind],
   );
 
   const getOverseer = useCallback((): RpcStub<Overseer> => {
@@ -216,6 +226,8 @@ export function HomePageContent({ prompt }: HomeSearch) {
             Ask a question, create an output, or create an app that works with your tools and data.
           </p>
         </header>
+
+        {kindsAvailable && <WorkspaceKindPicker kind={kind} onKindChange={setKind} />}
 
         {/* Composer */}
         {composer}
