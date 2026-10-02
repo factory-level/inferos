@@ -7,11 +7,10 @@ import type {
 // Duplicates the grammar in ../resources.ts on purpose: build-gatekeeper-configurator.ts transpiles
 // this file on its own, so it cannot import runtime helpers. __tests__/resources.test.ts keeps
 // the two in step.
-const DEFAULT_HOST = "demo.local";
 const BOARD_URL = /^inferops:\/\/([^/?#]+)\/project\/board\/([^/?#]+)\/?$/;
 
 export default {
-  initial: { host: DEFAULT_HOST, projectKey: null },
+  initial: { host: null, projectKey: null },
 
   initialValuesFromResourceUrl({ resourceUrl }) {
     const match = BOARD_URL.exec(resourceUrl.trim());
@@ -22,8 +21,8 @@ export default {
     return typeof values.projectKey === "string" && values.projectKey.length > 0;
   },
 
-  resourceUrl({ values }) {
-    return `inferops://${values.host || DEFAULT_HOST}/project/board/${values.projectKey}`;
+  async resourceUrl({ values, ui }) {
+    return `inferops://${values.host || await ui.defaultHost()}/project/board/${values.projectKey}`;
   },
 
   render({ values, setValues, ui }) {
@@ -36,7 +35,7 @@ export default {
           name="projectKey"
           value={values.projectKey}
           placeholder="Choose a project"
-          loadOptions={query => ui.listProjects(query)}
+          loadOptions={query => ui.listProjects(query, values.host ?? undefined)}
           onChange={projectKey => setValues({ projectKey })}
         />
       </Field>

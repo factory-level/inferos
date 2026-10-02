@@ -1,7 +1,7 @@
 // InferOps gatekeeper: scoped project-board reads and approved issue transitions.
 //
-// - `GatekeeperVendor` auto-provisions accounts (no OAuth): InferOps is mocked for now, so an
-//   account is just an id that keys its private copy of the demo data in `MockInferOps`.
+// - `GatekeeperVendor` auto-provisions accounts (no OAuth): an account is just an id that keys its
+//   private copy of the demo data in `MockInferOps`.
 // - `InferOpsAccount` (the GatekeeperUser) maps `inferops://<host>/project/board/<KEY>` to an
 //   `InferOpsProjectGatekeeper` facet whose props fix the account, host and project key. Scope is
 //   read from those props only; no session method accepts a project, host or account.
@@ -9,15 +9,16 @@
 //   `InferOpsIssueSession` reads that issue and proposes transitions.
 // - Every returned read is authorized as an observation. A transition is checked against the
 //   simulated issue, recorded, and submitted as an action; until it is decided, reads show the issue
-//   in its target state (simulation.ts). Applying calls the data source with this facet's id plus
-//   the action id as the idempotency key, which also rechecks scope, state, workflow and the expected
-//   revision against current data. Rejecting deletes the record, which ends the simulation.
+//   in its target state (simulation.ts), and a second move of the same issue is refused. Applying
+//   calls the data source with this facet's id plus the action id as the idempotency key, which
+//   also rechecks scope, state, workflow and the expected revision against current data. Rejecting
+//   deletes the record, which ends the simulation.
 // - Observers (strategy B): a binding is one project, so a collaborator is admitted when their own
 //   InferOps account can open that project.
 //
-// All project data comes through `InferOpsClient` (inferops-client.ts), opened by `#client()`
-// helpers from `openInferOpsClient` in mock-inferops.ts -- the one module to replace with an HTTP
-// client once the InferOps API contract is agreed.
+// All project data comes through `InferOpsClient` (inferops-client.ts), chosen by `clientFor`: the
+// HTTP client (http-inferops.ts) for the host of a configured InferOps connection, and the mock
+// (mock-inferops.ts) for the demo host.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
@@ -30,11 +31,12 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import { InferOpsError, inferOpsErrorCode, type InferOpsClient } from "./inferops-client";
+import { connectionFromEnv, openHttpInferOpsClient } from "./http-inferops";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
 import {
   DEFAULT_HOST, PROJECT_BOARD_RESOURCE, parseProjectBoardUrl, projectBoardUrl,
 } from "./resources";
-import { buildBoard, simulateIssue, type PendingTransition } from "./simulation";
+import { buildBoard, livePendingMove, simulateIssue, type PendingTransition } from "./simulation";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
   Board, InferOpsIssueSession, InferOpsProjectSession, Issue, Revision,
@@ -78,8 +80,25 @@ type ProjectGatekeeperProps = { accountId: string; host: string; projectKey: str
 
 type ExportsWithMock = { MockInferOps: DurableObjectNamespace<MockInferOps> };
 
-function clientFor(exports: ExportsWithMock, accountId: string, host: string): InferOpsClient {
+/**
+ * The data source for a host: the HTTP client when `host` is the configured InferOps connection's,
+ * otherwise the mock (which serves only the demo host and refuses any other). The host only selects
+ * a configured connection; no address or credential is ever taken from it.
+ *
+ * STOPGAP: the connection comes from worker vars, so it is shared by every account of the
+ * deployment. Local development only, until inferos#66 gives each account its own credential.
+ */
+function clientFor(
+  env: Cloudflare.Env, exports: ExportsWithMock, accountId: string, host: string,
+): InferOpsClient {
+  const connection = connectionFromEnv(env);
+  if (connection && host === connection.host) return openHttpInferOpsClient(connection);
   return openInferOpsClient(exports.MockInferOps, { accountId, host });
+}
+
+/** The host a new binding gets when its URL was not prefilled: the live connection's, if any. */
+function defaultHost(env: Cloudflare.Env): string {
+  return connectionFromEnv(env)?.host ?? DEFAULT_HOST;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,8 +114,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       tagline: "Read project boards and propose issue moves",
       description:
         "Gives Gadgets access to one InferOps project board at a time: read its issues and " +
-        "propose moving them between workflow states, each move approved by you. This " +
-        "deployment serves demo data, not a live InferOps workspace.",
+        "propose moving them between workflow states, each move approved by you. Unless the " +
+        "deployment is configured with an InferOps connection, it serves demo data.",
       autoProvisionsAccount: true,
       providesAuth: false,
     };
@@ -133,12 +152,16 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
 @validateRpc()
 export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountProps>
     implements GatekeeperUser {
-  #client(host = DEFAULT_HOST): InferOpsClient {
-    return clientFor(this.ctx.exports, this.ctx.props.accountId, host);
+  #client(host: string): InferOpsClient {
+    return clientFor(this.env, this.ctx.exports, this.ctx.props.accountId, host);
   }
 
   async describe(): Promise<AccountDescription> {
-    return { displayName: "InferOps (demo data)", avatar: INFEROPS_ICON };
+    const host = defaultHost(this.env);
+    return {
+      displayName: host === DEFAULT_HOST ? "InferOps (demo data)" : `InferOps (${host})`,
+      avatar: INFEROPS_ICON,
+    };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -173,13 +196,16 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     }
     return {
       iframeHtml: PROJECT_CONFIGURATOR_HTML,
-      ui: new RpcStub(new InferOpsProjectConfiguratorUI(this.#client())),
+      ui: new RpcStub(new InferOpsProjectConfiguratorUI(defaultHost(this.env), this.#client.bind(this))),
     };
   }
 
-  /** Delete this account's data. Bindings made through it then fail on their next read. */
+  /**
+   * Delete this account's demo data; its demo bindings then fail on their next read. Nothing is
+   * held for a live connection, whose credential is the deployment's (see `clientFor`).
+   */
   async revoke(): Promise<void> {
-    await this.#client().forget();
+    await this.#client(DEFAULT_HOST).forget();
   }
 
   reconnect(): never {
@@ -216,30 +242,40 @@ export class InferOpsVerifier extends WorkerEntrypoint<Cloudflare.Env, AccountPr
     implements InferOpsVerifierApi {
   async hasProjectAccess(host: string, projectKey: string): Promise<boolean> {
     try {
-      return await clientFor(this.ctx.exports, this.ctx.props.accountId, host).hasProject(projectKey);
+      return await clientFor(this.env, this.ctx.exports, this.ctx.props.accountId, host)
+        .hasProject(projectKey);
     } catch (error) {
-      // An unknown host is "no access"; anything else fails the open loudly instead of denying.
-      if (inferOpsErrorCode(error) === "NOT_FOUND") return false;
+      // An unknown host or a refused credential is "no access"; anything else fails the open
+      // loudly instead of denying.
+      const code = inferOpsErrorCode(error);
+      if (code === "NOT_FOUND" || code === "UNAUTHORIZED" || code === "FORBIDDEN") return false;
       throw error;
     }
   }
 }
 
 // Keeps the data source out of the iframe-facing object's public surface.
-const configuratorClients = new WeakMap<object, InferOpsClient>();
+const configuratorClients = new WeakMap<object, (host: string) => InferOpsClient>();
 
 @validateRpc()
 class InferOpsProjectConfiguratorUI extends RpcTarget implements InferOpsProjectConfiguratorRpc {
-  constructor(client: InferOpsClient) {
+  #defaultHost: string;
+
+  constructor(host: string, clientForHost: (host: string) => InferOpsClient) {
     super();
-    configuratorClients.set(this, client);
+    this.#defaultHost = host;
+    configuratorClients.set(this, clientForHost);
   }
 
-  async listProjects(query: string): Promise<ConfiguratorUIOption[]> {
-    const client = configuratorClients.get(this);
-    if (!client) throw new Error("The InferOps configurator is not initialized.");
+  async defaultHost(): Promise<string> {
+    return this.#defaultHost;
+  }
+
+  async listProjects(query: string, host?: string): Promise<ConfiguratorUIOption[]> {
+    const clientForHost = configuratorClients.get(this);
+    if (!clientForHost) throw new Error("The InferOps configurator is not initialized.");
     const needle = query.trim().toLowerCase();
-    return (await client.listProjects())
+    return (await clientForHost(host || this.#defaultHost).listProjects())
       .filter(p => !needle || p.identifier.toLowerCase().includes(needle) ||
         p.name.toLowerCase().includes(needle))
       .slice(0, OPTION_LIMIT)
@@ -332,7 +368,7 @@ export class InferOpsProjectGatekeeper
     implements Gatekeeper<InferOpsProjectSession> {
   #binding(): ProjectBinding {
     const { accountId, host } = this.ctx.props;
-    return new ProjectBinding(this.ctx, clientFor(this.ctx.exports, accountId, host));
+    return new ProjectBinding(this.ctx, clientFor(this.env, this.ctx.exports, accountId, host));
   }
 
   async describe(): Promise<ResourceDescription> {
@@ -446,7 +482,13 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
     case "INVALID_STATE":
       return `${what} was not applied: the target state is no longer valid for this issue.`;
     case "NOT_FOUND":
-      return `${what} was not applied: the issue is no longer in this project.`;
+      return `${what} was not applied: the issue or its target state is no longer in this project.`;
+    case "CONFLICT":
+      return `${what} was not applied: InferOps refused the move in the issue's current ` +
+        `condition. Read the board again.`;
+    case "UNAUTHORIZED":
+    case "FORBIDDEN":
+      return `${what} was not applied: InferOps no longer accepts this connection's access.`;
     default:
       return `${what} could not be applied. Try again later.`;
   }
@@ -459,7 +501,7 @@ const REVISION = /^\d+$/;
 
 // Errors the caller branches on carry the documented code first, as the data source's do.
 function fail(code: "NOT_FOUND" | "STALE_REVISION" | "WORKFLOW_MISMATCH" | "INVALID_STATE" |
-    "INVALID_REQUEST", detail: string): never {
+    "INVALID_REQUEST" | "CONFLICT", detail: string): never {
   throw new InferOpsError(code, detail);
 }
 
@@ -541,7 +583,8 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
     const snapshot = await binding.client.readProject(binding.projectKey);
     const stored = snapshot.issues.find(i => i.id === this.#issueId);
     if (!stored) fail("NOT_FOUND", "No such issue in this project.");
-    const issue = simulateIssue(stored, binding.pending());
+    const pending = binding.pending();
+    const issue = simulateIssue(stored, pending);
 
     const target = snapshot.states.find(s => s.id === toStateId);
     if (!target) fail("INVALID_STATE", `The target state is not part of project ${binding.projectKey}.`);
@@ -554,6 +597,12 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
         `${issue.identifier} is at revision ${issue.revision}, not ${expectedRevision}. Read it again.`);
     }
     if (issue.stateId === toStateId) return;
+    // The revision a move produces is not knowable in advance, so moves cannot be chained.
+    if (livePendingMove(stored, pending)) {
+      fail("CONFLICT",
+        `${issue.identifier} already has a move that has not taken effect yet. Wait for it, then ` +
+        `read the issue again.`);
+    }
 
     const from = snapshot.states.find(s => s.id === issue.stateId);
     const actionId = binding.stage({

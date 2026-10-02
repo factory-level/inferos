@@ -15,4 +15,4 @@ Everything else is the same as `packages/gatekeeper-*`:
 
 | Package | Purpose |
 | --- | --- |
-| `gatekeeper-inferops` | InferOps project boards and approved issue transitions, backed by mock data for now. |
+| `gatekeeper-inferops` | InferOps project boards and approved issue transitions. Demo data by default; a live InferOps through `INFEROPS_*` vars for local development only. |
