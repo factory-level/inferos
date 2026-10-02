@@ -70,8 +70,7 @@ export function classifyRpcError(err: unknown): RpcErrorClass {
   if (CONNECTION_MESSAGES.some(m => message.includes(m))) {
     return 'connection'
   }
-  // 'auth' is deliberately terminal — never quieted, never retried, and there is no missing
-  // re-auth handler: the session is invalid and only a fresh login cures it.
+  // Auth failures are terminal for this session; useAuth returns to a fresh login.
   if (getAuthErrorCode(err) !== undefined || AUTH_MESSAGES.some(m => message.includes(m))) {
     return 'auth'
   }

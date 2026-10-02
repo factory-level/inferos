@@ -31,6 +31,9 @@ import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
 import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
+import { startOpenAiCompanion } from './openai-companion.ts';
+import { installLocalSecrets } from './local-secrets.ts';
+import { parseEnv } from 'node:util';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SCRIPTS_DIR, "..");
@@ -66,6 +69,12 @@ function loadDevVars(): void {
   }
 }
 loadDevVars();
+// Keep shell/.dev.vars precedence while supporting local provider keys in the root .env.
+if (existsSync(join(ROOT, '.env'))) {
+  for (const [key, value] of Object.entries(parseEnv(readFileSync(join(ROOT, '.env'), 'utf8')))) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
 
 const useWorkersAi = process.argv.includes("--use-workers-ai-binding");
 
@@ -141,6 +150,8 @@ const devWatchers: ChildProcess[] = [];
 const deferredWatchers: (() => void)[] = [];
 let stoppingDevWatchers = false;
 let wranglerChild: ChildProcess | null = null;
+let cleanupOpenAiCompanion: (() => void) | undefined;
+let cleanupLocalApiKeys: (() => void) | undefined;
 
 // Resolve once something accepts a TCP connection on `port`, or once `timeoutMs` has elapsed.
 function waitForPort(port: number, timeoutMs: number): Promise<void> {
@@ -183,6 +194,8 @@ function stopDevWatchers(): void {
   stoppingDevWatchers = true;
   deferredWatchers.length = 0;
   for (const watcher of devWatchers) watcher.kill();
+  cleanupOpenAiCompanion?.();
+  cleanupLocalApiKeys?.();
 }
 
 process.on("exit", stopDevWatchers);
@@ -602,6 +615,23 @@ for (const gk of gatekeepers) {
   if (config.vars.PUBLIC_BASE_URL === undefined) {
     config.vars.PUBLIC_BASE_URL =
         serveFrontendAssets ? `http://${backendHost}` : "http://localhost:3000";
+  }
+
+  if (process.env.ENABLE_OPENAI_ASSISTANT_PLUGIN === 'true') {
+    const companion = await startOpenAiCompanion(ROOT, new URL(config.vars.PUBLIC_BASE_URL).origin);
+    cleanupOpenAiCompanion = companion.cleanup;
+    devWatchers.push(companion.child);
+    companion.child.on('exit', () => {
+      companion.cleanup();
+      if (!stoppingDevWatchers) console.error('ChatGPT companion stopped. Restart the local server to reconnect.');
+    });
+    config.vars.ENABLE_OPENAI_ASSISTANT_PLUGIN = 'true';
+    config.vars.OPENAI_ASSISTANT_PLUGIN_URL = companion.url;
+  }
+
+  if (process.env.ANTHROPIC_API_KEY) {
+    config.vars.DEV = true;
+    cleanupLocalApiKeys = installLocalSecrets(ROOT, { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY });
   }
 
   for (const gk of gatekeepers) {

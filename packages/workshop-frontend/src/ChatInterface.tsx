@@ -1704,9 +1704,9 @@ function ChatInterface({
       setSelectedModel(getStoredSelectedModel(availableModels));
     } else {
       // An existing thread takes its active agent's model, else the one that last spoke.
-      setSelectedModel(fallbackToStoredModelSelection(chatAgent?.id ?? null, availableModels));
+      setSelectedModel(fallbackToStoredModelSelection(chatAgent?.fallbackForModelId ?? chatAgent?.id ?? null, availableModels));
     }
-  }, [selectedChatId, availableModels, chatAgent?.id]);
+  }, [selectedChatId, availableModels, chatAgent?.id, chatAgent?.fallbackForModelId]);
 
   // Keep the ref in sync with selectedChatId state
   useEffect(() => {

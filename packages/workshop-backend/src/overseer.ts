@@ -3,7 +3,7 @@ import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -912,7 +912,7 @@ type ActiveAgentRecord = {
   // Hex durable object ID of the initiator's user DO, used to re-resolve the model config and for
   // billing.
   initiatorUserId: string;
-  // Model ID, used to re-resolve the model config (matches `chatMeta.activeAgent.id`).
+  // Requested model ID, used to re-resolve the config even when the last response used a fallback.
   modelId: string;
   // Who initiated this turn (a user, or a gadget for spawner/callback turns).
   initiator: AiChatAuthorInfo;
@@ -1117,6 +1117,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
       title: "Untitled Workspace",
+
+      // The workspace kind (see WorkspaceKind). Workspaces stored before kinds existed read the
+      // default.
+      kind: <WorkspaceKind>DEFAULT_WORKSPACE_KIND,
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -1952,7 +1956,8 @@ class OverseerImpl implements AgentHooks {
     }
 
     await this.#runAgentTurn(
-        record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat);
+        record.chatId, aiModel, record.initiator,
+        aiModel.config.billing === 'chatgpt-plan' || record.callbackInitiated, liveChat);
   }
 
   // The hand-off once a chat's turn is over and its running-agent state has been torn down: drop
@@ -7196,7 +7201,7 @@ class OverseerImpl implements AgentHooks {
     this.storage.activeAgents.put({
       chatId,
       initiatorUserId,
-      modelId: aiModel.profile.id,
+      modelId: aiModel.profile.fallbackForModelId ?? aiModel.profile.id,
       initiator,
       callbackInitiated,
     });
@@ -7261,7 +7266,7 @@ class OverseerImpl implements AgentHooks {
         // (This runs inside the try so the `finally` below still clears the active-agent state and
         // emits a stream "clear" — otherwise the UI would spin forever on a block.)
         let byokRouting: UserGatewayRouting | undefined;
-        if (this.ownerId) {
+        if (this.ownerId && aiModel.config.billing === undefined) {
           let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
           let usage = await checkUsageAndBalance(this.env, ownerStub);
           if (!usage.allowed) {
@@ -7289,6 +7294,7 @@ class OverseerImpl implements AgentHooks {
             this.env, aiModel.config, initiator, {
               sessionAffinity,
               userGateway: byokRouting,
+              background: callbackInitiated || initiator.type !== 'user',
               metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
             });
         turn.setModel(chosenModel.model);
@@ -7336,7 +7342,7 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
 
-      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage, apiError?.planError?.code);
     } finally {
       // If this turn billed the user's own Cloudflare account, refresh their cached balance now (in
       // the background) so the next turn's billing decision reflects the spend just incurred. Runs
@@ -10184,7 +10190,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // Continue existing chats with the most recent agent model used in that chat.
       for (let msg of this.impl.storage.chats.list({ prefix: `${keyString(externalChat.chatId)}.`, reverse: true })) {
         if (msg.author.type === "agent") {
-          modelId = msg.author.id;
+          modelId = msg.author.fallbackForModelId ?? msg.author.id;
           break;
         }
       }
@@ -10880,6 +10886,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let result: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       totalCost: this.impl.storage.totalCost.get(),
       containsRestrictedData: this.impl.storage.containsRestrictedData.get(),
       ownerInvitesOnly: this.impl.storage.ownerInvitesOnly.get(),
@@ -10905,6 +10912,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let metadata: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       totalCost: this.impl.storage.totalCost.get(),
       containsRestrictedData: this.impl.storage.containsRestrictedData.get(),
       ownerInvitesOnly: this.impl.storage.ownerInvitesOnly.get(),
@@ -10916,6 +10924,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let titleSubscriber = {
       update(value: string) {
         metadata.title = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+    let kindSubscriber = {
+      update(value: WorkspaceKind) {
+        metadata.kind = value;
         callback(metadata).catch(unsubscribe);
       }
     };
@@ -10940,6 +10954,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
+      this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
       this.impl.storage.containsRestrictedData.unsubscribe(restrictedDataSubscriber);
       this.impl.storage.ownerInvitesOnly.unsubscribe(ownerInvitesOnlySubscriber);
@@ -10947,6 +10962,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
+    this.impl.storage.kind.subscribe(kindSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
     this.impl.storage.containsRestrictedData.subscribe(restrictedDataSubscriber);
     this.impl.storage.ownerInvitesOnly.subscribe(ownerInvitesOnlySubscriber);
@@ -10969,6 +10985,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async setTitle(title: string): Promise<void> {
     this.impl.storage.title.put(title);
     await this.#owner.updateTitle(this.impl.ctx.id.toString(), title);
+  }
+
+  async setKind(kind: WorkspaceKind): Promise<void> {
+    this.impl.storage.kind.put(kind);
+    await this.#owner.updateKind(this.impl.ctx.id.toString(), kind);
   }
 
   async setPinned(pinned: boolean): Promise<void> {
@@ -11587,11 +11608,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
 
     // Recover the model this thread was using. getChatContext(null) does NOT resolve a model, so we
-    // find the id from the most recent agent-authored message (its author.id is the model id).
+    // find the original model choice from the most recent agent-authored message.
     let modelId: string | null = null;
     for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
       if (msg.author.type === "agent") {
-        modelId = msg.author.id;
+        modelId = msg.author.fallbackForModelId ?? msg.author.id;
         break;
       }
     }
@@ -12360,7 +12381,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
 // Restricted capability handed to "use"-role collaborators. It implements the full `Overseer`
 // interface but permits only the handful of methods needed to render and interact with the
-// gadgets' deployed UIs: getMetadata() (restricted to id/title/owner), a restricted
+// gadgets' deployed UIs: getMetadata() (restricted to id/title/kind/owner), a restricted
 // subscribeToMetadata(), subscribeToPresence(), subscribeToWorkpieces(), and getGadget()
 // (returning a restricted, mainline-only UseGadgetClientInterface). Presence includes active
 // viewers' names, profile IDs, and roles. Every other
@@ -12447,6 +12468,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
@@ -12464,6 +12486,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     let metadata: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
+      kind: this.impl.storage.kind.get(),
       owner,
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
@@ -12475,13 +12498,21 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
         callback(metadata).catch(unsubscribe);
       }
     };
+    let kindSubscriber = {
+      update(value: WorkspaceKind) {
+        metadata.kind = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
 
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
+      this.impl.storage.kind.unsubscribe(kindSubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
+    this.impl.storage.kind.subscribe(kindSubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -12519,6 +12550,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // --- Denied methods (build-only) ---
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
+  async setKind(_kind: WorkspaceKind): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }

@@ -1,5 +1,8 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail } from '@gadgets/workshop-shared/api';
+import { openAiCommand } from './openai-plugin.js';
+import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
+import { localApiModels } from './local-api-models.js';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, WorkspaceKind } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -102,6 +105,7 @@ const withholdSecret = (secret: string) => secret === "" ? "" : null;
 
 /** Withholds the non-empty secrets of `config`, for returning it to a client. */
 function redactModelConfig(config: AiModelConfig): RedactedAiModelConfig {
+  if (config.billing === 'chatgpt-plan') return config;
   let {apiToken, extraHeaders, ...rest} = config;
   return {
     ...rest,
@@ -118,6 +122,7 @@ function redactModelConfig(config: AiModelConfig): RedactedAiModelConfig {
  */
 function resolveWithheldSecrets(
     config: RedactedAiModelConfig, source?: AiModelConfig): AiModelConfig {
+  if (config.billing === 'chatgpt-plan') return config;
   let resolve = (secret: string | null, stored: string | undefined, what: string) => {
     if (secret !== null) return secret;
     if (!source) {
@@ -279,6 +284,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       },
       quickModel: <string | null>null,
       preferredModel: <string | null>null,
+      chatGptFallbackModel: <string | null>null,
       onboardingCompleted: false,
 
       // Set once the user's pre-existing workspaces have been asked to populate the outputs index
@@ -661,7 +667,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   #listModels(gwConfig: AiGatewayConfig | null): AiChatAuthorInfo[] {
-    let result: AiChatAuthorInfo[] = [];
+    let result: AiChatAuthorInfo[] = localApiModels(this.env).map(model => model.profile);
 
     // When AI Gateway mode is active, include the suggested models offered on enabled providers.
     if (gwConfig) {
@@ -680,13 +686,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async addModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig,
                  copySecretsFrom?: string): Promise<void> {
+    await this.#validatePlanModel(config);
     let source: AiModelConfig | undefined;
     if (copySecretsFrom !== undefined) {
       source = this.#getHandAddedModel(copySecretsFrom).config;
     }
     // A gateway model, hidden or not, would shadow the new model and leave it unreachable.
     if (this.storage.aiModels.get(profile.id) ||
-        getAiGatewayConfig(this.env)?.resolveModel(profile.id)) {
+        getAiGatewayConfig(this.env)?.resolveModel(profile.id) || localApiModels(this.env).some(model => model.profile.id === profile.id)) {
       throw new Error(`A model with ID "${profile.id}" already exists.`);
     }
     this.#putModel(profile, resolveWithheldSecrets(config, source));
@@ -698,8 +705,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async updateModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig): Promise<void> {
+    await this.#validatePlanModel(config);
     let stored = this.#getHandAddedModel(profile.id).config;
-    if (config.provider !== stored.provider || config.model !== stored.model) {
+    if (config.provider !== stored.provider || config.model !== stored.model ||
+        (config.billing ?? 'api-key') !== (stored.billing ?? 'api-key')) {
       throw new Error("A model's provider and model ID can't be changed.");
     }
     this.#putModel(profile, resolveWithheldSecrets(config, stored));
@@ -715,9 +724,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record;
   }
 
+  // Finish remote validation before reading model records, so a concurrent add/delete cannot
+  // interleave between the existence check and the synchronous storage write.
+  async #validatePlanModel(config: RedactedAiModelConfig): Promise<void> {
+    if (config.billing === 'chatgpt-plan') {
+      const models = await openAiCommand(this.env, this.storage.profile.get().id,
+          { operation: 'models', accountId: config.registrationId }, modelsSchema);
+      if (!models.some(model => model.slug === config.model)) {
+        throw new Error('Choose a model available to this ChatGPT account.');
+      }
+      if (config.apiToken !== undefined || config.apiUrl !== undefined || config.extraHeaders !== undefined || config.accountId !== undefined) {
+        throw new Error('ChatGPT plan models cannot contain API credentials or endpoint overrides.');
+      }
+    }
+  }
+
   #putModel(profile: AiChatAuthorInfo, config: AiModelConfig) {
     let gwConfig = getAiGatewayConfig(this.env);
-    if (gwConfig && !gwConfig.providers.has(config.provider)) {
+    if (config.billing !== 'chatgpt-plan' && gwConfig && !gwConfig.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
     }
     for (let limit of [config.contextWindow, config.outputLimit]) {
@@ -727,10 +751,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     profile.type = "agent";
+    delete profile.managed;
+    delete profile.fallbackForModelId;
+    if (config.billing === 'chatgpt-plan') profile.billing = 'chatgpt-plan';
+    else delete profile.billing;
     this.storage.aiModels.put({profile, config});
   }
 
   async deleteModel(id: string): Promise<void> {
+    if (localApiModels(this.env).some(model => model.profile.id === id)) {
+      throw new Error('This model is managed by the local API key configuration.');
+    }
     // In AI Gateway mode, don't allow deleting built-in suggested models.
     let gwConfig = getAiGatewayConfig(this.env);
     if (gwConfig) {
@@ -750,7 +781,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getQuickModel(): Promise<null | string> {
     let result = this.storage.quickModel.get();
-    if (result && this.storage.aiModels.get(result)) {
+    if (result && this.#resolveModel(result, getAiGatewayConfig(this.env))) {
       return result;
     } else {
       return null;
@@ -759,6 +790,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getPreferredModel(): Promise<string | null> {
     return this.storage.preferredModel.get();
+  }
+
+  async getChatGptFallback(): Promise<{ modelId: string | null; models: AiChatAuthorInfo[] }> {
+    const models = [...localApiModels(this.env), ...this.storage.aiModels.list()]
+      .filter(model => model.config.billing !== 'chatgpt-plan' &&
+        (model.config.apiToken || Object.keys(model.config.extraHeaders ?? {}).length > 0));
+    const selected = this.storage.chatGptFallbackModel.get();
+    return { modelId: models.some(model => model.profile.id === selected) ? selected : null,
+      models: models.map(model => model.profile) };
+  }
+
+  async setChatGptFallback(modelId: string | null): Promise<void> {
+    if (modelId !== null && !(await this.getChatGptFallback()).models.some(model => model.id === modelId)) {
+      throw new Error('Choose an existing API-key model.');
+    }
+    this.storage.chatGptFallbackModel.put(modelId);
   }
 
   async setPreferredModel(id: string | null): Promise<void> {
@@ -868,13 +915,31 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.#getChatContext(modelId, getAiGatewayConfig(this.env));
   }
 
-  #getChatContext(modelId: string | null, gwConfig: AiGatewayConfig | null): UserChatContext {
+  async #getChatContext(modelId: string | null, gwConfig: AiGatewayConfig | null): Promise<UserChatContext> {
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
     if (modelId) {
       result.aiModel = this.#resolveModel(modelId, gwConfig);
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
+      const config = result.aiModel.config;
+      const fallbackId = this.storage.chatGptFallbackModel.get();
+      if (config.billing === 'chatgpt-plan' && fallbackId) {
+        // Only an explicit disconnected state can change billing. Outages, quota and denied
+        // permissions keep the plan route and its recovery behavior.
+        const state = isOpenAiPluginEnabled(this.env)
+          ? await openAiCommand(this.env, result.profile.id, { operation: 'state' }, stateSchema) : null;
+        const account = state?.accounts.find(value => value.id === config.registrationId);
+        if (!account || account.status === 'signed-out') {
+          const fallback = localApiModels(this.env).find(model => model.profile.id === fallbackId)
+            ?? this.storage.aiModels.get(fallbackId);
+          if (!fallback || fallback.config.billing === 'chatgpt-plan') {
+            throw new Error('The selected API-key fallback is unavailable. Choose another model in Settings.');
+          }
+          result.aiModel = { profile: { ...fallback.profile, fallbackForModelId: modelId },
+            config: { ...fallback.config, billing: 'api-key' } };
+        }
+      }
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).
@@ -884,7 +949,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     } else {
       let quickModelId = this.storage.quickModel.get();
       if (quickModelId) {
-        let quickModel = this.storage.aiModels.get(quickModelId);
+        let quickModel = this.#resolveModel(quickModelId, gwConfig);
         if (quickModel) {
           result.quickModel = quickModel.config;
         }
@@ -913,7 +978,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * model with the same ID.
    */
   #resolveModel(id: string, gwConfig: AiGatewayConfig | null): UserAiModelRecord | undefined {
-    return gwConfig?.resolveModel(id) ?? this.storage.aiModels.get(id);
+    return gwConfig?.resolveModel(id) ?? localApiModels(this.env).find(model => model.profile.id === id)
+      ?? this.storage.aiModels.get(id);
   }
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
@@ -932,6 +998,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error("No such workspace belonging to user.");
     }
     record.title = title;
+    this.storage.gadgets.put(record);
+  }
+
+  async updateKind(gadgetId: string, kind: WorkspaceKind) {
+    let record = this.storage.gadgets.get(gadgetId);
+    if (!record) {
+      throw new Error("No such workspace belonging to user.");
+    }
+    record.kind = kind;
     this.storage.gadgets.put(record);
   }
 

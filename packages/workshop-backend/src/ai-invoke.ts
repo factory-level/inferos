@@ -1,5 +1,6 @@
 import type { Message, Usage } from "@earendil-works/pi-ai";
 import type { ModelHandle } from "./ai-models.js";
+import type { OpenAiPluginError } from '@gadgets/workshop-shared/openai-plugin';
 
 /**
  * An all-zeros pi Usage record, for synthesizing assistant messages that were never actually
@@ -22,7 +23,7 @@ export class AgentTurnError extends Error {
   /** HTTP status of the failing request, when the handle observed a response for it. */
   readonly statusCode?: number;
 
-  constructor(message: string, statusCode?: number) {
+  constructor(message: string, statusCode?: number, readonly planError?: OpenAiPluginError) {
     super(message);
     this.statusCode = statusCode;
   }
@@ -72,7 +73,8 @@ export async function completeText(handle: ModelHandle, args: {
     // Surface a cancellation as the abort reason, like a directly-aborted request would.
     args.signal?.throwIfAborted();
     const errorMessage = message.errorMessage ?? "The model request failed.";
-    throw new AgentTurnError(errorMessage, httpStatusFromError(errorMessage, handle.lastResponse));
+    throw new AgentTurnError(handle.planError?.message ?? errorMessage,
+      httpStatusFromError(errorMessage, handle.lastResponse), handle.planError);
   }
   return message.content
       .filter(block => block.type === "text")

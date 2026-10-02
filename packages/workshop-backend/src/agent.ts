@@ -4081,7 +4081,8 @@ async function runAgentPass(
     // Other failures become an AgentTurnError carrying the failing request's HTTP status (when
     // it can be determined) for the overseer's triage.
     throw new AgentTurnError(
-        turnFailure.message, httpStatusFromError(turnFailure.message, handle.lastResponse));
+        handle.planError?.message ?? turnFailure.message,
+        httpStatusFromError(turnFailure.message, handle.lastResponse), handle.planError);
   }
 
   return {type: reloadForCompaction ? "reloadForCompaction" : "finished"};
