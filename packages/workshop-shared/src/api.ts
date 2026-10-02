@@ -989,6 +989,8 @@ export const MAX_SITE_LOGO_DIMENSION = 512;
 export type AdminSettingsView = {
   /** Fallback theme for browsers without an explicit preference; absent on older deployments. */
   defaultTheme?: DefaultThemeMode;
+  /** Workshop listing density; omitted means comfortable. Gadget layouts are independent. */
+  displayDensity?: DisplayDensity;
   /** Whether new account signups are allowed. */
   signupsEnabled: boolean;
   /** Whether users may search the user directory to find collaborators. */
@@ -1057,6 +1059,9 @@ export type AdminFormat = {
 /** Deployment fallback used when a browser has no explicit theme preference. */
 export type DefaultThemeMode = "system" | "light" | "dark";
 
+/** Curated spacing for Workshop workspace and Explore listings. */
+export type DisplayDensity = "comfortable" | "compact";
+
 /** Initial soft settings for a deployment; this never configures authentication or resource grants. */
 export interface DeploymentProfile {
   /** Display name, at most MAX_SITE_NAME_LENGTH characters; empty keeps the default name. */
@@ -1065,6 +1070,8 @@ export interface DeploymentProfile {
   instanceInstructions: string;
   /** Initial fallback theme; omitted means system. Browser preferences take precedence. */
   defaultTheme?: DefaultThemeMode;
+  /** Workshop listing density; omitted means comfortable. Gadget layouts are independent. */
+  displayDensity?: DisplayDensity;
 }
 
 /**
@@ -1088,6 +1095,9 @@ export interface AdminApi {
 
   /** Set the fallback theme for browsers without a saved preference. Applies on their next connection. */
   setDefaultTheme(mode: DefaultThemeMode): Promise<void>;
+
+  /** Set Workshop listing spacing. Applies on the next client connection. */
+  setDisplayDensity(density: DisplayDensity): Promise<void>;
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
@@ -1220,6 +1230,8 @@ export type AuthVendorInfo = {
 export type ServerConfig = {
   /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
   defaultTheme?: DefaultThemeMode;
+  /** Workshop listing density; omitted means comfortable. Gadget layouts are independent. */
+  displayDensity?: DisplayDensity;
   /**
    * Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
    * configured (password-only).

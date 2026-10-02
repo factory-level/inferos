@@ -27,9 +27,9 @@ try {
   const admin = await authenticated.getAdminApi();
   if (!admin) throw new Error("This local account is not a deployment administrator");
   const result = await admin.initializeProfile({ siteName: config.styling.siteName,
-    instanceInstructions: instructions, defaultTheme: config.styling.theme });
+    instanceInstructions: instructions, defaultTheme: config.styling.theme, displayDensity: config.styling.density });
   console.log(JSON.stringify({ ok: true, operation: "profile", result, profile: config.profile,
-    pending: ["density defaults", "InferOps data and view adapters"] }));
+    pending: ["InferOps data and view adapters"] }));
 } catch {
   // RPC and provider errors can include user-supplied values; never echo the session or remote text.
   console.error("Profile initialization failed. Check the local server, administrator session and supported InferOS revision.");

@@ -13,7 +13,7 @@ import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { bundledBlueprintsManifestVersion, installBundledBlueprints } from './bundled-blueprints.js';
 import { BUNDLED_BLUEPRINTS } from './generated/bundled-blueprints.js';
-import type { DefaultThemeMode, DeploymentProfile } from '@gadgets/workshop-shared/api';
+import type { DefaultThemeMode, DeploymentProfile, DisplayDensity } from '@gadgets/workshop-shared/api';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -304,13 +304,13 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let result: Awaited<ReturnType<AdminApi['initializeProfile']>> = 'already-initialized';
     await this.#mutateAdminConfig(config => {
       if (config.profileInitialized) return config;
-      if (config.siteName !== '' || config.instanceInstructions !== '' || config.defaultTheme !== 'system') {
+      if (config.siteName !== '' || config.instanceInstructions !== '' || config.defaultTheme !== 'system' || config.displayDensity !== 'comfortable') {
         result = 'preserved';
         return { ...config, profileInitialized: true };
       }
       result = 'initialized';
       return { ...config, siteName: profile.siteName, instanceInstructions: profile.instanceInstructions,
-        defaultTheme: profile.defaultTheme ?? 'system', profileInitialized: true };
+        defaultTheme: profile.defaultTheme ?? 'system', displayDensity: profile.displayDensity ?? 'comfortable', profileInitialized: true };
     });
     return result;
   }
@@ -331,6 +331,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       userSearchEnabled: config.userSearchEnabled,
       siteName: config.siteName,
       defaultTheme: config.defaultTheme,
+      displayDensity: config.displayDensity,
       siteLogo: siteLogoImage(config.siteLogoConfigured),
       instanceInstructions: config.instanceInstructions,
       announcement: config.announcement,
@@ -594,6 +595,9 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   }
 
   async initializeProfile(profile: DeploymentProfile): ReturnType<AdminApi['initializeProfile']> {
+    if (profile.displayDensity !== undefined && !['comfortable', 'compact'].includes(profile.displayDensity)) {
+      throw new Error('Invalid display density.');
+    }
     if (profile.defaultTheme !== undefined && !['system', 'light', 'dark'].includes(profile.defaultTheme)) {
       throw new Error('Invalid default theme.');
     }
@@ -604,6 +608,11 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
       throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
     }
     return this.admin.initializeProfile(profile);
+  }
+
+  async setDisplayDensity(density: DisplayDensity): Promise<void> {
+    if (!['comfortable', 'compact'].includes(density)) throw new Error('Invalid display density.');
+    await this.admin.updateAdminConfig({ displayDensity: density });
   }
 
   async setDefaultTheme(mode: DefaultThemeMode): Promise<void> {

@@ -24,11 +24,14 @@ it("initializes once under concurrent requests and preserves subsequent administ
     await expect(admin.initializeProfile({ siteName: "Valid", instanceInstructions: "x".repeat(8001) })).rejects.toThrow(/Instructions too long/);
     // @ts-expect-error Exercise validation of an untyped RPC caller.
     await expect(admin.initializeProfile({ siteName: "Valid", instanceInstructions: "", defaultTheme: "sepia" })).rejects.toThrow();
-    const profile = { siteName: "Operations", instanceInstructions: "Use granted InferOps resources.", defaultTheme: "dark" as const };
+    // @ts-expect-error Exercise validation of an untyped RPC caller.
+    await expect(admin.initializeProfile({ siteName: "Valid", instanceInstructions: "", displayDensity: "tiny" })).rejects.toThrow();
+    const profile = { siteName: "Operations", instanceInstructions: "Use granted InferOps resources.", defaultTheme: "dark" as const, displayDensity: "compact" as const };
     const results = await Promise.all([admin.initializeProfile(profile), admin.initializeProfile(profile)]);
     expect(results.toSorted()).toEqual(["already-initialized", "initialized"]);
     expect(await admin.getSettings()).toMatchObject(profile);
-    expect((await api.getServerConfig()).defaultTheme).toBe('dark');
+    expect(await api.getServerConfig()).toMatchObject({ defaultTheme: 'dark', displayDensity: 'compact' });
+    await admin.setDisplayDensity('comfortable');
     await admin.setDefaultTheme('light');
     await admin.setSiteName("");
     await admin.setInstanceInstructions("");
@@ -39,7 +42,7 @@ it("initializes once under concurrent requests and preserves subsequent administ
     if (!anotherAdmin) throw new Error("Missing administrator capability after reconnect");
     expect(await anotherAdmin.initializeProfile(profile)).toBe("already-initialized");
     expect(await anotherAdmin.getSettings()).toMatchObject({ siteName: "", instanceInstructions: "" });
-    expect((await anotherPublic.getServerConfig()).defaultTheme).toBe('light');
+    expect(await anotherPublic.getServerConfig()).toMatchObject({ defaultTheme: 'light', displayDensity: 'comfortable' });
   } finally {
     await harness.server.close();
     network.uninstall();
@@ -47,7 +50,7 @@ it("initializes once under concurrent requests and preserves subsequent administ
   }
 });
 
-it.each(['fresh', 'branding', 'theme'] as const)("profile operator respects existing customization: %s", async existing => {
+it.each(['fresh', 'branding', 'theme', 'density'] as const)("profile operator respects existing customization: %s", async existing => {
   const customized = existing !== 'fresh';
   const network = new NetworkInterceptor();
   network.install();
@@ -61,10 +64,12 @@ it.each(['fresh', 'branding', 'theme'] as const)("profile operator respects exis
     using admin = await authenticated.getAdminApi();
     if (!admin) throw new Error("Missing administrator capability");
     if (existing === 'branding') await admin.setSiteName("Administrator choice");
+    if (existing === 'density') await admin.setDisplayDensity('compact');
     if (existing === 'theme') await admin.setDefaultTheme('light');
     const config = initialConsumerConfig("https://github.com/factory-level/inferos", "a".repeat(40));
     config.local.port = Number(harness.url.port);
     config.styling.theme = 'dark';
+    config.styling.density = 'compact';
     await writeFile(join(root, "inferos.config.json"), JSON.stringify(config));
     const { stdout, stderr } = await promisify(execFile)(process.execPath,
       [resolve(import.meta.dirname, "../../workshop-backend/scripts/initialize-consumer-profile.ts"), root],
@@ -75,7 +80,9 @@ it.each(['fresh', 'branding', 'theme'] as const)("profile operator respects exis
       ? { siteName: "Administrator choice", instanceInstructions: "", defaultTheme: 'system' }
       : existing === 'theme'
         ? { siteName: '', instanceInstructions: '', defaultTheme: 'light' }
-        : { siteName: config.styling.siteName, defaultTheme: 'dark', instanceInstructions: expect.stringContaining("InferOps as the transactional source of truth") });
+        : existing === 'density'
+          ? { siteName: '', instanceInstructions: '', defaultTheme: 'system', displayDensity: 'compact' }
+          : { siteName: config.styling.siteName, defaultTheme: 'dark', displayDensity: 'compact', instanceInstructions: expect.stringContaining("InferOps as the transactional source of truth") });
     await admin.setSiteName("");
     expect(await admin.initializeProfile({ siteName: "Profile", instanceInstructions: "" })).toBe("already-initialized");
   } finally {

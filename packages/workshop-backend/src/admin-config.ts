@@ -11,11 +11,13 @@
 import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { ADMIN_CONFIG_KEY, BlueprintKvEnv, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive.js";
-import type { DefaultThemeMode } from "@gadgets/workshop-shared/api";
+import type { DefaultThemeMode, DisplayDensity } from "@gadgets/workshop-shared/api";
 
 export type AdminConfig = {
   /** Fallback appearance for browsers without a saved theme preference. */
   defaultTheme: DefaultThemeMode;
+  /** Curated Workshop listing spacing. */
+  displayDensity: DisplayDensity;
   /** One-time profile initialization has been consumed, including when existing customizations won. */
   profileInitialized?: true;
   /**
@@ -92,6 +94,7 @@ export type FormatCuration = {
 
 export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   defaultTheme: "system",
+  displayDensity: "comfortable",
   signupsEnabled: true,
   userSearchEnabled: false,
   siteName: "",
@@ -317,6 +320,7 @@ export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
     : DEFAULT_ADMIN_CONFIG.signupsEnabled;
   return {
     ...(p.profileInitialized === true ? { profileInitialized: true as const } : {}),
+    displayDensity: p.displayDensity === "compact" ? "compact" : "comfortable",
     defaultTheme: p.defaultTheme === "light" || p.defaultTheme === "dark" ? p.defaultTheme : "system",
     signupsEnabled,
     userSearchEnabled: typeof p.userSearchEnabled === "boolean"
