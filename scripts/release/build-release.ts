@@ -358,7 +358,7 @@ async function main() {
   mkdirSync(join(args.out, "modules"), { recursive: true });
   mkdirSync(join(args.out, "assets"), { recursive: true });
 
-  const packages = readDeployablePackages(PACKAGES_DIR);
+  const packages = readDeployablePackages(ROOT);
 
   // 1. Every bundle, overlapping.
   const { bundles, assets } = await buildAll(packages, args.concurrency);

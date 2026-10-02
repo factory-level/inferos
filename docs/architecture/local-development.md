@@ -6,9 +6,11 @@ covers:
   - scripts/dev-server-config.ts
   - cloudflare.config.ts
   - scripts/worker-config.ts
+  - scripts/worker-dirs.ts
+  - custom-gatekeepers
   - packages/router
   - packages/integration-tests
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # Cloudflare-like local development
@@ -29,7 +31,7 @@ Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa
 
 ## Data and Control Flow
 
-The repository already has multi-worker Wrangler development and a Vite frontend. Discovery requires a wrangler.jsonc, so gatekeeper-kit is not a Worker. The dev runner scans this repository’s packages; arbitrary wrapper-owned gatekeeper directories are not yet a supported discovery contract. The integration harness exercises real RPC and Workers, but is not a consuming-repository bootstrap product. The working-tree run-local now assigns frontend assets to the public router, deriving ASSETS binding, SPA fallback and worker-first paths from the generated production router configuration. The backend no longer receives a second assets configuration. Normal Vite development still uses its separate port. The baseline commit predates this parity fix.
+The repository already has multi-worker Wrangler development and a Vite frontend. Discovery requires a wrangler.jsonc, so gatekeeper-kit is not a Worker. The dev runner scans this repository’s `packages/` and `custom-gatekeepers/` (the fork’s own gatekeepers), both listed once in `scripts/worker-dirs.ts`, which config generation, worker types, the release manifest and previews also use; a package name present in both is rejected. Arbitrary wrapper-owned gatekeeper directories outside this repository are still not a supported discovery contract. The integration harness exercises real RPC and Workers, but is not a consuming-repository bootstrap product. The working-tree run-local now assigns frontend assets to the public router, deriving ASSETS binding, SPA fallback and worker-first paths from the generated production router configuration. The backend no longer receives a second assets configuration. Normal Vite development still uses its separate port. The baseline commit predates this parity fix.
 
 ## Configuration
 

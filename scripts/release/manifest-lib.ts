@@ -16,10 +16,11 @@
 // The placeholder list is closed: the deploy-side renderer fails on any `$` token it doesn't
 // recognize, so this file and the renderer must evolve together (manifestVersion guards that).
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
 import { parse } from "jsonc-parser";
 import type { AssetManifestEntry, CollectedAssets, CollectedModule } from "./hash-lib.ts";
+import { workerPackageDirs } from "../worker-dirs.ts";
 
 /** Manifest version the deploy-side renderer must agree with (see header comment). */
 export const MANIFEST_VERSION = 1;
@@ -319,21 +320,22 @@ export const DEFAULT_CRED_INPUTS: DeployInput[] = [
 
 const GATEKEEPER_PREFIX = "gatekeeper-";
 
-/** Read every deployable package and its Wrangler configuration, sorted by package name. */
-export function readDeployablePackages(packagesDir: string): DeployablePackage[] {
-  return readdirSync(packagesDir)
-      .filter((name) => {
+/**
+ * Read every deployable package under the worker package roots of `root` (see `worker-dirs.ts`)
+ * and its Wrangler configuration, sorted by package name.
+ */
+export function readDeployablePackages(root: string): DeployablePackage[] {
+  return workerPackageDirs(root)
+      .filter((dir) => {
     try {
-      return statSync(join(packagesDir, name, "wrangler.jsonc")).isFile();
+      return statSync(join(dir, "wrangler.jsonc")).isFile();
     } catch {
       return false;
     }
   })
-      .toSorted()
-      .map((name) => {
-    const dir = join(packagesDir, name);
+      .map((dir) => {
     const config = parse(readFileSync(join(dir, "wrangler.jsonc"), "utf8")) as WranglerConfig;
-    return { name, dir, config };
+    return { name: basename(dir), dir, config };
   });
 }
 

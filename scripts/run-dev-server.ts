@@ -17,7 +17,7 @@ import {
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import { constants } from "node:os";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
@@ -29,6 +29,7 @@ import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
 import { parseConsumerConfig } from "./consumer/config.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
+import { workerPackageDirs } from "./worker-dirs.ts";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SCRIPTS_DIR, "..");
@@ -85,28 +86,24 @@ try {
 // ---------------------------------------------------------------------------
 // Discover gatekeeper packages.
 // ---------------------------------------------------------------------------
-function findGatekeepers(parentDir: string): Gatekeeper[] {
-  try {
-    return readdirSync(parentDir)
-        .filter(name => name.startsWith("gatekeeper-"))
-        .filter(name => {
-      try {
-        return statSync(join(parentDir, name, "wrangler.jsonc")).isFile();
-      } catch {
-        return false;
-      }
-    })
-        .map(name => ({ name, dir: join(parentDir, name) }));
-  } catch {
-    return [];
-  }
+function findGatekeepers(root: string): Gatekeeper[] {
+  return workerPackageDirs(root)
+      .map(dir => ({ name: basename(dir), dir }))
+      .filter(({ name }) => name.startsWith("gatekeeper-"))
+      .filter(({ dir }) => {
+    try {
+      return statSync(join(dir, "wrangler.jsonc")).isFile();
+    } catch {
+      return false;
+    }
+  });
 }
 
 // The committed wrangler.jsonc files are generated from cloudflare.config.ts; regenerate them so a
 // TypeScript edit reaches `pnpm dev-server` without a separate step.
 await generateWorkerConfigs({ check: false });
 
-const gatekeepers = findGatekeepers(PACKAGES_DIR);
+const gatekeepers = findGatekeepers(ROOT);
 
 const consumerOptions = process.argv.flatMap((arg, index) => arg === "--consumer-root" ? [process.argv[index + 1]] : []);
 if (consumerOptions.length > 1 || (consumerOptions.length && (!consumerOptions[0] || consumerOptions[0].startsWith("--")))) {

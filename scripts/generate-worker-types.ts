@@ -15,11 +15,12 @@
  * `--check` is non-mutating: writes a sibling temp file, compares, deletes it.
  */
 import { spawnSync } from "node:child_process";
-import { readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBinEntry } from "./bin-entry.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
+import { workerPackageDirs } from "./worker-dirs.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packagesDir = join(root, "packages");
@@ -37,11 +38,8 @@ const RESTORE_PATCH = `
 `;
 
 async function packageDirs(): Promise<string[]> {
-  const names = await readdir(packagesDir, { withFileTypes: true });
   const out: string[] = [];
-  for (const ent of names) {
-    if (!ent.isDirectory()) continue;
-    const dir = join(packagesDir, ent.name);
+  for (const dir of workerPackageDirs(root)) {
     try {
       await readFile(join(dir, "wrangler.jsonc"));
       out.push(dir);
