@@ -1,8 +1,8 @@
 /** Registered, renderer-owned project board. A target reference never grants resource access. */
-export interface CanvasWidget {
+export interface CanvasProjectBoardWidget {
   /** Stable instance ID, unique across this definition. */
   id: string;
-  /** The only registered v1 widget kind; arbitrary renderers are rejected. */
+  /** Registered InferOps board kind; arbitrary renderers are rejected. */
   kind: "inferops.project-board";
   /** Widget parameter schema version. */
   version: 1;
@@ -18,6 +18,35 @@ export interface CanvasWidget {
     showCompleted: boolean;
   };
 }
+
+/**
+ * A gadget in the workspace that owns the canvas, rendered in the existing sandboxed gadget host.
+ * The reference is workspace-local and resolved only through that workspace's already-authorized
+ * session; it grants nothing on its own and is meaningless in another workspace.
+ */
+export interface CanvasGadgetWidget {
+  /** Stable instance ID, unique across this definition. */
+  id: string;
+  /** Registered gadget kind; the gadget's own sandboxed UI bundle is the only renderer. */
+  kind: "inferos.gadget";
+  /** Widget parameter schema version. */
+  version: 1;
+  /** `gadget:<workpieceId>` within the owning workspace. */
+  targetRef: string;
+  /** Curated column span; the renderer clamps it to the section's column count. */
+  size: "normal" | "wide" | "full";
+  /**
+   * No parameters are defined for v1. The parser rejects any key; the type stays an empty object
+   * literal because RPC validation cannot express `never`-valued records.
+   */
+  params: {};
+}
+
+/** Registered widget instance; unknown kinds and versions are rejected. */
+export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget;
+
+/** Workspace-local gadget reference syntax accepted by `inferos.gadget` widgets. */
+export const CANVAS_GADGET_REF = /^gadget:(0|[1-9][0-9]{0,15})$/;
 
 /** Ordered group of widgets with a curated responsive column count. */
 export interface CanvasSection {
@@ -100,9 +129,16 @@ const position = (value: unknown, length: number): number => typeof value === "n
 
 function widget(value: unknown): CanvasWidget {
   const w = record(value, ["id", "kind", "version", "targetRef", "size", "params"], "widget");
-  if (w.kind !== "inferops.project-board" || w.version !== 1) return invalid("widget kind/version");
-  if (typeof w.targetRef !== "string" || w.targetRef.length > 512 || !/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
+  if (w.version !== 1) return invalid("widget kind/version");
   if (w.size !== "normal" && w.size !== "wide" && w.size !== "full") return invalid("widget size");
+  if (typeof w.targetRef !== "string" || w.targetRef.length > 512) return invalid("target reference");
+  if (w.kind === "inferos.gadget") {
+    if (!CANVAS_GADGET_REF.test(w.targetRef)) return invalid("target reference");
+    record(w.params, [], "widget parameters");
+    return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: {} };
+  }
+  if (w.kind !== "inferops.project-board") return invalid("widget kind/version");
+  if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
   const params = record(w.params, ["workflow", "showCompleted"], "widget parameters");
   if (params.workflow !== "software" && params.workflow !== "content") return invalid("workflow");
   if (typeof params.showCompleted !== "boolean") return invalid("completed filter");

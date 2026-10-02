@@ -20,6 +20,9 @@ test("starter validation rejects duplicated identities and unauthorized schema e
   assert.throws(() => readConsumerViews(root), /Invalid canvas/);
   save("b.json", { ...view, id: "other", revision: "00" });
   assert.throws(() => readConsumerViews(root), /revision/);
+  save("b.json", { ...view, id: "other", sections: [{ id: "s", title: "Gadgets", columns: 1, widgets: [
+    { id: "g", kind: "inferos.gadget", version: 1, targetRef: "gadget:7", size: "normal", params: {} }] }] });
+  assert.throws(() => readConsumerViews(root), /only contain InferOps project boards/);
 });
 
 test("starter validation refuses linked, executable and oversized source files", t => {

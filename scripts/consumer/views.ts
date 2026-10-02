@@ -19,6 +19,10 @@ export function readConsumerViews(root: string): CanvasDefinition[] {
     }
     const view = parseCanvasDefinition(JSON.parse(readFileSync(path, "utf8")));
     if (ids.has(view.id)) throw new Error("Starter views must have unique view IDs");
+    // Gadget references are workspace-local IDs, so a portable starter cannot meaningfully carry one.
+    if (view.sections.some(section => section.widgets.some(widget => widget.kind !== "inferops.project-board"))) {
+      throw new Error("Starter views may only contain InferOps project boards");
+    }
     ids.add(view.id);
     return view;
   });
