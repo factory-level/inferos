@@ -1,0 +1,72 @@
+import { execFileSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { initialConsumerConfig } from "./config.ts";
+import { checkConsumer } from "./runtime.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const json = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
+
+/** Create a new wrapper atomically; reruns validate its pin without rewriting customizations. */
+export function bootstrapConsumer(target: string, repository: string, revision: string) {
+  const config = initialConsumerConfig(repository, revision);
+  const destination = resolve(target);
+  if (existsSync(destination)) {
+    if (!existsSync(join(destination, ".inferos/bootstrap.json"))) throw new Error("Destination exists and is not a managed consumer; choose a new directory");
+    const existing = checkConsumer(destination);
+    if (existing.config.upstream.repository !== repository || existing.config.upstream.revision !== revision) {
+      throw new Error("Existing consumer has a different upstream pin; bootstrap does not perform upgrades");
+    }
+    return { created: false, destination, revision };
+  }
+  mkdirSync(dirname(destination), { recursive: true });
+  const staging = mkdtempSync(join(dirname(destination), `.${basename(destination)}-bootstrap-`));
+  const git = (...args: string[]) => execFileSync("git", ["-C", staging, ...args], { stdio: "pipe" });
+  try {
+    git("init", "--quiet");
+    // Local sources are allowed only when explicitly supplied as an absolute path, never via Git URL rewrites.
+    const transport = repository.includes("://") ? [] : ["-c", "protocol.file.allow=always"];
+    git(...transport, "submodule", "add", "--", repository, "inferos");
+    execFileSync("git", ["-C", join(staging, "inferos"), "checkout", "--detach", revision], { stdio: "pipe" });
+    git("add", "--", "inferos");
+    for (const directory of [".inferos", "fixtures", "gatekeepers", "blueprints", "profiles"]) mkdirSync(join(staging, directory));
+    const bundledBlueprints = join(staging, "inferos/packages/bundled-blueprints/blueprints");
+    if (!existsSync(bundledBlueprints)) throw new Error("Pinned revision does not include bundled blueprint sources");
+    cpSync(bundledBlueprints, join(staging, "blueprints"), { recursive: true });
+    for (const file of ["config.ts", "runtime.ts"]) writeFileSync(join(staging, ".inferos", file), readFileSync(join(here, file)));
+    const skillDirectory = join(staging, ".agents/skills/bootstrap-inferos");
+    mkdirSync(skillDirectory, { recursive: true });
+    writeFileSync(join(skillDirectory, "SKILL.md"), readFileSync(join(here, "../../.agents/skills/bootstrap-inferos/SKILL.md")));
+    writeFileSync(join(staging, "inferos.config.json"), json(config));
+    writeFileSync(join(staging, ".inferos/bootstrap.json"), json({ version: 1, repository, revision }));
+    const upstreamPackage = JSON.parse(readFileSync(join(staging, "inferos/package.json"), "utf8"));
+    writeFileSync(join(staging, "package.json"), json({
+      name: "inferos-consumer", private: true, type: "module", packageManager: upstreamPackage.packageManager,
+      engines: { node: ">=22.18.0" },
+      scripts: { "inferos:check": "node .inferos/runtime.ts check", "profile:init": "node .inferos/runtime.ts profile", "blueprints:check": "node .inferos/runtime.ts blueprints", doctor: "node .inferos/runtime.ts doctor", setup: "node .inferos/runtime.ts setup", dev: "node .inferos/runtime.ts dev" },
+    }));
+    writeFileSync(join(staging, ".gitignore"), "node_modules/\n.wrangler/\n.env*\n.dev.vars*\n.inferos/state/\n");
+    writeFileSync(join(staging, "fixtures/project-board.json"), readFileSync(join(here, "project-board.json")));
+    for (const directory of ["gatekeepers", "profiles"]) writeFileSync(join(staging, directory, ".gitkeep"), "");
+    writeFileSync(join(staging, "README.md"), `# InferOS consumer\n\nPinned InferOS with a synthetic project/board fixture and explicit feature/profile configuration.\n\nRun \`pnpm inferos:check\`, then \`pnpm setup\` and \`pnpm doctor\`. Doctor checks local prerequisites and reports pending adapters; a passing preflight is not runtime health verification. \`pnpm dev\` runs the native Workshop baseline on the configured port. Use Node 22.18+ and the packageManager version in package.json.\n\nThe fixture follows InferOps board wire fields; it is not a copied production database. Data, view, custom Worker and density adapters remain pending and check reports that status. On a supported pin, \`pnpm profile:init\` initializes site name, profile instructions and fallback theme using an INFEROS_ADMIN_SESSION environment variable from a signed-in local deployment administrator. It preserves existing customizations and never reapplies after initialization; use the admin UI for later name/instruction changes and the admin API for the fallback theme. Enabling an unavailable runtime feature fails startup rather than silently ignoring it.\n\nThe blueprints/ directory contains editable copies of the pinned standard formats. Run \`pnpm blueprints:check\` after edits, then restart development to install updates. The directory is the complete format set; it replaces upstream defaults. Restart after source edits to refresh installed templates; existing gadgets keep their own code. Bootstrap reruns preserve these files.\n\nKeep custom code in gatekeepers/, blueprints/ and profiles/. Never edit generated wrangler.jsonc. Local state is currently managed by the pinned native runner under inferos/.wrangler. Cloud topology and lifecycle parity remain tracked work.\n\nClone this wrapper with \`git clone --recurse-submodules\`. Review and commit the generated files, including the gitlink and .gitmodules, to publish your own fork. Secrets belong in uncommitted .dev.vars, not inferos.config.json.\n`);
+    checkConsumer(staging);
+    renameSync(staging, destination);
+    return { created: true, destination, revision };
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const [target, repository, revision, extra] = process.argv.slice(2);
+    if (!target || !repository || !revision || extra) throw new Error("Usage: node scripts/consumer/bootstrap.ts TARGET REPOSITORY COMMIT_SHA");
+    console.log(json(bootstrapConsumer(target, repository, revision)));
+  } catch (error) {
+    // Git errors may echo credential-bearing remotes from local Git configuration.
+    console.error(error instanceof Error && "status" in error ? "Git operation failed; check the source repository and commit pin" : error instanceof Error ? error.message : "Bootstrap failed");
+    process.exitCode = 1;
+  }
+}

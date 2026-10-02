@@ -50,9 +50,8 @@ export default {
 
     // Dev only: with no assets binding here, everything else goes to the backend.
     //
-    // In `run-local` mode the backend has a static `assets` binding configured (with
-    // `run_worker_first` for the API routes), so it serves the pre-built single-page app for these
-    // frontend requests. In normal dev mode the backend has no assets and frontend requests aren't
+    // In `run-local` mode this router has the same ASSETS binding and route precedence as
+    // production. In normal dev mode there are no assets and frontend requests aren't
     // expected here -- run the Vite dev server with `pnpm dev-client` and open localhost:3000
     // directly instead. (We don't try to forward to localhost:3000 becaues it doesn't work well:
     // Vite's HMR socket gets disconnected every time wrangler restarts workerd.)

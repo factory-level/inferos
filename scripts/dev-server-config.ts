@@ -1,3 +1,14 @@
+import { resolve } from "node:path";
+import type { WranglerConfig } from "./release/manifest-lib.ts";
+
+/** Keep run-local asset ownership and route precedence identical to the production router. */
+export function getDevRouterAssets(router: WranglerConfig, routerDirectory: string): NonNullable<WranglerConfig["assets"]> {
+  if (!router.assets?.directory || router.assets.binding !== "ASSETS") {
+    throw new Error("The production router must declare its ASSETS binding and asset directory");
+  }
+  return { ...router.assets, directory: resolve(routerDirectory, router.assets.directory) };
+}
+
 /**
  * The port a `VITE_BACKEND_HOST` names, as a string, or null when it names no port. Throws on a
  * value that is not a bare `host[:port]`.

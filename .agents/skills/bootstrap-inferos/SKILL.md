@@ -1,0 +1,22 @@
+---
+name: bootstrap-inferos
+description: Create or validate a consuming repository with a pinned InferOS submodule, explicit feature/profile configuration and native local development commands. Use for InferOS wrapper setup, not deployment or arbitrary existing-repository rewrites.
+---
+
+# Bootstrap InferOS
+
+In a source InferOS checkout, use `scripts/consumer/bootstrap.ts`; read `docs/wiki/consumer-bootstrap.md` for commands and `docs/design/consumer-configuration.md` for design decisions. In a generated wrapper (identified by `inferos.config.json`), use its `.inferos/runtime.ts` check/setup/doctor/blueprints/dev commands and README. A pinned older submodule may not contain the new bootstrap source or design documents; the copied wrapper helpers are the runnable entrypoints. Inspect `.inferos/config.ts` for the exact current schema.
+
+Obtain the destination, source repository and reviewed full Git commit SHA from the task or checkout. Bootstrap into a new directory; an existing managed wrapper can be validated without replacing its edits. Do not point bootstrap at an arbitrary populated repository or silently select a moving revision.
+
+Run the deterministic command with those three arguments, then run `pnpm inferos:check` inside the wrapper. Check both `ok` and `pending`: configuration validation does not prove operational readiness. `pnpm setup` installs the frozen dependency set. Run `pnpm doctor` before startup: it checks local prerequisites and returns nonzero for blocking errors. Its `ok` reports preflight success only; `runtimeReady` remains false while InferOps adapters are pending. An occupied port must be resolved by configuration, never by stopping an unrelated process. `pnpm dev` starts the current native Workshop baseline and reports missing consumer adapters. Keep the chosen package manager version.
+
+The wrapper owns configuration, profiles, gatekeepers and blueprints; the submodule stays pinned. Credentials belong in uncommitted local settings. Feature flags never grant authority. Durable views require composable views; do not silently enable dependent features or hide an unsupported-mode error.
+
+For an upgrade request, inspect the gitlink/config mismatch and preserve local changes. There is no automated upgrade command yet: report migration/config/helper compatibility work before changing pins. Never claim that profile/style, fixture data, durable views or custom Workers run just because their settings validate.
+
+After setup, report the created path, actual pin, validation evidence and remaining runtime gaps. Launch/deploy/provider authorization remains governed by the user's task; bootstrap alone does not authorize a production deployment.
+
+New wrappers include editable copies of the pinned standard sources in `blueprints/`. This is the complete format set used by `pnpm dev`, through the native `BUNDLED_BLUEPRINTS_DIR` mechanism; it is not an additive overlay. An empty legacy blueprint directory retains upstream defaults. Run `pnpm blueprints:check` after edits to compile and validate packaging, then restart development. Existing gadget instances retain their code; changing a template does not migrate them. Source/content changes trigger native template installation, while administrator curation remains authoritative. Bootstrap reruns preserve all copied files. These sandboxed Gadget blueprints do not enable custom Cloudflare Workers or implement the pending InferOps canvas.
+
+On pins containing the profile operator, `pnpm profile:init` initializes the site name, selected profile instructions and fallback theme after local administrator login. It requires `INFEROS_ADMIN_SESSION`, supplied privately by the operator, and only connects to the configured localhost port. Do not read or print a user's token without task authorization. Initialization preserves pre-existing branding/instructions and is consumed once on the server; use ordinary admin settings for later changes. An explicit browser theme preference wins over the deployment fallback. Density and other profile adapters remain pending. An older pin fails explicitly; do not patch the pin silently to bypass that check.
