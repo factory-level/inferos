@@ -46,7 +46,7 @@ The source run-local flow now derives ASSETS ownership, SPA fallback and worker-
 | Composable views | Configuration/design/issues exist; runtime feature missing |
 | Durable views | Configuration/design/issues exist; scoped storage/recovery feature missing |
 | Applied profile and styling | Local profile initialization and theme fallback verified through RPC/jsdom; density remains pending |
-| Wrapper-owned custom Cloudflare code | Design/issues exist; manifest discovery and wiring missing |
+| Wrapper-owned custom Cloudflare code | Explicit local Worker launch and enabled/disabled routes verified on a clean pin; cloud packaging remains pending |
 | Live InferOps gatekeeper | Contract and implementation issues remain open |
 | Agent authoring and activity | Native mechanisms researched; reusable authoring/canvas activity work remains |
 | Personal Cloudflare ChatGPT subscription | Eligibility and approved target topology unresolved |
@@ -83,3 +83,11 @@ Use `pnpm run doctor` explicitly: bare `pnpm doctor` selects pnpm’s built-in d
 ## Listing density implementation
 
 The profile operator now sends configured density to the existing administrator initialization capability. All five real Workers/RPC profile cases passed, including invalid input, compact initialization, later administrator changes observed after reconnect, and preservation of an already customized density. Backend/frontend/integration builds and focused lint passed. The frontend maps compact to desktop workspace-row and Explore card/list spacing using existing Tailwind utilities. This turn did not run a browser layout/keyboard audit; CSS source and successful compilation do not substitute for that visual evidence. Previously initialized deployments need an explicit administrator density update; rerunning initialization never overwrites them.
+
+## Clean-pin custom Worker activation
+
+A fresh wrapper at `/tmp/inferos-worker-verified` pinned `a69999e2b143c33ed59b838d36cd8ef29a5a7902` and enabled `customCloudflareCode` on port 18791. Frozen setup, canonical extension validation and consumer doctor passed with `modifiedUpstream: false`. Its ordinary `pnpm dev` command built and started the native multi-Worker environment. A real browser showed the Workshop login page; its screenshot was inspected and the browser error list was empty. The same origin returned 200 with `{"message":"Hello from the consumer Worker"}` at `/extensions/hello` and `/extensions/hello/nested`; an unlisted route returned 404.
+
+After stopping that runtime, changing only the feature flag to false and restarting through the same command, the Workshop still rendered and a browser fetch of `/extensions/hello` returned 404. The wrapper's Worker source remained intact. Both runtime handles terminated with signal exit 143 after deliberate cleanup, and the browser was closed. This proves enabled/disabled local behavior through actual Wrangler/workerd and the public router, not cloud deployment or authenticated custom endpoints.
+
+The initial clean-pin attempt exposed a scaffold import that traversed one directory too far. It was corrected before the successful proof, and bootstrap tests now import the generated canonical config and check preservation of Worker source through rerun/recursive clone. Eleven focused bootstrap/blueprint/extension tests, 13 workerd router tests, script type checking, router build and focused lint passed. The release manifest golden change was reviewed: it only reserves `/extensions` and `/extensions/*` for Worker-first routing; all 11 manifest tests then passed. No cloud deployment or provider connection was performed.

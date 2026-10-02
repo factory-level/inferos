@@ -12,7 +12,7 @@ Create a wrapper with pinned InferOS code and explicit InferOps/profile/feature 
 Run from this InferOS checkout with Node 22.18 or later:
 
 ```bash
-node scripts/consumer/bootstrap.ts /tmp/my-inferos https://github.com/factory-level/inferos 0e282e2144edbac404bcb83d52a5c814121be9e8
+node scripts/consumer/bootstrap.ts /tmp/my-inferos https://github.com/factory-level/inferos a69999e2b143c33ed59b838d36cd8ef29a5a7902
 cd /tmp/my-inferos
 pnpm inferos:check
 pnpm run setup
@@ -99,4 +99,4 @@ The native multi-Worker launcher binds each entry to the router as `CONSUMER_<ID
 
 Local service bindings may target other listed consumer Workers only. Remote resource bindings are rejected; configure local emulation/fixtures in canonical configs. Inputs/secrets stay in the Worker's ignored `.dev.vars`; the manifest contains no secret values. Dependencies and custom build commands are owned by the wrapper and must be installed explicitly. Entry points must exist before validation. Restart after manifest/config changes; ordinary Worker source changes use Wrangler's watcher.
 
-Consumer cloud release packaging, input validation and deployment wiring remain pending. The platform release reserves these routes but does not deploy custom Workers or enable them. The old example pin above predates this extension adapter; select a newer reviewed revision containing `scripts/consumer/extensions.ts` before enabling it.
+Consumer cloud release packaging, input validation and deployment wiring remain pending. The platform release reserves these routes but does not deploy custom Workers or enable them. The example pin above includes this adapter. Older pins without `scripts/consumer/extensions.ts` reject activation explicitly.
