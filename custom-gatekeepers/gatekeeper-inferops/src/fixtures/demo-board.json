@@ -1,0 +1,49 @@
+{
+  "$comment": "Seed data for the mock InferOps data source (mock-inferops.ts). Field shapes follow the InferOps BoardResponseSchema projection (scripts/consumer/project-board.schema.json) minus lease/run; UUIDs are synthetic.",
+  "projects": [
+    {
+      "project": { "id": "10000000-0000-4000-8000-000000000001", "identifier": "DEMO", "name": "Synthetic operations" },
+      "states": [
+        { "id": "20000000-0000-4000-8000-000000000004", "name": "Backlog", "group": "backlog", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000007", "name": "Ideas", "group": "backlog", "position": 1, "workflow": "content" },
+        { "id": "20000000-0000-4000-8000-000000000001", "name": "Ready", "group": "unstarted", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000002", "name": "Working", "group": "started", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000005", "name": "In Review", "group": "started", "position": 1, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000008", "name": "Drafting", "group": "started", "position": 2, "workflow": "content" },
+        { "id": "20000000-0000-4000-8000-000000000003", "name": "Done", "group": "completed", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000009", "name": "Published", "group": "completed", "position": 1, "workflow": "content" },
+        { "id": "20000000-0000-4000-8000-000000000006", "name": "Cancelled", "group": "cancelled", "position": 0, "workflow": "software" }
+      ],
+      "issues": [
+        { "id": "30000000-0000-4000-8000-000000000001", "identifier": "DEMO-1", "title": "Verify the local environment", "priority": "medium", "stateId": "20000000-0000-4000-8000-000000000001", "targetDate": null, "workflow": "software", "revision": "1", "assigneeId": null, "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000002", "identifier": "DEMO-2", "title": "Wire the board canvas to the gatekeeper", "priority": "high", "stateId": "20000000-0000-4000-8000-000000000002", "targetDate": "2026-10-09", "workflow": "software", "revision": "3", "assigneeId": "40000000-0000-4000-8000-000000000001", "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000003", "identifier": "DEMO-3", "title": "Approve transitions through the action queue", "priority": "urgent", "stateId": "20000000-0000-4000-8000-000000000005", "targetDate": "2026-10-06", "workflow": "software", "revision": "5", "assigneeId": "40000000-0000-4000-8000-000000000002", "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000004", "identifier": "DEMO-4", "title": "Rotate the staging database credentials", "priority": "high", "stateId": "20000000-0000-4000-8000-000000000001", "targetDate": "2026-10-03", "workflow": "software", "revision": "2", "assigneeId": "40000000-0000-4000-8000-000000000003", "blockedReason": "Waiting on the security team to issue a new vault path." },
+        { "id": "30000000-0000-4000-8000-000000000005", "identifier": "DEMO-5", "title": "Document the fixture refresh runbook", "priority": "low", "stateId": "20000000-0000-4000-8000-000000000004", "targetDate": null, "workflow": "software", "revision": "1", "assigneeId": null, "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000006", "identifier": "DEMO-6", "title": "Retire the legacy webhook relay", "priority": "none", "stateId": "20000000-0000-4000-8000-000000000006", "targetDate": null, "workflow": "software", "revision": "4", "assigneeId": null, "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000007", "identifier": "DEMO-7", "title": "Ship board read observations", "priority": "medium", "stateId": "20000000-0000-4000-8000-000000000003", "targetDate": "2026-09-28", "workflow": "software", "revision": "6", "assigneeId": "40000000-0000-4000-8000-000000000001", "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000008", "identifier": "DEMO-8", "title": "Fix flaky revision conflict test", "priority": "high", "stateId": "20000000-0000-4000-8000-000000000002", "targetDate": "2026-10-04", "workflow": "software", "revision": "2", "assigneeId": "40000000-0000-4000-8000-000000000002", "blockedReason": "Reproduces only on the shared CI runner." },
+        { "id": "30000000-0000-4000-8000-000000000009", "identifier": "DEMO-9", "title": "Launch post: running agents on a guarded canvas", "priority": "medium", "stateId": "20000000-0000-4000-8000-000000000008", "targetDate": "2026-10-15", "workflow": "content", "revision": "2", "assigneeId": "40000000-0000-4000-8000-000000000004", "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000010", "identifier": "DEMO-10", "title": "Customer story: operations team onboarding", "priority": "low", "stateId": "20000000-0000-4000-8000-000000000007", "targetDate": null, "workflow": "content", "revision": "1", "assigneeId": null, "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000011", "identifier": "DEMO-11", "title": "Release notes for the September milestone", "priority": "medium", "stateId": "20000000-0000-4000-8000-000000000009", "targetDate": "2026-09-30", "workflow": "content", "revision": "3", "assigneeId": "40000000-0000-4000-8000-000000000004", "blockedReason": null }
+      ]
+    },
+    {
+      "project": { "id": "10000000-0000-4000-8000-000000000002", "identifier": "ENG", "name": "Platform engineering" },
+      "states": [
+        { "id": "20000000-0000-4000-8000-000000000011", "name": "Backlog", "group": "backlog", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000012", "name": "Todo", "group": "unstarted", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000013", "name": "In Progress", "group": "started", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000014", "name": "Done", "group": "completed", "position": 0, "workflow": "software" },
+        { "id": "20000000-0000-4000-8000-000000000015", "name": "Cancelled", "group": "cancelled", "position": 0, "workflow": "software" }
+      ],
+      "issues": [
+        { "id": "30000000-0000-4000-8000-000000000021", "identifier": "ENG-41", "title": "Upgrade the Workers compatibility date", "priority": "medium", "stateId": "20000000-0000-4000-8000-000000000012", "targetDate": "2026-10-10", "workflow": "software", "revision": "1", "assigneeId": "40000000-0000-4000-8000-000000000003", "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000022", "identifier": "ENG-42", "title": "Add idempotency keys to the transition endpoint", "priority": "urgent", "stateId": "20000000-0000-4000-8000-000000000013", "targetDate": "2026-10-05", "workflow": "software", "revision": "4", "assigneeId": "40000000-0000-4000-8000-000000000001", "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000023", "identifier": "ENG-43", "title": "Paginate the full-board endpoint", "priority": "low", "stateId": "20000000-0000-4000-8000-000000000011", "targetDate": null, "workflow": "software", "revision": "1", "assigneeId": null, "blockedReason": null },
+        { "id": "30000000-0000-4000-8000-000000000024", "identifier": "ENG-44", "title": "Scope service tokens to one project", "priority": "high", "stateId": "20000000-0000-4000-8000-000000000012", "targetDate": "2026-10-12", "workflow": "software", "revision": "2", "assigneeId": null, "blockedReason": "Needs the auth contract agreed in inferos#21." },
+        { "id": "30000000-0000-4000-8000-000000000025", "identifier": "ENG-40", "title": "Enable row-level security on board views", "priority": "high", "stateId": "20000000-0000-4000-8000-000000000014", "targetDate": "2026-09-25", "workflow": "software", "revision": "7", "assigneeId": "40000000-0000-4000-8000-000000000002", "blockedReason": null }
+      ]
+    }
+  ]
+}

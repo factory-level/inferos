@@ -7,6 +7,8 @@ dist/
 packages/gatekeeper-*/src/generated/*-configurator-ui.txt
 packages/gatekeeper-*/src/generated/*-configurator-ui.js*
 packages/gatekeeper-*/src/generated/app.txt
+# Fork-owned gatekeepers (custom-gatekeepers/) generate the same build outputs.
+custom-gatekeepers/gatekeeper-*/src/generated/
 # Bundled blueprints (regenerated at build time from BUNDLED_BLUEPRINTS_DIR).
 packages/workshop-backend/src/generated/bundled-blueprints.ts
 packages/workshop-backend/src/generated/browser-export-runtime.txt
