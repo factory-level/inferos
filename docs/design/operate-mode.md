@@ -70,9 +70,25 @@ The transition function validates each event against the current definitions and
 
 The operate agent changes the page through a page-event tool that sends the same events. These events only change presentation: they never grant access or perform domain writes. The agent receives the current page state as context, so it knows what the user is looking at.
 
-### Single session
+### Sessions
 
-Each person has one operate session per operate space. An operate space is the unit a team works in (for example a clinic, a ward or an ops team). The session is the continuous operate chat plus that person's page state. Opening a shared view, or a subject someone else has open, adds it to your session; it does not join theirs. Presence shows who else is on the same subject, but their page state is never applied to yours. Handing work over (a shift change, an escalation) is an explicit action that shares a subject and a note, not a shared session.
+The operate session is the center of Operate. Everything else (views, screens, subjects, published apps) is something you open *in* your session.
+
+- **One per person.** Each person has exactly one operate session. It is created the first time they enter Operate and never forks. Every tab and device that person opens is a window onto the same session, kept live: a page change in one appears in the others.
+- **What it holds:**
+  - **the conversation:** one continuous operate chat, never split per screen or per view.
+  - **the page state:** the state machine's current value.
+  - **the event log:** every page event in order, each with a sequence number, from the person or the agent. The page state is the result of replaying it, so a session is deterministic and can be audited.
+  - **the working set:** references to the views, screens, subjects and apps opened in it, from any workspace the person can open. It holds references only, never copies of their data.
+- **Shared screens, separate sessions.** Opening a screen or view someone shared with you adds a reference to *your* session. Its definition stays shared, so their edits to it show up for you, but your session, conversation and page state stay yours. Presence shows who else has the same thing open. Handing work over is an explicit event that shares a subject and a note into another person's session.
+- **Authority stays with the viewer.** The session grants nothing. Each reference is rendered through the person's own access, so a reference they can no longer open shows as unavailable instead of failing the whole page.
+- **The agent works inside the session.** Each operate-chat turn receives the current page state, and the agent changes the page only by appending events through the same validated reducer. Events change presentation only; domain writes still go through gatekeepers and approvals.
+- **Links open things in your session.** The URL mirrors the session's current page so it can be shared or bookmarked. Opening one applies an `open…` event to the opener's own session; it never opens someone else's.
+
+**Where it lives (kernel).** Each person's session is backed by a dedicated, owner-only workspace (an Overseer) that never appears in the workspace list. That reuses chat, storage and live subscriptions. `AuthenticatedApi.getOperateSession()` mints an `OperateSession` capability over it, with:
+- `subscribe()`: the page state and sequence number, then each event as it lands
+- `dispatch(event, expectedSeq)`: append an event, rejected if `expectedSeq` is stale, so concurrent tabs never interleave silently
+- access to the session's operate chat
 
 ### Subjects
 
@@ -89,7 +105,7 @@ A view may declare a subject type (for example `patient`). Opening it requires a
 
 Proposed answers, to confirm:
 
-- **Session scope:** one session per person per operate space, where a space is the team's unit of work. A person in several spaces has one session in each.
+- **Session scope:** decided: one session per person, shared live across their tabs and devices (see Sessions).
 - **First layouts:** a primary region with a secondary one (a chart beside a side panel), and tabs. A grid of screens later.
 - **Apps in views:** render through the existing sandboxed gadget host, sized to the region. A dedicated app region would weaken isolation, which matters more with regulated data.
 - **Publishing:** require the kind to be set explicitly before publishing. Publishing creates a new pinned version, and upgrading what a space runs is a separate, explicit step, so changes to live operations are controlled.
