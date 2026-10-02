@@ -81,6 +81,14 @@ export function checkConsumer(root: string) {
   return { config, provenance, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
 }
 
+/** Load the pinned fixture validator without copying its canonical schema into wrapper helpers. */
+export async function validateConsumerFixture(root: string, upstream: string) {
+  const script = join(upstream, "scripts/consumer/fixtures.ts");
+  if (!existsSync(script)) throw new Error("Pinned revision lacks fixture validation; select a reviewed supporting pin");
+  const { checkConsumerFixture } = await import(pathToFileURL(script).href);
+  return checkConsumerFixture(root);
+}
+
 /** Read-only preflight results; passing checks do not prove application or cloud health. */
 export interface ConsumerDiagnostic {
   /** Stable check name for coding agents and terminal output. */
@@ -144,6 +152,12 @@ export async function diagnoseConsumer(root: string) {
     await assertLocalPortAvailable(config.local.port);
     add("port", "pass", `Port ${config.local.port} is available now; this check does not reserve it`);
   } catch (error) { add("port", "error", (error as Error).message); }
+  if (config.inferops.mode === "fixture") {
+    try {
+      await validateConsumerFixture(root, upstream);
+      add("fixture", "pass", "Synthetic board matches the pinned schema and configured project; data loading remains pending");
+    } catch { add("fixture", "error", "Run pnpm fixtures:check after setup; check the fixture schema, project reference and supporting pin"); }
+  }
   const unsupported: string[] = unavailableFeatures(config, upstream);
   if (config.features.customCloudflareCode) {
     const extensionScript = join(upstream, "scripts/consumer/extensions.ts");
@@ -164,7 +178,7 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "views", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|views|profile|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|profile|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -172,6 +186,11 @@ async function main() {
     return;
   }
   const { config, provenance, upstream, packageManager, pending, modifiedUpstream } = checkConsumer(root);
+  if (command === "fixtures") {
+    const result = await validateConsumerFixture(root, upstream);
+    console.log(JSON.stringify({ ok: true, operation: "fixtures", ...result, runtimeReady: false }));
+    return;
+  }
   if (command === "views") {
     const script = join(upstream, "scripts/consumer/views.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support starter view validation");
@@ -213,6 +232,7 @@ async function main() {
   if (config.features.customCloudflareCode && !existsSync(join(upstream, "scripts/consumer/extensions.ts"))) {
     throw new Error("Pinned revision does not support custom Workers");
   }
+  await validateConsumerFixture(root, upstream);
   await assertLocalPortAvailable(config.local.port);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
   console.error("Starting the native Workshop baseline. InferOps board data and agent canvas tools are pending; profile:init is a separate administrator operation.");

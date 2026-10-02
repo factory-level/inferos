@@ -18,6 +18,7 @@ pnpm inferos:check
 pnpm run setup
 pnpm run doctor
 pnpm blueprints:check
+pnpm fixtures:check
 pnpm dev
 ```
 
@@ -115,3 +116,11 @@ New wrappers select `inferops-operations` and write an explicit snapshot: compos
 On supporting pins, `features` and `styling` must be objects but their individual fields may be omitted. Resolution is base defaults → profile → explicit settings. `personal` inherits disabled features, My Workspace branding, comfortable density and system theme. `inferops-operations` supplies the defaults above. `pnpm inferos:check` reports the effective values and a `provenance` map (`default`, `profile`, `override`). An explicit false wins. For a temporary operations canvas, set `features.durableViews` to false; to disable the canvas entirely, set both view flags false. Disabling only composition while inheriting durable views is an error.
 
 Generated settings are deliberately explicit: changing only the profile name does not rewrite them. Remove chosen nested fields to inherit a profile after verifying the pinned parser supports partial objects. Old pins may require every field; fully explicit settings remain the portable form. Profile resolution controls startup and initial customization; it never reapplies over existing administrator settings or authorizes a resource.
+
+## Synthetic InferOps data validation
+
+`pnpm fixtures:check` validates `fixtures/project-board.json` using JSON Schema generated from InferOps `BoardResponseSchema` at a recorded Git revision. The validator additionally checks unique project/state/issue IDs, membership of the selected project, target-reference agreement and each issue’s state/workflow against its column. Revisions remain strings; live lease/run fields follow the canonical schema. Unknown fields fail instead of being silently discarded. The file must be regular JSON within the wrapper fixture directory, at most 1 MiB, with at most 256 projects/columns and 5000 total issues.
+
+Doctor reports fixture errors; dev rejects invalid fixtures before starting Workers. Run setup before validation so the pinned Zod dependency is available. A changed target reference requires deliberately updating the selected fixture project identifier. Remote mode does not read local fixture files and remains unsupported for startup. Reports contain counts and schema provenance, never card contents. Passing validation does not install records, authorize a resource or load the board into Canvas.
+
+Maintainers regenerate the committed schema with `node scripts/consumer/generate-board-schema.ts /absolute/path/to/clean/inferops FULL_SHA`, or append `--check` for a read-only drift check. This requires Bun and the InferOps checkout’s locked dependencies, but normal consumer validation uses only the committed schema and InferOS dependencies. Generation requires a clean tracked source tree at the supplied revision; review schema changes and fixture compatibility together.
