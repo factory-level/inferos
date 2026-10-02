@@ -11,25 +11,37 @@ import { checkConsumerSkills, type CollectedSkillPack } from "../../../scripts/c
 // [--dry-run] [--prune]. Public collections are visible to every user, which is why this needs an
 // administrator session; the Context Library itself enforces that on every write.
 
+// Local problems (arguments, configuration, invalid skills) describe wrapper files only, so their
+// messages are safe to print; this keeps them free of a Node stack trace.
+function fail(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
+
 const [rootArgument = ".", ...rest] = process.argv.slice(2);
 const root = resolve(rootArgument);
 const dryRun = rest.includes("--dry-run");
 const prune = rest.includes("--prune");
 const unknownFlags = rest.filter(arg => arg.startsWith("--") && arg !== "--dry-run" && arg !== "--prune");
-if (unknownFlags.length) throw new Error(`Unknown option ${unknownFlags[0]}; use --dry-run or --prune`);
-const config = parseConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
-
-// Validate everything locally first, so a bad SKILL.md fails with its own message and nothing is
-// half-uploaded. These messages describe wrapper files only, never server responses.
-const checked = checkConsumerSkills(root);
+if (unknownFlags.length) fail(`Unknown option ${unknownFlags[0]}; use --dry-run or --prune`);
+let config: ReturnType<typeof parseConsumerConfig>;
+let checked: ReturnType<typeof checkConsumerSkills>;
+try {
+  config = parseConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
+  // Validate everything locally first, so a bad SKILL.md fails with its own message and nothing is
+  // half-uploaded.
+  checked = checkConsumerSkills(root);
+} catch (error) {
+  fail(error instanceof SyntaxError ? "Invalid JSON in the wrapper configuration" : (error as Error).message);
+}
 const requested = rest.filter(arg => !arg.startsWith("--"));
 const unknownPacks = requested.filter(id => !checked.packs.some(pack => pack.id === id));
-if (unknownPacks.length) throw new Error(`Unknown skill pack ${unknownPacks[0]}; choose from ${checked.packs.map(pack => pack.id).join(", ")}`);
+if (unknownPacks.length) fail(`Unknown skill pack ${unknownPacks[0]}; choose from ${checked.packs.map(pack => pack.id).join(", ")}`);
 const packs = requested.length ? checked.packs.filter(pack => requested.includes(pack.id)) : checked.packs;
 for (const warning of checked.warnings) console.error(`warning: ${warning}`);
 
 const token = process.env.INFEROS_ADMIN_SESSION;
-if (!token) throw new Error("Set INFEROS_ADMIN_SESSION to a local Workshop administrator session token");
+if (!token) fail("Set INFEROS_ADMIN_SESSION to a local Workshop administrator session token");
 
 async function eachConcurrently<T>(items: T[], limit: number, run: (item: T) => Promise<void>) {
   let next = 0;
@@ -80,18 +92,34 @@ const timeout = setTimeout(() => socket.close(), 120_000);
 let context: RpcStub<ContextApi> | undefined;
 try {
   const authenticated = await api.authenticate(token);
-  const frame = await authenticated.getGatekeeperApp("context");
-  if (!frame) throw new Error("context-unavailable");
-  // The frame's `ui` is typed as a generic target; for the Context Library it is a ContextApi.
-  context = frame.ui as unknown as RpcStub<ContextApi>;
-  if (!(await context.getViewerInfo()).isAdmin) throw new Error("not-admin");
-  const results = [];
-  for (const pack of packs) results.push(await syncPack(context, pack));
-  console.log(JSON.stringify({ ok: true, operation: "skills:upload", dryRun, results, warnings: checked.warnings }, null, 2));
+  let frame = await authenticated.getGatekeeperApp("context");
+  // The Context Library is opt-in by default ("optional"), so a fresh deployment's administrator
+  // may not have its account yet. Opting in is what the Connectors page would do; a dry run only
+  // reports it.
+  let provisionContextAccount = false;
+  if (!frame && (await authenticated.listAddableGatekeepers()).some(vendor => vendor.id === "context")) {
+    provisionContextAccount = true;
+    if (!dryRun) {
+      await authenticated.provisionAmbientAccount("context");
+      frame = await authenticated.getGatekeeperApp("context");
+    }
+  }
+  let results;
+  if (provisionContextAccount && dryRun) {
+    results = packs.map(pack => ({ pack: pack.id, collection: "new", created: pack.files.map(file => file.path), updated: [], unchanged: 0 }));
+  } else {
+    if (!frame) throw new Error("context-unavailable");
+    // The frame's `ui` is typed as a generic target; for the Context Library it is a ContextApi.
+    context = frame.ui as unknown as RpcStub<ContextApi>;
+    if (!(await context.getViewerInfo()).isAdmin) throw new Error("not-admin");
+    results = [];
+    for (const pack of packs) results.push(await syncPack(context, pack));
+  }
+  console.log(JSON.stringify({ ok: true, operation: "skills:upload", dryRun, provisionContextAccount, results, warnings: checked.warnings }, null, 2));
 } catch (error) {
   // RPC and provider errors can include user-supplied values; never echo the session or remote text.
   const reason = error instanceof Error && error.message === "context-unavailable"
-    ? "The Context Library gatekeeper is not available on this deployment."
+    ? "The Context Library is not available to this account; check the deployment's Context Library mode in the admin Gatekeepers panel."
     : error instanceof Error && error.message === "not-admin"
     ? "This local account is not a deployment administrator; public skill collections need one."
     : error instanceof Error && error.message.startsWith("The Context Library did not index")

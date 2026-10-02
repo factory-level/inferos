@@ -100,6 +100,7 @@ pnpm skills:upload                  # or: pnpm skills:upload operate build
 ```
 
 How `skills:upload` behaves:
+- If the administrator has not added the Context Library yet, it opts them in (a dry run only reports `provisionContextAccount`).
 - It creates a missing collection, writes only new or changed files, and checks that the Context Library indexed every `SKILL.md`.
 - Files that exist only in the collection, such as edits made in the UI, are listed as `stale`. They are deleted only with `--prune`.
 - The `skill-upload` agent skill walks a coding agent through this, including drafting a new skill with skill-creator.

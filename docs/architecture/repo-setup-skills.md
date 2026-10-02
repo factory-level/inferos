@@ -40,7 +40,7 @@ Bootstrap copies `scripts/consumer/skill-packs` to the wrapper's `skills/`, writ
 - `skills:install` runs `pnpm dlx skills@1.7.0 add … --yes` in the wrapper.
 - `skills:upload` runs the pinned uploader.
 
-The uploader opens the same capnweb session as `profile:init` (`authenticate` → `getGatekeeperApp("context").ui`) and requires `getViewerInfo().isAdmin`. Per pack it then:
+The uploader opens the same capnweb session as `profile:init` (`authenticate` → `getGatekeeperApp("context").ui`) and requires `getViewerInfo().isAdmin`. The Context Library is opt-in by default, so if the administrator has no Context account yet, it first calls `provisionAmbientAccount("context")`, the same as adding it on the Connectors page. A dry run only reports `provisionContextAccount`. Per pack it then:
 1. Matches a public collection by title, or creates one.
 2. Compares each file's body and content type with `getContextDocument`.
 3. Writes new and changed files, six at a time.

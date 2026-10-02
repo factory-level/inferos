@@ -89,6 +89,7 @@ Each pack starts with editable starter skills, which the wrapper owns from then 
 
 `pnpm skills:check` validates packs offline with the Context Library's own frontmatter rules (an invalid `SKILL.md` would otherwise be skipped silently), along with path and size limits and unique names across packs. `pnpm skills:upload [pack...] [--dry-run] [--prune]` publishes packs to the local Workshop:
 - It uses the same administrator session and localhost-only rule as `profile:init`.
+- It opts the administrator into the Context Library if needed.
 - It finds each collection by title and creates it if missing.
 - It writes only changed files.
 - It reports remote-only files, and deletes them only with `--prune`.

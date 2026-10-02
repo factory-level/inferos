@@ -31,7 +31,7 @@ If the request does not make the pack obvious, ask. Add a new pack only on reque
    - Write runtime skills for the sandboxed Workshop agent. It acts through granted gatekeeper bindings and cannot run the wrapper's shell or Python scripts. Use `$ARGUMENT` where the slash-command text should go.
 3. **Re-run `pnpm skills:check`.**
 4. **Preview.** With `pnpm dev` running and the operator having provided `INFEROS_ADMIN_SESSION` privately, run `pnpm skills:upload <pack> --dry-run`, then show the user the `created` / `updated` / `stale` lists. Do not read, print or guess the session token.
-5. **Publish.** Run `pnpm skills:upload <pack>`. Add `--prune` only when the user agrees that the `stale` files, which may be edits made in the Context Library UI, should be deleted.
+5. **Publish.** Run `pnpm skills:upload <pack>`. On a fresh deployment this also adds the Context Library for the administrator, and the output says `provisionContextAccount: true`. Add `--prune` only when the user agrees that the `stale` files, which may be edits made in the Context Library UI, should be deleted.
 6. **Report.** Give the collection, the skills published and anything skipped. The user can confirm by typing `/` in Workshop chat. Uploads target the local Workshop only, since deployed instances have no upload path yet.
 
 Never claim a skill works against real InferOps data: board data is still mocked, and an uploaded skill describes behavior, it does not grant access. Commit wrapper skill changes like any other source file.
