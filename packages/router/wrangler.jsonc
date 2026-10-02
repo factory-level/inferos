@@ -25,7 +25,9 @@
       "/api/*",
       "/blueprint-screenshot",
       "/blueprint-screenshot/*",
-      "/gatekeeper/*"
+      "/gatekeeper/*",
+      "/extensions",
+      "/extensions/*"
     ],
     "directory": "../workshop-frontend/dist"
   }

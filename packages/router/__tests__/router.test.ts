@@ -66,6 +66,22 @@ describe('router fetch', () => {
     expect(await route(env, '/gatekeeper/googles')).toBe('assets');
   });
 
+  it('requires both the deployment switch and an explicit extension binding', async () => {
+    const env = makeEnv({ ASSETS: stubFetcher('assets'), CONSUMER_HELLO_WORLD: stubFetcher('extension') });
+    for (const flag of [undefined, 'false', 'TRUE']) {
+      const response = await router.fetch!(new Request('https://example.com/extensions/hello-world'), { ...env, CUSTOM_CLOUDFLARE_CODE: flag }, {} as ExecutionContext);
+      expect(response.status).toBe(404);
+    }
+    env.CUSTOM_CLOUDFLARE_CODE = 'true';
+    expect(await route(env, '/extensions/hello-world')).toBe('extension');
+    expect(await route(env, '/extensions/hello-world/nested')).toBe('extension');
+    for (const path of ['/extensions', '/extensions/missing', '/extensions/hello_world', '/extensions/HELLO-WORLD', '/extensions/hello-worlds']) {
+      expect((await router.fetch!(new Request(`https://example.com${path}`), env, {} as ExecutionContext)).status).toBe(404);
+    }
+    expect(await route(env, '/api')).toBe('backend');
+    expect(await route(env, '/extensions-lookalike')).toBe('assets');
+  });
+
   it('serves everything else from ASSETS when the binding is present', async () => {
     const env = makeEnv({ ASSETS: stubFetcher('assets') });
     expect(await route(env, '/')).toBe('assets');
@@ -117,6 +133,8 @@ describe('wrangler.jsonc contract', () => {
     expect(first).toContain('/blueprint-screenshot');
     expect(first).toContain('/blueprint-screenshot/*');
     expect(first).toContain('/gatekeeper/*');
+    expect(first).toContain('/extensions');
+    expect(first).toContain('/extensions/*');
   });
 
   it('serves the frontend as a single-page application', () => {
