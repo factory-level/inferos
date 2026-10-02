@@ -108,9 +108,6 @@ interface PreviewContext {
 /** The repository root. */
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** The directory holding every deployable package. */
-export const PACKAGES_DIR = join(ROOT, "packages");
-
 /** The generated per-package config file name (gitignored — it is build output). */
 export const STAGING_CONFIG_NAME = "wrangler.staging.jsonc";
 
@@ -734,7 +731,7 @@ export function generatePreviewConfigs(options: {
 } {
   const previewName = options.previewName ?? resolvePreviewName();
   const { accountId, workersDevHost } = resolveTarget();
-  const packages = readDeployablePackages(PACKAGES_DIR);
+  const packages = readDeployablePackages(ROOT);
   const configs = buildPreviewConfigs({
     previewName,
     packages,

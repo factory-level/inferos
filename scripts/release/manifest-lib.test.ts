@@ -26,7 +26,7 @@ const PLACEHOLDER_RE =
     /^\$(ACCOUNT_ID|PUBLIC_BASE_URL|KV_[A-Z0-9_]+_ID|R2_[A-Z0-9_]+_NAME|WORKER_NAME\([a-z0-9-]+\)|SECRET\([A-Z0-9_]+\))/;
 
 function readTestWorkerBuilds() {
-  return readDeployablePackages(join(ROOT, "packages")).map((pkg) => {
+  return readDeployablePackages(ROOT).map((pkg) => {
     const bundleDir = join(TESTDATA, "fixture-bundles", pkg.name);
     assert.ok(existsSync(bundleDir),
         `missing fixture bundle for new deployable package: add scripts/release/testdata/` +
@@ -285,7 +285,7 @@ test("generateManifest rejects gatekeepers whose folded shortNames collide", () 
 
 test("per-package deploy-inputs.json files are well-formed when present", () => {
   const KINDS = new Set(["secret", "var", "workerName"]);
-  for (const pkg of readDeployablePackages(join(ROOT, "packages"))) {
+  for (const pkg of readDeployablePackages(ROOT)) {
     const inputs = readDeployInputs(pkg.dir);
     if (inputs === undefined) continue;
     assert.ok(Array.isArray(inputs), `${pkg.name}/deploy-inputs.json must be an array`);
@@ -313,7 +313,7 @@ test("per-package deploy-inputs.json files are well-formed when present", () => 
 // kit a deployable, `workerKind` would type it a gatekeeper from its name, and the deploy wizard
 // would demand CLIENT_ID/CLIENT_SECRET for a library before letting anyone install it.
 test("a gatekeeper-prefixed library is not a deployable worker", () => {
-  const deployable = readDeployablePackages(join(ROOT, "packages")).map((pkg) => pkg.name);
+  const deployable = readDeployablePackages(ROOT).map((pkg) => pkg.name);
   assert.ok(!deployable.includes("gatekeeper-kit"),
       "gatekeeper-kit is a library; adding a wrangler.jsonc would publish it as a connector");
 });

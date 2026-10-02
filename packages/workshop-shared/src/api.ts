@@ -23,15 +23,14 @@
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
-import type { CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
+import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
-export const SERVICE_SALT = new Uint8Array([
-  0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
-]);
+export { SERVICE_SALT } from "./password-salt.js";
 
 /**
  * How a connect, reconnect, ensure-resources or sign-in flow starts, as returned by
@@ -47,7 +46,8 @@ export const SERVICE_SALT = new Uint8Array([
  * a connect's after CONNECT_FLOW_LIFETIME_MS (30 minutes, server-side), a sign-in's with its
  * `PendingLogin` attempt.
  */
-export type ConnectFlowStart = { url: string; nonce: string };
+export type { ConnectFlowStart } from './connect-flow.js';
+import type { ConnectFlowStart } from './connect-flow.js';
 
 /**
  * A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
@@ -520,6 +520,15 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Resolve UI feature flags for the authenticated user. */
   getUiFeatureFlags(): Promise<UiFeatureFlags>;
 
+  /** Obtain the local ChatGPT plan capability, or null when the deployment has disabled it. */
+  getOpenAiAssistantPlugin(): Promise<OpenAiAssistantPluginApi | null>;
+
+  /** Read the selected disconnected-ChatGPT fallback and the user's eligible API-key models. */
+  getChatGptFallback(): Promise<{ modelId: string | null; models: AiChatAuthorInfo[] }>;
+
+  /** Choose an API-key model used only when a ChatGPT registration is disconnected; null disables fallback. */
+  setChatGptFallback(modelId: string | null): Promise<void>;
+
   /**
    * Get the user's preferred model, chosen during onboarding. Returns null if the user has not
    * set a preference (or explicitly chose "No agent"). The preference may name a model that is
@@ -970,7 +979,7 @@ export const MAX_SITE_NAME_LENGTH = 40;
  * What this deployment calls itself when the admin has not set a custom `siteName`. Also the
  * product's own name, so it appears in prose the server and UI address to the user.
  */
-export const DEFAULT_SITE_NAME = "Cloudflare OS";
+export const DEFAULT_SITE_NAME = "InferOS";
 
 /**
  * The name to display for this deployment. Accepts an unset or not-yet-loaded `siteName` so both
@@ -1235,6 +1244,11 @@ export type ServerConfig = {
     composableViews: boolean;
     /** Saved definitions are available only when both installation flags are enabled. */
     durableViews: boolean;
+    /**
+     * What composition offers: addable widget kinds, blueprint widgets and screen templates.
+     * Absent on older deployments, which offer every kind and nothing else.
+     */
+    catalog?: CanvasCatalog;
   };
   /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
   defaultTheme?: DefaultThemeMode;
@@ -1343,7 +1357,9 @@ export type AiGatewayInfo = {
 };
 
 /** Configuration specifying how to connect to an AI model provider. */
-export type AiModelConfig = {
+export type ApiKeyModelConfig = {
+  /** Explicit api-key billing bypasses gateways; absent on legacy provider/gateway configurations. */
+  billing?: "api-key";
   /** Which AI provider hosts the model? */
   provider: AiModelProvider;
 
@@ -1392,6 +1408,33 @@ export type AiModelConfig = {
   outputLimit?: number;
 };
 
+/** An OpenAI model billed only to one explicitly selected ChatGPT registration. */
+export type ChatGptPlanModelConfig = {
+  /** Explicit plan routing, evaluated before gateway routing. */
+  billing: "chatgpt-plan";
+  /** ChatGPT plan usage supports the OpenAI Responses provider. */
+  provider: "openai";
+  /** Slug from this registration's model catalog. */
+  model: string;
+  /** Opaque registration owned by the initiating Workshop user. */
+  registrationId: string;
+  /** Optional local context budget; never sent as an API output cap. */
+  contextWindow?: number;
+  /** Local space reserved for the response; never sent to OpenAI. */
+  outputLimit?: number;
+  /** OAuth credentials cannot be embedded in model records. */
+  apiToken?: never;
+  /** Plan requests always target OpenAI through the local companion. */
+  apiUrl?: never;
+  /** Caller-supplied credentials or headers are prohibited on this route. */
+  extraHeaders?: never;
+  /** Cloudflare billing accounts do not apply to ChatGPT plans. */
+  accountId?: never;
+};
+
+/** Explicit model connection, with legacy provider configurations remaining valid unchanged. */
+export type AiModelConfig = ApiKeyModelConfig | ChatGptPlanModelConfig;
+
 /**
  * An `AiModelConfig` whose secrets may be withheld, so that a stored configuration can be shown
  * and edited without the client ever receiving its secrets. As returned by
@@ -1399,13 +1442,13 @@ export type AiModelConfig = {
  * passed to `AuthenticatedApi.updateModel()` or `addModel()`, a `null` secret keeps (or copies)
  * the stored value.
  */
-export type RedactedAiModelConfig = Omit<AiModelConfig, "apiToken" | "extraHeaders"> & {
+export type RedactedAiModelConfig = ChatGptPlanModelConfig | (Omit<ApiKeyModelConfig, "apiToken" | "extraHeaders"> & {
   /** `AiModelConfig.apiToken`, or null if withheld. */
   apiToken: string | null;
 
   /** `AiModelConfig.extraHeaders`, with each value null if withheld. */
   extraHeaders?: Record<string, string | null>;
-};
+});
 
 /**
  * Workers AI adds the response cap to the prompt and rejects a request whose total exceeds the
@@ -1593,10 +1636,30 @@ export type GadgetMetadata = {
    */
   defaultGadgetId?: WorkpieceId;
 
+  /**
+   * How the workspace runs and where it appears (see `WorkspaceKind`). Absent means "app": every
+   * workspace created before kinds existed, and records the owner's list stored before then.
+   */
+  kind?: WorkspaceKind;
+
   // TODO:
   // - created / modified / activity times
   // - icon? thumbnail?
 }
+
+/**
+ * What a workspace is, which decides exactly how it runs and where it is presented: an "app" is a
+ * full-screen gadget its users open (with a chat/app toggle), a "widget" is a small gadget shown as
+ * a tile on InferOps Canvas screens, and a "workflow" has no UI and runs on timed or event
+ * triggers. The kind changes only through an explicit `Overseer.setKind()`; nothing infers it.
+ */
+export type WorkspaceKind = "app" | "widget" | "workflow";
+
+/** Every `WorkspaceKind`, in the order they are offered. */
+export const WORKSPACE_KINDS: readonly WorkspaceKind[] = ["app", "widget", "workflow"];
+
+/** The kind a workspace has when none was ever set. */
+export const DEFAULT_WORKSPACE_KIND: WorkspaceKind = "app";
 
 /**
  * GadgetMetadata extended with timestamps. These are available when listing gadgets from the
@@ -1989,6 +2052,9 @@ export interface Overseer extends RpcTarget {
 
   /** Change the workspace title. */
   setTitle(title: string): Promise<void>;
+
+  /** Change the workspace kind (see `WorkspaceKind`). Build role only. */
+  setKind(kind: WorkspaceKind): Promise<void>;
 
   /** Pin or unpin this workspace in the user's list. */
   setPinned(pinned: boolean): Promise<void>;
@@ -2962,7 +3028,14 @@ export type ActionHistoryPage = {
   nextBeforeId?: number;
 };
 
+/** Lightweight attribution for a chat participant or configured model. */
 export type AiChatAuthorInfo = {
+  /** Original model choice when this author answered as its fallback; retry that choice next turn. */
+  fallbackForModelId?: string;
+  /** Model configuration is managed by the local runtime and cannot be edited or deleted in the UI. */
+  managed?: boolean;
+  /** Explicit subscription billing, when this model spends a connected ChatGPT allowance. */
+  billing?: 'chatgpt-plan';
   /**
    * Is the author a human, AI, or Gadget?
    *
@@ -3694,6 +3767,33 @@ export type AiToolCall = {
      * bindings lack it.
      */
     bindingName?: string;
+  };
+  output?: string;
+} | {
+  /**
+   * List the workspace's saved canvases and the deployment's composition catalog. The formatted
+   * output is recorded so replay doesn't re-read.
+   */
+  toolName: "listCanvases";
+  input: {};
+  output?: string;
+} | {
+  /**
+   * Create a canvas (no `canvasId`) or apply revision-checked operations to one. Applied when the
+   * call runs; replay returns the recorded output rather than re-applying.
+   */
+  toolName: "editCanvas";
+  input: {
+    canvasId?: string;
+    expectedRevision?: string;
+    title?: string;
+    templateId?: string;
+    /**
+     * The model's operations as sent, each carrying the remaining fields of its `CanvasOperation`
+     * variant. Typed by discriminant only: the canvas engine validates them, and a rejected call is
+     * logged with its input as received.
+     */
+    operations: {type: CanvasOperation["type"]}[];
   };
   output?: string;
 });

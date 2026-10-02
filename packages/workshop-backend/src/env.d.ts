@@ -9,6 +9,16 @@ declare global {
       /** Deployer-controlled structural canvas switches; both must be exactly true for storage. */
       COMPOSABLE_VIEWS?: string;
       DURABLE_VIEWS?: string;
+      /** Deployer-controlled composition catalog as JSON (see canvas-catalog.ts); never a grant. */
+      CANVAS_CATALOG?: string;
+      // Local Bun companion. These are injected only by the opted-in local runtime.
+      ENABLE_OPENAI_ASSISTANT_PLUGIN?: string;
+      OPENAI_ASSISTANT_PLUGIN_URL?: string;
+      OPENAI_ASSISTANT_PLUGIN_SECRET?: string;
+      // Local runtime only; never offered when DEV is false.
+      ANTHROPIC_API_KEY?: string;
+      // Set only by the local development runner.
+      DEV?: boolean;
       // Deployment-wide admin usernames: a JSON binding, or the same array as a JSON string
       // (which is what a secret binding, can carry).
       ADMINS?: string[] | string;

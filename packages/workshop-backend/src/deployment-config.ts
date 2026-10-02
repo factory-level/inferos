@@ -9,6 +9,7 @@ import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
 import { siteLogoImage } from "./site-logo.js";
+import { readCanvasCatalog } from "./canvas-catalog";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
@@ -51,6 +52,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     canvasFeatures: {
       composableViews: env.COMPOSABLE_VIEWS === "true",
       durableViews: env.COMPOSABLE_VIEWS === "true" && env.DURABLE_VIEWS === "true",
+      catalog: readCanvasCatalog(env),
     },
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),

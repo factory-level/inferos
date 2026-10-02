@@ -16,6 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { convertToWranglerConfig, resolveAndParseConfig } from "@cloudflare/config";
 import type { WranglerConfig } from "./release/manifest-lib.ts";
 import type { WranglerExtras } from "./worker-config.ts";
+import { workerPackageDirs } from "./worker-dirs.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -34,11 +35,12 @@ const subdirs = (dir: string) => readdirSync(dir, { withFileTypes: true })
   .map((e) => join(dir, e.name));
 
 /**
- * Every directory holding a Worker config: the root dev router, each package, and each integration
- * fixture. A directory with only a wrangler.jsonc is kept so that a hand-written one fails.
+ * Every directory holding a Worker config: the root dev router, each package (upstream and custom
+ * gatekeepers alike), and each integration fixture. A directory with only a wrangler.jsonc is kept
+ * so that a hand-written one fails.
  */
 export function workerConfigDirs(): string[] {
-  return [ROOT, ...subdirs(PACKAGES_DIR), ...subdirs(FIXTURES_DIR)]
+  return [ROOT, ...workerPackageDirs(ROOT), ...subdirs(FIXTURES_DIR)]
     .filter((dir) => existsSync(join(dir, SOURCE_NAME)) || existsSync(join(dir, GENERATED_NAME)))
     .toSorted();
 }

@@ -8,3 +8,6 @@ Create records from [`0000-template.md`](0000-template.md).
 
 | Record | Status | Date |
 | --- | --- | --- |
+| [0001. Customer capability flag vocabulary](0001-customer-capability-flag-vocabulary.md) | proposed | 2026-10-02 |
+| [0002. Local coding scope](0002-local-coding-scope.md) | proposed | 2026-10-02 |
+| [0003. Distinct agent capabilities](0003-distinct-agent-capabilities.md) | proposed | 2026-10-02 |

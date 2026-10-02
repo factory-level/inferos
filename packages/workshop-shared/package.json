@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "exports": {
+    "./openai-plugin": {
+      "types": "./src/openai-plugin.ts",
+      "import": "./src/openai-plugin.ts"
+    },
     "./api": {
       "types": "./src/api.ts",
       "import": "./src/api.ts"
@@ -38,6 +42,10 @@
     "./canvas": {
       "types": "./src/canvas.ts",
       "import": "./src/canvas.ts"
+    },
+    "./password-salt": {
+      "types": "./src/password-salt.ts",
+      "import": "./src/password-salt.ts"
     }
   },
   "scripts": {

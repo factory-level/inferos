@@ -186,6 +186,7 @@ function ProvidersPage() {
   const gatewayMode = aiConfig?.enabled === true
 
   const isBuiltIn = (modelId: string): boolean => {
+    if (models.some(model => model.id === modelId && model.managed)) return true
     if (!aiConfig?.enabled) return false
     const enabled = new Set((aiConfig as Extract<AiGatewayInfo, { enabled: true }>).enabledProviders)
     return PROVIDER_ORDER.some((p) => enabled.has(p) && modelId in SUGGESTED_MODELS[p])

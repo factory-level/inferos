@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
+import { classifyRpcError } from './rpcErrors'
+import { getDevLoginToken } from './features/auth/devLogin'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 
@@ -26,6 +28,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   // State closures go stale in cleanup functions, so we use a ref.
   const authenticatedApiRef = useRef<RpcStub<AuthenticatedApi> | null>(null)
   authenticatedApiRef.current = authState.authenticatedApi
+  const loginGeneration = useRef(0)
 
   /**
    * Names the signed-in user on error reports, for as long as this stub is the current one.
@@ -40,9 +43,9 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
    * newer login from being overwritten by the previous user. Disposal would not be enough on its
    * own: capnweb does not guarantee that disposing a stub rejects calls already in flight.
    *
-   * Nothing is cleared here. Cleanup also runs on unmount, and two instances of this hook can be
+   * Cleanup does not clear identity. It also runs on unmount, and two instances of this hook can be
    * mounted at once — the blueprint page runs its own inside the root's — so an inner one going
-   * away must not blank an identity the outer still holds. `logout` is the only thing that clears.
+   * away must not blank an identity the outer still holds. Only logout or a rejected session clears it.
    */
   useEffect(() => {
     const authenticatedApi = authState.authenticatedApi
@@ -51,9 +54,23 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     authenticatedApi.whoami().then((info) => {
       // Only a real user account names a person: for a gadget author `id` is its owner's id.
       if (!cancelled && info.type === 'user') setReportedUserId(info.id)
-    }).catch(() => {})
+    }).catch(error => {
+      if (cancelled || CF_ACCESS_MODE || classifyRpcError(error) !== 'auth') return
+      // A rejected pipelined capability is not a session. Forget only this attempt's token,
+      // leaving any newer login in another auth consumer intact.
+      const stored = localStorage.getItem('authToken')
+      if (stored && stored !== authState.token) {
+        authenticateWithToken(stored)
+        return
+      }
+      if (stored === authState.token) localStorage.removeItem('authToken')
+      authenticatedApi[Symbol.dispose]()
+      setReportedUserId(undefined)
+      setAuthState({ token: null, authenticatedApi: null, isLoading: false, error: null })
+      startDevLogin()
+    })
     return () => { cancelled = true }
-  }, [authState.authenticatedApi])
+  }, [authState.authenticatedApi, authState.token])
 
   useEffect(() => {
     if (CF_ACCESS_MODE) {
@@ -64,14 +81,29 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
         authenticateWithToken(storedToken)
       } else {
         setAuthState(prev => ({ ...prev, isLoading: false }))
+        startDevLogin()
       }
     }
     return () => {
+      loginGeneration.current++
       // The authenticateWithXxx functions also dispose the old stub via their setAuthState
       // updater, so this may double-dispose on reconnect. That's fine — dispose is idempotent.
       authenticatedApiRef.current?.[Symbol.dispose]()
     }
   }, [publicApi])
+
+  const startDevLogin = () => {
+    const generation = ++loginGeneration.current
+    void getDevLoginToken(publicApi).then(token => {
+      if (!token || generation !== loginGeneration.current) return
+      const stored = localStorage.getItem('authToken')
+      if (stored && stored !== token) return
+      localStorage.setItem('authToken', token)
+      authenticateWithToken(token)
+    }).catch(() => {
+      // Keep the regular sign-in form usable if the backend is unavailable or setup is disabled.
+    })
+  }
 
   const authenticateWithCfAccess = () => {
     setAuthState(prev => {
@@ -94,6 +126,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }
 
   const authenticateWithToken = (token: string) => {
+    loginGeneration.current++
     setAuthState(prev => {
       // Dispose the previous authenticated API stub if it exists
       if (prev.authenticatedApi) {
@@ -123,6 +156,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }
 
   const logout = () => {
+    loginGeneration.current++
     setReportedUserId(undefined)
 
     if (CF_ACCESS_MODE) {

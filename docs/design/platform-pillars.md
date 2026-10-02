@@ -1,7 +1,7 @@
 ---
 title: InferOS platform pillars
 status: draft
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # InferOS platform pillars
@@ -50,3 +50,5 @@ No wholesale kernel fork, replacement workflow runtime, copied trading domain, g
 - [Research sources](../wiki/research-sources.md)
 
 The [consumer configuration contract](consumer-configuration.md) specifies the explicit feature flags, profile/style application, durable views and wrapper-owned Cloudflare extensions required for a complete bootstrap.
+
+The 2026-10-02 baseline adds draft designs for [customer feature capabilities](feature-capabilities.md), [local coding workflows](local-coding-workflows.md), [customer onboarding](customer-onboarding.md), [connection extensions](connection-extensions.md), [agent platform integrations](agent-platform-integrations.md) and [agent deployments](agent-deployments.md). This document's own content predates that baseline and has not yet been revised to match it.

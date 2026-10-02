@@ -1,6 +1,6 @@
 ---
 title: Bootstrap a consuming repository
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # Bootstrap a consuming repository
@@ -34,17 +34,20 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 | `inferos/` | Pinned Git submodule |
 | `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
-| `views/operations.json` | Guarded starter composition; import it from the workspace Canvas dialog on supporting pins |
+| `.agents/skills/skill-upload/SKILL.md` | Agent guidance for installing, authoring and publishing runtime skills (`/skill-upload`) |
+| `skills/{operate,build,shared}/` | Editable starter runtime skills for the Workshop agent, one pack per public Context Library collection |
+| `inferos.skills.json` | Pack titles, directories, `include` lists (for example `.agents/skills/skill-creator`) and `exclude` globs |
+| `views/operations.json` | Guarded starter composition; import it from the workspace Canvas page on supporting pins |
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
-| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/dev entrypoints |
+| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/skills:check/skills:install/skills:upload/dev entrypoints |
 
 ## What check proves
 
 `pnpm inferos:check` validates settings, the actual submodule HEAD and the wrapper's staged gitlink. It reports `pending` adapters and `modifiedUpstream`. A true modifiedUpstream means the run includes local experiments and is not an exact-pinned-revision proof. An `ok` result proves configuration/pin consistency only; it is not proof that data/views/style are applied or that a server is healthy. A pin mismatch must be resolved deliberately, not bypassed by editing the validator.
 
-Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Pins containing the Canvas dialog support `composableViews` locally; `durableViews` additionally requires the native canvas store. The launcher passes both switches to the backend, whose public configuration controls the builder UI. Unsupported pins fail startup explicitly. Pins containing the custom Worker adapter support `customCloudflareCode` locally. This prevents a config file from falsely advertising running features.
+Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Pins containing the Canvas page or dialog support `composableViews` locally; `durableViews` additionally requires the native canvas store. The launcher passes both switches to the backend, whose public configuration controls the builder UI. Unsupported pins fail startup explicitly. Pins containing the custom Worker adapter support `customCloudflareCode` locally. This prevents a config file from falsely advertising running features.
 
 ## Local preflight
 
@@ -79,6 +82,30 @@ The command applies the configured `styling.siteName` (maximum 40 characters), i
 
 This initializes branding, instructions and the deployment fallback theme. Pins containing the density extension also initialize curated listing spacing: compact reduces desktop workspace-row and Explore card/list spacing. Mobile touch targets and gadget-owned layouts remain unchanged. Starter views, remote InferOps data and profile-specific component catalogs remain pending. Cloud application needs a separate explicit deployment-origin contract.
 
+
+## Skills
+
+A wrapper has two skill locations:
+
+- **Coding-agent skills** in `.agents/skills/`. Bootstrap ships `bootstrap-inferos` and `skill-upload`. Run `pnpm skills:install` to add Anthropic's `skill-creator` with the pinned skills.sh CLI (`skills@1.7.0`). To install something else, pass a source and skill: `pnpm skills:install vercel-labs/agent-skills --skill <name>`. The CLI writes `skills-lock.json` and links agent directories such as `.claude/skills`. Commit both.
+- **Runtime skills** in `skills/<pack>/<name>/SKILL.md`. These become Workshop agent skills and `/` commands in chat. `inferos.skills.json` maps each pack to one public Context Library collection, with titles `InferOS · Operate`, `InferOS · Build` and `InferOS · Shared`. A pack's `include` publishes an installed coding-agent skill as part of the pack. `exclude` drops `evals/`, `*-workspace/` and similar authoring output.
+
+Preload a fresh local deployment after `profile:init`, with the same private session variable:
+
+```bash
+pnpm skills:install                 # optional: skill-creator for coding agents and the build pack
+pnpm skills:check                   # offline: frontmatter, names, paths and size limits
+pnpm skills:upload --dry-run        # needs pnpm dev and INFEROS_ADMIN_SESSION
+pnpm skills:upload                  # or: pnpm skills:upload operate build
+```
+
+How `skills:upload` behaves:
+- If the administrator has not added the Context Library yet, it opts them in (a dry run only reports `provisionContextAccount`).
+- It creates a missing collection, writes only new or changed files, and checks that the Context Library indexed every `SKILL.md`.
+- Files that exist only in the collection, such as edits made in the UI, are listed as `stale`. They are deleted only with `--prune`.
+- The `skill-upload` agent skill walks a coding agent through this, including drafting a new skill with skill-creator.
+- Uploads reach the configured localhost port only. Deployed instances need the pending deployment-origin contract.
+
 ## Theme preference precedence
 
 The deployment theme is a fallback, not an enforced setting. A browser's saved `light`, `dark` or explicit `system` preference wins. Without a valid saved preference, the browser uses `ServerConfig.defaultTheme`, falling back to `system` on older deployments or before config loads. Choosing a theme keeps that choice for the session even if local storage is unavailable. A deployment fallback is never written into the browser's preference storage.
@@ -105,15 +132,15 @@ Consumer cloud release packaging, input validation and deployment wiring remain 
 
 ## Guarded starter views
 
-New wrappers contain `views/operations.json`: one `inferops.project-board` widget with the initial configured target reference. On a pin containing the canvas contract, `pnpm views:check` validates regular JSON definitions, unique identities, registered widget parameters and layout limits. It rejects linked/oversized files, unknown fields, arbitrary renderers and unsupported schema versions. It does not install a view, read a board or grant resource authority. `runtimeReady` remains false because the InferOps data adapter and agent canvas tools remain pending. On supporting pins, builders can open Canvas in a workspace and import this definition. With only `composableViews`, edits remain in memory and are discarded on reload or leaving the workspace. With both view flags, compositions are saved under the workspace build capability, with revision-checked writes and explicit reload after conflicts. Imported definitions receive a new view identity. The dialog supports creation, view/section renaming, curated widths/columns, ordering, cross-section board moves, removal and session-local undo. Export view downloads a validated JSON definition that can be kept in views/ and imported into another workspace. Import creates a new view identity and does not transfer resource grants. Board cards explicitly show “Not connected”; no transactional records are loaded or mutated. Disabling the flags hides the UI and denies storage calls without deleting saved definitions.
+New wrappers contain `views/operations.json`: one `inferops.project-board` widget with the initial configured target reference. On a pin containing the canvas contract, `pnpm views:check` validates regular JSON definitions, unique identities, registered widget parameters and layout limits. It rejects linked/oversized files, unknown fields, arbitrary renderers and unsupported schema versions. It does not install a view, read a board or grant resource authority. `runtimeReady` remains false because the real InferOps data adapter remains pending (boards are mocked by the InferOps gatekeeper). Chat agents can list and edit canvases; `pnpm canvas` configures which widget kinds, blueprint widgets and screen templates they offer (see the canvas architecture doc). On supporting pins, builders can open Canvas in a workspace and import this definition. With only `composableViews`, edits remain in memory and are discarded on reload or leaving the workspace. With both view flags, compositions are saved under the workspace build capability, with revision-checked writes and explicit reload after conflicts. Imported definitions receive a new view identity. The dialog supports creation, view/section renaming, curated widths/columns, ordering, cross-section board moves, removal and session-local undo. Export view downloads a validated JSON definition that can be kept in views/ and imported into another workspace. Import creates a new view identity and does not transfer resource grants. Board cards explicitly show “Not connected”; no transactional records are loaded or mutated. Disabling the flags hides the UI and denies storage calls without deleting saved definitions.
 
 Views are wrapper-owned source. Bootstrap reruns preserve edits; changing `inferos.targetRef` later does not silently rewrite existing view references. Edit them deliberately and revalidate. Ownership, sharing, credentials and transactional rows do not belong in view files. A target reference must be rebound to authorized resources when the runtime loader is implemented. Older pins without `scripts/consumer/views.ts` fail the command explicitly.
 
 ## Profile defaults and explicit overrides
 
-New wrappers select `inferops-operations` and write an explicit snapshot: composable/durable layouts enabled, custom Workers disabled, InferOps Workspace name, compact listing density and system theme. Use a pin containing canvas support; older pins report unsupported flags instead of silently dropping them. Previously generated wrappers keep their explicit settings, including disabled views.
+New wrappers select `inferops-operations` and write an explicit snapshot: composable/durable layouts enabled, custom Workers disabled, InferOS name, compact listing density and system theme. Use a pin containing canvas support; older pins report unsupported flags instead of silently dropping them. Previously generated wrappers keep their explicit settings, including disabled views.
 
-On supporting pins, `features` and `styling` must be objects but their individual fields may be omitted. Resolution is base defaults → profile → explicit settings. `personal` inherits disabled features, My Workspace branding, comfortable density and system theme. `inferops-operations` supplies the defaults above. `pnpm inferos:check` reports the effective values and a `provenance` map (`default`, `profile`, `override`). An explicit false wins. For a temporary operations canvas, set `features.durableViews` to false; to disable the canvas entirely, set both view flags false. Disabling only composition while inheriting durable views is an error.
+On supporting pins, `features` and `styling` must be objects but their individual fields may be omitted. Resolution is base defaults → profile → explicit settings. `personal` inherits disabled features, InferOS branding, comfortable density and system theme. `inferops-operations` supplies the defaults above. `pnpm inferos:check` reports the effective values and a `provenance` map (`default`, `profile`, `override`). An explicit false wins. For a temporary operations canvas, set `features.durableViews` to false; to disable the canvas entirely, set both view flags false. Disabling only composition while inheriting durable views is an error.
 
 Generated settings are deliberately explicit: changing only the profile name does not rewrite them. Remove chosen nested fields to inherit a profile after verifying the pinned parser supports partial objects. Old pins may require every field; fully explicit settings remain the portable form. Profile resolution controls startup and initial customization; it never reapplies over existing administrator settings or authorizes a resource.
 

@@ -1,5 +1,9 @@
 packages:
   - packages/*
+  # This fork's own gatekeepers, kept out of packages/ so upstream merges never touch them. Discovery
+  # treats them like packages/gatekeeper-* (see scripts/worker-dirs.ts).
+  - custom-gatekeepers/*
+  - assistant-plugins/*
   # The shared build tooling as `@gadgets/scripts`, so packages reach it by name rather than by a
   # relative path that breaks in forks vendoring this repo. Top level: it resolves from the root.
   - scripts

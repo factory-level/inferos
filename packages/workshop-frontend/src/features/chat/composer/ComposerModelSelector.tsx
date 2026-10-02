@@ -23,6 +23,7 @@ export const ComposerModelSelector = ({
     ? "No agent"
     : models.find((model) => model.id === selectedModel.id)?.name ??
       selectedModel.name ?? selectedModel.id;
+  const usesPlan = models.find(model => model.id === selectedModel?.id)?.billing === 'chatgpt-plan';
 
   return (
     <DropdownMenu>
@@ -34,6 +35,7 @@ export const ComposerModelSelector = ({
             aria-label="Select model"
           >
             <span className="min-w-0 truncate">{selectedModelLabel}</span>
+            {usesPlan && <span className="text-xs" title="Uses your connected ChatGPT allowance">ChatGPT plan</span>}
             <CaretDown
               size={12}
               weight="bold"
@@ -52,6 +54,7 @@ export const ComposerModelSelector = ({
               className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
             >
               <span className="min-w-0 flex-1 truncate">{model.name}</span>
+              {model.billing === 'chatgpt-plan' && <span className="text-xs">ChatGPT plan</span>}
               {active && (
                 <Check
                   size={12}

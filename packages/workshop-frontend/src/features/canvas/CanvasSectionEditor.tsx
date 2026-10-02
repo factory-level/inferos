@@ -1,17 +1,27 @@
 import { CanvasWidgetCard } from './CanvasWidgetCard'
+import { CanvasAddGadgetForm } from './CanvasAddGadgetForm'
 import { Button, Input } from '@cloudflare/kumo'
-import type { CanvasOperation, CanvasSection } from '@gadgets/workshop-shared/canvas'
+import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
+import type { CanvasCatalog, CanvasOperation, CanvasSection } from '@gadgets/workshop-shared/canvas'
+import { CanvasBlueprintWidgets } from './CanvasBlueprintWidgets'
+import { sectionGridClass } from './canvasLayout'
 
 type Props = {
   section: CanvasSection
   busy: boolean
   first: boolean
+  gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
+  acceptedGadgets: GadgetSummary[]
+  /** What the deployment lets this section offer. */
+  catalog: CanvasCatalog
+  viewTitle: string
   onMoveUp: () => void
   onEdit: (operations: CanvasOperation[]) => Promise<boolean>
+  onAskAgent: (request: string) => Promise<void>
 }
 
-export const CanvasSectionEditor = ({ section, busy, first, onMoveUp, onEdit }: Props) => (
-  <section className="space-y-3 rounded-lg border border-kumo-line p-4" aria-label={section.title}>
+export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGadgets, catalog, viewTitle, onMoveUp, onEdit, onAskAgent }: Props) => (
+  <section className="@container space-y-3 rounded-lg border border-kumo-line p-4" aria-label={section.title}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="font-medium text-kumo-default">{section.title}</h3>
       <div className="flex flex-wrap items-center gap-2">
@@ -33,11 +43,16 @@ export const CanvasSectionEditor = ({ section, busy, first, onMoveUp, onEdit }: 
       <Input label="Section title" name="title" defaultValue={section.title} required maxLength={120} disabled={busy} />
       <Button type="submit" disabled={busy}>Rename section</Button>
     </form>
-    <div className={`grid grid-cols-1 gap-3 ${section.columns === 3 ? 'lg:grid-cols-3' : section.columns === 2 ? 'lg:grid-cols-2' : ''}`}>
+    <div className={sectionGridClass(section.columns)}>
       {section.widgets.map((widget, index) => <CanvasWidgetCard key={widget.id} widget={widget} section={section}
-        index={index} busy={busy} onEdit={onEdit} />)}
+        index={index} busy={busy} gadgets={gadgets} onEdit={onEdit} />)}
     </div>
-    <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
+    {catalog.widgetKinds.includes('inferos.gadget') && <>
+      <CanvasAddGadgetForm section={section} gadgets={acceptedGadgets} busy={busy} onEdit={onEdit} />
+      <CanvasBlueprintWidgets blueprints={catalog.blueprints} viewTitle={viewTitle} sectionTitle={section.title}
+        busy={busy} onAskAgent={onAskAgent} />
+    </>}
+    {catalog.widgetKinds.includes('inferops.project-board') && <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
       event.preventDefault()
       const form = event.currentTarget
       const targetRef = String(new FormData(form).get('target') ?? '').trim()
@@ -49,6 +64,6 @@ export const CanvasSectionEditor = ({ section, busy, first, onMoveUp, onEdit }: 
       <Input label="InferOps board reference" name="target" required maxLength={512} disabled={busy}
         placeholder="inferops://tenant.workspace/project/board/PROJECT" className="min-w-0 flex-1" />
       <Button type="submit" disabled={busy || section.widgets.length >= 48}>Add board</Button>
-    </form>
+    </form>}
   </section>
 )

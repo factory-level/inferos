@@ -1,0 +1,31 @@
+{
+  "$comment": "The `board` binding is an InferOpsProjectSession from the inferops gatekeeper (custom-gatekeepers/gatekeeper-inferops). blueprintId is the install key: never rename it.",
+  "blueprintId": "inferops.kanban",
+  "title": "InferOps Kanban",
+  "description": "Use to view an InferOps project board as Kanban columns and move issues between workflow states, with every move approved before it reaches InferOps. Needs one InferOps project board connected as the `board` binding.",
+  "output": {
+    "id": "kanban",
+    "noun": "Kanban board",
+    "plural": "Kanban boards",
+    "icon": "kanban"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "revision": 1,
+  "created": "2026-10-02T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-10-02T00:00:00.000Z",
+  "bindings": {
+    "board": {
+      "type": "gatekeeper",
+      "title": "InferOps project board",
+      "description": "The InferOps project whose board this gadget shows, e.g. inferops://demo.local/project/board/DEMO.",
+      "gatekeeperName": "inferops",
+      "typeUrlPattern": "inferops://*/project/board/*",
+      "resourceUrl": "inferops://demo.local/project/board/DEMO"
+    }
+  }
+}

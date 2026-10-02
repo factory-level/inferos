@@ -16,7 +16,8 @@ covers:
   - packages/router
   - scripts/consumer
   - .agents/skills/bootstrap-inferos
-updated: 2026-10-01
+  - .agents/skills/skill-upload
+updated: 2026-10-02
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -35,10 +36,11 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 | `scripts/consumer/project-board.json` | Synthetic fixture matching inspected InferOps board wire fields |
 | `scripts/consumer/bootstrap.test.ts` | Fresh recursive clone, rerun preservation, drift rejection, failure cleanup and configuration failures |
 | `.agents/skills/bootstrap-inferos` | Coding-agent setup guidance with honest readiness reporting |
+| `.agents/skills/skill-upload` | Coding-agent guidance for installing, authoring and publishing wrapper skill packs, copied into wrappers |
 
 ## Data and Control Flow
 
-The bootstrap accepts destination, repository and full commit SHA. It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
+The bootstrap accepts destination, repository and full commit SHA. It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers, the `bootstrap-inferos` and `skill-upload` skills and the starter skill packs (`skills/`, with a default `inferos.skills.json`; see [repo setup skills](repo-setup-skills.md#skill-packs)) into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
 
 The copied wrapper runtime loads configuration and compares the actual submodule HEAD and staged gitlink. `check` reports configuration readiness, pending adapters and whether the submodule has local modifications; a matching HEAD alone is not an exact-revision proof. `setup` installs dependencies with the frozen upstream lockfile. `dev` checks IPv4/IPv6 loopback port availability before delegating to native run-local with the configured port. A busy port fails with a configuration instruction and does not stop the other listener. It rejects features absent from the pinned source and remote InferOps mode; it reports pending fixture/data and agent canvas adapters and requires the separate administrator profile initialization even in baseline mode.
 
@@ -62,7 +64,7 @@ The profile operator sends `styling.theme` as `defaultTheme`; `AdminSettings` pe
 
 ## Configuration
 
-The initial profile is inferops-operations, with composable and durable views enabled and custom Cloudflare code disabled. New wrappers materialize compact density, system theme and InferOps Workspace branding as explicit values. The configured site name can be initialized through the operator; theme is applied as a deployment fallback; density applies curated desktop workspace/Explore listing spacing. Fixture path is fixed to a wrapper-owned synthetic board. Remote mode accepts a noncredentialed HTTPS base URL but cannot launch until its adapter exists. Git sources support HTTPS or explicitly supplied absolute local paths. No cloud resources or production credentials are created. Custom Worker local support is described below.
+The initial profile is inferops-operations, with composable and durable views enabled and custom Cloudflare code disabled. New wrappers materialize compact density, system theme and InferOS branding as explicit values. The configured site name can be initialized through the operator; theme is applied as a deployment fallback; density applies curated desktop workspace/Explore listing spacing. Fixture path is fixed to a wrapper-owned synthetic board. Remote mode accepts a noncredentialed HTTPS base URL but cannot launch until its adapter exists. Git sources support HTTPS or explicitly supplied absolute local paths. No cloud resources or production credentials are created. Custom Worker local support is described below.
 
 ## Divergences from Design
 
@@ -88,13 +90,13 @@ Bootstrap creates a disabled public hello example, manifest, validation command 
 
 ## Durable-view server boundary
 
-The native Overseer capability now offers workspace-scoped definition storage behind exact-string `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` deployment bindings. Owner/build sessions can use it; use-only sessions cannot. The consumer launcher maps view flags to these bindings. Public server configuration advertises the effective flags to the builder Canvas dialog. Starter definitions are imported explicitly; no automatic installation or board data access occurs. See [canvas architecture](inferops-canvas.md) for transaction, sharing and resource-authorization boundaries.
+The native Overseer capability now offers workspace-scoped definition storage behind exact-string `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` deployment bindings. Owner/build sessions can use it; use-only sessions cannot. The consumer launcher maps view flags to these bindings. Public server configuration advertises the effective flags to the builder Canvas page. Starter definitions are imported explicitly; no automatic installation or board data access occurs. See [canvas architecture](inferops-canvas.md) for transaction, sharing and resource-authorization boundaries.
 
 ## Profile resolution and provenance
 
 The v1 parser accepts partial `features` and `styling` objects, while keeping those objects and all other top-level fields required. Unknown keys, explicit null/undefined and invalid values fail validation. Each field resolves base default → selected profile → own explicit override; false is an override. Dependency validation runs after resolution, so disabling only composableViews in the operations profile fails while inherited durableViews remains enabled. No dependent flag is silently changed.
 
-The personal profile inherits disabled features, My Workspace branding, comfortable density and system theme. Operations overrides both view flags to true, branding to InferOps Workspace and density to compact. The custom Worker flag and theme remain base defaults. `inferos:check` reports resolved features/style and per-field default/profile/override provenance. Bootstrap writes a fully explicit snapshot of the operations profile so switching the profile name alone does not reset choices. Existing fully explicit wrappers retain their values. To opt back into inheritance, remove only the selected nested fields after reviewing the pinned parser support. All native launch/profile/extension consumers use the same parser. This resolution does not overwrite initialized AdminConfig or alter authentication, grants or rollout flags.
+The personal profile inherits disabled features, InferOS branding, comfortable density and system theme. Operations overrides both view flags to true and density to compact, and inherits the InferOS name. The custom Worker flag and theme remain base defaults. `inferos:check` reports resolved features/style and per-field default/profile/override provenance. Bootstrap writes a fully explicit snapshot of the operations profile so switching the profile name alone does not reset choices. Existing fully explicit wrappers retain their values. To opt back into inheritance, remove only the selected nested fields after reviewing the pinned parser support. All native launch/profile/extension consumers use the same parser. This resolution does not overwrite initialized AdminConfig or alter authentication, grants or rollout flags.
 
 ## Canonical fixture validation
 

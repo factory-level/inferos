@@ -5,12 +5,13 @@ import {
   Compass,
   Hexagon,
   House,
+  Kanban,
   MagnifyingGlass,
   SidebarSimple,
   SquaresFour,
   Stack,
 } from '@phosphor-icons/react'
-import { useSiteName } from '../../ServerConfigContext'
+import { useServerConfig, useSiteName } from '../../ServerConfigContext'
 import SiteLogo from '../SiteLogo'
 import { useGatekeeperApps } from '../../useGatekeeperApps'
 import { openCommandPalette } from './commandPaletteBus'
@@ -42,6 +43,7 @@ export default function Sidebar({
   onToggleCollapsed: () => void
 }) {
   const siteName = useSiteName()
+  const composableViews = useServerConfig()?.canvasFeatures?.composableViews === true
   // Gatekeeper-served management apps the user can reach now (one per gatekeeper that provides a UI
   // and is connected / enabled for everyone). Disabled or not-yet-connected ones aren't returned, so
   // they simply don't appear. The set is fully dynamic — no gatekeeper is hardcoded.
@@ -141,6 +143,14 @@ export default function Sidebar({
               icon={<Stack size={14} weight="regular" />}
               collapsed={collapsed}
             />
+            {composableViews && (
+              <SidebarItem
+                to="/inferops-canvas"
+                label="InferOps Canvas"
+                icon={<Kanban size={14} weight="regular" />}
+                collapsed={collapsed}
+              />
+            )}
             {/* Gatekeeper management apps (e.g. the Context Library), listed dynamically. */}
             {gatekeeperApps.map((app) => {
               // Escape the icon URL for safe interpolation into a CSS url("…") string.

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
+import type { AiChatAuthorInfo, AiModelConfig, ApiKeyModelConfig } from "@gadgets/workshop-shared/api";
 import type { Handler } from "./network-interceptor.js";
 
 const CHAT_COMPLETIONS_SUFFIX = "/chat/completions";
@@ -47,7 +47,7 @@ export const SCRIPTED_MODEL_PROFILE: AiChatAuthorInfo = {
   id: SCRIPTED_MODEL_ID,
   name: "Scripted model",
 };
-export const SCRIPTED_MODEL_CONFIG: AiModelConfig = {
+export const SCRIPTED_MODEL_CONFIG: ApiKeyModelConfig = {
   provider: "cloudflare",
   model: SCRIPTED_MODEL_ID,
   accountId: "test-account",

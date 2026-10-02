@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { describe, it } from "node:test";
+import { workerPackageDirs } from "./worker-dirs.ts";
 
 // Every `deploy` script in the workspace, so a new package is covered without being listed here.
-const deployScripts = readdirSync("packages", { withFileTypes: true })
-  .filter(entry => entry.isDirectory())
-  .flatMap(entry => {
-    const manifestPath = join("packages", entry.name, "package.json");
+const deployScripts = workerPackageDirs(".")
+  .flatMap(dir => {
+    const manifestPath = join(relative(".", dir), "package.json");
     let manifest;
     try {
       manifest = JSON.parse(readFileSync(manifestPath, "utf8"));

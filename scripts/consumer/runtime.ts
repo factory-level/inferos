@@ -52,8 +52,12 @@ export async function assertLocalPortAvailable(port: number): Promise<void> {
   }
 }
 
+/** The skills.sh CLI version `skills:install` runs, pinned so installs are reproducible. */
+export const SKILLS_CLI = "skills@1.7.0";
+
 const featureSources = {
-  composableViews: "packages/workshop-frontend/src/features/canvas/CanvasDialog.tsx",
+  // The composition contract, not a UI file: UI files are renamed as the page evolves.
+  composableViews: "packages/workshop-shared/src/canvas.ts",
   durableViews: "packages/workshop-backend/src/canvas-store.ts",
   customCloudflareCode: "scripts/consumer/extensions.ts",
 } as const;
@@ -77,7 +81,6 @@ export function checkConsumer(root: string) {
   }
   const pending = ["InferOps fixture/remote adapter", "profile initialization not checked"];
   pending.push(...unavailableFeatures(config, upstream));
-  if (config.features.composableViews) pending.push("agent canvas tools");
   return { config, provenance, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
 }
 
@@ -168,17 +171,30 @@ export async function diagnoseConsumer(root: string) {
       add("extensions", "pass", `${workers.length} explicit custom Workers; run pnpm extensions:check to validate canonical configs`);
     } catch { add("extensions", "error", "Cannot validate custom Workers; check the manifest, contained paths and supported pin"); }
   }
+  const skillScript = join(upstream, "scripts/consumer/skills.ts");
+  if (existsSync(join(root, "inferos.skills.json")) && existsSync(skillScript)) {
+    try {
+      const { checkConsumerSkills } = await import(pathToFileURL(skillScript).href);
+      const { packs, warnings } = checkConsumerSkills(root);
+      const skills = packs.reduce((total: number, pack: { skills: unknown[] }) => total + pack.skills.length, 0);
+      add("skills", warnings.length ? "warning" : "pass", warnings.length ? warnings.join("; ")
+        : `${skills} skills in ${packs.length} packs validate; run pnpm skills:upload against a running Workshop to publish them`);
+    } catch (error) {
+      add("skills", "error", error instanceof Error && error.message.includes("Cannot find package")
+        ? "Run pnpm run setup before validating skill packs" : `Skill packs are invalid: ${(error as Error).message}`);
+    }
+  }
   if (config.inferops.mode === "remote") unsupported.push("remote InferOps");
   add("runtime", unsupported.length ? "error" : "warning", unsupported.length
     ? `Startup is blocked by unavailable adapters: ${unsupported.join(", ")}`
-    : "InferOps board data and agent canvas tools are pending; profile:init separately initializes branding/instructions on a supported pin");
+    : "InferOps board data is mocked by the InferOps gatekeeper (no real InferOps adapter yet); profile:init separately initializes branding/instructions on a supported pin");
   return { ok: !checks.some(check => check.status === "error"), checks, runtimeReady: false, pending };
 }
 
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|profile|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|skills|skills-upload|skills-install|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -197,6 +213,12 @@ async function main() {
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
     return;
   }
+  if (command === "canvas") {
+    const script = join(upstream, "scripts/consumer/canvas.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision does not support canvas configuration");
+    execFileSync(process.execPath, [script, root, ...process.argv.slice(3)], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
   if (command === "extensions") {
     const script = join(upstream, "scripts/consumer/extensions.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support custom Workers");
@@ -209,6 +231,12 @@ async function main() {
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
     return;
   }
+  if (command === "skills" || command === "skills-upload") {
+    const script = join(upstream, command === "skills" ? "scripts/consumer/skills.ts" : "packages/workshop-backend/scripts/upload-consumer-skills.ts");
+    if (!existsSync(script)) throw new Error("Pinned InferOS revision does not support skill packs; use a reviewed newer pin");
+    execFileSync(process.execPath, [script, root, ...(command === "skills" ? [] : process.argv.slice(3))], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
   if (command === "blueprints") {
     validateConsumerBlueprints(root, upstream);
     console.log(JSON.stringify({ ok: true, operation: "blueprints", source: consumerBlueprintDirectory(root) ? "wrapper" : "upstream" }));
@@ -219,6 +247,14 @@ async function main() {
     return;
   }
   const { pnpmCommand } = await import(pathToFileURL(join(upstream, "scripts/pnpm-command.ts")).href);
+  if (command === "skills-install") {
+    // The skills.sh CLI, pinned, writes .agents/skills/<name>, agent links and skills-lock.json in the
+    // wrapper. Packs publish those copies through their `include` lists; nothing is vendored twice.
+    const source = process.argv.length > 3 ? process.argv.slice(3) : ["anthropics/skills", "--skill", "skill-creator"];
+    const [binary, args] = pnpmCommand(["dlx", SKILLS_CLI, "add", ...source, "--yes"]);
+    execFileSync(binary, args, { cwd: root, stdio: "inherit" });
+    return;
+  }
   if (command === "setup") {
     const [binary, args] = pnpmCommand(["install", "--frozen-lockfile"]);
     execFileSync(binary, args, { cwd: upstream, stdio: "inherit" });
@@ -235,7 +271,7 @@ async function main() {
   await validateConsumerFixture(root, upstream);
   await assertLocalPortAvailable(config.local.port);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
-  console.error("Starting the native Workshop baseline. InferOps board data and agent canvas tools are pending; profile:init is a separate administrator operation.");
+  console.error("Starting the native Workshop baseline. InferOps board data is mocked by the InferOps gatekeeper; profile:init is a separate administrator operation.");
   const env: NodeJS.ProcessEnv = { ...process.env, VITE_BACKEND_HOST: `localhost:${config.local.port}` };
   const blueprints = consumerBlueprintDirectory(root);
   if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;
