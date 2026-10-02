@@ -1,7 +1,7 @@
 ---
 title: InferOS repository setup skills
 status: draft
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # InferOS repository setup skills
@@ -72,3 +72,28 @@ Tracking issue: [#20](https://github.com/factory-level/inferos/issues/20) (`skil
 ## Wrapper-owned blueprint sources
 
 Bootstrap copies standard format sources into the wrapper once. Local startup uses the wrapper as the complete `BUNDLED_BLUEPRINTS_DIR`, while empty legacy wrappers retain upstream defaults. Validation uses the pinned compiler without modifying generated backend files. Upgrades preserve consumer edits and require explicit reconciliation of copied upstream templates. Source-content, presentation or revision changes update installed templates; existing gadgets and admin curation are not reset. A consumer cloud-release wrapper must eventually carry the same source selection into release artifacts.
+
+## Skill packs and skill upload
+
+Wrappers carry two kinds of skills, linked by one convention:
+
+- **Coding-agent skills** live in `.agents/skills/<name>/`. Bootstrap ships `bootstrap-inferos` and `skill-upload`. Third-party skills install with the skills.sh (`skills`) CLI at a pinned version, through `pnpm skills:install [source --skill name]`. Anthropic's `skill-creator` is the default. The CLI records installs in `skills-lock.json` and links agent-specific directories such as `.claude/skills`.
+- **Runtime skills** for the Workshop agent live in `skills/<pack>/<name>/SKILL.md`. `inferos.skills.json` maps each pack to one public Context Library collection. A pack's `include` list publishes installed coding-agent skills without a second copy, so `build` includes `skill-creator`. `exclude` globs keep skill-creator's eval and workspace output out of the collection.
+
+New wrappers are preloaded with three packs:
+- **operate**: InferOps boards, issues and approvals.
+- **build**: gadgets, views, blueprints and skills.
+- **shared**: conventions every agent follows.
+
+Each pack starts with editable starter skills, which the wrapper owns from then on, the same as `blueprints/`.
+
+`pnpm skills:check` validates packs offline with the Context Library's own frontmatter rules (an invalid `SKILL.md` would otherwise be skipped silently), along with path and size limits and unique names across packs. `pnpm skills:upload [pack...] [--dry-run] [--prune]` publishes packs to the local Workshop:
+- It uses the same administrator session and localhost-only rule as `profile:init`.
+- It finds each collection by title and creates it if missing.
+- It writes only changed files.
+- It reports remote-only files, and deletes them only with `--prune`.
+- It confirms every `SKILL.md` was indexed.
+
+The `skill-upload` agent skill drives this flow, including authoring new skills with skill-creator. It does not hide any configuration in prose.
+
+Uploading to deployed instances waits on a deployment-origin authentication contract. Preloading is the explicit `skills:upload` step after `profile:init`, not an automatic part of `pnpm dev`.

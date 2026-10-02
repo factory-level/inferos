@@ -1,6 +1,6 @@
 ---
 title: Bootstrap a consuming repository
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # Bootstrap a consuming repository
@@ -34,11 +34,14 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 | `inferos/` | Pinned Git submodule |
 | `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
+| `.agents/skills/skill-upload/SKILL.md` | Agent guidance for installing, authoring and publishing runtime skills (`/skill-upload`) |
+| `skills/{operate,build,shared}/` | Editable starter runtime skills for the Workshop agent, one pack per public Context Library collection |
+| `inferos.skills.json` | Pack titles, directories, `include` lists (for example `.agents/skills/skill-creator`) and `exclude` globs |
 | `views/operations.json` | Guarded starter composition; import it from the workspace Canvas page on supporting pins |
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
-| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/dev entrypoints |
+| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/skills:check/skills:install/skills:upload/dev entrypoints |
 
 ## What check proves
 
@@ -78,6 +81,29 @@ unset INFEROS_ADMIN_SESSION
 The command applies the configured `styling.siteName` (maximum 40 characters), instructions selected by `profile`, and the fallback theme from `styling.theme`. It connects only to the configured local port. Results are `initialized`, `preserved` (existing name, instructions or non-system theme won), or `already-initialized`. Reruns do not update settings; use the normal admin UI for later name/instruction changes, or the admin API for the default theme. Reload the Workshop to pick up branding. The initialization marker lives with the authoritative settings, not in a wrapper file, so a wrapper rerun or changed config cannot reset it.
 
 This initializes branding, instructions and the deployment fallback theme. Pins containing the density extension also initialize curated listing spacing: compact reduces desktop workspace-row and Explore card/list spacing. Mobile touch targets and gadget-owned layouts remain unchanged. Starter views, remote InferOps data and profile-specific component catalogs remain pending. Cloud application needs a separate explicit deployment-origin contract.
+
+
+## Skills
+
+A wrapper has two skill locations:
+
+- **Coding-agent skills** in `.agents/skills/`. Bootstrap ships `bootstrap-inferos` and `skill-upload`. Run `pnpm skills:install` to add Anthropic's `skill-creator` with the pinned skills.sh CLI (`skills@1.7.0`). To install something else, pass a source and skill: `pnpm skills:install vercel-labs/agent-skills --skill <name>`. The CLI writes `skills-lock.json` and links agent directories such as `.claude/skills`. Commit both.
+- **Runtime skills** in `skills/<pack>/<name>/SKILL.md`. These become Workshop agent skills and `/` commands in chat. `inferos.skills.json` maps each pack to one public Context Library collection, with titles `InferOS · Operate`, `InferOS · Build` and `InferOS · Shared`. A pack's `include` publishes an installed coding-agent skill as part of the pack. `exclude` drops `evals/`, `*-workspace/` and similar authoring output.
+
+Preload a fresh local deployment after `profile:init`, with the same private session variable:
+
+```bash
+pnpm skills:install                 # optional: skill-creator for coding agents and the build pack
+pnpm skills:check                   # offline: frontmatter, names, paths and size limits
+pnpm skills:upload --dry-run        # needs pnpm dev and INFEROS_ADMIN_SESSION
+pnpm skills:upload                  # or: pnpm skills:upload operate build
+```
+
+How `skills:upload` behaves:
+- It creates a missing collection, writes only new or changed files, and checks that the Context Library indexed every `SKILL.md`.
+- Files that exist only in the collection, such as edits made in the UI, are listed as `stale`. They are deleted only with `--prune`.
+- The `skill-upload` agent skill walks a coding agent through this, including drafting a new skill with skill-creator.
+- Uploads reach the configured localhost port only. Deployed instances need the pending deployment-origin contract.
 
 ## Theme preference precedence
 
