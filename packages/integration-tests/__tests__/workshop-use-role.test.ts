@@ -89,6 +89,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
   setTitle: ws => ws.setTitle("Title"),
+  setKind: ws => ws.setKind("workflow"),
   setPinned: ws => ws.setPinned(true),
   deleteSelf: ws => ws.deleteSelf(),
   createGadget: ws => ws.createGadget("App"),
