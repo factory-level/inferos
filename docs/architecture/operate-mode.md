@@ -12,7 +12,7 @@ updated: 2026-10-02
 
 ## Overview
 
-The operate session is implemented in the kernel: one per person, holding a page state that is the replay of an ordered event log, plus an owner-only workspace for its operate chat. Clients reach it through `AuthenticatedApi.getOperateSession()`. No frontend uses it yet, and the operate chat has no operate-only tool set yet.
+The operate session is implemented in the kernel: one per person, holding a page state that is the replay of an ordered event log, plus an owner-only workspace for its operate chat. Clients reach it through `AuthenticatedApi.getOperateSession()`. The operate chat has no operate-only tool set yet.
 
 ## Components
 
@@ -33,17 +33,21 @@ The session lives in the user Durable Object, which already exists once per pers
 
 `getWorkspace()` claims a fresh Overseer id in the user DO (synchronously, so two first calls agree on one id) and registers it like `newGadget()` does, titled "Operate session". `listGadgets()` skips it. If the recorded workspace has been deleted, the next call claims a new one. The workspace is an ordinary owner-only Overseer, so the session's chat uses the existing chat machinery.
 
-References in the page state (`screen`, `workspace`) identify targets only. The session never opens them and grants no access.
+A session can run a **flow**: `startFlow` copies an ordered list of one workspace's screen ids into the page state (`flow`), `goToStep` moves the index within it, and `exitFlow` clears it. While `flow` is set the page is meant to show only that step (the full-canvas state); the working set and focus are untouched, so they return on exit. Because the steps are copied in, the reducer validates a step from the event alone and a run is unaffected by later edits to the flow it started from.
+
+A stored snapshot may predate a page-state field. The user DO fills missing fields from `INITIAL_OPERATE_PAGE` whenever it reads the snapshot, so such a session reads as if it always had the field.
+
+References in the page state (`screen`, `workspace`, and a flow's workspace and steps) identify targets only. The session never opens them and grants no access.
 
 ## Configuration
 
-None. Limits are constants in `operate-session.ts`: references and screen ids up to 128 characters, a subject up to 512, and at most 24 references in the working set (opening one more drops the oldest). One `listEvents()` page returns at most 200 entries.
+None. Limits are constants in `operate-session.ts`: references and screen ids up to 128 characters, a subject up to 512, at most 24 references in the working set (opening one more drops the oldest), and 1 to 32 steps in a flow run with a title up to 120 characters. One `listEvents()` page returns at most 200 entries.
 
 ## Divergences from Design
 
 Against [the design](../design/operate-mode.md):
 
-- Views, subject-bound views, approvals in the page state and handover events are not implemented. The page state covers the working set, focus, subject, chat panel and app presentation.
+- Views, subject-bound views, approvals in the page state and handover events are not implemented. The page state covers the working set, focus, subject, chat panel, app presentation and a running flow.
 - The session workspace exposes the full `Overseer`, including authoring methods. The operate-only chat mode is the next step.
 - The URL mirror, presence, and agent-dispatched events (`actor: "agent"`) are not implemented.
 - The event log is kept in full, with no compaction or retention policy.

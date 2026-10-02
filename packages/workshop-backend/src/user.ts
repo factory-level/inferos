@@ -1032,10 +1032,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return candidateId;
   }
 
+  // The stored page, with any field added to OperatePageState since it was stored filled in from
+  // the initial page, so a session that predates a field reads as if it always had it.
+  #operatePage(): OperateSessionSnapshot {
+    let { seq, state } = this.storage.operatePage.get();
+    return { seq, state: { ...INITIAL_OPERATE_PAGE, ...state } };
+  }
+
   /** Appends an operate event if `expectedSeq` is current; see OperateSession.dispatch(). */
   async dispatchOperateEvent(event: OperateEvent, expectedSeq: number, actor: OperateEventActor)
       : Promise<OperateSessionSnapshot> {
-    let current = this.storage.operatePage.get();
+    let current = this.#operatePage();
     if (expectedSeq !== current.seq) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);
     }
@@ -1073,8 +1080,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     };
 
     // Snapshot and subscribe with no await between, so no event can fall in the gap.
-    let { seq, state } = page.get();
-    subscriber({ seq, state }).catch(unsubscribe);
+    subscriber(this.#operatePage()).catch(unsubscribe);
     page.subscribe(pageSubscriber);
 
     return new RpcStub<{}>({
