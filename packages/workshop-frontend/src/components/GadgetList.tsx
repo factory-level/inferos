@@ -10,6 +10,7 @@ import { BindingBadge, getGradient as getBlueprintGradient, uniqueBindingBadges 
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
 import { BlueprintPreviewImage } from './BlueprintPreviewImage'
 import DeleteConfirmationDialog from './DeleteConfirmationDialog'
+import { useDisplayDensity } from '../ServerConfigContext'
 import { isImeComposing } from '../keyboardEvent'
 
 // Neutral monogram for a workspace — matches the sidebar treatment (no per-item color noise).
@@ -50,6 +51,7 @@ function AppRow({
   onTogglePin: (gadget: GadgetMetadataWithTimestamps) => void
   onRename: (gadget: GadgetMetadataWithTimestamps, newTitle: string) => void
 }) {
+  const compact = useDisplayDensity() === 'compact'
   const [isRenaming, setIsRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState(gadget.title || '')
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -75,7 +77,7 @@ function AppRow({
     <Link
       to="/workspace/$id"
       params={{ id: gadget.id }}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
+      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint ${compact ? "sm:py-1" : ""}`}
       onClick={(e) => {
         // Prevent navigation when renaming or clicking the menu
         if (isRenaming) e.preventDefault()

@@ -13,6 +13,9 @@ export function useServerConfig(): ServerConfig | null {
   return useContext(ServerConfigContext)
 }
 
+/** Curated Workshop listing spacing; older deployments keep their existing comfortable layout. */
+export const useDisplayDensity = () => useServerConfig()?.displayDensity ?? 'comfortable'
+
 /** Returns whether the latest deployment-config request failed. */
 export function useServerConfigError(): boolean {
   return useContext(ServerConfigErrorContext)

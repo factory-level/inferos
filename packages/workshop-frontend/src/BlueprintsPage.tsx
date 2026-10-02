@@ -11,11 +11,13 @@ import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { useAuthenticatedApi } from "./AuthContext";
 import { BindingBadge, uniqueBindingBadges } from "./components/BlueprintCard";
 import { BlueprintPreviewPlaceholder } from "./components/BlueprintPreviewImage";
+import { useDisplayDensity } from "./ServerConfigContext";
 import ViewToggle from "./components/ViewToggle";
 
 type VendorMap = Map<string, VendorDescription>;
 
 export default function BlueprintsPage() {
+  const compact = useDisplayDensity() === "compact";
   const { authenticatedApi } = useAuthenticatedApi();
   const toasts = useKumoToastManager();
   const toastsRef = useRef(toasts);
@@ -125,7 +127,7 @@ export default function BlueprintsPage() {
             }
           />
         ) : view === "grid" ? (
-          <div className="grid grid-cols-1 gap-4 px-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className={`grid grid-cols-1 gap-4 px-3 sm:grid-cols-2 lg:grid-cols-3 ${compact ? "sm:gap-2" : ""}`}>
             {filtered.map((blueprint) => (
               <FeaturedBlueprintCard
                 key={blueprint.id}
@@ -174,6 +176,7 @@ function FeaturedBlueprintCard({
   blueprint: BlueprintPublicInfo;
   vendorDescriptions: VendorMap;
 }) {
+  const compact = useDisplayDensity() === "compact";
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 2);
 
   return (
@@ -187,7 +190,7 @@ function FeaturedBlueprintCard({
 
       <BlueprintThumbnail blueprint={blueprint} />
 
-      <div className="flex flex-1 items-start gap-2.5 px-3 py-2.5">
+      <div className={`flex flex-1 items-start gap-2.5 px-3 py-2.5 ${compact ? "sm:py-1.5" : ""}`}>
         <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
           <BlueprintIcon size={15} weight="regular" />
         </div>
@@ -226,13 +229,14 @@ function FeaturedBlueprintRow({
   blueprint: BlueprintPublicInfo;
   vendorDescriptions: VendorMap;
 }) {
+  const compact = useDisplayDensity() === "compact";
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 3);
 
   return (
     <Link
       to="/blueprint/$id"
       params={{ id: blueprint.id }}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
+      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint ${compact ? "sm:py-1" : ""}`}
     >
       <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
         <BlueprintIcon size={16} weight="regular" />
@@ -265,17 +269,18 @@ function FeaturedBlueprintRow({
 }
 
 function LoadingSkeleton({ view }: { view: "grid" | "list" }) {
+  const compact = useDisplayDensity() === "compact";
   if (view === "list") {
     return (
       <div className="flex flex-col gap-0.5">
         {[1, 2, 3, 4, 5].map((i) => (
-          <div key={i} className="h-[58px] animate-pulse rounded-lg bg-kumo-elevated" />
+          <div key={i} className={`h-[58px] animate-pulse rounded-lg bg-kumo-elevated ${compact ? "sm:h-[45px]" : ""}`} />
         ))}
       </div>
     );
   }
   return (
-    <div className="grid grid-cols-1 gap-4 px-3 sm:grid-cols-2 lg:grid-cols-3">
+    <div className={`grid grid-cols-1 gap-4 px-3 sm:grid-cols-2 lg:grid-cols-3 ${compact ? "sm:gap-2" : ""}`}>
       {[1, 2, 3, 4, 5, 6].map((i) => (
         <div
           key={i}
