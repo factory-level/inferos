@@ -9,6 +9,9 @@
     // shared RPC API's types reference Workers globals (Fetcher, cloudflare:workers).
     "types": ["node", "@cloudflare/workers-types"],
     "noEmit": true,
+    // The fixture's cloudflare.config.ts pulls in the Node-run scripts/ (worker-config.ts and what it
+    // imports), which name sibling modules by their .ts path as Node's type stripping requires.
+    "allowImportingTsExtensions": true,
     "paths": {
       "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"]
     }

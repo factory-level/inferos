@@ -3634,7 +3634,7 @@ async function runAgentPass(
                   `listCanvases to see the current content before retrying.`
               : toolErrorText(error);
           toolCallNotes.set(toolCallId, { error: message });
-          if (error instanceof CanvasConflictError) throw new Error(message);
+          if (error instanceof CanvasConflictError) throw new Error(message, {cause: error});
           throw error;
         }
       }

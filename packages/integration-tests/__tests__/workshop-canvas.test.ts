@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { DEFAULT_CANVAS_CATALOG } from "@gadgets/workshop-shared/canvas";
 import { startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, logIn, signUp } from "../src/rpc-client.js";
@@ -10,7 +11,7 @@ it.each([[undefined, undefined], ['true', 'false'], ['false', 'true']])("denies 
   } });
   try {
     using api = connect(harness.url);
-    expect((await api.getServerConfig()).canvasFeatures).toEqual({ composableViews: composable === "true", durableViews: false });
+    expect((await api.getServerConfig()).canvasFeatures).toEqual({ composableViews: composable === "true", durableViews: false, catalog: DEFAULT_CANVAS_CATALOG });
     using owner = await signUp(api, "canvasdisabled");
     using workspace = await owner.newGadget();
     await expect(workspace.listCanvases()).rejects.toThrow(/disabled/);
@@ -30,7 +31,7 @@ it("stores workspace-scoped compositions with atomic revisions, reconnect recove
   } });
   try {
     using api = connect(harness.url);
-    expect((await api.getServerConfig()).canvasFeatures).toEqual({ composableViews: true, durableViews: true });
+    expect((await api.getServerConfig()).canvasFeatures).toEqual({ composableViews: true, durableViews: true, catalog: DEFAULT_CANVAS_CATALOG });
     using owner = await signUp(api, "canvasowner");
     using collaborator = await signUp(api, "canvasbuilder");
     using viewer = await signUp(api, "canvasviewer");
