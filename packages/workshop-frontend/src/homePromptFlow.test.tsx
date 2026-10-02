@@ -51,6 +51,10 @@ vi.mock("./features/chat/composer/ChatComposer", () => ({
 vi.mock("./components/MeshBackground", () => ({ default: () => null }));
 vi.mock("./components/AppShell/HomeTaskSuggestions", () => ({ default: () => null }));
 vi.mock("./useDocumentTitle", () => ({ useDocumentTitle: () => {} }));
+vi.mock("./FeatureFlagsContext", async () => {
+  const { DEFAULT_UI_FEATURE_FLAGS } = await import("@gadgets/workshop-shared/feature-flags");
+  return { useUiFeatureFlags: () => ({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: false }) };
+});
 
 import { HomePageContent } from "./routes/index";
 
