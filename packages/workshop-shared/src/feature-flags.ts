@@ -14,7 +14,7 @@ export const UI_FEATURE_FLAGS = [
   { key: "openai-chatgpt-plan-usage", dev: false, default: false },
   // Operate mode: the Build ↔ Operate toggle (Operate is the InferOps Canvas), the workspace kind
   // switch, and kind-specific canvas tiles. Also needs composable views to be enabled.
-  { key: "operate-mode", dev: false, default: false },
+  { key: "operate-mode", dev: true, default: false },
 ] as const satisfies readonly UiFeatureFlagDefinition[];
 
 type UiFeatureFlag = (typeof UI_FEATURE_FLAGS)[number];
