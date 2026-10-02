@@ -2,6 +2,11 @@
 title: InferOps canvas and transactional widgets
 covers:
   - packages/workshop-frontend/src/GadgetUI.tsx
+  - packages/workshop-frontend/src/features/canvas
+  - packages/workshop-frontend/src/pages/canvas
+  - packages/workshop-frontend/src/routes/workspace_.$id.canvas.tsx
+  - packages/workshop-frontend/src/hooks/useWorkspaceWorkpieces.ts
+  - packages/workshop-frontend/src/hooks/useResizableSplit.ts
   - packages/workshop-frontend/src/components/GadgetPresence.tsx
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/canvas.ts
@@ -23,7 +28,10 @@ Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa
 
 | Path | Responsibility |
 | --- | --- |
-| `packages/workshop-frontend/src/GadgetUI.tsx` | Sandboxed iframe host and RPC handshake. |
+| `packages/workshop-frontend/src/GadgetUI.tsx` | Sandboxed iframe host and RPC handshake; also hosts gadget widgets on the canvas page. |
+| `packages/workshop-frontend/src/pages/canvas/CanvasPage.tsx` | Canvas page at `/workspace/$id/canvas`: workspace chat beside the composed views. |
+| `packages/workshop-frontend/src/features/canvas/` | View picker, read-only renderer, gadget widget host and layout editor. |
+| `packages/workshop-frontend/src/hooks/` | Workpiece-list subscription and chat/pane split shared with the workspace editor. |
 | `packages/workshop-frontend/src/components/GadgetPresence.tsx` | Existing human presence display. |
 | `packages/workshop-shared/src/api.ts` | Human presence protocol and native client/server contracts. |
 | `packages/workshop-backend/src/overseer.ts` | Session roster and agent execution orchestration. |
@@ -61,13 +69,13 @@ Edits add/remove/move/configure sections or widgets, rename the view, or restore
 
 This engine performs no storage, authorization or feature enforcement. Its result is suitable for preview. Before persisting, a server caller must check installation flags and workspace edit authority, resolve resource capabilities independently, and compare/write inside one storage transaction. A test of this pure engine is not evidence that concurrent durable writes are safe.
 
-Bootstrap writes `views/operations.json` with the configured target reference. `views:check` runs the pinned validator, bounds file count/size, rejects links/executable files, duplicate view IDs and any widget other than a project board (gadget references are workspace-local, so a portable starter cannot carry one), and reports runtime readiness false. It does not load the InferOps fixture, connect a provider or publish a view. Supporting pins expose a builder Canvas dialog when composable views are enabled; importing the starter creates a new definition.
+Bootstrap writes `views/operations.json` with the configured target reference. `views:check` runs the pinned validator, bounds file count/size, rejects links/executable files, duplicate view IDs and any widget other than a project board (gadget references are workspace-local, so a portable starter cannot carry one), and reports runtime readiness false. It does not load the InferOps fixture, connect a provider or publish a view. Supporting pins expose a builder Canvas page when composable views are enabled; importing the starter creates a new definition.
 
 ## Workspace-scoped definition storage
 
 The existing Overseer durable object's typed storage now has a `canvases` collection. `WorkspaceCanvasStore` uses that collection and the object's synchronous transaction mechanism; it does not introduce a separate database or domain-data cache. Owner/build sessions expose list, get, create, edit and delete methods on the existing Overseer capability. The use-only surface explicitly denies all five methods, covered by the exhaustive use-role suite. Unrelated users still fail the native workspace-open authorization, and IDs are resolved only inside the current workspace's collection.
 
-Every storage operation requires deployment bindings `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` to equal the string `true`. These are structural installation switches, separate from admin soft settings and rollout flags. Disabling either denies reads and mutations without deleting stored records. The consumer launcher maps the corresponding config flags to these bindings. Public server configuration exposes effective flags; the frontend hides the Canvas dialog when composition is disabled. Agent canvas tools and the board data adapter remain pending.
+Every storage operation requires deployment bindings `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` to equal the string `true`. These are structural installation switches, separate from admin soft settings and rollout flags. Disabling either denies reads and mutations without deleting stored records. The consumer launcher maps the corresponding config flags to these bindings. Public server configuration exposes effective flags; the frontend hides the editor's Canvas button and the Canvas page explains that composition is disabled. Agent canvas tools and the board data adapter remain pending.
 
 Creation accepts content only, mints a new UUID and starts at revision zero. It enforces 64 active definitions per workspace. Imports/recreation never reuse the deleted view's identity, avoiding stale-edit confusion. Edit and delete compare expected revisions in the same synchronous transaction as the write. Invalid edit batches leave persisted content unchanged. Delete removes only the definition; underlying InferOps data is untouched. Unknown stored schema versions fail validation rather than being silently rewritten.
 
@@ -75,10 +83,14 @@ Definitions inherit the native workspace build-access boundary; they do not yet 
 
 Real Workers/RPC tests cover concurrent revision conflicts, rollback, scope isolation, build/use roles, quota and recreation identity. A harness configuration update reloads Workers with durable views disabled, proves access is denied, then reenables them and reads the original definition. This demonstrates Worker-reload retention, not a cloud rollout, OS crash recovery, schema migration or completed consumer view experience.
 
-## Builder composition UI
+## Canvas page and builder composition UI
 
-The workspace Canvas dialog uses Kumo controls and the shared guarded operation engine. Sections can be renamed; a separate move form selects a board and destination section, appends it there, and returns focus to the source selector. This avoids removing the focused control along with a moved card. Existing upward ordering and undo can refine or reverse the move. It supports temporary in-memory views or saved definitions through the existing Overseer capability. Temporary state survives closing the dialog but not leaving the workspace or reloading. Saved changes compare revisions; rejected writes retain the displayed snapshot and offer an explicit reload. Undo restores prior content with a new revision and retains up to 20 session-local snapshots per view. Import validates bounded JSON and sends only content, so stored identities and workspace authority are never imported.
+`/workspace/$id/canvas` is a fullscreen page (the root already treats every `/workspace/` path as chrome-free). It opens the workspace through the same `useWorkspaceOpen` flow as the editor, so share keys, observer confirmation and open failures behave identically, and use-only collaborators are redirected to the editor route, which shows them only the deployed gadget UI. The workspace's chat runs in a resizable left column (`ChatInterface`, with the remembered width shared with the editor) and the canvas fills the rest; on narrow screens a Chat/Canvas toggle shows one at a time. Chat selection lives in the `chat` search parameter. Opening a gadget from chat navigates to the editor with that gadget selected. The editor's Canvas button now navigates to this page instead of opening a dialog.
 
-Async responses from an earlier workspace are ignored. A slow file read cannot initiate a create against a workspace that has since been left. Board widgets display the target reference and an explicit unconnected state; layout controls do not load or mutate domain records. Widget data, agent tools, individual sharing and performance benchmarks remain follow-up work.
+Outside edit mode the active view renders read-only. Sections are size containers, so column counts follow the canvas pane's width rather than the viewport: two- and three-column sections collapse to one column below 48rem, and three-column sections show two columns until 64rem. Gadget widgets resolve their reference against the live workpiece list and open a `GadgetClient` through the workspace's `Overseer` (`getGadget`), disposing it when the widget goes away. They then render through the existing sandboxed `GadgetUI` host, keyed by the gadget's head commit so an accepted change reloads it. A widget does not load its bundle until it has been within 200px of the screen. Missing gadgets and drafts that are still pending in a conversation are never opened; each shows an explanatory state instead. Board widgets show their reference and the explicit unconnected state.
 
-Export revalidates the active definition and uses the existing browser file-download helper. The JSON contains only the strict portable schema, including required resource references. It contains no ownership, grants, credentials or transactional rows. The filename uses the validated view ID rather than the display title. Import preserves section/widget identities within the new composition but creates a fresh view ID and revision zero; it never carries authority from the source workspace. Exporting a temporary view is allowed, and does not implicitly save it to the server.
+Edit mode uses Kumo controls and the shared guarded operation engine. Sections can be renamed. Each section adds a board by reference or an accepted gadget from a picker. A separate move form selects a widget and destination section, appends it there, and returns focus to the source selector. This avoids removing the focused control along with a moved card. Existing upward ordering and undo can refine or reverse the move. It supports temporary in-memory views or saved definitions through the existing Overseer capability. Temporary views are labelled unsaved and last only while the page stays open. Saved changes compare revisions; rejected writes retain the displayed snapshot and offer an explicit reload. Undo restores prior content with a new revision and retains up to 20 session-local snapshots per view. Import validates bounded JSON and sends only content, so stored identities and workspace authority are never imported.
+
+Async responses from an earlier workspace are ignored. A slow file read cannot initiate a create against a workspace that has since been left. Layout controls do not load or mutate domain records or gadget code. Board data, gadget console logs in chat, agent canvas tools, individual sharing and performance benchmarks remain follow-up work.
+
+Export revalidates the active definition and uses the existing browser file-download helper. The JSON contains only the strict portable schema, including required resource references. It contains no ownership, grants, credentials or transactional rows. The filename uses the validated view ID rather than the display title. Import preserves section/widget identities within the new composition but creates a fresh view ID and revision zero; it never carries authority from the source workspace. Exporting a temporary view is allowed, and does not implicitly save it to the server. Exported views that contain gadget widgets are rejected by the consumer starter validator, because gadget references are workspace-local.

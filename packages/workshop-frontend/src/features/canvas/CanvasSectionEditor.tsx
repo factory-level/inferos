@@ -1,17 +1,22 @@
 import { CanvasWidgetCard } from './CanvasWidgetCard'
+import { CanvasAddGadgetForm } from './CanvasAddGadgetForm'
 import { Button, Input } from '@cloudflare/kumo'
+import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasOperation, CanvasSection } from '@gadgets/workshop-shared/canvas'
+import { sectionGridClass } from './canvasLayout'
 
 type Props = {
   section: CanvasSection
   busy: boolean
   first: boolean
+  gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
+  acceptedGadgets: GadgetSummary[]
   onMoveUp: () => void
   onEdit: (operations: CanvasOperation[]) => Promise<boolean>
 }
 
-export const CanvasSectionEditor = ({ section, busy, first, onMoveUp, onEdit }: Props) => (
-  <section className="space-y-3 rounded-lg border border-kumo-line p-4" aria-label={section.title}>
+export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGadgets, onMoveUp, onEdit }: Props) => (
+  <section className="@container space-y-3 rounded-lg border border-kumo-line p-4" aria-label={section.title}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="font-medium text-kumo-default">{section.title}</h3>
       <div className="flex flex-wrap items-center gap-2">
@@ -33,10 +38,11 @@ export const CanvasSectionEditor = ({ section, busy, first, onMoveUp, onEdit }: 
       <Input label="Section title" name="title" defaultValue={section.title} required maxLength={120} disabled={busy} />
       <Button type="submit" disabled={busy}>Rename section</Button>
     </form>
-    <div className={`grid grid-cols-1 gap-3 ${section.columns === 3 ? 'lg:grid-cols-3' : section.columns === 2 ? 'lg:grid-cols-2' : ''}`}>
+    <div className={sectionGridClass(section.columns)}>
       {section.widgets.map((widget, index) => <CanvasWidgetCard key={widget.id} widget={widget} section={section}
-        index={index} busy={busy} onEdit={onEdit} />)}
+        index={index} busy={busy} gadgets={gadgets} onEdit={onEdit} />)}
     </div>
+    <CanvasAddGadgetForm section={section} gadgets={acceptedGadgets} busy={busy} onEdit={onEdit} />
     <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
       event.preventDefault()
       const form = event.currentTarget

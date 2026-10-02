@@ -34,7 +34,7 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 | `inferos/` | Pinned Git submodule |
 | `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
-| `views/operations.json` | Guarded starter composition; import it from the workspace Canvas dialog on supporting pins |
+| `views/operations.json` | Guarded starter composition; import it from the workspace Canvas page on supporting pins |
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
@@ -44,7 +44,7 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 
 `pnpm inferos:check` validates settings, the actual submodule HEAD and the wrapper's staged gitlink. It reports `pending` adapters and `modifiedUpstream`. A true modifiedUpstream means the run includes local experiments and is not an exact-pinned-revision proof. An `ok` result proves configuration/pin consistency only; it is not proof that data/views/style are applied or that a server is healthy. A pin mismatch must be resolved deliberately, not bypassed by editing the validator.
 
-Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Pins containing the Canvas dialog support `composableViews` locally; `durableViews` additionally requires the native canvas store. The launcher passes both switches to the backend, whose public configuration controls the builder UI. Unsupported pins fail startup explicitly. Pins containing the custom Worker adapter support `customCloudflareCode` locally. This prevents a config file from falsely advertising running features.
+Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Pins containing the Canvas page or dialog support `composableViews` locally; `durableViews` additionally requires the native canvas store. The launcher passes both switches to the backend, whose public configuration controls the builder UI. Unsupported pins fail startup explicitly. Pins containing the custom Worker adapter support `customCloudflareCode` locally. This prevents a config file from falsely advertising running features.
 
 ## Local preflight
 

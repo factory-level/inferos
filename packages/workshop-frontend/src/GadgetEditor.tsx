@@ -1,6 +1,5 @@
-import { CanvasDialog } from './features/canvas/CanvasDialog'
 import { useServerConfig } from './ServerConfigContext'
-import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import {
@@ -33,7 +32,6 @@ import {
   GadgetSummary,
   WorktreeSummary,
   BlueprintOutput,
-  WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
 import WorkpieceCodeInterface from './features/code/WorkpieceCodeInterface'
@@ -65,6 +63,8 @@ import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 import ReconnectingChip from './components/ReconnectingChip'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
 import { useWorkspaceOpen } from './useWorkspaceOpen'
+import { useWorkspaceWorkpieces } from './hooks/useWorkspaceWorkpieces'
+import { useResizableSplit } from './hooks/useResizableSplit'
 import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
@@ -93,59 +93,6 @@ class ConsoleLogSubscriberImpl extends RpcTarget implements ConsoleLogSubscriber
       this.logBufferRef.current.push(...logs.map(l => ({ ...l, source: 'server' as const })))
       this.onBufferUpdated()
     }
-  }
-}
-
-// ─── workpieces subscriber ────────────────────────────────────────────────────
-
-// Receives the workspace's workpiece list (see Overseer.subscribeToWorkpieces()). Entries
-// received before ready() are buffered so a (re)subscription replaces the list atomically instead
-// of flashing a partially-populated one.
-class WorkpiecesSubscriberImpl extends RpcTarget implements WorkpiecesSubscriber {
-  private buffer: Map<WorkpieceId, WorkpieceSummary> | null = new Map()
-  private cancelled = false
-
-  constructor(
-    private onUpdate: (
-      update: (prev: Map<WorkpieceId, WorkpieceSummary>) => Map<WorkpieceId, WorkpieceSummary>,
-    ) => void,
-    private onReady: (initial: Map<WorkpieceId, WorkpieceSummary>) => void,
-  ) {
-    super()
-  }
-
-  entry(summary: WorkpieceSummary) {
-    if (this.cancelled) return
-    if (this.buffer) {
-      this.buffer.set(summary.id, summary)
-      return
-    }
-    this.onUpdate(prev => new Map(prev).set(summary.id, summary))
-  }
-
-  removed(id: WorkpieceId) {
-    if (this.cancelled) return
-    if (this.buffer) {
-      this.buffer.delete(id)
-      return
-    }
-    this.onUpdate(prev => {
-      const next = new Map(prev)
-      next.delete(id)
-      return next
-    })
-  }
-
-  ready() {
-    if (this.cancelled) return
-    const initial = this.buffer ?? new Map<WorkpieceId, WorkpieceSummary>()
-    this.buffer = null
-    this.onReady(initial)
-  }
-
-  // local call
-  cancel() {
-    this.cancelled = true
   }
 }
 
@@ -344,35 +291,12 @@ function PaneTab({
   )
 }
 
-const CHAT_WIDTH_STORAGE_KEY = 'gadgets:workshop:chatWidth'
 // Keep the old key prefix so existing "open" / "closed" preferences can migrate lazily.
 const WORKSPACE_VIEW_STORAGE_KEY_PREFIX = 'gadgets:workshop:workspaceVisibility:'
 const APP_RAIL_EXPANDED_STORAGE_KEY = 'gadgets:workshop:appRailExpanded'
-const MIN_CHAT_WIDTH = 280
-const MIN_WORKSPACE_WIDTH = 400
-const DEFAULT_CHAT_WIDTH = 420
 const WORKSPACE_TRANSITION_MS = 200
 
 const isBrowser = typeof window !== 'undefined'
-
-function clampChatWidth(width: number) {
-  if (!isBrowser) return Math.max(MIN_CHAT_WIDTH, Math.min(DEFAULT_CHAT_WIDTH, width))
-  const max = Math.max(MIN_CHAT_WIDTH, window.innerWidth - MIN_WORKSPACE_WIDTH)
-  return Math.max(MIN_CHAT_WIDTH, Math.min(max, width))
-}
-
-function getInitialChatWidth() {
-  if (!isBrowser) return DEFAULT_CHAT_WIDTH
-  const fallback = Math.min(DEFAULT_CHAT_WIDTH, Math.floor(window.innerWidth * 0.38))
-  let parsed = NaN
-  try {
-    const stored = window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY)
-    if (stored) parsed = Number(stored)
-  } catch {
-    // private mode / sandboxed iframes
-  }
-  return clampChatWidth(Number.isFinite(parsed) ? parsed : fallback)
-}
 
 function workspaceViewStorageKey(gadgetId: string) {
   // Per-workspace keys may outlive deleted workspaces, but each entry is tiny and bounded by
@@ -441,7 +365,6 @@ function NoGadgetPlaceholder({ height }: { height: string }) {
 
 export default function GadgetEditor() {
   const canvasFeatures = useServerConfig()?.canvasFeatures
-  const [canvasOpen, setCanvasOpen] = useState(false)
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id
   const navigate = useNavigate()
@@ -458,8 +381,6 @@ export default function GadgetEditor() {
   // ── core state ──────────────────────────────────────────────────────────────
   // The workspace's workpiece list (gadget-type workpieces only in v1), kept live via
   // subscribeToWorkpieces(). `workpiecesReady` flips once the initial listing has arrived.
-  const [workpieces, setWorkpieces] = useState<Map<WorkpieceId, WorkpieceSummary>>(new Map())
-  const [workpiecesReady, setWorkpiecesReady] = useState(false)
   const knownWorkpieceIdsRef = useRef<Set<WorkpieceId> | null>(null)
   // GadgetClient stub for the currently-selected gadget workpiece. Per-gadget operations (UI
   // bundle, RPC connection, bindings, blueprints) go through this stub. Null while the workspace
@@ -495,6 +416,7 @@ export default function GadgetEditor() {
       toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
     },
   })
+  const { workpieces, ready: workpiecesReady } = useWorkspaceWorkpieces(overseer, id)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 
   // The workspace-level flag covers reopen failures; the socket-level flag covers the outage
@@ -510,9 +432,6 @@ export default function GadgetEditor() {
   const isUseOnly = metadata?.role === 'use'
 
   // ── layout ───────────────────────────────────────────────────────────────────
-  const [chatWidth, setChatWidth] = useState(getInitialChatWidth)
-  const chatWidthRef = useRef(chatWidth)
-  const [isResizing, setIsResizing] = useState(false)
   const [chosenTab, setActiveTab] = useState<RightTab>('app')
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(() =>
     getStoredWorkspaceView(id)
@@ -862,6 +781,7 @@ export default function GadgetEditor() {
   const showFullEditor = layoutModeReady && (
     showingActivity || (hasVisibleWorkpieces && (workspaceView === null ? !simpleMode : workspaceView.mode === 'app'))
   )
+  const { width: chatWidth, isResizing, handleProps: resizeHandleProps } = useResizableSplit(showFullEditor)
   const showOutputRail = layoutModeReady && hasAnyApps && !showFullEditor
   const paneShowsActivity = showingActivity || activityClosing
   useEffect(() => {
@@ -912,22 +832,12 @@ export default function GadgetEditor() {
     setConsoleLogCount(0)
   }, [])
 
-  chatWidthRef.current = chatWidth
-
   const handleClientConsoleLog = useCallback((log: ConsoleLogEvent) => {
     const method = (console as any)[log.level] ?? console.log
     method('client:', ...log.message)
     if (selectedChatIdRef.current !== null) {
       consoleLogBufferRef.current.push({ ...log, source: 'client' as const })
       setConsoleLogCount(consoleLogBufferRef.current.length)
-    }
-  }, [])
-
-  const persistChatWidth = useCallback((width: number) => {
-    try {
-      window.localStorage.setItem(CHAT_WIDTH_STORAGE_KEY, String(Math.round(width)))
-    } catch {
-      // private mode / sandboxed iframes
     }
   }, [])
 
@@ -1009,14 +919,6 @@ export default function GadgetEditor() {
       replace: true,
     })
   }, [workpiecesReady, allGadgets, effectiveSelectedChatId, setWorkspaceVisibility, navigate, id])
-
-  useEffect(() => {
-    const handleResize = () => {
-      setChatWidth(width => clampChatWidth(width))
-    }
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
 
   // ── chat count / auto-switch ─────────────────────────────────────────────────
   const handleChatCountChange = useCallback((count: number, chatZeroExists: boolean) => {
@@ -1107,8 +1009,6 @@ export default function GadgetEditor() {
     activityReturnViewRef.current = null
     setActivityClosing(false)
     setWorkspaceTransitionEnabled(false)
-    setWorkpieces(new Map())
-    setWorkpiecesReady(false)
     knownWorkpieceIdsRef.current = null
     turnOutputRef.current = null
     setUserNavigatedToList(false)
@@ -1168,76 +1068,6 @@ export default function GadgetEditor() {
       navigateToChat(0, { replace: true })
     }
   }, [layoutModeReady, simpleMode, pinInitialChatSelection, urlChatId, navigateToChat, navigate, id])
-
-  // ── resize handle ─────────────────────────────────────────────────────────────
-  //
-  // Pointer capture keeps resizing reliable when dragging across the gadget iframe.
-  const handleResizePointerDown = useCallback(
-    (e: ReactPointerEvent<HTMLDivElement>) => {
-      if (!showFullEditor) return
-      e.preventDefault()
-      e.currentTarget.setPointerCapture(e.pointerId)
-      setIsResizing(true)
-    },
-    [showFullEditor],
-  )
-  const handleResizePointerMove = useCallback(
-    (e: ReactPointerEvent<HTMLDivElement>) => {
-      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
-      setChatWidth(clampChatWidth(e.clientX))
-    },
-    [],
-  )
-  const handleResizePointerUp = useCallback(
-    (e: ReactPointerEvent<HTMLDivElement>) => {
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId)
-      }
-      const width = e.type === 'pointercancel'
-        ? chatWidthRef.current
-        : clampChatWidth(e.clientX)
-      setChatWidth(width)
-      persistChatWidth(width)
-      setIsResizing(false)
-    },
-    [persistChatWidth],
-  )
-
-  useEffect(() => {
-    if (!isResizing) return
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'col-resize'
-    return () => {
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-    }
-  }, [isResizing])
-
-  // ── workpiece list subscription ───────────────────────────────────────────────
-  useEffect(() => {
-    if (!overseer) return
-    let sub: RpcStub<{}> | null = null
-    let cancelled = false
-    const subscriber = new WorkpiecesSubscriberImpl(
-      update => setWorkpieces(update),
-      initial => {
-        setWorkpieces(initial)
-        setWorkpiecesReady(true)
-      },
-    )
-    overseer.stub
-      .subscribeToWorkpieces(subscriber)
-      .then(s => {
-        if (cancelled) { s[Symbol.dispose](); return }
-        sub = s
-      })
-      .catch(err => console.error('Failed to subscribe to workpieces:', err))
-    return () => {
-      cancelled = true
-      subscriber.cancel()
-      sub?.[Symbol.dispose]()
-    }
-  }, [overseer])
 
   // ── selected gadget stub ────────────────────────────────────────────────────────
   // Open a GadgetClient for the selected workpiece when it is a gadget. getGadget() pipelines on
@@ -1470,8 +1300,6 @@ export default function GadgetEditor() {
   // ── always render the full two-pane edit layout; preview overlays on top ──────
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
-      {canvasFeatures?.composableViews && <CanvasDialog key={metadata.id} open={canvasOpen} onOpenChange={setCanvasOpen}
-        storage={canvasFeatures.durableViews ? { kind: 'durable', api: overseer.stub } : { kind: 'temporary' }} />}
       {/* ═══ SHARED TOP BAR (visible in both modes) ════════════════════════════ */}
       <div
         className="relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3"
@@ -1547,7 +1375,7 @@ export default function GadgetEditor() {
           )}
         </div>
 
-        {canvasFeatures?.composableViews && <WorkshopButton onClick={() => setCanvasOpen(true)}>Canvas</WorkshopButton>}
+        {canvasFeatures?.composableViews && <WorkshopButton onClick={() => navigate({ to: '/workspace/$id/canvas', params: { id: id! }, search: {} })}>Canvas</WorkshopButton>}
 
         {/* Right: presence, cost, workspace, share, blueprints */}
         <div className="hidden flex-shrink-0 items-center gap-1 md:flex">
@@ -1821,10 +1649,7 @@ export default function GadgetEditor() {
         <div
           className={`relative flex-shrink-0 touch-none cursor-col-resize overflow-visible bg-kumo-line max-md:hidden ${workspaceTransitionClass}`}
           style={{ width: showFullEditor ? 1 : 0 }}
-          onPointerDown={handleResizePointerDown}
-          onPointerMove={handleResizePointerMove}
-          onPointerUp={handleResizePointerUp}
-          onPointerCancel={handleResizePointerUp}
+          {...resizeHandleProps}
         >
           <div className="absolute inset-y-0 -left-2 -right-2" />
         </div>
