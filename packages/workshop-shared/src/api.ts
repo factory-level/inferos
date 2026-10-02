@@ -1048,7 +1048,7 @@ export const MAX_SITE_NAME_LENGTH = 40;
  * What this deployment calls itself when the admin has not set a custom `siteName`. Also the
  * product's own name, so it appears in prose the server and UI address to the user.
  */
-export const DEFAULT_SITE_NAME = "Cloudflare OS";
+export const DEFAULT_SITE_NAME = "InferOS";
 
 /**
  * The name to display for this deployment. Accepts an unset or not-yet-loaded `siteName` so both
@@ -1705,10 +1705,30 @@ export type GadgetMetadata = {
    */
   defaultGadgetId?: WorkpieceId;
 
+  /**
+   * How the workspace runs and where it appears (see `WorkspaceKind`). Absent means "app": every
+   * workspace created before kinds existed, and records the owner's list stored before then.
+   */
+  kind?: WorkspaceKind;
+
   // TODO:
   // - created / modified / activity times
   // - icon? thumbnail?
 }
+
+/**
+ * What a workspace is, which decides exactly how it runs and where it is presented: an "app" is a
+ * full-screen gadget its users open (with a chat/app toggle), a "widget" is a small gadget shown as
+ * a tile on InferOps Canvas screens, and a "workflow" has no UI and runs on timed or event
+ * triggers. The kind changes only through an explicit `Overseer.setKind()`; nothing infers it.
+ */
+export type WorkspaceKind = "app" | "widget" | "workflow";
+
+/** Every `WorkspaceKind`, in the order they are offered. */
+export const WORKSPACE_KINDS: readonly WorkspaceKind[] = ["app", "widget", "workflow"];
+
+/** The kind a workspace has when none was ever set. */
+export const DEFAULT_WORKSPACE_KIND: WorkspaceKind = "app";
 
 /**
  * GadgetMetadata extended with timestamps. These are available when listing gadgets from the
@@ -2101,6 +2121,9 @@ export interface Overseer extends RpcTarget {
 
   /** Change the workspace title. */
   setTitle(title: string): Promise<void>;
+
+  /** Change the workspace kind (see `WorkspaceKind`). Build role only. */
+  setKind(kind: WorkspaceKind): Promise<void>;
 
   /** Pin or unpin this workspace in the user's list. */
   setPinned(pinned: boolean): Promise<void>;
