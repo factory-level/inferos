@@ -30,9 +30,7 @@ import type { CodeChange } from "./code-change.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
-export const SERVICE_SALT = new Uint8Array([
-  0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
-]);
+export { SERVICE_SALT } from "./password-salt.js";
 
 /**
  * How a connect, reconnect, ensure-resources or sign-in flow starts, as returned by

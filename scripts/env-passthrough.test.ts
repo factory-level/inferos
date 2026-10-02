@@ -79,8 +79,10 @@ const EXPECTED: Record<string, ExpectedArea> = {
   },
   "packages/workshop-backend": {
     uncached: ["BUNDLED_BLUEPRINTS_DIR"],
-    // Operator command invoked directly by the consumer runtime, never inside a cached build.
-    external: ["INFEROS_ADMIN_SESSION"],
+    // Operator commands invoked directly (the consumer runtime's profile init, `pnpm dev:setup`),
+    // never inside a cached build. dev:setup reads the VITE_DEV_* login defaults and backend host so
+    // it signs in as the same account the dev frontend auto-logs in to.
+    external: ["INFEROS_ADMIN_SESSION", "VITE_BACKEND_HOST", "VITE_DEV_PASSWORD", "VITE_DEV_USERNAME"],
   },
   // Read by the Bun companion at runtime, never during a cached build.
   "assistant-plugins/openai": {
