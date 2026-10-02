@@ -1,6 +1,8 @@
 ---
 title: InferOps canvas and transactional widgets
 covers:
+  - packages/workshop-frontend/src/features/operate
+  - packages/workshop-frontend/src/features/workspace-kind
   - packages/workshop-frontend/src/GadgetUI.tsx
   - packages/workshop-frontend/src/features/canvas
   - packages/workshop-frontend/src/pages/inferops-canvas
@@ -138,4 +140,4 @@ Each workspace stores an explicit kind, `WorkspaceKind` in `workshop-shared/src/
 
 The kind is deterministic. The Overseer's `kind` singleton changes only through `Overseer.setKind()`, which is build-role only (the use-role capability denies it). Nothing infers it from the workspace's code. Workspaces stored before kinds existed read the default `app`. The Overseer sends the kind in `getMetadata()` and `subscribeToMetadata()` to both roles, because it decides how a use-role viewer is shown the workspace. `setKind` also mirrors the kind into the owner's workspace list (`User.updateKind`), so `listGadgets()` can group workspaces by kind without opening each one. Older list records have no `kind`, which also means `app`.
 
-The kind does not yet change presentation. The frontend surfaces that act on it (the Build/Operate toggle, the kind switch, and kind-specific canvas tiles) are separate, flag-gated work. Creating a workspace with a kind, and an agent tool to change it, are not implemented.
+Behind the `operate-mode` UI flag (on in local development; also requires composable views), the frontend acts on the kind. The workspace editor header shows a kind switch, with a confirmation step, for the build role. Apps get a Chat ↔ App toggle. Workflows replace the app preview with a Triggers panel listing their bound hooks (scheduled tasks register as hooks) and the pending-approval count. The workspace list shows a kind chip. The sidebar gains a Build | Operate toggle whose mode is derived from the URL: the InferOps Canvas routes are Operate, where the sidebar lists saved screens. Creating a workspace with a kind, publishing to Operate and the operate chat are designed in [operate-mode](../design/operate-mode.md) but not implemented.
