@@ -126,3 +126,15 @@ it('picks up saved views edited elsewhere, such as by the chat agent', async () 
     vi.useRealTimers()
   }
 })
+
+it('catches up on edits made while the page was hidden as soon as it is shown again', async () => {
+  const storage = api()
+  let visibility: DocumentVisibilityState = 'hidden'
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility)
+  await render({ kind: 'durable', api: storage })
+  storage.listCanvases.mockResolvedValue([{ ...initial(), revision: '2', title: 'Edited while away' }])
+  visibility = 'visible'
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+  expect(canvas.active?.title).toBe('Edited while away')
+  vi.restoreAllMocks()
+})

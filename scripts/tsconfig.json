@@ -22,7 +22,10 @@
   // which scripts/generate-worker-configs.ts imports under `node`.
   // The profile operator consumes the full Workers RPC types as well as Node globals. Its separate
   // tsconfig.operator.json is checked by the backend build without widening every build script.
-  "exclude": ["../packages/workshop-backend/scripts/initialize-consumer-profile.ts"],
+  "exclude": [
+    "../packages/workshop-backend/scripts/initialize-consumer-profile.ts",
+    "../packages/workshop-backend/scripts/dev-setup.ts"
+  ],
   "include": [
     "**/*.ts",
     "../packages/workshop-backend/scripts/*.ts",

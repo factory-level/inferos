@@ -42,6 +42,10 @@
     "./canvas": {
       "types": "./src/canvas.ts",
       "import": "./src/canvas.ts"
+    },
+    "./password-salt": {
+      "types": "./src/password-salt.ts",
+      "import": "./src/password-salt.ts"
     }
   },
   "scripts": {

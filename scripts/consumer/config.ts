@@ -40,7 +40,7 @@ export interface ConsumerProvenance {
 
 const defaults: Pick<ConsumerConfig, "features" | "styling"> = {
   features: { composableViews: false, durableViews: false, customCloudflareCode: false },
-  styling: { siteName: "My Workspace", density: "comfortable", theme: "system" },
+  styling: { siteName: "InferOS", density: "comfortable", theme: "system" },
 };
 const profiles: Record<ConsumerConfig["profile"], {
   features: Partial<ConsumerConfig["features"]>;
@@ -49,7 +49,7 @@ const profiles: Record<ConsumerConfig["profile"], {
   personal: { features: {}, styling: {} },
   "inferops-operations": {
     features: { composableViews: true, durableViews: true },
-    styling: { siteName: "InferOps Workspace", density: "compact" },
+    styling: { density: "compact" },
   },
 };
 

@@ -45,11 +45,11 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
 
   // Saved views can change outside this page: the chat agent edits them while the user watches.
   // A quiet re-read between the user's own operations picks those edits up; it never interrupts an
-  // operation in flight, and is skipped while the page is hidden.
+  // operation in flight. It pauses while the page is hidden and catches up as soon as it is shown.
   useEffect(() => {
     if (!api) return
     let stopped = false
-    const timer = setInterval(() => {
+    const refresh = () => {
       if (pending.current || document.visibilityState !== 'visible') return
       const current = generation.current
       api.listCanvases().then(result => {
@@ -58,8 +58,14 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
         setViews(previous => sameViews(previous, loaded) ? previous : loaded)
         setActiveId(id => loaded.some(view => view.id === id) ? id : loaded[0]?.id ?? null)
       }).catch(() => {})
-    }, CANVAS_REFRESH_MS)
-    return () => { stopped = true; clearInterval(timer) }
+    }
+    const timer = setInterval(refresh, CANVAS_REFRESH_MS)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', refresh)
+    }
   }, [api])
 
   const run = async (task: () => Promise<() => void>) => {

@@ -9,7 +9,8 @@ import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalConta
 import { useDocumentTitle } from '../../useDocumentTitle'
 import { MAX_SCREEN_WORKSPACES, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
 
-const BLANK_TEMPLATE = ''
+// Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
+const BLANK_TEMPLATE = ':blank'
 
 // Kumo's Select trigger in the shell's filled-control treatment, matching WorkshopInput.
 const FILLED_SELECT = '!h-9 rounded-md border-0 bg-kumo-control text-[13px] text-kumo-default shadow-none ring-0'

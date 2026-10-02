@@ -6,5 +6,5 @@
     "erasableSyntaxOnly": true,
     "paths": { "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"] }
   },
-  "include": ["scripts/initialize-consumer-profile.ts"]
+  "include": ["scripts/initialize-consumer-profile.ts", "scripts/dev-setup.ts"]
 }

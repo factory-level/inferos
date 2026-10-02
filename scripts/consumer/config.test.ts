@@ -10,17 +10,17 @@ const candidate = () => ({
 test("operations inherits supported view defaults, curated styling and per-field provenance", () => {
   const { config, provenance } = resolveConsumerConfig(candidate());
   assert.deepEqual(config.features, { composableViews: true, durableViews: true, customCloudflareCode: false });
-  assert.deepEqual(config.styling, { siteName: "InferOps Workspace", density: "compact", theme: "system" });
+  assert.deepEqual(config.styling, { siteName: "InferOS", density: "compact", theme: "system" });
   assert.deepEqual(provenance, {
     features: { composableViews: "profile", durableViews: "profile", customCloudflareCode: "default" },
-    styling: { siteName: "profile", density: "profile", theme: "default" },
+    styling: { siteName: "default", density: "profile", theme: "default" },
   });
 });
 
 test("personal retains baseline defaults and explicit false overrides operations", () => {
   const personal = resolveConsumerConfig({ ...candidate(), profile: "personal" });
   assert.deepEqual(personal.config.features, { composableViews: false, durableViews: false, customCloudflareCode: false });
-  assert.equal(personal.config.styling.siteName, "My Workspace");
+  assert.equal(personal.config.styling.siteName, "InferOS");
   assert.equal(personal.provenance.styling.density, "default");
   const operations = resolveConsumerConfig({ ...candidate(), features: { durableViews: false }, styling: { density: "comfortable", theme: "dark" } });
   assert.equal(operations.config.features.durableViews, false);

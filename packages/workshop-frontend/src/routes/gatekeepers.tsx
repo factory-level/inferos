@@ -662,10 +662,11 @@ function ConnectorsPage() {
 
   // Connectable vendors = OAuth/resource gatekeepers plus opt-in ambient ones, rendered identically.
   // An ambient vendor is recognized by `description.autoProvisionsAccount`, which routes the connect
-  // action to a direct (no-OAuth) add instead.
+  // action to a direct (no-OAuth) add instead. One that also offers resources is listed by both
+  // sources; only `addable` knows whether the user can still opt in, so it is the one shown.
   const availableVendors = useMemo<VendorEntry[]>(
     () => [
-      ...vendors,
+      ...vendors.filter((v) => !v.description.autoProvisionsAccount),
       ...addable,
     ],
     [vendors, addable],
