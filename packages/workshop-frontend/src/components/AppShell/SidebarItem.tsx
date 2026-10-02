@@ -19,6 +19,8 @@ export type SidebarItemProps = {
   matchPrefix?: boolean
   /** Overrides the pathname match, for rows told apart by more than their path (e.g. search). */
   active?: boolean
+  /** Runs on activation, before navigation (e.g. to record the open in the operate session). */
+  onClick?: () => void
 }
 
 export default function SidebarItem({
@@ -31,6 +33,7 @@ export default function SidebarItem({
   collapsed = false,
   matchPrefix = false,
   active,
+  onClick,
 }: SidebarItemProps) {
   // Resolve the active path manually so we can style the icon as well as the row. For parameterized
   // routes (e.g. "/gatekeepers/$appId"), substitute the params so the resolved path can match.
@@ -52,6 +55,7 @@ export default function SidebarItem({
     <Link
       {...linkProps}
       title={collapsed ? label : undefined}
+      onClick={onClick}
       aria-current={isActive ? 'page' : undefined}
       className={[
         'group relative flex h-11 items-center gap-2.5 rounded-lg px-2.5 text-[14px] leading-5 transition-colors md:h-8 md:text-[13px] md:leading-[18px]',

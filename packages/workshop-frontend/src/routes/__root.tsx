@@ -15,6 +15,7 @@ import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 import { useAppMode, useOperateModeAvailable } from '../features/operate/useAppMode'
+import { OperateSessionProvider } from '../features/operate/OperateSessionContext'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -141,7 +142,8 @@ function AuthenticatedShell({
   // Called here rather than only in the sidebar so Build locations are remembered for the
   // Operate → Build toggle even while the fullscreen workspace editor has no sidebar.
   const mode = useAppMode()
-  const operateShell = useOperateModeAvailable() && mode === 'operate'
+  const operateAvailable = useOperateModeAvailable()
+  const operateShell = operateAvailable && mode === 'operate'
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
 
@@ -176,7 +178,7 @@ function AuthenticatedShell({
   // Canvas page is part of Operate and keeps the shell (and its Operate sidebar). Connection loss is surfaced by a chip in whichever of
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
   const fullscreen = isWorkspaceEditor && !operateShell
-  return (
+  const shell = (
     <>
       <AccountSelectionModal />
       {fullscreen ? (
@@ -190,4 +192,6 @@ function AuthenticatedShell({
       )}
     </>
   )
+  // One subscription per tab to the person's operate session, shared by the sidebar and the page.
+  return operateAvailable ? <OperateSessionProvider>{shell}</OperateSessionProvider> : shell
 }
