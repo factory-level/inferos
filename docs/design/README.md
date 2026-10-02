@@ -15,6 +15,7 @@ Create documents from [`_template.md`](_template.md).
 | [InferOS repository setup skills](repo-setup-skills.md) | draft | Let a coding agent configure and maintain a consuming repository with a ready-to-customize local environment and explained deployment settings. |
 | [InferOps gatekeeper](inferops-gatekeeper.md) | draft | Expose scoped InferOps project/board/issue reads and approved issue transitions as native capabilities. |
 | [InferOps canvas and transactional widgets](inferops-canvas.md) | draft | Make operational data easy to load, compose and act on through a simple canvas, starting with Kanban and later maps. |
+| [Operate mode](operate-mode.md) | draft | Build authors apps, widgets and workflows; Operate runs operations through a single operate chat session that uses what was published, over views composed of screens and a page state machine. |
 | [Vertical extension research and decision matrix](vertical-extension-research.md) | draft | Make extension choices from documented native capabilities and concrete workflow requirements instead of assuming every vertical requires a kernel fork. |
 | [Consumer configuration](consumer-configuration.md) | draft | Forkable wrapper, explicit flags, profiles, style and durable view requirements |
 | [Customer feature capabilities](feature-capabilities.md) | draft | Eight-flag customer capability vocabulary, migration from the legacy flags, resolution and enforcement |
