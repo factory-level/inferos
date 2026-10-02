@@ -8,8 +8,8 @@ import { readConsumerViews } from "./views.ts";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:net";
 import { bootstrapConsumer } from "./bootstrap.ts";
-import { initialConsumerConfig, parseConsumerConfig } from "./config.ts";
-import { assertLocalPortAvailable, checkConsumer, diagnoseConsumer } from "./runtime.ts";
+import { CAPABILITY_NAMES, initialConsumerConfig, migrateConsumerConfig, parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
+import { assertLocalPortAvailable, capabilitySources, checkConsumer, diagnoseConsumer, reportCapabilities, unsupportedCapabilities } from "./runtime.ts";
 import { checkConsumerSkills } from "./skills.ts";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
@@ -153,4 +153,103 @@ test("consumer config rejects incompatible flags, unknown inputs and committed c
       return /inferops.baseUrl/.test(error.message);
     });
   }
+});
+
+test("capability report states enabled, supported and unsupported against the installed source", () => {
+  const upstream = mkdtempSync(join(tmpdir(), "inferos-capabilities-"));
+  try {
+    writeFileSync(join(upstream, "present.ts"), "");
+    const sources = { ...capabilitySources, INFEROPS_ENABLED: "present.ts", INFEROPS_AUTH: "present.ts", AGENT_DEPLOYMENTS: "absent.ts" };
+    const base = initialConsumerConfig("https://github.com/factory-level/inferos", "a".repeat(40));
+    const legacy = resolveConsumerConfig(base);
+    assert.deepEqual(reportCapabilities(legacy, upstream, sources).INFEROPS_ENABLED, { state: "supported", requested: false, source: "default" });
+    assert.deepEqual(unsupportedCapabilities(legacy.config, upstream, sources), []);
+    const resolved = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { INFEROPS_ENABLED: true, AGENT_DEPLOYMENTS: true, HARNESS_HG_ENABLED: false } });
+    const report = reportCapabilities(resolved, upstream, sources);
+    assert.deepEqual(Object.keys(report), [...CAPABILITY_NAMES]);
+    assert.deepEqual(report.INFEROPS_ENABLED, { state: "enabled", requested: true, source: "override" });
+    assert.deepEqual(report.INFEROPS_AUTH, { state: "supported", requested: false, source: "default" });
+    assert.deepEqual(report.AGENT_DEPLOYMENTS, { state: "unsupported", requested: true, source: "override" });
+    assert.deepEqual(report.HARNESS_HG_ENABLED, { state: "unsupported", requested: false, source: "override" });
+    assert.deepEqual(unsupportedCapabilities(resolved.config, upstream, sources), ["AGENT_DEPLOYMENTS"]);
+    // This revision implements none of the eight, and says so.
+    assert.ok(Object.values(reportCapabilities(resolved, upstream)).every(status => status.state === "unsupported"));
+    assert.deepEqual(unsupportedCapabilities(resolved.config, upstream), ["INFEROPS_ENABLED", "AGENT_DEPLOYMENTS"]);
+  } finally { rmSync(upstream, { recursive: true, force: true }); }
+});
+
+const runtime = (target: string, command: string) => spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), command], { encoding: "utf8" });
+const rewrite = (target: string, edit: (config: Record<string, any>) => unknown) => {
+  const path = join(target, "inferos.config.json");
+  writeFileSync(path, JSON.stringify(edit(JSON.parse(readFileSync(path, "utf8")))));
+};
+
+test("a migrated wrapper checks unchanged, and enabling an uninstalled capability fails every entry point", async () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-migrate-"));
+  const source = join(root, "source");
+  try {
+    execFileSync("git", ["init", "--quiet", source]);
+    writeFileSync(join(source, "package.json"), JSON.stringify({ type: "module", packageManager: "pnpm@11.17.0" }));
+    mkdirSync(join(source, "packages/bundled-blueprints/blueprints/example/files"), { recursive: true });
+    writeFileSync(join(source, "packages/bundled-blueprints/blueprints/example/files/client.js"), "// upstream blueprint\n");
+    mkdirSync(join(source, "scripts"));
+    writeFileSync(join(source, "scripts/pnpm-command.ts"), "export const pnpmCommand = (args: string[]) => [\"pnpm\", args];\n");
+    const commit = () => {
+      git(source, "add", ".");
+      git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture");
+      return git(source, "rev-parse", "HEAD");
+    };
+    const legacyPin = commit();
+    mkdirSync(join(source, "scripts/consumer"));
+    writeFileSync(join(source, "scripts/consumer/config.ts"), readFileSync(new URL("./config.ts", import.meta.url)));
+    const supportingPin = commit();
+
+    const target = join(root, "consumer");
+    bootstrapConsumer(target, source, supportingPin);
+    const before = runtime(target, "check");
+    assert.equal(before.status, 0);
+    const v1 = JSON.parse(before.stdout);
+    assert.equal(v1.schemaVersion, 1);
+    assert.equal(Object.hasOwn(v1.provenance, "capabilities"), false);
+    for (const name of CAPABILITY_NAMES) assert.deepEqual(v1.capabilities[name], { state: "unsupported", requested: false, source: "default" });
+
+    rewrite(target, migrateConsumerConfig);
+    const after = runtime(target, "check");
+    assert.equal(after.status, 0);
+    const v2 = JSON.parse(after.stdout);
+    assert.equal(v2.ok, true);
+    assert.equal(v2.schemaVersion, 2);
+    for (const key of ["revision", "profile", "features", "styling", "pending"]) assert.deepEqual(v2[key], v1[key]);
+    assert.deepEqual(v2.provenance.features, v1.provenance.features);
+    assert.deepEqual(v2.provenance.styling, v1.provenance.styling);
+    for (const name of CAPABILITY_NAMES) assert.deepEqual(v2.capabilities[name], { state: "unsupported", requested: false, source: "override" });
+    assert.equal(bootstrapConsumer(target, source, supportingPin).created, false);
+
+    rewrite(target, config => ({ ...config, capabilities: { ...config.capabilities, INFEROPS_ENABLED: true } }));
+    const enabled = runtime(target, "check");
+    assert.equal(enabled.status, 1);
+    assert.match(enabled.stderr, /not supported by this installation: INFEROPS_ENABLED/);
+    const refused = JSON.parse(enabled.stdout);
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.capabilities.INFEROPS_ENABLED, { state: "unsupported", requested: true, source: "override" });
+    const dev = runtime(target, "dev");
+    assert.equal(dev.status, 1);
+    assert.match(dev.stderr, /INFEROPS_ENABLED\. No server was started/);
+    const doctor = await diagnoseConsumer(target);
+    assert.equal(doctor.ok, false);
+    assert.match(doctor.checks.find(check => check.name === "runtime")?.message ?? "", /INFEROPS_ENABLED/);
+    assert.equal(doctor.checks.find(check => check.name === "runtime")?.status, "error");
+
+    // A pin whose parser predates version 2 cannot read the file, so the wrapper helper refuses it too.
+    const older = join(root, "older");
+    bootstrapConsumer(older, source, legacyPin);
+    assert.equal(runtime(older, "check").status, 0);
+    rewrite(older, migrateConsumerConfig);
+    const unreadable = runtime(older, "check");
+    assert.equal(unreadable.status, 1);
+    assert.equal(JSON.parse(unreadable.stdout).ok, false);
+    assert.match(unreadable.stderr, /does not support configuration schemaVersion 2/);
+    assert.match(runtime(older, "dev").stderr, /schemaVersion 2.*No server was started/);
+    assert.match((await diagnoseConsumer(older)).checks.find(check => check.name === "runtime")?.message ?? "", /schemaVersion 2/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
