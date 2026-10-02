@@ -49,7 +49,7 @@ export const HANDOFF_KEY = 'gadgets.handoff'
  * kind of flow the popup runs, and the flow's nonce, which the handoff page presents with the
  * ticket (`completeConnectHandoff` for a connect, `confirmLogin` for a sign-in).
  */
-export type PopupHandoff = { kind: 'connect' | 'login'; nonce: string }
+export type PopupHandoff = { kind: 'connect' | 'login' | 'openai'; nonce: string }
 
 /**
  * Opens `url` as a popup that holds `handoff` and nothing else of this tab. The popup is opened
@@ -137,7 +137,7 @@ export function readPopupHandoff(): PopupHandoff | null {
   }
   if (typeof parsed !== 'object' || parsed === null) return null
   const { kind, nonce } = parsed as { kind?: unknown; nonce?: unknown }
-  if (kind !== 'connect' && kind !== 'login') return null
+  if (kind !== 'connect' && kind !== 'login' && kind !== 'openai') return null
   if (typeof nonce !== 'string' || !HEX_256_PATTERN.test(nonce)) return null
   return { kind, nonce }
 }

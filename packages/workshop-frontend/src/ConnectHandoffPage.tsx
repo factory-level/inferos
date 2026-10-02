@@ -73,10 +73,14 @@ export default function ConnectHandoffPage() {
     let redeem: () => Promise<void>
     let done: Outcome
     let failed: string
-    if (handoff.kind === 'connect') {
+    if (handoff.kind === 'connect' || handoff.kind === 'openai') {
       if (isLoading || authenticatedApi === null) return
       api = authenticatedApi
-      redeem = () => authenticatedApi.completeConnectHandoff(ticket, handoff.nonce)
+      redeem = handoff.kind === 'openai' ? async () => {
+        using plugin = await authenticatedApi.getOpenAiAssistantPlugin()
+        if (!plugin) throw new Error('ChatGPT plan usage is disabled on this deployment.')
+        await plugin.completeSignIn(ticket, handoff.nonce)
+      } : () => authenticatedApi.completeConnectHandoff(ticket, handoff.nonce)
       done = { title: 'Connected', detail: CLOSE_HINT }
       failed = 'Could not complete the connection'
     } else {
@@ -110,7 +114,7 @@ export default function ConnectHandoffPage() {
   // A failure while the connection is down is the socket's, not the server's: the redemption is
   // presented again once the session is back, so show the wait rather than a transient error.
   else if (outcome?.failed && connectionLost) outcome = null
-  else if (outcome === null && handoff.kind === 'connect' && !isLoading && authenticatedApi === null) {
+  else if (outcome === null && handoff.kind !== 'login' && !isLoading && authenticatedApi === null) {
     outcome = SIGNED_OUT
   }
 

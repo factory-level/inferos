@@ -100,6 +100,26 @@ describe('ConnectHandoffPage', () => {
     testState.authenticatedApi = { completeConnectHandoff } as unknown as RpcStub<AuthenticatedApi>
   }
 
+  it('redeems a ChatGPT ticket through the authenticated capability and disposes it', async () => {
+    const completeSignIn = vi.fn<(ticket: string, nonce: string) => Promise<void>>(async () => {})
+    const dispose = vi.fn<() => void>()
+    testState.authenticatedApi = { getOpenAiAssistantPlugin: async () => ({ completeSignIn, [Symbol.dispose]: dispose }) } as unknown as RpcStub<AuthenticatedApi>
+    arrive(TICKET, { kind: 'openai', nonce: NONCE })
+    await render({ strict: true })
+    await settle()
+    expect(completeSignIn).toHaveBeenCalledExactlyOnceWith(TICKET, NONCE)
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(confirmLogin).not.toHaveBeenCalled()
+    expect(completeConnectHandoff).not.toHaveBeenCalled()
+  })
+
+  it('does not redeem a ChatGPT ticket without a Workshop session', async () => {
+    arrive(TICKET, { kind: 'openai', nonce: NONCE })
+    const page = await render()
+    expect(page.textContent).toContain("You're signed out")
+    expect(confirmLogin).not.toHaveBeenCalled()
+  })
+
   it('redeems a connect ticket with the nonce once, strips the fragment, spends the record, and closes', async () => {
     completeConnectHandoff.mockResolvedValue(undefined)
     signedIn()
