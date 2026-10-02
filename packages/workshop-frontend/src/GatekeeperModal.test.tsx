@@ -132,3 +132,58 @@ describe('GatekeeperModal configurator readiness', () => {
     expect(addConnection.disabled).toBe(true)
   })
 })
+
+describe('GatekeeperModal opt-in gatekeepers', () => {
+  let root: Root | undefined
+  let container: HTMLDivElement | undefined
+
+  afterEach(() => {
+    act(() => root?.unmount())
+    container?.remove()
+    testState.authenticatedApi = null
+    vi.unstubAllGlobals()
+  })
+
+  it('provisions the account directly instead of opening a sign-in window', async () => {
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    const vendor = { displayName: 'Demo boards', url: 'https://boards.example.com/', autoProvisionsAccount: true }
+    const provisionAmbientAccount = vi.fn<(vendorId: string) => Promise<void>>(async () => {})
+    const connectAccount = vi.fn<() => Promise<never>>(async () => { throw new Error('no sign-in flow') })
+    testState.authenticatedApi = {
+      listModels: async () => [],
+      listGatekeeperVendors: async () => [{ id: 'boards', description: vendor, supportedResources: [RESOURCE] }],
+      subscribeConnectedAccounts: (subscriber: ConnectedAccountsSubscriber) => {
+        subscriber.ready()
+        return subscription()
+      },
+      listGatekeeperApps: async () => [],
+      provisionAmbientAccount,
+      connectAccount,
+    } as unknown as RpcStub<AuthenticatedApi>
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => root!.render(<GatekeeperModal
+      open
+      onClose={() => {}}
+      getOverseer={() => { throw new Error('not called') }}
+      onCreated={() => Promise.resolve()}
+      initialVendorId="boards"
+      initialResourceUrlPattern={RESOURCE.urlPattern}
+    />))
+
+    const connect = await vi.waitFor(() => {
+      const button = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button'))
+        .find(item => item.textContent === 'Connect Demo boards')
+      expect(button).toBeDefined()
+      return button!
+    })
+    await act(async () => connect.click())
+    expect(provisionAmbientAccount).toHaveBeenCalledWith('boards')
+    expect(connectAccount).not.toHaveBeenCalled()
+  })
+})

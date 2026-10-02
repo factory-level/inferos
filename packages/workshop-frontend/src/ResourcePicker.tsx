@@ -325,8 +325,9 @@ export default function ResourcePicker({
         })
       }
 
-      // "Connect new account" row (not shown in accountsOnly mode).
-      if (!accountsOnly) {
+      // "Connect new account" row (not shown in accountsOnly mode, nor for an opt-in gatekeeper the
+      // user already has its one account for).
+      if (!accountsOnly && !(vendor.description.autoProvisionsAccount && vendorAccounts.length > 0)) {
         items.push({
           type: 'connect',
           vendorId: vendor.id,
@@ -387,7 +388,7 @@ export default function ResourcePicker({
             }
           }
         } else {
-          handleConnectNew(item.vendorId, item.resourceUrlPatterns)
+          handleConnectNew(item.vendorId, item.resourceUrlPatterns, item.vendorDescription.autoProvisionsAccount)
         }
       }
       return () => { activateRef.current = null }
@@ -396,10 +397,12 @@ export default function ResourcePicker({
 
   // --- Connect new account handler ---
 
-  const handleConnectNew = async (vendorId: string, resourceUrlPatterns?: string[]) => {
+  const handleConnectNew = async (vendorId: string, resourceUrlPatterns?: string[], autoProvisions?: boolean) => {
     setConnectingVendor(vendorId)
     try {
-      openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns))
+      // Opt-in gatekeepers have no sign-in flow; their account is minted directly.
+      if (autoProvisions) await authenticatedApi.provisionAmbientAccount(vendorId)
+      else openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns))
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
@@ -604,12 +607,12 @@ export default function ResourcePicker({
 
                 {/* Connect new account */}
                 {(() => {
-                  if (accountsOnly) return null
+                  if (accountsOnly || (vendor.description.autoProvisionsAccount && vendorAccounts.length > 0)) return null
                   const isActive = itemIdx === activeIndex
                   itemIdx++
                   return (
                   <div
-                    onClick={() => !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
+                    onClick={() => !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined, vendor.description.autoProvisionsAccount)}
                     className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''}`}
                     style={{
                       cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',

@@ -11,7 +11,8 @@ import { CanvasView } from './CanvasView'
 import { exportCanvas } from './exportCanvas'
 import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 
-const BLANK_TEMPLATE = ''
+// Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
+const BLANK_TEMPLATE = ':blank'
 
 export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, onAskAgent }: {
   storage: CanvasStorage

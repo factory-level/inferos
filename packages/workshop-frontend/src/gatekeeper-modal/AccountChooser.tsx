@@ -40,6 +40,7 @@ export function AccountChooser({
   reconnectingAccountId,
   requiredResourceUrlPatterns,
   grantingAccountId = null,
+  singleAccount = false,
   onSelect,
   onConnect,
   onReconnect,
@@ -54,6 +55,8 @@ export function AccountChooser({
   reconnectingAccountId: number | null
   requiredResourceUrlPatterns?: string[]
   grantingAccountId?: number | null
+  /** The vendor allows one account per user (an opt-in gatekeeper), so none is offered beyond it. */
+  singleAccount?: boolean
   onSelect: (id: number) => void
   onConnect: () => void
   onReconnect: (id: number) => void
@@ -139,7 +142,7 @@ export function AccountChooser({
           )
         })}
 
-        {(!isEmailMailbox || accounts.length === 0) && (
+        {((!isEmailMailbox && !singleAccount) || accounts.length === 0) && (
           <button
             type="button"
             onClick={onConnect}
