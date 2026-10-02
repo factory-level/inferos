@@ -6,7 +6,7 @@ import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
 import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import ShareModal from '../ShareModal'
-import { BindingBadge, getGradient as getBlueprintGradient, uniqueBindingBadges } from './BlueprintCard'
+import { BindingBadge, uniqueBindingBadges } from './BlueprintCard'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
 import { BlueprintPreviewImage } from './BlueprintPreviewImage'
 import DeleteConfirmationDialog from './DeleteConfirmationDialog'
@@ -517,8 +517,8 @@ function HomeFeaturedBlueprintCard({
           className="mb-3"
         />
         <div className="flex min-w-0 items-start gap-2 px-1 pb-1">
-          <div className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br ${getBlueprintGradient(blueprint.id)}`}>
-            <Hexagon size={13} className="text-white/75" weight="bold" />
+          <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-kumo-control">
+            <Hexagon size={13} className="text-kumo-brand" weight="bold" />
           </div>
           <div className="min-w-0 flex-1">
             <p className="m-0 truncate text-[13px] leading-[18px] font-semibold tracking-[-0.25px] text-kumo-default">

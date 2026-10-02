@@ -798,9 +798,13 @@ export default function GadgetEditor() {
   // list.
   const hasAnyApps = allGadgets.length > 0 || allWorktrees.length > 0
   const hasVisibleWorkpieces = visibleWorkpieces.length > 0
+  // A workflow always has pane content (its triggers), even before it has any gadget.
+  const hasPaneContent = hasVisibleWorkpieces || outputView === 'triggers'
   const showingActivity = workspaceView?.mode === 'activity'
   const showFullEditor = layoutModeReady && (
-    showingActivity || (hasVisibleWorkpieces && (workspaceView === null ? !simpleMode : workspaceView.mode === 'app'))
+    showingActivity || (hasPaneContent && (workspaceView === null
+      ? !simpleMode || outputView === 'triggers'
+      : workspaceView.mode === 'app'))
   )
   const { width: chatWidth, isResizing, handleProps: resizeHandleProps } = useResizableSplit(showFullEditor)
   const showOutputRail = layoutModeReady && hasAnyApps && !showFullEditor

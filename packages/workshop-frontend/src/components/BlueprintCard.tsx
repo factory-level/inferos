@@ -11,21 +11,6 @@ import {
 } from "@gadgets/workshop-shared/api";
 import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 
-const gradients = [
-  "from-[#4A154B] to-[#7C3085]",
-  "from-[#0052CC] to-[#2684FF]",
-  "from-[#5865F2] to-[#7983F5]",
-  "from-[#34A853] to-[#4285F4]",
-  "from-[#24292e] to-[#555]",
-  "from-[#E01E5A] to-[#ECB22E]",
-  "from-orange-600 to-red-600",
-  "from-emerald-600 to-teal-600",
-];
-
-export function getGradient(id: string) {
-  return gradients[id.charCodeAt(0) % gradients.length];
-}
-
 export type BindingBadgeInfo = {
   type: BlueprintBinding["type"];
   label: string;
@@ -134,10 +119,8 @@ export function BlueprintCard({
       />
       <div className="pointer-events-none relative z-20 flex flex-1 flex-col p-4">
         <div className="flex items-start gap-3">
-          <div
-            className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-gradient-to-br ${getGradient(id)}`}
-          >
-            <Hexagon size={16} className="text-white/75" weight="bold" />
+          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-kumo-control">
+            <Hexagon size={16} className="text-kumo-brand" weight="bold" />
           </div>
           <div className="min-w-0 flex-1">
             <p className="m-0 line-clamp-2 text-[15px] leading-5 font-medium tracking-[-0.25px] text-kumo-default">

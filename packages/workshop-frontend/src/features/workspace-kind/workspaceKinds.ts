@@ -21,23 +21,23 @@ export const WORKSPACE_KIND_PRESENTATION: Record<WorkspaceKind, WorkspaceKindPre
     label: 'App',
     icon: AppWindowIcon,
     description: 'A full-screen gadget people open and use. Has a Chat ↔ App toggle.',
-    operate: 'a launch card on screens; opens full-screen with Chat ↔ App',
+    operate: 'once published, opens full-page in a view, with the operate chat beside it',
     switchConsequence:
       'Switching to App brings back the app view with a Chat ↔ App toggle. Its gadget code is kept.',
   },
   widget: {
     label: 'Widget',
     icon: SquaresFourIcon,
-    description: 'A small gadget that lives as a tile on InferOps Canvas screens.',
-    operate: 'a live tile on screens',
+    description: 'A small gadget, made to be placed on screens and shown in conversation.',
+    operate: 'once published, placed on screens; the operate chat can also show it',
     switchConsequence:
-      'Switching to Widget removes the Chat ↔ App toggle and presents the gadget as a tile on screens. Its gadget code is kept.',
+      'Switching to Widget removes the Chat ↔ App toggle. Its gadget code is kept.',
   },
   workflow: {
     label: 'Workflow',
     icon: FlowArrowIcon,
     description: 'No UI. The agent runs on a schedule or when an event arrives.',
-    operate: 'a status tile on screens, with triggers, runs and approvals',
+    operate: 'once published, runs on its triggers and reports runs and approvals to the operate chat',
     switchConsequence:
       'Switching to Workflow hides the app view and shows its triggers instead. Its gadget code is kept; add a timed or event trigger to start runs.',
   },
