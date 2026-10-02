@@ -12,6 +12,8 @@ covers:
   - packages/workshop-frontend/src/ServerConfigContext.tsx
   - packages/workshop-frontend/src/BlueprintsPage.tsx
   - packages/workshop-frontend/src/components/GadgetList.tsx
+  - scripts/run-dev-server.ts
+  - packages/router
   - scripts/consumer
   - .agents/skills/bootstrap-inferos
 updated: 2026-10-01
@@ -38,7 +40,7 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 
 The bootstrap accepts destination, repository and full commit SHA. It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
 
-The copied wrapper runtime loads configuration and compares the actual submodule HEAD and staged gitlink. `check` reports configuration readiness, pending adapters and whether the submodule has local modifications; a matching HEAD alone is not an exact-revision proof. `setup` installs dependencies with the frozen upstream lockfile. `dev` checks IPv4/IPv6 loopback port availability before delegating to native run-local with the configured port. A busy port fails with a configuration instruction and does not stop the other listener. It rejects enabled unimplemented features or remote InferOps mode; it reports pending fixture/view adapters and requires the separate administrator profile initialization even in baseline mode.
+The copied wrapper runtime loads configuration and compares the actual submodule HEAD and staged gitlink. `check` reports configuration readiness, pending adapters and whether the submodule has local modifications; a matching HEAD alone is not an exact-revision proof. `setup` installs dependencies with the frozen upstream lockfile. `dev` checks IPv4/IPv6 loopback port availability before delegating to native run-local with the configured port. A busy port fails with a configuration instruction and does not stop the other listener. It rejects enabled composable/durable views or remote InferOps mode; it reports pending fixture/view adapters and requires the separate administrator profile initialization even in baseline mode.
 
 `doctor` aggregates nonmutating configuration/pin, Node, native-script, pnpm-version, local-tool and port checks. Missing dependencies point to `pnpm run setup`; requested unavailable features are errors. It exits nonzero on errors and reports dirty upstream code and pending runtime adapters as warnings. Its `runtimeReady: false` is separate from the preflight `ok` field. It does not claim running-service health or cloud parity and never stops a listener. The native launcher now uses a frozen-lockfile install as well as the wrapper setup command.
 
@@ -60,7 +62,7 @@ The profile operator sends `styling.theme` as `defaultTheme`; `AdminSettings` pe
 
 ## Configuration
 
-The initial profile is inferops-operations, with all three optional features disabled. The configured site name can be initialized through the operator; theme is applied as a deployment fallback; density applies curated desktop workspace/Explore listing spacing. Fixture path is fixed to a wrapper-owned synthetic board. Remote mode accepts a noncredentialed HTTPS base URL but cannot launch until its adapter exists. Git sources support HTTPS or explicitly supplied absolute local paths. No cloud resources or production credentials are created.
+The initial profile is inferops-operations, with all three optional features disabled. The configured site name can be initialized through the operator; theme is applied as a deployment fallback; density applies curated desktop workspace/Explore listing spacing. Fixture path is fixed to a wrapper-owned synthetic board. Remote mode accepts a noncredentialed HTTPS base URL but cannot launch until its adapter exists. Git sources support HTTPS or explicitly supplied absolute local paths. No cloud resources or production credentials are created. Custom Worker local support is described below.
 
 ## Divergences from Design
 
@@ -75,3 +77,11 @@ The generated wrapper copies its small operator helpers so it can pin a prior In
 `displayDensity` is normalized to comfortable for missing/invalid persisted values and published in admin/public configuration. `AdminApi.setDisplayDensity` validates comfortable/compact and supports later administrator changes. Profile initialization treats an existing compact setting as customization, preserving all target settings together. Initialization already consumed by an older version is not reapplied when density support is added; use the explicit setter.
 
 The frontend reads deployment density from its existing server-config context. Compact spacing applies at the `sm` breakpoint and above to workspace rows, Explore rows, grid gaps and card content; mobile spacing is unchanged. Loading rows/grid gaps follow the same density. Font sizes, Kumo colors, keyboard interactions, menus and gadget-owned layouts remain unchanged. This is curated listing spacing, not a global CSS scale or a canvas density implementation. Configuration refresh requires a client reconnect/reload; an admin-panel control remains pending.
+
+## Consumer Workers
+
+`scripts/consumer/extensions.ts` reads an explicit v1 manifest only while custom code is enabled. It validates names, directory containment, canonical configs/entrypoints and duplicate destinations, then uses `renderWorkerConfig` to generate per-Worker local configs. All configs validate before writes; generated-file symlinks are rejected. No Worker packages are discovered by name. The canonical config is executable trusted deployer code; path validation is not a JavaScript sandbox.
+
+`run-dev-server.ts --consumer-root` adds those configs to the existing Wrangler invocation and injects only HTTP service bindings into the router. `CUSTOM_CLOUDFLARE_CODE` is a deployer-controlled string switch, separate from AdminConfig and rollout flags. The router requires it plus a matching `CONSUMER_*` binding. Reserved `/extensions` routes run before SPA asset fallback in both canonical and local router configs. Disabled routes return 404 without calling a service. Requests retain their method/body/path; endpoint authentication belongs to the Worker.
+
+Bootstrap creates a disabled public hello example, manifest, validation command and generated-file ignore. The wrapper runtime accepts the custom code flag only on a supporting pin; doctor validates the manifest without importing custom config modules. `extensions:check` additionally renders canonical configs. View features and remote InferOps remain blocked. Cloud consumer manifest composition and deployment remain unimplemented; no feature flag grants resource access or triggers deployment.

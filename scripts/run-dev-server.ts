@@ -26,6 +26,7 @@ import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
+import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -105,6 +106,12 @@ function findGatekeepers(parentDir: string): Gatekeeper[] {
 await generateWorkerConfigs({ check: false });
 
 const gatekeepers = findGatekeepers(PACKAGES_DIR);
+
+const consumerOptions = process.argv.flatMap((arg, index) => arg === "--consumer-root" ? [process.argv[index + 1]] : []);
+if (consumerOptions.length > 1 || (consumerOptions.length && (!consumerOptions[0] || consumerOptions[0].startsWith("--")))) {
+  throw new Error("--consumer-root requires one wrapper directory");
+}
+const consumerWorkers = consumerOptions.length ? await prepareConsumerWorkers(consumerOptions[0]) : [];
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -461,6 +468,12 @@ function devBuildConfig(build: WranglerBuild | undefined, pkgDir: string): Wrang
     config.services.push({ binding: bindingName(gk), service: gk.name });
   }
 
+  for (const worker of consumerWorkers) {
+    if (config.services.some((service: ServiceBinding) => service.binding === worker.binding)) throw new Error("Consumer router binding collision");
+    config.services.push({ binding: worker.binding, service: worker.name });
+  }
+  config.vars = { ...config.vars, CUSTOM_CLOUDFLARE_CODE: consumerWorkers.length ? "true" : "false" };
+
   const outPath = join(ROOT, "wrangler.dev.jsonc");
   writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");
   console.log(`generated: ${outPath}`);
@@ -606,6 +619,7 @@ for (const gk of gatekeepers) {
 
 const configs = [
   "wrangler.dev.jsonc",
+  ...consumerWorkers.map(worker => worker.configPath),
   join("packages", "workshop-backend", "wrangler.dev.jsonc"),
   ...gatekeepers.map(gk => join(gk.dir, "wrangler.dev.jsonc")),
 ];

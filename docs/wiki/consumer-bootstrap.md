@@ -42,7 +42,7 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 
 `pnpm inferos:check` validates settings, the actual submodule HEAD and the wrapper's staged gitlink. It reports `pending` adapters and `modifiedUpstream`. A true modifiedUpstream means the run includes local experiments and is not an exact-pinned-revision proof. An `ok` result proves configuration/pin consistency only; it is not proof that data/views/style are applied or that a server is healthy. A pin mismatch must be resolved deliberately, not bypassed by editing the validator.
 
-Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Until adapters ship, enabling these causes `dev` to fail with an explicit message. This prevents a config file from falsely advertising running features.
+Flags are `composableViews`, `durableViews` and `customCloudflareCode`. Durable views require composable views. Composable/durable view adapters remain unavailable and enabling either causes `dev` to fail explicitly. Pins containing the custom Worker adapter support `customCloudflareCode` locally. This prevents a config file from falsely advertising running features.
 
 ## Local preflight
 
@@ -85,6 +85,18 @@ The deployment theme is a fallback, not an enforced setting. A browser's saved `
 
 ## Current limits
 
-`dev` launches native Workshop through run-local. It does not yet render the included InferOps fixture, automatically initialize the profile, load wrapper Workers or implement durable view storage. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
+`dev` launches native Workshop through run-local. It does not yet render the included InferOps fixture, automatically initialize the profile, implement durable view storage. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
 
 The tests cover fresh creation, recursive clone, paths with spaces, customized rerun, revision drift, Git failure cleanup and all flag combinations. No cloud deployment or live provider login is performed by bootstrap or those tests.
+
+## Custom Cloudflare Workers in local development
+
+New wrappers include `inferos.extensions.json` and a disabled `workers/hello` example. Set `features.customCloudflareCode` to true, run `pnpm extensions:check`, then `pnpm dev`. The example returns JSON at `/extensions/hello`. `extensions:check` executes trusted canonical config modules and writes generated `wrangler.consumer.jsonc` files; review that code before running it. A disabled flag does not read the manifest or import its configs. Disabling it and restarting removes activation while retaining source and local state.
+
+The v1 manifest is `{ "schemaVersion": 1, "workers": [{ "id": "hello", "directory": "workers/hello" }] }`. IDs are unique lowercase hyphenated slugs; directories and entrypoints stay under the wrapper's `workers/`. Each entry requires `cloudflare.config.ts`, whose Worker name is `consumer-<id>`. The generated config uses the same canonical converter as native Workers and retains bindings/migrations. Never edit generated configs. Only explicit entries are activated; library directories are not discovered automatically.
+
+The native multi-Worker launcher binds each entry to the router as `CONSUMER_<ID>` and sets its deployer-owned enable switch. The router reserves `/extensions/<id>` and descendants, passes the original request/path through, and returns 404 for disabled, missing or malformed routes. These are **public endpoints**: the custom Worker owns authentication for private data. No Workshop session, admin capability, gatekeeper grant or agent binding is automatically provided. This is trusted deployer code, not code accepted from canvas composition.
+
+Local service bindings may target other listed consumer Workers only. Remote resource bindings are rejected; configure local emulation/fixtures in canonical configs. Inputs/secrets stay in the Worker's ignored `.dev.vars`; the manifest contains no secret values. Dependencies and custom build commands are owned by the wrapper and must be installed explicitly. Entry points must exist before validation. Restart after manifest/config changes; ordinary Worker source changes use Wrangler's watcher.
+
+Consumer cloud release packaging, input validation and deployment wiring remain pending. The platform release reserves these routes but does not deploy custom Workers or enable them. The old example pin above predates this extension adapter; select a newer reviewed revision containing `scripts/consumer/extensions.ts` before enabling it.

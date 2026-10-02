@@ -66,7 +66,8 @@ export function checkConsumer(root: string) {
     throw new Error("Upstream does not declare its pnpm version");
   }
   const pending = ["InferOps fixture/remote adapter", "profile initialization not checked"];
-  for (const [name, enabled] of Object.entries(config.features)) if (enabled) pending.push(name);
+  for (const [name, enabled] of Object.entries(config.features)) if (enabled && name !== "customCloudflareCode") pending.push(name);
+  if (config.features.customCloudflareCode && !existsSync(join(upstream, "scripts/consumer/extensions.ts"))) pending.push("customCloudflareCode");
   return { config, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
 }
 
@@ -127,13 +128,22 @@ export async function diagnoseConsumer(root: string) {
     try { require.resolve(name); return false; } catch { return true; }
   });
   add("dependencies", unresolved.length ? "error" : "pass", unresolved.length
-    ? `Run pnpm setup; missing local tools: ${unresolved.join(", ")}`
+    ? `Run pnpm run setup; missing local tools: ${unresolved.join(", ")}`
     : "Local build tools resolve; frozen-lockfile installation and builds still validate the full dependency graph");
   try {
     await assertLocalPortAvailable(config.local.port);
     add("port", "pass", `Port ${config.local.port} is available now; this check does not reserve it`);
   } catch (error) { add("port", "error", (error as Error).message); }
-  const unsupported = Object.entries(config.features).filter(([, enabled]) => enabled).map(([name]) => name);
+  const unsupported = Object.entries(config.features).filter(([name, enabled]) => enabled && name !== "customCloudflareCode").map(([name]) => name);
+  if (config.features.customCloudflareCode) {
+    const extensionScript = join(upstream, "scripts/consumer/extensions.ts");
+    try {
+      if (!existsSync(extensionScript)) throw new Error("Pinned revision does not support custom Workers");
+      const { readConsumerWorkers } = await import(pathToFileURL(extensionScript).href);
+      const workers = readConsumerWorkers(root);
+      add("extensions", "pass", `${workers.length} explicit custom Workers; run pnpm extensions:check to validate canonical configs`);
+    } catch { add("extensions", "error", "Cannot validate custom Workers; check the manifest, contained paths and supported pin"); }
+  }
   if (config.inferops.mode === "remote") unsupported.push("remote InferOps");
   add("runtime", unsupported.length ? "error" : "warning", unsupported.length
     ? `Startup is blocked by unavailable adapters: ${unsupported.join(", ")}`
@@ -144,7 +154,7 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|profile|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|profile|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -152,6 +162,12 @@ async function main() {
     return;
   }
   const { config, upstream, packageManager, pending, modifiedUpstream } = checkConsumer(root);
+  if (command === "extensions") {
+    const script = join(upstream, "scripts/consumer/extensions.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision does not support custom Workers");
+    execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
   if (command === "profile") {
     const script = join(upstream, "packages/workshop-backend/scripts/initialize-consumer-profile.ts");
     if (!existsSync(script)) throw new Error("Pinned InferOS revision does not support profile initialization; use a reviewed newer pin");
@@ -174,9 +190,12 @@ async function main() {
     console.log(JSON.stringify({ ok: true, operation: "setup", pending }));
     return;
   }
-  const requested = Object.entries(config.features).filter(([, enabled]) => enabled).map(([name]) => name);
+  const requested = Object.entries(config.features).filter(([name, enabled]) => enabled && name !== "customCloudflareCode").map(([name]) => name);
   if (requested.length || config.inferops.mode === "remote") {
     throw new Error("Requested consumer runtime adapters are not implemented; use check for details. No server was started.");
+  }
+  if (config.features.customCloudflareCode && !existsSync(join(upstream, "scripts/consumer/extensions.ts"))) {
+    throw new Error("Pinned revision does not support custom Workers");
   }
   await assertLocalPortAvailable(config.local.port);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
@@ -185,7 +204,7 @@ async function main() {
   const blueprints = consumerBlueprintDirectory(root);
   if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;
   else delete env.BUNDLED_BLUEPRINTS_DIR;
-  const child = spawn(process.execPath, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port)], {
+  const child = spawn(process.execPath, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...(config.features.customCloudflareCode ? ["--consumer-root", root] : [])], {
     cwd: upstream, stdio: "inherit", env,
   });
   const { relayTermination } = await import(pathToFileURL(join(upstream, "scripts/relay-termination.ts")).href);
