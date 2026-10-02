@@ -25,6 +25,14 @@ export const CanvasSectionEditor = ({ section, busy, first, onMoveUp, onEdit }: 
         <Button size="sm" disabled={busy} onClick={() => void onEdit([{ type: 'removeSection', sectionId: section.id }])}>Remove section</Button>
       </div>
     </div>
+    <form key={`${section.id}:${section.title}`} className="flex flex-wrap items-end gap-2" onSubmit={event => {
+      event.preventDefault()
+      void onEdit([{ type: 'configureSection', sectionId: section.id, columns: section.columns,
+        title: String(new FormData(event.currentTarget).get('title') ?? '').trim() }])
+    }}>
+      <Input label="Section title" name="title" defaultValue={section.title} required maxLength={120} disabled={busy} />
+      <Button type="submit" disabled={busy}>Rename section</Button>
+    </form>
     <div className={`grid grid-cols-1 gap-3 ${section.columns === 3 ? 'lg:grid-cols-3' : section.columns === 2 ? 'lg:grid-cols-2' : ''}`}>
       {section.widgets.map((widget, index) => <CanvasWidgetCard key={widget.id} widget={widget} section={section}
         index={index} busy={busy} onEdit={onEdit} />)}

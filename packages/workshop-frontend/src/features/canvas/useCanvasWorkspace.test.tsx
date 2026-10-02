@@ -80,3 +80,25 @@ it('does not import into an old workspace after a slow file read', async () => {
   expect(old.createCanvas).not.toHaveBeenCalled()
   expect(container.textContent).toContain('No view')
 })
+
+it('moves a board between sections, undoes the move and imports with a fresh view identity', async () => {
+  await render({ kind: 'temporary' })
+  await act(async () => { await canvas.create({ title: 'Portable', sections: [
+    { id: 'from', title: 'First', columns: 1, widgets: [{ id: 'board', kind: 'inferops.project-board', version: 1,
+      targetRef: 'inferops://demo.local/project/board/DEMO', size: 'full', params: { workflow: 'software', showCompleted: false } }] },
+    { id: 'to', title: 'Second', columns: 2, widgets: [] },
+  ] }) })
+  const originalId = canvas.active!.id
+  await act(async () => { await canvas.edit([{ type: 'moveWidget', widgetId: 'board', sectionId: 'to', index: 0 }]) })
+  expect(canvas.active!.sections.map(section => section.widgets.length)).toEqual([0, 1])
+  expect(canvas.active!.sections[1].widgets[0].id).toBe('board')
+  await act(async () => { await canvas.undo() })
+  expect(canvas.active!.sections.map(section => section.widgets.length)).toEqual([1, 0])
+  const portable = JSON.stringify(canvas.active)
+  const file = new File([portable], 'canvas.json')
+  Object.defineProperty(file, 'text', { value: async () => portable })
+  await act(async () => { await canvas.importDefinition(file) })
+  expect(canvas.active!.id).not.toBe(originalId)
+  expect(canvas.active!.revision).toBe('0')
+  expect(canvas.active!.sections).toEqual(JSON.parse(portable).sections)
+})

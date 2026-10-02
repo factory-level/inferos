@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Button, Dialog, Input } from '@cloudflare/kumo'
 import DeleteConfirmationDialog from '../../components/DeleteConfirmationDialog'
+import { CanvasMoveWidgetForm } from './CanvasMoveWidgetForm'
+import { exportCanvas } from './exportCanvas'
 import { CanvasSectionEditor } from './CanvasSectionEditor'
 import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 
@@ -50,6 +52,7 @@ export const CanvasDialog = ({ open, onOpenChange, storage }: {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-lg font-semibold text-kumo-default">{active.title}</h2>
               <div className="flex gap-2">
+                <Button disabled={canvas.busy} onClick={() => exportCanvas(active)}>Export view</Button>
                 <Button disabled={canvas.busy || !canvas.canUndo} onClick={() => void canvas.undo()}>Undo layout change</Button>
                 <Button disabled={canvas.busy} onClick={() => setConfirmDelete(true)}>Delete view</Button>
               </div>
@@ -63,6 +66,7 @@ export const CanvasDialog = ({ open, onOpenChange, storage }: {
             </form>
             {active.sections.map((section, index) => <CanvasSectionEditor key={section.id} section={section} busy={canvas.busy}
               first={index === 0} onEdit={canvas.edit} onMoveUp={() => void canvas.edit([{ type: 'moveSection', sectionId: section.id, index: index - 1 }])} />)}
+            {active.sections.length > 1 && <CanvasMoveWidgetForm key={active.id} sections={active.sections} busy={canvas.busy} onEdit={canvas.edit} />}
             <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
               event.preventDefault()
               const form = event.currentTarget
