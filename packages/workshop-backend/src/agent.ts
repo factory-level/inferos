@@ -1,9 +1,10 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { WorkspaceKind, AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger } from "./observability";
+import { workspaceKindAllowsFile, workspaceKindContract, workspaceKindStarter } from "@gadgets/workshop-shared/workspace-kind";
 import { CanvasConflictError, type CanvasCatalog, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { Type, toToolDeclaration } from "@earendil-works/pi-ai";
 import type {
@@ -539,6 +540,9 @@ export interface AgentHooks {
    */
   createGadget(title: string, bindingName: string, chatId: number, output?: BlueprintOutput)
       : {id: WorkpieceId, title: string};
+
+  /** The workspace's kind: what its gadgets are built as (see workspace-kind.ts). */
+  getWorkspaceKind(): WorkspaceKind;
 
   /**
    * Create a new worktree workpiece rooted at the given commit id (a full oid, resolved against
@@ -1922,6 +1926,17 @@ async function runAgentPass(
     }
   };
 
+  // The workspace's kind decides what its gadgets are built as. It is read once per turn, so a
+  // switch made mid-turn takes effect on the next one.
+  let workspaceKind = hooks.getWorkspaceKind();
+  let assertKindAllowsFile = (workpieceId: WorkpieceId, filename: string) => {
+    if (!hooks.isWorktree(workpieceId) && !workspaceKindAllowsFile(workspaceKind, filename)) {
+      throw new Error(`This workspace's kind is ${workspaceKind}, which has no UI, so ` +
+          `${filename} cannot be written here. Do the work in server.js, or tell the user to ` +
+          `switch the workspace's kind to App or Widget if a UI is wanted.`);
+    }
+  };
+
   // Always-available resources (e.g. the Context Library) describe the agent's environment, so
   // they're announced in the system prompt (slot 1, below) alongside the bindings list rather
   // than as a synthetic user turn.
@@ -2854,6 +2869,7 @@ async function runAgentPass(
     // Named in the prompt because the request that should trigger them ("make me a doc") may
     // not look trigger the agent to browse blueprints.
     let standardFormats = await hooks.describeStandardFormats();
+    let kindContract = workspaceKindContract(workspaceKind);
 
     // Build connectable-vendors section. We only list vendor names here; the agent fetches a
     // vendor's resource URL patterns on demand via listConnectableResources.
@@ -2878,7 +2894,8 @@ async function runAgentPass(
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
       SYSTEM_PROMPT,
-      (standardFormats ? `${standardFormats}\n\n` : "") +
+      (kindContract ? `${kindContract}\n\n` : "") +
+          (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +
           (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
     ];
@@ -3083,6 +3100,7 @@ async function runAgentPass(
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
           assertMayModifyWorkpiece(resolved.workpieceId);
+          assertKindAllowsFile(resolved.workpieceId, filename);
 
           // Writing over a worktree's symlink or submodule entry is rejected with the same
           // descriptive error reading one gets, and a base *directory* path too -- such a
@@ -3153,6 +3171,7 @@ async function runAgentPass(
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
           assertMayModifyWorkpiece(resolved.workpieceId);
+          assertKindAllowsFile(resolved.workpieceId, filename);
           let readFiles = filesRead.get(resolved.workpieceId);
           if (readFiles === undefined || !readFiles.has(filename)) {
             // A file the agent never saw may not exist at all, usually a mistyped name.
@@ -3441,8 +3460,19 @@ async function runAgentPass(
           // (exactly as writeFile/editFile do) so reverts can be referred to precisely.
           let changeId = nextChangeId;
 
-          let output: {gadgetId: WorkpieceId, changeId: number, blueprintNotes?: string} =
+          let output: {gadgetId: WorkpieceId, changeId: number, blueprintNotes?: string,
+                       starterNotes?: string} =
               {gadgetId: created.id, changeId};
+
+          // With no blueprint, the gadget starts from its workspace kind's starter (if the kind
+          // has one), so what a typed workspace builds has a structure fixed by code.
+          let starter = blueprint ? null : workspaceKindStarter(workspaceKind);
+          if (starter) {
+            appendAgentEdit(created.id, {[created.id]: Object.entries(starter)
+                .map(([filename, text]): [string, {set: string}] => [filename, {set: text}])});
+            output.starterNotes = `Started from the ${workspaceKind} starter: ` +
+                `${Object.keys(starter).join(", ")}. Use readFile to inspect before editing.`;
+          }
 
           if (blueprint) {
             // Copy the blueprint's files into the new gadget as one change: like writeFile edits,

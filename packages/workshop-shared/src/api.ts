@@ -612,9 +612,12 @@ export interface AuthenticatedApi extends RpcTarget {
    *   into a gadget), so provisional gadgets are useful to allow the user to write an initial
    *   chat message without explicitly creating a new gadget.
    *
+   * `kind` is what the workspace builds (see `WorkspaceKind`); omitted, it is the default, an app.
+   * It is stored before the workspace is returned, so its first chat already builds that kind.
+   *
    * TODO(multi-gadget): This should be renamed to newWorkspace().
    */
-  newGadget(): Promise<RpcStub<Overseer>>;
+  newGadget(kind?: WorkspaceKind): Promise<RpcStub<Overseer>>;
 
   /**
    * List metadata about all the user's Gadgets. Used to display the front-page listing.
@@ -3649,8 +3652,13 @@ export type AiToolCall = {
    * `blueprintNotes` is present for blueprint instantiations: formatted text describing the files
    * copied in and the bindings the blueprint expects the agent to wire up. Recorded so replay
    * doesn't have to re-fetch the blueprint (whose content may have changed since).
+   *
+   * `starterNotes` is present when the gadget started from its workspace kind's starter files
+   * instead (see `workspaceKindStarter`), naming the files copied in.
    */
-  output?: {gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string};
+  output?: {
+    gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string, starterNotes?: string,
+  };
 } | {
   /**
    * Create a new worktree workpiece: a file tree rooted at a git commit, private to the creating
