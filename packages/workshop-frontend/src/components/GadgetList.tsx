@@ -12,6 +12,8 @@ import { BlueprintPreviewImage } from './BlueprintPreviewImage'
 import DeleteConfirmationDialog from './DeleteConfirmationDialog'
 import { useDisplayDensity } from '../ServerConfigContext'
 import { isImeComposing } from '../keyboardEvent'
+import { useUiFeatureFlags } from '../FeatureFlagsContext'
+import { WorkspaceKindChip } from '../features/workspace-kind/WorkspaceKindChip'
 
 // Neutral monogram for a workspace — matches the sidebar treatment (no per-item color noise).
 function initials(title: string | undefined): string {
@@ -43,8 +45,10 @@ function AppRow({
   onInfo,
   onTogglePin,
   onRename,
+  showKind,
 }: {
   gadget: GadgetMetadataWithTimestamps
+  showKind: boolean
   onDelete: (gadget: GadgetMetadataWithTimestamps) => void
   onShare: (gadget: GadgetMetadataWithTimestamps) => void
   onInfo: (gadget: GadgetMetadataWithTimestamps) => void
@@ -111,6 +115,7 @@ function AppRow({
               {gadget.title || 'Untitled Workspace'}
             </h3>
           )}
+          {showKind && <WorkspaceKindChip kind={gadget.kind} />}
         </div>
         {gadget.owner && (
           <p className="text-xs text-kumo-subtle truncate mt-0.5">
@@ -174,6 +179,7 @@ function AppRow({
 export default function GadgetList({ showHeader = true }: { showHeader?: boolean } = {}) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
+  const operateMode = useUiFeatureFlags().flags['operate-mode']
   const [gadgets, setGadgets] = useState<GadgetMetadataWithTimestamps[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -402,6 +408,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
               onInfo={setInfoTarget}
               onTogglePin={handleTogglePin}
               onRename={handleRename}
+              showKind={operateMode}
             />
           ))
         )}
