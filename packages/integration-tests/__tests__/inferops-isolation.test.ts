@@ -555,6 +555,31 @@ async function setVar(name: "INFEROPS_ENABLED" | "CODING_WORKBENCH_ENABLED", ena
     }),
   }));
   harness.url = (await harness.server.listen()).url;
+  await settled(harness.url);
+}
+
+/**
+ * Wait until the reloaded server answers steadily. Right after `server.update` the runtime can
+ * still be restarting, so a WebSocket opened at once is sometimes dropped mid-test ("WebSocket
+ * connection failed"). Two pings a short gap apart over one connection must both succeed.
+ */
+async function settled(url: URL): Promise<void> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const api = connect(url);
+    try {
+      await api.ping();
+      await new Promise(done => setTimeout(done, 250));
+      await api.ping();
+      return;
+    } catch (error) {
+      last = error;
+      await new Promise(done => setTimeout(done, 250));
+    } finally {
+      api[Symbol.dispose]();
+    }
+  }
+  throw new Error(`The reloaded server never settled: ${String(last)}`);
 }
 
 const setEnabled = (enabled: boolean) => setVar("INFEROPS_ENABLED", enabled);
