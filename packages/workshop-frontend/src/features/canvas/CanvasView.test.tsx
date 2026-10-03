@@ -16,11 +16,13 @@ let root: Root
 let container: HTMLDivElement
 const disposed: (WorkpieceId | string)[] = []
 const BOARD = 'inferops://demo.local/project/board/DEMO'
+const issue = (id: string, stateId: string) => ({ id, identifier: `DEMO-${id}`, title: `Issue ${id}`, priority: 'none', stateId, targetDate: null,
+  workflow: 'software', revision: '1', assigneeId: null, blockedReason: null })
 const demoBoard = {
   project: { id: 'p', identifier: 'DEMO', name: 'Demo' },
   columns: [
-    { state: { id: 'todo', name: 'Todo', group: 'unstarted', position: 0, workflow: 'software' }, issues: [{ id: '1' }, { id: '2' }] },
-    { state: { id: 'done', name: 'Done', group: 'completed', position: 1, workflow: 'software' }, issues: [{ id: '3' }] },
+    { state: { id: 'todo', name: 'Todo', group: 'unstarted', position: 0, workflow: 'software' }, issues: [issue('1', 'todo'), issue('2', 'todo')] },
+    { state: { id: 'done', name: 'Done', group: 'completed', position: 1, workflow: 'software' }, issues: [issue('3', 'done')] },
   ],
 }
 const readBoard = vi.fn<() => Promise<typeof demoBoard>>(async () => demoBoard)
@@ -66,13 +68,15 @@ it('renders accepted gadgets live beside boards the workspace has no connection 
   expect(container.querySelector(`[aria-label="Project board ${BOARD}"]`)?.textContent).toContain('Not connected')
 })
 
-it('shows a connected board\'s states and counts, reading it once for every card of it, and releases the session', async () => {
+it('shows a connected board\'s columns, reading it once for every card of it, and releases the session', async () => {
   lookup.mockResolvedValue(connection)
   await render(definition([boardWidget('b'), boardWidget('all', true)]), summaries())
   expect(lookup).toHaveBeenCalledTimes(1)
   const cards = [...container.querySelectorAll(`[aria-label="Project board ${BOARD}"]`)]
-  expect(cards.map(card => [...card.querySelectorAll('li')].map(item => item.textContent))).toEqual([['Todo 2'], ['Todo 2', 'Done 1']])
+  expect(cards.map(card => [...card.querySelectorAll('section')].map(column => [column.querySelector('h3')?.textContent, column.querySelectorAll('[data-issue-id]').length])))
+    .toEqual([[['Todo2', 2]], [['Todo2', 2], ['Done1', 1]]])
   expect(cards[0]?.textContent).toContain('Demo (DEMO)')
+  expect(cards[0]?.querySelector('button[aria-label="Refresh board"]')).not.toBeNull()
   expect(readBoard).toHaveBeenCalledTimes(1)
   // A move decided on this board's connection, by anyone, re-reads the board; other actions do not.
   await act(async () => { actions?.entry(action('inferops://demo.local/project/board/OTHER', 'approved')); actions?.entry(action(BOARD, 'pending')) })

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
+import { useActionEntries } from '../../useActions'
 import { BoardData, LOADING_BOARD, boardRequestKey, type BoardRequest, type BoardState, type MoveResult } from './boardData'
 import type { Revision } from '@inferos/gatekeeper-inferops/src/types'
 
@@ -29,6 +30,17 @@ const release = (overseer: RpcStub<Overseer>): void => {
 /** Mark every card of a board in this scope stale and re-read it, e.g. once a proposed move was decided. */
 export const invalidateBoard = (overseer: RpcStub<Overseer>, targetRef: string): void => {
   adapters.get(overseer)?.data.invalidate(targetRef)
+}
+
+/**
+ * Re-read a board whenever an action on its connection leaves `pending`: a move approved or
+ * rejected, by anyone, changes the authoritative board. Every presentation that shows boards
+ * of the scope calls this; the action store is shared and reference-counted.
+ */
+export const useDecidedActionInvalidation = (overseer: RpcStub<Overseer>): void => {
+  useActionEntries(overseer, record => {
+    if (record.type === 'action' && record.state !== 'pending' && record.resourceUrl) invalidateBoard(overseer, record.resourceUrl)
+  })
 }
 
 /** The live state of one board card's request in the given scope, with its actions. */

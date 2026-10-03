@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import { DEFAULT_CANVAS_CATALOG, type CanvasCatalog } from '@gadgets/workshop-shared/canvas'
+import { DEFAULT_CANVAS_CATALOG, type CanvasCatalog, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { CanvasWorkspacePane } from './CanvasWorkspacePane'
 import type { CanvasStorage } from './useCanvasWorkspace'
 
@@ -13,21 +13,31 @@ vi.mock('../../GadgetUI', () => ({ default: () => null }))
 
 let root: Root
 let container: HTMLDivElement
-// The read-only view watches the action log for decided moves; nothing else here reaches the workspace.
+// The read-only view watches the action log for decided moves and resolves board references;
+// nothing else here reaches the workspace.
 const overseer = {
   subscribeToActions: async () => ({ [Symbol.dispose]: () => {} }),
   listActions: async () => ({ entries: [] }),
+  getGatekeeperByResourceUrl: async () => null,
 } as unknown as RpcStub<Overseer>
+const onOpenWidgetChange = vi.fn<(widgetId: string | null) => void>()
 const render = async (storage: CanvasStorage, catalog: CanvasCatalog = DEFAULT_CANVAS_CATALOG,
-    onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => {})) => {
+    onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => {}), openWidgetId: string | null = null) => {
   await act(async () => root.render(<CanvasWorkspacePane storage={storage} overseer={overseer} gadgets={new Map()}
-    catalog={catalog} viewId={null} onViewChange={() => {}} onAskAgent={onAskAgent} />))
+    catalog={catalog} viewId={null} onViewChange={() => {}} openWidgetId={openWidgetId} onOpenWidgetChange={onOpenWidgetChange} onAskAgent={onAskAgent} />))
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
+const BOARD = 'inferops://demo.local/project/board/DEMO'
+const saved: CanvasDefinition = { schemaVersion: 1, id: 'ops', revision: '0', title: 'Ops', sections: [{ id: 'main', title: 'Main', columns: 2,
+  widgets: [{ id: 'b', kind: 'inferops.project-board', version: 1, targetRef: BOARD, size: 'wide', params: { workflow: 'software', showCompleted: false } }] }] }
+const durable = (): CanvasStorage => ({ kind: 'durable', api: { listCanvases: async () => [saved], createCanvas: vi.fn<Overseer['createCanvas']>(),
+  editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() } })
 const button = (name: string) => [...container.querySelectorAll('button')].find(item => item.textContent === name)
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
+  onOpenWidgetChange.mockClear()
 })
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
@@ -73,4 +83,21 @@ it('reports the agent hand-off failing instead of dropping it silently', async (
   await act(async () => { container.querySelector('form')!.requestSubmit() })
   await act(async () => { button('InferOps Kanban')!.click() })
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not start the chat')
+})
+
+it('opens a board card in its full view from the card, closes it from the full view, and closes an opened widget the view lacks', async () => {
+  await render(durable())
+  expect(container.querySelector('[data-presentation="card"]')).not.toBeNull()
+  await act(async () => { button('Open')!.click() })
+  expect(onOpenWidgetChange).toHaveBeenCalledWith('b')
+  await render(durable(), DEFAULT_CANVAS_CATALOG, undefined, 'b')
+  expect(container.querySelector('[data-presentation="full"]')).not.toBeNull()
+  expect(container.querySelector('[data-presentation="card"]')).toBeNull()
+  expect(container.querySelector('h1')).toBeNull()
+  await act(async () => { button('Back to Ops')!.click() })
+  expect(onOpenWidgetChange).toHaveBeenLastCalledWith(null)
+  onOpenWidgetChange.mockClear()
+  await render(durable(), DEFAULT_CANVAS_CATALOG, undefined, 'gone')
+  expect(onOpenWidgetChange).toHaveBeenCalledWith(null)
+  expect(container.querySelector('[data-presentation="card"]')).not.toBeNull()
 })
