@@ -12,3 +12,4 @@ Create records from [`0000-template.md`](0000-template.md).
 | [0002. Local coding scope](0002-local-coding-scope.md) | proposed | 2026-10-02 |
 | [0003. Distinct agent capabilities](0003-distinct-agent-capabilities.md) | proposed | 2026-10-02 |
 | [0004. InferOps gatekeeper acts with each person's own authority](0004-inferops-gatekeeper-user-authority.md) | proposed | 2026-10-02 |
+| [0005. InferOps board URLs use InferOps' own tenant.workspace authority](0005-inferops-uri-authority.md) | proposed | 2026-10-02 |

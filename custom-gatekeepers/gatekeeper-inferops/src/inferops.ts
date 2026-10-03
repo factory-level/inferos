@@ -2,9 +2,16 @@
 //
 // - `GatekeeperVendor` auto-provisions accounts (no OAuth): an account is just an id that keys its
 //   private copy of the demo data in `MockInferOps`.
-// - `InferOpsAccount` (the GatekeeperUser) maps `inferops://<host>/project/board/<KEY>` to an
-//   `InferOpsProjectGatekeeper` facet whose props fix the account, host and project key. Scope is
-//   read from those props only; no session method accepts a project, host or account.
+// - `InferOpsAccount` (the GatekeeperUser) maps `inferops://<tenant>.<workspace>/project/board/<KEY>`
+//   (InferOps' own URI grammar) to an `InferOpsProjectGatekeeper` facet whose props fix the
+//   account, host, workspace id and project key. Scope is read from those props only; no session
+//   method accepts a project, host, workspace or account.
+// - The URL never names a deployment, and its labels authorize nothing. The `<workspace>` slug is
+//   resolved against the signed-in person's own workspaces (`resolveWorkspace`), so a slug they do
+//   not hold is refused exactly like a missing project. The `<tenant>` label is checked for syntax
+//   only: the identity InferLab reports carries a tenant id, never its slug, so there is nothing to
+//   compare it with (InferOps' own widgets do not check it either). `demo.local` names the demo
+//   data and nothing else.
 // - Sessions: `InferOpsProjectSession` reads the board and narrows to one issue with `openIssue`;
 //   `InferOpsIssueSession` reads that issue and proposes transitions.
 // - Every returned read is authorized as an observation. A transition is checked against the
@@ -25,9 +32,9 @@
 //   data, or the local-development stopgap connection.
 //
 // All project data comes through `InferOpsClient` (inferops-client.ts), chosen by `clientFor`: the
-// HTTP client (http-inferops.ts) with the account's own authority for the host of the configured
-// InferOps API, the same client with the stopgap connection for its host, and the mock
-// (mock-inferops.ts) for the demo host.
+// mock (mock-inferops.ts) for the demo host, the HTTP client (http-inferops.ts) with a connected
+// account's own authority in one of its workspaces, and the same client with the stopgap
+// connection for a URL naming the stopgap's workspace slug.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
@@ -42,18 +49,19 @@ import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired,
 } from "@gadgets/gatekeeper-kit/credentials";
-import { InferOpsError, inferOpsErrorCode, type InferOpsClient } from "./inferops-client";
 import {
-  connectionFromEnv, endpointFromEnv, openHttpInferOpsClient, type InferOpsAuthority,
-  type InferOpsEndpoint,
+  InferOpsError, inferOpsErrorCode, type InferOpsClient, type ProjectSummary,
+} from "./inferops-client";
+import {
+  connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
 import { InferOpsCredentials, type InferOpsWorkspace } from "./inferops-credentials";
 import {
-  InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, startInferLabLogin,
+  InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
 } from "./inferlab-login";
 import {
-  DEFAULT_HOST, PROJECT_BOARD_RESOURCE, parseProjectBoardUrl, projectBoardUrl,
+  DEMO_HOST, PROJECT_BOARD_RESOURCE, parseHost, parseProjectBoardUrl, projectBoardUrl,
 } from "./resources";
 import { buildBoard, livePendingMove, simulateIssue, type PendingTransition } from "./simulation";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
@@ -106,9 +114,10 @@ type AccountProps = { accountId: string; email?: string; connected?: boolean };
 type AccountRef = Pick<AccountProps, "accountId" | "connected">;
 
 /**
- * One project-board binding, fixed when the Workshop mints it. `workspaceId` is the InferOps
- * workspace a connected account made the binding in; it comes from the account's membership, never
- * from the URL.
+ * One project-board binding, fixed when the Workshop mints it. `host` is the URL's
+ * `<tenant>.<workspace>`, kept for the binding's description and the mock's key. `workspaceId` is
+ * the InferOps workspace a connected account made the binding in: the membership the URL's
+ * workspace slug resolved to, never an id taken from the URL.
  */
 type ProjectGatekeeperProps = AccountRef & { host: string; projectKey: string; workspaceId?: string };
 
@@ -122,24 +131,13 @@ function credentialsOf(exports: ExportsWithStores, accountId: string) {
 }
 
 /**
- * The API endpoint connected accounts call: `INFEROPS_BASE_URL`, or the InferLab origin itself when
- * only that is configured (locally one server serves both). Null while neither is set.
- */
-function apiEndpoint(env: Cloudflare.Env): InferOpsEndpoint | null {
-  const configured = endpointFromEnv(env);
-  if (configured) return configured;
-  const origin = inferLabAuthOrigin(env);
-  return origin ? { baseUrl: origin, host: new URL(origin).host } : null;
-}
-
-/**
  * The HTTP client as one connected person: every request fetches the account's current token for
- * `workspaceId` (the binding's, or the account's current one), and a token InferOps rejects is
+ * `workspaceId` (one of the person's own), and a token InferOps rejects is
  * adjudicated by the account before the request fails. A dead session surfaces as `UNAUTHORIZED`;
  * a session replaced mid-request as `UNAVAILABLE`, which a retry resolves.
  */
 function accountClient(
-  exports: ExportsWithStores, endpoint: InferOpsEndpoint, accountId: string, workspaceId?: string,
+  exports: ExportsWithStores, endpoint: InferOpsEndpoint, accountId: string, workspaceId: string,
 ): InferOpsClient {
   const source = new CredentialSource<InferOpsAuthority>({
     account: () => {
@@ -174,10 +172,11 @@ function accountClient(
 }
 
 /**
- * The data source for an account on a host. A connected account calling the configured API host
- * uses its own authority; the stopgap connection serves its host for every other account; the mock
- * serves the demo host and refuses any other. The host only selects one of these; no address or
- * credential is ever taken from it.
+ * The data source for a binding: the mock for the demo host; for a connected account, the HTTP
+ * client with its own authority in `workspaceId`, which the caller resolved from the URL's
+ * workspace slug against the person's memberships; for any other account, the stopgap connection
+ * when the host names its workspace slug. Anything else is refused as a missing project would be.
+ * No address or credential is ever taken from the host.
  *
  * STOPGAP: the connection from worker vars is shared by every account of the deployment. Local
  * development only; it never backs a connected person, whose own token always wins.
@@ -186,22 +185,30 @@ function clientFor(
   env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
   workspaceId?: string,
 ): InferOpsClient {
-  const endpoint = apiEndpoint(env);
-  if (account.connected && endpoint && host === endpoint.host) {
-    return accountClient(exports, endpoint, account.accountId, workspaceId);
+  const mock = () => openInferOpsClient(exports.MockInferOps, { accountId: account.accountId, host });
+  if (host === DEMO_HOST) return mock();
+  if (account.connected) {
+    const endpoint = inferOpsApiEndpoint(env);
+    if (endpoint && workspaceId) return accountClient(exports, endpoint, account.accountId, workspaceId);
+  } else {
+    const stopgap = connectionFromEnv(env);
+    if (stopgap && parseHost(host)?.workspace === stopgap.workspaceSlug) {
+      return openHttpInferOpsClient(stopgap);
+    }
   }
-  const stopgap = connectionFromEnv(env);
-  if (stopgap && host === stopgap.host) return openHttpInferOpsClient(stopgap);
-  return openInferOpsClient(exports.MockInferOps, { accountId: account.accountId, host });
+  // The mock refuses every host but its own, with the same NOT_FOUND an unknown project gets.
+  return mock();
 }
 
-/**
- * The host a new binding gets when its URL was not prefilled: the API's for a connected account,
- * the stopgap connection's for any other, else the demo host.
- */
-function defaultHost(env: Cloudflare.Env, account: AccountRef): string {
-  if (account.connected) return apiEndpoint(env)?.host ?? DEFAULT_HOST;
-  return connectionFromEnv(env)?.host ?? DEFAULT_HOST;
+/** The message every refused binding gets, whatever was missing: workspace, host or project. */
+function unavailableProject(projectKey: string, host: string): string {
+  return `No InferOps project ${projectKey} is available on ${host}.`;
+}
+
+/** The deployment a connected account calls, for its display name; null when it serves demo data. */
+function deploymentHost(env: Cloudflare.Env, account: AccountRef): string | null {
+  if (account.connected) return inferOpsApiEndpoint(env)?.host ?? null;
+  return connectionFromEnv(env)?.host ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,10 +285,10 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   }
 
   async describe(): Promise<AccountDescription> {
-    const host = defaultHost(this.env, this.ctx.props);
+    const deployment = deploymentHost(this.env, this.ctx.props);
     const identity = this.ctx.props.connected ? await this.#credentials().identity() : null;
     return {
-      displayName: host === DEFAULT_HOST ? "InferOps (demo data)" : `InferOps (${host})`,
+      displayName: deployment ? `InferOps (${deployment})` : "InferOps (demo data)",
       uniqueName: identity?.email,
       avatar: INFEROPS_ICON,
     };
@@ -291,16 +298,35 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     return [PROJECT_BOARD_RESOURCE];
   }
 
-  /** The workspace a connected account binds in on the API host; undefined elsewhere. */
-  async #bindingWorkspace(host: string): Promise<string | undefined> {
-    if (!this.ctx.props.connected || host !== apiEndpoint(this.env)?.host) return undefined;
-    return this.#credentials().currentWorkspace();
+  /**
+   * The workspace a URL's host names for this account: the id of the person's own workspace with
+   * that slug for a connected account, or null when they hold none (whether or not it exists).
+   * Undefined for the demo host and for an account with no identity, whose stopgap connection
+   * fixes its own workspace.
+   */
+  async #workspaceFor(host: string): Promise<string | null | undefined> {
+    if (host === DEMO_HOST || !this.ctx.props.connected) return undefined;
+    const labels = parseHost(host);
+    return labels ? this.#credentials().resolveWorkspace(labels.workspace) : null;
+  }
+
+  /** Whether the project is available on `host` to this account; false for a workspace it lacks. */
+  async #hasProject(host: string, workspaceId: string | null | undefined, projectKey: string) {
+    if (workspaceId === null) return false;
+    try {
+      return await this.#client(host, workspaceId).hasProject(projectKey);
+    } catch (error) {
+      if (inferOpsErrorCode(error) === "NOT_FOUND") return false;
+      throw error;
+    }
   }
 
   /**
-   * Bind one project board. The URL only names the target: the project must exist for this account,
-   * and the resulting class carries the account, host, key and (for a connected account) workspace
-   * in its props, which is the only place the gatekeeper ever reads its scope from.
+   * Bind one project board. The URL only names the target: its workspace slug must be one of the
+   * person's own, the project must exist there for this account, and the resulting class carries
+   * the account, host, key and (for a connected account) workspace id in its props, which is the
+   * only place the gatekeeper ever reads its scope from. A workspace the person lacks, an unknown
+   * host and a missing project are refused with one message, so a URL cannot probe for any of them.
    */
   @skipRpcValidation()
   async getGatekeeperClassFor(url: string): Promise<{
@@ -308,12 +334,14 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     resource: SupportedResource;
   }> {
     const { host, projectKey } = parseProjectBoardUrl(url);
-    const workspaceId = await this.#bindingWorkspace(host);
-    if (!(await this.#client(host, workspaceId).hasProject(projectKey))) {
-      throw new Error(`No InferOps project ${projectKey} is available on ${host}.`);
+    const workspaceId = await this.#workspaceFor(host);
+    if (!(await this.#hasProject(host, workspaceId, projectKey))) {
+      throw new Error(unavailableProject(projectKey, host));
     }
     const { accountId, connected } = this.ctx.props;
-    const props: ProjectGatekeeperProps = { accountId, connected, host, projectKey, workspaceId };
+    const props: ProjectGatekeeperProps = {
+      accountId, connected, host, projectKey, workspaceId: workspaceId ?? undefined,
+    };
     return {
       class: this.ctx.exports.InferOpsProjectGatekeeper({ props }),
       resource: PROJECT_BOARD_RESOURCE,
@@ -326,13 +354,27 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
       throw new Error(`Unsupported InferOps resource configurator type: ${resourceUrlPattern}`);
     }
     const store = this.ctx.props.connected ? this.#credentials() : null;
+    const stopgap = store ? null : connectionFromEnv(this.env);
     return {
       iframeHtml: PROJECT_CONFIGURATOR_HTML,
-      ui: new RpcStub(new InferOpsProjectConfiguratorUI(
-        defaultHost(this.env, this.ctx.props), this.#client.bind(this), {
-          list: async () => (await store?.identity())?.workspaces ?? [],
-          select: workspaceId => store ? store.selectWorkspace(workspaceId) : Promise.resolve(),
-        })),
+      ui: new RpcStub(new InferOpsProjectConfiguratorUI({
+        // Demo data needs no organization or workspace; every other account must name both.
+        defaultHost: store || stopgap ? null : DEMO_HOST,
+        workspaces: async () => store
+          ? (await store.identity())?.workspaces ?? []
+          : stopgap ? [{ workspaceId: stopgap.workspaceId, workspaceName: "Configured workspace",
+                         workspaceSlug: stopgap.workspaceSlug }] : [],
+        projects: async host => {
+          const workspaceId = await this.#workspaceFor(host);
+          if (workspaceId === null) return [];
+          try {
+            return await this.#client(host, workspaceId).listProjects();
+          } catch (error) {
+            if (inferOpsErrorCode(error) === "NOT_FOUND") return [];
+            throw error;
+          }
+        },
+      })),
     };
   }
 
@@ -342,7 +384,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
    * connection, whose credential is the deployment's (see `clientFor`).
    */
   async revoke(): Promise<void> {
-    await this.#client(DEFAULT_HOST).forget();
+    await this.#client(DEMO_HOST).forget();
     if (this.ctx.props.connected) await this.#credentials().revoke();
   }
 
@@ -401,51 +443,48 @@ export class InferOpsVerifier extends WorkerEntrypoint<Cloudflare.Env, AccountPr
   }
 }
 
-/** The account's workspace choice, as the configurator reads and sets it. */
-type WorkspaceChoice = {
-  list(): Promise<InferOpsWorkspace[]>;
-  select(workspaceId: string | null): Promise<void>;
+/** What the configurator may ask of the account. */
+type ConfiguratorSource = {
+  /** The host a binding names when the form names no workspace; null when one must be named. */
+  defaultHost: string | null;
+  /** The workspaces a URL may name for this account, each with its slug. */
+  workspaces(): Promise<InferOpsWorkspace[]>;
+  /** The projects this account can open on `host`; empty for a workspace it does not hold. */
+  projects(host: string): Promise<ProjectSummary[]>;
 };
 
-// Keeps the data source and the account out of the iframe-facing object's public surface.
-const configuratorClients = new WeakMap<object, {
-  clientForHost: (host: string) => InferOpsClient; workspaces: WorkspaceChoice;
-}>();
+// Keeps the account out of the iframe-facing object's public surface.
+const configuratorSources = new WeakMap<object, ConfiguratorSource>();
 
 @validateRpc()
 class InferOpsProjectConfiguratorUI extends RpcTarget implements InferOpsProjectConfiguratorRpc {
-  #defaultHost: string;
-
-  constructor(host: string, clientForHost: (host: string) => InferOpsClient,
-              workspaces: WorkspaceChoice) {
+  constructor(source: ConfiguratorSource) {
     super();
-    this.#defaultHost = host;
-    configuratorClients.set(this, { clientForHost, workspaces });
+    configuratorSources.set(this, source);
   }
 
-  async defaultHost(): Promise<string> {
-    return this.#defaultHost;
+  #source(): ConfiguratorSource {
+    const source = configuratorSources.get(this);
+    if (!source) throw new Error("The InferOps configurator is not initialized.");
+    return source;
+  }
+
+  async defaultHost(): Promise<string | null> {
+    return this.#source().defaultHost;
   }
 
   async listWorkspaces(): Promise<ConfiguratorUIOption[]> {
-    const workspaces = await this.#private().workspaces.list();
-    return workspaces.map(w => ({ value: w.workspaceId, title: w.workspaceName, subtitle: w.workspaceId }));
+    const workspaces = await this.#source().workspaces();
+    return workspaces.flatMap(w => w.workspaceSlug
+      ? [{ value: w.workspaceSlug, title: w.workspaceName, subtitle: w.workspaceSlug }] : []);
   }
 
-  async selectWorkspace(workspaceId: string | null): Promise<void> {
-    await this.#private().workspaces.select(workspaceId);
-  }
-
-  #private() {
-    const entry = configuratorClients.get(this);
-    if (!entry) throw new Error("The InferOps configurator is not initialized.");
-    return entry;
-  }
-
-  async listProjects(query: string, host?: string): Promise<ConfiguratorUIOption[]> {
-    const { clientForHost } = this.#private();
+  async listProjects(query: string, host: string): Promise<ConfiguratorUIOption[]> {
+    if (host !== DEMO_HOST && !parseHost(host)) {
+      throw new Error("Enter your organization and choose a workspace first.");
+    }
     const needle = query.trim().toLowerCase();
-    return (await clientForHost(host || this.#defaultHost).listProjects())
+    return (await this.#source().projects(host))
       .filter(p => !needle || p.identifier.toLowerCase().includes(needle) ||
         p.name.toLowerCase().includes(needle))
       .slice(0, OPTION_LIMIT)

@@ -10,6 +10,10 @@
 // - What leaves this object is an `InferOpsAuthority` (the access token and one workspace id): the
 //   refresh token never crosses the RPC boundary. The workspace is always one the person is a
 //   member of; a binding in another workspace is refused here, before any request is made.
+// - A resource URL names its workspace by slug (`inferops://<tenant>.<workspace>/…`), and
+//   `resolveWorkspace` maps it onto the person's memberships. The slugs are read from InferOps at
+//   connect time and stored with the identity; a slug is only ever matched, never trusted to widen
+//   the membership list InferLab reported.
 //
 // Nothing here logs a token, a header or a body.
 
@@ -38,7 +42,6 @@ const SESSION_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const CALLBACK_KEY = "callback";
 const IDENTITY_KEY = "identity";
-const WORKSPACE_KEY = "selectedWorkspace";
 
 /** The tokens one InferLab session issued. Stored whole; only the access token is served. */
 export type InferOpsGrant = {
@@ -49,7 +52,16 @@ export type InferOpsGrant = {
 };
 
 /** One InferOps workspace the person belongs to, as InferLab reported it at connect time. */
-export type InferOpsWorkspace = { workspaceId: string; workspaceName: string };
+export type InferOpsWorkspace = {
+  workspaceId: string;
+  workspaceName: string;
+  /**
+   * The workspace's slug, the `<workspace>` of a resource URL, as InferOps listed it at connect
+   * time. Absent for a workspace InferOps did not list, or for an identity stored before slugs
+   * were kept; such a workspace cannot be named by a URL until the person reconnects.
+   */
+  workspaceSlug?: string;
+};
 
 /** Who connected, as InferLab reported it. `email` is kept for display and sign-in only. */
 export type InferOpsIdentity = {
@@ -181,7 +193,6 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
                 callback: Fetcher<GatekeeperConnectCallback>): Promise<void> {
     this.ctx.storage.kv.put(CALLBACK_KEY, callback);
     this.ctx.storage.kv.put(IDENTITY_KEY, connection.identity);
-    this.ctx.storage.kv.delete(WORKSPACE_KEY);
     this.#coordinator.connect(connection.grant);
   }
 
@@ -222,37 +233,25 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Chooses which of the person's workspaces new bindings are made in; null returns to the default
-   * (the only workspace). A workspace the person is not a member of is refused.
+   * The id of the person's workspace whose slug is `slug`, the `<workspace>` of a resource URL, or
+   * null when the person holds no such workspace. Null says nothing about whether it exists.
    */
-  async selectWorkspace(workspaceId: string | null): Promise<void> {
-    if (workspaceId === null) {
-      this.ctx.storage.kv.delete(WORKSPACE_KEY);
-      return;
-    }
-    this.#membership(workspaceId);
-    this.ctx.storage.kv.put(WORKSPACE_KEY, workspaceId);
-  }
-
-  /**
-   * The workspace a new binding is made in: the selected one, else the person's only one. Throws
-   * when the person has several and none is selected, or has none at all.
-   */
-  async currentWorkspace(): Promise<string> {
-    return this.#workspace(undefined);
+  async resolveWorkspace(slug: string): Promise<string | null> {
+    const identity = this.ctx.storage.kv.get<InferOpsIdentity>(IDENTITY_KEY);
+    return identity?.workspaces.find(w => w.workspaceSlug === slug)?.workspaceId ?? null;
   }
 
   /**
    * The access token and workspace for one request, refreshing the token first when it is about to
-   * expire. `workspaceId` names a binding's workspace; omitted, the current one is used. Throws a
+   * expire. `workspaceId` names a binding's workspace, which must be one of the person's. Throws a
    * `CredentialsExpiredError` once InferLab has confirmed the session dead, after announcing it to
    * the Workshop once.
    */
-  async getCredentials(workspaceId?: string): Promise<CredentialsWithIdentity<InferOpsAuthority>> {
+  async getCredentials(workspaceId: string): Promise<CredentialsWithIdentity<InferOpsAuthority>> {
     // The connection first, so a disconnected account reads as such rather than as no membership.
     const { creds, identity, generation } =
       await this.#coordinator.snapshot(this.#refresh, { notify: this.#notify });
-    const target = this.#workspace(workspaceId);
+    const target = this.#membership(workspaceId).workspaceId;
     return { creds: { token: creds.accessToken, workspaceId: target }, identity, generation };
   }
 
@@ -283,18 +282,5 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
       throw new Error("You are not a member of that InferOps workspace, so it cannot be used here.");
     }
     return member;
-  }
-
-  #workspace(requested: string | undefined): string {
-    if (requested !== undefined) return this.#membership(requested).workspaceId;
-    const selected = this.ctx.storage.kv.get<string>(WORKSPACE_KEY);
-    if (selected !== undefined) return this.#membership(selected).workspaceId;
-    const identity = this.ctx.storage.kv.get<InferOpsIdentity>(IDENTITY_KEY);
-    const workspaces = identity?.workspaces ?? [];
-    if (workspaces.length === 1) return workspaces[0]!.workspaceId;
-    if (workspaces.length === 0) {
-      throw new Error("Your InferLab account has no InferOps workspace.");
-    }
-    throw new Error("You belong to several InferOps workspaces; choose one when adding the board.");
   }
 }

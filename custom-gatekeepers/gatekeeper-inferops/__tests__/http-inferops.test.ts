@@ -4,14 +4,15 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  connectionFromEnv, endpointFromEnv, openHttpInferOpsClient, type InferOpsConnection,
+  connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
+  type InferOpsConnection,
 } from "../src/http-inferops";
 import { inferOpsErrorCode } from "../src/inferops-client";
 
 const TOKEN = "iex_test-secret-token";
 const CONNECTION: InferOpsConnection = {
   baseUrl: "https://ops.example/api", host: "ops.example", token: TOKEN,
-  workspaceId: "90000000-0000-4000-8000-000000000001",
+  workspaceId: "90000000-0000-4000-8000-000000000001", workspaceSlug: "operations",
 };
 
 const DEMO = { id: "10000000-0000-4000-8000-000000000001", identifier: "DEMO", name: "Demo" };
@@ -311,7 +312,15 @@ describe("connection configuration", () => {
     expect(() => connectionFromEnv({ INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_API_TOKEN: TOKEN }))
       .toThrow("INFEROPS_API_TOKEN is set but INFEROPS_WORKSPACE_ID is not.");
     expect(() => connectionFromEnv({
+      INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_API_TOKEN: TOKEN, INFEROPS_WORKSPACE_ID: "w",
+    })).toThrow("INFEROPS_API_TOKEN is set but INFEROPS_WORKSPACE_SLUG is not.");
+    expect(() => connectionFromEnv({
+      INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_API_TOKEN: TOKEN, INFEROPS_WORKSPACE_ID: "w",
+      INFEROPS_WORKSPACE_SLUG: "Operations",
+    })).toThrow("INFEROPS_WORKSPACE_SLUG is not a workspace slug.");
+    expect(() => connectionFromEnv({
       INFEROPS_BASE_URL: "ftp://ops.example", INFEROPS_API_TOKEN: TOKEN, INFEROPS_WORKSPACE_ID: "w",
+      INFEROPS_WORKSPACE_SLUG: "operations",
     })).toThrow("must be an http(s) URL");
   });
 
@@ -322,13 +331,46 @@ describe("connection configuration", () => {
     expect(() => endpointFromEnv({ INFEROPS_BASE_URL: "nope" })).toThrow("INFEROPS_BASE_URL is not a URL.");
   });
 
-  it("derives the host a resource URL must name from the base URL", () => {
+  it("normalizes the base URL and keeps the workspace slug a resource URL must name", () => {
     expect(connectionFromEnv({
       INFEROPS_BASE_URL: "http://LOCALHOST:8080/", INFEROPS_API_TOKEN: TOKEN,
-      INFEROPS_WORKSPACE_ID: CONNECTION.workspaceId,
+      INFEROPS_WORKSPACE_ID: CONNECTION.workspaceId, INFEROPS_WORKSPACE_SLUG: "operations",
     })).toEqual({
       baseUrl: "http://localhost:8080", host: "localhost:8080", token: TOKEN,
-      workspaceId: CONNECTION.workspaceId,
+      workspaceId: CONNECTION.workspaceId, workspaceSlug: "operations",
     });
+  });
+});
+
+describe("workspace slugs", () => {
+  const OPS = "90000000-0000-4000-8000-0000000000AA";
+  const respond = (body: unknown, status = 200) => {
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    const fetcher = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      calls.push({ url: String(input), headers: new Headers(init.headers) });
+      return Response.json(body, { status });
+    }) as typeof fetch;
+    return { calls, fetcher };
+  };
+
+  it("lists id and slug from GET /workspaces with the bearer token and no workspace header", async () => {
+    const { calls, fetcher } = respond([
+      { id: OPS, tenant_id: "t", product: "inferops", name: "Operations", slug: "operations" },
+    ]);
+    expect(await listWorkspaceSlugs("https://ops.example/api", TOKEN, fetcher))
+      .toEqual([{ workspaceId: OPS.toLowerCase(), slug: "operations" }]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://ops.example/api/workspaces");
+    expect(calls[0]!.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(calls[0]!.headers.has("x-workspace-id")).toBe(false);
+  });
+
+  it("fails on a malformed slug or a refused token instead of returning partial data", async () => {
+    const bad = respond([{ id: OPS, slug: "Not A Slug" }]);
+    expect((await failure(listWorkspaceSlugs("https://ops.example", TOKEN, bad.fetcher))).code)
+      .toBe("UNAVAILABLE");
+    const refused = respond({ error: { code: "UNAUTHORIZED", message: "no" } }, 401);
+    expect((await failure(listWorkspaceSlugs("https://ops.example", TOKEN, refused.fetcher))).code)
+      .toBe("UNAUTHORIZED");
   });
 });

@@ -1,4 +1,6 @@
-import { Autocomplete, Field, h, Section, type ConfiguratorUISpec } from "@gadgets/configurator-ui";
+import {
+  Autocomplete, Field, h, Section, TextInput, type ConfiguratorUISpec,
+} from "@gadgets/configurator-ui";
 import type {
   InferOpsProjectConfiguratorRpc,
   InferOpsProjectConfiguratorValues,
@@ -6,15 +8,22 @@ import type {
 
 // Duplicates the grammar in ../resources.ts on purpose: build-gatekeeper-configurator.ts transpiles
 // this file on its own, so it cannot import runtime helpers. __tests__/resources.test.ts keeps
-// the two in step.
-const BOARD_URL = /^inferops:\/\/([^/?#]+)\/project\/board\/([^/?#]+)\/?$/;
+// the two in step. The gatekeeper validates whatever URL this builds.
+const BOARD_URL = /^inferops:\/\/([^/?#.]+)\.([^/?#.]+)\/project\/board\/([^/?#]+)\/?$/;
+
+/** `<tenant>.<workspace>` from the form, or null until both are given. */
+function hostOf(values: InferOpsProjectConfiguratorValues): string | null {
+  const tenant = values.tenant?.trim().toLowerCase();
+  const workspace = values.workspace?.trim();
+  return tenant && workspace ? `${tenant}.${workspace}` : null;
+}
 
 export default {
-  initial: { host: null, projectKey: null, workspaceId: null },
+  initial: { tenant: null, workspace: null, projectKey: null },
 
   initialValuesFromResourceUrl({ resourceUrl }) {
     const match = BOARD_URL.exec(resourceUrl.trim());
-    return match ? { host: match[1]!.toLowerCase(), projectKey: match[2]! } : {};
+    return match ? { tenant: match[1]!, workspace: match[2]!, projectKey: match[3]! } : {};
   },
 
   isReady({ values }) {
@@ -22,26 +31,41 @@ export default {
   },
 
   async resourceUrl({ values, ui }) {
-    return `inferops://${values.host || await ui.defaultHost()}/project/board/${values.projectKey}`;
+    const host = hostOf(values) ?? await ui.defaultHost();
+    if (!host) throw new Error("Enter your organization and choose a workspace.");
+    return `inferops://${host}/project/board/${values.projectKey}`;
   },
 
   render({ values, setValues, clearFields, ui }) {
     return <Section>
       <Field
+        label="Organization"
+        description={"Your InferLab organization's short name, as in " +
+          "inferops://<organization>.<workspace>/…. It only labels the address: your workspace " +
+          "membership decides what you can open. Leave empty for demo data."}
+        optional
+      >
+        <TextInput
+          name="tenant"
+          value={values.tenant}
+          placeholder="acme"
+          optional
+          onChange={tenant => setValues({ tenant })}
+        />
+      </Field>
+      <Field
         label="Workspace"
-        description="Only needed when you belong to several InferOps workspaces."
+        description="One of your InferOps workspaces. Leave empty for demo data."
         optional
       >
         <Autocomplete
-          name="workspaceId"
-          value={values.workspaceId}
-          placeholder="Your only workspace"
+          name="workspace"
+          value={values.workspace}
+          placeholder="Choose a workspace"
           optional
           loadOptions={() => ui.listWorkspaces()}
-          onChange={workspaceId => {
-            // The choice lives on the account, since a resource URL never carries a workspace.
-            void ui.selectWorkspace(workspaceId);
-            setValues({ workspaceId, projectKey: null });
+          onChange={workspace => {
+            setValues({ workspace, projectKey: null });
             clearFields("projectKey");
           }}
         />
@@ -54,7 +78,7 @@ export default {
           name="projectKey"
           value={values.projectKey}
           placeholder="Choose a project"
-          loadOptions={query => ui.listProjects(query, values.host ?? undefined)}
+          loadOptions={async query => ui.listProjects(query, hostOf(values) ?? await ui.defaultHost() ?? "")}
           onChange={projectKey => setValues({ projectKey })}
         />
       </Field>
