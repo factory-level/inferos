@@ -36,7 +36,7 @@ export function BlueprintBindingCard({
   data: BindingCardData
   onChange: (annotation: BlueprintBindingAnnotation) => void
   autoFocusDescription?: boolean
-  /** When true, render without the outer card chrome (border, background, divider). */
+  /** When true, render without the outer card chrome (background, divider). */
   flat?: boolean
 }) {
   const { bindingName, resourceTitle, vendorId, creationSpec, annotation } = data
@@ -46,14 +46,14 @@ export function BlueprintBindingCard({
 
   const containerClass = flat
     ? 'space-y-3'
-    : 'rounded-xl border border-kumo-line bg-kumo-base'
+    : 'rounded-xl bg-kumo-elevated'
   const headerClass = flat
     ? 'flex items-start gap-3'
     : 'flex items-start gap-3 px-3 pt-3'
   const descriptionWrapperClass = flat ? '' : 'px-3 pt-2'
   const footerClass = flat
     ? 'flex items-center [&_label]:!text-[12px] [&_label]:!leading-4 [&_label]:!tracking-[-0.2px] [&_label]:!font-normal [&_label]:!text-kumo-subtle'
-    : 'mt-2 flex items-center border-t border-kumo-line/70 px-3 py-2 [&_label]:!text-[12px] [&_label]:!leading-4 [&_label]:!tracking-[-0.2px] [&_label]:!font-normal [&_label]:!text-kumo-subtle'
+    : 'mx-3 mt-2 flex items-center border-t border-kumo-line py-2 [&_label]:!text-[12px] [&_label]:!leading-4 [&_label]:!tracking-[-0.2px] [&_label]:!font-normal [&_label]:!text-kumo-subtle'
 
   return (
     <div className={containerClass}>
@@ -67,7 +67,7 @@ export function BlueprintBindingCard({
             value={annotation.title}
             onChange={(e) => onChange({ ...annotation, title: e.target.value })}
             placeholder="Connection name"
-            className="!h-8 w-full bg-kumo-base text-[13px] leading-5 font-medium tracking-[-0.25px]"
+            className="!h-8 w-full text-[13px] leading-5 font-medium tracking-[-0.25px]"
           />
           <p className="mt-1 text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
             Referenced in code as: <span className="font-mono text-kumo-subtle">{bindingName}</span>
