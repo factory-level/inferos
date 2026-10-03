@@ -16,6 +16,11 @@ export const describeAgentEvent = (event: OperateEvent, titleOf: (ref: OperateRe
     case 'exitFlow': return 'left the flow'
     case 'reviewApproval': return 'opened an approval for review'
     case 'approvalResolved': return `reported an approval ${event.outcome}`
+    case 'openConsole': return `opened ${event.title}`
+    case 'openView': return 'switched the view'
+    case 'showScreen': return event.screenId === null ? 'went back to the view' : 'opened a screen'
+    case 'closeConsole': return 'closed the console'
+    case 'setPresentation': return event.presentation === 'chat' ? 'switched to full chat' : 'switched to the canvas'
   }
 }
 
