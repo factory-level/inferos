@@ -1,0 +1,64 @@
+import { useCallback, useEffect, useSyncExternalStore } from 'react'
+import type { RpcStub } from 'capnweb'
+import type { Overseer } from '@gadgets/workshop-shared/api'
+import { BoardData, LOADING_BOARD, boardRequestKey, type BoardRequest, type BoardState, type MoveResult } from './boardData'
+import type { Revision } from '@inferos/gatekeeper-inferops/src/types'
+
+// One adapter per scope, the Overseer stub being the user's capability on the workspace. A new
+// stub (another workspace, a reopened session) gets an empty adapter; the old one is disposed with
+// its last card, so no scope's data outlives it.
+const adapters = new Map<RpcStub<Overseer>, { data: BoardData; refs: number }>()
+
+const acquire = (overseer: RpcStub<Overseer>): BoardData => {
+  let held = adapters.get(overseer)
+  if (!held) {
+    held = { data: new BoardData(overseer), refs: 0 }
+    adapters.set(overseer, held)
+  }
+  held.refs++
+  return held.data
+}
+
+const release = (overseer: RpcStub<Overseer>): void => {
+  const held = adapters.get(overseer)
+  if (!held || --held.refs > 0) return
+  adapters.delete(overseer)
+  held.data.dispose()
+}
+
+/** Mark every card of a board in this scope stale and re-read it, e.g. once a proposed move was decided. */
+export const invalidateBoard = (overseer: RpcStub<Overseer>, targetRef: string): void => {
+  adapters.get(overseer)?.data.invalidate(targetRef)
+}
+
+/** The live state of one board card's request in the given scope, with its actions. */
+export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest): {
+  state: BoardState
+  refresh: () => void
+  move: (issueId: string, toStateId: string, expectedRevision: Revision) => Promise<MoveResult>
+} => {
+  const key = boardRequestKey(request)
+  // Held for the component's life as well as per subscription, so a request change does not
+  // dispose and recreate the scope's adapter between the two.
+  useEffect(() => { acquire(overseer); return () => release(overseer) }, [overseer])
+  const subscribe = useCallback((onChange: () => void) => {
+    const data = acquire(overseer)
+    const unsubscribe = data.subscribe(request, onChange)
+    return () => { unsubscribe(); release(overseer) }
+  // The request is identified by its key; a new object with the same key is the same request.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overseer, key])
+  const getSnapshot = useCallback(() => adapters.get(overseer)?.data.get(request) ?? LOADING_BOARD,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [overseer, key])
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  return {
+    state,
+    refresh: () => adapters.get(overseer)?.data.refresh(request),
+    move: (issueId, toStateId, expectedRevision) => {
+      const data = adapters.get(overseer)?.data
+      return data ? data.move(request, issueId, toStateId, expectedRevision)
+        : Promise.resolve({ ok: false, code: 'NOT_LOADED', message: 'The board is not loaded.' })
+    },
+  }
+}

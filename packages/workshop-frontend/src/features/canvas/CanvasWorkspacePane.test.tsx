@@ -13,7 +13,11 @@ vi.mock('../../GadgetUI', () => ({ default: () => null }))
 
 let root: Root
 let container: HTMLDivElement
-const overseer = {} as RpcStub<Overseer>
+// The read-only view watches the action log for decided moves; nothing else here reaches the workspace.
+const overseer = {
+  subscribeToActions: async () => ({ [Symbol.dispose]: () => {} }),
+  listActions: async () => ({ entries: [] }),
+} as unknown as RpcStub<Overseer>
 const render = async (storage: CanvasStorage, catalog: CanvasCatalog = DEFAULT_CANVAS_CATALOG,
     onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => {})) => {
   await act(async () => root.render(<CanvasWorkspacePane storage={storage} overseer={overseer} gadgets={new Map()}
