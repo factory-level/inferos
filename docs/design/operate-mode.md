@@ -22,7 +22,7 @@ InferOS has two modes. Build is where people author software: apps, widgets and 
 - **Build is for admins and leads.** Creating and changing apps, widgets, workflows, skills, gadgets and consoles needs a build role. Employees get Operate only and work in the consoles assigned to their role. The role comes from server-enforced authority, never from a UI flag, a deployment profile or the console itself.
 - Each console can carry an authored **state machine**: named states, the screens or views each shows, and the guarded transitions between them. It drives navigation and presentation only. Domain writes still go through gatekeepers and approvals.
 - Admins and leads can see, for every console and view, which apps and widgets are assigned to it, at which pinned version, with their health and pending approvals. Operators see the same inventory, read-only and scoped to what their role can open.
-- Operate has three surfaces, kept distinct: an **app** owns a full page, a **widget** is a bounded piece that can be placed on a screen or rendered in the operate chat, and **full chat** is a ChatGPT-style assistant page with no canvas that loads widgets into the conversation. All three are presentations of the same session.
+- Operate has three surfaces, kept distinct: an **app** owns a full page, a **widget** is a bounded piece that can be placed on a screen or rendered in the operate chat, and **full chat** is a ChatGPT-style assistant page with no canvas that loads widgets into the conversation. All three are presentations of the same session. Full chat is optional: each console decides whether to offer it.
 - Operate is **a single session**. One continuous operate chat runs across every view and screen in the space. Shared screens and views share their definitions, never a session: each person's conversation and page state are their own.
 - A **page state machine** owns the full Operate page state. User actions, the operate agent and the URL all change it through the same validated events. The state is serializable, so a reload or link restores it.
 - The operate chat is a kernel **chat mode**. Its agent may use the space's installed gadgets and connected gatekeepers through `executeCode`, read screens and views, and send page events. It has no authoring tools (`readFile`, `writeFile`, `editFile`, `createGadget`, `createWorktree`, `setGadgetBinding`). Writes still go through gatekeeper approvals, and InferOps stays authoritative.
@@ -76,7 +76,14 @@ The rule: something that needs its own navigation or a full page is an app. Some
 
 Placing a widget in the conversation is presentation only, as it is on a screen. The widget reads under the viewer's own authority, and its actions reach the agent as events. Any domain write still goes through gatekeeper approval.
 
-**Full chat** is how Operate works for a role that needs no canvas, and for anyone who prefers to just ask. It uses the same session: one conversation, one page state, one event log. Switching between full chat and a console's canvas is a page event (`setPresentation`), so it keeps the conversation and restores on reload. A console may set full chat as its default presentation, or be chat-only. In full chat the agent can load only the widgets assigned to the person's consoles, the same set it could place on their screens.
+**Full chat** is optional and is decided per console. A console declares one `fullChat` setting:
+
+- `off` (the default): the console has no full chat, and the operate chat appears only beside the canvas.
+- `available`: the person can switch between the canvas and full chat.
+- `default`: the console opens in full chat, and the canvas is one switch away.
+- `only`: the console is chat-only, with no canvas. This suits a role that needs no screens.
+
+Full chat uses the same session: one conversation, one page state, one event log. Switching between full chat and the canvas is a page event (`setPresentation`), so it keeps the conversation and restores on reload. The reducer rejects `setPresentation` when the open console's setting doesn't allow full chat. In full chat the agent can load only the widgets assigned to the open console, the same set it could place on that console's screens. Like every console setting, `fullChat` selects a presentation. It grants nothing.
 
 ### Views and screens
 
@@ -92,6 +99,7 @@ A role console groups what one operator role works in:
 - **screens** those views reference.
 - **flows** that step through its screens.
 - **a state machine** (optional) over its screens and views.
+- **a full chat setting** (`off` by default, or `available`, `default` or `only`; see Surfaces).
 - **assignments**: the published apps and widgets the console's screens may use, each at a pinned installed version.
 - **roles** it is assigned to.
 
