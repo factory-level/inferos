@@ -18,4 +18,5 @@ Create documents from [`_template.md`](_template.md).
 | [Research source ledger](research-sources.md) | Dated sources, repository revisions and explicit evidence limits. |
 | [Implementation roadmap](implementation-roadmap.md) | The MVP walkthrough from #1, the wave milestones and what has merged against each issue. |
 | [Bootstrap a consumer](consumer-bootstrap.md) | Commands, generated files, verified scope and current limitations |
+| [Upstream starter inventory and provenance](starter-inventory.md) | Each step of the cloudflare-os-starter operator flow, the InferOS command that covers it, and the licence review |
 | [Local verification evidence](local-verification-evidence.md) | Actual startup, browser/restart proof and requirement-by-requirement remaining gaps |

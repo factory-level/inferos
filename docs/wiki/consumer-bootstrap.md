@@ -9,7 +9,7 @@ Create a wrapper with pinned InferOS code and explicit InferOps/profile/feature 
 
 ## Steps
 
-Run from this InferOS checkout with Node 22.18 or later:
+Run this from the InferOS checkout with Node 22.18 or later, after running `pnpm install` in the checkout. The scaffolder imports `yaml` through `scripts/consumer/skill-manifest.ts` and fails with `ERR_MODULE_NOT_FOUND` without it.
 
 ```bash
 node scripts/consumer/bootstrap.ts /tmp/my-inferos https://github.com/factory-level/inferos 6bb215f0ad9d6911d599117949088dab4e0d7496
