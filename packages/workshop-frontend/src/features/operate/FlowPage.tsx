@@ -21,8 +21,9 @@ export const FlowPage = ({ flow, chatOpen, onEvent }: {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-kumo-base">
-      <header className="flex h-14 flex-shrink-0 items-center gap-3 border-b border-kumo-line px-4">
-        <div className="min-w-0 flex-1">
+      {/* Narrow widths wrap the title onto its own row, so the step's name is never squeezed out by the controls. */}
+      <header className="flex min-h-14 flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-kumo-line px-4 py-2 sm:h-14 sm:flex-nowrap sm:py-0">
+        <div className="min-w-0 flex-1 basis-full sm:basis-0">
           <p className="m-0 truncate text-[11px] leading-4 font-medium uppercase tracking-[0.06em] text-kumo-inactive">{flow.title}</p>
           <h1 aria-live="polite" className="m-0 truncate text-[14px] leading-5 font-medium text-kumo-default">
             {position}{stepTitle ? ` · ${stepTitle}` : ''}
