@@ -47,6 +47,7 @@
   },
   "devDependencies": {
     "@gadgets/scripts": "workspace:*",
+    "@inferos/gatekeeper-inferops": "workspace:*",
     "@tanstack/router-plugin": "^1.168.40",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

@@ -14,32 +14,73 @@ vi.mock('../../GadgetUI', () => ({
 
 let root: Root
 let container: HTMLDivElement
-const disposed: WorkpieceId[] = []
+const disposed: (WorkpieceId | string)[] = []
+const BOARD = 'inferops://demo.local/project/board/DEMO'
+const demoBoard = {
+  project: { id: 'p', identifier: 'DEMO', name: 'Demo' },
+  columns: [
+    { state: { id: 'todo', name: 'Todo', group: 'unstarted', position: 0, workflow: 'software' }, issues: [{ id: '1' }, { id: '2' }] },
+    { state: { id: 'done', name: 'Done', group: 'completed', position: 1, workflow: 'software' }, issues: [{ id: '3' }] },
+  ],
+}
+const readBoard = vi.fn<() => Promise<typeof demoBoard>>(async () => demoBoard)
+const connection = {
+  openSession: async () => ({ readBoard, [Symbol.dispose]: () => { disposed.push('session') } }),
+  [Symbol.dispose]: () => { disposed.push('client') },
+}
+let actions: { entry: (record: object) => void } | undefined
+const lookup = vi.fn<(url: string) => Promise<object | null>>(async () => null)
 const overseer = {
   getGadget: vi.fn<(id: WorkpieceId) => object>((id: WorkpieceId) => ({ [Symbol.dispose]: () => { disposed.push(id) } })),
+  getGatekeeperByResourceUrl: lookup,
+  subscribeToActions: async (subscriber: typeof actions) => { actions = subscriber; return { [Symbol.dispose]: () => {} } },
+  listActions: async () => ({ entries: [] }),
 } as unknown as RpcStub<Overseer>
 const gadgetWidget = (id: string, ref: string): CanvasWidget => ({ id, kind: 'inferos.gadget', version: 1, targetRef: ref, size: 'normal', params: {} })
 const definition = (widgets: CanvasWidget[]): CanvasDefinition => ({ schemaVersion: 1, id: 'ops', revision: '0', title: 'Ops',
   sections: [{ id: 'main', title: 'Main', columns: 2, widgets }] })
 const summaries = (...gadgets: GadgetSummary[]) => new Map(gadgets.map(gadget => [gadget.id, gadget]))
+const action = (resourceUrl: string, state: string) => ({ id: 1, type: 'action', state, resourceUrl, resourceTitle: 'Board', createdAt: new Date() })
+const boardWidget = (id: string, showCompleted = false): CanvasWidget => ({ id, kind: 'inferops.project-board', version: 1,
+  targetRef: BOARD, size: 'wide', params: { workflow: 'software', showCompleted } })
 const render = async (view: CanvasDefinition, gadgets: Map<WorkpieceId, GadgetSummary>) => {
   await act(async () => root.render(<CanvasView definition={view} gadgets={gadgets} overseer={overseer} />))
+  // Let the adapter's lookup and read settle.
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  disposed.length = 0; vi.mocked(overseer.getGadget).mockClear()
+  disposed.length = 0; vi.mocked(overseer.getGadget).mockClear(); readBoard.mockClear(); actions = undefined
+  lookup.mockClear().mockResolvedValue(null)
 })
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
-it('renders accepted gadgets live beside boards that stay explicitly unconnected', async () => {
-  await render(definition([gadgetWidget('g', 'gadget:3'), { id: 'b', kind: 'inferops.project-board', version: 1,
-    targetRef: 'inferops://demo.local/project/board/DEMO', size: 'wide', params: { workflow: 'software', showCompleted: false } }]),
-  summaries({ id: 3, type: 'gadget', title: 'Shift report', commitId: 'c1' }))
+it('renders accepted gadgets live beside boards the workspace has no connection for', async () => {
+  await render(definition([gadgetWidget('g', 'gadget:3'), boardWidget('b')]),
+    summaries({ id: 3, type: 'gadget', title: 'Shift report', commitId: 'c1' }))
   expect(container.querySelector('[aria-label="Shift report"] [data-testid="gadget-ui"]')?.textContent).toBe('visible')
   expect(overseer.getGadget).toHaveBeenCalledWith(3)
-  expect(container.querySelector('[aria-label="Project board inferops://demo.local/project/board/DEMO"]')?.textContent).toContain('Not connected')
+  expect(lookup).toHaveBeenCalledWith(BOARD)
+  expect(container.querySelector(`[aria-label="Project board ${BOARD}"]`)?.textContent).toContain('Not connected')
+})
+
+it('shows a connected board\'s states and counts, reading it once for every card of it, and releases the session', async () => {
+  lookup.mockResolvedValue(connection)
+  await render(definition([boardWidget('b'), boardWidget('all', true)]), summaries())
+  expect(lookup).toHaveBeenCalledTimes(1)
+  const cards = [...container.querySelectorAll(`[aria-label="Project board ${BOARD}"]`)]
+  expect(cards.map(card => [...card.querySelectorAll('li')].map(item => item.textContent))).toEqual([['Todo 2'], ['Todo 2', 'Done 1']])
+  expect(cards[0]?.textContent).toContain('Demo (DEMO)')
+  expect(readBoard).toHaveBeenCalledTimes(1)
+  // A move decided on this board's connection, by anyone, re-reads the board; other actions do not.
+  await act(async () => { actions?.entry(action('inferops://demo.local/project/board/OTHER', 'approved')); actions?.entry(action(BOARD, 'pending')) })
+  expect(readBoard).toHaveBeenCalledTimes(1)
+  await act(async () => { actions?.entry(action(BOARD, 'approved')); await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(readBoard).toHaveBeenCalledTimes(2)
+  await render(definition([]), summaries())
+  expect(disposed).toEqual(['client', 'session'])
 })
 
 it('never opens a draft or a missing gadget, and disposes stubs when a widget goes away', async () => {
