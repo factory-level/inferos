@@ -85,7 +85,7 @@ export function bootstrapConsumer(target: string, repository: string, revision: 
       engines: { node: ">=22.18.0" },
       scripts: { inferos: "node .inferos/runtime.ts", "inferos:check": "node .inferos/runtime.ts check", "profile:init": "node .inferos/runtime.ts profile", local: "node .inferos/runtime.ts local", "extensions:check": "node .inferos/runtime.ts extensions", "gatekeepers:check": "node .inferos/runtime.ts gatekeepers", "gatekeepers:generate": "node .inferos/runtime.ts gatekeepers --write", "views:check": "node .inferos/runtime.ts views", canvas: "node .inferos/runtime.ts canvas", "fixtures:check": "node .inferos/runtime.ts fixtures", "blueprints:check": "node .inferos/runtime.ts blueprints", "skills:check": "node .inferos/runtime.ts skills", "skills:install": "node .inferos/runtime.ts skills-install", "skills:upload": "node .inferos/runtime.ts skills-upload", doctor: "node .inferos/runtime.ts doctor", setup: "node .inferos/runtime.ts setup", dev: "node .inferos/runtime.ts dev" },
     }));
-    writeFileSync(join(staging, ".gitignore"), "node_modules/\n.wrangler/\n.env*\n.dev.vars*\n.inferos/state/\nwrangler.consumer.jsonc\n");
+    writeFileSync(join(staging, ".gitignore"), "node_modules/\n.wrangler/\n.env*\n.dev.vars*\n.inferos/state/\nwrangler.consumer.jsonc\nwrangler.dev.jsonc\n");
     writeFileSync(join(staging, "views/operations.json"), json({
       schemaVersion: 1, id: "operations", revision: "0", title: "Operations",
       sections: [{ id: "project-section", title: "Project board", columns: 1, widgets: [{
