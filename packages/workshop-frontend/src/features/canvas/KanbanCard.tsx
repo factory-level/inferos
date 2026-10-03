@@ -2,6 +2,7 @@ import { useState, type KeyboardEvent } from 'react'
 import { Badge, Button, DropdownMenu } from '@cloudflare/kumo'
 import { ArrowRight, DotsThree } from '@phosphor-icons/react'
 import type { Issue, State } from '@inferos/gatekeeper-inferops/src/types'
+import type { BoardActivityItem } from './boardActivity'
 import type { PendingMove } from './boardData'
 import { PRIORITY_LABELS, formatTargetDate, isOverdue, type MoveDecision } from './kanbanBoard'
 
@@ -15,6 +16,8 @@ export type KanbanCardProps = {
   targets: readonly State[]
   /** The issue's undecided move, resolved to its target state. */
   pending?: { move: PendingMove; toState: State | undefined }
+  /** A move of the issue awaiting approval that this board did not propose, from the action log. */
+  proposed?: BoardActivityItem
   /** How the issue's last move was decided, until it moves again or changes. */
   decision?: { outcome: MoveDecision['outcome']; toState: State | undefined }
   /** `YYYY-MM-DD`, for the overdue mark. */
@@ -31,7 +34,7 @@ export type KanbanCardProps = {
  * proposes the move, the "Move to" menu offers the same targets, and it can be dragged to a
  * column. A pending move keeps its controls disabled, since the gatekeeper refuses a second.
  */
-export const KanbanCard = ({ issue, state, targets, pending, decision, today, instructionsId, onMove, onDragStart, onDragEnd }: KanbanCardProps) => {
+export const KanbanCard = ({ issue, state, targets, pending, proposed, decision, today, instructionsId, onMove, onDragStart, onDragEnd }: KanbanCardProps) => {
   const [choice, setChoice] = useState<State | null>(null)
   const movable = targets.length > 0 && !pending
   const chosen = choice && targets.find(target => target.id === choice.id) ? choice : null
@@ -81,7 +84,10 @@ export const KanbanCard = ({ issue, state, targets, pending, decision, today, in
     {pending && <Badge variant="warning" icon={ArrowRight}>
       {pending.move.phase === 'proposing' ? 'Proposing move to' : 'Awaiting approval:'} {pending.toState?.name ?? 'another state'}
     </Badge>}
-    {decision && !pending && <Badge variant={decision.outcome === 'rejected' ? 'error' : 'success'}>
+    {proposed && !pending && <Badge variant="warning" icon={ArrowRight}>
+      Awaiting approval{proposed.actor ? ` (${proposed.actor})` : ''}: {proposed.title}
+    </Badge>}
+    {decision && !pending && !proposed && <Badge variant={decision.outcome === 'rejected' ? 'error' : 'success'}>
       Move to {decision.toState?.name ?? 'another state'} {decision.outcome}
     </Badge>}
     {chosen && <p className="text-xs text-kumo-brand">Move to {chosen.name}? Enter to propose, Escape to cancel.</p>}

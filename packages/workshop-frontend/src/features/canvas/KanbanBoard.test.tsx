@@ -4,6 +4,7 @@ import { act, type ReactElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Board, Issue, State } from '@inferos/gatekeeper-inferops/src/types'
+import type { BoardActivityItem } from './boardActivity'
 import type { MoveResult, PendingMove } from './boardData'
 import { KanbanBoard, type KanbanLayout } from './KanbanBoard'
 
@@ -35,8 +36,9 @@ const basic = board([TODO, [issue('1', 'todo', { priority: 'high', assigneeId: '
   [DOING, []], [DONE, [issue('2', 'done')]], [IDEAS, [issue('3', 'ideas', { workflow: 'content' })]])
 const onMove = vi.fn<(issue: Issue, toState: State) => Promise<MoveResult>>(async () => ({ ok: true }))
 
-const render = async (b: Board, pending: PendingMove[] = [], layout: KanbanLayout = 'embedded', columns = b.columns) => {
-  await act(async () => root.render(<KanbanBoard board={b} columns={columns} pending={pending} layout={layout} onMove={onMove} />))
+const render = async (b: Board, pending: PendingMove[] = [], layout: KanbanLayout = 'embedded', columns = b.columns,
+  awaiting: ReadonlyMap<string, BoardActivityItem> = new Map()) => {
+  await act(async () => root.render(<KanbanBoard board={b} columns={columns} pending={pending} awaiting={awaiting} layout={layout} onMove={onMove} />))
 }
 const card = (id: string) => [...container.querySelectorAll<HTMLElement>('[data-issue-id]')].find(item => item.dataset.issueId === id)!
 const column = (id: string) => [...container.querySelectorAll<HTMLElement>('[data-state-id]')].find(item => item.dataset.stateId === id)!
@@ -170,4 +172,13 @@ it('lays columns out to scroll sideways when embedded and to share the width in 
   await render(basic, [], 'full')
   expect(container.firstElementChild?.getAttribute('data-layout')).toBe('full')
   expect(column('todo').className).toContain('flex-1')
+})
+
+it("marks a card whose move another caller proposed as awaiting approval, with who asked, and offers no move", async () => {
+  const proposed: BoardActivityItem = { id: 9, kind: 'awaiting', actor: 'Agent', title: 'Move DEMO-1 to Doing', at: new Date(0), issue: 'DEMO-1' }
+  await render(basic, [], 'embedded', basic.columns, new Map([['DEMO-1', proposed]]))
+  expect(card('1').textContent).toContain('Awaiting approval (Agent): Move DEMO-1 to Doing')
+  expect(card('1').getAttribute('draggable')).toBe('false')
+  expect(menuItems('1')).toEqual([])
+  expect(menuItems('2').length).toBeGreaterThan(0)
 })

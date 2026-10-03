@@ -42,7 +42,7 @@ const gadgetWidget = (id: string, ref: string): CanvasWidget => ({ id, kind: 'in
 const definition = (widgets: CanvasWidget[]): CanvasDefinition => ({ schemaVersion: 1, id: 'ops', revision: '0', title: 'Ops',
   sections: [{ id: 'main', title: 'Main', columns: 2, widgets }] })
 const summaries = (...gadgets: GadgetSummary[]) => new Map(gadgets.map(gadget => [gadget.id, gadget]))
-const action = (resourceUrl: string, state: string) => ({ id: 1, type: 'action', state, resourceUrl, resourceTitle: 'Board', createdAt: new Date() })
+const action = (resourceUrl: string, state: string) => ({ id: 1, type: 'action', state, resourceUrl, resourceTitle: 'Board', createdAt: new Date(), description: { title: 'Move DEMO-1 to Doing', description: '' } })
 const boardWidget = (id: string, showCompleted = false): CanvasWidget => ({ id, kind: 'inferops.project-board', version: 1,
   targetRef: BOARD, size: 'wide', params: { workflow: 'software', showCompleted } })
 const render = async (view: CanvasDefinition, gadgets: Map<WorkpieceId, GadgetSummary>) => {
