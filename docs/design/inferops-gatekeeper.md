@@ -102,7 +102,7 @@ Every response is validated before any of it is used; a response that does not m
 
 There is no pagination in v1: the board endpoint returns the whole board and InferOS does not invent a cursor over it.
 
-A run keeps `id`, `issueId`, `repoId`, `status`, `baseRef`, `externalRunId`, `result`, `error` and its timestamps; `requestedBy`, `action` and `leaseGeneration` are dropped. A result keeps its required `summary` and, when well formed, `testSummary`, `patch` (`path`, `sha256`, `files`, `insertions`, `deletions`), `branch`, `commitSha` and `prUrl`; `patch` and `testSummary` are new in InferOps ([factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327)) and a shape that does not match is left out rather than failing the read.
+A run keeps `id`, `issueId`, `repoId`, `status`, `baseRef`, `externalRunId`, `result`, `error` and its timestamps; `requestedBy`, `action` and `leaseGeneration` are dropped. A result keeps its required `summary` and, when well formed, `testSummary`, `patch` (`path`, `sha256`, `files`, `insertions`, `deletions`), `tests` (`directory`, `passed`, `failed`, and per command `index`, `argv`, `exitCode`, `timedOut`, `durationMs`, `truncated` and the `stdout`, `stderr` and `record` artifact paths), `reasonCode` (`AUTH_BLOCKED`, `QUOTA_BLOCKED` or `TESTS_FAILED`), `branch`, `commitSha` and `prUrl`; `patch`, `testSummary`, `tests` and `reasonCode` are new in InferOps ([factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327)) and a shape that does not match (any malformed test command, or an unknown reason) is left out whole rather than failing the read.
 
 ### Project scope is checked by InferOS
 

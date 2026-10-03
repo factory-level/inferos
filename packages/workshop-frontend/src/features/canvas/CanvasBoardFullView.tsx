@@ -10,15 +10,17 @@ import { useDecidedActionInvalidation } from './useBoardData'
  * One board widget of a view opened on its own: the same request as its card, served from the
  * scope's shared adapter, with the whole pane for its columns.
  */
-export const CanvasBoardFullView = ({ widget, viewTitle, overseer, onBack }: {
+export const CanvasBoardFullView = ({ widget, viewTitle, overseer, onBack, codingDispatch }: {
   widget: CanvasProjectBoardWidget
   viewTitle: string
   overseer: RpcStub<Overseer>
   onBack: () => void
+  /** See `CanvasBoardWidgetProps.codingDispatch`. */
+  codingDispatch?: boolean
 }) => {
   useDecidedActionInvalidation(overseer)
   return <div className="flex h-full min-h-0 flex-col gap-3">
     <div><Button size="sm" variant="ghost" icon={ArrowLeft} onClick={onBack}>Back to {viewTitle}</Button></div>
-    <div className="min-h-0 flex-1"><CanvasBoardWidget widget={widget} overseer={overseer} presentation="full" /></div>
+    <div className="min-h-0 flex-1"><CanvasBoardWidget widget={widget} overseer={overseer} presentation="full" codingDispatch={codingDispatch} /></div>
   </div>
 }

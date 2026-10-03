@@ -26,6 +26,8 @@ export type BoardActivityItem = {
   at: Date
   /** The identifier of the issue an action moves, when the gatekeeper named it. */
   issue?: string
+  /** The action's kind tag (`ActionKind.tag`), when the gatekeeper gave one, e.g. "inferops.code-dispatch". */
+  tag?: string
 }
 
 export type BoardActivity = {
@@ -88,6 +90,7 @@ export const foldBoardActivity = (
       title: record.description.title,
       at: kind === 'awaiting' ? record.createdAt : actionChangeTime(record),
       issue: issueOf(record),
+      ...record.type === 'action' && record.description.actionKind ? { tag: record.description.actionKind.tag } : {},
     }
     if (kind === 'awaiting') {
       if (connected) active.push(item)
@@ -128,6 +131,20 @@ export const describeActivity = (item: BoardActivityItem, now: number): string =
     case 'rejected': return `${actor}: ${item.title}, rejected ${formatActivityAge(item.at, now)}`
   }
 }
+
+/**
+ * Two resources' activity shown as one, such as a board's and its project's coding dispatch.
+ * Action log ids are unique within the workspace, so the items never collide.
+ */
+export const combineActivity = (a: BoardActivity, b: BoardActivity): BoardActivity => ({
+  active: [...a.active, ...b.active].toSorted(newestFirst),
+  recent: [...a.recent, ...b.recent].toSorted(newestFirst).slice(0, RECENT_ACTIVITY_LIMIT),
+})
+
+/** Only the actions: reads left out, for a resource that is re-read automatically and would fill the line with them. */
+export const actionsOnly = (activity: BoardActivity): BoardActivity => activity.recent.some(item => item.kind === 'read')
+  ? { active: activity.active, recent: activity.recent.filter(item => item.kind !== 'read') }
+  : activity
 
 /** Awaiting actions by the identifier of the issue they move, for the issue's card. */
 export const awaitingByIssue = (activity: BoardActivity): ReadonlyMap<string, BoardActivityItem> =>
