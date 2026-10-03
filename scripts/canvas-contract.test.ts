@@ -4,6 +4,8 @@ import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type
 
 const board = (id = "board-a"): CanvasWidget => ({ id, kind: "inferops.project-board", version: 1,
   targetRef: "inferops://demo.local/project/board/DEMO", size: "full", params: { workflow: "software", showCompleted: false } });
+const wiki = (page: string | null = null): CanvasWidget => ({ id: "wiki-a", kind: "inferops.wiki", version: 1,
+  targetRef: "inferops://demo.local/knowledge/wiki", size: "full", params: { page } });
 const gadget = (id = "gadget-a", targetRef = "gadget:7"): CanvasWidget => ({ id, kind: "inferos.gadget", version: 1,
   targetRef, size: "normal", params: {} });
 const initial = (): CanvasDefinition => ({ schemaVersion: 1, id: "operations", revision: "0", title: "Operations",
@@ -98,4 +100,19 @@ test("gadget widgets carry only a workspace-local reference and no parameters", 
     assert.throws(() => applyCanvasOperations(input, "0", [{ type: "addWidget", sectionId: "other", index: 0, widget: { ...gadget(), ...change } }]), /Invalid canvas/);
   }
   assert.throws(() => applyCanvasOperations(added, "1", [{ type: "configureWidget", widget: { ...board("gadget-a"), targetRef: "gadget:7" } }]), /target reference/);
+});
+
+test("wiki widgets name one workspace's Wiki and, optionally, the page opened first", () => {
+  const input = initial();
+  const added = applyCanvasOperations(input, "0", [{ type: "addWidget", sectionId: "other", index: 0, widget: wiki("release-process") }]);
+  assert.deepEqual(added.sections[1].widgets, [wiki("release-process")]);
+  assert.deepEqual(applyCanvasOperations(added, "1", [{ type: "configureWidget", widget: wiki() }]).sections[1].widgets, [wiki()]);
+  for (const change of [{ targetRef: "inferops://demo.local/knowledge/document/handbook" }, { targetRef: "inferops://demo.local/knowledge/wiki?token=x" },
+    { targetRef: "inferops://demo/knowledge/wiki" }, { targetRef: "inferops://demo.local/project/board/DEMO" },
+    { params: {} }, { params: { page: "" } }, { params: { page: "../secret" } }, { params: { page: "a/b" } }, { params: { page: 1 } },
+    { params: { page: null, extra: true } }, { version: 2 }]) {
+    assert.throws(() => applyCanvasOperations(input, "0", [{ type: "addWidget", sectionId: "other", index: 0, widget: { ...wiki(), ...change } }]), /Invalid canvas/);
+  }
+  assert.throws(() => applyCanvasOperations(input, "0", [{ type: "addWidget", sectionId: "other", index: 0, widget: wiki() }], ["inferops.project-board"]),
+    /inferops.wiki is not enabled/);
 });
