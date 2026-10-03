@@ -4,13 +4,14 @@
 // is resolved to a session only through the workspace's existing connection
 // (Overseer.getGatekeeperByResourceUrl), so a reference identifies a board and authorizes nothing.
 //
-// InferOps stays authoritative: the adapter keeps snapshots, never a second copy it edits. A move
-// is proposed through the gatekeeper's approval path and shown as pending until the authoritative
-// board says it was decided. Reads are independent board reads; there is no batching.
+// InferOps stays authoritative: the adapter keeps snapshots, never a second copy it edits. A move,
+// a new issue or an edit is proposed through the gatekeeper's approval path and shown as pending
+// until the authoritative board says it was decided. Reads are independent board reads; there is
+// no batching.
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
-import type { Board, InferOpsProjectSession, Revision } from '@inferos/gatekeeper-inferops/src/types'
+import type { Board, InferOpsProjectSession, IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
 
 /** What one board card asks for: registered kind and version, canonical target, normalized params. */
 export type BoardRequest = Pick<CanvasProjectBoardWidget, 'kind' | 'version' | 'targetRef' | 'params'>
@@ -26,6 +27,17 @@ export type PendingMove = {
   phase: 'proposing' | 'awaiting'
 }
 
+/**
+ * A new issue or an edit proposed through the gatekeeper whose queued form the board has not shown
+ * yet. Once queued, the gatekeeper's reads overlay it themselves (`Issue.pending` "create" or
+ * "update"), so the change is held here only until the first board read after it was queued: that
+ * read shows the overlay, and the board, not this list, says what became of it.
+ */
+export type PendingChange = { phase: 'proposing' | 'awaiting' } & (
+  | { kind: 'create'; title: string; stateId?: string }
+  | { kind: 'update'; issueId: string; changes: IssueChanges; expectedRevision: Revision }
+)
+
 export type BoardState =
   | { status: 'loading' }
   /** The workspace holds no connection covering the reference. The cue to offer connecting, never to connect. */
@@ -33,13 +45,15 @@ export type BoardState =
   /** Nothing usable was loaded (or the connection was revoked, which drops what was). */
   | { status: 'error'; message: string }
   /** `stale`: newer data was asked for (a refresh, a move, an approval) and has not arrived; `error` says why the refresh failed. */
-  | { status: 'ready' | 'stale'; board: Board; pending: readonly PendingMove[]; error?: string }
+  | { status: 'ready' | 'stale'; board: Board; pending: readonly PendingMove[]; changes: readonly PendingChange[]; error?: string }
 
-export type MoveResult = { ok: true } | { ok: false; code: string; message: string }
+/** How a proposal (move, create or edit) went: queued for approval, or refused with the gatekeeper's code and message. */
+export type ProposalResult = { ok: true } | { ok: false; code: string; message: string }
 
 /** The state of a request nobody has subscribed to yet; one object, so snapshots compare equal. */
 export const LOADING_BOARD: BoardState = { status: 'loading' }
 const UNBOUND: BoardState = { status: 'unbound' }
+const NOT_LOADED = { ok: false, code: 'NOT_LOADED', message: 'The board is not loaded.' } as const
 
 /** The reference as the gatekeeper describes it: the host is case-insensitive, the key is not. */
 export const canonicalBoardRef = (targetRef: string): string =>
@@ -68,7 +82,13 @@ type Entry = { target: string; request: BoardRequest; listeners: Set<() => void>
 // What the scope knows about one board, shared by every card of it. The two clocks order reads:
 // a read started before `wanted` cannot satisfy the demand that set it, and a read older than
 // `applied` never lands over the one on screen.
-type TargetData = { wanted: number; applied: number; pending: PendingMove[]; session?: Promise<RpcStub<InferOpsProjectSession> | null> }
+type TargetData = {
+  wanted: number
+  applied: number
+  pending: PendingMove[]
+  changes: PendingChange[]
+  session?: Promise<RpcStub<InferOpsProjectSession> | null>
+}
 
 type Read = { target: string; clock: number; entries: Set<Entry>; running: boolean }
 
@@ -128,37 +148,44 @@ export class BoardData {
    * the board) until the authoritative board reports it decided; the board is re-read either way,
    * so a refused move restores it and an accepted one shows the gatekeeper's simulated result.
    */
-  async move(request: BoardRequest, issueId: string, toStateId: string, expectedRevision: Revision): Promise<MoveResult> {
-    const entry = this.#entries.get(boardRequestKey(request))
-    if (!entry || !('board' in entry.state)) return { ok: false, code: 'NOT_LOADED', message: 'The board is not loaded.' }
-    const column = entry.state.board.columns.find(c => c.issues.some(i => i.id === issueId))
-    if (!column) return { ok: false, code: 'NOT_FOUND', message: 'No such issue on this board.' }
-    const target = this.#target(entry.target)
-    if (target.pending.some(p => p.issueId === issueId)) {
-      return { ok: false, code: 'CONFLICT', message: 'This issue already has a move that has not taken effect yet.' }
-    }
+  async move(request: BoardRequest, issueId: string, toStateId: string, expectedRevision: Revision): Promise<ProposalResult> {
+    const found = this.#changeable(request, issueId)
+    if (!found.ok) return found
+    const { entry, column } = found
     const move: PendingMove = { issueId, fromStateId: column.state.id, toStateId, expectedRevision, phase: 'proposing' }
-    this.#setPending(entry.target, [...target.pending, move])
-    try {
-      const session = await this.#session(entry.target)
-      if (!session) {
-        this.#setPending(entry.target, target.pending.filter(p => p !== move))
-        return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
-      }
-      const issue = session.openIssue(issueId)
-      try {
-        await issue.transition(toStateId, expectedRevision)
-      } finally {
-        issue[Symbol.dispose]()
-      }
-      this.#setPending(entry.target, target.pending.filter(p => p !== move).concat({ ...move, phase: 'awaiting' }))
-      return { ok: true }
-    } catch (error) {
-      this.#setPending(entry.target, target.pending.filter(p => p !== move))
-      return { ok: false, code: codeOf(error), message: messageOf(error) }
-    } finally {
-      this.invalidate(entry.target)
-    }
+    const pending = () => this.#target(entry.target).pending.filter(p => p !== move)
+    this.#publish(entry.target, { pending: [...this.#target(entry.target).pending, move] })
+    return this.#propose(entry.target, async session => {
+      using issue = session.openIssue(issueId)
+      await issue.transition(toStateId, expectedRevision)
+    }, queued => this.#publish(entry.target, { pending: queued ? [...pending(), { ...move, phase: 'awaiting' }] : pending() }))
+  }
+
+  /**
+   * Propose a new issue through the gatekeeper. Until the board is re-read it is listed as a
+   * pending change; from then on the gatekeeper's read shows it as a provisional card
+   * (`pending: "create"`) until it is approved or rejected.
+   */
+  async create(request: BoardRequest, issue: NewIssue): Promise<ProposalResult> {
+    const entry = this.#entries.get(boardRequestKey(request))
+    if (!entry || !('board' in entry.state)) return NOT_LOADED
+    const change: PendingChange = { kind: 'create', title: issue.title.trim(), stateId: issue.stateId, phase: 'proposing' }
+    return this.#proposeChange(entry.target, change, session => session.createIssue(issue))
+  }
+
+  /**
+   * Propose changing an issue's title, description or priority at the revision the card read.
+   * Like a move, at most one change of an issue may be pending; the gatekeeper's read then shows
+   * the new values with `pending: "update"` at the unchanged revision until it is decided.
+   */
+  async update(request: BoardRequest, issueId: string, changes: IssueChanges, expectedRevision: Revision): Promise<ProposalResult> {
+    const found = this.#changeable(request, issueId)
+    if (!found.ok) return found
+    const change: PendingChange = { kind: 'update', issueId, changes, expectedRevision, phase: 'proposing' }
+    return this.#proposeChange(found.entry.target, change, async session => {
+      using issue = session.openIssue(issueId)
+      await issue.update(changes, expectedRevision)
+    })
   }
 
   /** Drop every entry and session; late results are discarded. The scope is over. */
@@ -170,10 +197,58 @@ export class BoardData {
     this.#targets.clear()
   }
 
+  // The issue's entry and column, if the board holds it and nothing about it is still pending:
+  // the gatekeeper allows one pending change per issue, and a provisional (pending create) card
+  // has no issue behind it to change yet.
+  #changeable(request: BoardRequest, issueId: string):
+    { ok: true; entry: Entry; column: Board['columns'][number] } | Extract<ProposalResult, { ok: false }> {
+    const entry = this.#entries.get(boardRequestKey(request))
+    if (!entry || !('board' in entry.state)) return NOT_LOADED
+    const column = entry.state.board.columns.find(c => c.issues.some(i => i.id === issueId))
+    const issue = column?.issues.find(i => i.id === issueId)
+    if (!column || !issue) return { ok: false, code: 'NOT_FOUND', message: 'No such issue on this board.' }
+    if (issue.pending === 'create') {
+      return { ok: false, code: 'PENDING_CREATE', message: 'This issue exists only once its creation is approved.' }
+    }
+    const target = this.#target(entry.target)
+    if (issue.pending || target.pending.some(p => p.issueId === issueId) || target.changes.some(c => c.kind === 'update' && c.issueId === issueId)) {
+      return { ok: false, code: 'CONFLICT', message: 'This issue already has a change that has not taken effect yet.' }
+    }
+    return { ok: true, entry, column }
+  }
+
+  #proposeChange(target: string, change: PendingChange, call: (session: RpcStub<InferOpsProjectSession>) => Promise<void>): Promise<ProposalResult> {
+    const others = () => this.#target(target).changes.filter(c => c !== change)
+    this.#publish(target, { changes: [...this.#target(target).changes, change] })
+    return this.#propose(target, call,
+      queued => this.#publish(target, { changes: queued ? [...others(), { ...change, phase: 'awaiting' }] : others() }))
+  }
+
+  // Submit through the target's session. `settle(true)` once the gatekeeper queued it,
+  // `settle(false)` when it was refused or could not be sent. The board is re-read either way.
+  async #propose(target: string, call: (session: RpcStub<InferOpsProjectSession>) => Promise<void>,
+    settle: (queued: boolean) => void): Promise<ProposalResult> {
+    try {
+      const session = await this.#session(target)
+      if (!session) {
+        settle(false)
+        return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
+      }
+      await call(session)
+      settle(true)
+      return { ok: true }
+    } catch (error) {
+      settle(false)
+      return { ok: false, code: codeOf(error), message: messageOf(error) }
+    } finally {
+      this.invalidate(target)
+    }
+  }
+
   #target(target: string): TargetData {
     let data = this.#targets.get(target)
     if (!data) {
-      data = { wanted: 0, applied: 0, pending: [] }
+      data = { wanted: 0, applied: 0, pending: [], changes: [] }
       this.#targets.set(target, data)
     }
     return data
@@ -188,10 +263,10 @@ export class BoardData {
     for (const listener of entry.listeners) listener()
   }
 
-  #setPending(target: string, pending: PendingMove[]): void {
-    this.#target(target).pending = pending
+  #publish(target: string, update: Partial<Pick<TargetData, 'pending' | 'changes'>>): void {
+    const data = Object.assign(this.#target(target), update)
     for (const entry of this.#entriesOf(target)) {
-      if ('board' in entry.state) this.#set(entry, { ...entry.state, pending })
+      if ('board' in entry.state) this.#set(entry, { ...entry.state, pending: data.pending, changes: data.changes })
     }
   }
 
@@ -234,7 +309,7 @@ export class BoardData {
       target.applied = read.clock
       if (board) this.#reconcile(read.target, board)
       for (const entry of this.#entriesOf(read.target)) {
-        this.#set(entry, board ? { status: 'ready', board, pending: target.pending } : UNBOUND)
+        this.#set(entry, board ? { status: 'ready', board, pending: target.pending, changes: target.changes } : UNBOUND)
       }
     } catch (error) {
       // Re-resolve the connection on the next read rather than reuse a session that just failed.
@@ -255,12 +330,16 @@ export class BoardData {
 
   // Keep an awaiting move only while the authoritative board still shows it undecided: the
   // gatekeeper simulates it in the target state at the unchanged revision until it is applied
-  // (new revision) or rejected (back where it was, same revision).
+  // (new revision) or rejected (back where it was, same revision). An awaiting create or edit is
+  // dropped by any read that lands, since only reads started after it was queued can land
+  // (`wanted`), and those overlay it themselves.
   #reconcile(target: string, board: Board): void {
-    const { pending } = this.#target(target)
+    const data = this.#target(target)
+    data.changes = data.changes.filter(change => change.phase === 'proposing')
+    const { pending } = data
     if (pending.length === 0) return
     const issues = new Map(board.columns.flatMap(c => c.issues.map(i => [i.id, i] as const)))
-    this.#target(target).pending = pending.filter(move => {
+    data.pending = pending.filter(move => {
       if (move.phase === 'proposing') return true
       const issue = issues.get(move.issueId)
       return issue !== undefined && issue.revision === move.expectedRevision && issue.stateId === move.toStateId

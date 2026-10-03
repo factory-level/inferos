@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { Board, Issue } from '@inferos/gatekeeper-inferops/src/types'
+import type { Board, Issue, IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
 import { BoardData, boardRequestKey, canonicalBoardRef, visibleColumns, type BoardRequest } from './boardData'
 
 const DEMO = 'inferops://demo.local/project/board/DEMO'
 const request = (targetRef = DEMO, params: BoardRequest['params'] = { workflow: 'software', showCompleted: false }): BoardRequest =>
   ({ kind: 'inferops.project-board', version: 1, targetRef, params })
 
-const issue = (id: string, stateId: string, revision = '1'): Issue =>
-  ({ id, identifier: `DEMO-${id}`, title: id, priority: 'none', stateId, targetDate: null, workflow: 'software', revision, assigneeId: null, blockedReason: null })
+const issue = (id: string, stateId: string, revision = '1', extra: Partial<Issue> = {}): Issue =>
+  ({ id, identifier: `DEMO-${id}`, title: id, priority: 'none', stateId, targetDate: null, workflow: 'software', revision, assigneeId: null, blockedReason: null, ...extra })
 const board = (issues: Issue[], identifier = 'DEMO'): Board => ({
   project: { id: 'p', identifier, name: 'Demo' },
   columns: [
@@ -30,6 +30,8 @@ const deferred = <T,>() => {
 const workspace = (connected: Record<string, boolean> = { [DEMO]: true }) => {
   const reads: Deferred<Board>[] = []
   const transitions: { issueId: string; toStateId: string; expectedRevision: string; settle: Deferred<void> }[] = []
+  const creates: { issue: NewIssue; settle: Deferred<void> }[] = []
+  const updates: { issueId: string; changes: IssueChanges; expectedRevision: string; settle: Deferred<void> }[] = []
   const disposed: string[] = []
   const lookups: string[] = []
   const session = (target: string) => ({
@@ -38,8 +40,12 @@ const workspace = (connected: Record<string, boolean> = { [DEMO]: true }) => {
       transition: (toStateId: string, expectedRevision: string) => {
         const settle = deferred<void>(); transitions.push({ issueId, toStateId, expectedRevision, settle }); return settle.promise
       },
+      update: (changes: IssueChanges, expectedRevision: string) => {
+        const settle = deferred<void>(); updates.push({ issueId, changes, expectedRevision, settle }); return settle.promise
+      },
       [Symbol.dispose]: () => { disposed.push(`issue:${issueId}`) },
     }),
+    createIssue: (created: NewIssue) => { const settle = deferred<void>(); creates.push({ issue: created, settle }); return settle.promise },
     [Symbol.dispose]: () => { disposed.push(`session:${target}`) },
   })
   const overseer = {
@@ -49,7 +55,7 @@ const workspace = (connected: Record<string, boolean> = { [DEMO]: true }) => {
       return { openSession: async () => session(target), [Symbol.dispose]: () => { disposed.push(`client:${target}`) } }
     }),
   } as unknown as RpcStub<Overseer>
-  return { overseer, reads, transitions, disposed, lookups, connected }
+  return { overseer, reads, transitions, creates, updates, disposed, lookups, connected }
 }
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0))
@@ -259,6 +265,74 @@ describe('BoardData', () => {
     await flush()
     expect(ws.reads).toHaveLength(2)
     expect(await data.move(request(), 'missing', 'done', '1')).toMatchObject({ ok: false, code: 'NOT_FOUND' })
+  })
+
+  it('queues a new issue through the session with its state, lists it until the board shows the provisional card, and reports refusals', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+    const result = data.create(request(), { title: ' Write docs ', priority: 'high', stateId: 'todo' })
+    await flush()
+    expect(ws.creates.map(c => c.issue)).toEqual([{ title: ' Write docs ', priority: 'high', stateId: 'todo' }])
+    expect(data.get(request())).toMatchObject({ changes: [{ kind: 'create', title: 'Write docs', stateId: 'todo', phase: 'proposing' }] })
+    ws.creates[0]!.settle.resolve()
+    expect(await result).toEqual({ ok: true })
+    expect(data.get(request())).toMatchObject({ status: 'stale', changes: [{ kind: 'create', phase: 'awaiting' }] })
+    await flush()
+    // The gatekeeper's read overlays the queued create itself; the adapter stops listing it.
+    ws.reads[1]!.resolve(board([issue('1', 'todo'), issue('pending-9', 'todo', '0', { identifier: 'DEMO-new', title: 'Write docs', pending: 'create' })]))
+    await flush()
+    expect(data.get(request())).toMatchObject({ status: 'ready', changes: [] })
+    expect(columns(data.get(request()))).toEqual([['1', 'pending-9'], [], []])
+    const refused = data.create(request(), { title: 'Nope', stateId: 'elsewhere' })
+    await flush()
+    ws.creates[1]!.settle.reject(new Error('INVALID_STATE: That state is not part of this project.'))
+    expect(await refused).toEqual({ ok: false, code: 'INVALID_STATE', message: 'That state is not part of this project.' })
+    expect(data.get(request())).toMatchObject({ changes: [] })
+  })
+
+  it('queues an edit at the revision read, and refuses one locally while anything about the issue is pending', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo', '7'), issue('2', 'todo', '3', { pending: 'transition' }),
+      issue('pending-9', 'todo', '0', { identifier: 'DEMO-new', pending: 'create' })]))
+    await flush()
+    const result = data.update(request(), '1', { title: 'Renamed' }, '7')
+    await flush()
+    expect(ws.updates).toMatchObject([{ issueId: '1', changes: { title: 'Renamed' }, expectedRevision: '7' }])
+    expect(data.get(request())).toMatchObject({ changes: [{ kind: 'update', issueId: '1', phase: 'proposing' }] })
+    expect(await data.update(request(), '1', { priority: 'low' }, '7')).toMatchObject({ ok: false, code: 'CONFLICT' })
+    expect(await data.move(request(), '1', 'done', '7')).toMatchObject({ ok: false, code: 'CONFLICT' })
+    ws.updates[0]!.settle.resolve()
+    expect(await result).toEqual({ ok: true })
+    expect(ws.disposed).toContain('issue:1')
+    expect(await data.update(request(), '2', { title: 'x' }, '3')).toMatchObject({ ok: false, code: 'CONFLICT' })
+    // A provisional card has no issue behind it: no edit, and no move (which used to fail NOT_FOUND remotely).
+    expect(await data.update(request(), 'pending-9', { title: 'x' }, '0')).toMatchObject({ ok: false, code: 'PENDING_CREATE' })
+    expect(await data.move(request(), 'pending-9', 'done', '0')).toMatchObject({ ok: false, code: 'PENDING_CREATE' })
+    expect(ws.updates).toHaveLength(1)
+    expect(ws.transitions).toHaveLength(0)
+  })
+
+  it('reports a stale edit with its code, drops it and re-reads the board', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo', '7')]))
+    await flush()
+    const result = data.update(request(), '1', { priority: 'high' }, '7')
+    await flush()
+    ws.updates[0]!.settle.reject(new Error('Error: STALE_REVISION: DEMO-1 is at revision 8, not 7. Read it again.'))
+    expect(await result).toEqual({ ok: false, code: 'STALE_REVISION', message: 'DEMO-1 is at revision 8, not 7. Read it again.' })
+    expect(data.get(request())).toMatchObject({ status: 'stale', changes: [] })
+    await flush()
+    expect(ws.reads).toHaveLength(2)
   })
 
   it('filters columns for presentation only', () => {

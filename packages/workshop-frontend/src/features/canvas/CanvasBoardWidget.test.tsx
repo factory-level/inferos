@@ -1,23 +1,18 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
-import { act, type ReactElement, type ReactNode } from 'react'
+import { act, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, ActionsSubscriber, Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
-import type { Board, Issue } from '@inferos/gatekeeper-inferops/src/types'
+import type { Board, Issue, IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
 import { CanvasBoardWidget } from './CanvasBoardWidget'
 import { CanvasBoardFullView } from './CanvasBoardFullView'
+import { dialogField, setFieldValue } from './kumoPopupDoubles'
 
-vi.mock('@cloudflare/kumo', async importOriginal => ({
-  ...await importOriginal<typeof import('@cloudflare/kumo')>(),
-  DropdownMenu: Object.assign(({ children }: { children: ReactNode }) => <div>{children}</div>, {
-    Trigger: ({ render }: { render: ReactElement }) => render,
-    Content: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
-    Item: ({ children, onClick }: { children: ReactNode; onClick?: () => void }) => <button type="button" role="menuitem" onClick={onClick}>{children}</button>,
-  }),
-}))
+vi.mock('@cloudflare/kumo', async importOriginal =>
+  (await import('./kumoPopupDoubles')).withKumoPopupDoubles(await importOriginal<typeof import('@cloudflare/kumo')>()))
 
 let root: Root
 let container: HTMLDivElement
@@ -42,8 +37,13 @@ const transition = vi.fn<(toStateId: string, revision: string) => Promise<void>>
   const moved = current.columns.flatMap(c => c.issues).find(i => i.id === '1')!
   current = { ...current, columns: current.columns.map(c => ({ ...c, issues: c.state.id === toStateId ? [{ ...moved, stateId: toStateId }] : c.issues.filter(i => i.id !== '1') })) }
 })
-const openIssue = vi.fn<(id: string) => object>((id: string) => ({ transition, read: async () => issue(id, 'todo'), [Symbol.dispose]: () => {} }))
-const session = { readBoard, openIssue, [Symbol.dispose]: () => {} }
+// Like the gatekeeper, a read after an update overlays the new title at the unchanged revision, marked pending.
+const update = vi.fn<(changes: IssueChanges, revision: string) => Promise<void>>(async changes => {
+  current = { ...current, columns: current.columns.map(c => ({ ...c, issues: c.issues.map(i => i.id === '1' ? { ...i, ...changes, pending: 'update' as const } : i) })) }
+})
+const createIssue = vi.fn<(issue: NewIssue) => Promise<void>>(async () => {})
+const openIssue = vi.fn<(id: string) => object>((id: string) => ({ transition, update, read: async () => issue(id, 'todo'), [Symbol.dispose]: () => {} }))
+const session = { readBoard, openIssue, createIssue, [Symbol.dispose]: () => {} }
 const connection = { openSession: async () => session, [Symbol.dispose]: () => {} }
 const lookup = vi.fn<(url: string) => Promise<object | null>>(async () => connection)
 // A fresh stub per test is a fresh scope, so adapters never leak between tests.
@@ -63,7 +63,7 @@ beforeEach(() => {
     subscribeToActions: async (subscriber: ActionsSubscriber) => { actions = subscriber; return { [Symbol.dispose]: () => {} } },
     listActions: async () => ({ entries: [] }),
   } as unknown as RpcStub<Overseer>
-  current = demo; readBoard.mockClear(); transition.mockClear(); openIssue.mockClear()
+  current = demo; readBoard.mockClear(); transition.mockClear(); openIssue.mockClear(); update.mockClear(); createIssue.mockClear()
   lookup.mockClear().mockResolvedValue(connection)
 })
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
@@ -160,4 +160,30 @@ it('drops awaiting activity once the connection is revoked', async () => {
   expect(article().querySelector('[role="alert"]')?.textContent).toContain('credential refused')
   expect(activityLine()).toBeNull()
   expect(article().querySelector('[aria-live="polite"]')?.textContent).toBe('')
+})
+
+const dialogButton = (text: string) => [...container.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(b => b.textContent === text)!
+
+it('creates in the column\'s state and edits at the revision read; an edit waits for approval and is applied once a decided action re-reads the board', async () => {
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} />)
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="New issue in Doing"]')!.click() })
+  await act(async () => setFieldValue(dialogField(container, 'Title'), 'Write docs'))
+  await act(async () => { dialogButton('Propose issue').click(); await settle() })
+  expect(createIssue).toHaveBeenCalledWith({ title: 'Write docs', priority: 'none', stateId: 'doing' })
+
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Edit DEMO-1"]')!.click() })
+  await act(async () => setFieldValue(dialogField(container, 'Title'), 'Renamed'))
+  await act(async () => { dialogButton('Propose changes').click(); await settle() })
+  expect(openIssue).toHaveBeenLastCalledWith('1')
+  expect(update).toHaveBeenCalledWith({ title: 'Renamed' }, '7')
+  expect(card('1').textContent).toContain('Renamed')
+  expect(card('1').textContent).toContain('Edit waiting for approval')
+  expect(article().querySelector('[aria-label="Edit DEMO-1"]')).toBeNull()
+
+  // Approved in the chat's action list: InferOps applies it at a new revision.
+  current = { ...current, columns: current.columns.map(c => ({ ...c, issues: c.issues.map(i => i.id === '1' ? { ...i, pending: undefined, revision: '8' } : i) })) }
+  await act(async () => { actions?.entry({ ...agentMove(3, 'approved'), requestedBy: 'person' }); await settle() })
+  expect(card('1').textContent).toContain('Edit applied')
+  expect(article().querySelector('[aria-label="Edit DEMO-1"]')).not.toBeNull()
+  expect([...article().querySelectorAll('[role="status"]')].map(s => s.textContent)).toContain('Edit of DEMO-1 applied.')
 })

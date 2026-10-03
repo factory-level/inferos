@@ -263,9 +263,9 @@ missing a button.
 - The mock still advances a revision by one per transition. Nothing depends on that.
 - InferOps accepts mixed-case project identifiers; the resource grammar accepts uppercase keys
   only, so such a project is listed by the picker but cannot be bound.
-- The Kanban gadget and the canvas do not read `Issue.pending` yet; they mark moves they requested
-  themselves until the next refresh, and a provisional create card is draggable like any other
-  (a move of it fails `NOT_FOUND`).
+- The Kanban gadget does not read `Issue.pending` yet; it marks moves it requested itself until the
+  next refresh, and a provisional create card is draggable like any other (a move of it fails
+  `NOT_FOUND`). The canvas Kanban reads it (see [InferOps canvas](inferops-canvas.md#kanban-board)).
 - The mock starts a created issue at revision 1 and numbers it after the highest existing key.
 
 ## Open Questions
