@@ -143,6 +143,8 @@ it("pages, filters, streams and replays a workspace's action history", async () 
         [{ state: "approved", description: { title: "Read the test value" } }]);
     expect(actions.entries.map(e => e.state)).toEqual([...Array(54).fill("pending"), "approved"]);
     expect(pending.entries).toEqual(actions.entries.filter(e => e.state === "pending"));
+    // Calls made through the owner's own connection session are attributed to a person.
+    expect(new Set(all.entries.map(e => e.requestedBy))).toEqual(new Set(["person"]));
 
     watermark = actionChangeTime(approved);
   }

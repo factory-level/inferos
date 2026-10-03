@@ -165,6 +165,10 @@ A card stays where the authoritative board places it and shows its pending move 
 
 `KanbanBoard.test.tsx` covers rendering, the three move paths, pending and decided display, announcements, focus retention and the two layouts; `CanvasBoardWidget.test.tsx` covers the adapter states, the ids and revision a keyboard move sends, and the card and full view sharing one read; `CanvasWorkspacePane.test.tsx` covers opening and closing the full view. Chat shows no board of its own: on the InferOps Canvas page the chat sits beside the canvas pane, and a move's approval is decided in the chat's action list. Performance has not been measured, large boards are not paged and nothing polls on visibility.
 
+## Action attribution
+
+Every workspace action log entry (`ActionLogEntry`, from `listActions` and `subscribeToActions`) carries an optional `requestedBy`: `agent`, `person`, `gadget` or `hook`, mapped in `actionRecordToLog` from the kind of the stored record's `caller` (`user` becomes `person`). It is the groundwork for agent activity and approval displays. It is a display label only: no decision reads it, and the caller's chat id, gadget id and identity stay on the server. Records persisted before callers were tracked have no `caller`, so their entries omit the field. `workshop-agent-actions.test.ts` checks that an agent's writes report `agent`, and `workshop-action-history.test.ts` that writes and reads through the owner's own connection session report `person`. Nothing in the frontend shows it yet.
+
 ## Workspace kind
 
 Each workspace stores an explicit kind, `WorkspaceKind` in `workshop-shared/src/api.ts`: `app`, `widget` or `workflow`. It records how the workspace is meant to run and where Operate mode (the InferOps Canvas) presents it. An app opens full-screen with a chat/app toggle. A widget is a tile on canvas screens. A workflow has no UI and runs on timed (scheduler) or event (hook) triggers.

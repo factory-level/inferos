@@ -998,6 +998,11 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // (built-in agent tools use the BUILTIN_TOOL_GATEKEEPER_ID sentinel).
   let gatekeeperId = record.gatekeeperId >= 0 ? record.gatekeeperId : undefined;
 
+  // Only the kind of caller leaves the server, never its chat or gadget id. Records persisted
+  // before callers were tracked have no `caller`, so their entries carry no `requestedBy`.
+  const from = (record.caller as GatekeeperCaller | undefined)?.from;
+  const requestedBy = from === "user" ? "person" : from;
+
   switch (record.type) {
     case "observation":
       return {
@@ -1007,6 +1012,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         resourceUrl: record.resourceUrl,
         createdAt: record.createdAt,
         state: record.state,
+        requestedBy,
         type: "observation",
         description: record.description,
       };
@@ -1019,6 +1025,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         createdAt: record.createdAt,
         appliedAt: record.appliedAt,
         state: record.state,
+        requestedBy,
         type: "action",
         description: record.description,
         resolvedBy: record.resolvedBy,
@@ -1033,6 +1040,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         createdAt: record.createdAt,
         appliedAt: record.appliedAt,
         state: record.state,
+        requestedBy,
         type: "bindHook",
         hookId: record.hookId,
         description: record.description,
