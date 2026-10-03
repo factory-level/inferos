@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -91,6 +91,10 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     const unsupportedProfile = spawnSync(process.execPath, [join(clone, ".inferos/runtime.ts"), "profile"], { encoding: "utf8" });
     assert.equal(unsupportedProfile.status, 1);
     assert.match(unsupportedProfile.stderr, /does not support profile initialization/);
+    assert.equal(JSON.parse(readFileSync(join(clone, "package.json"), "utf8")).scripts.local, "node .inferos/runtime.ts local");
+    const unsupportedLocal = spawnSync(process.execPath, [join(clone, ".inferos/runtime.ts"), "local", "status"], { encoding: "utf8" });
+    assert.equal(unsupportedLocal.status, 1);
+    assert.match(unsupportedLocal.stderr, /does not support the local lifecycle/);
     const diagnostic = await diagnoseConsumer(clone);
     assert.equal(diagnostic.ok, false);
     assert.equal(diagnostic.runtimeReady, false);
@@ -268,5 +272,131 @@ test("a migrated wrapper checks unchanged, and enabling an uninstalled capabilit
     assert.match(unreadable.stderr, /does not support configuration schemaVersion 2/);
     assert.match(runtime(older, "dev").stderr, /schemaVersion 2.*No server was started/);
     assert.match((await diagnoseConsumer(older)).checks.find(check => check.name === "runtime")?.message ?? "", /schemaVersion 2/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** A pin with what a customer shell needs: v2 parsing, the canvas CLI, the InferOps gatekeeper and a stand-in lifecycle operator. */
+function customerShellSource(root: string, { gatekeeperCode = true } = {}) {
+  const source = join(root, "source");
+  const repo = join(import.meta.dirname, "../..");
+  const copy = (path: string) => {
+    mkdirSync(join(source, path, ".."), { recursive: true });
+    writeFileSync(join(source, path), readFileSync(join(repo, path)));
+  };
+  const write = (path: string, text: string) => {
+    mkdirSync(join(source, path, ".."), { recursive: true });
+    writeFileSync(join(source, path), text);
+  };
+  execFileSync("git", ["init", "--quiet", source]);
+  write("package.json", JSON.stringify({ type: "module", packageManager: "pnpm@11.17.0" }));
+  write("packages/bundled-blueprints/blueprints/example/files/client.js", "// upstream blueprint\n");
+  for (const path of ["scripts/consumer/config.ts", "scripts/consumer/runtime.ts", "scripts/consumer/canvas.ts", "scripts/worker-dirs.ts",
+    "packages/workshop-shared/src/canvas.ts", "scripts/relay-termination.ts", "scripts/kill-process-tree.ts"]) copy(path);
+  write("custom-gatekeepers/gatekeeper-inferops/wrangler.jsonc", "{}\n");
+  write("packages/workshop-backend/src/canvas-store.ts", "export {};\n"); // durableViews' source
+  if (gatekeeperCode) for (const path of [capabilitySources.INFEROPS_ENABLED!, capabilitySources.INFEROPS_AUTH!]) write(path, "export {};\n");
+  // The real fixture validator needs installed dependencies; start's preflight only needs it to answer.
+  write("scripts/consumer/fixtures.ts", "export const checkConsumerFixture = () => ({});\n");
+  // Reports how the wrapper invoked it, so the delegation is observable without a stack.
+  write("scripts/local/lifecycle.ts", "console.log(JSON.stringify({ argv: process.argv.slice(2), host: process.env.VITE_BACKEND_HOST, cwd: process.cwd() }));\n");
+  git(source, "add", ".");
+  git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture");
+  return { source, revision: git(source, "rev-parse", "HEAD") };
+}
+
+const runWrapper = (target: string, ...args: string[]) =>
+  spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), ...args], { encoding: "utf8" });
+
+test("a customer shell wrapper is version 2 with the InferOps capabilities on, the gatekeeper selected and edits kept on rerun", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-customer-shell-"));
+  try {
+    const { source, revision } = customerShellSource(root);
+    const target = join(root, "shell");
+    const options = { capabilities: ["INFEROPS_ENABLED", "INFEROPS_AUTH"] as const };
+    assert.equal(bootstrapConsumer(target, source, revision, options).created, true);
+
+    const written = JSON.parse(readFileSync(join(target, "inferos.config.json"), "utf8"));
+    assert.equal(written.schemaVersion, 2);
+    assert.equal(written.profile, "inferops-operations");
+    assert.deepEqual(written.capabilities, Object.fromEntries(CAPABILITY_NAMES.map(name => [name, name === "INFEROPS_ENABLED" || name === "INFEROPS_AUTH"])));
+    const canvas = JSON.parse(readFileSync(join(target, "inferos.canvas.json"), "utf8"));
+    assert.deepEqual(canvas.customGatekeepers, ["gatekeeper-inferops"]);
+    assert.deepEqual(canvas.screens.map((screen: { id: string }) => screen.id), ["operations"]);
+    assert.equal(canvas.screens[0].sections[0].widgets[0].kind, "inferops.project-board");
+    assert.equal(canvas.screens[0].sections[0].widgets[0].targetRef, written.inferops.targetRef);
+
+    const check = runWrapper(target, "check");
+    assert.equal(check.status, 0, check.stderr);
+    const report = JSON.parse(check.stdout);
+    assert.equal(report.ok, true);
+    assert.equal(report.schemaVersion, 2);
+    assert.equal(report.profile, "inferops-operations");
+    for (const name of ["INFEROPS_ENABLED", "INFEROPS_AUTH"]) {
+      assert.deepEqual(report.capabilities[name], { state: "enabled", requested: true, source: "override" });
+      assert.equal(report.provenance.capabilities[name], "override");
+    }
+    assert.deepEqual(report.capabilities.CODING_WORKBENCH_ENABLED, { state: "unsupported", requested: false, source: "override" });
+    assert.deepEqual(report.features, { composableViews: true, durableViews: true, customCloudflareCode: false, inferlabLogin: false });
+
+    // Customer edits: branding, a capability switched off, and their own screen template.
+    rewrite(target, config => ({ ...config, styling: { ...config.styling, siteName: "Acme Ops" }, capabilities: { ...config.capabilities, INFEROPS_AUTH: false } }));
+    const editedCanvas = { ...canvas, screens: [{ ...canvas.screens[0], id: "acme", title: "Acme board" }] };
+    writeFileSync(join(target, "inferos.canvas.json"), JSON.stringify(editedCanvas));
+    const editedConfig = readFileSync(join(target, "inferos.config.json"), "utf8");
+    for (const rerun of [options, {}, { profile: "personal" as const }]) {
+      assert.equal(bootstrapConsumer(target, source, revision, rerun).created, false);
+      assert.equal(readFileSync(join(target, "inferos.config.json"), "utf8"), editedConfig);
+      assert.deepEqual(JSON.parse(readFileSync(join(target, "inferos.canvas.json"), "utf8")), editedCanvas);
+    }
+    const rechecked = JSON.parse(runWrapper(target, "check").stdout);
+    assert.equal(rechecked.styling.siteName, "Acme Ops");
+    assert.deepEqual(rechecked.capabilities.INFEROPS_AUTH, { state: "supported", requested: false, source: "override" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("pnpm local in a wrapper delegates to the pinned operator, serving the wrapper and seeding its first screen", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-wrapper-local-"));
+  try {
+    const { source, revision } = customerShellSource(root);
+    const target = join(root, "shell");
+    bootstrapConsumer(target, source, revision, { capabilities: ["INFEROPS_ENABLED"] });
+    rewrite(target, config => ({ ...config, local: { port: 9177 } }));
+    const local = (...args: string[]) => {
+      const result = runWrapper(target, "local", ...args);
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout);
+    };
+    const status = local("status", "--json");
+    assert.deepEqual(status.argv, ["status", "--json"]);
+    assert.equal(status.host, "localhost:9177");
+    assert.equal(realpathSync(status.cwd), realpathSync(join(target, "inferos")));
+    assert.deepEqual(local("seed").argv, ["seed", "--screen", "operations"]);
+    assert.deepEqual(local("seed", "--screen", "other").argv, ["seed", "--screen", "other"]);
+    assert.deepEqual(local("start", "--json", "--", "--use-workers-ai-binding").argv,
+      ["start", "--json", "--", "--use-workers-ai-binding", "--consumer-root", target]);
+    assert.deepEqual(local("stop").argv, ["stop"]);
+
+    // start runs the same refusals as dev before anything is launched.
+    rewrite(target, config => ({ ...config, capabilities: { ...config.capabilities, AGENT_DEPLOYMENTS: true } }));
+    const refused = runWrapper(target, "local", "start");
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /AGENT_DEPLOYMENTS\. No server was started/);
+    assert.equal(refused.stdout, "");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("bootstrap refuses InferOps capabilities a pin cannot honour and leaves nothing behind", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-customer-shell-unsupported-"));
+  try {
+    const { source, revision } = customerShellSource(root, { gatekeeperCode: false });
+    const target = join(root, "shell");
+    assert.throws(() => bootstrapConsumer(target, source, revision, { capabilities: ["INFEROPS_ENABLED"] }),
+      /not supported by this installation: INFEROPS_ENABLED/);
+    assert.equal(existsSync(target), false);
+    assert.throws(() => bootstrapConsumer(target, source, revision, { capabilities: ["NOT_A_CAPABILITY" as never] }), /Unknown capability/);
+    // Without capabilities the same pin still produces the version 1 wrapper, with no canvas file written.
+    bootstrapConsumer(target, source, revision);
+    assert.equal(JSON.parse(readFileSync(join(target, "inferos.config.json"), "utf8")).schemaVersion, 1);
+    assert.equal(existsSync(join(target, "inferos.canvas.json")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
