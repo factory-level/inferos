@@ -18,7 +18,7 @@ InferOS has two modes. Build is where people author software: apps, widgets and 
 - An authored app, widget or workflow reaches Operate only through **Publish to Operate**. Publishing packages the workspace as a blueprint and installs it into an operate space at a pinned version. Edits in Build do not reach operations until someone republishes, and upgrading an installed version is explicit.
 - An **operate space** lives in a workspace and can be added to. It holds the installed published things, its screens and views, and the operate session. Installing adds gadgets and bindings through existing mechanisms and grants no new authority.
 - A **view** composes many operate screens (existing canvas definitions) into one page with a declared layout. Views store references, layout and a revision only, like screens. A **rollup** is a view that summarizes several screens on one page, such as an Overview of a board and its activity.
-- A **role console** (working name, see Open Questions) is the authored collection of everything one operator role works in: its views and rollups, its screens, the flows and state machine that move a person between them, and the published apps and widgets assigned to it. A console stores references, layout, assignments and a revision only. It grants no access.
+- A **console** (a "role console" in prose; `console` in code and events) is the authored collection of everything one operator role works in: its views and rollups, its screens, the flows and state machine that move a person between them, and the published apps and widgets assigned to it. A console stores references, layout, assignments and a revision only. It grants no access.
 - **Build is for admins and leads.** Creating and changing apps, widgets, workflows, skills, gadgets and consoles needs a build role. Employees get Operate only and work in the consoles assigned to their role. The role comes from server-enforced authority, never from a UI flag, a deployment profile or the console itself.
 - Each console can carry an authored **state machine**: named states, the screens or views each shows, and the guarded transitions between them. It drives navigation and presentation only. Domain writes still go through gatekeepers and approvals.
 - Admins and leads can see, for every console and view, which apps and widgets are assigned to it, at which pinned version, with their health and pending approvals. Operators see the same inventory, read-only and scoped to what their role can open.
@@ -206,6 +206,8 @@ A view may declare a subject type (for example `patient`). Opening it requires a
 
 Proposed answers, to confirm:
 
+- **Name:** decided: **console** names one role's collection of screens, views, flows, state machine and assigned apps and widgets.
+
 - **Session scope:** decided: one session per person, shared live across their tabs and devices (see Sessions).
 - **First layouts:** a primary region with a secondary one (a chart beside a side panel), tabs, and a grid for rollups.
 - **Apps in views:** render through the existing sandboxed gadget host, sized to the region. A dedicated app region would weaken isolation, which matters more with regulated data.
@@ -213,7 +215,6 @@ Proposed answers, to confirm:
 
 Still open:
 
-- **The console's name.** "Role console" is a working name for the collection of screens, views and the flows between them. Candidates: console, station, desk, post, playbook.
 - Where console definitions live: in the operate space's Overseer next to screens and flows, or also as portable consumer config (`inferos.canvas.json`, the wrapper's `views/`).
 - Where an operator's role comes from: workspace collaborator roles alone, an InferOps membership or role read through the gatekeeper, or both.
 - Whether InferOS adopts declarative chat widgets (template widgets like InferOps `widget-kit` or ChatKit) alongside gadget widgets, or renders only gadget and InferOps widgets in the conversation. If it does, decide whether one template format serves both InferOps and InferOS.
