@@ -24,6 +24,7 @@ This is a draft specification and implementation backlog. It does not claim the 
 | [InferOS repository setup skills](repo-setup-skills.md) | Let a coding agent configure and maintain a consuming repository with a ready-to-customize local environment and explained deployment settings. |
 | [InferOps gatekeeper](inferops-gatekeeper.md) | Expose scoped InferOps project/board/issue reads and approved issue transitions as native capabilities. |
 | [InferOps canvas and transactional widgets](inferops-canvas.md) | Make operational data easy to load, compose and act on through a simple canvas, starting with Kanban and later maps. |
+| [Operate mode](operate-mode.md) | Run operations from what Build published, on three distinct surfaces: full-page apps, widgets for screens and the operate chat, and an optional ChatGPT-style full chat that each console can offer. Each operator role gets its own console of views, and Build stays with admins and leads. |
 | [Vertical extension research and decision matrix](vertical-extension-research.md) | Make extension choices from documented native capabilities and concrete workflow requirements instead of assuming every vertical requires a kernel fork. |
 
 ## Behavior
