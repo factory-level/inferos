@@ -1,11 +1,13 @@
 // The actions a binding records between proposal and decision: on a board binding a transition, an
-// issue create or an issue update; on a coding-dispatch binding a dispatch or a run cancel. Each is
+// issue create or an issue update; on a coding-dispatch binding a dispatch or a run cancel; on a
+// Wiki binding a section update. Each is
 // stored in the facet's KV under `action:<n>` (inferops.ts)
 // and carries the exact request it will send when applied, plus a fingerprint of that request.
 //
 // - Records written before creates and updates existed have no `kind`; `readAction` reads them as
 //   transitions, and they carry no fingerprint, so none is checked for them.
-// - The fingerprint is a SHA-256 over the binding's project key and the normalized request. Apply
+// - The fingerprint is a SHA-256 over the binding's scope (its project key, or `knowledge/wiki`)
+//   and the normalized request. Apply
 //   recomputes it from the request it is about to send and refuses a mismatch. InferOps does not
 //   fingerprint idempotency keys (a reused key with another body returns the first result), so
 //   this is the check that one action's key is only ever sent with the one request approved for it.
@@ -81,8 +83,26 @@ export type CancelRunAction = ActionBase & {
   identifier: string;
 };
 
+/** A proposed replacement of a Wiki section's body, and the body before it, for revert. */
+export type SectionUpdateAction = ActionBase & {
+  kind: "section-update";
+  sectionId: string;
+  /** The section's page and tag, for messages. */
+  documentTitle: string;
+  tag: string;
+  body: string;
+  /** The section version the edit was proposed at; apply sends nothing if it has changed. */
+  expectedVersion: number;
+  /** The body the edit replaces. */
+  previousBody: string;
+  /** The version InferOps reported for the applied edit; a revert requires it unchanged. */
+  appliedVersion?: number;
+};
+
 /** Any recorded action. */
-export type ActionRecord = TransitionAction | CreateAction | UpdateAction | DispatchAction | CancelRunAction;
+export type ActionRecord =
+  | TransitionAction | CreateAction | UpdateAction | DispatchAction | CancelRunAction
+  | SectionUpdateAction;
 
 /** An action a board binding records. */
 export type BoardAction = TransitionAction | CreateAction | UpdateAction;
@@ -99,7 +119,8 @@ export type StagedAction =
   | Omit<CreateAction, "actionId" | "status">
   | Omit<UpdateAction, "actionId" | "status">
   | Omit<DispatchAction, "actionId" | "status">
-  | Omit<CancelRunAction, "actionId" | "status">;
+  | Omit<CancelRunAction, "actionId" | "status">
+  | Omit<SectionUpdateAction, "actionId" | "status">;
 
 /** A stored record, with legacy records (no `kind`) read as the transitions they are. */
 export function readAction(raw: unknown): ActionRecord | undefined {
@@ -129,12 +150,20 @@ export function requestOf(record: StagedAction | ActionRecord): unknown {
                baseRef: record.baseRef, expectedRevision: record.expectedRevision };
     case "cancel":
       return { kind: record.kind, runId: record.runId };
+    case "section-update":
+      return { kind: record.kind, sectionId: record.sectionId, body: record.body,
+               expectedVersion: record.expectedVersion };
   }
 }
 
 /** Whether an action belongs to a coding-dispatch binding. */
 export function isCodingAction(record: ActionRecord): record is CodingAction {
   return record.kind === "dispatch" || record.kind === "cancel";
+}
+
+/** Whether an action belongs to a Wiki binding. */
+export function isWikiAction(record: ActionRecord): record is SectionUpdateAction {
+  return record.kind === "section-update";
 }
 
 /** JSON with object keys sorted and undefined members dropped, so equal requests hash equally. */
@@ -149,10 +178,13 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** The fingerprint of an action's request within the bound project. */
-export async function fingerprintOf(projectKey: string, record: StagedAction | ActionRecord):
+/**
+ * The fingerprint of an action's request within the binding's scope: the bound project's key, or
+ * `knowledge/wiki` for a Wiki binding (whose facet is one workspace's).
+ */
+export async function fingerprintOf(scope: string, record: StagedAction | ActionRecord):
     Promise<string> {
-  const bytes = new TextEncoder().encode(canonical({ projectKey, request: requestOf(record) }));
+  const bytes = new TextEncoder().encode(canonical({ projectKey: scope, request: requestOf(record) }));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
@@ -161,8 +193,8 @@ export async function fingerprintOf(projectKey: string, record: StagedAction | A
  * Whether the request `record` would send now is the one staged with it. A legacy record has no
  * fingerprint and passes.
  */
-export async function matchesFingerprint(projectKey: string, record: ActionRecord):
+export async function matchesFingerprint(scope: string, record: ActionRecord):
     Promise<boolean> {
   if (record.fingerprint === undefined) return true;
-  return record.fingerprint === await fingerprintOf(projectKey, record);
+  return record.fingerprint === await fingerprintOf(scope, record);
 }

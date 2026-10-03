@@ -33,6 +33,9 @@ export default defineConfig({
           // The coding-dispatch gatekeeper, the same way: declared, and driven through `TestHooks`.
           DISPATCH_GATEKEEPER: { className: "InferOpsDispatchGatekeeper", useSQLite: true },
           TEST_DISPATCH_GATEKEEPER: { className: "TestDispatchGatekeeper", useSQLite: true },
+          // The Wiki gatekeeper, the same way.
+          WIKI_GATEKEEPER: { className: "InferOpsWikiGatekeeper", useSQLite: true },
+          TEST_WIKI_GATEKEEPER: { className: "TestWikiGatekeeper", useSQLite: true },
           // One sign-in attempt per object; the tests seed its callback from inside the object.
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
           // One per connected account; the tests reach it through the account entrypoints.

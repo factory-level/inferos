@@ -8,8 +8,12 @@ import type {
   ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper } from "../src/inferops.js";
-import type { InferOpsDispatchSession, InferOpsProjectSession } from "../src/types.js";
+import {
+  InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper, InferOpsWikiGatekeeper,
+} from "../src/inferops.js";
+import type {
+  InferOpsDispatchSession, InferOpsProjectSession, InferOpsWikiSession,
+} from "../src/types.js";
 
 export { default } from "../src/inferops.js";
 export * from "../src/inferops.js";
@@ -17,7 +21,7 @@ export * from "../src/inferops.js";
 // ctx.exports are named explicitly.
 export {
   GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsDispatchGatekeeper,
-  InferOpsProjectGatekeeper, InferOpsVerifier, MockInferOps,
+  InferOpsProjectGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper, MockInferOps,
 } from "../src/inferops.js";
 
 /**
@@ -44,6 +48,20 @@ export class TestDispatchGatekeeper extends InferOpsDispatchGatekeeper {
     return this.ctx.storage.kv.get(key);
   }
 }
+
+/** The production Wiki gatekeeper plus raw storage access, as `TestProjectGatekeeper`. */
+export class TestWikiGatekeeper extends InferOpsWikiGatekeeper {
+  async putRaw(key: string, value: unknown): Promise<void> {
+    this.ctx.storage.kv.put(key, value);
+  }
+
+  async getRaw(key: string): Promise<unknown> {
+    return this.ctx.storage.kv.get(key);
+  }
+}
+
+/** The props the Workshop bakes into one Wiki binding. */
+export type WikiProps = { accountId: string; host: string; connected?: boolean; workspaceId?: string };
 
 /** The props the Workshop bakes into one project-board binding. */
 export type BindingProps = {
@@ -119,6 +137,10 @@ class TestVerifier extends RpcTarget {
   async hasProjectAccess(): Promise<boolean> {
     return this.hasAccess;
   }
+
+  async hasWikiAccess(): Promise<boolean> {
+    return this.hasAccess;
+  }
 }
 
 /** The emails sign-in and connect flows reported to each `TestConnectCallback`, by label. */
@@ -161,6 +183,7 @@ type TestExports = {
     DurableObjectClass<TestProjectGatekeeper>;
   InferOpsAccount(options: { props: AccountProps }): Fetcher<GatekeeperUser>;
   TestDispatchGatekeeper(options: { props: BindingProps }): DurableObjectClass<TestDispatchGatekeeper>;
+  TestWikiGatekeeper(options: { props: WikiProps }): DurableObjectClass<TestWikiGatekeeper>;
 };
 
 /** The project configurator's capability, as the picker iframe receives it. */
@@ -260,6 +283,14 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       .startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
   }
 
+  /** A Wiki session over a Wiki binding `bindAccount` made under `name`. */
+  async startBoundWikiSession(name: string): Promise<InferOpsWikiSession> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsWikiGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsWikiGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
   /** What `bindAccount` minted under `name`, by the resource description it gives. */
   async describeBound(name: string) {
     return this.#bound(name).describe();
@@ -352,6 +383,76 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Write a raw record into a dispatch binding's storage. */
   async putDispatchRaw(props: BindingProps, key: string, value: unknown): Promise<void> {
     await this.#dispatchGatekeeper(props).putRaw(key, value);
+  }
+
+  #wikiGatekeeper(props: WikiProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<TestWikiGatekeeper>(
+      `${props.accountId}/wiki/${props.host}`,
+      () => ({ class: exports.TestWikiGatekeeper({ props }) }));
+  }
+
+  /** A Wiki session over a Wiki binding with these props. */
+  async startWikiSession(props: WikiProps): Promise<InferOpsWikiSession> {
+    return this.#wikiGatekeeper(props).startSession(
+      new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Apply an action of a Wiki binding; returns the failure message, or null on success. */
+  async applyWiki(props: WikiProps, actionId: number): Promise<string | null> {
+    try {
+      await this.#wikiGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache()));
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  async rejectWiki(props: WikiProps, actionId: number): Promise<void> {
+    await this.#wikiGatekeeper(props).rejectAction(actionId);
+  }
+
+  async revertWiki(props: WikiProps, actionId: number): Promise<string | null> {
+    const result = await this.#wikiGatekeeper(props).revertAction(actionId);
+    return result?.message ?? null;
+  }
+
+  async getWikiRaw(props: WikiProps, key: string): Promise<unknown> {
+    return this.#wikiGatekeeper(props).getRaw(key);
+  }
+
+  async putWikiRaw(props: WikiProps, key: string, value: unknown): Promise<void> {
+    await this.#wikiGatekeeper(props).putRaw(key, value);
+  }
+
+  /** Admission of a collaborator to a Wiki binding, whose own account does or does not read it. */
+  async addWikiObserver(props: WikiProps, hasAccess: boolean): Promise<string | null> {
+    const verifier = new RpcStub(new TestVerifier(hasAccess)) as unknown as
+      Fetcher<GatekeeperUserVerifier>;
+    try {
+      await this.#wikiGatekeeper(props).addObserver("observer-1", verifier);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Admission of a collaborator by their own account's verifier, over a bound Wiki binding. */
+  async addWikiObserverFrom(name: string, observer: AccountProps): Promise<string | null> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsWikiGatekeeper>;
+    try {
+      await this.ctx.facets.get<InferOpsWikiGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+        .addObserver("observer-2", await this.#account(observer).getVerifier());
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** The workspaces the Wiki picker lists for this account. */
+  async listWikiWorkspaces(props: AccountProps) {
+    const frame = await this.#account(props).startResourceConfigurator("inferops://*/knowledge/wiki");
+    return (frame.ui as unknown as ConfiguratorRpc).listWorkspaces();
   }
 
   /** A session over a binding, recording into this object's queue log. */

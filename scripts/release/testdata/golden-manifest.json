@@ -496,6 +496,12 @@
             "InferOpsDispatchGatekeeper"
           ],
           "tag": "v2"
+        },
+        {
+          "new_sqlite_classes": [
+            "InferOpsWikiGatekeeper"
+          ],
+          "tag": "v3"
         }
       ],
       "modules": [

@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
 import { inferOpsErrorCode } from "../src/inferops-client";
@@ -720,5 +720,130 @@ describe("coding runs", () => {
     const before = calls.length;
     expect((await failure(client.cancelRun("DEMO", RUN_ENG, "inst:10"))).code).toBe("NOT_FOUND");
     expect(calls.slice(before).some(c => c.method === "POST")).toBe(false);
+  });
+});
+
+describe("the InferMind Wiki over HTTP", () => {
+  const DOC = "60000000-0000-4000-8000-000000000001";
+  const OTHER_DOC = "60000000-0000-4000-8000-000000000002";
+  const SECTION = "61000000-0000-4000-8000-000000000001";
+  const MISSING = "61000000-0000-4000-8000-0000000000ff";
+
+  type WikiCall = { method: string; path: string; headers: Headers; body: unknown };
+
+  /**
+   * InferOps' knowledge routes as they answer: bare JSON (no envelope), `null` for a missing page
+   * or section, and a 403 whose message says which gate refused.
+   */
+  function fakeWiki(override?: (call: WikiCall) => Response | undefined) {
+    const calls: WikiCall[] = [];
+    const section = { id: SECTION, documentId: DOC, tag: "purpose", body: "Old body.", version: 4 };
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const call: WikiCall = {
+        method: init?.method ?? "GET", path: url.pathname.replace(/^\/api/, "") + url.search,
+        headers: new Headers(init?.headers), body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      };
+      calls.push(call);
+      const overridden = override?.(call);
+      if (overridden) return overridden;
+      if (call.path === "/knowledge/documents") {
+        return Response.json([{
+          id: DOC.toUpperCase(), workspaceId: CONNECTION.workspaceId, slug: "handbook", title: "Handbook",
+          summary: "private summary", pathway: "engineering", parentId: null, siblingOrder: 2,
+        }]);
+      }
+      if (call.path === `/knowledge/documents/${DOC}`) {
+        return Response.json({
+          id: DOC, workspaceId: CONNECTION.workspaceId, slug: "handbook", title: "Handbook",
+          summary: null, pathway: null, parentId: null, siblingOrder: 2, body: "read-only page body",
+        });
+      }
+      if (call.path.startsWith("/knowledge/documents/")) return Response.json(null);
+      if (call.path === `/knowledge/sections?documentId=${DOC}`) return Response.json([section]);
+      if (call.path === `/knowledge/sections/${SECTION}` && call.method === "GET") return Response.json(section);
+      if (call.path === `/knowledge/sections/${SECTION}` && call.method === "PATCH") {
+        section.body = (call.body as { body: string }).body;
+        section.version += 1;
+        return Response.json(section);
+      }
+      if (call.path.startsWith("/knowledge/sections/")) return new Response(null, { status: 200 });
+      return Response.json({ error: { code: "NOT_FOUND", message: "no route" } }, { status: 404 });
+    }) as typeof fetch;
+    return { calls, fetcher, client: openHttpInferOpsClient(CONNECTION, fetcher) };
+  }
+
+  it("lists pages from the bare array, keeping only the tree fields", async () => {
+    const { client, calls } = fakeWiki();
+    expect(await client.listDocuments()).toEqual([
+      { id: DOC, slug: "handbook", title: "Handbook", parentId: null, siblingOrder: 2 },
+    ]);
+    expect(calls[0]!.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(calls[0]!.headers.get("x-workspace-id")).toBe(CONNECTION.workspaceId);
+  });
+
+  it("reads a page without its read-only body, and answers a missing one NOT_FOUND", async () => {
+    const { client, calls } = fakeWiki();
+    expect(await client.readDocument(DOC)).toEqual({ id: DOC, slug: "handbook", title: "Handbook" });
+    const missing = await client.readDocument(OTHER_DOC).catch(e => e);
+    expect(inferOpsErrorCode(missing)).toBe("NOT_FOUND");
+    const before = calls.length;
+    expect(inferOpsErrorCode(await client.readDocument("../x").catch(e => e))).toBe("NOT_FOUND");
+    expect(calls.length).toBe(before);
+  });
+
+  it("lists sections only after the page itself is found, and refuses another page's section", async () => {
+    const { client, calls } = fakeWiki();
+    expect(await client.listSections(DOC)).toEqual([
+      { id: SECTION, documentId: DOC, tag: "purpose", body: "Old body.", version: 4 },
+    ]);
+    expect(calls.map(c => c.path)).toEqual([`/knowledge/documents/${DOC}`, `/knowledge/sections?documentId=${DOC}`]);
+    expect(inferOpsErrorCode(await client.listSections(OTHER_DOC).catch(e => e))).toBe("NOT_FOUND");
+    expect(calls.some(c => c.path.includes(OTHER_DOC) && c.path.startsWith("/knowledge/sections"))).toBe(false);
+
+    const { client: mixed } = fakeWiki(call => call.path.startsWith("/knowledge/sections?")
+      ? Response.json([{ id: SECTION, documentId: OTHER_DOC, tag: "x", body: "", version: 1 }]) : undefined);
+    expect(inferOpsErrorCode(await mixed.listSections(DOC).catch(e => e))).toBe("UNAVAILABLE");
+  });
+
+  it("answers a missing section NOT_FOUND, whether InferOps sends null or nothing", async () => {
+    const { client } = fakeWiki();
+    expect(inferOpsErrorCode(await client.readSection(MISSING).catch(e => e))).toBe("NOT_FOUND");
+    const { client: nulls } = fakeWiki(call => call.path === `/knowledge/sections/${MISSING}` ? Response.json(null) : undefined);
+    expect(inferOpsErrorCode(await nulls.readSection(MISSING).catch(e => e))).toBe("NOT_FOUND");
+  });
+
+  it("patches only the body, with the idempotency key, after finding the section", async () => {
+    const { client, calls } = fakeWiki();
+    expect(await client.updateSection(SECTION, "New body.", "inst:7"))
+      .toMatchObject({ id: SECTION, body: "New body.", version: 5 });
+    const patch = calls.find(c => c.method === "PATCH")!;
+    expect(patch.body).toEqual({ body: "New body." });
+    expect(patch.headers.get("x-idempotency-key")).toBe("inst:7");
+    expect(calls.map(c => c.method)).toEqual(["GET", "PATCH"]);
+
+    const before = calls.length;
+    expect(inferOpsErrorCode(await client.updateSection(MISSING, "x", "inst:8").catch(e => e))).toBe("NOT_FOUND");
+    expect(calls.slice(before).map(c => c.method)).toEqual(["GET"]);
+    expect(inferOpsErrorCode(await client.updateSection(SECTION, "x", "").catch(e => e))).toBe("INVALID_REQUEST");
+  });
+
+  it("maps a 403 to FORBIDDEN with one Wiki message, never InferOps' own text", async () => {
+    for (const message of ["Wrong product for this route", "Missing permission: knowledge:write"]) {
+      const { client } = fakeWiki(() =>
+        Response.json({ success: false, error: { code: "FORBIDDEN", message } }, { status: 403 }));
+      const error = await client.listDocuments().catch(e => e) as Error;
+      expect(inferOpsErrorCode(error)).toBe("FORBIDDEN");
+      expect(error.message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
+    }
+  });
+
+  it("treats a response that does not match the contract as UNAVAILABLE", async () => {
+    const { client } = fakeWiki(call => call.path === `/knowledge/sections/${SECTION}`
+      ? Response.json({ id: SECTION, documentId: DOC, tag: "t", body: "b", version: "4" }) : undefined);
+    expect(inferOpsErrorCode(await client.readSection(SECTION).catch(e => e))).toBe("UNAVAILABLE");
+    const { client: wrapped } = fakeWiki(call => call.path === "/knowledge/documents"
+      ? Response.json({ documents: [] }) : undefined);
+    expect(inferOpsErrorCode(await wrapped.listDocuments().catch(e => e))).toBe("UNAVAILABLE");
   });
 });

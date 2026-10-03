@@ -1,0 +1,63 @@
+{
+  "$comment": "Seed Wiki for the mock InferOps data source (mock-inferops.ts): InferMind documents (list shape) and sections (WikiSectionSchema) as InferOps' knowledge routes return them. UUIDs are synthetic; Drafts has no readable section.",
+  "documents": [
+    {
+      "id": "60000000-0000-4000-8000-000000000001",
+      "slug": "handbook",
+      "title": "Team handbook",
+      "parentId": null,
+      "siblingOrder": 0
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000002",
+      "slug": "release-process",
+      "title": "Release process",
+      "parentId": "60000000-0000-4000-8000-000000000001",
+      "siblingOrder": 1
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000003",
+      "slug": "onboarding",
+      "title": "Onboarding",
+      "parentId": "60000000-0000-4000-8000-000000000001",
+      "siblingOrder": 0
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000004",
+      "slug": "drafts",
+      "title": "Drafts",
+      "parentId": null,
+      "siblingOrder": 1
+    }
+  ],
+  "sections": [
+    {
+      "id": "61000000-0000-4000-8000-000000000001",
+      "documentId": "60000000-0000-4000-8000-000000000001",
+      "tag": "purpose",
+      "body": "This handbook explains how the demo team works. Start with [[onboarding#first-week]], then read [[release-process#steps]].",
+      "version": 1
+    },
+    {
+      "id": "61000000-0000-4000-8000-000000000002",
+      "documentId": "60000000-0000-4000-8000-000000000001",
+      "tag": "current-work",
+      "body": "Current work is tracked on the demo board.\n\n[DEMO board](inferops://demo.local/project/board/DEMO)\n\nAsk in the team channel before moving a card you do not own.",
+      "version": 3
+    },
+    {
+      "id": "61000000-0000-4000-8000-000000000003",
+      "documentId": "60000000-0000-4000-8000-000000000002",
+      "tag": "steps",
+      "body": "1. Freeze the release branch.\n2. Run the full test suite.\n3. Tag the release and publish the notes.\n\nThe release checklist lives on the board, see [the DEMO board](inferops://demo.local/project/board/DEMO) for open items.",
+      "version": 2
+    },
+    {
+      "id": "61000000-0000-4000-8000-000000000004",
+      "documentId": "60000000-0000-4000-8000-000000000003",
+      "tag": "first-week",
+      "body": "In your first week, pair with a teammate on one small issue and read [[handbook#purpose]].",
+      "version": 1
+    }
+  ]
+}

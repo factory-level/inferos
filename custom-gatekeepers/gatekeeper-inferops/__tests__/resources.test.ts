@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import dispatchUi from "../src/configurator/dispatch-ui";
+import wikiUi from "../src/configurator/wiki-ui";
 import projectUi from "../src/configurator/project-ui";
 import type { InferOpsProjectConfiguratorRpc } from "../src/configurator/project-configurator-types";
-import { parseProjectBoardUrl, parseProjectDispatchUrl, projectBoardUrl } from "../src/resources";
+import {
+  parseProjectBoardUrl, parseProjectDispatchUrl, parseWikiUrl, projectBoardUrl,
+} from "../src/resources";
 
 const URL = "inferops://acme.operations/project/board/ENG";
 const DEMO = "inferops://demo.local/project/board/DEMO";
@@ -92,5 +95,32 @@ describe("coding-dispatch URLs", () => {
     expect(await dispatchUi.initialValuesFromResourceUrl({
       resourceUrl: URL, resourceUrlPattern: "inferops://*/project/dispatch/*", ui: uiWith(null),
     })).toEqual({});
+  });
+});
+
+describe("Wiki URLs", () => {
+  const WIKI = "inferops://acme.knowledge/knowledge/wiki";
+  const DEMO_WIKI = "inferops://demo.local/knowledge/wiki";
+  const PATTERN = "inferops://*/knowledge/wiki";
+
+  // The Wiki picker duplicates the grammar too; keep it in step.
+  it.each([WIKI, DEMO_WIKI])("round-trips %s through the Wiki picker", async url => {
+    const values = await wikiUi.initialValuesFromResourceUrl({
+      resourceUrl: url, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    });
+    const { tenant, workspace } = parseWikiUrl(url);
+    expect(values).toEqual({ tenant, workspace });
+    const built = await wikiUi.resourceUrl({ values: { ...wikiUi.initial, ...values }, ui: uiWith(null) });
+    expect(parseWikiUrl(built)).toEqual(parseWikiUrl(url));
+    // A board URL does not prefill the Wiki picker.
+    expect(await wikiUi.initialValuesFromResourceUrl({
+      resourceUrl: URL, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    })).toEqual({});
+  });
+
+  it("builds the demo Wiki with no organization or workspace only when the account offers it", async () => {
+    expect(await wikiUi.resourceUrl({ values: wikiUi.initial, ui: uiWith("demo.local") })).toBe(DEMO_WIKI);
+    await expect(wikiUi.resourceUrl({ values: wikiUi.initial, ui: uiWith(null) }))
+      .rejects.toThrow("choose an InferMind workspace");
   });
 });

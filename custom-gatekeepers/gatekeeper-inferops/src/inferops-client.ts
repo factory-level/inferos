@@ -3,7 +3,9 @@
 // `http-inferops.ts` implements it over the InferOps HTTP API. `clientFor` in inferops.ts is the one
 // place that chooses between them.
 
-import type { Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run } from "./types";
+import type {
+  Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, WikiDocumentNode,
+} from "./types";
 
 /** Error codes a data source reports. Callers branch on these, never on message text. */
 export type InferOpsErrorCode =
@@ -87,6 +89,22 @@ export type RunRecord = Omit<Run, "pending">;
 /** What a dispatch sends: always the `code` action, a repository and the revision it was read at. */
 export type DispatchRequest = { repoId: string; baseRef?: string; expectedRevision: Revision };
 
+/** A Wiki page as listed: its place in the tree, without content. */
+export type WikiDocumentRecord = WikiDocumentNode;
+
+/** A Wiki page's identity, as read on its own. InferOps' read-only page `body` is not kept. */
+export type WikiDocumentHead = Pick<WikiDocumentNode, "id" | "slug" | "title">;
+
+/** One section as InferOps stores it: its page, tag, markdown and version. */
+export type WikiSectionRecord = {
+  id: string;
+  documentId: string;
+  tag: string;
+  body: string;
+  /** InferOps' row version, bumped by every write. */
+  version: number;
+};
+
 /** One project an account can reach, as listed for the resource picker. */
 export type ProjectSummary = Pick<Project, "identifier" | "name">;
 
@@ -165,6 +183,29 @@ export interface InferOpsClient {
 
   /** Cancel a queued or running run of the project (InferOps `issue:delegate`). */
   cancelRun(projectKey: string, runId: string, idempotencyKey: string): Promise<RunRecord>;
+
+  /**
+   * The workspace's Wiki pages the account can see (InferMind `knowledge:read`), in InferOps' order.
+   * Every Wiki call fails with FORBIDDEN when the workspace is not an InferMind workspace or the
+   * account lacks the knowledge permission.
+   */
+  listDocuments(): Promise<WikiDocumentRecord[]>;
+
+  /** One Wiki page by UUID; NOT_FOUND for one this workspace does not have (or not a UUID). */
+  readDocument(documentId: string): Promise<WikiDocumentHead>;
+
+  /** The page's sections the account can read, in page order; NOT_FOUND for an unknown page. */
+  listSections(documentId: string): Promise<WikiSectionRecord[]>;
+
+  /** One section by UUID; NOT_FOUND for one this workspace does not have (or not a UUID). */
+  readSection(sectionId: string): Promise<WikiSectionRecord>;
+
+  /**
+   * Replace a section's body (InferMind `knowledge:write`); the section's version advances. InferOps
+   * takes no expected version and does not replay an idempotency key here: the caller reads the
+   * section first and decides. The key is sent anyway, for when InferOps honors it.
+   */
+  updateSection(sectionId: string, body: string, idempotencyKey: string): Promise<WikiSectionRecord>;
 
   /** Whether the account can open the project; used to admit observers of a shared gadget. */
   hasProject(projectKey: string): Promise<boolean>;

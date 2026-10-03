@@ -1,7 +1,10 @@
 // The resource-URL grammar, InferOps' own (`_libs/widgets/shared/inferops-uri.ts`):
 // `inferops://<tenant>.<workspace>/project/<kind>/<KEY>`, where `<kind>` is `board` (read the board,
 // propose issue changes) or `dispatch` (hand the project's software issues to the coding runner).
-// The two kinds are separate grants: a board binding can never dispatch. A URL names a target; it never grants
+// The two kinds are separate grants: a board binding can never dispatch. A third kind,
+// `inferops://<tenant>.<workspace>/knowledge/wiki`, grants one person's read of the workspace's
+// InferMind Wiki and proposed section edits; `…/knowledge/document/<slug>` names one page of it and
+// is a reference only, never bound. A URL names a target; it never grants
 // anything by itself, and it never names a deployment: the API base URL and the credentials come
 // from the account and the deployment's configuration. The gatekeeper resolves the workspace slug
 // against the person's own workspaces, binds the result into its props when the Workshop mints the
@@ -32,6 +35,17 @@ export const PROJECT_DISPATCH_RESOURCE: SupportedResource = {
   description:
     "Propose handing one InferOps project's software issues to the local coding runner, and " +
     "follow or cancel its runs.",
+};
+
+/**
+ * One workspace's InferMind Wiki: read its pages and propose section edits. Pages in it are named
+ * by `inferops://<tenant>.<workspace>/knowledge/document/<slug>` references, which grant nothing.
+ */
+export const KNOWLEDGE_WIKI_RESOURCE: SupportedResource = {
+  urlPattern: "inferops://*/knowledge/wiki",
+  title: "InferMind Wiki",
+  description:
+    "Read the pages of one InferMind workspace's Wiki and propose edits to their sections.",
 };
 
 /** The project-scoped resource kinds, by the path segment that names them. */
@@ -101,6 +115,66 @@ export function parseProjectDispatchUrl(url: string): ProjectBoardRef {
 export function projectResourceKind(url: string): ProjectResourceKind | null {
   const kind = /^inferops:\/\/[^/?#]+\/project\/([a-z]+)\//.exec(url.trim())?.[1];
   return kind === "board" || kind === "dispatch" ? kind : null;
+}
+
+/** Every resource kind, by what its URL's path names. */
+export type ResourceKind = ProjectResourceKind | "wiki";
+
+/** The kind a resource URL names, or null when it names none (the parsers explain why). */
+export function resourceKind(url: string): ResourceKind | null {
+  if (/^inferops:\/\/[^/?#]+\/knowledge\/wiki\/?$/.test(url.trim())) return "wiki";
+  return projectResourceKind(url);
+}
+
+/** A parsed Wiki resource URL: the workspace's `<tenant>.<workspace>` host and its labels. */
+export type WikiRef = { host: string; tenant: string; workspace: string };
+
+/** Parse a Wiki resource URL, or throw a message naming the expected form. Syntax only. */
+export function parseWikiUrl(url: string): WikiRef {
+  const host = /^inferops:\/\/([^/?#]+)\/knowledge\/wiki\/?$/.exec(url.trim())?.[1];
+  const labels = host ? parseHost(host) : null;
+  if (!host || !labels) {
+    throw new Error(
+      "Not an InferMind Wiki URL: expected inferops://<tenant>.<workspace>/knowledge/wiki, for " +
+      `example inferops://acme.knowledge/knowledge/wiki, or inferops://${DEMO_HOST}/knowledge/wiki ` +
+      "for demo data.");
+  }
+  return { host, ...labels };
+}
+
+/** The canonical URL of a workspace's Wiki. Inverse of `parseWikiUrl`. */
+export function wikiUrl({ host }: Pick<WikiRef, "host">): string {
+  return `inferops://${host}/knowledge/wiki`;
+}
+
+/** A parsed Wiki page reference: the workspace and the page's slug. */
+export type WikiDocumentRef = WikiRef & { slug: string };
+
+// A document slug as it can appear in a reference: URL-unreserved characters only, so it needs no
+// escaping and cannot smuggle a path, query or fragment. InferOps' own slugs are lowercase words
+// joined by hyphens.
+const DOCUMENT_SLUG = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$/;
+
+/** Whether `value` can be a Wiki page slug in a reference. */
+export function isDocumentSlug(value: string): boolean {
+  return DOCUMENT_SLUG.test(value);
+}
+
+/**
+ * Parse a Wiki page reference, `inferops://<tenant>.<workspace>/knowledge/document/<slug>`, or
+ * return null when `url` is not one. It identifies a page and grants nothing: the page is
+ * readable only through a Wiki binding of the same workspace.
+ */
+export function parseWikiDocumentUrl(url: string): WikiDocumentRef | null {
+  const match = /^inferops:\/\/([^/?#]+)\/knowledge\/document\/([^/?#]+)\/?$/.exec(url.trim());
+  const labels = match ? parseHost(match[1]!) : null;
+  if (!match || !labels || !isDocumentSlug(match[2]!)) return null;
+  return { host: match[1]!, ...labels, slug: match[2]! };
+}
+
+/** The reference of one Wiki page. Inverse of `parseWikiDocumentUrl`. */
+export function wikiDocumentUrl({ host, slug }: Pick<WikiDocumentRef, "host" | "slug">): string {
+  return `inferops://${host}/knowledge/document/${slug}`;
 }
 
 /** The canonical URL of a project board. Inverse of `parseProjectBoardUrl`. */

@@ -17,7 +17,7 @@ declare namespace Cloudflare {
     mainModule: typeof import("./inferops.js");
     // Durable Object classes exposed as namespaces on ctx.exports.
     durableNamespaces: "MockInferOps" | "InferOpsProjectGatekeeper" | "InferOpsDispatchGatekeeper" |
-      "InferLabLogin" | "InferOpsCredentials";
+      "InferOpsWikiGatekeeper" | "InferLabLogin" | "InferOpsCredentials";
   }
 
   // Deployment vars the committed wrangler.jsonc deliberately leaves unset.

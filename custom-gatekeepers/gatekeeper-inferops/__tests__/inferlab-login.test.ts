@@ -114,19 +114,24 @@ describe("configuration", () => {
 describe("token response", () => {
   const envelope = (u: unknown) => JSON.stringify({ token: "a", refreshToken: "r", user: u });
 
-  it("normalizes the email, keeps the session and the InferOps workspaces only", () => {
+  it("normalizes the email, keeps the session and the InferOps and InferMind workspaces only", () => {
     const exchange = exchangeFromTokenResponse(envelope({
       ...user(" Ada@Example.com "),
       workspaces: [
         ...user("x").workspaces,
         { workspaceId: "90000000-0000-4000-8000-000000000002", workspaceName: "Mind", product: "infermind" },
+        { workspaceId: "90000000-0000-4000-8000-000000000003", workspaceName: "Other", product: "inferfuture" },
       ],
     }));
     expect(exchange).toEqual({
       grant: { accessToken: "a", accessExpiresAt: 0, refreshToken: "r" },
       identity: {
         userId: "u1", email: "ada@example.com", tenantId: "t1",
-        workspaces: [{ workspaceId: "90000000-0000-4000-8000-000000000001", workspaceName: "Ops" }],
+        // An InferOps workspace carries no product (as identities stored before InferMind did).
+        workspaces: [
+          { workspaceId: "90000000-0000-4000-8000-000000000001", workspaceName: "Ops" },
+          { workspaceId: "90000000-0000-4000-8000-000000000002", workspaceName: "Mind", product: "infermind" },
+        ],
       },
       emailVerified: true,
     });
