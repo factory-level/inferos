@@ -22,9 +22,9 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | `scripts/run-dev-server.ts` | Existing local startup orchestration. |
 | `scripts/generate-worker-configs.ts` | Generated config synchronization. `--consumer-root <wrapper>` also covers the wrapper's own gatekeepers, and `syncWorkerConfigs` generates or checks any given set of Worker directories ([wrapper topology](local-development.md#wrapper-topology)). |
 | `scripts/release/manifest-lib.ts` | Deployable discovery and inputs. |
-| `.agents/skills/bootstrap-inferos` | Consumer setup, configuration and evidence guidance. |
+| `.agents/skills/bootstrap-inferos` | Consumer setup, configuration (including applying a reviewed intake) and evidence guidance. |
 | `.agents/skills/skill-upload` | Installing, authoring (with skill-creator) and publishing wrapper skills. |
-| `scripts/consumer` | Atomic scaffolding, profile resolution, preflight and fixture/view/extension/skill-pack validation. |
+| `scripts/consumer` | Atomic scaffolding, profile resolution, preflight, fixture/view/extension/skill-pack validation and intake application ([customer onboarding](customer-onboarding.md)). |
 | `scripts/consumer/skill-packs` | Starter `operate`, `build` and `shared` runtime skills that bootstrap copies to `skills/`. |
 | `scripts/consumer/skills.ts`, `skill-manifest.ts` | Read `inferos.skills.json`, collect pack files (excludes, includes, limits, no links) and validate `SKILL.md` frontmatter. |
 | `packages/workshop-backend/scripts/upload-consumer-skills.ts` | Local administrator upload of packs into public Context Library collections. |

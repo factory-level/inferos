@@ -1,7 +1,7 @@
 ---
 title: Customer OS onboarding
 status: draft
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Customer OS onboarding
@@ -50,6 +50,37 @@ The sequence is:
 
 Steps 5 through 10 are InferOS work. The private repository pins the foundation, resolves its configuration through the contract in [feature capabilities](feature-capabilities.md), and adds customer-owned code through [connection extensions](connection-extensions.md). Setup, configure, verify, upgrade and recovery run through the [repository setup skills](repo-setup-skills.md).
 
+### Reviewed intake
+
+InferOS consumes the reviewed intake as one JSON file, `scripts/consumer/intake.schema.json` (schema version 1). The intake is the InferOS-facing summary of steps 1 to 4, not the InferOps model itself. It holds:
+
+- `synthetic`: whether the intake describes invented sample data. Reports and drafted issues carry the label.
+- `review`: status (`reviewed` or `draft`), reviewer and date. Only a reviewed intake is applied.
+- `customer`: the customer's name.
+- `inferops`: one tenant and workspace slug, and one or more projects, each with a key, name and workflow kind (`software` or `content`). Each project is referenced as `inferops://<tenant>.<workspace>/project/board/<KEY>` ([ADR 0005](../adr/0005-inferops-uri-authority.md)). A reference identifies a target and never authorizes it.
+- `capabilities`: the requested product capabilities (`kanban`, `wiki`, `local-coding`, `state-machine`, `harness`, `publish-widget`, `publish-app`, `agent-deployments`).
+- `wiki.pillars`: the onboarding-selected Wiki pillars.
+- `operations`: the operational inventory. Each operation has an id, name, owner, project, optional pillar and optional SOP reference.
+- `requirements`: each with an id, text and category. The category decides the disposition.
+
+The validator is strict, versioned and bounded. Unknown fields, an unknown version, values over their limits and broken cross-references are rejected. Errors name the field and the rule, never the rejected value.
+
+Applying an intake derives only supported configuration. It switches on a configuration capability only when the pin implements it, never an unsupported one. It also sets the `inferops-operations` profile and writes a starter view and screen template that reference the customer's boards. Every requirement is reported as `supported`, `unsupported` or `custom-work`, with a reason and the capability or issue it maps to. No requirement is dropped. Wiki pillars stay pending [#87](https://github.com/factory-level/inferos/issues/87) until the Wiki host ships.
+
+The fields the intake manages are recorded, so a rerun updates only values the intake wrote and the customer has not changed since. A customer edit is kept. When the customer's value and the intake's value have both changed, the conflict is reported and the field is not overwritten. A gap issue is drafted for every `unsupported` and `custom-work` requirement. Issues are filed only on an explicit request, in the repository the operator names.
+
+### Commands for steps 5 to 10
+
+| Step | Command | Status |
+| --- | --- | --- |
+| 5. Bootstrap | `node scripts/consumer/bootstrap.ts <dest> <repo> <sha>`, then `pnpm inferos:check`, `pnpm run setup` and `pnpm run doctor` in the wrapper | Exists |
+| 6. Configure | `pnpm inferos intake apply <file>`; `pnpm inferos config migrate` for a version 1 wrapper; `pnpm canvas` and `pnpm profile:init` | Exists |
+| 7. Create issues for gaps | `pnpm inferos intake apply <file> --file-issues <owner/repo>` | Exists |
+| 8. Customize locally | Edit `workers/`, `gatekeepers/`, `blueprints/`, `skills/` and `views/`. Validate with `pnpm extensions:check`, `pnpm blueprints:check`, `pnpm skills:check` and `pnpm views:check`. Run with `pnpm dev` or `pnpm local start` | Exists |
+| 9. Verify | `pnpm inferos:check`, `pnpm run doctor` and `pnpm local verify`. Live acceptance is recorded per issue against a running InferOps | Partly exists; a cloud-parity check does not ([#11](https://github.com/factory-level/inferos/issues/11)) |
+| Upgrade | `pnpm inferos upgrade` | Does not exist yet |
+| 10. Deploy explicitly | `pnpm inferos deploy` | Does not exist yet ([#11](https://github.com/factory-level/inferos/issues/11)) |
+
 Independent tracks may proceed in parallel once their contracts are settled. The first build target is the [local coding workflow](local-coding-workflows.md) proof, which does not wait for the full onboarding sequence.
 
 ## Non-Goals
@@ -69,9 +100,9 @@ From the roadmap's completion evidence:
 
 ## Open Questions
 
-- The format of the reviewed intake and how InferOS configuration is derived from it.
-- Which CLI commands cover each of steps 5 through 10, and which exist today in the wrapper tooling.
-- How unmet requirements are turned into scoped issues, and in which repository they are filed.
+- Whether unmet requirements should be filed in the customer's wrapper repository, in InferOS, or in both. The command files into the repository the operator names.
+- How the intake is produced from the InferOps model (steps 3 and 4). Today it is written and reviewed by hand. The inventory companion is [factory-level/inferops#2324](https://github.com/factory-level/inferops/issues/2324).
+- When `inferops.targetRef` and the synthetic fixture should follow the customer's first project, rather than stay on the synthetic board.
 
 ## Related
 
