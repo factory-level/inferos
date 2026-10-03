@@ -83,6 +83,35 @@ OAuth app with its own redirect URI:
 In local dev, `run-dev-server.ts` seeds each gatekeeper's `CLIENT_ID`/`CLIENT_SECRET` from
 `GOOGLE_*` / `GITHUB_*` / `CLOUDFLARE_OAUTH_*` shell vars.
 
+### InferLab
+
+The InferOps gatekeeper (`custom-gatekeepers/gatekeeper-inferops`, vendor id `inferops`) signs users
+in with their InferLab account. It's off unless the gatekeeper has `INFERLAB_AUTH_ORIGIN` set: then
+`describe()` reports `providesAuth`, and listing `inferops` in `AUTH_GATEKEEPERS` adds the button.
+
+```
+AUTH_GATEKEEPERS=inferops
+# On the gatekeeper-inferops Worker: InferLab central-auth (https, or http on loopback).
+INFERLAB_AUTH_ORIGIN=https://auth.inferlab.io
+```
+
+- InferOS is InferLab's public PKCE client `inferos`, so there is no client secret. InferLab must
+  register the deployment's origin. Its redirect URI is always `${PUBLIC_BASE_URL}/gatekeeper/inferops/oauth`.
+- The flow is `GET /authorize` (S256), then a server-side `POST /auth/token`. The gatekeeper accepts
+  `user.email` only when the response marks it `emailVerified: true`. A missing flag fails closed,
+  because InferLab also issues sessions for emails nobody proved, such as invitations and
+  impersonation. A sign-in keeps only the email and signs the InferLab session out again.
+- With the origin set, the InferOps gatekeeper no longer auto-provisions demo accounts: a person
+  **connects** it through the same PKCE sign-in (silent while InferLab's SSO cookie is live), and
+  that account keeps their InferLab session so every board request is made with their own token
+  and workspace. See [the gatekeeper](architecture/inferops-gatekeeper.md).
+- Consumer wrappers set `features.inferlabLogin` (or `capabilities.INFEROPS_AUTH` in a version 2
+  file) instead. `run-dev-server.ts` then appends `inferops` to `AUTH_GATEKEEPERS` and defaults
+  `INFERLAB_AUTH_ORIGIN` to `http://localhost:8080`, the local InferLab stack. In-repo, set both
+  variables in the shell. Listing `inferops` without the gatekeeper enabled or without a valid
+  origin stops the dev server with the reason, and the backend refuses to serve while
+  `AUTH_GATEKEEPERS` names a vendor that is unbound or does not provide sign-in.
+
 ## Storage / bindings
 
 - `PendingLogin` (DO) — short-lived bridge between a gatekeeper login pop-up and the browser that

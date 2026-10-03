@@ -1,0 +1,80 @@
+// @vitest-environment jsdom
+/* eslint-disable react/react-in-jsx-scope */
+
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { INITIAL_OPERATE_PAGE, type OperateEvent, type OperatePageState } from '@gadgets/workshop-shared/operate-session'
+
+const testState = vi.hoisted(() => ({
+  state: null as unknown,
+  dispatch: null as unknown,
+}))
+
+vi.mock('@cloudflare/kumo', async importOriginal => ({
+  ...await importOriginal<typeof import('@cloudflare/kumo')>(),
+  useKumoToastManager: () => ({ add: () => {} }),
+}))
+vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
+vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true } }) }))
+vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
+  useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
+    { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [] },
+  ] }),
+}))
+vi.mock('../../pages/inferops-canvas/InferOpsCanvasHome', () => ({ InferOpsCanvasHome: () => <div data-testid="home" /> }))
+vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: () => <div data-testid="chat" /> }))
+vi.mock('./SessionScreen', () => ({ SessionScreen: ({ screenId }: { screenId: string }) => <div data-testid="screen">{screenId}</div> }))
+vi.mock('./FlowScreen', () => ({ FlowScreen: ({ screenId }: { screenId: string }) => <div data-testid="step">{screenId}</div> }))
+vi.mock('./OperateSessionContext', () => ({
+  useOperateSession: () => ({ snapshot: { seq: 3, state: testState.state }, error: null, dispatch: testState.dispatch, session: null }),
+}))
+
+import { OperateSessionPage } from './OperateSessionPage'
+
+const BOARD = { type: 'screen', workspaceId: 'ws1', screenId: 'board' } as const
+const OPEN: OperatePageState = { ...INITIAL_OPERATE_PAGE, workingSet: [BOARD], focus: BOARD, chatOpen: false }
+
+let container: HTMLDivElement
+let root: Root
+const dispatch = vi.fn<(event: OperateEvent) => Promise<void>>(async () => {})
+
+beforeEach(() => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+  dispatch.mockClear()
+  testState.dispatch = dispatch
+})
+
+afterEach(() => {
+  act(() => root.unmount())
+  container.remove()
+  vi.unstubAllGlobals()
+})
+
+const render = (state: OperatePageState) => {
+  testState.state = state
+  act(() => root.render(<OperateSessionPage />))
+}
+
+describe('OperateSessionPage', () => {
+  it('shows the working set as tabs and the focused screen', () => {
+    render(OPEN)
+    expect([...container.querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(['Shift board'])
+    expect(container.querySelector('[data-testid="screen"]')?.textContent).toBe('board')
+  })
+
+  it('gives the whole page to a running flow, keeping the working set for afterwards', () => {
+    render({ ...OPEN, flow: { workspaceId: 'ws1', flowId: 'f', title: 'Admission', steps: ['intake', 'triage'], index: 1 } })
+    expect(container.querySelector('[role="tablist"]')).toBeNull()
+    expect(container.querySelector('[data-testid="screen"]')).toBeNull()
+    expect(container.querySelector('[data-testid="step"]')?.textContent).toBe('triage')
+    expect(container.querySelector('h1')?.textContent).toBe('Step 2 of 2')
+
+    const finish = [...container.querySelectorAll('button')].find(b => b.textContent?.trim() === 'Finish')!
+    act(() => finish.click())
+    expect(dispatch).toHaveBeenCalledWith({ type: 'exitFlow' })
+  })
+})

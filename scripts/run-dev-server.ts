@@ -21,12 +21,16 @@ import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
-import { getDevRouterAssets, getDevServerConfig } from "./dev-server-config.ts";
+import {
+  INFERLAB_LOGIN_GATEKEEPER, getDevRouterAssets, getDevServerConfig, getInferLabLoginVars,
+  inferLabLoginStartupError,
+} from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
 import { parseConsumerConfig } from "./consumer/config.ts";
+import { inferOpsAuthRequested } from "./consumer/config.ts";
 import { unsupportedCapabilities } from "./consumer/runtime.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
@@ -34,6 +38,7 @@ import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
 import { startOpenAiCompanion } from './openai-companion.ts';
 import { installLocalSecrets } from './local-secrets.ts';
+import { recordDevServer } from "./local/stack.ts";
 import { parseEnv } from 'node:util';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -138,6 +143,16 @@ const gatekeepers = findGatekeepers(ROOT).filter(({ dir, name }) =>
 // that turns composition (with saved views) on. A wrapper's own flags always take precedence.
 const canvasFeatures = consumerConfig?.features
     ?? { composableViews: canvasConfig !== null, durableViews: canvasConfig !== null };
+// InferOps-backed sign-in (`features.inferlabLogin`, or `INFEROPS_AUTH` in a version 2 wrapper) is
+// a wrapper flag; in-repo, set AUTH_GATEKEEPERS and INFERLAB_AUTH_ORIGIN in the shell instead.
+// Either way the result is checked before anything starts: asking for it without the gatekeeper or
+// without an InferLab origin is a configuration error, never a login page quietly missing a button.
+const inferLabLoginEnabled = consumerConfig ? inferOpsAuthRequested(consumerConfig) : false;
+const inferLabLogin = getInferLabLoginVars(inferLabLoginEnabled, process.env);
+const inferLabLoginError = inferLabLoginStartupError(
+  { ...inferLabLogin, DISABLE_PASSWORD_AUTH: process.env.DISABLE_PASSWORD_AUTH },
+  gatekeepers.some(({ name }) => name === INFERLAB_LOGIN_GATEKEEPER));
+if (inferLabLoginError) throw new Error(inferLabLoginError);
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -545,9 +560,13 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_PORTAL_HIDDEN_SERVER_IDS", "MCP_ALLOW_INSECURE",
   ],
   "gatekeeper-mcp": ["MCP_ALLOW_INSECURE"],
-  // A live InferOps connection for local development. One token for the whole dev server is a
-  // stopgap until each person connects with their own InferOps sign-in (inferos#66).
+  // The InferOps API. The base URL is what connected people call with their own InferLab session;
+  // the token and workspace id are a local-development stopgap for accounts with no identity.
   "gatekeeper-inferops": ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"],
+};
+// Vars resolved here rather than read raw from the shell.
+const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined>> = {
+  [INFERLAB_LOGIN_GATEKEEPER]: { INFERLAB_AUTH_ORIGIN: inferLabLogin.INFERLAB_AUTH_ORIGIN },
 };
 
 for (const gk of gatekeepers) {
@@ -569,6 +588,9 @@ for (const gk of gatekeepers) {
     if (process.env[name] !== undefined) {
       config.vars[name] = process.env[name];
     }
+  }
+  for (const [name, value] of Object.entries(RESOLVED_GATEKEEPER_VARS[gk.name] ?? {})) {
+    if (value !== undefined) config.vars[name] = value;
   }
 
   const outPath = join(gk.dir, "wrangler.dev.jsonc");
@@ -613,6 +635,9 @@ for (const gk of gatekeepers) {
   // they are injected into the gatekeeper Workers (see SHARED_GATEKEEPER_CREDS below).
   for (const name of OPTIONAL_FEATURE_VARS) {
     if (process.env[name] !== undefined) config.vars[name] = process.env[name];
+  }
+  if (inferLabLogin.AUTH_GATEKEEPERS !== undefined) {
+    config.vars.AUTH_GATEKEEPERS = inferLabLogin.AUTH_GATEKEEPERS;
   }
 
   // Account connect flows post their completion ticket to the Workshop *origin* named here (see
@@ -695,6 +720,10 @@ const wranglerEntry = resolveBinEntry(ROOT, "wrangler");
 const [wranglerCommand, wranglerArgv]: [string, string[]] = wranglerEntry
   ? [process.execPath, [wranglerEntry, "dev", ...args]]
   : pnpmCommand(["exec", "wrangler", "dev", ...args]);
+
+// Recorded so `pnpm local status|stop` (scripts/local/lifecycle.ts) can find this server.
+process.on("exit", recordDevServer(ROOT,
+    { port: Number(wranglerPort ?? DEFAULT_WRANGLER_PORT), mode: serveFrontendAssets ? "run-local" : "dev-server" }));
 
 // `spawn`, not `execFileSync`, so the deferred watchers can start once the server is up. It stays in
 // this process group with the terminal attached, so Ctrl-C reaches it as before.

@@ -99,6 +99,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "CF_ACCESS_AUD", "CF_ACCESS_ISS", "CF_AI_GATEWAY", "CF_AI_GATEWAY_ACCOUNT_ID",
       "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_USE_BINDING",
       "CI_COMMIT_SHA", "CI_PIPELINE_IID", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
+      // run-dev-server.ts checks the sign-in configuration before starting anything.
+      "DISABLE_PASSWORD_AUTH",
       // run-dev-server.ts starts the companion at runtime; the frontend reads its flag over RPC.
       "ENABLE_OPENAI_ASSISTANT_PLUGIN",
       "ANTHROPIC_API_KEY",

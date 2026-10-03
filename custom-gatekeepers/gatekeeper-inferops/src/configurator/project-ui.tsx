@@ -10,7 +10,7 @@ import type {
 const BOARD_URL = /^inferops:\/\/([^/?#]+)\/project\/board\/([^/?#]+)\/?$/;
 
 export default {
-  initial: { host: null, projectKey: null },
+  initial: { host: null, projectKey: null, workspaceId: null },
 
   initialValuesFromResourceUrl({ resourceUrl }) {
     const match = BOARD_URL.exec(resourceUrl.trim());
@@ -25,8 +25,27 @@ export default {
     return `inferops://${values.host || await ui.defaultHost()}/project/board/${values.projectKey}`;
   },
 
-  render({ values, setValues, ui }) {
+  render({ values, setValues, clearFields, ui }) {
     return <Section>
+      <Field
+        label="Workspace"
+        description="Only needed when you belong to several InferOps workspaces."
+        optional
+      >
+        <Autocomplete
+          name="workspaceId"
+          value={values.workspaceId}
+          placeholder="Your only workspace"
+          optional
+          loadOptions={() => ui.listWorkspaces()}
+          onChange={workspaceId => {
+            // The choice lives on the account, since a resource URL never carries a workspace.
+            void ui.selectWorkspace(workspaceId);
+            setValues({ workspaceId, projectKey: null });
+            clearFields("projectKey");
+          }}
+        />
+      </Field>
       <Field
         label="Project"
         description="The board of this project only. Other projects stay out of reach."

@@ -11,7 +11,7 @@ export type CapabilityName = typeof CAPABILITY_NAMES[number];
 interface ConsumerSettings {
   upstream: { repository: string; revision: string };
   profile: "personal" | "inferops-operations";
-  features: { composableViews: boolean; durableViews: boolean; customCloudflareCode: boolean };
+  features: { composableViews: boolean; durableViews: boolean; customCloudflareCode: boolean; inferlabLogin: boolean };
   styling: { siteName: string; density: "comfortable" | "compact"; theme: "system" | "light" | "dark" };
   local: { port: number };
   inferops: { mode: "fixture"; fixture: "fixtures/project-board.json"; targetRef: string }
@@ -53,7 +53,7 @@ export interface ConsumerProvenance {
 }
 
 const defaults: Pick<ConsumerConfig, "features" | "styling"> = {
-  features: { composableViews: false, durableViews: false, customCloudflareCode: false },
+  features: { composableViews: false, durableViews: false, customCloudflareCode: false, inferlabLogin: false },
   styling: { siteName: "InferOS", density: "comfortable", theme: "system" },
 };
 const profiles: Record<ConsumerConfig["profile"], {
@@ -61,6 +61,7 @@ const profiles: Record<ConsumerConfig["profile"], {
   styling: Partial<ConsumerConfig["styling"]>;
 }> = {
   personal: { features: {}, styling: {} },
+  // Profiles never change authentication policy, so neither one sets inferlabLogin.
   "inferops-operations": {
     features: { composableViews: true, durableViews: true },
     styling: { density: "compact" },
@@ -76,15 +77,23 @@ export const CAPABILITY_REQUIREMENTS: Partial<Record<CapabilityName, readonly Ca
 };
 
 /**
- * Compatibility mapping from the version 1 flags. Each keeps its name and meaning under `features`
- * because no capability means the same thing: composition and a durable layout are not state-machine
- * execution, and custom code activation is not an agent permission.
+ * Compatibility mapping from the version 1 flags. Each keeps its name and meaning under `features`.
+ * Three map to no capability, because none means the same thing: composition and a durable layout
+ * are not state-machine execution, and custom code activation is not an agent permission.
+ * `inferlabLogin` is the version 1 spelling of `INFEROPS_AUTH`: either switches InferOps-backed
+ * sign-in on (see {@link inferOpsAuthRequested}).
  */
-export const LEGACY_FLAG_COMPATIBILITY: Record<keyof ConsumerConfig["features"], { retained: true; capability: null }> = {
+export const LEGACY_FLAG_COMPATIBILITY: Record<keyof ConsumerConfig["features"], { retained: true; capability: CapabilityName | null }> = {
   composableViews: { retained: true, capability: null },
   durableViews: { retained: true, capability: null },
   customCloudflareCode: { retained: true, capability: null },
+  inferlabLogin: { retained: true, capability: "INFEROPS_AUTH" },
 };
+
+/** Whether the configuration asks for InferOps-backed sign-in: `features.inferlabLogin`, or `INFEROPS_AUTH` in version 2. */
+export function inferOpsAuthRequested(config: ConsumerConfig): boolean {
+  return config.features.inferlabLogin || (config.schemaVersion === 2 && config.capabilities.INFEROPS_AUTH);
+}
 
 function resolveGroup<T extends object>(base: T, profile: Partial<T>, overrides: Record<string, unknown>) {
   // Only known own properties participate; false is an override, never a missing value.
@@ -129,7 +138,7 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
     throw new Error("upstream.revision: expected full lowercase Git commit SHA");
   }
   const profile = choice(root.profile, ["personal", "inferops-operations"], "profile");
-  const featureOverrides = object(root.features, ["composableViews", "durableViews", "customCloudflareCode"], "features", true);
+  const featureOverrides = object(root.features, ["composableViews", "durableViews", "customCloudflareCode", "inferlabLogin"], "features", true);
   const resolvedFeatures = resolveGroup(defaults.features, profiles[profile].features, featureOverrides);
   const features = resolvedFeatures.value;
   for (const key of Object.keys(features)) {
@@ -167,6 +176,7 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
       composableViews: features.composableViews as boolean,
       durableViews: features.durableViews as boolean,
       customCloudflareCode: features.customCloudflareCode as boolean,
+      inferlabLogin: features.inferlabLogin as boolean,
     },
     styling: {
       siteName: string(styling.siteName, "styling.siteName"),

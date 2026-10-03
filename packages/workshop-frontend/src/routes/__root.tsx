@@ -15,6 +15,8 @@ import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 import { useAppMode, useOperateModeAvailable } from '../features/operate/useAppMode'
+import { OperateSessionProvider, useOperateSession } from '../features/operate/OperateSessionContext'
+import { OPERATE_HOME } from '../features/operate/operateMode'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -131,6 +133,25 @@ function RootComponent() {
  * or the normal app chrome. Lives inside AuthProvider so the wizard can
  * use useAuthenticatedApi().
  */
+/**
+ * The page inside its chrome, or fullscreen without it. A flow running in the operate session
+ * takes the whole page on the session's own route (the "full canvas" state), so the sidebar gives
+ * way there. Rendered under OperateSessionProvider when Operate is available.
+ */
+function ShellFrame({ fullscreen }: { fullscreen: boolean }) {
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const flowRunning = useOperateSession()?.snapshot?.state.flow != null
+  return fullscreen || (flowRunning && pathname === OPERATE_HOME) ? (
+    <main className="h-full min-h-0">
+      <Outlet />
+    </main>
+  ) : (
+    <AppShell>
+      <Outlet />
+    </AppShell>
+  )
+}
+
 function AuthenticatedShell({
   authenticatedApi,
   isWorkspaceEditor,
@@ -141,7 +162,8 @@ function AuthenticatedShell({
   // Called here rather than only in the sidebar so Build locations are remembered for the
   // Operate → Build toggle even while the fullscreen workspace editor has no sidebar.
   const mode = useAppMode()
-  const operateShell = useOperateModeAvailable() && mode === 'operate'
+  const operateAvailable = useOperateModeAvailable()
+  const operateShell = operateAvailable && mode === 'operate'
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
 
@@ -175,19 +197,12 @@ function AuthenticatedShell({
   // gets the persistent left-rail AppShell. With Operate mode available, a workspace's InferOps
   // Canvas page is part of Operate and keeps the shell (and its Operate sidebar). Connection loss is surfaced by a chip in whichever of
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
-  const fullscreen = isWorkspaceEditor && !operateShell
-  return (
+  const shell = (
     <>
       <AccountSelectionModal />
-      {fullscreen ? (
-        <main className="h-full min-h-0">
-          <Outlet />
-        </main>
-      ) : (
-        <AppShell>
-          <Outlet />
-        </AppShell>
-      )}
+      <ShellFrame fullscreen={isWorkspaceEditor && !operateShell} />
     </>
   )
+  // One subscription per tab to the person's operate session, shared by the sidebar and the page.
+  return operateAvailable ? <OperateSessionProvider>{shell}</OperateSessionProvider> : shell
 }

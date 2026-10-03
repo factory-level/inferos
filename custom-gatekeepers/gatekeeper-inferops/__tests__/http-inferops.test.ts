@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  connectionFromEnv, openHttpInferOpsClient, type InferOpsConnection,
+  connectionFromEnv, endpointFromEnv, openHttpInferOpsClient, type InferOpsConnection,
 } from "../src/http-inferops";
 import { inferOpsErrorCode } from "../src/inferops-client";
 
@@ -302,14 +302,24 @@ describe("credential and provider failures", () => {
 });
 
 describe("connection configuration", () => {
-  it("is absent until a base URL is set, and names a missing variable without its value", () => {
+  it("is absent until a token is set, and names a missing variable without its value", () => {
     expect(connectionFromEnv({})).toBeNull();
-    expect(connectionFromEnv({ INFEROPS_API_TOKEN: TOKEN })).toBeNull();
+    // A base URL alone is the API connected people call with their own session, not a stopgap.
+    expect(connectionFromEnv({ INFEROPS_BASE_URL: "http://localhost:8080" })).toBeNull();
+    expect(() => connectionFromEnv({ INFEROPS_API_TOKEN: TOKEN }))
+      .toThrow("INFEROPS_API_TOKEN is set but INFEROPS_BASE_URL is not.");
     expect(() => connectionFromEnv({ INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_API_TOKEN: TOKEN }))
-      .toThrow("INFEROPS_BASE_URL is set but INFEROPS_WORKSPACE_ID is not.");
+      .toThrow("INFEROPS_API_TOKEN is set but INFEROPS_WORKSPACE_ID is not.");
     expect(() => connectionFromEnv({
       INFEROPS_BASE_URL: "ftp://ops.example", INFEROPS_API_TOKEN: TOKEN, INFEROPS_WORKSPACE_ID: "w",
     })).toThrow("must be an http(s) URL");
+  });
+
+  it("names the API endpoint from the base URL alone", () => {
+    expect(endpointFromEnv({})).toBeNull();
+    expect(endpointFromEnv({ INFEROPS_BASE_URL: "https://ops.example/api/" }))
+      .toEqual({ baseUrl: "https://ops.example/api", host: "ops.example" });
+    expect(() => endpointFromEnv({ INFEROPS_BASE_URL: "nope" })).toThrow("INFEROPS_BASE_URL is not a URL.");
   });
 
   it("derives the host a resource URL must name from the base URL", () => {
