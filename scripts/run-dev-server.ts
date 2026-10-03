@@ -636,8 +636,10 @@ for (const gk of gatekeepers) {
     config.vars.OPENAI_ASSISTANT_PLUGIN_URL = companion.url;
   }
 
+  // The local server is always development: UI flags resolve to their `dev` values (there is no
+  // Flagship binding locally), and the API-key models below additionally need their key.
+  config.vars.DEV = true;
   if (process.env.ANTHROPIC_API_KEY) {
-    config.vars.DEV = true;
     cleanupLocalApiKeys = installLocalSecrets(ROOT, { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY });
   }
 
