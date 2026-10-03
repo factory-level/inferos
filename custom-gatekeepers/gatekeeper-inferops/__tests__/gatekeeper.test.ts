@@ -3,6 +3,7 @@
 
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import type { Board } from "../src/types";
 import type { BindingProps } from "./worker";
 
 const STATE = {
@@ -227,6 +228,259 @@ describe("transitions", () => {
   });
 });
 
+/** Every card of a board with the id of the column it sits in. */
+function cards(board: Board) {
+  return board.columns.flatMap(c => c.issues.map(i => ({ ...i, column: c.state.id })));
+}
+
+describe("creating issues", () => {
+  it("queues a create for approval, shows a provisional card, and creates only on approval", async () => {
+    const { props, hooks, mock, session } = setup();
+
+    await session.createIssue({ title: "  Write the runbook  ", priority: "high" });
+
+    const { actions } = await hooks.log();
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      title: "Create issue: Write the runbook", implementsRevert: false,
+      fields: { Project: "DEMO", Title: "Write the runbook", State: "Backlog", Priority: "high" },
+    });
+    // Simulated: a provisional card in the default (first software) column.
+    const provisional = cards(await session.readBoard()).filter(c => c.pending === "create");
+    expect(provisional).toEqual([expect.objectContaining({
+      id: "pending-1", identifier: "DEMO-new", title: "Write the runbook", priority: "high",
+      column: STATE.backlog, stateId: STATE.backlog, workflow: "software", revision: "0",
+    })]);
+    expect(await failure(session.openIssue("pending-1"))).toContain("NOT_FOUND");
+    // ...but nothing exists in InferOps yet.
+    expect((await mock.readProject("DEMO")).issues).toHaveLength(11);
+
+    expect(await hooks.apply(props, actions[0]!.id)).toBeNull();
+
+    const created = (await mock.readProject("DEMO")).issues.filter(i => i.title === "Write the runbook");
+    expect(created).toEqual([expect.objectContaining({
+      identifier: "DEMO-12", priority: "high", stateId: STATE.backlog, workflow: "software",
+    })]);
+    const after = cards(await session.readBoard());
+    expect(after.some(c => c.pending)).toBe(false);
+    expect(after.filter(c => c.title === "Write the runbook").map(c => c.id)).toEqual([created[0]!.id]);
+  });
+
+  it("creates in a named state, taking its workflow", async () => {
+    const { props, hooks, mock, session } = setup();
+
+    await session.createIssue({ title: "Launch post", stateId: STATE.drafting, description: "Body" });
+    const action = (await hooks.log()).actions[0]!;
+    expect(action.fields).toMatchObject({ State: "Drafting", Workflow: "content", Description: "Body" });
+    expect(await hooks.apply(props, action.id)).toBeNull();
+
+    expect((await mock.readProject("DEMO")).issues.find(i => i.title === "Launch post"))
+      .toMatchObject({ stateId: STATE.drafting, workflow: "content" });
+  });
+
+  it("refuses a state outside the project, and empty or overlong fields, before proposing", async () => {
+    const { hooks, session } = setup();
+
+    expect(await failure(session.createIssue({ title: "x", stateId: STATE.engTodo }))).toMatch(/INVALID_STATE/);
+    expect(await failure(session.createIssue({ title: "   " }))).toMatch(/INVALID_REQUEST/);
+    expect(await failure(session.createIssue({ title: "x".repeat(501) }))).toMatch(/INVALID_REQUEST/);
+    expect(await failure(session.createIssue({ title: "x", description: "d".repeat(20_001) })))
+      .toMatch(/INVALID_REQUEST/);
+    expect((await hooks.log()).actions).toEqual([]);
+  });
+
+  it("leaves nothing behind when the create is denied", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.createIssue({ title: "Denied" });
+
+    await hooks.reject(props, 1);
+
+    expect(cards(await session.readBoard()).some(c => c.pending)).toBe(false);
+    expect(await hooks.apply(props, 1)).toContain("Unknown InferOps action");
+    expect((await mock.readProject("DEMO")).issues).toHaveLength(11);
+  });
+
+  it("creates one issue when approval is delivered twice", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.createIssue({ title: "Once" });
+
+    expect(await hooks.apply(props, 1)).toBeNull();
+    expect(await hooks.apply(props, 1)).toBeNull();
+
+    expect((await mock.readProject("DEMO")).issues.filter(i => i.title === "Once")).toHaveLength(1);
+  });
+
+  it("is not revertible", async () => {
+    const { props, hooks, session } = setup();
+    await session.createIssue({ title: "Permanent" });
+    await hooks.apply(props, 1);
+
+    expect(await hooks.revert(props, 1)).toContain("cannot be undone here");
+  });
+});
+
+describe("updating issues", () => {
+  it("queues an update, overlays it on reads, and writes it only on approval", async () => {
+    const { props, hooks, mock, session } = setup();
+    const issue = session.openIssue(DEMO_1);
+
+    await issue.update({ title: "Verify everything", priority: "urgent" }, "1");
+
+    const { actions } = await hooks.log();
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      title: "Update DEMO-1: title, priority", implementsRevert: true,
+      fields: {
+        Issue: "DEMO-1", "Current title": "Verify the local environment",
+        "New title": "Verify everything", Priority: "medium → urgent", "Expected revision": "1",
+      },
+    });
+    expect(await issue.read()).toMatchObject({
+      title: "Verify everything", priority: "urgent", revision: "1", pending: "update",
+    });
+    expect(cards(await session.readBoard()).find(c => c.id === DEMO_1))
+      .toMatchObject({ title: "Verify everything", pending: "update" });
+    expect(await mock.readIssue("DEMO", DEMO_1))
+      .toMatchObject({ title: "Verify the local environment", revision: "1" });
+
+    expect(await hooks.apply(props, actions[0]!.id)).toBeNull();
+
+    expect(await mock.readIssue("DEMO", DEMO_1))
+      .toMatchObject({ title: "Verify everything", priority: "urgent", revision: "2" });
+    const read = await issue.read();
+    expect(read).toMatchObject({ title: "Verify everything", revision: "2" });
+    expect(read.pending).toBeUndefined();
+  });
+
+  it("sends only changed fields, and a change of nothing proposes nothing", async () => {
+    const { hooks, session } = setup();
+    const issue = session.openIssue(DEMO_1);
+
+    await issue.update({ title: "Verify the local environment", priority: "medium" }, "1");
+    expect((await hooks.log()).actions).toEqual([]);
+
+    await issue.update({ title: "Verify the local environment", priority: "low" }, "1");
+    expect((await hooks.log()).actions.map(a => a.title)).toEqual(["Update DEMO-1: priority"]);
+  });
+
+  it("requires a decimal expected revision and refuses a stale one", async () => {
+    const { hooks, session } = setup();
+    const issue = session.openIssue(DEMO_1);
+
+    expect(await failure(issue.update({ title: "x" }, "next"))).toMatch(/INVALID_REQUEST/);
+    expect(await failure(issue.update({ title: "x" }, "7"))).toMatch(/STALE_REVISION/);
+    expect(await failure(issue.update({ title: "" }, "1"))).toMatch(/INVALID_REQUEST/);
+    expect((await hooks.log()).actions).toEqual([]);
+  });
+
+  it("refuses a second update or move of an issue until the first is decided", async () => {
+    const { props, hooks, session } = setup();
+    const issue = session.openIssue(DEMO_1);
+
+    await issue.update({ priority: "urgent" }, "1");
+    expect(await failure(issue.update({ priority: "low" }, "1"))).toMatch(/CONFLICT/);
+    expect(await failure(issue.transition(STATE.working, "1"))).toMatch(/CONFLICT/);
+    expect((await hooks.log()).actions).toHaveLength(1);
+
+    // ...and an update waits for a pending move just the same.
+    const other = setup();
+    await other.session.openIssue(DEMO_1).transition(STATE.working, "1");
+    expect(await failure(other.session.openIssue(DEMO_1).update({ priority: "low" }, "1")))
+      .toMatch(/CONFLICT/);
+
+    expect(await hooks.apply(props, 1)).toBeNull();
+    await issue.update({ priority: "low" }, (await issue.read()).revision);
+    expect((await hooks.log()).actions).toHaveLength(2);
+  });
+
+  it("refuses to apply an update whose issue changed after it was proposed", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).update({ title: "Mine" }, "1");
+    await mock.transition("DEMO", DEMO_1, STATE.done, "1", "someone-else");
+
+    expect(await hooks.apply(props, 1)).toContain("changed in InferOps after this update was proposed");
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ title: "Verify the local environment" });
+  });
+
+  it("leaves nothing behind when the update is denied", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).update({ title: "Denied" }, "1");
+
+    await hooks.reject(props, 1);
+
+    expect(await session.openIssue(DEMO_1).read())
+      .toMatchObject({ title: "Verify the local environment", revision: "1" });
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ revision: "1" });
+  });
+
+  it("applies an update once when approval is delivered twice", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).update({ title: "Twice" }, "1");
+
+    expect(await hooks.apply(props, 1)).toBeNull();
+    expect(await hooks.apply(props, 1)).toBeNull();
+
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ title: "Twice", revision: "2" });
+  });
+
+  it("reverts a title and priority update while nothing else changed the issue", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).update({ title: "Temporary", priority: "low" }, "1");
+    await hooks.apply(props, 1);
+
+    expect(await hooks.revert(props, 1)).toBeNull();
+
+    expect(await mock.readIssue("DEMO", DEMO_1))
+      .toMatchObject({ title: "Verify the local environment", priority: "medium", revision: "3" });
+  });
+
+  it("does not revert an update the issue has moved on from, or one that replaced the description", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).update({ title: "Temporary" }, "1");
+    await hooks.apply(props, 1);
+    await mock.transition("DEMO", DEMO_1, STATE.done, "2", "someone-else");
+
+    expect(await hooks.revert(props, 1)).toContain("has changed again since this update");
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ title: "Temporary" });
+
+    await session.openIssue(DEMO_1).update({ description: "New body" }, "3");
+    const described = (await hooks.log()).actions[1]!;
+    expect(described).toMatchObject({
+      title: "Update DEMO-1: description", implementsRevert: false,
+      fields: { "New description": "New body" },
+    });
+    await hooks.apply(props, described.id);
+    expect(await hooks.revert(props, described.id)).toContain("cannot be restored here");
+  });
+});
+
+describe("stored actions", () => {
+  it("applies a record stored before creates and updates existed as the transition it is", async () => {
+    const { props, hooks, mock } = setup();
+    await hooks.putRaw(props, "action:5", {
+      actionId: 5, issueId: DEMO_1, identifier: "DEMO-1", fromStateId: STATE.ready,
+      toStateId: STATE.working, toStateName: "Working", expectedRevision: "1", status: "pending",
+    });
+
+    expect(await hooks.apply(props, 5)).toBeNull();
+
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: STATE.working, revision: "2" });
+  });
+
+  it("refuses to send a request that no longer matches the fingerprint staged with it", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).update({ title: "Approved title" }, "1");
+    const record = await hooks.getRaw(props, "action:1") as { changes: { title: string } };
+    record.changes.title = "Something else";
+    await hooks.putRaw(props, "action:1", record);
+
+    expect(await hooks.apply(props, 1)).toContain("no longer matches the one proposed");
+
+    expect(await mock.readIssue("DEMO", DEMO_1))
+      .toMatchObject({ title: "Verify the local environment", revision: "1" });
+  });
+});
+
 describe("mock data source", () => {
   it("replays an idempotency key and refuses its reuse for another change", async () => {
     const { mock } = setup();
@@ -237,6 +491,21 @@ describe("mock data source", () => {
     expect(replay).toEqual(first);
     expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ revision: "2" });
     expect(await failure(mock.transition("DEMO", DEMO_1, STATE.done, "2", "key-1"))).toMatch(/IDEMPOTENCY_CONFLICT/);
+  });
+
+  it("replays a create under its key, and refuses the key for another create", async () => {
+    const { mock } = setup();
+    const request = { title: "Once", stateId: STATE.backlog };
+
+    const first = await mock.createIssue("DEMO", request, "key-c");
+    const replay = await mock.createIssue("DEMO", request, "key-c");
+
+    expect(replay).toEqual(first);
+    expect((await mock.readProject("DEMO")).issues.filter(i => i.title === "Once")).toHaveLength(1);
+    expect(await failure(mock.createIssue("DEMO", { ...request, title: "Twice" }, "key-c")))
+      .toMatch(/IDEMPOTENCY_CONFLICT/);
+    expect(await failure(mock.createIssue("DEMO", { title: "x", stateId: STATE.drafting }, "key-d")))
+      .toMatch(/WORKFLOW_MISMATCH/);
   });
 });
 

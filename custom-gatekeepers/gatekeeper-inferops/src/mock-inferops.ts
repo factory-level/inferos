@@ -1,8 +1,9 @@
 // MOCK InferOps data source: the only module that holds project data. It is the default data source
 // (the demo host, and every test), beside the HTTP client in http-inferops.ts, and enforces the
 // rules the gatekeeper relies on: project scope, state membership, workflow compatibility,
-// expected-revision checks and idempotent replay. It advances a revision by one per move; InferOps
-// does not, and nothing may depend on it.
+// expected-revision checks and idempotent replay, for moves, creates and updates. It advances a
+// revision by one per write and starts a created issue at "1"; InferOps does not, and nothing may
+// depend on it.
 //
 // One `MockInferOps` Durable Object per (host, account) holds a private copy of the seed fixture,
 // so each auto-provisioned account starts from the same demo board and its moves stay its own.
@@ -12,7 +13,8 @@ import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/observability/logger";
 import SEED from "./fixtures/demo-board.json";
 import {
-  InferOpsError, type InferOpsClient, type ProjectSnapshot, type ProjectSummary,
+  InferOpsError, type InferOpsClient, type IssueChanges, type NewIssueRequest, type ProjectSnapshot,
+  type ProjectSummary,
 } from "./inferops-client";
 import type { Issue, Revision } from "./types";
 
@@ -26,18 +28,14 @@ const logger = createLogger<{ vendorId: string; projectKey: string; replayed: bo
   component: "gatekeeper.inferops", vendorId: "inferops",
 });
 
-type MockData = { projects: ProjectSnapshot[] };
+/** The projects, and each issue's description by id (not part of `Issue`, so kept apart). */
+type MockData = { projects: ProjectSnapshot[]; descriptions?: Record<string, string | null> };
 
-/** What one idempotency key was used for, and the issue it produced. */
-type IdempotencyRecord = {
-  operation: { projectKey: string; issueId: string; toStateId: string; expectedRevision: Revision };
-  result: Issue;
-};
-
-function sameOperation(a: IdempotencyRecord["operation"], b: IdempotencyRecord["operation"]) {
-  return a.projectKey === b.projectKey && a.issueId === b.issueId &&
-    a.toStateId === b.toStateId && a.expectedRevision === b.expectedRevision;
-}
+/**
+ * What one idempotency key was used for, and the issue it produced. The operation is its JSON
+ * text, built in a fixed member order, so two uses compare as strings.
+ */
+type IdempotencyRecord = { operation: string; result: Issue };
 
 function notFound(): InferOpsError {
   // One message for "no such issue" and "issue of another project", so a caller cannot probe.
@@ -94,19 +92,12 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     if (!/^\d+$/.test(expectedRevision)) {
       throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
     }
-    const operation = { projectKey, issueId, toStateId, expectedRevision };
+    const operation = JSON.stringify(["transition", projectKey, issueId, toStateId, expectedRevision]);
 
     // Replay first: a retried apply must succeed even though its own first attempt already moved
     // the revision on.
-    const previous = this.ctx.storage.kv.get<IdempotencyRecord>(IDEMPOTENCY_PREFIX + idempotencyKey);
-    if (previous) {
-      if (!sameOperation(previous.operation, operation)) {
-        throw new InferOpsError(
-          "IDEMPOTENCY_CONFLICT", "This idempotency key was already used for a different change.");
-      }
-      logger.info("transition replayed", { event: "mock.transition.replayed", projectKey, replayed: true });
-      return previous.result;
-    }
+    const previous = this.#replay(idempotencyKey, operation);
+    if (previous) return previous;
 
     const data = this.#data();
     const project = this.#project(data, projectKey);
@@ -127,11 +118,94 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     }
 
     issue.stateId = toStateId;
+    return this.#commit(data, issue, idempotencyKey, operation, projectKey);
+  }
+
+  async createIssue(projectKey: string, request: NewIssueRequest, idempotencyKey: string):
+      Promise<Issue> {
+    if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+    const operation = JSON.stringify(["create", projectKey, request.title,
+      request.description ?? null, request.priority ?? null, request.stateId, request.workflow ?? null]);
+    const previous = this.#replay(idempotencyKey, operation);
+    if (previous) return previous;
+
+    const data = this.#data();
+    const project = this.#project(data, projectKey);
+    const title = request.title.trim();
+    if (!title || title.length > 500) {
+      throw new InferOpsError("INVALID_REQUEST", "A title of 1 to 500 characters is required.");
+    }
+    const state = project.states.find(s => s.id === request.stateId);
+    if (!state) {
+      throw new InferOpsError("NOT_FOUND", `The target state is not part of project ${projectKey}.`);
+    }
+    const workflow = request.workflow ?? "software";
+    if (state.workflow !== workflow) {
+      throw new InferOpsError("WORKFLOW_MISMATCH",
+        `A ${workflow} issue cannot be created in the ${state.workflow} state "${state.name}".`);
+    }
+    const seq = project.issues.reduce((max, i) =>
+      Math.max(max, Number(/-(\d+)$/.exec(i.identifier)?.[1] ?? 0)), 0) + 1;
+    const issue: Issue = {
+      id: crypto.randomUUID(), identifier: `${projectKey}-${seq}`, title,
+      priority: request.priority ?? "none", stateId: state.id, targetDate: null, workflow,
+      revision: "0", assigneeId: null, blockedReason: null,
+    };
+    project.issues.push(issue);
+    (data.descriptions ??= {})[issue.id] = request.description ?? null;
+    return this.#commit(data, issue, idempotencyKey, operation, projectKey);
+  }
+
+  async updateIssue(
+    projectKey: string, issueId: string, changes: IssueChanges, expectedRevision: Revision,
+    idempotencyKey: string,
+  ): Promise<Issue> {
+    if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+    if (!/^\d+$/.test(expectedRevision)) {
+      throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
+    }
+    const { title, description, priority } = changes;
+    if (title === undefined && description === undefined && priority === undefined) {
+      throw new InferOpsError("INVALID_REQUEST", "An update must change at least one field.");
+    }
+    const operation = JSON.stringify(["update", projectKey, issueId, title ?? null,
+      description === undefined ? "(unchanged)" : description, priority ?? null, expectedRevision]);
+    const previous = this.#replay(idempotencyKey, operation);
+    if (previous) return previous;
+
+    const data = this.#data();
+    const issue = this.#project(data, projectKey).issues.find(i => i.id === issueId);
+    if (!issue) throw notFound();
+    if (issue.revision !== expectedRevision) {
+      throw new InferOpsError("STALE_REVISION",
+        `${issue.identifier} is at revision ${issue.revision}, not ${expectedRevision}.`);
+    }
+    if (title !== undefined) issue.title = title;
+    if (priority !== undefined) issue.priority = priority;
+    if (description !== undefined) (data.descriptions ??= {})[issue.id] = description;
+    return this.#commit(data, issue, idempotencyKey, operation, projectKey);
+  }
+
+  /** The result a key already produced for this operation; throws if it produced another's. */
+  #replay(idempotencyKey: string, operation: string): Issue | undefined {
+    const previous = this.ctx.storage.kv.get<IdempotencyRecord>(IDEMPOTENCY_PREFIX + idempotencyKey);
+    if (!previous) return undefined;
+    if (previous.operation !== operation) {
+      throw new InferOpsError(
+        "IDEMPOTENCY_CONFLICT", "This idempotency key was already used for a different change.");
+    }
+    logger.info("write replayed", { event: "mock.write.replayed", replayed: true });
+    return previous.result;
+  }
+
+  /** Advance the issue's revision, store the data and the key's result, and return the issue. */
+  #commit(data: MockData, issue: Issue, idempotencyKey: string, operation: string,
+          projectKey: string): Issue {
     issue.revision = (BigInt(issue.revision) + 1n).toString();
     this.ctx.storage.kv.put(DATA_KEY, data);
     this.ctx.storage.kv.put<IdempotencyRecord>(
       IDEMPOTENCY_PREFIX + idempotencyKey, { operation, result: issue });
-    logger.info("transition applied", { event: "mock.transition.applied", projectKey, replayed: false });
+    logger.info("write applied", { event: "mock.write.applied", projectKey, replayed: false });
     return issue;
   }
 
@@ -160,6 +234,10 @@ export function openInferOpsClient(
     readIssue: (projectKey, issueId) => stub.readIssue(projectKey, issueId),
     transition: (projectKey, issueId, toStateId, expectedRevision, idempotencyKey) =>
       stub.transition(projectKey, issueId, toStateId, expectedRevision, idempotencyKey),
+    createIssue: (projectKey, issue, idempotencyKey) =>
+      stub.createIssue(projectKey, issue, idempotencyKey),
+    updateIssue: (projectKey, issueId, changes, expectedRevision, idempotencyKey) =>
+      stub.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey),
     hasProject: projectKey => stub.hasProject(projectKey),
     forget: () => stub.forget(),
   };

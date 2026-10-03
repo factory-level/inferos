@@ -8,7 +8,7 @@ import type {
   ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import type { InferOpsProjectGatekeeper } from "../src/inferops.js";
+import { InferOpsProjectGatekeeper } from "../src/inferops.js";
 import type { InferOpsProjectSession } from "../src/types.js";
 
 export { default } from "../src/inferops.js";
@@ -20,6 +20,20 @@ export {
   InferOpsVerifier, MockInferOps,
 } from "../src/inferops.js";
 
+/**
+ * The production gatekeeper plus one test-only method, so a test can write a stored action record
+ * the way an older version (or a corrupted store) left it.
+ */
+export class TestProjectGatekeeper extends InferOpsProjectGatekeeper {
+  async putRaw(key: string, value: unknown): Promise<void> {
+    this.ctx.storage.kv.put(key, value);
+  }
+
+  async getRaw(key: string): Promise<unknown> {
+    return this.ctx.storage.kv.get(key);
+  }
+}
+
 /** The props the Workshop bakes into one project-board binding. */
 export type BindingProps = {
   accountId: string; host: string; projectKey: string; connected?: boolean; workspaceId?: string;
@@ -28,7 +42,11 @@ export type BindingProps = {
 /** What the recording approval queue was told, in order. */
 export type QueueLog = {
   observations: string[];
-  actions: Array<{ id: number; title: string; description: string }>;
+  actions: Array<{
+    id: number; title: string; description: string; implementsRevert: boolean;
+    /** Each field's label and shown value. */
+    fields: Record<string, string>;
+  }>;
 };
 
 class TestApprovalQueue extends RpcTarget {
@@ -41,7 +59,14 @@ class TestApprovalQueue extends RpcTarget {
   }
 
   async submitAction(id: number, description: ActionDescription): Promise<void> {
-    this.log.actions.push({ id, title: description.title, description: description.description });
+    const fields: Record<string, string> = {};
+    for (const field of description.fields ?? []) {
+      if ("value" in field && typeof field.value === "string") fields[field.label] = field.value;
+    }
+    this.log.actions.push({
+      id, title: description.title, description: description.description,
+      implementsRevert: description.implementsRevert ?? false, fields,
+    });
   }
 
   async getGitCache(): Promise<GitCache> {
@@ -118,8 +143,8 @@ export type SignInExports = {
 };
 
 type TestExports = {
-  InferOpsProjectGatekeeper(options: { props: BindingProps }):
-    DurableObjectClass<InferOpsProjectGatekeeper>;
+  TestProjectGatekeeper(options: { props: BindingProps }):
+    DurableObjectClass<TestProjectGatekeeper>;
   InferOpsAccount(options: { props: AccountProps }): Fetcher<GatekeeperUser>;
 };
 
@@ -142,9 +167,9 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   #gatekeeper(props: BindingProps) {
     const exports = this.ctx.exports as unknown as TestExports;
-    return this.ctx.facets.get<InferOpsProjectGatekeeper>(
+    return this.ctx.facets.get<TestProjectGatekeeper>(
       `${props.accountId}/${props.projectKey}`,
-      () => ({ class: exports.InferOpsProjectGatekeeper({ props }) }));
+      () => ({ class: exports.TestProjectGatekeeper({ props }) }));
   }
 
   // --- Driving an account the Workshop holds by its props. Stubs cannot leave a Durable Object's
@@ -202,6 +227,16 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return this.#bound(name).startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
   }
 
+  /** Apply an action of a bound binding; returns the failure message, or null on success. */
+  async applyBound(name: string, actionId: number): Promise<string | null> {
+    try {
+      await this.#bound(name).applyAction(actionId, new RpcStub(new TestGitCache()));
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
   /** Admission of a collaborator by their own account's verifier, over a bound binding. */
   async addObserverFrom(name: string, observer: AccountProps): Promise<string | null> {
     try {
@@ -252,6 +287,16 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return messageOf(error);
     }
+  }
+
+  /** Write a raw value into the binding's storage, as an older version might have left it. */
+  async putRaw(props: BindingProps, key: string, value: unknown): Promise<void> {
+    await this.#gatekeeper(props).putRaw(key, value);
+  }
+
+  /** Read a raw value from the binding's storage. */
+  async getRaw(props: BindingProps, key: string): Promise<unknown> {
+    return this.#gatekeeper(props).getRaw(key);
   }
 
   async reject(props: BindingProps, actionId: number): Promise<void> {

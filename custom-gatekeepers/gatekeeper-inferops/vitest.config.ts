@@ -28,6 +28,8 @@ export default defineConfig({
           // Declared so the class is a Durable Object class here, as the generated wrangler.jsonc's
           // migrations make it in production; the tests reach it only through ctx.facets.
           PROJECT_GATEKEEPER: { className: "InferOpsProjectGatekeeper", useSQLite: true },
+          // The same, with a test-only hook for writing raw action records; `TestHooks` drives it.
+          TEST_PROJECT_GATEKEEPER: { className: "TestProjectGatekeeper", useSQLite: true },
           // One sign-in attempt per object; the tests seed its callback from inside the object.
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
           // One per connected account; the tests reach it through the account entrypoints.
@@ -43,5 +45,8 @@ export default defineConfig({
     include: ["__tests__/*.test.ts"],
     // Asserts the pool actually started, rather than trusting a green run to mean workerd.
     setupFiles: ["@gadgets/scripts/assert-workerd"],
+    // A file's first test also pays for starting its Durable Objects and facets in workerd, which on
+    // a loaded CI runner has taken longer than vitest's 5s default.
+    testTimeout: 20_000,
   },
 });
