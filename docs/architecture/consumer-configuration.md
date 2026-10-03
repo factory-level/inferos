@@ -30,9 +30,9 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 
 | Path | Responsibility |
 | --- | --- |
-| `scripts/consumer/config.ts` | Version 1 contract, exact keys/types, pin and URL checks, flag dependency validation |
+| `scripts/consumer/config.ts` | Version 1 and 2 contract, exact keys/types, pin and URL checks, flag and capability dependency validation, version 1 to 2 migration |
 | `scripts/consumer/bootstrap.ts` | Atomic creation in a sibling temporary directory, pinned submodule, wrapper files, copied standard blueprint sources and rerun protection |
-| `scripts/consumer/runtime.ts` | Check actual submodule/index pin, install locked dependencies, diagnose local prerequisites, launch native Workshop baseline |
+| `scripts/consumer/runtime.ts` | Check actual submodule/index pin, report capability support, install locked dependencies, diagnose local prerequisites, launch native Workshop baseline |
 | `scripts/consumer/project-board.json` | Synthetic fixture matching inspected InferOps board wire fields |
 | `scripts/consumer/bootstrap.test.ts` | Fresh recursive clone, rerun preservation, drift rejection, failure cleanup and configuration failures |
 | `.agents/skills/bootstrap-inferos` | Coding-agent setup guidance with honest readiness reporting |
@@ -70,9 +70,22 @@ The initial profile is inferops-operations, with composable and durable views en
 
 The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Site name, profile instructions, fallback theme, listing density, local custom Workers and canvas layout persistence are implemented. Authorized InferOps data, agent composition tools, complete view-sharing and cloud extension deployment remain pending. The native development runner's state/topology and lifecycle limitations remain. Bootstrap is not yet an upgrade/recovery service and does not copy production domain storage.
 
+The [capability design](../design/feature-capabilities.md) requires each flag to be enforced at server operations, declared tools, the CLI and the UI, with a named owner, default and disable policy. Only the configuration contract, its migration and the CLI support report exist. No capability has an implementation, so all eight report `unsupported` and none can be switched on.
+
 ## Open Questions
 
 The generated wrapper copies its small operator helpers so it can pin a prior InferOS revision. A reviewed upgrade command must define helper-version compatibility and update policy. Complete runtime and cloud validation is still required before declaring the objective complete.
+
+Capability configuration ([#67](https://github.com/factory-level/inferos/issues/67)) leaves these undecided. Each has a conservative interim choice in code, not a decision:
+
+- **Owner and default of each capability.** The design leaves both open. Every capability defaults to off and no profile enables one. No owner is recorded.
+- **Legacy flag mapping.** The design names no capability equivalent for `composableViews`, `durableViews` or `customCloudflareCode`, so all three are retained under `features` and none maps to a capability. Whether any is later retired is open.
+- **Further dependencies.** Only `INFEROPS_CANVAS_STATE_MACHINE` requires `INFEROPS_ENABLED` is stated. Whether `INFEROPS_AUTH` requires `INFEROPS_ENABLED`, whether the state machine requires `composableViews`, and whether the publication flags depend on anything are not validated. The "valid configured flow and runtime dependencies" of the state machine have no configuration fields yet.
+- **Migrated capability values.** The migration writes all eight as explicit `false` rather than leaving them to inherit, matching how bootstrap materializes a profile. If inheriting is preferred, the migration should write an empty `capabilities` object.
+- **New wrappers stay on version 1.** Bootstrap can pin a revision whose parser predates version 2, so it still writes version 1. When bootstrap should write version 2 is open.
+- **No migration command.** `migrateConsumerConfig` is a function; no wrapper command rewrites `inferos.config.json`, and existing wrappers would need the newer copied helpers to get one.
+- **Where support is declared.** The source table lives in the copied `runtime.ts`, so a wrapper with older helpers reports a capability unsupported even after its pin gains the code. Whether the pinned revision should declare its own supported set is part of the helper-compatibility question above.
+- **Remaining enforcement.** Server, tool and UI enforcement, and the drain or cancel policy on disable, belong to each capability's own change.
 
 ## Listing density
 
@@ -97,6 +110,18 @@ The native Overseer capability now offers workspace-scoped definition storage be
 The v1 parser accepts partial `features` and `styling` objects, while keeping those objects and all other top-level fields required. Unknown keys, explicit null/undefined and invalid values fail validation. Each field resolves base default → selected profile → own explicit override; false is an override. Dependency validation runs after resolution, so disabling only composableViews in the operations profile fails while inherited durableViews remains enabled. No dependent flag is silently changed.
 
 The personal profile inherits disabled features, InferOS branding, comfortable density and system theme. Operations overrides both view flags to true and density to compact, and inherits the InferOS name. The custom Worker flag and theme remain base defaults. `inferos:check` reports resolved features/style and per-field default/profile/override provenance. Bootstrap writes a fully explicit snapshot of the operations profile so switching the profile name alone does not reset choices. Existing fully explicit wrappers retain their values. To opt back into inheritance, remove only the selected nested fields after reviewing the pinned parser support. All native launch/profile/extension consumers use the same parser. This resolution does not overwrite initialized AdminConfig or alter authentication, grants or rollout flags.
+
+## Capability flags and schema version 2
+
+`inferos.config.json` has two accepted versions. Version 1 is unchanged: the same keys, the same resolution and the same resolved object, with no `capabilities` field in the configuration or its provenance. Version 2 adds one required `capabilities` object whose keys are the eight names of [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md): `INFEROPS_ENABLED`, `INFEROPS_CANVAS_STATE_MACHINE`, `HARNESS_HG_ENABLED`, `INFEROPS_AUTH`, `PUBLISH_CLOUDFLAREOS_WIDGET`, `PUBLISH_CLOUDFLAREOS_APP`, `AGENT_DEPLOYMENTS` and `CODING_WORKBENCH_ENABLED`. It resolves like `features`: base default (off), then profile (none sets one), then explicit override, with per-field provenance. A `capabilities` key in a version 1 file, any other version, an unknown capability key and a non-boolean value all fail. Errors name the field and never include the rejected value.
+
+Version 2 keeps `features` and its `durableViews` requires `composableViews` rule. `CAPABILITY_REQUIREMENTS` adds one rule: `INFEROPS_CANVAS_STATE_MACHINE` requires `INFEROPS_ENABLED`. A missing requirement is an error; the parser never turns another flag on. A capability is a configuration value only. It grants no resource, credential or deployment authority.
+
+`migrateConsumerConfig` validates a version 1 file and returns the same file as version 2. Every written setting is kept as written, omitted `features` and `styling` fields still inherit, and all eight capabilities are written as explicit `false`. `LEGACY_FLAG_COMPATIBILITY` is the compatibility mapping: the three legacy flags are retained with their meaning and none maps to a capability, so a durable layout does not become state-machine execution and custom code activation does not become an agent permission. The function does not write files, and no wrapper command calls it yet.
+
+`runtime.ts` holds `capabilitySources`, the pinned source path that makes an installation honour each capability. All eight entries are `null` at this revision: nothing reads any of the flags. `custom-gatekeepers/gatekeeper-inferops` serves mock boards and is selected through `inferos.canvas.json`, not through `INFEROPS_ENABLED`, so it does not count. `inferos:check` prints `schemaVersion` and a `capabilities` report with, per name, `state` (`enabled`: on and installed; `supported`: installed and off; `unsupported`: code absent), `requested` and `source` (default, profile or override). A version 1 wrapper gets the same report with every capability unrequested.
+
+Switching on an unsupported capability fails instead of doing nothing. `inferos:check` still prints the report, with `ok: false`, and exits nonzero; `doctor` reports a runtime error; `dev` refuses to start; and `run-dev-server.ts --consumer-root` throws before any Worker is prepared. The same three commands also refuse a version 2 file when the pinned revision's own `scripts/consumer/config.ts` is missing or rejects it, because the pinned launcher parses that file itself.
 
 ## Canonical fixture validation
 

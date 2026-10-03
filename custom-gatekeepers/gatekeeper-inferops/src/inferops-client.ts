@@ -1,7 +1,7 @@
-// The data-source contract the gatekeeper is written against. Today `mock-inferops.ts` implements it
-// with seeded fixture data in a Durable Object; a real InferOps HTTP client replaces that one module
-// (and the single `openInferOpsClient` import in inferops.ts) without touching the gatekeeper,
-// sessions, simulation or approval code.
+// The data-source contract the gatekeeper is written against. `mock-inferops.ts` implements it with
+// seeded fixture data in a Durable Object (the default, and what the tests and the demo use);
+// `http-inferops.ts` implements it over the InferOps HTTP API. `clientFor` in inferops.ts is the one
+// place that chooses between them.
 
 import type { Board, Issue, Project, Revision } from "./types";
 
@@ -18,11 +18,19 @@ export type InferOpsErrorCode =
   /** An idempotency key was reused for a different operation. */
   | "IDEMPOTENCY_CONFLICT"
   /** The request itself was malformed. */
-  | "INVALID_REQUEST";
+  | "INVALID_REQUEST"
+  /** The change is refused in the issue's current condition, such as a move already in progress. */
+  | "CONFLICT"
+  /** InferOps rejected the connection's credential (expired or revoked). */
+  | "UNAUTHORIZED"
+  /** The connection is not permitted to do this in InferOps. */
+  | "FORBIDDEN"
+  /** InferOps could not be reached, or its response was not usable. */
+  | "UNAVAILABLE";
 
 const ERROR_CODES: ReadonlySet<string> = new Set<InferOpsErrorCode>([
   "NOT_FOUND", "STALE_REVISION", "WORKFLOW_MISMATCH", "INVALID_STATE", "IDEMPOTENCY_CONFLICT",
-  "INVALID_REQUEST",
+  "INVALID_REQUEST", "CONFLICT", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE",
 ]);
 
 /**
@@ -73,10 +81,12 @@ export interface InferOpsClient {
   readIssue(projectKey: string, issueId: string): Promise<Issue>;
 
   /**
-   * Move an issue to another state of its project. Checks scope, state membership, workflow and the
-   * expected revision, in that order, and increments the revision on success. A repeated
-   * `idempotencyKey` for the same operation returns the stored result without applying it again;
-   * for a different operation it fails with IDEMPOTENCY_CONFLICT.
+   * Move an issue to another state of its project, after checking scope, state membership,
+   * workflow and the expected revision. The returned issue carries its new revision, which is
+   * opaque: nothing may assume how far a move advances it. A repeated `idempotencyKey` for the same
+   * operation returns the issue without applying the move again. The mock refuses a key reused for
+   * a different operation with IDEMPOTENCY_CONFLICT; InferOps does not detect that, so callers must
+   * never reuse one.
    */
   transition(
     projectKey: string, issueId: string, toStateId: string, expectedRevision: Revision,

@@ -71,6 +71,7 @@ export interface InferOpsIssueSession {
    * Move this issue to a state in the same project and workflow.
    * Supply the revision returned by read(); a stale version fails with STALE_REVISION.
    * An incompatible target fails with WORKFLOW_MISMATCH or INVALID_STATE.
+   * While an earlier move of this issue has not yet taken effect, another fails with CONFLICT.
    * Read again before retrying a stale change.
    */
   transition(toStateId: string, expectedRevision: Revision): Promise<void>;
