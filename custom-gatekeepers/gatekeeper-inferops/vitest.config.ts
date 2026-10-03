@@ -45,5 +45,8 @@ export default defineConfig({
     include: ["__tests__/*.test.ts"],
     // Asserts the pool actually started, rather than trusting a green run to mean workerd.
     setupFiles: ["@gadgets/scripts/assert-workerd"],
+    // A file's first test also pays for starting its Durable Objects and facets in workerd, which on
+    // a loaded CI runner has taken longer than vitest's 5s default.
+    testTimeout: 20_000,
   },
 });
