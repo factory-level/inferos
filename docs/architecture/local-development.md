@@ -23,7 +23,7 @@ updated: 2026-10-02
 
 ## Overview
 
-Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa00851`. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
+The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-aware topology ([#9](https://github.com/factory-level/inferos/issues/9)) and cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)) are not implemented. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
 
 ## Components
 
@@ -42,7 +42,9 @@ Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa
 
 ## Data and Control Flow
 
-The repository already has multi-worker Wrangler development and a Vite frontend. Discovery requires a wrangler.jsonc, so gatekeeper-kit is not a Worker. The dev runner scans this repository’s `packages/` and `custom-gatekeepers/` (the fork’s own gatekeepers), both listed once in `scripts/worker-dirs.ts`, which config generation, worker types, the release manifest and previews also use; a package name present in both is rejected. Arbitrary wrapper-owned gatekeeper directories outside this repository are still not a supported discovery contract. The integration harness exercises real RPC and Workers, but is not a consuming-repository bootstrap product. The working-tree run-local now assigns frontend assets to the public router, deriving ASSETS binding, SPA fallback and worker-first paths from the generated production router configuration. The backend no longer receives a second assets configuration. Normal Vite development still uses its separate port. The baseline commit predates this parity fix.
+The repository already has multi-worker Wrangler development and a Vite frontend. Discovery requires a wrangler.jsonc, so gatekeeper-kit is not a Worker. The dev runner scans this repository’s `packages/` and `custom-gatekeepers/` (the fork’s own gatekeepers), both listed once in `scripts/worker-dirs.ts`, which config generation, worker types, the release manifest and previews also use; a package name present in both is rejected. Arbitrary wrapper-owned gatekeeper directories outside this repository are still not a supported discovery contract. The integration harness exercises real RPC and Workers, but is not a consuming-repository bootstrap product. `run-local` assigns frontend assets to the public router, deriving the ASSETS binding, SPA fallback and worker-first paths from the generated production router configuration, and the backend receives no second assets configuration. Normal Vite development (`pnpm dev-server` plus `pnpm dev-client`) still serves the frontend on its separate port.
+
+Before starting Wrangler, `run-dev-server.ts` also resolves the InferOps switches and optional local integrations described under [Configuration](#configuration), and records its pid for `pnpm local stop`.
 
 ## Preparing a local instance
 
@@ -80,7 +82,14 @@ The connection is found through the native action log rather than a file: every 
 
 ## Configuration
 
-cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.jsonc. The default frontend and backend ports are 3000 and 8787. .dev.vars supplies local values with shell overrides. Remote Workers AI requires account access. See the settings and parity wiki pages.
+cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.jsonc. The default frontend and backend ports are 3000 and 8787. A root `.dev.vars`, then a root `.env`, fill variables the shell has not set. Remote Workers AI requires account access. See the [settings](../wiki/configuration-reference.md) and [parity](../wiki/local-cloud-parity.md) wiki pages.
+
+The dev server resolves these before it writes the per-Worker dev configs:
+
+- **InferOps integration.** `resolveInferOpsEnabled` (`scripts/dev-server-config.ts`) takes a version 2 wrapper's `INFEROPS_ENABLED` capability, else the shell's `INFEROPS_ENABLED` (default on), and passes `"true"` or `"false"` to the gatekeeper, which enforces it ([#103](https://github.com/factory-level/inferos/pull/103)). A wrapper that turns the capability on while `inferos.canvas.json` leaves the gatekeeper out stops startup. `INFEROPS_BASE_URL`, and the local-development stopgap `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG`, pass through from the shell to the gatekeeper; without a base URL the gatekeeper serves its built-in demo data.
+- **Sign in with InferLab.** A wrapper's `INFEROPS_AUTH` (or version 1 `features.inferlabLogin`) adds `inferops` to `AUTH_GATEKEEPERS` and sets `INFERLAB_AUTH_ORIGIN`; in-repo, both come from the shell. An inconsistent combination stops startup. Details are in [consumer configuration](consumer-configuration.md#inferops-backed-sign-in).
+- **ChatGPT plan usage.** `ENABLE_OPENAI_ASSISTANT_PLUGIN=true` starts the local Bun companion and wires it to the backend; `ANTHROPIC_API_KEY` enables managed local API-key models. Both write their secrets to the backend's `.dev.vars` and remove them on exit ([#40](https://github.com/factory-level/inferos/pull/40)). See [ChatGPT connection](chatgpt-connection.md).
+- The backend always runs with `DEV` set, so UI flags resolve to their `dev` values.
 
 ## Divergences from Design
 
@@ -92,7 +101,7 @@ cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.json
 ## Open Questions
 
 - Choose the wrapper configuration schema after comparing the upstream starter contract with this fork.
-- The asset ownership difference is fixed in the working tree; wrapper extension discovery, cloud auth and real binding parity still need proof.
+- Wrapper extension discovery, cloud auth and real binding parity still need proof.
 
 ## Evidence
 

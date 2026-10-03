@@ -16,6 +16,6 @@ Create documents from [`_template.md`](_template.md).
 | [Vertical customization decision matrix](vertical-decision-matrix.md) | Choose native primitives, custom code and external services by concrete workflow. |
 | [Priority vertical research](priority-verticals.md) | Deeper extension boundaries for field operations, IT, DevOps, industrial and medical workflows. |
 | [Research source ledger](research-sources.md) | Dated sources, repository revisions and explicit evidence limits. |
-| [Implementation roadmap](implementation-roadmap.md) | Seven pillars, sequenced implementation slices and deferred maps work. |
+| [Implementation roadmap](implementation-roadmap.md) | The MVP walkthrough from #1, the wave milestones and what has merged against each issue. |
 | [Bootstrap a consumer](consumer-bootstrap.md) | Commands, generated files, verified scope and current limitations |
 | [Local verification evidence](local-verification-evidence.md) | Actual startup, browser/restart proof and requirement-by-requirement remaining gaps |
