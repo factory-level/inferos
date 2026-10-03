@@ -5,8 +5,10 @@ import { resolve } from "node:path";
 import { parse } from "jsonc-parser";
 
 import {
+  DEFAULT_INFERLAB_AUTH_ORIGIN,
   getDevServerConfig,
   getDevRouterAssets,
+  getInferLabLoginVars,
   getWranglerPortFromBackendHost,
 } from "./dev-server-config.ts";
 
@@ -95,4 +97,28 @@ describe("getDevServerConfig", () => {
       assert.throws(() => getDevServerConfig(args), /--port must be an integer between 1 and 65535/);
     });
   }
+});
+
+describe("getInferLabLoginVars", () => {
+  it("passes the shell's settings through while the flag is off", () => {
+    assert.deepEqual(getInferLabLoginVars(false, {}), {
+      AUTH_GATEKEEPERS: undefined, INFERLAB_AUTH_ORIGIN: undefined,
+    });
+    assert.deepEqual(getInferLabLoginVars(false, {
+      AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io",
+    }), { AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io" });
+  });
+
+  it("allowlists the InferOps vendor against the local InferLab stack by default", () => {
+    assert.deepEqual(getInferLabLoginVars(true, {}), {
+      AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: DEFAULT_INFERLAB_AUTH_ORIGIN,
+    });
+  });
+
+  it("keeps other sign-in vendors and an explicit origin", () => {
+    assert.deepEqual(getInferLabLoginVars(true, {
+      AUTH_GATEKEEPERS: "google, github", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io",
+    }), { AUTH_GATEKEEPERS: "google,github,inferops", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io" });
+    assert.equal(getInferLabLoginVars(true, { AUTH_GATEKEEPERS: "InferOps" }).AUTH_GATEKEEPERS, "InferOps");
+  });
 });

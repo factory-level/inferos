@@ -483,6 +483,12 @@
             "InferOpsProjectGatekeeper"
           ],
           "tag": "v0"
+        },
+        {
+          "new_sqlite_classes": [
+            "InferLabLogin"
+          ],
+          "tag": "v1"
         }
       ],
       "modules": [

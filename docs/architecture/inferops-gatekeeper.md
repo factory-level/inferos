@@ -21,13 +21,15 @@ updated: 2026-10-02
 `InferOpsIssueSession` (`read`, `transition`). The gatekeeper code is written against a data-source
 contract (`src/inferops-client.ts`) that `src/mock-inferops.ts` implements; replacing that one
 module with an InferOps HTTP client is the path to live data. The bundled
-`inferops.kanban` blueprint renders a bound board as a Kanban gadget.
+`inferops.kanban` blueprint renders a bound board as a Kanban gadget. When configured, the vendor
+also provides "Sign in with InferLab" through InferLab central-auth.
 
 ## Components
 
 | Path | Responsibility |
 | --- | --- |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (auto-provisioned accounts, no OAuth), account (`GatekeeperUser`), verifier, project-board gatekeeper facet, sessions, configurator RPC. |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (auto-provisioned accounts; sign-in-only connect flow), account (`GatekeeperUser`), verifier, project-board gatekeeper facet, sessions, configurator RPC, HTTP entry for the sign-in legs. |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab sign-in: `INFERLAB_AUTH_ORIGIN` validation, `InferLabLogin` Durable Object per attempt, `/authorize` redirect with PKCE, `/oauth` callback and server-side code exchange. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. |
 | `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<host>/project/board/<KEY>` (default host `demo.local`). |
@@ -42,6 +44,20 @@ module with an InferOps HTTP client is the path to live data. The bundled
   an `InferOpsAccount` whose only prop is a random `accountId`. It declares no singleton and no
   management UI, so the Workshop reaches it only through URL-addressed resources. Provisioning
   follows the admin's per-vendor mode; the gatekeeper asserts no ambience.
+- **Sign-in.** `describe().providesAuth` is true only when `INFERLAB_AUTH_ORIGIN` is a bare HTTPS
+  origin (or HTTP on loopback). `connectAccount(callback, {scopes: "auth"})` creates an
+  `InferLabLogin` object holding the callback and an initiation nonce, and returns
+  `<BASE_URL>/<attempt>/<nonce>`. Any other scope still throws, because board access needs no
+  connect flow. The popup leg trades the nonce, once, for an OAuth nonce and a PKCE verifier. It then
+  redirects to `<origin>/authorize?client_id=inferos&redirect_uri=<BASE_URL>/oauth&state=<attempt>.<nonce>`
+  with an S256 challenge. The `/oauth` leg claims the state once and POSTs
+  `{clientId, code, codeVerifier, redirectUri}` to `<origin>/auth/token` (30 s timeout, capped body).
+  It mints an `InferOpsAccount` whose props add the normalized `user.email` and calls
+  `callback.complete`. It ends on the kit's handoff page. A response without `emailVerified: true`,
+  a non-2xx status, an InferLab `error=` redirect, or a replayed or forged state ends the attempt
+  with an error page. The InferLab tokens are discarded, and the alarm deletes the attempt's object
+  after at most 20 minutes. `getAuthenticatedEmail()` returns the email prop, or null for
+  auto-provisioned accounts.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses the URL, checks the project
   exists for the account, and returns `InferOpsProjectGatekeeper` with props
   `{accountId, host, projectKey}`. Sessions read scope only from those props; no method takes a
@@ -70,15 +86,22 @@ module with an InferOps HTTP client is the path to live data. The bundled
 ## Configuration
 
 `cloudflare.config.ts` uses the shared gatekeeper factory (`allow_irrevocable_stub_storage`,
-migration `v0`: `MockInferOps`, `InferOpsProjectGatekeeper`); `wrangler.jsonc` is generated. The
-worker needs no secrets or vars. Discovery under `custom-gatekeepers/` binds it as
-`GATEKEEPER_INFEROPS`. The release manifest gives it no deploy inputs and marks it install-once.
+migrations `v0`: `MockInferOps`, `InferOpsProjectGatekeeper`, and `v1`: `InferLabLogin`);
+`wrangler.jsonc` is generated. The worker needs no secrets. The optional `INFERLAB_AUTH_ORIGIN`
+var turns on sign-in, and `BASE_URL` is set per deployment like every gatekeeper's. Discovery under
+`custom-gatekeepers/` binds it as `GATEKEEPER_INFEROPS`. The release manifest gives it no deploy
+inputs and marks it install-once. In local dev, `run-dev-server.ts` sets `INFERLAB_AUTH_ORIGIN` from
+the shell, or from a wrapper's `features.inferlabLogin` (default `http://localhost:8080`).
 
 ## Divergences from Design
 
-- InferOps is mocked: authentication, the external API contract and companion InferOps endpoints are
-  not implemented. Accounts are auto-provisioned per user rather than connected to an InferOps
-  identity, so "permission mapping" is the mock's per-account project list.
+- InferOps board data is mocked: the external API contract, API authentication and companion
+  InferOps endpoints are not implemented. Accounts are auto-provisioned per user rather than
+  connected to an InferOps identity, so "permission mapping" is the mock's per-account project list.
+  InferLab sign-in authenticates the Workshop user only. It does not connect the board account and
+  keeps no InferLab token.
+- The release manifest has no deploy input for `INFERLAB_AUTH_ORIGIN`, so cloud installs can't turn
+  on InferLab sign-in from the wizard yet.
 - The simulated revision assumes InferOps increments revisions by one per transition, which the mock
   does; a real client must confirm or replace this.
 - No "pending" marker is exposed on `Issue`, so the agent-facing API stays verbatim; the Kanban
@@ -94,5 +117,8 @@ worker needs no secrets or vars. Discovery under `custom-gatekeepers/` binds it 
 `custom-gatekeepers/gatekeeper-inferops/__tests__/` (workerd) covers board reads and observations,
 cross-project denial, invalid state, workflow mismatch, stale revision at proposal and at apply,
 duplicate apply replay, rejection clearing the simulation, revert, and observer admission.
+`inferlab-login.test.ts` covers origin validation, `providesAuth`, the authorize redirect, the PKCE
+exchange and handoff, single-use links and states, forged states, InferLab errors, rejected
+exchanges and unverified emails.
 `packages/bundled-blueprints/blueprints/inferops-kanban/__tests__/` covers the gadget's server and
 board rules. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.

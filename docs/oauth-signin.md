@@ -83,6 +83,28 @@ OAuth app with its own redirect URI:
 In local dev, `run-dev-server.ts` seeds each gatekeeper's `CLIENT_ID`/`CLIENT_SECRET` from
 `GOOGLE_*` / `GITHUB_*` / `CLOUDFLARE_OAUTH_*` shell vars.
 
+### InferLab
+
+The InferOps gatekeeper (`custom-gatekeepers/gatekeeper-inferops`, vendor id `inferops`) signs users
+in with their InferLab account. It's off unless the gatekeeper has `INFERLAB_AUTH_ORIGIN` set: then
+`describe()` reports `providesAuth`, and listing `inferops` in `AUTH_GATEKEEPERS` adds the button.
+
+```
+AUTH_GATEKEEPERS=inferops
+# On the gatekeeper-inferops Worker: InferLab central-auth (https, or http on loopback).
+INFERLAB_AUTH_ORIGIN=https://auth.inferlab.io
+```
+
+- InferOS is InferLab's public PKCE client `inferos`, so there is no client secret. InferLab must
+  register the deployment's origin. Its redirect URI is always `${PUBLIC_BASE_URL}/gatekeeper/inferops/oauth`.
+- The flow is `GET /authorize` (S256), then a server-side `POST /auth/token`. The gatekeeper accepts
+  `user.email` only when the response marks it `emailVerified: true`. A missing flag fails closed,
+  because InferLab also issues sessions for emails nobody proved, such as invitations and
+  impersonation. It keeps only the email and drops the InferLab tokens.
+- Consumer wrappers set `features.inferlabLogin` instead. `run-dev-server.ts` then appends
+  `inferops` to `AUTH_GATEKEEPERS` and defaults `INFERLAB_AUTH_ORIGIN` to
+  `http://localhost:8080`, the local InferLab stack. In-repo, set both variables in the shell.
+
 ## Storage / bindings
 
 - `PendingLogin` (DO) — short-lived bridge between a gatekeeper login pop-up and the browser that

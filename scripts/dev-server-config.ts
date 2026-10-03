@@ -78,3 +78,29 @@ export function getDevServerConfig(args: readonly string[], envBackendHost?: str
     wranglerPort: getWranglerPortFromBackendHost(backendHost),
   };
 }
+
+/** The gatekeeper that serves "Sign in with InferLab", and its vendor id in AUTH_GATEKEEPERS. */
+export const INFERLAB_LOGIN_GATEKEEPER = "gatekeeper-inferops";
+const INFERLAB_LOGIN_VENDOR = "inferops";
+/** Where `bun run dev up` serves InferLab central-auth locally. */
+export const DEFAULT_INFERLAB_AUTH_ORIGIN = "http://localhost:8080";
+
+/**
+ * Resolves the sign-in settings for a consumer's `features.inferlabLogin`. Enabling it adds the
+ * InferOps vendor to the backend's AUTH_GATEKEEPERS allowlist, keeping any vendors the shell already
+ * lists, and points the gatekeeper at the shell's INFERLAB_AUTH_ORIGIN or the local InferLab stack.
+ * Disabled, both pass through from the shell unchanged, so hand-set variables still work in-repo.
+ */
+export function getInferLabLoginVars(enabled: boolean, shell: {
+  AUTH_GATEKEEPERS?: string; INFERLAB_AUTH_ORIGIN?: string;
+}): { AUTH_GATEKEEPERS?: string; INFERLAB_AUTH_ORIGIN?: string } {
+  if (!enabled) {
+    return { AUTH_GATEKEEPERS: shell.AUTH_GATEKEEPERS, INFERLAB_AUTH_ORIGIN: shell.INFERLAB_AUTH_ORIGIN };
+  }
+  const vendors = (shell.AUTH_GATEKEEPERS ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  if (!vendors.map(v => v.toLowerCase()).includes(INFERLAB_LOGIN_VENDOR)) vendors.push(INFERLAB_LOGIN_VENDOR);
+  return {
+    AUTH_GATEKEEPERS: vendors.join(","),
+    INFERLAB_AUTH_ORIGIN: shell.INFERLAB_AUTH_ORIGIN?.trim() || DEFAULT_INFERLAB_AUTH_ORIGIN,
+  };
+}

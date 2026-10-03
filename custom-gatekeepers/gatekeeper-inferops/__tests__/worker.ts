@@ -3,10 +3,10 @@
 // gatekeeper as a facet with props, hands it an approval queue that records what it is told, and
 // applies or rejects the actions it collected.
 
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionDescription, GatekeeperUserVerifier, GitCache, GitObjectType, GitOid,
-  ObservationDescription,
+  ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { InferOpsProjectGatekeeper } from "../src/inferops.js";
 import type { InferOpsProjectSession } from "../src/types.js";
@@ -16,7 +16,8 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferOpsAccount, InferOpsProjectGatekeeper, InferOpsVerifier, MockInferOps,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsProjectGatekeeper, InferOpsVerifier,
+  MockInferOps,
 } from "../src/inferops.js";
 
 /** The props the Workshop bakes into one project-board binding. */
@@ -78,6 +79,23 @@ class TestVerifier extends RpcTarget {
     return this.hasAccess;
   }
 }
+
+/** The emails sign-in accounts reported to each `TestConnectCallback`, by label. */
+export const signIns: Array<{ label: string; email: string | null }> = [];
+
+/** Stands in for the Workshop's sign-in callback: records the account's email, returns a handoff. */
+export class TestConnectCallback extends WorkerEntrypoint<Cloudflare.Env, { label: string }> {
+  async complete(user: Fetcher<GatekeeperUser>): Promise<ConnectHandoff> {
+    signIns.push({ label: this.ctx.props.label, email: await user.getAuthenticatedEmail() });
+    return { targetOrigin: "http://localhost:3000", ticket: `ticket-${this.ctx.props.label}` };
+  }
+}
+
+/** The test worker's own entrypoints, as `ctx.exports` exposes them. */
+export type SignInExports = {
+  TestConnectCallback(options: { props: { label: string } }): Fetcher<TestConnectCallback>;
+  GatekeeperVendor(options: object): Fetcher<import("../src/inferops.js").GatekeeperVendor>;
+};
 
 type TestExports = {
   InferOpsProjectGatekeeper(options: { props: BindingProps }):

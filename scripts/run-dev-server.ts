@@ -21,7 +21,9 @@ import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
-import { getDevRouterAssets, getDevServerConfig } from "./dev-server-config.ts";
+import {
+  INFERLAB_LOGIN_GATEKEEPER, getDevRouterAssets, getDevServerConfig, getInferLabLoginVars,
+} from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
@@ -134,6 +136,13 @@ const gatekeepers = findGatekeepers(ROOT).filter(({ dir, name }) =>
 // that turns composition (with saved views) on. A wrapper's own flags always take precedence.
 const canvasFeatures = consumerConfig?.features
     ?? { composableViews: canvasConfig !== null, durableViews: canvasConfig !== null };
+// "Sign in with InferLab" is a wrapper flag only; in-repo, set AUTH_GATEKEEPERS and
+// INFERLAB_AUTH_ORIGIN in the shell instead.
+const inferLabLoginEnabled = consumerConfig?.features.inferlabLogin ?? false;
+const inferLabLogin = getInferLabLoginVars(inferLabLoginEnabled, process.env);
+if (inferLabLoginEnabled && !gatekeepers.some(({ name }) => name === INFERLAB_LOGIN_GATEKEEPER)) {
+  throw new Error(`features.inferlabLogin requires ${INFERLAB_LOGIN_GATEKEEPER}; enable it with pnpm canvas enable ${INFERLAB_LOGIN_GATEKEEPER}`);
+}
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -542,6 +551,10 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
   ],
   "gatekeeper-mcp": ["MCP_ALLOW_INSECURE"],
 };
+// Vars resolved here rather than read raw from the shell.
+const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined>> = {
+  [INFERLAB_LOGIN_GATEKEEPER]: { INFERLAB_AUTH_ORIGIN: inferLabLogin.INFERLAB_AUTH_ORIGIN },
+};
 
 for (const gk of gatekeepers) {
   const srcPath = join(gk.dir, "wrangler.jsonc");
@@ -562,6 +575,9 @@ for (const gk of gatekeepers) {
     if (process.env[name] !== undefined) {
       config.vars[name] = process.env[name];
     }
+  }
+  for (const [name, value] of Object.entries(RESOLVED_GATEKEEPER_VARS[gk.name] ?? {})) {
+    if (value !== undefined) config.vars[name] = value;
   }
 
   const outPath = join(gk.dir, "wrangler.dev.jsonc");
@@ -606,6 +622,9 @@ for (const gk of gatekeepers) {
   // they are injected into the gatekeeper Workers (see SHARED_GATEKEEPER_CREDS below).
   for (const name of OPTIONAL_FEATURE_VARS) {
     if (process.env[name] !== undefined) config.vars[name] = process.env[name];
+  }
+  if (inferLabLogin.AUTH_GATEKEEPERS !== undefined) {
+    config.vars.AUTH_GATEKEEPERS = inferLabLogin.AUTH_GATEKEEPERS;
   }
 
   // Account connect flows post their completion ticket to the Workshop *origin* named here (see

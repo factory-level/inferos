@@ -1,7 +1,7 @@
 ---
 title: InferOps gatekeeper
 status: draft
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # InferOps gatekeeper
@@ -19,10 +19,15 @@ Expose scoped InferOps project/board/issue reads and approved issue transitions 
 - Record reads as observations and transitions as proposed actions with simulation/approval before dispatch.
 - Recheck authorization and expected revision when executing; stale approval must not silently apply to changed data.
 - Keep InferOps domain storage authoritative and preserve its permission/business rules; no direct database bypass.
+- Optionally sign Workshop users in with their InferLab account, as an opt-in deployment setting that is off by default and leaves password login available.
 
 ## Behavior
 
 The user connects an InferOps account, selects a project and receives a scoped session. The session reads a board or issue through validated InferOps APIs. A transition proposal names the issue, target state and expected revision; preview reports the intended change without writing. Approval executes using the original scope, a deduplication key and current domain checks. Conflicts return structured reload/review instructions. Revocation and reconnect clear affected caches. Shared Gadgets cannot gain the owner’s wider scope by changing a target URI. Installation alone never asserts ambience; provisioning follows admin policy.
+
+### Sign in with InferLab
+
+When a deployment enables it, the login page offers InferLab next to its other sign-in options. InferOS is a public PKCE client of InferLab central-auth (client id `inferos`, redirect URI `<PUBLIC_BASE_URL>/gatekeeper/inferops/oauth`). The gatekeeper exchanges the code server-side and hands the Workshop only the verified email, which keys the Workshop account like every gatekeeper sign-in. Signing in grants no board access. Board authority stays with the account and scope contract below (#21), so the sign-in tokens are not kept.
 
 ## Non-Goals
 

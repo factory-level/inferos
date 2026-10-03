@@ -9,17 +9,17 @@ const candidate = () => ({
 
 test("operations inherits supported view defaults, curated styling and per-field provenance", () => {
   const { config, provenance } = resolveConsumerConfig(candidate());
-  assert.deepEqual(config.features, { composableViews: true, durableViews: true, customCloudflareCode: false });
+  assert.deepEqual(config.features, { composableViews: true, durableViews: true, customCloudflareCode: false, inferlabLogin: false });
   assert.deepEqual(config.styling, { siteName: "InferOps Workspace", density: "compact", theme: "system" });
   assert.deepEqual(provenance, {
-    features: { composableViews: "profile", durableViews: "profile", customCloudflareCode: "default" },
+    features: { composableViews: "profile", durableViews: "profile", customCloudflareCode: "default", inferlabLogin: "default" },
     styling: { siteName: "profile", density: "profile", theme: "default" },
   });
 });
 
 test("personal retains baseline defaults and explicit false overrides operations", () => {
   const personal = resolveConsumerConfig({ ...candidate(), profile: "personal" });
-  assert.deepEqual(personal.config.features, { composableViews: false, durableViews: false, customCloudflareCode: false });
+  assert.deepEqual(personal.config.features, { composableViews: false, durableViews: false, customCloudflareCode: false, inferlabLogin: false });
   assert.equal(personal.config.styling.siteName, "My Workspace");
   assert.equal(personal.provenance.styling.density, "default");
   const operations = resolveConsumerConfig({ ...candidate(), features: { durableViews: false }, styling: { density: "comfortable", theme: "dark" } });
@@ -47,11 +47,27 @@ test("fully explicit legacy wrappers keep their behavior and resolution does not
     styling: { siteName: "Existing", density: "comfortable", theme: "system" } };
   const before = structuredClone(legacy);
   const resolved = resolveConsumerConfig(legacy);
-  assert.deepEqual(resolved.config, before);
+  // A flag added after the wrapper was written resolves to its default, which is off.
+  assert.deepEqual(resolved.config, { ...before, features: { ...before.features, inferlabLogin: false } });
   assert.equal(resolved.provenance.features.composableViews, "override");
   resolved.config.features.composableViews = true;
   assert.deepEqual(legacy, before);
   const initial = initialConsumerConfig(legacy.upstream.repository, legacy.upstream.revision);
   assert.deepEqual(parseConsumerConfig(initial), initial);
   assert.equal(resolveConsumerConfig(initial).provenance.features.composableViews, "override");
+});
+
+test("InferLab login is an explicit opt-in that no profile turns on", () => {
+  for (const profile of ["personal", "inferops-operations"]) {
+    const resolved = resolveConsumerConfig({ ...candidate(), profile });
+    assert.equal(resolved.config.features.inferlabLogin, false);
+    assert.equal(resolved.provenance.features.inferlabLogin, "default");
+  }
+  const enabled = resolveConsumerConfig({ ...candidate(), features: { inferlabLogin: true } });
+  assert.equal(enabled.config.features.inferlabLogin, true);
+  assert.equal(enabled.provenance.features.inferlabLogin, "override");
+  assert.equal(initialConsumerConfig("https://github.com/factory-level/inferos", "a".repeat(40)).features.inferlabLogin, false);
+  for (const inferlabLogin of [null, "true", 1]) {
+    assert.throws(() => parseConsumerConfig({ ...candidate(), features: { inferlabLogin } }), /features.inferlabLogin/);
+  }
 });

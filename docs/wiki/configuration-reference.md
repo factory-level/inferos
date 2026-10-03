@@ -35,6 +35,7 @@ A starting settings inventory for the setup skills, grounded in current code.
 | Context sharingDomain | Deployer; gatekeeper binding props | Context Library | Isolation namespace; dev default is dev, choose production domain deliberately |
 | METRICS / ERROR_REPORTER | Deployer; optional bindings | Observability enabled | Routing/configuration separate from payload; logs must exclude prompts/tokens/data |
 | VITE_FRONTEND_ERROR_REPORTING | Builder; frontend env | Optional client reports, default off | Build-time flag; backend reporter/rate limiter bindings also required |
+| INFERLAB_AUTH_ORIGIN | Deployer; gatekeeper-inferops environment, or wrapper `features.inferlabLogin` locally (default `http://localhost:8080`) | InferLab sign-in; unset turns it off | Nonsecret InferLab central-auth origin (HTTPS, or HTTP on loopback); also list `inferops` in AUTH_GATEKEEPERS |
 | COMPOSABLE_VIEWS / DURABLE_VIEWS | Deployer; wrapper `features`, or in-repo the presence of `inferos.canvas.json` | Canvas composition and saved views; default off | Structural switches, never grants |
 | CANVAS_CATALOG | Deployer; `inferos.canvas.json` via `pnpm canvas` | Optional; unset offers every widget kind | Nonsecret JSON of enabled widget kinds, blueprint widgets and screen templates; malformed fails closed |
 | Custom gatekeeper selection | Deployer; `inferos.canvas.json` `customGatekeepers` | Default: every `custom-gatekeepers/` package with a `wrangler.jsonc` | Chooses which fork-owned gatekeepers the dev server binds; does not provision accounts |

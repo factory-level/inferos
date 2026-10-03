@@ -15,6 +15,10 @@
 // - Observers (strategy B): a binding is one project, so a collaborator is admitted when their own
 //   InferOps account can open that project.
 //
+// - Sign-in: when INFERLAB_AUTH_ORIGIN is set the vendor also provides authentication, so the
+//   Workshop can offer "Sign in with InferLab" (`connectAccount` with `scopes: "auth"`; see
+//   inferlab-login.ts). The account it hands back carries only the InferLab-verified email.
+//
 // All project data comes through `InferOpsClient` (inferops-client.ts), opened by `#client()`
 // helpers from `openInferOpsClient` in mock-inferops.ts -- the one module to replace with an HTTP
 // client once the InferOps API contract is agreed.
@@ -32,6 +36,9 @@ import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import { InferOpsError, inferOpsErrorCode, type InferOpsClient } from "./inferops-client";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
 import {
+  InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, startInferLabLogin,
+} from "./inferlab-login";
+import {
   DEFAULT_HOST, PROJECT_BOARD_RESOURCE, parseProjectBoardUrl, projectBoardUrl,
 } from "./resources";
 import { buildBoard, simulateIssue, type PendingTransition } from "./simulation";
@@ -42,7 +49,7 @@ import type {
 import TYPES_CODE from "./types.txt";
 import PROJECT_CONFIGURATOR_HTML from "./generated/project-ui.txt";
 
-export { MockInferOps };
+export { InferLabLogin, MockInferOps };
 
 const VENDOR_ID = "inferops";
 
@@ -60,18 +67,22 @@ const INFEROPS_ICON = {
 const NO_CONNECT_FLOW = "The InferOps connector is provided automatically; it has no connect flow.";
 const OPTION_LIMIT = 100;
 
-/** Keep ES Module worker format; this worker is used over RPC and has no HTTP flow. */
+/** HTTP serves only the InferLab sign-in legs; everything else is RPC. */
 export default {
-  async fetch(): Promise<Response> {
-    return new Response("Not Found", { status: 404 });
+  async fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
+    const response = await handleInferLabLogin(request, env, ctx.exports.InferLabLogin);
+    return response ?? new Response("Not Found", { status: 404 });
   },
 };
 
 // ---------------------------------------------------------------------------
 // Props
 
-/** An auto-provisioned account: only an id, which keys the account's InferOps data. */
-type AccountProps = { accountId: string };
+/**
+ * An account: an id, which keys the account's InferOps data, plus the InferLab-verified email when
+ * it was minted by sign-in. Auto-provisioned accounts carry no identity.
+ */
+type AccountProps = { accountId: string; email?: string };
 
 /** One project-board binding, fixed when the Workshop mints it. */
 type ProjectGatekeeperProps = { accountId: string; host: string; projectKey: string };
@@ -98,7 +109,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
         "propose moving them between workflow states, each move approved by you. This " +
         "deployment serves demo data, not a live InferOps workspace.",
       autoProvisionsAccount: true,
-      providesAuth: false,
+      providesAuth: inferLabAuthOrigin(this.env) !== null,
     };
   }
 
@@ -113,9 +124,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
     }) as unknown as Fetcher<GatekeeperUser>;
   }
 
-  connectAccount(_callback: Fetcher<GatekeeperConnectCallback>,
-                 _options?: GatekeeperConnectOptions): Promise<{ url: string }> {
-    throw new Error(NO_CONNECT_FLOW);
+  /** Only sign-in (`scopes: "auth"`) has a flow; connecting for board access is automatic. */
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
+                       options?: GatekeeperConnectOptions): Promise<{ url: string }> {
+    if (options?.scopes !== "auth") throw new Error(NO_CONNECT_FLOW);
+    return startInferLabLogin(this.ctx.exports.InferLabLogin, this.env, callback);
   }
 
   async getSupportedResources(_options?: { userId?: string }): Promise<SupportedResource[]> {
@@ -190,8 +203,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     throw new Error(NO_CONNECT_FLOW);
   }
 
+  /** The InferLab-verified email for a sign-in account; null for an auto-provisioned one. */
   async getAuthenticatedEmail(): Promise<string | null> {
-    return null;
+    return this.ctx.props.email ?? null;
   }
 
   /** No grantable resource types, so nothing to authorize and no URL to return. */

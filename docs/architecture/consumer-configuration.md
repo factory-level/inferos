@@ -13,10 +13,11 @@ covers:
   - packages/workshop-frontend/src/BlueprintsPage.tsx
   - packages/workshop-frontend/src/components/GadgetList.tsx
   - scripts/run-dev-server.ts
+  - scripts/dev-server-config.ts
   - packages/router
   - scripts/consumer
   - .agents/skills/bootstrap-inferos
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -77,6 +78,15 @@ The generated wrapper copies its small operator helpers so it can pin a prior In
 `displayDensity` is normalized to comfortable for missing/invalid persisted values and published in admin/public configuration. `AdminApi.setDisplayDensity` validates comfortable/compact and supports later administrator changes. Profile initialization treats an existing compact setting as customization, preserving all target settings together. Initialization already consumed by an older version is not reapplied when density support is added; use the explicit setter.
 
 The frontend reads deployment density from its existing server-config context. Compact spacing applies at the `sm` breakpoint and above to workspace rows, Explore rows, grid gaps and card content; mobile spacing is unchanged. Loading rows/grid gaps follow the same density. Font sizes, Kumo colors, keyboard interactions, menus and gadget-owned layouts remain unchanged. This is curated listing spacing, not a global CSS scale or a canvas density implementation. Configuration refresh requires a client reconnect/reload; an admin-panel control remains pending.
+
+## InferLab sign-in flag
+
+`features.inferlabLogin` (default false, set by no profile, so its provenance is `default` unless the wrapper overrides it) turns on "Sign in with InferLab". The wrapper runtime accepts it only on pins containing `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts`. `run-dev-server.ts --consumer-root` resolves it through `getInferLabLoginVars` (`scripts/dev-server-config.ts`):
+
+- It appends `inferops` to the backend's `AUTH_GATEKEEPERS`, keeping vendors the shell lists.
+- It sets the gatekeeper's `INFERLAB_AUTH_ORIGIN` to the shell value, or `http://localhost:8080`.
+
+Startup fails if the wrapper's canvas config left `gatekeeper-inferops` out. Disabled, both variables pass through from the shell unchanged. Password login is unaffected. See [sign-in](../oauth-signin.md#inferlab).
 
 ## Consumer Workers
 

@@ -3,7 +3,7 @@ export interface ConsumerConfig {
   schemaVersion: 1;
   upstream: { repository: string; revision: string };
   profile: "personal" | "inferops-operations";
-  features: { composableViews: boolean; durableViews: boolean; customCloudflareCode: boolean };
+  features: { composableViews: boolean; durableViews: boolean; customCloudflareCode: boolean; inferlabLogin: boolean };
   styling: { siteName: string; density: "comfortable" | "compact"; theme: "system" | "light" | "dark" };
   local: { port: number };
   inferops: { mode: "fixture"; fixture: "fixtures/project-board.json"; targetRef: string }
@@ -39,7 +39,7 @@ export interface ConsumerProvenance {
 }
 
 const defaults: Pick<ConsumerConfig, "features" | "styling"> = {
-  features: { composableViews: false, durableViews: false, customCloudflareCode: false },
+  features: { composableViews: false, durableViews: false, customCloudflareCode: false, inferlabLogin: false },
   styling: { siteName: "My Workspace", density: "comfortable", theme: "system" },
 };
 const profiles: Record<ConsumerConfig["profile"], {
@@ -47,6 +47,7 @@ const profiles: Record<ConsumerConfig["profile"], {
   styling: Partial<ConsumerConfig["styling"]>;
 }> = {
   personal: { features: {}, styling: {} },
+  // Profiles never change authentication policy, so neither one sets inferlabLogin.
   "inferops-operations": {
     features: { composableViews: true, durableViews: true },
     styling: { siteName: "InferOps Workspace", density: "compact" },
@@ -93,7 +94,7 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
     throw new Error("upstream.revision: expected full lowercase Git commit SHA");
   }
   const profile = choice(root.profile, ["personal", "inferops-operations"], "profile");
-  const featureOverrides = object(root.features, ["composableViews", "durableViews", "customCloudflareCode"], "features", true);
+  const featureOverrides = object(root.features, ["composableViews", "durableViews", "customCloudflareCode", "inferlabLogin"], "features", true);
   const resolvedFeatures = resolveGroup(defaults.features, profiles[profile].features, featureOverrides);
   const features = resolvedFeatures.value;
   for (const key of Object.keys(features)) {
@@ -124,6 +125,7 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
       composableViews: features.composableViews as boolean,
       durableViews: features.durableViews as boolean,
       customCloudflareCode: features.customCloudflareCode as boolean,
+      inferlabLogin: features.inferlabLogin as boolean,
     },
     styling: {
       siteName: string(styling.siteName, "styling.siteName"),

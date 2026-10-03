@@ -57,6 +57,7 @@ const featureSources = {
   composableViews: "packages/workshop-shared/src/canvas.ts",
   durableViews: "packages/workshop-backend/src/canvas-store.ts",
   customCloudflareCode: "scripts/consumer/extensions.ts",
+  inferlabLogin: "custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts",
 } as const;
 
 const unavailableFeatures = (config: ReturnType<typeof parseConsumerConfig>, upstream: string) =>
