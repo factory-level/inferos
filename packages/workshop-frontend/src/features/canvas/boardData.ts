@@ -73,10 +73,11 @@ export const visibleColumns = (board: Board, params: BoardRequest['params']): Bo
   board.columns.filter(({ state }) => state.workflow === params.workflow &&
     (params.showCompleted || (state.group !== 'completed' && state.group !== 'cancelled')))
 
-// The gatekeeper leads its messages with the code (`STALE_REVISION: ...`), all that survives RPC.
-const codeOf = (error: unknown): string =>
+/** The gatekeeper leads its messages with the code (`STALE_REVISION: ...`), all that survives RPC. */
+export const codeOf = (error: unknown): string =>
   /^(?:\w*Error: )?([A-Z_]+): /.exec(error instanceof Error ? error.message : String(error))?.[1] ?? 'ERROR'
-const messageOf = (error: unknown): string =>
+/** A gatekeeper error's message without its leading code. */
+export const messageOf = (error: unknown): string =>
   (error instanceof Error ? error.message : String(error)).replace(/^(?:\w*Error: )?[A-Z_]+: /, '')
 // The connection no longer covers the target: its credential was refused, the project is gone
 // from it, or the connection itself was removed from the workspace.

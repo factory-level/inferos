@@ -1,7 +1,8 @@
 import { expect, it } from 'vitest'
 import type { ActionLogEntry, ActionRequester } from '@gadgets/workshop-shared/api'
 import {
-  RECENT_ACTIVITY_LIMIT, RECENT_ACTIVITY_MS, awaitingByIssue, describeActivity, foldBoardActivity, nextActivityChange,
+  RECENT_ACTIVITY_LIMIT, RECENT_ACTIVITY_MS, actionsOnly, awaitingByIssue, combineActivity, describeActivity, foldBoardActivity,
+  nextActivityChange,
 } from './boardActivity'
 
 const BOARD = 'inferops://demo.local/project/board/DEMO'
@@ -87,4 +88,15 @@ it('says when the display next changes: an item crossing a minute of age, or fad
   // Item 1 fades at 120s; item 2 turns one minute old at 110s.
   expect(nextActivityChange(activity, T0 + 70_000)).toBe(T0 + 110_000)
   expect(nextActivityChange(foldBoardActivity([move(1, 'pending')], BOARD, T0, true), T0)).toBeNull()
+})
+
+it("combines a board's activity with its coding dispatch's actions, keeping each action's kind tag and leaving out the dispatch reads", () => {
+  const DISPATCH = 'inferops://demo.local/project/dispatch/DEMO'
+  const dispatch = move(6, 'pending', { resourceUrl: DISPATCH, createdAt: at(8), description: { title: 'Dispatch DEMO-1 to app', description: '',
+    fields: [{ label: 'Issue', kind: 'inline', value: 'DEMO-1' }], actionKind: { tag: 'inferops.code-dispatch', label: 'Dispatch' } } } as Partial<ActionLogEntry>)
+  const coding = foldBoardActivity([dispatch, read(7, 9, { resourceUrl: DISPATCH })], DISPATCH, T0 + 30_000, true)
+  expect(coding.active[0]).toMatchObject({ id: 6, issue: 'DEMO-1', tag: 'inferops.code-dispatch' })
+  const shown = combineActivity(foldBoardActivity([move(2, 'pending', { createdAt: at(5) }), read(3, 10)], BOARD, T0 + 30_000, true), actionsOnly(coding))
+  expect(shown.active.map(item => item.id)).toEqual([6, 2])
+  expect(shown.recent.map(item => item.id)).toEqual([3])
 })

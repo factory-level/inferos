@@ -1,10 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent } from 'react'
 import { Button } from '@cloudflare/kumo'
 import { Plus } from '@phosphor-icons/react'
-import type { Board, Issue, IssueChanges, NewIssue, State } from '@inferos/gatekeeper-inferops/src/types'
+import type { Board, Issue, IssueChanges, NewIssue, Run, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
 import type { PendingChange, PendingMove, ProposalResult } from './boardData'
+import { describeRun, finishedRuns, latestRunOf } from './codingRuns'
 import { KanbanCard } from './KanbanCard'
+import type { CodingControl } from './KanbanCodingForm'
 import { KanbanIssueDialog } from './KanbanIssueDialog'
 import { decidedChanges, decidedMoves, moveTargets, pendingMoveOf, sortIssues, stateOf, type ChangeDecision, type MoveDecision } from './kanbanBoard'
 
@@ -30,6 +32,8 @@ export type KanbanBoardProps = {
   onCreate: (issue: NewIssue) => Promise<ProposalResult>
   /** Proposes an edit of the issue at its revision through the approval path. */
   onUpdate: (issue: Issue, changes: IssueChanges) => Promise<ProposalResult>
+  /** Coding dispatch for the board's project; absent, no card offers it. */
+  coding?: CodingControl
 }
 
 type Announcement = { text: string; tone: 'info' | 'error' }
@@ -38,6 +42,8 @@ type Announcement = { text: string; tone: 'info' | 'error' }
 export const APPLIED_MARK_MS = 6000
 
 const today = () => new Date().toISOString().slice(0, 10)
+
+const NO_RUNS: readonly Run[] = []
 
 const issueCard = (root: HTMLElement, issueId: string) =>
   [...root.querySelectorAll<HTMLElement>('[data-issue-id]')].find(card => card.dataset.issueId === issueId)
@@ -56,14 +62,18 @@ const changeAnnouncement = (decision: ChangeDecision): string => decision.kind =
  * `onUpdate`. Once queued they show as the gatekeeper's provisional card or overlaid values,
  * marked waiting for approval; the board read that drops the marker decides them, which is
  * announced too (whoever proposed them, as the board alone cannot tell).
+ *
+ * With `coding`, each card shows its issue's latest coding run, and a run that finishes is announced.
  */
-export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout, onMove, onCreate, onUpdate }: KanbanBoardProps) => {
+export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout, onMove, onCreate, onUpdate, coding }: KanbanBoardProps) => {
   const instructionsId = useId()
   const root = useRef<HTMLDivElement>(null)
   // The issue whose card has focus; restored when its card re-mounts in another column.
   const focused = useRef<string | null>(null)
   const seen = useRef<readonly PendingMove[]>(pending)
   const seenBoard = useRef<Board>(board)
+  const runs: readonly Run[] = coding?.state.status === 'ready' ? coding.state.runs : NO_RUNS
+  const seenRuns = useRef<readonly Run[]>(runs)
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>())
   const [dragging, setDragging] = useState<Issue | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
@@ -110,6 +120,17 @@ export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout
     })
   }, [pending, board])
   useEffect(() => () => { for (const timer of timers.current) clearTimeout(timer) }, [])
+
+  // The runner finishes runs on its own; say so, as a card's badge changing is otherwise silent.
+  useEffect(() => {
+    const finished = finishedRuns(seenRuns.current, runs)
+    seenRuns.current = runs
+    if (finished.length === 0) return
+    setAnnouncement({
+      tone: finished.some(run => run.status !== 'succeeded') ? 'error' : 'info',
+      text: finished.map(run => describeRun(run.issueIdentifier, run)).join(' '),
+    })
+  }, [runs])
 
   useLayoutEffect(() => {
     const id = focused.current
@@ -199,6 +220,7 @@ export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout
               edit={edit}
               editDecision={editDecision && editDecision.revision === issue.revision ? editDecision.outcome : undefined}
               onUpdate={locked ? undefined : update(issue)}
+              coding={coding && { control: coding, run: latestRunOf(runs, issue.id) }}
               pending={pendingMove && { move: pendingMove, toState: stateOf(board, pendingMove.toStateId) }}
               proposed={proposed}
               decision={decision && decision.revision === issue.revision ? { outcome: decision.outcome, toState: stateOf(board, decision.toStateId) } : undefined}
