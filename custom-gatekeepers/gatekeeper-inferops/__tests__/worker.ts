@@ -3,10 +3,10 @@
 // gatekeeper as a facet with props, hands it an approval queue that records what it is told, and
 // applies or rejects the actions it collected.
 
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionDescription, GatekeeperUserVerifier, GitCache, GitObjectType, GitOid,
-  ObservationDescription,
+  ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { InferOpsProjectGatekeeper } from "../src/inferops.js";
 import type { InferOpsProjectSession } from "../src/types.js";
@@ -16,11 +16,14 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferOpsAccount, InferOpsProjectGatekeeper, InferOpsVerifier, MockInferOps,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsProjectGatekeeper,
+  InferOpsVerifier, MockInferOps,
 } from "../src/inferops.js";
 
 /** The props the Workshop bakes into one project-board binding. */
-export type BindingProps = { accountId: string; host: string; projectKey: string };
+export type BindingProps = {
+  accountId: string; host: string; projectKey: string; connected?: boolean; workspaceId?: string;
+};
 
 /** What the recording approval queue was told, in order. */
 export type QueueLog = {
@@ -79,9 +82,52 @@ class TestVerifier extends RpcTarget {
   }
 }
 
+/** The emails sign-in and connect flows reported to each `TestConnectCallback`, by label. */
+export const signIns: Array<{ label: string; email: string | null }> = [];
+/** The stage ids reconnects reported, by label. */
+export const reconnects: Array<{ label: string; stageId: string }> = [];
+/** The labels whose credentials the gatekeeper reported expired, in order. */
+export const expired: string[] = [];
+
+/** The props of one account, as the Workshop's stub for it carries them. */
+export type AccountProps = { accountId: string; email?: string; connected?: boolean };
+
+/** Stands in for the Workshop's callback: records the account's email and returns a handoff. */
+export class TestConnectCallback extends WorkerEntrypoint<Cloudflare.Env, { label: string }> {
+  async complete(user: Fetcher<GatekeeperUser>): Promise<ConnectHandoff> {
+    signIns.push({ label: this.ctx.props.label, email: await user.getAuthenticatedEmail() });
+    return { targetOrigin: "http://localhost:3000", ticket: `ticket-${this.ctx.props.label}` };
+  }
+
+  async reconnectComplete(stageId: string): Promise<ConnectHandoff> {
+    reconnects.push({ label: this.ctx.props.label, stageId });
+    return { targetOrigin: "http://localhost:3000", ticket: `reticket-${this.ctx.props.label}` };
+  }
+
+  async credentialsExpired(): Promise<void> {
+    expired.push(this.ctx.props.label);
+  }
+
+  async credentialsRestored(): Promise<void> {}
+}
+
+/** The test worker's own entrypoints, as `ctx.exports` exposes them. */
+export type SignInExports = {
+  TestConnectCallback(options: { props: { label: string } }): Fetcher<TestConnectCallback>;
+  GatekeeperVendor(options: object): Fetcher<import("../src/inferops.js").GatekeeperVendor>;
+};
+
 type TestExports = {
   InferOpsProjectGatekeeper(options: { props: BindingProps }):
     DurableObjectClass<InferOpsProjectGatekeeper>;
+  InferOpsAccount(options: { props: AccountProps }): Fetcher<GatekeeperUser>;
+};
+
+/** The workspace half of the project configurator's capability. */
+type WorkspaceRpc = {
+  listWorkspaces(): Promise<Array<{ value: string; title: string }>>;
+  selectWorkspace(workspaceId: string | null): Promise<void>;
+  listProjects(query: string): Promise<Array<{ value: string }>>;
 };
 
 function messageOf(error: unknown): string {
@@ -90,12 +136,108 @@ function messageOf(error: unknown): string {
 
 export class TestHooks extends DurableObject<Cloudflare.Env> {
   #log: QueueLog = { observations: [], actions: [] };
+  // Classes the accounts minted, by binding name: a facet is re-initialized from its class on
+  // every `facets.get`.
+  #minted = new Map<string, DurableObjectClass<InferOpsProjectGatekeeper>>();
 
   #gatekeeper(props: BindingProps) {
     const exports = this.ctx.exports as unknown as TestExports;
     return this.ctx.facets.get<InferOpsProjectGatekeeper>(
       `${props.accountId}/${props.projectKey}`,
       () => ({ class: exports.InferOpsProjectGatekeeper({ props }) }));
+  }
+
+  // --- Driving an account the Workshop holds by its props. Stubs cannot leave a Durable Object's
+  // context, so every account operation runs in here and hands back plain data or a session.
+
+  #account(props: AccountProps): Fetcher<GatekeeperUser> {
+    return (this.ctx.exports as unknown as TestExports).InferOpsAccount({ props });
+  }
+
+  async describeAccount(props: AccountProps) {
+    return this.#account(props).describe();
+  }
+
+  async authenticatedEmail(props: AccountProps): Promise<string | null> {
+    return this.#account(props).getAuthenticatedEmail();
+  }
+
+  async revokeAccount(props: AccountProps): Promise<void> {
+    await this.#account(props).revoke();
+  }
+
+  async reconnectAccount(props: AccountProps): Promise<string> {
+    return (await this.#account(props).reconnect()).url;
+  }
+
+  /** Commits a reconnect; returns the failure message, or null on success. */
+  async commitReconnect(props: AccountProps, stageId: string): Promise<string | null> {
+    try {
+      await this.#account(props).commitReconnect(stageId);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Binds `url` through the account's own `getGatekeeperClassFor`; the failure message, or null. */
+  async bindAccount(name: string, props: AccountProps, url: string): Promise<string | null> {
+    try {
+      const { class: cls } = await this.#account(props).getGatekeeperClassFor(url);
+      this.#minted.set(name, cls as DurableObjectClass<InferOpsProjectGatekeeper>);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  #bound(name: string) {
+    const cls = this.#minted.get(name);
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsProjectGatekeeper>(`minted/${name}`, () => ({ class: cls }));
+  }
+
+  /** A session over a binding `bindAccount` made under `name`. */
+  async startBoundSession(name: string): Promise<InferOpsProjectSession> {
+    return this.#bound(name).startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Admission of a collaborator by their own account's verifier, over a bound binding. */
+  async addObserverFrom(name: string, observer: AccountProps): Promise<string | null> {
+    try {
+      await this.#bound(name).addObserver("observer-2", await this.#account(observer).getVerifier());
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  async #configurator(props: AccountProps): Promise<WorkspaceRpc> {
+    const frame = await this.#account(props).startResourceConfigurator("inferops://*/project/board/*");
+    return frame.ui as unknown as WorkspaceRpc;
+  }
+
+  async listWorkspaces(props: AccountProps) {
+    return (await this.#configurator(props)).listWorkspaces();
+  }
+
+  /** The failure message, or null on success. */
+  async selectWorkspace(props: AccountProps, workspaceId: string | null): Promise<string | null> {
+    try {
+      await (await this.#configurator(props)).selectWorkspace(workspaceId);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** The project keys the configurator lists, or the failure message. */
+  async listProjects(props: AccountProps, query = ""): Promise<string[] | string> {
+    try {
+      return (await (await this.#configurator(props)).listProjects(query)).map(p => p.value);
+    } catch (error) {
+      return messageOf(error);
+    }
   }
 
   /** A session over a binding, recording into this object's queue log. */

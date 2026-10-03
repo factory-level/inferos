@@ -11,9 +11,12 @@
 // - Nothing here logs a token, a header or a body, and InferOps' own error text is never passed on:
 //   failures are reported by operation name, status and code.
 //
-// STOPGAP: until per-user sign-in lands (inferos#66) the connection comes from worker vars
-// (`connectionFromEnv`), so every account of the deployment shares one credential. That is for
-// local development only; #66 replaces it with the connected person's own token.
+// Two ways to be authorized (see `clientFor` in inferops.ts):
+// - A connected account's own InferOps token and workspace (`InferOpsAuthorizedEndpoint`): the
+//   authority is fetched per request, so a refreshed or replaced token is picked up and a rejected
+//   one is adjudicated by the account before the gatekeeper gives up on it.
+// - STOPGAP: a connection from worker vars (`connectionFromEnv`), shared by every account of the
+//   deployment. Local development only; it never backs a connected person.
 
 import { createLogger } from "@gadgets/observability/logger";
 import {
@@ -25,48 +28,72 @@ import type { Issue, Project, Revision, State, StateGroup, Workflow } from "./ty
 type LogFields = { vendorId: string; operation: string; status: number; code: string };
 const logger = createLogger<LogFields>({ component: "gatekeeper.inferops.http", vendorId: "inferops" });
 
-/** Where and as whom the client calls InferOps. */
-export type InferOpsConnection = {
+/** Where the client calls InferOps. */
+export type InferOpsEndpoint = {
   /** API base URL without a trailing slash. */
   baseUrl: string;
   /** The base URL's host, which is what `<host>` in a resource URL must name to use it. */
   host: string;
-  /** Bearer token. Never logged. */
-  token: string;
-  /** The InferOps workspace every request is made in. */
-  workspaceId: string;
 };
 
-/** The worker vars that configure the stopgap connection. */
+/** As whom one request is made: a bearer token and the workspace it is made in. Never logged. */
+export type InferOpsAuthority = { token: string; workspaceId: string };
+
+/**
+ * Runs one request under the current authority. The account's credential source implements it:
+ * it fetches (and refreshes) the token, and when InferOps rejects it, asks the account whether the
+ * grant is dead before failing the request.
+ */
+export type Authorize = <T>(operation: (authority: InferOpsAuthority) => Promise<T>) => Promise<T>;
+
+/** An endpoint whose authority is fetched per request: a connected person's own token. */
+export type InferOpsAuthorizedEndpoint = InferOpsEndpoint & { authorize: Authorize };
+
+/** Where and as whom the stopgap client calls InferOps: one fixed credential. */
+export type InferOpsConnection = InferOpsEndpoint & InferOpsAuthority;
+
+/** The worker vars that configure the API endpoint and the stopgap connection. */
 export type InferOpsConnectionVars = {
   INFEROPS_BASE_URL?: string;
   INFEROPS_API_TOKEN?: string;
   INFEROPS_WORKSPACE_ID?: string;
 };
 
-/**
- * The connection configured through worker vars, or null when `INFEROPS_BASE_URL` is unset (demo
- * data only). A base URL without its token or workspace id throws, naming the missing variable,
- * rather than silently serving demo data. Local-development stopgap; see the module comment.
- */
-export function connectionFromEnv(env: InferOpsConnectionVars): InferOpsConnection | null {
-  if (!env.INFEROPS_BASE_URL) return null;
-  for (const name of ["INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"] as const) {
-    if (!env[name]) throw new Error(`INFEROPS_BASE_URL is set but ${name} is not.`);
-  }
+/** Normalizes an API base URL, or throws naming the variable (never its value). */
+export function parseInferOpsBaseUrl(raw: string, name: string): InferOpsEndpoint {
   let url: URL;
   try {
-    url = new URL(env.INFEROPS_BASE_URL);
+    url = new URL(raw);
   } catch {
-    throw new Error("INFEROPS_BASE_URL is not a URL.");
+    throw new Error(`${name} is not a URL.`);
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("INFEROPS_BASE_URL must be an http(s) URL.");
+    throw new Error(`${name} must be an http(s) URL.`);
+  }
+  return { baseUrl: (url.origin + url.pathname).replace(/\/+$/, ""), host: url.host };
+}
+
+/**
+ * The API endpoint configured through `INFEROPS_BASE_URL`, or null when unset. Connected accounts
+ * call it with their own authority; it needs no token of its own.
+ */
+export function endpointFromEnv(env: InferOpsConnectionVars): InferOpsEndpoint | null {
+  return env.INFEROPS_BASE_URL ? parseInferOpsBaseUrl(env.INFEROPS_BASE_URL, "INFEROPS_BASE_URL") : null;
+}
+
+/**
+ * The stopgap connection configured through worker vars, or null when `INFEROPS_API_TOKEN` is
+ * unset. A token without its base URL or workspace id throws, naming the missing variable, rather
+ * than silently serving demo data. Local-development stopgap; see the module comment.
+ */
+export function connectionFromEnv(env: InferOpsConnectionVars): InferOpsConnection | null {
+  if (!env.INFEROPS_API_TOKEN) return null;
+  for (const name of ["INFEROPS_BASE_URL", "INFEROPS_WORKSPACE_ID"] as const) {
+    if (!env[name]) throw new Error(`INFEROPS_API_TOKEN is set but ${name} is not.`);
   }
   return {
-    baseUrl: (url.origin + url.pathname).replace(/\/+$/, ""),
-    host: url.host,
-    token: env.INFEROPS_API_TOKEN!,
+    ...parseInferOpsBaseUrl(env.INFEROPS_BASE_URL!, "INFEROPS_BASE_URL"),
+    token: env.INFEROPS_API_TOKEN,
     workspaceId: env.INFEROPS_WORKSPACE_ID!,
   };
 }
@@ -237,19 +264,29 @@ function parsed<T>(operation: string, body: unknown, parse: (body: unknown) => T
 type Send = { method: "GET" | "POST"; path: string; body?: unknown; idempotencyKey?: string };
 
 /**
- * The InferOps HTTP data source for one connection. `fetcher` is injectable for tests. Project
- * keys are resolved to ids through the project list on every use, so scope always follows what the
- * connection can see now.
+ * The InferOps HTTP data source for one connection: a fixed credential, or an endpoint whose
+ * authority is fetched per request. `fetcher` is injectable for tests. Project keys are resolved to
+ * ids through the project list on every use, so scope always follows what the connection can see
+ * now.
  */
 export function openHttpInferOpsClient(
-  connection: InferOpsConnection, fetcher: typeof fetch = fetch,
+  connection: InferOpsConnection | InferOpsAuthorizedEndpoint, fetcher: typeof fetch = fetch,
 ): InferOpsClient {
+  const authorize: Authorize = "authorize" in connection
+    ? connection.authorize
+    : operation => operation({ token: connection.token, workspaceId: connection.workspaceId });
+
   /** Send one request and return its parsed JSON body, or throw the mapped `InferOpsError`. */
-  async function request(operation: string, send: Send): Promise<unknown> {
+  function request(operation: string, send: Send): Promise<unknown> {
+    return authorize(authority => sendAs(authority, operation, send));
+  }
+
+  async function sendAs(authority: InferOpsAuthority, operation: string, send: Send):
+      Promise<unknown> {
     const headers: Record<string, string> = {
       accept: "application/json",
-      authorization: `Bearer ${connection.token}`,
-      "x-workspace-id": connection.workspaceId,
+      authorization: `Bearer ${authority.token}`,
+      "x-workspace-id": authority.workspaceId,
     };
     if (send.body !== undefined) headers["content-type"] = "application/json";
     if (send.idempotencyKey) headers["x-idempotency-key"] = send.idempotencyKey;

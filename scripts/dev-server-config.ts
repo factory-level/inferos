@@ -78,3 +78,78 @@ export function getDevServerConfig(args: readonly string[], envBackendHost?: str
     wranglerPort: getWranglerPortFromBackendHost(backendHost),
   };
 }
+
+/** The gatekeeper that serves "Sign in with InferLab", and its vendor id in AUTH_GATEKEEPERS. */
+export const INFERLAB_LOGIN_GATEKEEPER = "gatekeeper-inferops";
+/** The InferOps vendor id, as AUTH_GATEKEEPERS names it. */
+export const INFERLAB_LOGIN_VENDOR = "inferops";
+/** Where `bun run dev up` serves InferLab central-auth locally. */
+export const DEFAULT_INFERLAB_AUTH_ORIGIN = "http://localhost:8080";
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Whether `value` is an origin the gatekeeper will accept as INFERLAB_AUTH_ORIGIN: a bare HTTPS
+ * origin, or HTTP on a loopback host. Mirrors `inferLabAuthOrigin` in the gatekeeper, which cannot
+ * be imported here (it depends on `cloudflare:workers`).
+ */
+export function isInferLabAuthOrigin(value: string | undefined): boolean {
+  if (!value?.trim()) return false;
+  let url: URL;
+  try { url = new URL(value.trim()); } catch { return false; }
+  const secure = url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
+  return secure && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/";
+}
+
+/** The vendor ids an AUTH_GATEKEEPERS value lists, lowercased. */
+export function authGatekeeperVendors(value: string | undefined): string[] {
+  return (value ?? "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * The reason sign-in cannot start, or null when it can. Checked before the dev server starts: with
+ * password login off, some gatekeeper has to be allowlisted (the backend would otherwise keep
+ * password login on rather than lock everyone out, silently overriding the setting), and with
+ * `inferops` allowlisted, the gatekeeper has to run and has to know the InferLab origin, or the
+ * login page would silently offer fewer ways in and no error would say why.
+ */
+export function inferLabLoginStartupError(settings: {
+  AUTH_GATEKEEPERS?: string; INFERLAB_AUTH_ORIGIN?: string; DISABLE_PASSWORD_AUTH?: string;
+}, gatekeeperEnabled: boolean): string | null {
+  const vendors = authGatekeeperVendors(settings.AUTH_GATEKEEPERS);
+  if (settings.DISABLE_PASSWORD_AUTH === "true" && vendors.length === 0) {
+    return "DISABLE_PASSWORD_AUTH=true leaves no way to sign in: list a sign-in gatekeeper in " +
+      `AUTH_GATEKEEPERS (for InferOps identity, ${INFERLAB_LOGIN_VENDOR}) or unset DISABLE_PASSWORD_AUTH`;
+  }
+  if (!vendors.includes(INFERLAB_LOGIN_VENDOR)) return null;
+  if (!gatekeeperEnabled) {
+    return `AUTH_GATEKEEPERS lists ${INFERLAB_LOGIN_VENDOR}, but ${INFERLAB_LOGIN_GATEKEEPER} is not enabled; ` +
+      `enable it with pnpm canvas enable ${INFERLAB_LOGIN_GATEKEEPER}`;
+  }
+  if (!isInferLabAuthOrigin(settings.INFERLAB_AUTH_ORIGIN)) {
+    return `AUTH_GATEKEEPERS lists ${INFERLAB_LOGIN_VENDOR}, but INFERLAB_AUTH_ORIGIN is ` +
+      `${settings.INFERLAB_AUTH_ORIGIN?.trim() ? "not a bare HTTPS origin (or HTTP on localhost)" : "not set"}; ` +
+      `set it to the InferLab central-auth origin, or remove ${INFERLAB_LOGIN_VENDOR} from AUTH_GATEKEEPERS`;
+  }
+  return null;
+}
+
+/**
+ * Resolves the sign-in settings for a consumer's `features.inferlabLogin`. Enabling it adds the
+ * InferOps vendor to the backend's AUTH_GATEKEEPERS allowlist, keeping any vendors the shell already
+ * lists, and points the gatekeeper at the shell's INFERLAB_AUTH_ORIGIN or the local InferLab stack.
+ * Disabled, both pass through from the shell unchanged, so hand-set variables still work in-repo.
+ */
+export function getInferLabLoginVars(enabled: boolean, shell: {
+  AUTH_GATEKEEPERS?: string; INFERLAB_AUTH_ORIGIN?: string;
+}): { AUTH_GATEKEEPERS?: string; INFERLAB_AUTH_ORIGIN?: string } {
+  if (!enabled) {
+    return { AUTH_GATEKEEPERS: shell.AUTH_GATEKEEPERS, INFERLAB_AUTH_ORIGIN: shell.INFERLAB_AUTH_ORIGIN };
+  }
+  const vendors = (shell.AUTH_GATEKEEPERS ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  if (!authGatekeeperVendors(shell.AUTH_GATEKEEPERS).includes(INFERLAB_LOGIN_VENDOR)) vendors.push(INFERLAB_LOGIN_VENDOR);
+  return {
+    AUTH_GATEKEEPERS: vendors.join(","),
+    INFERLAB_AUTH_ORIGIN: shell.INFERLAB_AUTH_ORIGIN?.trim() || DEFAULT_INFERLAB_AUTH_ORIGIN,
+  };
+}

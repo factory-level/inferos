@@ -3,12 +3,14 @@
 // Test-only bindings, declared in `vitest.config.ts` rather than `wrangler.jsonc`, so they are absent
 // from the generated `worker-configuration.d.ts`.
 
-import type { MockInferOps, TestHooks } from "./worker.js";
+import type { InferLabLogin, InferOpsCredentials, MockInferOps, TestHooks } from "./worker.js";
 
 declare global {
   namespace Cloudflare {
     interface Env {
       MOCK_INFEROPS: DurableObjectNamespace<MockInferOps>;
+      INFERLAB_LOGIN: DurableObjectNamespace<InferLabLogin>;
+      INFEROPS_CREDENTIALS: DurableObjectNamespace<InferOpsCredentials>;
       TEST_HOOKS: DurableObjectNamespace<TestHooks>;
     }
   }

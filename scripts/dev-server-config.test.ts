@@ -5,9 +5,13 @@ import { resolve } from "node:path";
 import { parse } from "jsonc-parser";
 
 import {
+  DEFAULT_INFERLAB_AUTH_ORIGIN,
   getDevServerConfig,
   getDevRouterAssets,
+  getInferLabLoginVars,
   getWranglerPortFromBackendHost,
+  inferLabLoginStartupError,
+  isInferLabAuthOrigin,
 } from "./dev-server-config.ts";
 
 describe("run-local asset topology", () => {
@@ -95,4 +99,62 @@ describe("getDevServerConfig", () => {
       assert.throws(() => getDevServerConfig(args), /--port must be an integer between 1 and 65535/);
     });
   }
+});
+
+describe("getInferLabLoginVars", () => {
+  it("passes the shell's settings through while the flag is off", () => {
+    assert.deepEqual(getInferLabLoginVars(false, {}), {
+      AUTH_GATEKEEPERS: undefined, INFERLAB_AUTH_ORIGIN: undefined,
+    });
+    assert.deepEqual(getInferLabLoginVars(false, {
+      AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io",
+    }), { AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io" });
+  });
+
+  it("allowlists the InferOps vendor against the local InferLab stack by default", () => {
+    assert.deepEqual(getInferLabLoginVars(true, {}), {
+      AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: DEFAULT_INFERLAB_AUTH_ORIGIN,
+    });
+  });
+
+  it("keeps other sign-in vendors and an explicit origin", () => {
+    assert.deepEqual(getInferLabLoginVars(true, {
+      AUTH_GATEKEEPERS: "google, github", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io",
+    }), { AUTH_GATEKEEPERS: "google,github,inferops", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io" });
+    assert.equal(getInferLabLoginVars(true, { AUTH_GATEKEEPERS: "InferOps" }).AUTH_GATEKEEPERS, "InferOps");
+  });
+});
+
+describe("inferLabLoginStartupError", () => {
+  it("passes when InferOps sign-in is not asked for, whatever else is set", () => {
+    assert.equal(inferLabLoginStartupError({}, false), null);
+    assert.equal(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "google", DISABLE_PASSWORD_AUTH: "true" }, false), null);
+    assert.equal(inferLabLoginStartupError({ INFERLAB_AUTH_ORIGIN: "nope" }, true), null);
+  });
+
+  it("fails clearly when password login is off and no gatekeeper could sign anyone in", () => {
+    assert.match(inferLabLoginStartupError({ DISABLE_PASSWORD_AUTH: "true" }, true)!, /no way to sign in/);
+    assert.match(inferLabLoginStartupError({ DISABLE_PASSWORD_AUTH: "true", AUTH_GATEKEEPERS: " , " }, true)!, /no way to sign in/);
+    assert.equal(inferLabLoginStartupError({ DISABLE_PASSWORD_AUTH: "false" }, false), null);
+  });
+
+  it("fails clearly when the gatekeeper is off or the InferLab origin is missing or malformed", () => {
+    assert.match(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: DEFAULT_INFERLAB_AUTH_ORIGIN }, false)!,
+      /gatekeeper-inferops is not enabled/);
+    assert.match(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "google,InferOps" }, true)!, /INFERLAB_AUTH_ORIGIN is not set/);
+    assert.match(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "http://auth.example" }, true)!,
+      /not a bare HTTPS origin/);
+    assert.equal(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "https://auth.example" }, true), null);
+    // The resolved wrapper settings always pass: the flag fills in the local origin.
+    assert.equal(inferLabLoginStartupError(getInferLabLoginVars(true, {}), true), null);
+  });
+
+  it("accepts the origins the gatekeeper accepts", () => {
+    for (const ok of ["https://auth.inferlab.io", "https://auth.inferlab.io/", "http://localhost:8080", " http://127.0.0.1:8080 "]) {
+      assert.equal(isInferLabAuthOrigin(ok), true, ok);
+    }
+    for (const bad of [undefined, "", "http://auth.inferlab.io", "https://auth.inferlab.io/sso", "https://u:p@auth.inferlab.io", "not a url"]) {
+      assert.equal(isInferLabAuthOrigin(bad), false, String(bad));
+    }
+  });
 });

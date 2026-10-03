@@ -5,7 +5,9 @@ import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, Ai
 import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
-import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
+import {
+  assertAuthGatekeepersConfigured, isPasswordAuthEnabled, getAuthGatekeeperAllowlist,
+} from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
@@ -40,6 +42,9 @@ const logger = createWorkshopLogger("workshop.server");
 // Set once we've asked the AdminSettings DO to install the bundled blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
 let bundledBlueprintInstallStarted = false;
+// The sign-in allowlist is checked once per isolate; a failure is retried by the next request, so
+// a gatekeeper that comes up late is not held against the deployment for the isolate's lifetime.
+let authGatekeepersChecked: Promise<void> | undefined;
 
 const USER_SEARCH_POLICY_CACHE_TTL_MS = 30_000;
 
@@ -919,6 +924,16 @@ export default {
     }
 
     if (url.pathname === "/api") {
+      // Fail closed on a sign-in allowlist the deployment cannot honour, with the reason.
+      try {
+        await (authGatekeepersChecked ??= assertAuthGatekeepersConfigured(env));
+      } catch (err) {
+        authGatekeepersChecked = undefined;
+        logger.error("sign-in is misconfigured", { event: "auth.gatekeepers.misconfigured", error: err });
+        return new Response(`Sign-in is misconfigured: ${err instanceof Error ? err.message : String(err)}`,
+          { status: 500 });
+      }
+
       // Make sure the bundled blueprints are installed. The AdminSettings DO doesn't wake
       // merely because someone deployed, so the install needs a trigger; hanging it off API
       // traffic means a fresh deployment is provisioned by its first visitor. Fire-and-forget,

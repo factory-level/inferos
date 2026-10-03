@@ -1,7 +1,7 @@
 ---
 title: Consumer configuration, profiles and durable views
 status: draft
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # Consumer configuration, profiles and durable views
@@ -16,7 +16,7 @@ Make a forkable consuming repository semi-configured for InferOps operations: pi
 
 - `inferos.config.json` is a versioned, nonsecret consumer contract. Validate unknown keys, types, version, Git pin, URL credentials and incompatible flags before starting or deploying.
 - The wrapper owns its files and custom code; `inferos/` is a pinned submodule. A bootstrap rerun preserves edits and does not perform an implicit upgrade.
-- Explicit flags are `composableViews`, `durableViews` and `customCloudflareCode`. Base defaults are false. The operations profile enables composable and durable layouts; custom Cloudflare code remains opt-in. New wrappers materialize these resolved defaults explicitly. Board data and agent view adapters remain pending.
+- Explicit flags are `composableViews`, `durableViews`, `customCloudflareCode` and `inferlabLogin`. Base defaults are false. The operations profile enables composable and durable layouts; custom Cloudflare code and InferLab sign-in remain opt-in, because profiles never change authentication policy. New wrappers materialize these resolved defaults explicitly. Board data and agent view adapters remain pending.
 - `durableViews` requires `composableViews`. Reject an incompatible combination instead of silently enabling a dependency. Flags are deployment choices, never credentials or permission grants.
 - Resolve defaults → selected profile → explicit wrapper overrides and report provenance. Existing Flagship rollout resolution must remain separate from structural installation capabilities: a rollout cannot activate a feature absent from the installation.
 - Enforce disabled features at server operation boundaries as well as UI discovery. Account, tenant, workspace and project authorization is always enforced independently.
