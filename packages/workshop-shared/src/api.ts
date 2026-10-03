@@ -408,9 +408,9 @@ export const getAuthErrorCode = authErrors.getCode;
 
 /**
  * A person's operate session (docs/design/operate-mode.md, "Sessions"): one continuous operate
- * chat plus a page state that is the replay of an ordered event log. The person's tabs, devices and
- * (later) the operate agent all change the page through `dispatch()`, applied by the shared
- * `applyOperateEvent`. The session holds references only and grants no access.
+ * chat plus a page state that is the replay of an ordered event log. The person's tabs and devices
+ * change the page through `dispatch()`, and the operate agent through the same log, each applied by
+ * the shared `applyOperateEvent`. The session holds references only and grants no access.
  */
 export interface OperateSession extends RpcTarget {
   /**
@@ -433,6 +433,13 @@ export interface OperateSession extends RpcTarget {
   /**
    * The owner-only workspace behind the session, where its operate chat runs. It is created on first
    * call and is never listed by `listGadgets()`.
+   *
+   * The returned capability is operate-only, however the workspace is opened (here or through
+   * `openGadget()`), and refused to anyone but its owner. It allows the chat, the action log and its
+   * approvals, connection requests, and reads of saved canvases and flows; every method that
+   * authors software (gadgets, code, canvas and flow edits, hooks, blueprints, sharing) rejects.
+   * Its chats' agents have no authoring tools: they work through connected resources, whose writes
+   * still wait for approval, and change the session's page with events logged as actor `"agent"`.
    */
   getWorkspace(): Promise<RpcStub<Overseer>>;
 }
