@@ -2293,6 +2293,18 @@ export interface Overseer extends RpcTarget {
   getGatekeeperById(id: WorkpieceId): Promise<GatekeeperClient<any>>;
 
   /**
+   * Get the existing gatekeeper bound to a resource, by the canonical URL the gatekeeper itself
+   * reports for it (ResourceDescription.url), or null if this workspace holds no connection to
+   * that resource. When several connections name the same resource, the oldest is returned.
+   *
+   * This only finds a connection that newGatekeeper() created, so the URL grants nothing: the
+   * capability was minted from the creator's connected account through the admin-policy
+   * chokepoint, and a collaborator was verified against it with their own account at open(). A
+   * null result is the cue to offer newGatekeeper(), never to connect on the caller's behalf.
+   */
+  getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+
+  /**
    * Try to create a new gatekeeper for this URL.
    *
    * `accountId` is the user's connected account to use to access this resource. To determine an
