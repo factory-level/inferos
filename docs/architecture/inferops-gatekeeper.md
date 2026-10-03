@@ -360,7 +360,8 @@ board rules.
 `packages/integration-tests/__tests__/inferops-isolation.test.ts` is the end-to-end isolation suite
 (#23): the real Workshop and the real gatekeeper Worker under `createTestHarness`, driven over the
 Workshop's RPC API, against a fake InferLab and InferOps (`packages/integration-tests/src/inferops-fake.ts`)
-behind the network interceptor, with no request escaping it. The gatekeeper runs with
+behind the network interceptor (the fake also has a runner lane, `runnerKey` and `serve()`, used by
+the mocked coding-runner suite; see [local coding workflows](local-coding-workflows.md#evidence)), with no request escaping it. The gatekeeper runs with
 `INFERLAB_AUTH_ORIGIN` and `INFEROPS_BASE_URL` set and no stopgap token, so every case uses a
 person's own account from the real connect flow: `connectAccount`, the gatekeeper's redirect to
 `/authorize`, the `/oauth` callback whose PKCE exchange the fake verifies, `GET /workspaces`, and
