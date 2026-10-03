@@ -2,8 +2,8 @@
 // drive the real InferOps gatekeeper through the real Workshop.
 //
 // It answers what the gatekeeper calls and nothing more: InferLab's authorization-code + PKCE token
-// exchange, refresh and logout; InferOps' `GET /workspaces`, project list, board, issue read, and the
-// three issue writes. Its rules are the ones the isolation suite leans on, taken from InferOps:
+// exchange, refresh and logout; InferOps' `GET /workspaces`, project list, board, issue read, the
+// three issue writes, and coding dispatch (repositories, runs, dispatch and cancel). Its rules are the ones the isolation suite leans on, taken from InferOps:
 //
 // - A token belongs to one person. Every InferOps request is authorized by that token *and* the
 //   person's current membership of the `x-workspace-id` workspace (401 for a dead token, 403 for a
@@ -14,6 +14,11 @@
 // - Revisions are decimal strings; a write naming another revision is a 409 `STALE_REVISION`.
 // - Writes carry `x-idempotency-key`. The first response under a key is stored and replayed for
 //   every later request with that key, without writing again.
+// - Dispatch and cancel need the person's `issue:delegate` (`grantDelegate`; nobody holds it by
+//   default, as InferOps' write roles do not), else 403. A dispatch is refused 409 `RUN_ACTIVE` while
+//   the issue has a queued or running run, 400 `VALIDATION` for a repository that is not enrolled
+//   and enabled in the workspace, and 409 `STALE_REVISION`; it queues a run and advances the issue's
+//   revision. Runs are workspace-wide, as in InferOps: their issue decides their project.
 //
 // Failure switches: `failNextRequests` (503 for the next N InferOps calls), `failNextWrites` (503 for
 // the next N writes, before anything is committed), and `loseNextWriteResponse` (commit the next
@@ -74,6 +79,13 @@ export const PROJECTS: Record<"ENG" | "WEB" | "OPS", ProjectDef> = {
 
 const ISSUE_PREFIX: Record<keyof typeof PROJECTS, string> = { ENG: "3e", WEB: "3d", OPS: "3f" };
 
+/** The repositories each workspace has enrolled for coding. `infra` is disabled. */
+export const REPOS = {
+  webApp: { id: "5e000000-0000-4000-8000-000000000001", slug: "web-app", workspace: "operations" as WorkspaceSlug, enabled: true },
+  infra: { id: "5e000000-0000-4000-8000-000000000002", slug: "infra", workspace: "operations" as WorkspaceSlug, enabled: false },
+  desk: { id: "5e000000-0000-4000-8000-000000000003", slug: "desk-tools", workspace: "knowledge" as WorkspaceSlug, enabled: true },
+} as const;
+
 /** The issues every fake starts with. */
 export const SEEDED_ISSUES = ["ENG-1", "ENG-2", "WEB-1", "OPS-1"] as const;
 
@@ -97,6 +109,14 @@ export type FakePerson = {
   readonly userId: string;
   readonly email: string;
   workspaces: Set<WorkspaceSlug>;
+  /** Whether the person holds InferOps' `issue:delegate`, which dispatch and cancel need. */
+  canDelegate: boolean;
+};
+
+/** One coding run, as InferOps stores it. */
+export type FakeRun = {
+  id: string; issueId: string; repoId: string; status: string; baseRef: string | null;
+  requestedBy: string;
 };
 
 /** One request that reached the InferOps API, as it arrived. */
@@ -113,7 +133,7 @@ export type FakeRequest = {
 
 /** One write InferOps committed. */
 export type FakeCommit = {
-  operation: "create" | "update" | "transition";
+  operation: "create" | "update" | "transition" | "dispatch" | "cancel";
   issueId: string;
   idempotencyKey: string;
   person: string;
@@ -159,6 +179,7 @@ export class InferOpsFake {
   readonly #codes = new Map<string, PendingCode>();
   readonly #issues = new Map<string, FakeIssue>();
   readonly #idempotency = new Map<string, Stored>();
+  readonly #runs = new Map<string, FakeRun>();
   #serial = 0;
 
   constructor() {
@@ -193,9 +214,28 @@ export class InferOpsFake {
     if (this.#people.has(label)) throw new Error(`Person ${label} already exists`);
     const person: FakePerson = {
       userId: `user-${label}`, email: `${label}@acme.test`, workspaces: new Set(workspaces),
+      canDelegate: false,
     };
     this.#people.set(label, person);
     return person;
+  }
+
+  /** Give the person InferOps' `issue:delegate`, so they may dispatch and cancel runs. */
+  grantDelegate(person: FakePerson): void {
+    person.canDelegate = true;
+  }
+
+  /** The runs of `identifier`'s issue, oldest first. */
+  runsOf(identifier: string): FakeRun[] {
+    const issue = this.issue(identifier);
+    return [...this.#runs.values()].filter(r => r.issueId === issue.id);
+  }
+
+  /** The runner moves a run on, as `inferops runner` would report it. */
+  setRunStatus(runId: string, status: string): void {
+    const run = this.#runs.get(runId);
+    if (!run) throw new Error(`No run ${runId}`);
+    run.status = status;
   }
 
   /** Change a person's memberships, in InferLab and InferOps alike, from now on. */
@@ -341,6 +381,13 @@ export class InferOpsFake {
     };
   }
 
+  #wireRun(run: FakeRun) {
+    return {
+      ...run, action: "code", externalRunId: null, leaseGeneration: "1", result: null, error: null,
+      queuedAt: "2026-10-03T00:00:00.000Z", startedAt: null, finishedAt: null,
+    };
+  }
+
   async #inferops(url: URL, method: string, headers: Headers, request: Request): Promise<Response> {
     const token = headers.get("authorization")?.replace(/^Bearer /, "") ?? null;
     const session = token ? this.#sessions.find(s => s.access === token && s.live) : undefined;
@@ -377,7 +424,30 @@ export class InferOpsFake {
       return issue && projects.some(p => p.id === issue.projectId) ? issue : undefined;
     };
 
+    const runIn = (id: string) => {
+      const run = this.#runs.get(id);
+      return run && issueIn(run.issueId) ? run : undefined;
+    };
+
     if (method === "GET") {
+      if (url.pathname === "/project/repos") {
+        return json({ repos: Object.values(REPOS).filter(r => r.workspace === slug).map(r => ({
+          id: r.id, slug: r.slug, gitUrl: `git@forge.test:acme/${r.slug}.git`, defaultBaseRef: "main",
+          enabled: r.enabled,
+        })) });
+      }
+      if (url.pathname === "/project/runs") {
+        const issueId = url.searchParams.get("issueId");
+        const limit = Number(url.searchParams.get("limit") ?? 50);
+        const runs = [...this.#runs.values()].toReversed()
+          .filter(r => issueIn(r.issueId) && (!issueId || r.issueId === issueId)).slice(0, limit);
+        return json({ runs: runs.map(r => this.#wireRun(r)) });
+      }
+      const runMatch = /^\/project\/runs\/([^/]+)$/.exec(url.pathname);
+      if (runMatch) {
+        const run = runIn(runMatch[1]!);
+        return run ? json({ run: this.#wireRun(run) }) : failure(404, "NOT_FOUND", "no such run");
+      }
       if (url.pathname === "/project/projects") {
         return json({ projects: projects.map(({ id, identifier, name }) => ({ id, identifier, name })) });
       }
@@ -403,9 +473,12 @@ export class InferOpsFake {
     // Writes.
     const key = record.idempotencyKey;
     if (!key) return failure(400, "INVALID_REQUEST", "missing idempotency key");
-    const operation = method === "POST" && url.pathname === "/project/issues" ? "create"
+    const operation: FakeCommit["operation"] | null =
+      method === "POST" && url.pathname === "/project/issues" ? "create"
       : method === "PATCH" ? "update"
-      : url.pathname.endsWith("/transition") ? "transition" : null;
+      : url.pathname.endsWith("/transition") ? "transition"
+      : url.pathname.endsWith("/dispatch") ? "dispatch"
+      : /^\/project\/runs\/[^/]+\/cancel$/.test(url.pathname) ? "cancel" : null;
     if (!operation) return failure(404, "NOT_FOUND", "no route");
     const stored = this.#idempotency.get(`${operation}:${key}`);
     if (stored) {
@@ -417,11 +490,14 @@ export class InferOpsFake {
       return failure(503, "UNAVAILABLE", "upstream down");
     }
     const body = await request.json() as Record<string, unknown>;
-    const result = this.#write(operation, url, body, projects, issueIn);
+    const result = operation === "dispatch" || operation === "cancel"
+      ? this.#runWrite(operation, url, body, person, issueIn, runIn)
+      : this.#write(operation, url, body, projects, issueIn);
     if (result.status >= 300) return json(result.body, result.status);
     this.#idempotency.set(`${operation}:${key}`, result);
+    const written = result.body as { issue?: { id: string }; run?: { issueId: string } };
     this.commits.push({
-      operation, issueId: (result.body as { issue: { id: string } }).issue.id, idempotencyKey: key,
+      operation, issueId: written.issue?.id ?? written.run!.issueId, idempotencyKey: key,
       person: record.person!,
     });
     if (this.loseNextWriteResponse) {
@@ -466,6 +542,37 @@ export class InferOpsFake {
     }
     issue.revision = String(Number(issue.revision) + 1);
     return { status: 200, body: { issue: this.#wireIssue(issue) } };
+  }
+
+  #runWrite(operation: "dispatch" | "cancel", url: URL, body: Record<string, unknown>,
+             person: FakePerson, issueIn: (id: string) => FakeIssue | undefined,
+             runIn: (id: string) => FakeRun | undefined): Stored {
+    if (!person.canDelegate) return err(403, "FORBIDDEN");
+    if (operation === "cancel") {
+      const run = runIn(/^\/project\/runs\/([^/]+)/.exec(url.pathname)?.[1] ?? "");
+      if (!run) return err(404, "NOT_FOUND");
+      if (run.status !== "queued" && run.status !== "running") return err(409, "CONFLICT");
+      run.status = run.status === "queued" ? "cancelled" : "unknown";
+      return { status: 200, body: { run: this.#wireRun(run) } };
+    }
+    const issue = issueIn(/^\/project\/issues\/([^/]+)/.exec(url.pathname)?.[1] ?? "");
+    if (!issue) return err(404, "NOT_FOUND");
+    if (body.action !== "code") return err(400, "VALIDATION");
+    if ([...this.#runs.values()].some(r => r.issueId === issue.id &&
+        (r.status === "queued" || r.status === "running"))) {
+      return err(409, "RUN_ACTIVE");
+    }
+    const repo = Object.values(REPOS).find(r => r.id === body.repoId);
+    const project = Object.values(PROJECTS).find(p => p.id === issue.projectId)!;
+    if (!repo || !repo.enabled || repo.workspace !== project.workspace) return err(400, "VALIDATION");
+    if (body.expectedRevision !== issue.revision) return err(409, "STALE_REVISION");
+    const run: FakeRun = {
+      id: randomUUID(), issueId: issue.id, repoId: repo.id, status: "queued",
+      baseRef: typeof body.baseRef === "string" ? body.baseRef : null, requestedBy: person.userId,
+    };
+    this.#runs.set(run.id, run);
+    issue.revision = String(Number(issue.revision) + 1);
+    return { status: 201, body: { run: this.#wireRun(run) } };
   }
 
   issuesOfProject(projectId: string): FakeIssue[] {

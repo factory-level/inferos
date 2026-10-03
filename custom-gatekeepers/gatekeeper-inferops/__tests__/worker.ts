@@ -8,16 +8,16 @@ import type {
   ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { InferOpsProjectGatekeeper } from "../src/inferops.js";
-import type { InferOpsProjectSession } from "../src/types.js";
+import { InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper } from "../src/inferops.js";
+import type { InferOpsDispatchSession, InferOpsProjectSession } from "../src/types.js";
 
 export { default } from "../src/inferops.js";
 export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsProjectGatekeeper,
-  InferOpsVerifier, MockInferOps,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsDispatchGatekeeper,
+  InferOpsProjectGatekeeper, InferOpsVerifier, MockInferOps,
 } from "../src/inferops.js";
 
 /**
@@ -25,6 +25,17 @@ export {
  * the way an older version (or a corrupted store) left it.
  */
 export class TestProjectGatekeeper extends InferOpsProjectGatekeeper {
+  async putRaw(key: string, value: unknown): Promise<void> {
+    this.ctx.storage.kv.put(key, value);
+  }
+
+  async getRaw(key: string): Promise<unknown> {
+    return this.ctx.storage.kv.get(key);
+  }
+}
+
+/** The production dispatch gatekeeper plus raw storage access, as `TestProjectGatekeeper`. */
+export class TestDispatchGatekeeper extends InferOpsDispatchGatekeeper {
   async putRaw(key: string, value: unknown): Promise<void> {
     this.ctx.storage.kv.put(key, value);
   }
@@ -46,6 +57,8 @@ export type QueueLog = {
     id: number; title: string; description: string; implementsRevert: boolean;
     /** Each field's label and shown value. */
     fields: Record<string, string>;
+    /** The action kind's tag, when the action declares one. */
+    kind?: string;
   }>;
 };
 
@@ -66,6 +79,7 @@ class TestApprovalQueue extends RpcTarget {
     this.log.actions.push({
       id, title: description.title, description: description.description,
       implementsRevert: description.implementsRevert ?? false, fields,
+      ...(description.actionKind ? { kind: description.actionKind.tag } : {}),
     });
   }
 
@@ -146,6 +160,7 @@ type TestExports = {
   TestProjectGatekeeper(options: { props: BindingProps }):
     DurableObjectClass<TestProjectGatekeeper>;
   InferOpsAccount(options: { props: AccountProps }): Fetcher<GatekeeperUser>;
+  TestDispatchGatekeeper(options: { props: BindingProps }): DurableObjectClass<TestDispatchGatekeeper>;
 };
 
 /** The project configurator's capability, as the picker iframe receives it. */
@@ -181,6 +196,21 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async describeAccount(props: AccountProps) {
     return this.#account(props).describe();
+  }
+
+  /** The resource URL patterns the account offers now. */
+  async supportedPatterns(props: AccountProps): Promise<string[]> {
+    return (await this.#account(props).getSupportedResources()).map(r => r.urlPattern);
+  }
+
+  /** Whether the account starts a configurator for `pattern`; the failure message, or null. */
+  async configuratorFor(props: AccountProps, pattern: string): Promise<string | null> {
+    try {
+      await this.#account(props).startResourceConfigurator(pattern);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
   }
 
   async authenticatedEmail(props: AccountProps): Promise<string | null> {
@@ -220,6 +250,19 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     const cls = this.#minted.get(name);
     if (!cls) throw new Error(`No binding named ${name}.`);
     return this.ctx.facets.get<InferOpsProjectGatekeeper>(`minted/${name}`, () => ({ class: cls }));
+  }
+
+  /** A dispatch session over a dispatch binding `bindAccount` made under `name`. */
+  async startBoundDispatchSession(name: string): Promise<InferOpsDispatchSession> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsDispatchGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsDispatchGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** What `bindAccount` minted under `name`, by the resource description it gives. */
+  async describeBound(name: string) {
+    return this.#bound(name).describe();
   }
 
   /** A session over a binding `bindAccount` made under `name`. */
@@ -267,6 +310,48 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return messageOf(error);
     }
+  }
+
+  #dispatchGatekeeper(props: BindingProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<TestDispatchGatekeeper>(
+      `${props.accountId}/dispatch/${props.projectKey}`,
+      () => ({ class: exports.TestDispatchGatekeeper({ props }) }));
+  }
+
+  /** A coding-dispatch session over a dispatch binding with these props. */
+  async startDispatchSession(props: BindingProps): Promise<InferOpsDispatchSession> {
+    return this.#dispatchGatekeeper(props).startSession(
+      new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Apply an action of a dispatch binding; returns the failure message, or null on success. */
+  async applyDispatch(props: BindingProps, actionId: number): Promise<string | null> {
+    try {
+      await this.#dispatchGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache()));
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  async rejectDispatch(props: BindingProps, actionId: number): Promise<void> {
+    await this.#dispatchGatekeeper(props).rejectAction(actionId);
+  }
+
+  async revertDispatch(props: BindingProps, actionId: number): Promise<string | null> {
+    const result = await this.#dispatchGatekeeper(props).revertAction(actionId);
+    return result?.message ?? null;
+  }
+
+  /** A raw record of a dispatch binding's storage. */
+  async getDispatchRaw(props: BindingProps, key: string): Promise<unknown> {
+    return this.#dispatchGatekeeper(props).getRaw(key);
+  }
+
+  /** Write a raw record into a dispatch binding's storage. */
+  async putDispatchRaw(props: BindingProps, key: string, value: unknown): Promise<void> {
+    await this.#dispatchGatekeeper(props).putRaw(key, value);
   }
 
   /** A session over a binding, recording into this object's queue log. */

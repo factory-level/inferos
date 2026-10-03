@@ -16,6 +16,15 @@
 // - Sessions: `InferOpsProjectSession` reads the board, proposes new issues and narrows to one
 //   issue with `openIssue`; `InferOpsIssueSession` reads that issue and proposes transitions and
 //   field updates.
+// - Coding dispatch is a second, separate resource kind,
+//   `inferops://<tenant>.<workspace>/project/dispatch/<KEY>`, bound by the same rules into an
+//   `InferOpsDispatchGatekeeper` facet. A board binding cannot dispatch. `InferOpsDispatchSession`
+//   lists repositories and runs (observations) and proposes dispatches and cancels (actions). It is
+//   offered and served only while the deployment has `CODING_WORKBENCH_ENABLED` on
+//   (coding-workbench.ts),
+//   and only for repositories on the wrapper's allowlist (`CODING_WORKBENCH_REPOS`), checked before
+//   any request at proposal and again at apply. InferOps itself requires `issue:delegate` of the
+//   person, so a connection without it is refused at apply with FORBIDDEN.
 // - Every returned read is authorized as an observation. Every write is checked against the
 //   simulated board, recorded with the exact request it will send and that request's fingerprint
 //   (actions.ts), and submitted as an action; none is auto-approvable. Until it is decided, reads
@@ -58,34 +67,41 @@ import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired,
 } from "@gadgets/gatekeeper-kit/credentials";
 import {
-  InferOpsError, inferOpsErrorCode, type InferOpsClient, type ProjectSummary,
+  InferOpsError, inferOpsErrorCode, type InferOpsClient, type ProjectSummary, type RunRecord,
 } from "./inferops-client";
 import {
   connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
 import { assertInferOpsEnabled, whileInferOpsEnabled } from "./enablement";
+import {
+  assertCodingWorkbenchEnabled, assertRepoAllowlisted, codingRepoAllowlist, codingWorkbenchEnabled,
+  whileCodingWorkbenchEnabled,
+} from "./coding-workbench";
 import { InferOpsCredentials, type InferOpsWorkspace } from "./inferops-credentials";
 import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
 } from "./inferlab-login";
 import {
-  DEMO_HOST, PROJECT_BOARD_RESOURCE, parseHost, parseProjectBoardUrl, projectBoardUrl,
+  DEMO_HOST, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, parseHost, parseProjectBoardUrl,
+  parseProjectDispatchUrl, projectBoardUrl, projectDispatchUrl, projectResourceKind,
 } from "./resources";
 import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
 } from "./simulation";
 import {
-  fingerprintOf, isIssueChange, matchesFingerprint, readAction, type ActionRecord,
-  type CreateAction, type StagedAction, type UpdateAction,
+  fingerprintOf, isCodingAction, isIssueChange, matchesFingerprint, readAction, type ActionRecord,
+  type CancelRunAction, type CreateAction, type DispatchAction, type StagedAction, type UpdateAction,
 } from "./actions";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
-  Board, InferOpsIssueSession, InferOpsProjectSession, Issue, IssueChanges, NewIssue, Revision,
+  Board, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession, Issue,
+  IssueChanges, NewIssue, Repo, Revision, Run,
 } from "./types";
 import type { NewIssueRequest } from "./inferops-client";
 import TYPES_CODE from "./types.txt";
 import PROJECT_CONFIGURATOR_HTML from "./generated/project-ui.txt";
+import DISPATCH_CONFIGURATOR_HTML from "./generated/dispatch-ui.txt";
 
 export { InferLabLogin, InferOpsCredentials, MockInferOps };
 
@@ -228,6 +244,23 @@ function openClientFor(
   return mock();
 }
 
+/**
+ * The data source for a coding-dispatch binding: the same source as `clientFor`, refused with
+ * `DISABLED` on every call while InferOps or coding dispatch is off.
+ */
+function codingClientFor(
+  env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
+  workspaceId?: string,
+): InferOpsClient {
+  return whileCodingWorkbenchEnabled(env, () => openClientFor(env, exports, account, host, workspaceId));
+}
+
+/** The resource kinds offered now: coding dispatch only while the deployment has it on. */
+function supportedResources(env: Cloudflare.Env): SupportedResource[] {
+  return codingWorkbenchEnabled(env)
+    ? [PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE] : [PROJECT_BOARD_RESOURCE];
+}
+
 /** The message every refused binding gets, whatever was missing: workspace, host or project. */
 function unavailableProject(projectKey: string, host: string): string {
   return `No InferOps project ${projectKey} is available on ${host}.`;
@@ -290,7 +323,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   }
 
   async getSupportedResources(_options?: { userId?: string }): Promise<SupportedResource[]> {
-    return [PROJECT_BOARD_RESOURCE];
+    return supportedResources(this.env);
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -324,7 +357,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return [PROJECT_BOARD_RESOURCE];
+    return supportedResources(this.env);
   }
 
   /**
@@ -351,11 +384,12 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   }
 
   /**
-   * Bind one project board. The URL only names the target: its workspace slug must be one of the
-   * person's own, the project must exist there for this account, and the resulting class carries
-   * the account, host, key and (for a connected account) workspace id in its props, which is the
-   * only place the gatekeeper ever reads its scope from. A workspace the person lacks, an unknown
-   * host and a missing project are refused with one message, so a URL cannot probe for any of them.
+   * Bind one project board, or one project's coding dispatch. The URL only names the target: its
+   * workspace slug must be one of the person's own, the project must exist there for this account,
+   * and the resulting class carries the account, host, key and (for a connected account) workspace
+   * id in its props, which is the only place the gatekeeper ever reads its scope from. A workspace
+   * the person lacks, an unknown host and a missing project are refused with one message, so a URL
+   * cannot probe for any of them. A dispatch binding is refused while coding dispatch is off.
    */
   @skipRpcValidation()
   async getGatekeeperClassFor(url: string): Promise<{
@@ -363,7 +397,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     resource: SupportedResource;
   }> {
     assertInferOpsEnabled(this.env);
-    const { host, projectKey } = parseProjectBoardUrl(url);
+    const dispatch = projectResourceKind(url) === "dispatch";
+    if (dispatch) assertCodingWorkbenchEnabled(this.env);
+    const { host, projectKey } = dispatch ? parseProjectDispatchUrl(url) : parseProjectBoardUrl(url);
     const workspaceId = await this.#workspaceFor(host);
     if (!(await this.#hasProject(host, workspaceId, projectKey))) {
       throw new Error(unavailableProject(projectKey, host));
@@ -372,21 +408,24 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     const props: ProjectGatekeeperProps = {
       accountId, connected, host, projectKey, workspaceId: workspaceId ?? undefined,
     };
-    return {
-      class: this.ctx.exports.InferOpsProjectGatekeeper({ props }),
-      resource: PROJECT_BOARD_RESOURCE,
-    };
+    return dispatch
+      ? { class: this.ctx.exports.InferOpsDispatchGatekeeper({ props }), resource: PROJECT_DISPATCH_RESOURCE }
+      : { class: this.ctx.exports.InferOpsProjectGatekeeper({ props }), resource: PROJECT_BOARD_RESOURCE };
   }
 
   @skipRpcValidation()
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
-    if (resourceUrlPattern !== PROJECT_BOARD_RESOURCE.urlPattern) {
+    const iframeHtml = resourceUrlPattern === PROJECT_BOARD_RESOURCE.urlPattern
+      ? PROJECT_CONFIGURATOR_HTML
+      : resourceUrlPattern === PROJECT_DISPATCH_RESOURCE.urlPattern && codingWorkbenchEnabled(this.env)
+        ? DISPATCH_CONFIGURATOR_HTML : null;
+    if (!iframeHtml) {
       throw new Error(`Unsupported InferOps resource configurator type: ${resourceUrlPattern}`);
     }
     const store = this.ctx.props.connected ? this.#credentials() : null;
     const stopgap = store ? null : connectionFromEnv(this.env);
     return {
-      iframeHtml: PROJECT_CONFIGURATOR_HTML,
+      iframeHtml,
       ui: new RpcStub(new InferOpsProjectConfiguratorUI({
         // Demo data needs no organization or workspace; every other account must name both.
         defaultHost: store || stopgap ? null : DEMO_HOST,
@@ -578,9 +617,22 @@ class ProjectBinding {
       const record = readAction(raw);
       if (record?.status !== "pending") continue;
       if (isIssueChange(record)) changes.push(record);
-      else creates.push(record);
+      else if (record.kind === "create") creates.push(record);
     }
     return { changes, creates };
+  }
+
+  /** The pending actions of a coding-dispatch binding. */
+  codingPending(): { dispatches: DispatchAction[]; cancels: CancelRunAction[] } {
+    const dispatches: DispatchAction[] = [];
+    const cancels: CancelRunAction[] = [];
+    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
+      const record = readAction(raw);
+      if (record?.status !== "pending") continue;
+      if (record.kind === "dispatch") dispatches.push(record);
+      else if (record.kind === "cancel") cancels.push(record);
+    }
+    return { dispatches, cancels };
   }
 
   /**
@@ -653,13 +705,7 @@ export class InferOpsProjectGatekeeper
 
   /** Strategy B: the binding is one project, so admit an observer who can open that project. */
   async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    const { host, projectKey, workspaceId } = this.ctx.props;
-    const verifier = user as unknown as Fetcher<InferOpsVerifierApi>;
-    if (!(await verifier.hasProjectAccess(host, projectKey, workspaceId))) {
-      throw new Error(
-        `This collaborator cannot open InferOps project ${projectKey}, so they cannot observe ` +
-        `data the Gadget read from its board.`);
-    }
+    await admitProjectObserver(this.ctx.props, user);
   }
 
   /** Nothing is tracked per observer under strategy B. */
@@ -677,6 +723,7 @@ export class InferOpsProjectGatekeeper
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
     if (record.status === "applied") return;
     if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
+    if (isCodingAction(record)) throw new Error(`InferOps action ${actionId} is not a board action.`);
     const fields = { projectKey: binding.projectKey, action: actionId };
     if (!(await matchesFingerprint(binding.projectKey, record))) {
       logger.error("action no longer matches its fingerprint", {
@@ -735,6 +782,7 @@ export class InferOpsProjectGatekeeper
     if (!record || record.status !== "applied") {
       return { message: "This change was never applied, so there is nothing to revert." };
     }
+    if (isCodingAction(record)) return { message: "This is not a board action." };
     if (record.kind === "create") {
       return {
         message: `Creating ${record.createdIdentifier ?? "an issue"} cannot be undone here. ` +
@@ -778,6 +826,21 @@ export class InferOpsProjectGatekeeper
   }
 }
 
+/**
+ * Observer strategy B, for both kinds of binding: a binding is one project, so a collaborator is
+ * admitted when their own account can open that project in the binding's workspace.
+ */
+async function admitProjectObserver(props: ProjectGatekeeperProps,
+                                    user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+  const { host, projectKey, workspaceId } = props;
+  const verifier = user as unknown as Fetcher<InferOpsVerifierApi>;
+  if (!(await verifier.hasProjectAccess(host, projectKey, workspaceId))) {
+    throw new Error(
+      `This collaborator cannot open InferOps project ${projectKey}, so they cannot observe ` +
+      `data the Gadget read from it.`);
+  }
+}
+
 /** Whether `current` is exactly what `update` left: its revision and the values it set. */
 function stillShowsUpdate(update: UpdateAction, current: Issue): boolean {
   const { title, priority } = update.changes;
@@ -795,12 +858,22 @@ function actionLabel(record: ActionRecord): string {
       return `Creating "${plainInline(record.issue.title, 60)}"`;
     case "update":
       return `The update of ${record.identifier}`;
+    case "dispatch":
+      return `Dispatching ${record.identifier} to ${plainInline(record.repoSlug, 60)}`;
+    case "cancel":
+      return `Cancelling the run of ${record.identifier}`;
   }
 }
 
 function applyFailureMessage(record: ActionRecord, code: string | null): string {
   const what = actionLabel(record);
-  const noun = { transition: "move", create: "issue", update: "update" }[record.kind];
+  if (isCodingAction(record)) {
+    const coding = codingFailureMessage(record, what, code);
+    if (coding) return coding;
+  }
+  const noun = {
+    transition: "move", create: "issue", update: "update", dispatch: "dispatch", cancel: "cancel",
+  }[record.kind];
   switch (code) {
     case "STALE_REVISION":
       return `${what} was not applied: the issue changed in InferOps after this ${noun} was ` +
@@ -830,6 +903,40 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
         `applied once InferOps is turned back on.`;
     default:
       return `${what} could not be applied. Try again later.`;
+  }
+}
+
+/** The failure messages specific to dispatches and cancels; null falls back to the shared ones. */
+function codingFailureMessage(record: DispatchAction | CancelRunAction, what: string,
+                              code: string | null): string | null {
+  switch (code) {
+    case "UNAUTHORIZED":
+    case "FORBIDDEN":
+      return `${what} was not applied: your InferOps connection needs dispatch permission ` +
+        `(issue:delegate) in InferOps for this workspace.`;
+    case "RUN_ACTIVE":
+      return `${what} was not applied: ${record.identifier} already has a queued or running run ` +
+        `in InferOps. Follow it or cancel it first.`;
+    case "DISABLED":
+      return `${what} was not applied: coding dispatch is turned off for this deployment. It can ` +
+        `be applied once it is turned back on.`;
+    case "WORKFLOW_MISMATCH":
+      return `${what} was not applied: only software issues can be coded.`;
+    case "CONFLICT":
+      return record.kind === "dispatch"
+        ? `${what} was not applied: InferOps refused it in the issue's current condition (it is ` +
+          `closed, or its lease is quarantined). Read the board again.`
+        : `${what} was not applied: the run has already finished.`;
+    case "INVALID_REQUEST":
+      return record.kind === "dispatch"
+        ? `${what} was not applied: InferOps rejected it (the repository may be disabled or no ` +
+          `longer enrolled).`
+        : null;
+    case "NOT_FOUND":
+      return `${what} was not applied: the ${record.kind === "dispatch" ? "issue" : "run"} is no ` +
+        `longer in this project.`;
+    default:
+      return null;
   }
 }
 
@@ -1092,6 +1199,328 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       title: sanitizeTitle(`Update ${issue.identifier}: ${named.join(", ")}`),
       ...description.finish(),
       implementsRevert: sent.description === undefined,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Coding-dispatch gatekeeper (a facet of the Overseer, one per dispatch binding)
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISSUE_KEY = /^[A-Z][A-Z0-9]{0,15}-\d{1,9}$/;
+/** InferOps' git ref rule (`GIT_REF_NAME` in run.dto.ts): it reaches the runner's command line. */
+const GIT_REF = /^(?![-/])(?!.*\/\/)(?!.*\.\.)(?!.*@\{)[^\s~^:?*[\\]+(?<![/.])$/;
+const PROVISIONAL_RUN = "pending-";
+const ACTIVE_RUN: ReadonlySet<Run["status"]> = new Set(["queued", "running"]);
+
+@validateRpc()
+export class InferOpsDispatchGatekeeper
+    extends DurableObject<Cloudflare.Env, ProjectGatekeeperProps>
+    implements Gatekeeper<InferOpsDispatchSession> {
+  #binding(): ProjectBinding {
+    const { accountId, connected, host, workspaceId } = this.ctx.props;
+    return new ProjectBinding(this.ctx,
+      codingClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId));
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    const { host, projectKey } = this.ctx.props;
+    return {
+      url: projectDispatchUrl({ host, projectKey }),
+      title: `InferOps coding dispatch ${projectKey}`,
+      snippet: `Coding dispatch for InferOps project ${projectKey} on ${host}: propose handing its ` +
+        `software issues to the local coding runner, and follow or cancel the runs.`,
+      suggestedBindingName: "INFEROPS_DISPATCH",
+      tsType: "InferOpsDispatchSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
+  /** Every dispatch and cancel waits for review; none is auto-approvable. */
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsDispatchSession> {
+    return new DispatchSessionImpl(this.#binding(), approvalQueue.dup(), this.env);
+  }
+
+  /** Strategy B, as for a board binding. */
+  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    await admitProjectObserver(this.ctx.props, user);
+  }
+
+  /** Nothing is tracked per observer under strategy B. */
+  async removeObserver(_id: string): Promise<void> {}
+
+  /**
+   * Send the recorded dispatch or cancel under the action's idempotency key, after checking that
+   * coding dispatch is still on, that a dispatch's repository is still allowlisted, and that the
+   * request still matches its fingerprint; InferOps rechecks the person's `issue:delegate`, the
+   * project scope (through the client), the issue's condition and revision. A cancel answered
+   * CONFLICT for a run that has already stopped counts as applied: there is nothing left to stop.
+   */
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+    const binding = this.#binding();
+    const record = binding.action(actionId);
+    if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
+    if (record.status === "applied") return;
+    if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
+    if (!isCodingAction(record)) throw new Error(`InferOps action ${actionId} is not a coding action.`);
+    const fields = { projectKey: binding.projectKey, action: actionId };
+    if (!(await matchesFingerprint(binding.projectKey, record))) {
+      logger.error("action no longer matches its fingerprint", {
+        event: "action.fingerprint.mismatch", ...fields, code: "IDEMPOTENCY_CONFLICT",
+      });
+      throw new Error(applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
+    }
+    const refusal = (error: unknown): Error => {
+      const code = inferOpsErrorCode(error);
+      logger.warn(`${record.kind} failed`, {
+        event: `${record.kind}.apply.failed`, ...fields, code: code ?? "UNKNOWN", error,
+      });
+      return new Error(applyFailureMessage(record, code), { cause: error });
+    };
+    try {
+      assertCodingWorkbenchEnabled(this.env);
+    } catch (error) {
+      throw refusal(error);
+    }
+    if (record.kind === "dispatch" && !codingRepoAllowlist(this.env).has(record.repoId.toLowerCase())) {
+      logger.warn("dispatch refused: repository not allowlisted", {
+        event: "dispatch.apply.not_allowlisted", ...fields, code: "FORBIDDEN",
+      });
+      throw new Error(`${actionLabel(record)} was not applied: the repository is no longer on ` +
+        `this deployment's coding allowlist.`);
+    }
+    const key = binding.idempotencyKey(actionId);
+    let applied: ActionRecord;
+    try {
+      if (record.kind === "dispatch") {
+        const run = await binding.client.dispatchIssue(binding.projectKey, record.issueId, {
+          repoId: record.repoId, baseRef: record.baseRef, expectedRevision: record.expectedRevision,
+        }, key);
+        applied = { ...record, status: "applied", runId: run.id };
+      } else {
+        await cancelOrConfirmStopped(binding, record.runId, key);
+        applied = { ...record, status: "applied" };
+      }
+    } catch (error) {
+      throw refusal(error);
+    }
+    binding.putAction(applied);
+    logger.info(`${record.kind} applied`, { event: `${record.kind}.applied`, ...fields });
+  }
+
+  /** Forget the pending action; reads stop simulating it at once. */
+  async rejectAction(actionId: number): Promise<void> {
+    const binding = this.#binding();
+    if (binding.action(actionId)?.status === "pending") binding.deleteAction(actionId);
+  }
+
+  /** Neither kind is revertible: a dispatch is stopped by a cancel, and a stopped run stays stopped. */
+  async revertAction(actionId: number):
+      Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
+    const record = this.#binding().action(actionId);
+    return {
+      message: record?.kind === "dispatch"
+        ? `A dispatch cannot be undone. Cancel the run of ${record.identifier} instead.`
+        : "A cancelled run cannot be restarted. Dispatch the issue again instead.",
+    };
+  }
+}
+
+/**
+ * Cancel the run; when InferOps answers CONFLICT because it has already stopped (a retried apply
+ * whose first response was lost, or someone else stopping it), that is the outcome asked for.
+ */
+async function cancelOrConfirmStopped(binding: ProjectBinding, runId: string, key: string) {
+  try {
+    await binding.client.cancelRun(binding.projectKey, runId, key);
+  } catch (error) {
+    if (inferOpsErrorCode(error) !== "CONFLICT") throw error;
+    const run = await binding.client.readRun(binding.projectKey, runId);
+    if (ACTIVE_RUN.has(run.status)) throw error;
+  }
+}
+
+/** A run as the caller sees it: a real one, marked when a cancel of it is pending. */
+function shownRun(run: RunRecord, cancels: CancelRunAction[]): Run {
+  return cancels.some(c => c.runId === run.id) ? { ...run, pending: "cancel" } : run;
+}
+
+/** The provisional run a pending dispatch shows as until it is decided. */
+function provisionalRun(dispatch: DispatchAction): Run {
+  return {
+    id: `${PROVISIONAL_RUN}${dispatch.actionId}`, issueId: dispatch.issueId,
+    issueIdentifier: dispatch.identifier, repoId: dispatch.repoId, status: "queued",
+    baseRef: dispatch.baseRef ?? null, externalRunId: null, result: null, error: null,
+    queuedAt: dispatch.proposedAt, startedAt: null, finishedAt: null, pending: "dispatch",
+  };
+}
+
+/** Rethrow a data-source "not found" for a run without saying which way it was not found. */
+function hideRunExistence(error: unknown): never {
+  if (inferOpsErrorCode(error) === "NOT_FOUND") fail("NOT_FOUND", "No such run in this project.");
+  throw error;
+}
+
+@validateRpc()
+class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
+  #binding: ProjectBinding;
+  #queue: RpcStub<ApprovalQueue>;
+  #env: Cloudflare.Env;
+
+  constructor(binding: ProjectBinding, queue: RpcStub<ApprovalQueue>, env: Cloudflare.Env) {
+    super();
+    this.#binding = binding;
+    this.#queue = queue;
+    this.#env = env;
+  }
+
+  [Symbol.dispose]() {
+    this.#queue[Symbol.dispose]();
+  }
+
+  async listRepos(): Promise<Repo[]> {
+    const allowed = codingRepoAllowlist(this.#env);
+    const repos = (await this.#binding.client.listRepos())
+      .map(repo => ({ ...repo, allowed: allowed.has(repo.id.toLowerCase()) }));
+    await this.#queue.authorizeObservation({
+      title: "List InferOps repositories",
+      description: `Listed the ${repos.length} repositories of the workspace of project ` +
+        `${this.#binding.projectKey}; ${repos.filter(r => r.allowed).length} are allowed for coding.`,
+    });
+    return repos;
+  }
+
+  async getRun(runId: string): Promise<Run> {
+    if (runId.startsWith(PROVISIONAL_RUN)) fail("NOT_FOUND", "No such run in this project.");
+    const binding = this.#binding;
+    const run = await binding.client.readRun(binding.projectKey, runId).catch(hideRunExistence);
+    await this.#queue.authorizeObservation({
+      title: `Read InferOps coding run of ${run.issueIdentifier}`,
+      description: `Read the ${run.status} coding run of issue ${run.issueIdentifier} of project ` +
+        `${binding.projectKey}.`,
+    });
+    return shownRun(run, binding.codingPending().cancels);
+  }
+
+  async listRuns(): Promise<Run[]> {
+    const binding = this.#binding;
+    const runs = await binding.client.listRuns(binding.projectKey);
+    const { dispatches, cancels } = binding.codingPending();
+    const shown = [
+      ...dispatches.toSorted((a, b) => b.actionId - a.actionId).map(provisionalRun),
+      ...runs.map(run => shownRun(run, cancels)),
+    ];
+    await this.#queue.authorizeObservation({
+      title: `Read InferOps coding runs of ${binding.projectKey}`,
+      description: `Read the ${runs.length} recent coding runs of project ${binding.projectKey}.`,
+    });
+    return shown;
+  }
+
+  /**
+   * Everything that can be checked without a request is checked first: the switch, the arguments
+   * and the allowlist. Then the issue is resolved from the board by its key (which also fixes it to
+   * the bound project), and its workflow, state and revision, the repository and any active run are
+   * checked, so a dispatch InferOps would refuse is not proposed. None of it is an observation: the
+   * approval shows what was read.
+   */
+  async dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<void> {
+    const binding = this.#binding;
+    assertCodingWorkbenchEnabled(this.#env);
+    if (!REVISION.test(expectedRevision)) {
+      fail("INVALID_REQUEST", "expectedRevision must be the decimal string the issue was read at.");
+    }
+    if (!ISSUE_KEY.test(issueKey)) fail("INVALID_REQUEST", "issueKey must be an issue key such as ENG-42.");
+    if (!UUID.test(target.repoId)) fail("INVALID_REQUEST", "repoId must be a repository id from listRepos().");
+    if (target.baseRef !== undefined && (target.baseRef.length > 255 || !GIT_REF.test(target.baseRef) ||
+        target.baseRef.endsWith(".lock"))) {
+      fail("INVALID_REQUEST", "baseRef must be a git ref name, such as main.");
+    }
+    const repoId = target.repoId.toLowerCase();
+    assertRepoAllowlisted(this.#env, repoId);
+
+    const snapshot = await binding.client.readProject(binding.projectKey);
+    const issue = snapshot.issues.find(i => i.identifier === issueKey);
+    if (!issue) fail("NOT_FOUND", "No such issue in this project.");
+    if (issue.workflow !== "software") {
+      fail("WORKFLOW_MISMATCH", `${issue.identifier} is content work; only software issues can be coded.`);
+    }
+    const state = snapshot.states.find(s => s.id === issue.stateId);
+    if (state?.group === "completed" || state?.group === "cancelled") {
+      fail("CONFLICT", `${issue.identifier} is already ${state.group}; there is nothing to dispatch.`);
+    }
+    if (issue.revision !== expectedRevision) {
+      fail("STALE_REVISION",
+        `${issue.identifier} is at revision ${issue.revision}, not ${expectedRevision}. Read it again.`);
+    }
+    if (binding.codingPending().dispatches.some(d => d.issueId === issue.id)) {
+      throw new InferOpsError("RUN_ACTIVE",
+        `${issue.identifier} already has a dispatch that has not taken effect yet.`);
+    }
+    const repo = (await binding.client.listRepos()).find(r => r.id.toLowerCase() === repoId);
+    if (!repo?.enabled) {
+      fail("INVALID_REQUEST", "The repository is not enrolled in this workspace, or is disabled.");
+    }
+    const runs = await binding.client.listRuns(binding.projectKey, issue.id);
+    const active = runs.find(run => ACTIVE_RUN.has(run.status));
+    if (active) {
+      throw new InferOpsError("RUN_ACTIVE",
+        `${issue.identifier} already has a ${active.status} run. Follow it or cancel it first.`);
+    }
+
+    const actionId = await binding.stage({
+      kind: "dispatch", issueId: issue.id, identifier: issue.identifier, repoId,
+      repoSlug: repo.slug, ...(target.baseRef !== undefined ? { baseRef: target.baseRef } : {}),
+      expectedRevision, proposedAt: new Date().toISOString(),
+    });
+    const description = buildDescription(
+      `Hand an issue of InferOps project ${binding.projectKey} to the local coding runner, which ` +
+      `works on it in a local checkout and reports a patch and test results. It is dispatched only ` +
+      `if the issue is still at the revision below when approved, and only with your own InferOps ` +
+      `dispatch permission.`)
+      .inline("Issue", issue.identifier)
+      .inline("Title", issue.title)
+      .inline("Repository", repo.slug)
+      .inline("Base ref", target.baseRef ?? `${repo.defaultBaseRef} (default)`)
+      .inline("Expected revision", expectedRevision)
+      .finish();
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Dispatch ${issue.identifier} to ${repo.slug}`),
+      ...description,
+      implementsRevert: false,
+      actionKind: { tag: "inferops.code-dispatch", label: "Dispatch a coding task" },
+    });
+  }
+
+  /** A cancel already pending for the run makes this a no-op. */
+  async cancel(runId: string): Promise<void> {
+    if (runId.startsWith(PROVISIONAL_RUN)) fail("NOT_FOUND", "No such run in this project.");
+    const binding = this.#binding;
+    const run = await binding.client.readRun(binding.projectKey, runId).catch(hideRunExistence);
+    if (!ACTIVE_RUN.has(run.status)) fail("CONFLICT", `The run of ${run.issueIdentifier} is already ${run.status}.`);
+    if (binding.codingPending().cancels.some(c => c.runId === run.id)) return;
+
+    const actionId = await binding.stage({ kind: "cancel", runId: run.id, identifier: run.issueIdentifier });
+    const description = buildDescription(
+      `Stop a coding run of InferOps project ${binding.projectKey}. A queued run ends cancelled; a ` +
+      `running one ends unknown, because its work may be partly done, and InferOps holds the issue ` +
+      `for a person to recover.`)
+      .inline("Issue", run.issueIdentifier)
+      .inline("Run", run.id)
+      .inline("Status", run.status)
+      .finish();
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Cancel the ${run.status} run of ${run.issueIdentifier}`),
+      ...description,
+      implementsRevert: false,
+      actionKind: { tag: "inferops.run-cancel", label: "Cancel a coding run" },
     });
   }
 }

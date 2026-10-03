@@ -12,6 +12,7 @@ import {
   getWranglerPortFromBackendHost,
   inferLabLoginStartupError,
   isInferLabAuthOrigin,
+  resolveCodingWorkbenchEnabled,
   resolveInferOpsEnabled,
 } from "./dev-server-config.ts";
 
@@ -179,5 +180,28 @@ describe("resolveInferOpsEnabled", () => {
     assert.equal(resolveInferOpsEnabled({ capability: false, canvasSelected: false, shell: undefined }), "false");
     assert.throws(() => resolveInferOpsEnabled({ capability: true, canvasSelected: false, shell: undefined }),
       /INFEROPS_ENABLED is on, but inferos.canvas.json leaves gatekeeper-inferops out/);
+  });
+});
+
+describe("resolveCodingWorkbenchEnabled", () => {
+  it("keeps a version 1 wrapper and the plain checkout off unless the shell turns it on", () => {
+    assert.equal(resolveCodingWorkbenchEnabled({ capability: null, inferOpsEnabled: "true", shell: undefined }), "false");
+    assert.equal(resolveCodingWorkbenchEnabled({ capability: null, inferOpsEnabled: "true", shell: "false" }), "false");
+    assert.equal(resolveCodingWorkbenchEnabled({ capability: null, inferOpsEnabled: "true", shell: "true" }), "true");
+    assert.throws(() => resolveCodingWorkbenchEnabled({ capability: null, inferOpsEnabled: "true", shell: "on" }),
+      /CODING_WORKBENCH_ENABLED must be "true" or "false"/);
+  });
+
+  it("switches a version 2 wrapper with its capability, whatever the shell says", () => {
+    assert.equal(resolveCodingWorkbenchEnabled({ capability: true, inferOpsEnabled: "true", shell: "false" }), "true");
+    assert.equal(resolveCodingWorkbenchEnabled({ capability: false, inferOpsEnabled: "true", shell: "true" }), "false");
+  });
+
+  it("refuses to start with coding on while the InferOps integration is off", () => {
+    assert.equal(resolveCodingWorkbenchEnabled({ capability: false, inferOpsEnabled: "false", shell: undefined }), "false");
+    for (const options of [{ capability: true, shell: undefined }, { capability: null, shell: "true" }]) {
+      assert.throws(() => resolveCodingWorkbenchEnabled({ ...options, inferOpsEnabled: "false" }),
+        /CODING_WORKBENCH_ENABLED is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
+    }
   });
 });

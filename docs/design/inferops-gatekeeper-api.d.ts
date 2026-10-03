@@ -138,3 +138,122 @@ export interface InferOpsProjectSession {
    */
   createIssue(issue: NewIssue): Promise<void>;
 }
+
+/** Where a coding run stands. queued and running are active; the rest are final. */
+export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "unknown";
+
+/** A repository the workspace may hand coding work to. */
+export interface Repo {
+  /** Stable repository UUID; pass it to dispatch(). */
+  id: string;
+  /** Short handle, such as web-app. */
+  slug: string;
+  /** The branch a run starts from when dispatch() names none. */
+  defaultBaseRef: string;
+  /** A disabled repository takes no new dispatch. */
+  enabled: boolean;
+  /** Whether this deployment allows coding against it; dispatch() refuses any other. */
+  allowed: boolean;
+}
+
+/** The patch a run left in its local checkout, when it produced one. */
+export interface RunPatch {
+  /** Where the patch file is on the machine that ran it. */
+  path: string;
+  /** SHA-256 of the patch file, hex. */
+  sha256: string;
+  /** Files changed. */
+  files: number;
+  /** Lines added. */
+  insertions: number;
+  /** Lines removed. */
+  deletions: number;
+}
+
+/** What a finished run reported. */
+export interface RunResult {
+  /** The runner's own account of what it did. Not evidence that tests passed. */
+  summary: string;
+  /** Test results the runner captured by running the configured commands, when it reports them. */
+  testSummary?: string;
+  /** The local patch, when the run produced one. */
+  patch?: RunPatch;
+  /** The branch the run pushed, when it published its work. */
+  branch?: string;
+  /** The commit the run pushed, when it published its work. */
+  commitSha?: string;
+  /** The pull request the run opened, when it published its work. */
+  prUrl?: string;
+}
+
+/** One coding run of an issue of this project. */
+export interface Run {
+  /** Stable run UUID. */
+  id: string;
+  /** The issue's UUID. */
+  issueId: string;
+  /** The issue's human-readable key, such as ENG-42. */
+  issueIdentifier: string;
+  /** The repository the run works on. */
+  repoId: string;
+  /** Where the run stands. */
+  status: RunStatus;
+  /** The git ref the work started from; null means the repository's default branch. */
+  baseRef: string | null;
+  /** The coding tool's own session id, once it has one. */
+  externalRunId: string | null;
+  /** Set once the run has finished with a result. */
+  result: RunResult | null;
+  /** Why the run failed or was cancelled, when it did. */
+  error: string | null;
+  /** When it was queued (ISO timestamp). */
+  queuedAt: string;
+  /** When the runner started it, or null. */
+  startedAt: string | null;
+  /** When it finished, or null. */
+  finishedAt: string | null;
+  /**
+   * Set while a change requested through this connection has not taken effect yet; absent
+   * otherwise. "dispatch": the run does not exist yet; its id is provisional ("pending-<n>") and not
+   * accepted by getRun() or cancel(). "cancel": the run is shown as it is now, and will stop.
+   */
+  pending?: "dispatch" | "cancel";
+}
+
+/** What to run a dispatched issue against. */
+export interface DispatchTarget {
+  /** One of listRepos()'s ids that is enabled and allowed. */
+  repoId: string;
+  /** Start from this git ref instead of the repository's default branch. */
+  baseRef?: string;
+}
+
+/**
+ * Coding dispatch for one project, fixed when this capability is created: hand its software issues
+ * to the local coding runner and follow the runs. Every method fails with DISABLED while the
+ * deployment has coding dispatch turned off.
+ */
+export interface InferOpsDispatchSession {
+  /** The workspace's repositories, each marked with whether this deployment allows coding against it. */
+  listRepos(): Promise<Repo[]>;
+  /**
+   * Hand a software issue of this project to the coding runner. issueKey is its human-readable key,
+   * such as ENG-42; supply the revision you read it at, and a stale one fails with STALE_REVISION.
+   * listRuns() shows the run at once, marked pending "dispatch". Fails with FORBIDDEN for a
+   * repository this deployment does not allow (or when your InferOps access lacks dispatch
+   * permission), RUN_ACTIVE while the issue already has a queued or running run (or a pending
+   * dispatch), WORKFLOW_MISMATCH for a content issue, CONFLICT for an issue that is already done or
+   * cancelled, NOT_FOUND for an issue outside this project, and INVALID_REQUEST for a malformed
+   * repository id, ref or revision, or a repository that is disabled or not in the workspace.
+   */
+  dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<void>;
+  /** One run of an issue of this project. A run of another project fails with NOT_FOUND. */
+  getRun(runId: string): Promise<Run>;
+  /** This project's recent runs, newest first. */
+  listRuns(): Promise<Run[]>;
+  /**
+   * Stop a queued or running run of this project. A queued run ends cancelled; a running one ends
+   * unknown, because its work may be partly done. A finished run fails with CONFLICT.
+   */
+  cancel(runId: string): Promise<void>;
+}

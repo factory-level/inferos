@@ -18,15 +18,37 @@ interface ConsumerSettings {
     | { mode: "remote"; baseUrl: string; targetRef: string };
 }
 
+/**
+ * One local repository the wrapper allows coding against: the InferOps repository id a dispatch
+ * names, the local checkout the runner works in, and the deterministic test commands it runs.
+ */
+export interface CodingRepo {
+  /** The InferOps repository UUID (lowercase). */
+  repoId: string;
+  /** Absolute path of the local checkout. Never leaves this machine: the gatekeeper gets ids only. */
+  path: string;
+  /** The test commands the runner executes after a turn, in order. At least one. */
+  testCommands: string[];
+  /** The ref work starts from when a dispatch names none; the repository's default otherwise. */
+  baseRef?: string;
+}
+
+/** The coding-workbench allowlist (version 2 only). Listing a repository grants nothing by itself. */
+export interface CodingWorkbenchConfig {
+  repos: CodingRepo[];
+}
+
 /** Declarative consumer inputs. These settings never grant resource or deployment authority. */
 export type ConsumerConfig = ConsumerSettings
-  & ({ schemaVersion: 1 } | { schemaVersion: 2; capabilities: Record<CapabilityName, boolean> });
+  & ({ schemaVersion: 1 }
+    | { schemaVersion: 2; capabilities: Record<CapabilityName, boolean>; codingWorkbench?: CodingWorkbenchConfig });
 
-const object = (value: unknown, keys: string[], path: string, partial = false): Record<string, unknown> => {
+const object = (value: unknown, keys: string[], path: string, partial = false, optional: string[] = []): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}: expected object`);
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some(key => !keys.includes(key)) || (!partial && keys.some(key => !Object.hasOwn(record, key)))) {
-    throw new Error(`${path}: expected exactly ${keys.join(", ")}`);
+  if (Object.keys(record).some(key => !keys.includes(key) && !optional.includes(key)) ||
+      (!partial && keys.some(key => !Object.hasOwn(record, key)))) {
+    throw new Error(`${path}: expected exactly ${keys.join(", ")}${optional.length ? ` (optionally ${optional.join(", ")})` : ""}`);
   }
   return record;
 };
@@ -74,7 +96,58 @@ const capabilityDefaults = Object.fromEntries(CAPABILITY_NAMES.map(name => [name
 /** Validated, never auto-enabled: each key requires every listed capability to be on as well. */
 export const CAPABILITY_REQUIREMENTS: Partial<Record<CapabilityName, readonly CapabilityName[]>> = {
   INFEROPS_CANVAS_STATE_MACHINE: ["INFEROPS_ENABLED"],
+  // Coding dispatch goes through the InferOps gatekeeper, which refuses everything while it is off.
+  CODING_WORKBENCH_ENABLED: ["INFEROPS_ENABLED"],
 };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// InferOps' git ref rule (`GIT_REF_NAME` in its run.dto.ts): no leading dash or slash, no `..`,
+// `@{`, `//`, whitespace or `~^:?*[\`, no trailing slash, dot or `.lock`.
+const GIT_REF = /^(?![-/])(?!.*\/\/)(?!.*\.\.)(?!.*@\{)[^\s~^:?*[\\]+(?<![/.])$/;
+const MAX_CODING_REPOS = 50;
+const MAX_TEST_COMMANDS = 20;
+
+/** Validate `codingWorkbench` without echoing rejected values. Paths must be absolute; ids unique. */
+function parseCodingWorkbench(value: unknown): CodingWorkbenchConfig {
+  const workbench = object(value, ["repos"], "codingWorkbench");
+  if (!Array.isArray(workbench.repos) || workbench.repos.length > MAX_CODING_REPOS) {
+    throw new Error(`codingWorkbench.repos: expected an array of at most ${MAX_CODING_REPOS}`);
+  }
+  const seen = new Set<string>();
+  const repos = workbench.repos.map((entry, index): CodingRepo => {
+    const at = `codingWorkbench.repos[${index}]`;
+    const repo = object(entry, ["repoId", "path", "testCommands", "baseRef"], at, true);
+    for (const key of ["repoId", "path", "testCommands"]) {
+      if (!Object.hasOwn(repo, key)) throw new Error(`${at}.${key}: required`);
+    }
+    if (typeof repo.repoId !== "string" || !UUID.test(repo.repoId)) throw new Error(`${at}.repoId: expected lowercase UUID`);
+    if (seen.has(repo.repoId)) throw new Error(`${at}.repoId: listed twice`);
+    seen.add(repo.repoId);
+    const path = string(repo.path, `${at}.path`);
+    if (/[\r\n\0]/.test(path) || (!path.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(path))) {
+      throw new Error(`${at}.path: expected absolute local path`);
+    }
+    if (!Array.isArray(repo.testCommands) || !repo.testCommands.length || repo.testCommands.length > MAX_TEST_COMMANDS) {
+      throw new Error(`${at}.testCommands: expected 1 to ${MAX_TEST_COMMANDS} commands`);
+    }
+    const testCommands = repo.testCommands.map((command, n) => {
+      const text = string(command, `${at}.testCommands[${n}]`);
+      if (/[\r\n\0]/.test(text)) throw new Error(`${at}.testCommands[${n}]: expected one line`);
+      return text;
+    });
+    const baseRef = repo.baseRef === undefined ? undefined : string(repo.baseRef, `${at}.baseRef`);
+    if (baseRef !== undefined && (baseRef.length > 255 || !GIT_REF.test(baseRef) || baseRef.endsWith(".lock"))) {
+      throw new Error(`${at}.baseRef: expected git ref name`);
+    }
+    return { repoId: repo.repoId, path, testCommands, ...(baseRef !== undefined ? { baseRef } : {}) };
+  });
+  return { repos };
+}
+
+/** The allowlisted InferOps repository ids, comma-separated, as the gatekeeper's `CODING_WORKBENCH_REPOS`. */
+export function codingRepoIds(config: ConsumerConfig): string {
+  return config.schemaVersion === 2 ? (config.codingWorkbench?.repos ?? []).map(repo => repo.repoId).join(",") : "";
+}
 
 /**
  * Compatibility mapping from the version 1 flags. Each keeps its name and meaning under `features`.
@@ -130,8 +203,9 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
   const version = (input as { schemaVersion?: unknown } | null)?.schemaVersion;
   if (version !== 1 && version !== 2) throw new Error("schemaVersion: only versions 1 and 2 are supported");
   if (version === 1 && Object.hasOwn(input as object, "capabilities")) throw new Error("capabilities: requires schemaVersion 2");
+  if (version === 1 && Object.hasOwn(input as object, "codingWorkbench")) throw new Error("codingWorkbench: requires schemaVersion 2");
   const root = object(input, ["schemaVersion", "upstream", "profile", "features", "styling", "local", "inferops",
-    ...(version === 2 ? ["capabilities"] : [])], "config");
+    ...(version === 2 ? ["capabilities"] : [])], "config", false, version === 2 ? ["codingWorkbench"] : []);
   const upstream = object(root.upstream, ["repository", "revision"], "upstream");
   const repository = validateRepository(upstream.repository);
   if (typeof upstream.revision !== "string" || !/^[a-f0-9]{40}$/.test(upstream.revision)) {
@@ -191,7 +265,11 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
   const provenance: ConsumerProvenance = { features: resolvedFeatures.provenance, styling: resolvedStyle.provenance };
   if (!resolvedCapabilities) return { config: { schemaVersion: 1, ...settings }, provenance };
   const capabilities = Object.fromEntries(CAPABILITY_NAMES.map(name => [name, resolvedCapabilities.value[name]])) as Record<CapabilityName, boolean>;
-  return { config: { schemaVersion: 2, ...settings, capabilities }, provenance: { ...provenance, capabilities: resolvedCapabilities.provenance } };
+  const codingWorkbench = Object.hasOwn(root, "codingWorkbench") ? parseCodingWorkbench(root.codingWorkbench) : undefined;
+  return {
+    config: { schemaVersion: 2, ...settings, capabilities, ...(codingWorkbench ? { codingWorkbench } : {}) },
+    provenance: { ...provenance, capabilities: resolvedCapabilities.provenance },
+  };
 }
 
 /** Resolve and validate configuration; omitted profile-controlled fields inherit defaults. */

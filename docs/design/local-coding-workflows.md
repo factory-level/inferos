@@ -1,7 +1,7 @@
 ---
 title: Local coding workflows and agent dispatch
 status: draft
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Local coding workflows and agent dispatch
@@ -12,7 +12,7 @@ Tracking epic: [#48](https://github.com/factory-level/inferos/issues/48); roadma
 
 From a local InferOS customer environment, let a human or an authorized native or external agent invoke an approved coding workflow against an allowlisted local repository. A supported signed-in coding tool runs locally, plans, edits and tests, and returns a reviewable local diff or patch with actual test evidence.
 
-The capability sits behind `CODING_WORKBENCH_ENABLED` (see [feature capabilities](feature-capabilities.md)). This is a draft target and implementation backlog; no code, deployment, acceptance or provider proof is complete.
+The capability sits behind `CODING_WORKBENCH_ENABLED` (see [feature capabilities](feature-capabilities.md)). This is a draft target and implementation backlog. The governed dispatch path through the InferOps gatekeeper exists ([current architecture](../architecture/local-coding-workflows.md)); the runner's local patch mode, deployment, acceptance and provider proof are not complete.
 
 ## Requirements
 
@@ -35,6 +35,17 @@ The capability sits behind `CODING_WORKBENCH_ENABLED` (see [feature capabilities
 InferOps already contains `apps/_inferops-cli/src/runner/codex.ts`, project dispatch/run/lease contracts and `inferops runner codex`. Extend that implementation through a thin adapter or shared runner seam. Do not create a second work ledger, another authoritative task board, a second general workflow engine, or separate user and developer command systems.
 
 The existing runner's direct backend client is a baseline to adapt, not proof of the proposed Gatekeeper boundary. Its current clone, push and draft-PR path is not sufficient for a local-only patch workflow.
+
+**Decided seam (2026-10-02, [#69](https://github.com/factory-level/inferos/issues/69)):** extend the InferOps runner itself, in InferOps, through [factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327). The runner gains a patch-result mode (`inferops runner codex --result patch --config <runner.json>`) that works in a `git worktree` of an allowlisted local checkout, writes a patch, runs the allowlisted test commands and reports them through the existing run record, with no commit, push or PR; its lease, heartbeat, `externalRunId` and resume behavior are unchanged. InferOS adds no runner, adapter or second ledger: it dispatches, follows and cancels runs through the InferOps gatekeeper, and supplies the wrapper's repository allowlist from which the runner's local configuration is written.
+
+### Dispatch grant
+
+Dispatch is a grant of its own at both ends ([#70](https://github.com/factory-level/inferos/issues/70)):
+
+- **InferOS:** a separate gatekeeper resource kind, `inferops://<tenant>.<workspace>/project/dispatch/<KEY>`, bound by the same rules as a project board (the workspace slug must be one the person holds; the tenant label authorizes nothing; `demo.local` is the demo data). A board binding never carries it, so an agent granted only a board cannot dispatch. It is offered and served only while `CODING_WORKBENCH_ENABLED` is on, and only for repositories on the wrapper's allowlist, checked before any request.
+- **InferOps:** the dispatch and cancel are made with the person's own token, so InferOps requires its workspace permission `issue:delegate`, which issue-write roles do not carry. A valid caller without it is refused when the approved dispatch is applied.
+
+Each dispatch and cancel is a proposed action that waits for approval, is bound to the normalized request by a fingerprint, and is sent under the idempotency key `<binding instance>:<action>`; InferOps rechecks the workflow, state, lease, an active run and the expected revision.
 
 ### Feature and safety
 
@@ -91,14 +102,19 @@ Acceptance:
 
 ## Open Questions
 
-- The shape of the adapter or shared runner seam, and whether it lives in InferOps, InferOS or a shared package.
-- The mapping of the reported states onto the existing durable run states, and the compatibility migration it needs.
+- The mapping of the reported states onto the existing durable run states, and the compatibility migration it needs. InferOps' run states today are queued, running, succeeded, failed, cancelled and unknown; waiting for input and quota or login blocked have no state of their own yet.
 - The environment allowlist for each coding adapter in subscription-only mode.
 - The retention and cleanup policy for diffs and test evidence.
 - Which signed-in coding tool is the first proven adapter.
 
+Resolved on 2026-10-02:
+
+- The seam: extend the existing InferOps runner in InferOps ([factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327)); InferOS reaches it only through the gatekeeper. See [Reuse the existing runner](#reuse-the-existing-runner).
+- The dispatch grant: a separate gatekeeper resource kind plus InferOps' `issue:delegate`. See [Dispatch grant](#dispatch-grant).
+
 ## Related
 
+- [Current architecture](../architecture/local-coding-workflows.md)
 - [Feature capabilities](feature-capabilities.md)
 - [Local development](local-development.md)
 - [Repository setup skills](repo-setup-skills.md)

@@ -39,6 +39,13 @@ auto-provisioned demo accounts, and the HTTP client is reachable only through a
 **local-development stopgap** connection in worker vars. The bundled `inferops.kanban` blueprint
 renders a bound board as a Kanban gadget.
 
+A second resource kind, `inferops://<tenant>.<workspace>/project/dispatch/<KEY>`, binds the same
+way to an `InferOpsDispatchGatekeeper` whose `InferOpsDispatchSession` (`listRepos`, `listRuns`,
+`getRun`, `dispatch`, `cancel`) hands the project's software issues to the InferOps coding runner
+through approved actions. It is a separate grant from the board, offered and served only while
+`CODING_WORKBENCH_ENABLED` is on, and dispatches only the wrapper's allowlisted repositories; see
+[local coding workflows](local-coding-workflows.md).
+
 ## Components
 
 | Path | Responsibility |
@@ -46,12 +53,14 @@ renders a bound board as a Kanban gadget.
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and InferOps workspaces InferLab reported with each one's slug, slug resolution (`resolveWorkspace`), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`). |
-| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). |
-| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. The only module that talks InferOps HTTP. |
-| `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<tenant>.<workspace>/project/board/<KEY>` (two lowercase slug labels; `demo.local` is the demo data), `parseHost`, `isSlug`. |
-| `custom-gatekeepers/gatekeeper-inferops/src/actions.ts` | The stored action records, a tagged union (`kind`: `transition`, `create`, `update`) each carrying the exact request it sends; `readAction` reads a record without `kind` (written before creates and updates) as a transition; `fingerprintOf`/`matchesFingerprint` hash the normalized request with the project key (SHA-256 over canonical JSON). |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, and the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | The `CODING_WORKBENCH_ENABLED` switch and `CODING_WORKBENCH_REPOS` allowlist for dispatch bindings ([local coding workflows](local-coding-workflows.md)). |
+| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). Also two demo repositories and a run ledger with InferOps' dispatch guards and replay, and `setRunStatus` standing in for the runner. |
+| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. Its coding calls read `GET /project/repos` (dropping `gitUrl`), `GET /project/runs` (filtered to the bound project's issues), `GET /project/runs/<id>`, and send `POST /project/issues/<id>/dispatch` and `POST /project/runs/<id>/cancel`, each after the issue's or run's scope check. The only module that talks InferOps HTTP. |
+| `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<tenant>.<workspace>/project/<kind>/<KEY>` with `<kind>` `board` or `dispatch` (two lowercase slug labels; `demo.local` is the demo data), the two `SupportedResource`s, `projectResourceKind`, `parseHost`, `isSlug`. |
+| `custom-gatekeepers/gatekeeper-inferops/src/actions.ts` | The stored action records, a tagged union (`kind`: `transition`, `create`, `update` on a board binding; `dispatch`, `cancel` on a dispatch binding) each carrying the exact request it sends; `readAction` reads a record without `kind` (written before creates and updates) as a transition; `fingerprintOf`/`matchesFingerprint` hash the normalized request with the project key (SHA-256 over canonical JSON). |
 | `custom-gatekeepers/gatekeeper-inferops/src/simulation.ts` | Board ordering and read-time overlay of pending actions: an issue's live pending transition or update (`pending` `transition` or `update`), and pending creates as provisional cards (`pending: "create"`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx` | The same picker for a dispatch binding, building `…/project/dispatch/<KEY>`; offered only while coding dispatch is on. |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/project-ui.tsx` | Organization, workspace and project picker built by the shared `build:configurator` task. It builds `inferops://<organization>.<workspace>/project/board/<KEY>` from an organization label, a workspace slug from the account's list and a project; with both left empty it asks the gatekeeper for a default host, which only a demo account has (`demo.local`). It duplicates the URL grammar for prefilling, kept in step by `__tests__/resources.test.ts`. |
 | `scripts/run-dev-server.ts` | Passes `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG` from the shell or root `.dev.vars` into the gatekeeper's generated dev config, resolves `INFERLAB_AUTH_ORIGIN` and `AUTH_GATEKEEPERS` for a wrapper's sign-in flag, and refuses to start when InferOps sign-in is asked for without the gatekeeper or an InferLab origin. |
 | `packages/bundled-blueprints/blueprints/inferops-kanban` | Kanban gadget expecting a `board` binding of type `InferOpsProjectSession`. |
@@ -194,6 +203,15 @@ renders a bound board as a Kanban gadget.
   their account can open the bound project in the binding's workspace, with their own token;
   `removeObserver` is a no-op. `NOT_FOUND`, `UNAUTHORIZED`, `FORBIDDEN` and no membership of that
   workspace mean no access; any other failure fails the open.
+- **Coding dispatch.** A dispatch binding's facet, `InferOpsDispatchGatekeeper`, reuses the board's
+  binding state (instance id, action records, fingerprints, idempotency keys) and observer strategy
+  B, but its data source is guarded by `CODING_WORKBENCH_ENABLED` as well as `INFEROPS_ENABLED`.
+  `dispatch` and `cancel` are staged and submitted like board writes, with action kinds
+  `inferops.code-dispatch` and `inferops.run-cancel`; `applyAction` rechecks the switch, the
+  allowlist and the fingerprint before sending. A 409 `RUN_ACTIVE` maps to `RUN_ACTIVE` (it was
+  `CONFLICT`, which only a dispatch can receive), and a refused apply names the missing
+  `issue:delegate`, an active run, a stale revision or the switch. The full flow is in
+  [local coding workflows](local-coding-workflows.md#data-and-control-flow).
 - **Kanban gadget.** Its Durable Object proxies `loadBoard()` to `env.board.readBoard()` and
   `moveIssue()` to `env.board.openIssue(id).transition(stateId, revision)` (pipelined, then
   disposed), returning failure codes as data. The client renders columns, drag and drop, and a
@@ -203,8 +221,8 @@ renders a bound board as a Kanban gadget.
 ## Configuration
 
 `cloudflare.config.ts` uses the shared gatekeeper factory (`allow_irrevocable_stub_storage`,
-migrations `v0`: `MockInferOps`, `InferOpsProjectGatekeeper`, and `v1`: `InferLabLogin`,
-`InferOpsCredentials`); `wrangler.jsonc` is generated. The worker needs no secrets. `BASE_URL` is
+migrations `v0`: `MockInferOps`, `InferOpsProjectGatekeeper`, `v1`: `InferLabLogin`,
+`InferOpsCredentials`, and `v2`: `InferOpsDispatchGatekeeper`); `wrangler.jsonc` is generated. The worker needs no secrets. `BASE_URL` is
 set per deployment like every gatekeeper's. Discovery under `custom-gatekeepers/` binds it as
 `GATEKEEPER_INFEROPS`. The release manifest gives it no deploy inputs and marks it install-once.
 
@@ -216,6 +234,8 @@ sign-in flag (default `http://localhost:8080`, the local InferLab stack).
 | Var | Meaning |
 | --- | --- |
 | `INFEROPS_ENABLED` | `"true"` or `"false"`: the integration switch (below). Unset counts as on, so deployments that predate it keep working; anything else is off. `pnpm dev-server` always sets it. |
+| `CODING_WORKBENCH_ENABLED` | `"true"` turns coding dispatch on; anything else, or unset, is off, and it is off while `INFEROPS_ENABLED` is. `pnpm dev-server` always sets it ([local coding workflows](local-coding-workflows.md#configuration)). |
+| `CODING_WORKBENCH_REPOS` | The allowlisted InferOps repository ids, comma-separated, from the wrapper's `codingWorkbench.repos`. Unset allows none. |
 | `INFERLAB_AUTH_ORIGIN` | InferLab central-auth origin (bare HTTPS, or HTTP on loopback). Set, it turns on sign-in and makes every account a connected person; the exchange, refresh and logout go here. Unset means demo accounts. |
 | `INFEROPS_BASE_URL` | InferOps API base URL connected people call with their own session. It never appears in a resource URL; the account's display name shows its host. Unset, the InferLab origin serves as the API too (locally one server serves both). |
 | `INFEROPS_API_TOKEN` | Stopgap bearer token (a user access token or an `iex_` service-account key) for accounts with no identity. Requires the base URL, the workspace id and the workspace slug, else an error names the missing variable. |
@@ -368,7 +388,9 @@ account's bindings without a request; and no access token, refresh token, `Beare
 issue description in any Workers runtime log (`TestHarness.getLogs()`) or failure message of the
 run. With `INFEROPS_ENABLED` turned off by a harness reload, a read through an existing binding
 fails `DISABLED`, a queued move is not applied and stays pending, and a new binding is refused,
-all without a request; turned back on, the read works and the queued move applies. Remaining
+all without a request; turned back on, the read works and the queued move applies. Coding dispatch
+(run with `CODING_WORKBENCH_ENABLED` on and one allowlisted repository) is covered by its own cases,
+listed under [local coding workflows](local-coding-workflows.md#evidence). Remaining
 gaps: it is fake-backed (a live local run is recorded below, through the stopgap connection), no
 cloud smoke has been recorded, and `use`-role viewers are not exercised by it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
 

@@ -1,4 +1,5 @@
 // The deployment switch for the InferOps integration (`INFEROPS_ENABLED`, capability flag #33).
+// coding-workbench.ts applies the same per-call guard to coding dispatch.
 //
 // It is checked on every data-source call, not when a binding or session is made, so a binding or
 // session that exists when the integration is turned off is refused from its next call on, and works
@@ -34,6 +35,14 @@ export function assertInferOpsEnabled(env: Pick<Cloudflare.Env, "INFEROPS_ENABLE
 export function whileInferOpsEnabled(
   env: Pick<Cloudflare.Env, "INFEROPS_ENABLED">, open: () => InferOpsClient,
 ): InferOpsClient {
+  return guarded(() => assertInferOpsEnabled(env), open);
+}
+
+/**
+ * A proxy over the client that runs `check` before every call except `forget`, opening the real
+ * client only once a call is allowed. Shared by the integration switch and the coding switch.
+ */
+export function guarded(check: () => void, open: () => InferOpsClient): InferOpsClient {
   let client: InferOpsClient | undefined;
   const inner = () => (client ??= open());
   return new Proxy({} as InferOpsClient, {
@@ -42,7 +51,7 @@ export function whileInferOpsEnabled(
       if (typeof method !== "string" || method === "then") return undefined;
       if (method === "forget") return () => inner().forget();
       return async (...args: unknown[]) => {
-        assertInferOpsEnabled(env);
+        check();
         const target = inner() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
         const call = target[method];
         if (typeof call !== "function") throw new TypeError(`InferOpsClient has no method ${method}`);

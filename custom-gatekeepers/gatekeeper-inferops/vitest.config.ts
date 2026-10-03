@@ -30,6 +30,9 @@ export default defineConfig({
           PROJECT_GATEKEEPER: { className: "InferOpsProjectGatekeeper", useSQLite: true },
           // The same, with a test-only hook for writing raw action records; `TestHooks` drives it.
           TEST_PROJECT_GATEKEEPER: { className: "TestProjectGatekeeper", useSQLite: true },
+          // The coding-dispatch gatekeeper, the same way: declared, and driven through `TestHooks`.
+          DISPATCH_GATEKEEPER: { className: "InferOpsDispatchGatekeeper", useSQLite: true },
+          TEST_DISPATCH_GATEKEEPER: { className: "TestDispatchGatekeeper", useSQLite: true },
           // One sign-in attempt per object; the tests seed its callback from inside the object.
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
           // One per connected account; the tests reach it through the account entrypoints.
