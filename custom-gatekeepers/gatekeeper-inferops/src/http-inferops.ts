@@ -41,7 +41,8 @@ import {
 } from "./inferops-client";
 import { isSlug } from "./resources";
 import type {
-  Issue, Project, Revision, RunPatch, RunResult, RunStatus, State, StateGroup, Workflow,
+  Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
+  State, StateGroup, Workflow,
 } from "./types";
 
 type LogFields = { vendorId: string; operation: string; status: number; code: string };
@@ -135,6 +136,9 @@ const STATE_GROUPS: readonly StateGroup[] = ["backlog", "unstarted", "started", 
 const WORKFLOWS: readonly Workflow[] = ["content", "software"];
 const PRIORITIES: readonly Issue["priority"][] = ["urgent", "high", "medium", "low", "none"];
 const RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "succeeded", "failed", "cancelled", "unknown"];
+const RUN_REASON_CODES: readonly RunReasonCode[] = ["AUTH_BLOCKED", "QUOTA_BLOCKED", "TESTS_FAILED"];
+/** InferOps' own bound on the test commands one run reports. */
+const RUN_TEST_COMMANDS_MAX = 100;
 /** How many of the workspace's newest runs `listRuns` reads before keeping the project's. */
 const RUN_LIST_LIMIT = 200;
 
@@ -298,6 +302,44 @@ function parsePatch(value: unknown): RunPatch | undefined {
   };
 }
 
+function parseTestCommand(value: unknown): RunTestCommand | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const command = value as Record<string, unknown>;
+  const artifacts = command.artifacts as Record<string, unknown> | null | undefined;
+  if (!count(command.index) || (command.index as number) < 1 || !Array.isArray(command.argv) ||
+      command.argv.length === 0 || !command.argv.every(arg => typeof arg === "string") ||
+      !(command.exitCode === null || (typeof command.exitCode === "number" && Number.isInteger(command.exitCode))) ||
+      typeof command.timedOut !== "boolean" || !count(command.durationMs) || typeof command.truncated !== "boolean" ||
+      typeof artifacts !== "object" || artifacts === null || typeof artifacts.stdout !== "string" ||
+      typeof artifacts.stderr !== "string" || typeof artifacts.record !== "string") {
+    return undefined;
+  }
+  return {
+    index: command.index as number, argv: [...command.argv as string[]], exitCode: command.exitCode as number | null,
+    timedOut: command.timedOut, durationMs: command.durationMs as number, truncated: command.truncated,
+    artifacts: { stdout: artifacts.stdout, stderr: artifacts.stderr, record: artifacts.record },
+  };
+}
+
+/**
+ * The test evidence a result names, or undefined. Like the patch it is new in InferOps, so a shape
+ * that does not match is left out whole: a partial copy would misstate what ran.
+ */
+function parseTests(value: unknown): RunTests | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const tests = value as Record<string, unknown>;
+  if (typeof tests.directory !== "string" || !count(tests.passed) || !count(tests.failed) ||
+      !Array.isArray(tests.commands) || tests.commands.length > RUN_TEST_COMMANDS_MAX) {
+    return undefined;
+  }
+  const commands = tests.commands.map(parseTestCommand);
+  if (commands.some(command => command === undefined)) return undefined;
+  return {
+    directory: tests.directory, passed: tests.passed as number, failed: tests.failed as number,
+    commands: commands as RunTestCommand[],
+  };
+}
+
 /** A run's result: the summary is required; the optional fields are copied only when well formed. */
 function parseResult(value: unknown): RunResult | null {
   if (value === null) return null;
@@ -305,9 +347,13 @@ function parseResult(value: unknown): RunResult | null {
   const optional = (key: "branch" | "commitSha" | "prUrl" | "testSummary") =>
     typeof result[key] === "string" ? { [key]: result[key] } : {};
   const patch = parsePatch(result.patch);
+  const tests = parseTests(result.tests);
+  // An unknown reason is left out rather than guessed at; the run's status still says how it ended.
+  const reasonCode = RUN_REASON_CODES.find(code => code === result.reasonCode);
   return {
     summary: text(result.summary, "run.result.summary"),
-    ...optional("testSummary"), ...(patch ? { patch } : {}),
+    ...optional("testSummary"), ...(patch ? { patch } : {}), ...(tests ? { tests } : {}),
+    ...(reasonCode ? { reasonCode } : {}),
     ...optional("branch"), ...optional("commitSha"), ...optional("prUrl"),
   };
 }

@@ -10,6 +10,10 @@
 //   pnpm local verify [--json] [--board URL]     Readiness over the authenticated RPC: what an agent would see
 //   pnpm local reset [--json] --yes              Delete this checkout's .wrangler/state (and nothing else)
 //   pnpm local logs [--json] [--lines N]         Where Wrangler's log files are, and the newest one's tail
+//   pnpm local runner start|status|stop [--json] [--consumer-root DIR] [--once]
+//                                                The InferOps coding runner for a wrapper (scripts/local/coding.ts)
+//   pnpm local coding doctor [--json] [--consumer-root DIR]
+//                                                Whether that runner may start: flag, allowlist, CLI, sign-in, environment
 //
 // Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and
 // exits 0 when its check passed, 1 when it failed, 2 on a usage error. With `--json` the only
@@ -21,13 +25,14 @@
 // `packages/workshop-backend/scripts/` (dev-setup.ts and dev-verify.ts), which hold the RPC code.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { readCanvasConfig } from "../consumer/canvas.ts";
 import { assertLocalPortAvailable } from "../consumer/runtime.ts";
 import { relayTermination } from "../relay-termination.ts";
+import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
   probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack,
@@ -37,7 +42,7 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OPERATORS = join(ROOT, "packages", "workshop-backend", "scripts");
 
-export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs"] as const;
+export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs", "runner", "coding"] as const;
 export type Command = (typeof COMMANDS)[number];
 
 /** Exit codes every command shares. */
@@ -54,7 +59,17 @@ export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
   verify [--board URL] [--user U] [--password P]
                           Sign in, read the demo board through the gatekeeper, reach the approval queue
   reset --yes             Delete this checkout's .wrangler/state; refuses while the stack runs
-  logs [--lines N]        Locate Wrangler's log directory and show the newest file's tail`;
+  logs [--lines N]        Locate Wrangler's log directory and show the newest file's tail
+  runner start|status|stop [--consumer-root DIR] [--once]
+                          Run the InferOps coding runner (patch mode) for a wrapper's codingWorkbench.repos
+  coding doctor [--consumer-root DIR]
+                          Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env`;
+
+/** The subcommands of the two-word commands. */
+const SUBCOMMANDS: Partial<Record<Command, readonly string[]>> = {
+  runner: ["start", "status", "stop"],
+  coding: ["doctor"],
+};
 
 /** What one operator script run produced: its JSON report, or why there is none. */
 export interface OperatorResult {
@@ -64,7 +79,7 @@ export interface OperatorResult {
 }
 
 /** Everything the commands touch outside their own logic, injectable so tests need no stack. */
-export interface LifecycleDeps {
+export interface LifecycleDeps extends CodingDeps {
   root: string;
   env: NodeJS.ProcessEnv;
   isPortListening: (port: number) => Promise<boolean>;
@@ -108,6 +123,25 @@ function startStackForeground(stack: LocalStack, passthrough: string[]): Promise
   return new Promise(() => {});
 }
 
+function runProcess(argv: string[], env: Record<string, string> | NodeJS.ProcessEnv): ProcessResult {
+  const result = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
+  return { exitCode: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? (result.error ? String(result.error.message) : "") };
+}
+
+/** Start the runner in its own process group, detached, appending its output to `logPath`. */
+function launchDetached(argv: string[], env: Record<string, string>, logPath: string, cwd: string): number {
+  mkdirSync(cwd, { recursive: true });
+  const log = openSync(logPath, "a");
+  try {
+    const child = spawn(argv[0]!, argv.slice(1), { cwd, env, detached: true, stdio: ["ignore", log, log] });
+    child.unref();
+    if (child.pid === undefined) throw new Error(`Could not start ${argv[0]}`);
+    return child.pid;
+  } finally {
+    closeSync(log);
+  }
+}
+
 export const defaultDeps: LifecycleDeps = {
   root: ROOT,
   env: process.env,
@@ -120,10 +154,16 @@ export const defaultDeps: LifecycleDeps = {
   sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
   wranglerLogDir: () => wranglerLogDir(),
   now: Date.now,
+  runCli: runProcess,
+  launch: launchDetached,
+  git: args => runProcess(["git", ...args], process.env),
 };
 
 type Parsed = {
   command: Command;
+  sub?: string;
+  consumerRoot?: string;
+  once: boolean;
   json: boolean;
   port?: string;
   screen?: string;
@@ -139,10 +179,16 @@ type Parsed = {
 class UsageError extends Error {}
 
 function parse(argv: readonly string[]): Parsed {
-  const [command, ...rest] = argv;
+  const [command, ...afterCommand] = argv;
   if (!command || !(COMMANDS as readonly string[]).includes(command)) {
     throw new UsageError(command ? `Unknown command "${command}".\n${USAGE}` : USAGE);
   }
+  const subcommands = SUBCOMMANDS[command as Command];
+  const sub = subcommands ? afterCommand[0] : undefined;
+  if (subcommands && (!sub || !subcommands.includes(sub))) {
+    throw new UsageError(`${command} needs one of: ${subcommands.join(", ")}.\n${USAGE}`);
+  }
+  const rest = subcommands ? afterCommand.slice(1) : afterCommand;
   // Flags for the stack itself follow `--` and are forwarded to run-local untouched.
   const separator = rest.indexOf("--");
   const own = separator === -1 ? rest : rest.slice(0, separator);
@@ -161,6 +207,8 @@ function parse(argv: readonly string[]): Parsed {
         board: { type: "string" },
         yes: { type: "boolean", default: false },
         lines: { type: "string", default: "50" },
+        "consumer-root": { type: "string" },
+        once: { type: "boolean", default: false },
       },
       allowNegative: true,
     }));
@@ -168,7 +216,9 @@ function parse(argv: readonly string[]): Parsed {
     throw new UsageError(`${error instanceof Error ? error.message : String(error)}\n${USAGE}`);
   }
   if (!/^\d+$/.test(values.lines)) throw new UsageError("--lines must be a whole number");
-  return { command: command as Command, json: values.json, port: values.port, screen: values.screen,
+  if (values["consumer-root"] !== undefined && !subcommands) throw new UsageError("--consumer-root applies to runner and coding only");
+  if (values.once && sub !== "start") throw new UsageError("--once applies to runner start only");
+  return { command: command as Command, sub, consumerRoot: values["consumer-root"], once: values.once, json: values.json, port: values.port, screen: values.screen,
     approval: values.approval, user: values.user, password: values.password, board: values.board,
     yes: values.yes, lines: Number(values.lines), passthrough };
 }
@@ -373,6 +423,9 @@ export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps 
       case "verify": return verify(stack, parsed, deps);
       case "reset": return reset(stack, parsed);
       case "logs": return logs(parsed, deps);
+      case "runner":
+      case "coding":
+        return runCoding(parsed.command, parsed.sub!, { consumerRoot: parsed.consumerRoot, once: parsed.once }, deps);
     }
   })();
   return { ...result, json: parsed.json };

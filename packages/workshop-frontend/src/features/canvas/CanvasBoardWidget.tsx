@@ -3,16 +3,24 @@ import { ArrowClockwise, ArrowsOutSimple } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
-import { awaitingByIssue } from './boardActivity'
+import { actionsOnly, awaitingByIssue, combineActivity } from './boardActivity'
 import { visibleColumns } from './boardData'
 import { BoardActivityLine } from './BoardActivityLine'
+import { dispatchRefOf } from './codingRuns'
 import { KanbanBoard } from './KanbanBoard'
 import { useBoardActivity } from './useBoardActivity'
 import { useBoardData } from './useBoardData'
+import { useCodingDispatch } from './useCodingDispatch'
 
 export type CanvasBoardWidgetProps = {
   widget: CanvasProjectBoardWidget
   overseer: RpcStub<Overseer>
+  /**
+   * Offer coding dispatch when the workspace also holds the project's coding-dispatch connection.
+   * Only the workspace's own canvas passes it; the Operate session and flows never do, as code is
+   * not edited from Operate. Without it the dispatch reference is never even looked up.
+   */
+  codingDispatch?: boolean
 } & (
   /** A card in a view: the board fits its cell and columns scroll sideways. `onOpen` offers the full view. */
   | { presentation: 'card'; onOpen?: () => void }
@@ -30,15 +38,23 @@ const proposalCount = (moves: number, changes: number) => {
  * A live board: its request served by the scope's shared adapter, so every presentation of one
  * reference shows the same board from one read. Shows the adapter's state explicitly (loading,
  * not connected, InferOps turned off, error, stale, pending moves and changes), the board's
- * activity from the scope's action log, and the Kanban once a board is held.
+ * activity from the scope's action log, and the Kanban once a board is held. With `codingDispatch`
+ * and the project's coding-dispatch connection, the Kanban also offers coding tasks and their runs,
+ * and the activity line includes the dispatch and cancel actions.
  */
 export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   const { widget, overseer, presentation } = props
   const { state, refresh, move, create, update } = useBoardData(overseer, widget)
+  const dispatchRef = props.codingDispatch ? dispatchRefOf(widget.targetRef) : null
+  const coding = useCodingDispatch(overseer, dispatchRef)
   const board = 'board' in state ? state.board : undefined
   // Awaiting actions show only while a board is held: once the connection is revoked or the board
   // cannot be read, nothing here can say what became of them.
-  const { activity, now } = useBoardActivity(overseer, widget.targetRef, board !== undefined)
+  const { activity: boardActivity, now } = useBoardActivity(overseer, widget.targetRef, board !== undefined)
+  // Its runs are re-read automatically, so the dispatch connection's reads would crowd the line.
+  const { activity: codingActivity } = useBoardActivity(overseer, coding.state.status === 'unavailable' ? null : dispatchRef,
+    coding.state.status === 'ready')
+  const activity = combineActivity(boardActivity, actionsOnly(codingActivity))
   const columns = board ? visibleColumns(board, widget.params) : []
   const full = presentation === 'full'
   // What this scope proposed and the board does not show decided yet. Creates and edits leave this
@@ -58,7 +74,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
         {proposals.count} {proposals.noun} pending approval
       </Badge>}
       <Button size="sm" shape="square" variant="ghost" icon={ArrowClockwise} aria-label="Refresh board"
-        disabled={state.status === 'loading'} onClick={refresh} />
+        disabled={state.status === 'loading'} onClick={() => { refresh(); coding.refresh() }} />
       {presentation === 'card' && props.onOpen && <Button size="sm" variant="ghost" icon={ArrowsOutSimple} onClick={props.onOpen}>Open</Button>}
     </header>
     <BoardActivityLine activity={activity} now={now} compact={!full} />
@@ -78,10 +94,16 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
       {board && (columns.length === 0
         ? <p className="text-sm text-kumo-subtle">No {widget.params.workflow} states to show. {widget.params.showCompleted ? '' : 'Completed and cancelled states are hidden on this card.'}</p>
         : <KanbanBoard board={board} columns={columns} pending={'pending' in state ? state.pending : []} changes={'changes' in state ? state.changes : []}
-          awaiting={awaitingByIssue(activity)} layout={full ? 'full' : 'embedded'}
+          awaiting={awaitingByIssue(boardActivity)} layout={full ? 'full' : 'embedded'}
           onMove={(issue, toState) => move(issue.id, toState.id, issue.revision)}
           onCreate={create}
-          onUpdate={(issue, changes) => update(issue.id, changes, issue.revision)} />)}
+          onUpdate={(issue, changes) => update(issue.id, changes, issue.revision)}
+          coding={coding.state.status === 'unavailable' ? undefined : {
+            state: coding.state, activity: codingActivity,
+            onDispatch: (issue, repoId) => coding.dispatch(issue.identifier, { repoId }, issue.revision),
+            onCancel: run => coding.cancel(run.id),
+            onRefresh: coding.refresh,
+          }} />)}
     </div>
   </article>
 }

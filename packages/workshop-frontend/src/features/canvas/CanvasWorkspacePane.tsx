@@ -15,7 +15,7 @@ import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 // Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
 const BLANK_TEMPLATE = ':blank'
 
-export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent }: {
+export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent, codingDispatch }: {
   storage: CanvasStorage
   overseer: RpcStub<Overseer>
   /** Every gadget in the workspace, drafts included, keyed by workpiece ID. */
@@ -32,6 +32,11 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   onOpenWidgetChange: (widgetId: string | null) => void
   /** Hands a request to the chat agent. */
   onAskAgent: (request: string) => Promise<void>
+  /**
+   * Offer coding dispatch on boards whose project the workspace also holds a coding-dispatch
+   * connection for. The workspace's own canvas passes it; an Operate session's screen never does.
+   */
+  codingDispatch?: boolean
 }) => {
   const canvas = useCanvasWorkspace(storage, viewId)
   const selectPortalContainer = useDialogSelectPortalContainer()
@@ -93,10 +98,11 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
         {createForm}
       </div>}
       {active && !editing && (openWidget
-        ? <CanvasBoardFullView widget={openWidget} viewTitle={active.title} overseer={overseer} onBack={() => onOpenWidgetChange(null)} />
+        ? <CanvasBoardFullView widget={openWidget} viewTitle={active.title} overseer={overseer} onBack={() => onOpenWidgetChange(null)}
+          codingDispatch={codingDispatch} />
         : <>
           <h1 className="text-lg font-semibold text-kumo-default">{active.title}</h1>
-          <CanvasView definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} />
+          <CanvasView definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} codingDispatch={codingDispatch} />
         </>)}
       {active && editing && <div className="space-y-4">
         {createForm}

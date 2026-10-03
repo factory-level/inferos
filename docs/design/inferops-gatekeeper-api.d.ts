@@ -170,6 +170,44 @@ export interface RunPatch {
   deletions: number;
 }
 
+/** One configured test command the runner ran in the run's checkout after the coding turn. */
+export interface RunTestCommand {
+  /** 1-based position in the repository's configured test commands. */
+  index: number;
+  /** The command and its arguments. */
+  argv: string[];
+  /** The exit code; null when the command timed out or could not start. Only 0 passes. */
+  exitCode: number | null;
+  /** Whether the command was stopped for running too long. */
+  timedOut: boolean;
+  /** How long it ran, in milliseconds. */
+  durationMs: number;
+  /** Whether its output was longer than the runner keeps (it keeps the tail). */
+  truncated: boolean;
+  /** Where its captured output and record are on the machine that ran it. */
+  artifacts: { stdout: string; stderr: string; record: string };
+}
+
+/** The test evidence a run captured: every configured command it ran, with pass and fail counts. */
+export interface RunTests {
+  /** The artifacts directory on the machine that ran it. */
+  directory: string;
+  /** Commands that exited 0. */
+  passed: number;
+  /** Commands that did not. */
+  failed: number;
+  /** Each command run; empty when the repository has none configured. */
+  commands: RunTestCommand[];
+}
+
+/**
+ * Why a run that did not succeed ended as it did, when the runner can say so. AUTH_BLOCKED: the
+ * coding tool's own sign-in is missing or expired. QUOTA_BLOCKED: its plan's usage limit is
+ * exhausted. Both pause the runner until someone fixes it. TESTS_FAILED: the run produced a patch
+ * but a configured test command did not pass.
+ */
+export type RunReasonCode = "AUTH_BLOCKED" | "QUOTA_BLOCKED" | "TESTS_FAILED";
+
 /** What a finished run reported. */
 export interface RunResult {
   /** The runner's own account of what it did. Not evidence that tests passed. */
@@ -178,6 +216,10 @@ export interface RunResult {
   testSummary?: string;
   /** The local patch, when the run produced one. */
   patch?: RunPatch;
+  /** The test commands the runner ran and what each left behind, when it ran any. */
+  tests?: RunTests;
+  /** Why the run did not succeed, when the runner names a reason. */
+  reasonCode?: RunReasonCode;
   /** The branch the run pushed, when it published its work. */
   branch?: string;
   /** The commit the run pushed, when it published its work. */

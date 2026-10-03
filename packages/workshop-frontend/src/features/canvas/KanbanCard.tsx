@@ -1,9 +1,11 @@
 import { useState, type KeyboardEvent } from 'react'
 import { Badge, Button, DropdownMenu } from '@cloudflare/kumo'
-import { ArrowRight, DotsThree, PencilSimple } from '@phosphor-icons/react'
-import type { Issue, IssueChanges, State } from '@inferos/gatekeeper-inferops/src/types'
+import { ArrowRight, Code, DotsThree, PencilSimple } from '@phosphor-icons/react'
+import type { Issue, IssueChanges, Run, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
 import type { PendingChange, PendingMove, ProposalResult } from './boardData'
+import { CodingRunBadge } from './CodingRunStatus'
+import type { CodingControl } from './KanbanCodingForm'
 import { KanbanIssueDialog } from './KanbanIssueDialog'
 import { PRIORITY_LABELS, formatTargetDate, isOverdue, type ChangeDecision, type MoveDecision } from './kanbanBoard'
 
@@ -27,6 +29,11 @@ export type KanbanCardProps = {
   editDecision?: ChangeDecision['outcome']
   /** Proposes an edit at the issue's revision; absent while the issue cannot be edited (anything pending). */
   onUpdate?: (changes: IssueChanges) => Promise<ProposalResult>
+  /**
+   * Coding dispatch for the issue's project, with the issue's latest run. Absent when the board's
+   * workspace holds no coding-dispatch connection for the project, or the surface offers none.
+   */
+  coding?: { control: CodingControl; run: Run | undefined }
   /** `YYYY-MM-DD`, for the overdue mark. */
   today: string
   /** The element id of the board's keyboard instructions. */
@@ -54,8 +61,10 @@ const pendingBadge = ({ issue, pending, edit, proposed }: Pick<KanbanCardProps, 
  * proposes the move, the "Move to" menu offers the same targets, and it can be dragged to a
  * column; its Edit button opens the edit form. Anything pending on the issue (a move, an edit, or
  * its own creation) withholds every control, since the gatekeeper allows one pending change.
+ * With coding dispatch offered, it shows the issue's latest coding run, and a software issue's
+ * Coding button opens its coding task, which a pending move or edit does not withhold.
  */
-export const KanbanCard = ({ issue, state, targets, pending, proposed, decision, edit, editDecision, today, instructionsId, onMove, onUpdate, onDragStart, onDragEnd }: KanbanCardProps) => {
+export const KanbanCard = ({ issue, state, targets, pending, proposed, decision, edit, editDecision, coding, today, instructionsId, onMove, onUpdate, onDragStart, onDragEnd }: KanbanCardProps) => {
   const [choice, setChoice] = useState<State | null>(null)
   const movable = targets.length > 0 && !pending
   const chosen = choice && targets.find(target => target.id === choice.id) ? choice : null
@@ -81,6 +90,7 @@ export const KanbanCard = ({ issue, state, targets, pending, proposed, decision,
 
   const overdue = isOverdue(issue, state, today)
   const waiting = pendingBadge({ issue, pending, edit, proposed })
+  const codable = coding !== undefined && issue.workflow === 'software' && issue.pending !== 'create'
   return <li data-issue-id={issue.id} data-pending={issue.pending} tabIndex={0} draggable={movable}
     aria-label={`${issue.identifier}: ${issue.title}${issue.pending === 'create' ? ' (not created yet)' : ''}`}
     aria-describedby={instructionsId} aria-busy={pending?.move.phase === 'proposing' || edit?.phase === 'proposing' || undefined}
@@ -95,10 +105,12 @@ export const KanbanCard = ({ issue, state, targets, pending, proposed, decision,
     <div className="flex items-center gap-2">
       <span className="font-mono text-xs text-kumo-subtle">{issue.identifier}</span>
       {issue.priority !== 'none' && <Badge variant={PRIORITY_VARIANT[issue.priority]}>{PRIORITY_LABELS[issue.priority]}</Badge>}
+      {codable && <KanbanIssueDialog kind="code" issue={issue} run={coding.run} coding={coding.control}
+        trigger={<Button size="xs" shape="square" variant="ghost" className="ml-auto" aria-label={`Coding task for ${issue.identifier}`} icon={Code} />} />}
       {onUpdate && <KanbanIssueDialog kind="edit" issue={issue} onUpdate={onUpdate}
-        trigger={<Button size="xs" shape="square" variant="ghost" className="ml-auto" aria-label={`Edit ${issue.identifier}`} icon={PencilSimple} />} />}
+        trigger={<Button size="xs" shape="square" variant="ghost" className={codable ? '' : 'ml-auto'} aria-label={`Edit ${issue.identifier}`} icon={PencilSimple} />} />}
       {movable && <DropdownMenu>
-        <DropdownMenu.Trigger render={<Button size="xs" shape="square" variant="ghost" className={onUpdate ? '' : 'ml-auto'} aria-label={`Move ${issue.identifier} to…`} icon={DotsThree} />} />
+        <DropdownMenu.Trigger render={<Button size="xs" shape="square" variant="ghost" className={onUpdate || codable ? '' : 'ml-auto'} aria-label={`Move ${issue.identifier} to…`} icon={DotsThree} />} />
         <DropdownMenu.Content align="end">
           {targets.map(target => <DropdownMenu.Item key={target.id} onClick={() => onMove(target)}>Move to {target.name}</DropdownMenu.Item>)}
         </DropdownMenu.Content>
@@ -115,6 +127,7 @@ export const KanbanCard = ({ issue, state, targets, pending, proposed, decision,
       Move to {decision.toState?.name ?? 'another state'} {decision.outcome}
     </Badge>}
     {editDecision && !waiting && <Badge variant={editDecision === 'rejected' ? 'error' : 'success'}>Edit {editDecision}</Badge>}
+    {coding?.run && <CodingRunBadge run={coding.run} />}
     {chosen && <p className="text-xs text-kumo-brand">Move to {chosen.name}? Enter to propose, Escape to cancel.</p>}
   </li>
 }
