@@ -113,6 +113,9 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "PREVIEW_WORKERS_DEV_HOST", "PREVIEW_WRANGLER", "VITE_BACKEND_HOST",
       // Read by `vp/concurrency.ts` in the wrapper before `vp` starts, never inside a task.
       "VP_RUN_CONCURRENCY_LIMIT",
+      // The MOCK `inferops` and `codex` binaries in local/testdata, started as processes by the runner
+      // tests with the environment the lifecycle builds; never part of a build.
+      "CODEX_HOME", "CODEX_PATH", "HOME", "INFEROPS_API_KEY", "INFEROPS_ENDPOINT", "INFEROPS_WORKSPACE_ID",
     ],
   },
 };

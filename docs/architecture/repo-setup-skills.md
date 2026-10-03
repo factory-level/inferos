@@ -26,7 +26,8 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | `.agents/skills/skill-upload` | Installing, authoring (with skill-creator) and publishing wrapper skills. |
 | `scripts/consumer` | Atomic scaffolding, profile resolution, preflight, fixture/view/extension/skill-pack validation and intake application ([customer onboarding](customer-onboarding.md)). |
 | `scripts/consumer/settings.ts` | The executable settings table for the selected private customer, validated by wrapper `doctor` and generating the [configuration reference](../wiki/configuration-reference.md#selected-customer-settings) section; `settings.test.ts` fails on drift ([details](consumer-configuration.md#data-and-control-flow)). |
-| `scripts/consumer/skill-packs` | Starter `operate`, `build` and `shared` runtime skills that bootstrap copies to `skills/`. |
+| `scripts/consumer/skill-packs` | Starter `operate`, `build` and `shared` runtime skills that bootstrap copies to `skills/`. `build/coding-dispatch` drives coding dispatch through the InferOps gatekeeper and reports only the runner's patch and test evidence. |
+| `.agents/skills/local-coding` | Setup, operation and recovery of the local coding runner; see [local coding workflows](local-coding-workflows.md). |
 | `scripts/consumer/skills.ts`, `skill-manifest.ts` | Read `inferos.skills.json`, collect pack files (excludes, includes, limits, no links) and validate `SKILL.md` frontmatter. |
 | `packages/workshop-backend/scripts/upload-consumer-skills.ts` | Local administrator upload of packs into public Context Library collections. |
 
@@ -36,7 +37,7 @@ Bootstrap generates an exact submodule gitlink, copied command helpers and skill
 
 ### Skill packs
 
-Bootstrap copies `scripts/consumer/skill-packs` to the wrapper's `skills/`, writes the default `inferos.skills.json` and copies the `skill-upload` skill. The wrapper's commands map as follows:
+Bootstrap copies `scripts/consumer/skill-packs` to the wrapper's `skills/`, writes the default `inferos.skills.json` and copies the `skill-upload` and `local-coding` skills. The wrapper's commands map as follows:
 - `skills:check` runs the pinned `scripts/consumer/skills.ts` and needs `pnpm run setup` for its `yaml`/`zod` dependencies. `doctor` runs the same check.
 - `skills:install` runs `pnpm dlx skills@1.7.0 add … --yes` in the wrapper.
 - `skills:upload` runs the pinned uploader.

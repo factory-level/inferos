@@ -20,6 +20,12 @@
 //   and enabled in the workspace, and 409 `STALE_REVISION`; it queues a run and advances the issue's
 //   revision. Runs are workspace-wide, as in InferOps: their issue decides their project.
 //
+// The runner lane: `runnerKey(workspace)` mints a service-account key holding `run:execute` for one
+// workspace, as `inferops runner codex` uses. With it, and only with it, a caller may list runs, read
+// an issue, and claim (`start`), `heartbeat` and `finish` a run, fenced on the lease generation
+// (`LEASE_LOST` once the run is no longer this lease's). A key reads and writes nothing else. `serve()`
+// exposes the same fake on a loopback port, so a runner process outside the test can reach it.
+//
 // Failure switches: `failNextRequests` (503 for the next N InferOps calls), `failNextWrites` (503 for
 // the next N writes, before anything is committed), and `loseNextWriteResponse` (commit the next
 // write, store its response under its key, then drop the connection). `revokeSessions` ends a
@@ -29,6 +35,7 @@
 // so a test can say what reached InferOps, as whom, and what changed.
 
 import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import type { Handler } from "./network-interceptor.js";
 
 /** InferLab's origin: `INFERLAB_AUTH_ORIGIN`. */
@@ -117,6 +124,13 @@ export type FakePerson = {
 export type FakeRun = {
   id: string; issueId: string; repoId: string; status: string; baseRef: string | null;
   requestedBy: string;
+  /** The issue lease generation: bumped by each `start`, quoted by every heartbeat and finish. */
+  leaseGeneration: string;
+  externalRunId: string | null;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
 };
 
 /** One request that reached the InferOps API, as it arrived. */
@@ -125,7 +139,7 @@ export type FakeRequest = {
   path: string;
   /** The bearer token, verbatim (null without one). */
   token: string | null;
-  /** Whose token it was, when it is one InferLab issued and still honors. */
+  /** Whose token it was, when it is one InferLab issued and still honors; `runner:<workspace>` for a runner key. */
   person: string | null;
   workspaceId: string | null;
   idempotencyKey: string | null;
@@ -180,6 +194,8 @@ export class InferOpsFake {
   readonly #issues = new Map<string, FakeIssue>();
   readonly #idempotency = new Map<string, Stored>();
   readonly #runs = new Map<string, FakeRun>();
+  /** Service-account keys holding `run:execute`, by key, with the one workspace each may act in. */
+  readonly #runnerKeys = new Map<string, WorkspaceSlug>();
   #serial = 0;
 
   constructor() {
@@ -236,6 +252,55 @@ export class InferOpsFake {
     const run = this.#runs.get(runId);
     if (!run) throw new Error(`No run ${runId}`);
     run.status = status;
+  }
+
+  /** A service-account key holding `run:execute` in `workspace`, as a runner's `INFEROPS_API_KEY`. */
+  runnerKey(workspace: WorkspaceSlug): string {
+    const key = `iops_sk_${randomHex()}`;
+    this.#runnerKeys.set(key, workspace);
+    return key;
+  }
+
+  /** The stored run `runId`. */
+  run(runId: string): FakeRun {
+    const run = this.#runs.get(runId);
+    if (!run) throw new Error(`No run ${runId}`);
+    return run;
+  }
+
+  /**
+   * Serve this fake's InferOps API on a loopback port, for a process outside the test (a runner).
+   * Requests are answered exactly as the interceptor's are, and recorded the same way.
+   */
+  async serve(): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = createServer((incoming, outgoing) => {
+      const chunks: Buffer[] = [];
+      incoming.on("data", chunk => chunks.push(chunk));
+      incoming.on("end", () => {
+        const url = new URL(incoming.url ?? "/", INFEROPS_ORIGIN);
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(incoming.headers)) {
+          if (typeof value === "string") headers.set(name, value);
+        }
+        const method = incoming.method ?? "GET";
+        const body = chunks.length ? Buffer.concat(chunks) : undefined;
+        const request = new Request(url, { method, headers, body: method === "GET" ? undefined : body });
+        this.#inferops(url, method, headers, request).then(async response => {
+          outgoing.writeHead(response.status, { "content-type": "application/json" });
+          outgoing.end(Buffer.from(await response.arrayBuffer()));
+        }, (error: unknown) => {
+          outgoing.writeHead(500);
+          outgoing.end(String(error));
+        });
+      });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("The fake did not get a port");
+    return {
+      url: `http://127.0.0.1:${address.port}`,
+      close: () => new Promise(resolve => server.close(() => resolve())),
+    };
   }
 
   /** Change a person's memberships, in InferLab and InferOps alike, from now on. */
@@ -382,10 +447,7 @@ export class InferOpsFake {
   }
 
   #wireRun(run: FakeRun) {
-    return {
-      ...run, action: "code", externalRunId: null, leaseGeneration: "1", result: null, error: null,
-      queuedAt: "2026-10-03T00:00:00.000Z", startedAt: null, finishedAt: null,
-    };
+    return { ...run, action: "code", queuedAt: "2026-10-03T00:00:00.000Z" };
   }
 
   async #inferops(url: URL, method: string, headers: Headers, request: Request): Promise<Response> {
@@ -402,6 +464,11 @@ export class InferOpsFake {
     if (this.failNextRequests > 0) {
       this.failNextRequests--;
       return failure(503, "UNAVAILABLE", "upstream down");
+    }
+    const runnerWorkspace = token ? this.#runnerKeys.get(token) : undefined;
+    if (runnerWorkspace) {
+      record.person = `runner:${runnerWorkspace}`;
+      return this.#runner(url, method, workspaceId, runnerWorkspace, request);
     }
     if (!session) return failure(401, "UNAUTHORIZED", "invalid token");
     const person = session.person;
@@ -569,10 +636,69 @@ export class InferOpsFake {
     const run: FakeRun = {
       id: randomUUID(), issueId: issue.id, repoId: repo.id, status: "queued",
       baseRef: typeof body.baseRef === "string" ? body.baseRef : null, requestedBy: person.userId,
+      leaseGeneration: "1", externalRunId: null, result: null, error: null, startedAt: null, finishedAt: null,
     };
     this.#runs.set(run.id, run);
     issue.revision = String(Number(issue.revision) + 1);
     return { status: 201, body: { run: this.#wireRun(run) } };
+  }
+
+  /**
+   * The runner lane: a `run:execute` key lists runs, reads an issue, and claims, heartbeats and
+   * finishes a run of its own workspace. Anything else is 403, as a key without a person's grants.
+   */
+  async #runner(url: URL, method: string, workspaceId: string | null, workspace: WorkspaceSlug,
+                request: Request): Promise<Response> {
+    if (workspaceId !== WORKSPACES[workspace].id) return failure(403, "FORBIDDEN", "not this key's workspace");
+    const projects = Object.values(PROJECTS).filter(p => p.workspace === workspace);
+    const issueIn = (id: string) => {
+      const issue = this.#issues.get(id);
+      return issue && projects.some(p => p.id === issue.projectId) ? issue : undefined;
+    };
+    if (method === "GET" && url.pathname === "/project/runs") {
+      const status = url.searchParams.get("status");
+      const runs = [...this.#runs.values()]
+        .filter(r => issueIn(r.issueId) && (!status || r.status === status));
+      return json({ runs: runs.map(r => this.#wireRun(r)) });
+    }
+    const issueMatch = /^\/project\/issues\/([^/]+)$/.exec(url.pathname);
+    if (method === "GET" && issueMatch) {
+      const issue = issueIn(issueMatch[1]!);
+      return issue ? json({ issue: this.#wireIssue(issue) }) : failure(404, "NOT_FOUND", "no such issue");
+    }
+    const match = /^\/project\/runs\/([^/]+)\/(start|heartbeat|finish)$/.exec(url.pathname);
+    if (method !== "POST" || !match) return failure(403, "FORBIDDEN", "run:execute does not grant this");
+    const run = this.#runs.get(match[1]!);
+    if (!run || !issueIn(run.issueId)) return failure(404, "NOT_FOUND", "no such run");
+    const body = await request.json() as Record<string, unknown>;
+    const now = new Date().toISOString();
+    if (match[2] === "start") {
+      if (run.status !== "queued") return failure(409, "CONFLICT", "run is not queued");
+      run.status = "running";
+      run.leaseGeneration = String(Number(run.leaseGeneration) + 1);
+      run.startedAt = now;
+      if (typeof body.externalRunId === "string") run.externalRunId = body.externalRunId;
+      return json({ run: this.#wireRun(run) });
+    }
+    if (run.status !== "running" || body.leaseGeneration !== run.leaseGeneration) {
+      return failure(409, "LEASE_LOST", "the lease is no longer yours");
+    }
+    if (match[2] === "heartbeat") {
+      if (typeof body.externalRunId === "string") run.externalRunId ??= body.externalRunId;
+      return json({ run: this.#wireRun(run) });
+    }
+    const status = String(body.status);
+    if (!["succeeded", "failed", "cancelled", "unknown"].includes(status)) {
+      return failure(400, "VALIDATION", "not a finish status");
+    }
+    if (status === "succeeded" && (typeof body.result !== "object" || body.result === null)) {
+      return failure(400, "VALIDATION", "A succeeded run must report its result");
+    }
+    run.status = status;
+    run.result = typeof body.result === "object" && body.result !== null ? body.result as Record<string, unknown> : null;
+    run.error = typeof body.error === "string" ? body.error : null;
+    run.finishedAt = now;
+    return json({ run: this.#wireRun(run) });
   }
 
   issuesOfProject(projectId: string): FakeIssue[] {
