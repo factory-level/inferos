@@ -4,11 +4,17 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { INITIAL_OPERATE_PAGE, type OperateEvent, type OperatePageState } from '@gadgets/workshop-shared/operate-session'
+import {
+  INITIAL_OPERATE_PAGE,
+  type OperateEvent,
+  type OperateEventRecord,
+  type OperatePageState,
+} from '@gadgets/workshop-shared/operate-session'
 
 const testState = vi.hoisted(() => ({
   state: null as unknown,
   dispatch: null as unknown,
+  recentEvents: [] as OperateEventRecord[],
 }))
 
 vi.mock('@cloudflare/kumo', async importOriginal => ({
@@ -24,10 +30,16 @@ vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
 }))
 vi.mock('../../pages/inferops-canvas/InferOpsCanvasHome', () => ({ InferOpsCanvasHome: () => <div data-testid="home" /> }))
 vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: () => <div data-testid="chat" /> }))
+vi.mock('./SessionApprovals', () => ({
+  SessionApprovals: ({ screenWorkspaceId }: { screenWorkspaceId: string | null }) =>
+    <div data-testid="approvals">{screenWorkspaceId}</div>,
+}))
+vi.mock('./useSessionWorkspace', () => ({ useSessionWorkspace: () => null }))
 vi.mock('./SessionScreen', () => ({ SessionScreen: ({ screenId }: { screenId: string }) => <div data-testid="screen">{screenId}</div> }))
 vi.mock('./FlowScreen', () => ({ FlowScreen: ({ screenId }: { screenId: string }) => <div data-testid="step">{screenId}</div> }))
 vi.mock('./OperateSessionContext', () => ({
-  useOperateSession: () => ({ snapshot: { seq: 3, state: testState.state }, error: null, dispatch: testState.dispatch, session: null }),
+  useOperateSession: () => ({ snapshot: { seq: 3, state: testState.state }, recentEvents: testState.recentEvents,
+    error: null, dispatch: testState.dispatch, session: null }),
 }))
 
 import { OperateSessionPage } from './OperateSessionPage'
@@ -46,6 +58,7 @@ beforeEach(() => {
   root = createRoot(container)
   dispatch.mockClear()
   testState.dispatch = dispatch
+  testState.recentEvents = []
 })
 
 afterEach(() => {
@@ -64,6 +77,27 @@ describe('OperateSessionPage', () => {
     render(OPEN)
     expect([...container.querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(['Shift board'])
     expect(container.querySelector('[data-testid="screen"]')?.textContent).toBe('board')
+  })
+
+  it('covers the focused screen’s workspace with the session’s approvals', () => {
+    render(OPEN)
+    expect(container.querySelector('[data-testid="approvals"]')?.textContent).toBe('ws1')
+  })
+
+  it('attributes the page change the operate agent made last', () => {
+    testState.recentEvents = [
+      { seq: 1, event: { type: 'open', ref: BOARD }, actor: 'agent', at: new Date() },
+      { seq: 2, event: { type: 'setChatOpen', open: false }, actor: 'person', at: new Date() },
+    ]
+    render(OPEN)
+    const notes = [...container.querySelectorAll('[role="status"]')].map(note => note.textContent)
+    expect(notes.some(note => note?.startsWith('Agent opened Shift board'))).toBe(true)
+  })
+
+  it('attributes nothing to the agent when a person made every change', () => {
+    testState.recentEvents = [{ seq: 1, event: { type: 'open', ref: BOARD }, actor: 'person', at: new Date() }]
+    render(OPEN)
+    expect(container.textContent).not.toContain('Agent ')
   })
 
   it('gives the whole page to a running flow, keeping the working set for afterwards', () => {
