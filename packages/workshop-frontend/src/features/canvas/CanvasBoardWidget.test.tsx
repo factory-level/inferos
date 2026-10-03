@@ -4,7 +4,7 @@ import { act, type ReactElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import type { ActionLogEntry, ActionsSubscriber, Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
 import type { Board, Issue } from '@inferos/gatekeeper-inferops/src/types'
 import { CanvasBoardWidget } from './CanvasBoardWidget'
@@ -48,6 +48,7 @@ const connection = { openSession: async () => session, [Symbol.dispose]: () => {
 const lookup = vi.fn<(url: string) => Promise<object | null>>(async () => connection)
 // A fresh stub per test is a fresh scope, so adapters never leak between tests.
 let overseer: RpcStub<Overseer>
+let actions: ActionsSubscriber | undefined
 
 const settle = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 const render = async (element: ReactElement) => { await act(async () => root.render(element)); await settle() }
@@ -59,7 +60,7 @@ beforeEach(() => {
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
   overseer = {
     getGatekeeperByResourceUrl: lookup,
-    subscribeToActions: async () => ({ [Symbol.dispose]: () => {} }),
+    subscribeToActions: async (subscriber: ActionsSubscriber) => { actions = subscriber; return { [Symbol.dispose]: () => {} } },
     listActions: async () => ({ entries: [] }),
   } as unknown as RpcStub<Overseer>
   current = demo; readBoard.mockClear(); transition.mockClear(); openIssue.mockClear()
@@ -96,6 +97,20 @@ it('reports a failed read with a retry, keeps the last board as stale when a ref
   expect(container.textContent).toContain('No content states to show')
 })
 
+it('says InferOps is turned off, not that the read failed, and shows the board again once it is on', async () => {
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" />)
+  expect(card('1')).toBeDefined()
+  readBoard.mockRejectedValueOnce(new Error('Error: DISABLED: InferOps is turned off for this deployment.'))
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
+  const statuses = [...article().querySelectorAll('[role="status"]')].map(s => s.textContent)
+  expect(statuses).toContainEqual(expect.stringContaining('InferOps is turned off for this deployment.'))
+  expect(article().querySelector('[role="alert"]')).toBeNull()
+  expect(article().querySelector('[data-issue-id]')).toBeNull()
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
+  expect(article().textContent).not.toContain('turned off')
+  expect(card('1')).toBeDefined()
+})
+
 it('proposes a keyboard move through the adapter with the issue id, target state and the revision read', async () => {
   await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" />)
   const first = card('1')
@@ -125,4 +140,38 @@ it('serves the card and the full view of one reference from one read, with the s
   expect(transition).toHaveBeenCalledWith('doing', '7')
   expect(boards.map(b => b.textContent?.includes('1 move pending approval'))).toEqual([true, true])
   expect(readBoard).toHaveBeenCalledTimes(2)
+})
+
+const agentMove = (id: number, state: ActionLogEntry['state']): ActionLogEntry => ({
+  id, type: 'action', state, resourceUrl: BOARD, resourceTitle: 'InferOps board DEMO', createdAt: new Date(), requestedBy: 'agent',
+  description: { title: 'Move DEMO-1 to Done', description: '', fields: [{ label: 'Issue', kind: 'inline', value: 'DEMO-1' }] },
+} as ActionLogEntry)
+const activityLine = () => article().querySelector('[aria-label="Board activity"]')
+
+it("shows the agent's awaiting move in the header and on its card, announced once, and its read as recent", async () => {
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" />)
+  expect(activityLine()).toBeNull()
+  await act(async () => {
+    actions?.entry({ id: 1, type: 'observation', state: 'approved', resourceUrl: BOARD, resourceTitle: 'InferOps board DEMO', createdAt: new Date(), requestedBy: 'agent', description: { title: 'Read InferOps board DEMO', description: '' } } as ActionLogEntry)
+  })
+  expect(activityLine()?.textContent).toContain('Agent: Read InferOps board DEMO, just now')
+  expect(article().querySelector('[aria-live="polite"]')?.textContent).toBe('')
+  await act(async () => { actions?.entry(agentMove(2, 'pending')) })
+  // The card shows the newest awaiting action first and counts the rest.
+  expect(activityLine()?.textContent).toContain('Agent is waiting for approval: Move DEMO-1 to Done')
+  expect(activityLine()?.textContent).toContain('+1 more')
+  expect(article().querySelector('[aria-live="polite"]')?.textContent).toBe('Agent is waiting for approval: Move DEMO-1 to Done')
+  expect(card('1').textContent).toContain('Awaiting approval (Agent): Move DEMO-1 to Done')
+  expect(card('1').getAttribute('draggable')).toBe('false')
+})
+
+it('drops awaiting activity once the connection is revoked', async () => {
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="full" />)
+  await act(async () => { actions?.entry(agentMove(2, 'pending')) })
+  expect(activityLine()?.textContent).toContain('waiting for approval')
+  readBoard.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: credential refused'))
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
+  expect(article().querySelector('[role="alert"]')?.textContent).toContain('credential refused')
+  expect(activityLine()).toBeNull()
+  expect(article().querySelector('[aria-live="polite"]')?.textContent).toBe('')
 })

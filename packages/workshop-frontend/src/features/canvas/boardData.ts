@@ -32,6 +32,12 @@ export type BoardState =
   | { status: 'unbound' }
   /** Nothing usable was loaded (or the connection was revoked, which drops what was). */
   | { status: 'error'; message: string }
+  /**
+   * The deployment has InferOps turned off: the gatekeeper refuses every read and move (`DISABLED`).
+   * The connection is kept, so the board returns as it was once InferOps is turned back on; what was
+   * shown is dropped meanwhile.
+   */
+  | { status: 'disabled'; message: string }
   /** `stale`: newer data was asked for (a refresh, a move, an approval) and has not arrived; `error` says why the refresh failed. */
   | { status: 'ready' | 'stale'; board: Board; pending: readonly PendingMove[]; error?: string }
 
@@ -242,9 +248,11 @@ export class BoardData {
       const target = this.#targets.get(read.target)
       if (!target || read.clock < target.wanted || read.clock <= target.applied) return
       for (const entry of this.#entriesOf(read.target)) {
-        this.#set(entry, revoked(error) || !('board' in entry.state)
-          ? { status: 'error', message: messageOf(error) }
-          : { ...entry.state, status: 'stale', error: messageOf(error) })
+        this.#set(entry, codeOf(error) === 'DISABLED'
+          ? { status: 'disabled', message: messageOf(error) }
+          : revoked(error) || !('board' in entry.state)
+            ? { status: 'error', message: messageOf(error) }
+            : { ...entry.state, status: 'stale', error: messageOf(error) })
       }
     } finally {
       const index = this.#reads.indexOf(read)

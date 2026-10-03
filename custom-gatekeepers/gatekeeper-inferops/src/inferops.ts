@@ -1,4 +1,5 @@
-// InferOps gatekeeper: scoped project-board reads and approved issue transitions.
+// InferOps gatekeeper: scoped project-board reads and approved issue creates, updates and
+// transitions.
 //
 // - `GatekeeperVendor` auto-provisions accounts (no OAuth): an account is just an id that keys its
 //   private copy of the demo data in `MockInferOps`.
@@ -12,14 +13,21 @@
 //   only: the identity InferLab reports carries a tenant id, never its slug, so there is nothing to
 //   compare it with (InferOps' own widgets do not check it either). `demo.local` names the demo
 //   data and nothing else.
-// - Sessions: `InferOpsProjectSession` reads the board and narrows to one issue with `openIssue`;
-//   `InferOpsIssueSession` reads that issue and proposes transitions.
-// - Every returned read is authorized as an observation. A transition is checked against the
-//   simulated issue, recorded, and submitted as an action; until it is decided, reads show the issue
-//   in its target state (simulation.ts), and a second move of the same issue is refused. Applying
-//   calls the data source with this facet's id plus the action id as the idempotency key, which
-//   also rechecks scope, state, workflow and the expected revision against current data. Rejecting
-//   deletes the record, which ends the simulation.
+// - Sessions: `InferOpsProjectSession` reads the board, proposes new issues and narrows to one
+//   issue with `openIssue`; `InferOpsIssueSession` reads that issue and proposes transitions and
+//   field updates.
+// - Every returned read is authorized as an observation. Every write is checked against the
+//   simulated board, recorded with the exact request it will send and that request's fingerprint
+//   (actions.ts), and submitted as an action; none is auto-approvable. Until it is decided, reads
+//   overlay it (simulation.ts), and a second move or update of the same issue is refused. Applying
+//   recomputes the fingerprint and refuses a mismatch, then calls the data source with this facet's
+//   id plus the action id as the idempotency key, which also rechecks scope, state, workflow and
+//   the expected revision against current data. Rejecting deletes the record, which ends the
+//   simulation.
+// - Reverts: a transition moves back while the issue is still in the state it moved to; an update
+//   restores the previous title and priority while the issue is still at the revision the update
+//   produced and still shows its values; an update that changed the description, and every create,
+//   cannot be reverted (InferOS never reads the description, and InferOps has no issue delete).
 // - Observers (strategy B): a binding is one project, so a collaborator is admitted when their own
 //   InferOps account can open that project.
 //
@@ -38,7 +46,7 @@
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { buildDescription, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
+import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
   AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
@@ -56,6 +64,7 @@ import {
   connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
+import { assertInferOpsEnabled, whileInferOpsEnabled } from "./enablement";
 import { InferOpsCredentials, type InferOpsWorkspace } from "./inferops-credentials";
 import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
@@ -63,11 +72,18 @@ import {
 import {
   DEMO_HOST, PROJECT_BOARD_RESOURCE, parseHost, parseProjectBoardUrl, projectBoardUrl,
 } from "./resources";
-import { buildBoard, livePendingMove, simulateIssue, type PendingTransition } from "./simulation";
+import {
+  buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
+} from "./simulation";
+import {
+  fingerprintOf, isIssueChange, matchesFingerprint, readAction, type ActionRecord,
+  type CreateAction, type StagedAction, type UpdateAction,
+} from "./actions";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
-  Board, InferOpsIssueSession, InferOpsProjectSession, Issue, Revision,
+  Board, InferOpsIssueSession, InferOpsProjectSession, Issue, IssueChanges, NewIssue, Revision,
 } from "./types";
+import type { NewIssueRequest } from "./inferops-client";
 import TYPES_CODE from "./types.txt";
 import PROJECT_CONFIGURATOR_HTML from "./generated/project-ui.txt";
 
@@ -155,7 +171,7 @@ function accountClient(
     ...endpoint,
     async authorize(operation) {
       try {
-        // Every InferOps call here is safe to repeat: reads, or a transition under its own
+        // Every InferOps call here is safe to repeat: reads, or a write under its own
         // idempotency key.
         return await source.run(operation, { replayable: true });
       } catch (error) {
@@ -172,6 +188,18 @@ function accountClient(
 }
 
 /**
+ * The data source for a binding, refused with `DISABLED` on every call while the deployment has
+ * InferOps turned off (enablement.ts). Checked per call, so existing bindings and sessions stop
+ * and resume with the switch.
+ */
+function clientFor(
+  env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
+  workspaceId?: string,
+): InferOpsClient {
+  return whileInferOpsEnabled(env, () => openClientFor(env, exports, account, host, workspaceId));
+}
+
+/**
  * The data source for a binding: the mock for the demo host; for a connected account, the HTTP
  * client with its own authority in `workspaceId`, which the caller resolved from the URL's
  * workspace slug against the person's memberships; for any other account, the stopgap connection
@@ -181,7 +209,7 @@ function accountClient(
  * STOPGAP: the connection from worker vars is shared by every account of the deployment. Local
  * development only; it never backs a connected person, whose own token always wins.
  */
-function clientFor(
+function openClientFor(
   env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
   workspaceId?: string,
 ): InferOpsClient {
@@ -222,10 +250,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       displayName: "InferOps",
       url: "https://github.com/factory-level/inferops",
       logo: INFEROPS_ICON,
-      tagline: "Read project boards and propose issue moves",
+      tagline: "Read project boards and propose issue changes",
       description:
         "Gives Gadgets access to one InferOps project board at a time: read its issues and " +
-        "propose moving them between workflow states, each move approved by you. " +
+        "propose creating issues, editing them and moving them between workflow states, each " +
+        "change approved by you. " +
         (identity
           ? "Connecting signs you in with InferLab, so everything happens with your own " +
             "InferOps access."
@@ -333,6 +362,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
   }> {
+    assertInferOpsEnabled(this.env);
     const { host, projectKey } = parseProjectBoardUrl(url);
     const workspaceId = await this.#workspaceFor(host);
     if (!(await this.#hasProject(host, workspaceId, projectKey))) {
@@ -495,12 +525,6 @@ class InferOpsProjectConfiguratorUI extends RpcTarget implements InferOpsProject
 // ---------------------------------------------------------------------------
 // Project gatekeeper (a facet of the Overseer, one per binding)
 
-/** A submitted transition and its outcome so far. */
-type ActionRecord = PendingTransition & {
-  toStateName: string;
-  status: "pending" | "applied" | "reverted";
-};
-
 const ACTION_PREFIX = "action:";
 const NEXT_ACTION_KEY = "nextActionId";
 const INSTANCE_KEY = "instanceId";
@@ -534,8 +558,9 @@ class ProjectBinding {
     return `${this.instanceId()}:${actionId}${suffix}`;
   }
 
+  /** A recorded action; a record from before creates and updates reads as a transition. */
   action(actionId: number): ActionRecord | undefined {
-    return this.kv.get<ActionRecord>(ACTION_PREFIX + actionId);
+    return readAction(this.kv.get(ACTION_PREFIX + actionId));
   }
 
   putAction(record: ActionRecord): void {
@@ -546,20 +571,40 @@ class ProjectBinding {
     this.kv.delete(ACTION_PREFIX + actionId);
   }
 
-  pending(): PendingTransition[] {
-    const out: PendingTransition[] = [];
-    for (const [, record] of this.kv.list<ActionRecord>({ prefix: ACTION_PREFIX })) {
-      if (record.status === "pending") out.push(record);
+  pending(): Pending {
+    const changes: Pending["changes"][number][] = [];
+    const creates: CreateAction[] = [];
+    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
+      const record = readAction(raw);
+      if (record?.status !== "pending") continue;
+      if (isIssueChange(record)) changes.push(record);
+      else creates.push(record);
     }
-    return out;
+    return { changes, creates };
   }
 
-  /** Record a pending transition before it is submitted, so an immediate apply can find it. */
-  stage(record: Omit<ActionRecord, "actionId" | "status">): number {
+  /**
+   * Record a pending action, with the fingerprint of the request it will send, before it is
+   * submitted, so an immediate apply can find it.
+   */
+  async stage(staged: StagedAction): Promise<number> {
+    const fingerprint = await fingerprintOf(this.projectKey, staged);
     const actionId = this.kv.get<number>(NEXT_ACTION_KEY) ?? 1;
     this.kv.put(NEXT_ACTION_KEY, actionId + 1);
-    this.putAction({ ...record, actionId, status: "pending" });
+    this.putAction({ ...staged, actionId, status: "pending", fingerprint } as ActionRecord);
     return actionId;
+  }
+
+  /** Submit a staged action; if it was not submitted, forget it so it is no longer simulated. */
+  async submit(queue: RpcStub<ApprovalQueue>, actionId: number,
+               description: Parameters<ApprovalQueue["submitAction"]>[1]): Promise<void> {
+    try {
+      await queue.submitAction(actionId, description);
+    } catch (error) {
+      // Not submitted (unless an auto-approval already applied it), so stop simulating it.
+      if (this.action(actionId)?.status === "pending") this.deleteAction(actionId);
+      throw error;
+    }
   }
 
   async board(): Promise<Board> {
@@ -567,7 +612,7 @@ class ProjectBinding {
   }
 
   async issue(issueId: string): Promise<Issue> {
-    return simulateIssue(await this.client.readIssue(this.projectKey, issueId), this.pending());
+    return simulateIssue(await this.client.readIssue(this.projectKey, issueId), this.pending().changes);
   }
 }
 
@@ -586,7 +631,8 @@ export class InferOpsProjectGatekeeper
     return {
       url: projectBoardUrl({ host, projectKey }),
       title: `InferOps board ${projectKey}`,
-      snippet: `Board of InferOps project ${projectKey} on ${host}: read issues and propose moves.`,
+      snippet: `Board of InferOps project ${projectKey} on ${host}: read issues and propose ` +
+        `creating, editing and moving them.`,
       suggestedBindingName: "INFEROPS_BOARD",
       tsType: "InferOpsProjectSession",
     };
@@ -596,7 +642,7 @@ export class InferOpsProjectGatekeeper
     return TYPES_CODE;
   }
 
-  /** Every transition waits for review; none is auto-approvable. */
+  /** Every write waits for review; none is auto-approvable. */
   async getAutoApprovableActions(): Promise<ActionKind[]> {
     return [];
   }
@@ -619,47 +665,87 @@ export class InferOpsProjectGatekeeper
   /** Nothing is tracked per observer under strategy B. */
   async removeObserver(_id: string): Promise<void> {}
 
-  /** `cache` is unused: transitions involve no git objects. */
+  /**
+   * Send the recorded request under the action's idempotency key, so a repeated apply (or one
+   * whose response was lost) is answered by InferOps without writing twice. The fingerprint staged
+   * with the action must still match the request, or nothing is sent. `cache` is unused: no git
+   * objects are involved.
+   */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
     const binding = this.#binding();
     const record = binding.action(actionId);
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
     if (record.status === "applied") return;
     if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
+    const fields = { projectKey: binding.projectKey, action: actionId };
+    if (!(await matchesFingerprint(binding.projectKey, record))) {
+      logger.error("action no longer matches its fingerprint", {
+        event: "action.fingerprint.mismatch", ...fields, code: "IDEMPOTENCY_CONFLICT",
+      });
+      throw new Error(applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
+    }
+    const key = binding.idempotencyKey(actionId);
+    let applied: ActionRecord;
     try {
-      await binding.client.transition(
-        binding.projectKey, record.issueId, record.toStateId, record.expectedRevision,
-        binding.idempotencyKey(actionId));
+      switch (record.kind) {
+        case "transition":
+          await binding.client.transition(
+            binding.projectKey, record.issueId, record.toStateId, record.expectedRevision, key);
+          applied = { ...record, status: "applied" };
+          break;
+        case "create": {
+          const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
+          applied = { ...record, status: "applied", createdIdentifier: created.identifier };
+          break;
+        }
+        case "update": {
+          const updated = await binding.client.updateIssue(
+            binding.projectKey, record.issueId, record.changes, record.expectedRevision, key);
+          applied = { ...record, status: "applied", appliedRevision: updated.revision };
+          break;
+        }
+      }
     } catch (error) {
       const code = inferOpsErrorCode(error);
-      logger.warn("transition failed", {
-        event: "transition.apply.failed", projectKey: binding.projectKey, action: actionId,
-        code: code ?? "UNKNOWN", error,
+      logger.warn(`${record.kind} failed`, {
+        event: `${record.kind}.apply.failed`, ...fields, code: code ?? "UNKNOWN", error,
       });
       throw new Error(applyFailureMessage(record, code), { cause: error });
     }
-    binding.putAction({ ...record, status: "applied" });
-    logger.info("transition applied", {
-      event: "transition.applied", projectKey: binding.projectKey, action: actionId,
-    });
+    binding.putAction(applied);
+    logger.info(`${record.kind} applied`, { event: `${record.kind}.applied`, ...fields });
   }
 
-  /** Forget the pending move; reads stop simulating it at once, so no restart is needed. */
+  /** Forget the pending action; reads stop simulating it at once, so no restart is needed. */
   async rejectAction(actionId: number): Promise<void> {
     const binding = this.#binding();
     if (binding.action(actionId)?.status === "pending") binding.deleteAction(actionId);
   }
 
   /**
-   * Move the issue back to the state it left, provided nothing has moved it since. The data source
-   * checks the current revision again, so a concurrent change makes this fail rather than clobber.
+   * Undo an applied move or title/priority update, provided nothing has changed the issue since.
+   * The data source checks the current revision again, so a concurrent change makes this fail
+   * rather than clobber. Creates, and updates that changed the description, are submitted as not
+   * revertible.
    */
   async revertAction(actionId: number):
       Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
     const binding = this.#binding();
     const record = binding.action(actionId);
     if (!record || record.status !== "applied") {
-      return { message: "This move was never applied, so there is nothing to revert." };
+      return { message: "This change was never applied, so there is nothing to revert." };
+    }
+    if (record.kind === "create") {
+      return {
+        message: `Creating ${record.createdIdentifier ?? "an issue"} cannot be undone here. ` +
+          `Cancel it in InferOps if needed.`,
+      };
+    }
+    if (record.kind === "update" && record.changes.description !== undefined) {
+      return {
+        message: `This change to ${record.identifier} replaced its description, which cannot be ` +
+          `restored here. Edit it in InferOps if needed.`,
+      };
     }
     let current: Issue;
     try {
@@ -668,37 +754,80 @@ export class InferOpsProjectGatekeeper
       if (inferOpsErrorCode(error) !== "NOT_FOUND") throw error;
       return { message: `${record.identifier} is no longer in project ${binding.projectKey}.` };
     }
-    if (current.stateId !== record.toStateId) {
-      return {
-        message: `${record.identifier} has moved again since this change, so it was not moved ` +
-          `back. Move it in InferOps if needed.`,
-      };
+    const revertKey = binding.idempotencyKey(actionId, ":revert");
+    if (record.kind === "transition") {
+      if (current.stateId !== record.toStateId) {
+        return {
+          message: `${record.identifier} has moved again since this change, so it was not moved ` +
+            `back. Move it in InferOps if needed.`,
+        };
+      }
+      await binding.client.transition(
+        binding.projectKey, record.issueId, record.fromStateId, current.revision, revertKey);
+    } else {
+      if (!stillShowsUpdate(record, current)) {
+        return {
+          message: `${record.identifier} has changed again since this update, so its previous ` +
+            `values were not restored. Edit it in InferOps if needed.`,
+        };
+      }
+      await binding.client.updateIssue(
+        binding.projectKey, record.issueId, record.previous, current.revision, revertKey);
     }
-    await binding.client.transition(
-      binding.projectKey, record.issueId, record.fromStateId, current.revision,
-      binding.idempotencyKey(actionId, ":revert"));
     binding.putAction({ ...record, status: "reverted" });
   }
 }
 
+/** Whether `current` is exactly what `update` left: its revision and the values it set. */
+function stillShowsUpdate(update: UpdateAction, current: Issue): boolean {
+  const { title, priority } = update.changes;
+  return current.revision === update.appliedRevision &&
+    (title === undefined || current.title === title) &&
+    (priority === undefined || current.priority === priority);
+}
+
+/** What an action does, for its failure messages; untrusted titles are kept to one short line. */
+function actionLabel(record: ActionRecord): string {
+  switch (record.kind) {
+    case "transition":
+      return `${record.identifier} → ${record.toStateName}`;
+    case "create":
+      return `Creating "${plainInline(record.issue.title, 60)}"`;
+    case "update":
+      return `The update of ${record.identifier}`;
+  }
+}
+
 function applyFailureMessage(record: ActionRecord, code: string | null): string {
-  const what = `${record.identifier} → ${record.toStateName}`;
+  const what = actionLabel(record);
+  const noun = { transition: "move", create: "issue", update: "update" }[record.kind];
   switch (code) {
     case "STALE_REVISION":
-      return `${what} was not applied: the issue changed in InferOps after this move was ` +
-        `proposed (expected revision ${record.expectedRevision}). Discard this move and read the ` +
-        `board again.`;
+      return `${what} was not applied: the issue changed in InferOps after this ${noun} was ` +
+        `proposed (expected revision ${"expectedRevision" in record ? record.expectedRevision : "?"}). ` +
+        `Discard this ${noun} and read the board again.`;
     case "WORKFLOW_MISMATCH":
     case "INVALID_STATE":
       return `${what} was not applied: the target state is no longer valid for this issue.`;
     case "NOT_FOUND":
-      return `${what} was not applied: the issue or its target state is no longer in this project.`;
+      return record.kind === "create"
+        ? `${what} was not applied: its target state is no longer in this project.`
+        : `${what} was not applied: the issue or its target state is no longer in this project.`;
     case "CONFLICT":
-      return `${what} was not applied: InferOps refused the move in the issue's current ` +
-        `condition. Read the board again.`;
+      return `${what} was not applied: InferOps refused it in the issue's current condition. ` +
+        `Read the board again.`;
+    case "INVALID_REQUEST":
+      return `${what} was not applied: InferOps rejected the request as invalid.`;
+    case "IDEMPOTENCY_CONFLICT":
+      return `${what} was not applied: the stored request no longer matches the one proposed. ` +
+        `Discard it and propose it again.`;
     case "UNAUTHORIZED":
     case "FORBIDDEN":
-      return `${what} was not applied: InferOps no longer accepts this connection's access.`;
+      return `${what} was not applied: InferOps does not permit it for this connection (its ` +
+        `access or the workflow policy refused it).`;
+    case "DISABLED":
+      return `${what} was not applied: InferOps is turned off for this deployment. It can be ` +
+        `applied once InferOps is turned back on.`;
     default:
       return `${what} could not be applied. Try again later.`;
   }
@@ -708,6 +837,8 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
 // Sessions
 
 const REVISION = /^\d+$/;
+const MAX_TITLE = 500;
+const MAX_DESCRIPTION = 20_000;
 
 // Errors the caller branches on carry the documented code first, as the data source's do.
 function fail(code: "NOT_FOUND" | "STALE_REVISION" | "WORKFLOW_MISMATCH" | "INVALID_STATE" |
@@ -719,6 +850,21 @@ function fail(code: "NOT_FOUND" | "STALE_REVISION" | "WORKFLOW_MISMATCH" | "INVA
 function hideIssueExistence(error: unknown): never {
   if (inferOpsErrorCode(error) === "NOT_FOUND") fail("NOT_FOUND", "No such issue in this project.");
   throw error;
+}
+
+/** A title trimmed as InferOps trims it, or INVALID_REQUEST when empty or too long. */
+function validTitle(title: string): string {
+  const trimmed = title.trim();
+  if (!trimmed || trimmed.length > MAX_TITLE) {
+    fail("INVALID_REQUEST", `A title must be 1 to ${MAX_TITLE} characters.`);
+  }
+  return trimmed;
+}
+
+function checkDescription(description: string | null | undefined): void {
+  if (description && description.length > MAX_DESCRIPTION) {
+    fail("INVALID_REQUEST", `A description must be at most ${MAX_DESCRIPTION} characters.`);
+  }
 }
 
 @validateRpc()
@@ -757,6 +903,48 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
       .catch(hideIssueExistence);
     return new IssueSessionImpl(this.#binding, this.#queue.dup(), issueId);
   }
+
+  /**
+   * The state is resolved now, from the board, and sent explicitly, so the issue lands in the
+   * column the approver saw. The workflow is the state's, named only when it is `content`
+   * (InferOps' default is `software`).
+   */
+  async createIssue(issue: NewIssue): Promise<void> {
+    const title = validTitle(issue.title);
+    checkDescription(issue.description);
+    const binding = this.#binding;
+    const snapshot = await binding.client.readProject(binding.projectKey);
+    const states = orderStates(snapshot.states);
+    const state = issue.stateId !== undefined
+      ? states.find(s => s.id === issue.stateId)
+      : states.find(s => s.workflow === "software") ?? states[0];
+    if (!state) {
+      fail("INVALID_STATE", issue.stateId !== undefined
+        ? `The target state is not part of project ${binding.projectKey}.`
+        : `Project ${binding.projectKey} has no states to create an issue in.`);
+    }
+    const request: NewIssueRequest = {
+      title,
+      ...(issue.description ? { description: issue.description } : {}),
+      ...(issue.priority ? { priority: issue.priority } : {}),
+      stateId: state.id,
+      ...(state.workflow === "content" ? { workflow: "content" as const } : {}),
+    };
+    const actionId = await binding.stage({ kind: "create", issue: request, stateName: state.name });
+    const description = buildDescription(
+      `Create an issue in InferOps project ${binding.projectKey}.`)
+      .inline("Project", binding.projectKey)
+      .inline("Title", title)
+      .inline("State", state.name)
+      .inline("Workflow", state.workflow)
+      .inline("Priority", request.priority ?? "none");
+    if (request.description) description.verbatim("Description", request.description);
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Create issue: ${title}`),
+      ...description.finish(),
+      implementsRevert: false,
+    });
+  }
 }
 
 @validateRpc()
@@ -785,7 +973,12 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
     return issue;
   }
 
-  async transition(toStateId: string, expectedRevision: Revision): Promise<void> {
+  /**
+   * The stored and simulated issue, after checking the expected revision. The revision a change
+   * produces is not knowable in advance, so changes cannot be chained: `livePending` says whether
+   * one is already waiting.
+   */
+  async #current(expectedRevision: Revision) {
     if (!REVISION.test(expectedRevision)) {
       fail("INVALID_REQUEST", "expectedRevision must be the decimal string returned by read().");
     }
@@ -793,29 +986,37 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
     const snapshot = await binding.client.readProject(binding.projectKey);
     const stored = snapshot.issues.find(i => i.id === this.#issueId);
     if (!stored) fail("NOT_FOUND", "No such issue in this project.");
-    const pending = binding.pending();
-    const issue = simulateIssue(stored, pending);
+    const { changes } = binding.pending();
+    const issue = simulateIssue(stored, changes);
+    if (issue.revision !== expectedRevision) {
+      fail("STALE_REVISION",
+        `${issue.identifier} is at revision ${issue.revision}, not ${expectedRevision}. Read it again.`);
+    }
+    const refuseIfPending = () => {
+      if (livePendingChange(stored, changes)) {
+        fail("CONFLICT",
+          `${issue.identifier} already has a change that has not taken effect yet. Wait for it, ` +
+          `then read the issue again.`);
+      }
+    };
+    return { snapshot, stored, issue, refuseIfPending };
+  }
 
+  async transition(toStateId: string, expectedRevision: Revision): Promise<void> {
+    const binding = this.#binding;
+    const { snapshot, issue, refuseIfPending } = await this.#current(expectedRevision);
     const target = snapshot.states.find(s => s.id === toStateId);
     if (!target) fail("INVALID_STATE", `The target state is not part of project ${binding.projectKey}.`);
     if (target.workflow !== issue.workflow) {
       fail("WORKFLOW_MISMATCH",
         `${issue.identifier} is a ${issue.workflow} issue; "${target.name}" is a ${target.workflow} state.`);
     }
-    if (issue.revision !== expectedRevision) {
-      fail("STALE_REVISION",
-        `${issue.identifier} is at revision ${issue.revision}, not ${expectedRevision}. Read it again.`);
-    }
     if (issue.stateId === toStateId) return;
-    // The revision a move produces is not knowable in advance, so moves cannot be chained.
-    if (livePendingMove(stored, pending)) {
-      fail("CONFLICT",
-        `${issue.identifier} already has a move that has not taken effect yet. Wait for it, then ` +
-        `read the issue again.`);
-    }
+    refuseIfPending();
 
     const from = snapshot.states.find(s => s.id === issue.stateId);
-    const actionId = binding.stage({
+    const actionId = await binding.stage({
+      kind: "transition",
       issueId: issue.id,
       identifier: issue.identifier,
       fromStateId: issue.stateId,
@@ -832,16 +1033,65 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       .inline("To", target.name)
       .inline("Expected revision", expectedRevision)
       .finish();
-    try {
-      await this.#queue.submitAction(actionId, {
-        title: sanitizeTitle(`Move ${issue.identifier} to ${target.name}`),
-        ...rendered,
-        implementsRevert: true,
-      });
-    } catch (error) {
-      // Not submitted (unless an auto-approval already applied it), so stop simulating it.
-      if (binding.action(actionId)?.status === "pending") binding.deleteAction(actionId);
-      throw error;
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Move ${issue.identifier} to ${target.name}`),
+      ...rendered,
+      implementsRevert: true,
+    });
+  }
+
+  /**
+   * Only fields whose value differs from the (simulated) issue are sent; the description is not
+   * part of `Issue`, so a supplied one is always sent. The previous title and priority are
+   * recorded for revert; a description change makes the action not revertible.
+   */
+  async update(changes: IssueChanges, expectedRevision: Revision): Promise<void> {
+    const title = changes.title === undefined ? undefined : validTitle(changes.title);
+    checkDescription(changes.description);
+    const binding = this.#binding;
+    const { issue, refuseIfPending } = await this.#current(expectedRevision);
+
+    const sent: IssueChanges = {
+      ...(title !== undefined && title !== issue.title ? { title } : {}),
+      ...(changes.description !== undefined ? { description: changes.description } : {}),
+      ...(changes.priority !== undefined && changes.priority !== issue.priority
+        ? { priority: changes.priority } : {}),
+    };
+    const named = (["title", "description", "priority"] as const).filter(f => sent[f] !== undefined);
+    if (named.length === 0) return;
+    refuseIfPending();
+
+    const previous = {
+      ...(sent.title !== undefined ? { title: issue.title } : {}),
+      ...(sent.priority !== undefined ? { priority: issue.priority } : {}),
+    };
+    const actionId = await binding.stage({
+      kind: "update",
+      issueId: issue.id,
+      identifier: issue.identifier,
+      expectedRevision,
+      changes: sent,
+      previous,
+    });
+    const description = buildDescription(
+      `Change fields of an issue of InferOps project ${binding.projectKey}. It is applied only if ` +
+      `the issue is still at the revision below when approved.`)
+      .inline("Issue", issue.identifier);
+    if (sent.title !== undefined) {
+      description.inline("Current title", issue.title).inline("New title", sent.title);
+    } else {
+      description.inline("Title", issue.title);
     }
+    if (sent.priority !== undefined) {
+      description.inline("Priority", `${issue.priority} → ${sent.priority}`);
+    }
+    if (sent.description === null) description.prose("The description is cleared.");
+    else if (sent.description !== undefined) description.verbatim("New description", sent.description);
+    description.inline("Expected revision", expectedRevision);
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Update ${issue.identifier}: ${named.join(", ")}`),
+      ...description.finish(),
+      implementsRevert: sent.description === undefined,
+    });
   }
 }
