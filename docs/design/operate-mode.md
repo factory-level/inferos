@@ -15,6 +15,7 @@ InferOS has two modes. Build is where people author software: apps, widgets and 
 ## Requirements
 
 - Each workspace stores an explicit kind: `app`, `widget` or `workflow` (`WorkspaceKind`). The kind changes only through a deliberate switch and is never inferred from code. It decides how the authored thing runs and how Operate presents it.
+- The kind is **deterministic from Build to Operate**. It is checked when the thing is built, travels with every publish and install, and is checked again wherever Operate places or offers something. The operate chat is offered only what it can actually load on the open console, so a published thing of the wrong kind, or one that isn't assigned there, never appears in an operator's conversation or in the agent's context.
 - An authored app, widget or workflow reaches Operate only through **Publish to Operate**. Publishing packages the workspace as a blueprint and installs it into an operate space at a pinned version. Edits in Build do not reach operations until someone republishes, and upgrading an installed version is explicit.
 - An **operate space** lives in a workspace and can be added to. It holds the installed published things, its screens and views, and the operate session. Installing adds gadgets and bindings through existing mechanisms and grants no new authority.
 - A **view** composes many operate screens (existing canvas definitions) into one page with a declared layout. Views store references, layout and a revision only, like screens. A **rollup** is a view that summarizes several screens on one page, such as an Overview of a board and its activity.
@@ -55,6 +56,21 @@ From a Build workspace, Publish to Operate creates or updates a blueprint for it
 | `app` | Opens full-page in a view, with the operate chat beside it (Chat ↔ App). |
 | `widget` | Placed on screens. The operate agent can also show it in the conversation. |
 | `workflow` | Runs on its triggers, has no UI, and reports its runs and approvals into the session. |
+
+### Kind controls
+
+The kind is set by a person, never inferred, and the same pure checks (`workshop-shared/src/workspace-kind.ts`) run at every step:
+
+| Step | Control |
+| --- | --- |
+| Set | Only `Overseer.setKind()` changes the kind. It needs build access, and a `use` collaborator is denied. |
+| Build | The builder agent gets the kind's contract and starts from the kind's starter files. Its file tools refuse a file the kind forbids, such as a workflow's `client.js`. |
+| Publish | The blueprint records the kind. Publishing runs `checkWorkspaceKind` and refuses a gadget that doesn't fit: an app or widget without a UI, a widget or workflow without a server, or a workflow with a UI. |
+| Install | The installed copy takes its kind from the blueprint, never the default. A blueprint with no kind installs as `app` and is offered only as an app. |
+| Place | A screen accepts an `inferos.gadget` widget only if the gadget is widget-kind. A console accepts an assignment only on a surface its kind allows: apps open full-page, widgets go on screens and in the conversation, and workflows run on triggers and report runs. |
+| Offer to chat | The operate agent's catalog is derived from the open console: its assigned widgets, for screens and the conversation; its apps, to open; and its workflows' runs and approvals, to report. Nothing is listed that the agent could not load, and nothing from outside the console is listed. |
+
+Every refusal names the step and the rule that failed, so an author can fix the kind or the files. These checks decide presentation and placement only. They grant no access, and a misplaced or mistyped thing is refused rather than adapted.
 
 ### Surfaces: apps, widgets and full chat
 

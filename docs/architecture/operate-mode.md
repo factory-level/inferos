@@ -61,6 +61,7 @@ Against [the design](../design/operate-mode.md):
 - Role consoles are not implemented: no console definition, no per-role menu or mosaic, no console state machine (`openConsole`, `consoleEvent`, `navigateBack`), and no grid layout for rollups.
 - Build is not gated by role. Any signed-in user can author, and the Build | Operate toggle depends only on the `operate-mode` flag and composable views.
 - There is no full chat presentation (`setPresentation`), and the operate chat can't render widgets inside the conversation. The operate chat panel sits beside the canvas only.
+- Kind controls stop at authoring. Today the kernel enforces only the explicit `setKind()` (denied to `use`), the builder contract and starter files, and the workflow `client.js` refusal in the agent's file tools. That refusal is skipped in worktrees. A blueprint does not record the kind, so an install reads as `app` (`integration-tests/__tests__/operate-published.test.ts` records this as a known gap). `checkWorkspaceKind` runs only in tests, not at publish. Placing an `inferos.gadget` does not require a widget-kind gadget, and there is no per-console operate catalog.
 - There is no derived console inventory and no admin or observability view of which apps and widgets each console uses.
 - Build still offers the bundled `inferops.kanban` blueprint as a creatable output, and it does not yet offer Widgets or Agent workflows as outputs.
 
