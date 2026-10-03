@@ -26,11 +26,13 @@ export type InferOpsErrorCode =
   /** The connection is not permitted to do this in InferOps. */
   | "FORBIDDEN"
   /** InferOps could not be reached, or its response was not usable. */
-  | "UNAVAILABLE";
+  | "UNAVAILABLE"
+  /** The deployment has the InferOps integration turned off (`INFEROPS_ENABLED`, enablement.ts). */
+  | "DISABLED";
 
 const ERROR_CODES: ReadonlySet<string> = new Set<InferOpsErrorCode>([
   "NOT_FOUND", "STALE_REVISION", "WORKFLOW_MISMATCH", "INVALID_STATE", "IDEMPOTENCY_CONFLICT",
-  "INVALID_REQUEST", "CONFLICT", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE",
+  "INVALID_REQUEST", "CONFLICT", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE", "DISABLED",
 ]);
 
 /**

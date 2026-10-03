@@ -28,5 +28,10 @@ declare namespace Cloudflare {
      * InferOps account a person's own InferLab session instead of an auto-provisioned demo account.
      */
     INFERLAB_AUTH_ORIGIN?: string;
+    /**
+     * `"true"` or `"false"`: whether the InferOps integration is on (capability `INFEROPS_ENABLED`).
+     * The dev server always sets it; unset counts as on (see enablement.ts).
+     */
+    INFEROPS_ENABLED?: string;
   }
 }

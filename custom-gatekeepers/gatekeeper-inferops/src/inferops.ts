@@ -64,6 +64,7 @@ import {
   connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
+import { assertInferOpsEnabled, whileInferOpsEnabled } from "./enablement";
 import { InferOpsCredentials, type InferOpsWorkspace } from "./inferops-credentials";
 import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
@@ -187,6 +188,18 @@ function accountClient(
 }
 
 /**
+ * The data source for a binding, refused with `DISABLED` on every call while the deployment has
+ * InferOps turned off (enablement.ts). Checked per call, so existing bindings and sessions stop
+ * and resume with the switch.
+ */
+function clientFor(
+  env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
+  workspaceId?: string,
+): InferOpsClient {
+  return whileInferOpsEnabled(env, () => openClientFor(env, exports, account, host, workspaceId));
+}
+
+/**
  * The data source for a binding: the mock for the demo host; for a connected account, the HTTP
  * client with its own authority in `workspaceId`, which the caller resolved from the URL's
  * workspace slug against the person's memberships; for any other account, the stopgap connection
@@ -196,7 +209,7 @@ function accountClient(
  * STOPGAP: the connection from worker vars is shared by every account of the deployment. Local
  * development only; it never backs a connected person, whose own token always wins.
  */
-function clientFor(
+function openClientFor(
   env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
   workspaceId?: string,
 ): InferOpsClient {
@@ -349,6 +362,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
   }> {
+    assertInferOpsEnabled(this.env);
     const { host, projectKey } = parseProjectBoardUrl(url);
     const workspaceId = await this.#workspaceFor(host);
     if (!(await this.#hasProject(host, workspaceId, projectKey))) {
@@ -811,6 +825,9 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
     case "FORBIDDEN":
       return `${what} was not applied: InferOps does not permit it for this connection (its ` +
         `access or the workflow policy refused it).`;
+    case "DISABLED":
+      return `${what} was not applied: InferOps is turned off for this deployment. It can be ` +
+        `applied once InferOps is turned back on.`;
     default:
       return `${what} could not be applied. Try again later.`;
   }
