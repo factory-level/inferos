@@ -87,7 +87,7 @@ describe("INFEROPS_ENABLED", () => {
 
     turn("false");
     expect(await hooks.apply(props, actionId)).toContain("InferOps is turned off for this deployment");
-    expect(await hooks.revert(props, actionId)).toBe("This move was never applied, so there is nothing to revert.");
+    expect(await hooks.revert(props, actionId)).toBe("This change was never applied, so there is nothing to revert.");
     expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: READY, revision: "1" });
 
     turn("true");
