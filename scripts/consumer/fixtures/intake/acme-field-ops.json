@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "review": { "status": "reviewed", "reviewedBy": "InferOS maintainers (synthetic sample review)", "reviewedOn": "2026-10-02" },
+  "customer": { "name": "Acme Field Operations" },
+  "inferops": {
+    "tenant": "acme",
+    "workspace": "operations",
+    "projects": [
+      { "key": "ENG", "name": "Field tooling engineering", "workflow": "software" },
+      { "key": "OPS", "name": "Field operations procedures", "workflow": "content" }
+    ]
+  },
+  "capabilities": ["kanban", "wiki", "local-coding"],
+  "wiki": {
+    "pillars": [
+      { "id": "field-service", "title": "Field service" },
+      { "id": "safety", "title": "Safety and compliance" },
+      { "id": "dispatch", "title": "Dispatch" }
+    ]
+  },
+  "operations": [
+    { "id": "dispatch-crew", "name": "Dispatch a field crew to a work order", "owner": "Dispatch lead", "project": "OPS", "pillar": "dispatch", "sop": "wiki:dispatch/dispatch-a-crew" },
+    { "id": "site-safety-check", "name": "Run the pre-job site safety check", "owner": "Safety officer", "project": "OPS", "pillar": "safety", "sop": "wiki:safety/pre-job-check" },
+    { "id": "close-work-order", "name": "Close a completed work order", "owner": "Field supervisor", "project": "OPS", "pillar": "field-service", "sop": null },
+    { "id": "ship-mobile-fix", "name": "Ship a fix to the technician mobile checklist", "owner": "Engineering lead", "project": "ENG", "pillar": "field-service", "sop": null }
+  ],
+  "requirements": [
+    { "id": "REQ-01", "text": "Dispatchers track work orders on a Kanban board with configured lanes.", "category": "kanban" },
+    { "id": "REQ-02", "text": "Staff sign in with their own InferLab identity; no shared account.", "category": "sign-in" },
+    { "id": "REQ-03", "text": "Supervisors keep one saved operations view showing both project boards.", "category": "views" },
+    { "id": "REQ-04", "text": "The company Wiki shows Field service, Safety and Dispatch pillars with a Master page each.", "category": "wiki" },
+    { "id": "REQ-05", "text": "An engineer dispatches a local coding task against the customer fork from an ENG issue.", "category": "local-coding" },
+    { "id": "REQ-06", "text": "Technicians see a branded mobile checklist component for site visits.", "category": "custom-component" },
+    { "id": "REQ-07", "text": "Work orders sync from the synthetic Acme ERP connector.", "category": "integration" },
+    { "id": "REQ-08", "text": "The environment is deployed to Acme's Cloudflare account.", "category": "deployment" }
+  ]
+}
