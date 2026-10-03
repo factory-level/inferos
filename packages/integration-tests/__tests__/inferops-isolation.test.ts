@@ -582,6 +582,23 @@ async function settled(url: URL): Promise<void> {
   throw new Error(`The reloaded server never settled: ${String(last)}`);
 }
 
+/**
+ * Run `phase` over fresh connections until one survives. Even a settled server can drop a socket
+ * opened just after a reload, which surfaces as "WebSocket connection failed." (thrown, or as the
+ * message `failure` returns). Only side-effect-free phases may be repeated; any other failure is
+ * the test's real result.
+ */
+async function overFreshConnection<T>(phase: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await phase();
+    } catch (error) {
+      if (attempt >= 3 || !String(error).includes("WebSocket connection failed")) throw error;
+      await settled(harness.url);
+    }
+  }
+}
+
 const setEnabled = (enabled: boolean) => setVar("INFEROPS_ENABLED", enabled);
 
 const ENG_DISPATCH = `inferops://acme.operations/project/dispatch/ENG`;
@@ -694,18 +711,20 @@ describe("coding dispatch", () => {
 
     await setVar("CODING_WORKBENCH_ENABLED", false);
     try {
-      const api = await logIn(connect(harness.url), hal.username);
-      const reopened = await api.openGadget(gadgetId);
-      const stale = await (await reopened.getGatekeeperById(connectionId)).openSession() as
-        RpcStub<InferOpsDispatchSession>;
-      const before = fake.requests.length;
-      expect(await failure(stale.listRuns())).toContain("DISABLED: Coding dispatch is turned off");
-      expect(await failure(reopened.approveAction(action.id))).toContain("coding dispatch is turned off");
-      expect(await failure(reopened.newGatekeeper(hal.account.id, ENG_DISPATCH)))
-        .toContain("Coding dispatch is turned off");
-      expect(fake.requests.slice(before)).toEqual([]);
-      // The board stays available: the switch covers coding dispatch only.
-      expect(await (await api.newGadget()).newGatekeeper(hal.account.id, ENG_BOARD)).toBeTruthy();
+      await overFreshConnection(async () => {
+        const api = await logIn(connect(harness.url), hal.username);
+        const reopened = await api.openGadget(gadgetId);
+        const stale = await (await reopened.getGatekeeperById(connectionId)).openSession() as
+          RpcStub<InferOpsDispatchSession>;
+        const before = fake.requests.length;
+        expect(await failure(stale.listRuns())).toContain("DISABLED: Coding dispatch is turned off");
+        expect(await failure(reopened.approveAction(action.id))).toContain("coding dispatch is turned off");
+        expect(await failure(reopened.newGatekeeper(hal.account.id, ENG_DISPATCH)))
+          .toContain("Coding dispatch is turned off");
+        expect(fake.requests.slice(before)).toEqual([]);
+        // The board stays available: the switch covers coding dispatch only.
+        expect(await (await api.newGadget()).newGatekeeper(hal.account.id, ENG_BOARD)).toBeTruthy();
+      });
     } finally {
       await setVar("CODING_WORKBENCH_ENABLED", true);
     }
@@ -735,22 +754,27 @@ describe("the deployment switch", () => {
 
     await setEnabled(false);
     try {
-      const off = await reopen();
-      const before = fake.requests.length;
-      expect(await failure(off.session.readBoard()))
-        .toContain("DISABLED: InferOps is turned off for this deployment.");
-      expect(await failure(off.ws.approveAction(action.id)))
-        .toContain("was not applied: InferOps is turned off for this deployment");
-      expect(await failure(off.ws.newGatekeeper(alice.account.id, ENG_BOARD)))
-        .toContain("InferOps is turned off for this deployment.");
-      expect(fake.requests.slice(before)).toEqual([]);
-      expect((await pending(off.ws)).map(a => a.id)).toEqual([action.id]);
+      await overFreshConnection(async () => {
+        const off = await reopen();
+        const before = fake.requests.length;
+        expect(await failure(off.session.readBoard()))
+          .toContain("DISABLED: InferOps is turned off for this deployment.");
+        expect(await failure(off.ws.approveAction(action.id)))
+          .toContain("was not applied: InferOps is turned off for this deployment");
+        expect(await failure(off.ws.newGatekeeper(alice.account.id, ENG_BOARD)))
+          .toContain("InferOps is turned off for this deployment.");
+        expect(fake.requests.slice(before)).toEqual([]);
+        expect((await pending(off.ws)).map(a => a.id)).toEqual([action.id]);
+      });
     } finally {
       await setEnabled(true);
     }
 
-    const on = await reopen();
-    expect((await on.session.readBoard()).project.identifier).toBe("ENG");
+    const on = await overFreshConnection(async () => {
+      const reopened = await reopen();
+      expect((await reopened.session.readBoard()).project.identifier).toBe("ENG");
+      return reopened;
+    });
     await on.ws.approveAction(action.id);
     expect(fake.issue("ENG-2").stateId).toBe(DONE.id);
   });
