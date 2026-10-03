@@ -100,10 +100,16 @@ INFERLAB_AUTH_ORIGIN=https://auth.inferlab.io
 - The flow is `GET /authorize` (S256), then a server-side `POST /auth/token`. The gatekeeper accepts
   `user.email` only when the response marks it `emailVerified: true`. A missing flag fails closed,
   because InferLab also issues sessions for emails nobody proved, such as invitations and
-  impersonation. It keeps only the email and drops the InferLab tokens.
-- Consumer wrappers set `features.inferlabLogin` instead. `run-dev-server.ts` then appends
-  `inferops` to `AUTH_GATEKEEPERS` and defaults `INFERLAB_AUTH_ORIGIN` to
-  `http://localhost:8080`, the local InferLab stack. In-repo, set both variables in the shell.
+  impersonation. A sign-in keeps only the email and signs the InferLab session out again.
+- With the origin set, the InferOps gatekeeper no longer auto-provisions demo accounts: a person
+  **connects** it through the same PKCE sign-in (silent while InferLab's SSO cookie is live), and
+  that account keeps their InferLab session so every board request is made with their own token
+  and workspace. See [the gatekeeper](architecture/inferops-gatekeeper.md).
+- Consumer wrappers set `features.inferlabLogin` (or `capabilities.INFEROPS_AUTH` in a version 2
+  file) instead. `run-dev-server.ts` then appends `inferops` to `AUTH_GATEKEEPERS` and defaults
+  `INFERLAB_AUTH_ORIGIN` to `http://localhost:8080`, the local InferLab stack. In-repo, set both
+  variables in the shell. Listing `inferops` without the gatekeeper enabled or without a valid
+  origin stops the dev server with the reason.
 
 ## Storage / bindings
 

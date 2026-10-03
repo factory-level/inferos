@@ -25,9 +25,11 @@ Expose scoped InferOps project/board/issue reads and approved issue transitions 
 
 The user connects an InferOps account, selects a project and receives a scoped session. The session reads a board or issue through validated InferOps APIs. A transition proposal names the issue, target state and expected revision; preview reports the intended change without writing. Approval executes using the original scope, a deduplication key and current domain checks. Conflicts return structured reload/review instructions. Revocation and reconnect clear affected caches. Shared Gadgets cannot gain the owner’s wider scope by changing a target URI. Installation alone never asserts ambience; provisioning follows admin policy.
 
-### Sign in with InferLab
+### Sign in and connect with InferLab
 
-When a deployment enables it, the login page offers InferLab next to its other sign-in options. InferOS is a public PKCE client of InferLab central-auth (client id `inferos`, redirect URI `<PUBLIC_BASE_URL>/gatekeeper/inferops/oauth`). The gatekeeper exchanges the code server-side and hands the Workshop only the verified email, which keys the Workshop account like every gatekeeper sign-in. Signing in grants no board access. Board authority stays with the account and scope contract below (#21), so the sign-in tokens are not kept.
+When a deployment enables it (`INFEROPS_AUTH`, [#66](https://github.com/factory-level/inferos/issues/66)), the login page offers InferLab next to its other sign-in options. InferOS is a public PKCE client of InferLab central-auth (client id `inferos`, redirect URI `<PUBLIC_BASE_URL>/gatekeeper/inferops/oauth`). The gatekeeper exchanges the code server-side. For a sign-in it hands the Workshop only the verified email, which keys the Workshop account like every gatekeeper sign-in, and ends the InferLab session: signing in grants no board, tenant or resource.
+
+The same sign-in connects the InferOps gatekeeper account. A connected account holds that person's InferLab session, refreshes and revokes it, and makes every InferOps request with their own token and one of their own workspaces, so InferOps permissions, row-level rules and revocation apply per person ([ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md)). The deployment holds no credential shared between people. When the integration is off, another supported sign-in mode is required and the gatekeeper serves demo accounts; there is no anonymous bypass. Asking for the integration without the gatekeeper or an InferLab origin fails at startup with a clear message.
 
 ## InferOps contract
 

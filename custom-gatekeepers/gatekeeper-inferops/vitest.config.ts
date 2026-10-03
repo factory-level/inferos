@@ -30,6 +30,8 @@ export default defineConfig({
           PROJECT_GATEKEEPER: { className: "InferOpsProjectGatekeeper", useSQLite: true },
           // One sign-in attempt per object; the tests seed its callback from inside the object.
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
+          // One per connected account; the tests reach it through the account entrypoints.
+          INFEROPS_CREDENTIALS: { className: "InferOpsCredentials", useSQLite: true },
           // A facet carrying props is only reachable through `ctx.facets`, so the tests drive the
           // gatekeeper from a hook Durable Object, as the overseer does in production.
           TEST_HOOKS: { className: "TestHooks", useSQLite: true },

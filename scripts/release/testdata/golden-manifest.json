@@ -486,7 +486,8 @@
         },
         {
           "new_sqlite_classes": [
-            "InferLabLogin"
+            "InferLabLogin",
+            "InferOpsCredentials"
           ],
           "tag": "v1"
         }

@@ -23,12 +23,14 @@ import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
 import {
   INFERLAB_LOGIN_GATEKEEPER, getDevRouterAssets, getDevServerConfig, getInferLabLoginVars,
+  inferLabLoginStartupError,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
 import { parseConsumerConfig } from "./consumer/config.ts";
+import { inferOpsAuthRequested } from "./consumer/config.ts";
 import { unsupportedCapabilities } from "./consumer/runtime.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
@@ -140,13 +142,15 @@ const gatekeepers = findGatekeepers(ROOT).filter(({ dir, name }) =>
 // that turns composition (with saved views) on. A wrapper's own flags always take precedence.
 const canvasFeatures = consumerConfig?.features
     ?? { composableViews: canvasConfig !== null, durableViews: canvasConfig !== null };
-// "Sign in with InferLab" is a wrapper flag only; in-repo, set AUTH_GATEKEEPERS and
-// INFERLAB_AUTH_ORIGIN in the shell instead.
-const inferLabLoginEnabled = consumerConfig?.features.inferlabLogin ?? false;
+// InferOps-backed sign-in (`features.inferlabLogin`, or `INFEROPS_AUTH` in a version 2 wrapper) is
+// a wrapper flag; in-repo, set AUTH_GATEKEEPERS and INFERLAB_AUTH_ORIGIN in the shell instead.
+// Either way the result is checked before anything starts: asking for it without the gatekeeper or
+// without an InferLab origin is a configuration error, never a login page quietly missing a button.
+const inferLabLoginEnabled = consumerConfig ? inferOpsAuthRequested(consumerConfig) : false;
 const inferLabLogin = getInferLabLoginVars(inferLabLoginEnabled, process.env);
-if (inferLabLoginEnabled && !gatekeepers.some(({ name }) => name === INFERLAB_LOGIN_GATEKEEPER)) {
-  throw new Error(`features.inferlabLogin requires ${INFERLAB_LOGIN_GATEKEEPER}; enable it with pnpm canvas enable ${INFERLAB_LOGIN_GATEKEEPER}`);
-}
+const inferLabLoginError = inferLabLoginStartupError(
+  inferLabLogin, gatekeepers.some(({ name }) => name === INFERLAB_LOGIN_GATEKEEPER));
+if (inferLabLoginError) throw new Error(inferLabLoginError);
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -554,8 +558,8 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_PORTAL_HIDDEN_SERVER_IDS", "MCP_ALLOW_INSECURE",
   ],
   "gatekeeper-mcp": ["MCP_ALLOW_INSECURE"],
-  // A live InferOps connection for local development. One token for the whole dev server is a
-  // stopgap until each person connects with their own InferOps sign-in (inferos#66).
+  // The InferOps API. The base URL is what connected people call with their own InferLab session;
+  // the token and workspace id are a local-development stopgap for accounts with no identity.
   "gatekeeper-inferops": ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"],
 };
 // Vars resolved here rather than read raw from the shell.

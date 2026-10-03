@@ -1,15 +1,20 @@
-// Sign in with InferLab: the Workshop's gatekeeper sign-in flow (`connectAccount` with
-// `scopes: "auth"`), backed by InferLab central-auth's authorization-code + PKCE server.
+// Sign in and connect with InferLab: the Workshop's gatekeeper flows (`connectAccount` with
+// `scopes: "auth"` or `"full"`, and `GatekeeperUser.reconnect`), backed by InferLab central-auth's
+// authorization-code + PKCE server.
 //
 // - InferOS is the public client `inferos` (no secret). Its redirect URI is this gatekeeper's
 //   `<BASE_URL>/oauth`, which InferLab registers exactly; `INFERLAB_AUTH_ORIGIN` names the auth
-//   server. With no valid origin configured the vendor does not offer sign-in at all.
-// - `InferLabLogin` is one short-lived Durable Object per attempt. It holds the Workshop's callback,
-//   the single-use initiation and OAuth nonces, and the PKCE verifier, and deletes itself by alarm.
-// - The code is exchanged server-side (`POST /auth/token`). Only an email InferLab marks
-//   `emailVerified: true` is accepted, and only the email is kept: the
-//   tokens are dropped, because board reads still use demo data and the InferOps API authority for
-//   gatekeeper sessions is a separate, open contract.
+//   server. With no valid origin configured the vendor offers neither sign-in nor a connect flow.
+// - `InferLabLogin` is one short-lived Durable Object per attempt. It holds the flow's purpose, the
+//   Workshop's callback, the single-use initiation and OAuth nonces, and the PKCE verifier, and
+//   deletes itself by alarm.
+// - The code is exchanged server-side (`POST /auth/token`). What happens to the session depends on
+//   the purpose:
+//   - Sign-in keeps only the email, and only when InferLab marks it `emailVerified: true`; the
+//     session is signed out again at once, so signing in leaves no InferLab session behind.
+//   - A connect stores the session in the account's `InferOpsCredentials` object, so the person's
+//     own authority backs every request the account makes (inferops-credentials.ts).
+//   - A reconnect stages the session there until the Workshop commits it.
 
 import { DurableObject } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
@@ -25,6 +30,10 @@ import { createLogger } from "@gadgets/observability/logger";
 import {
   stripTrailingSlashes, type ConnectHandoff, type GatekeeperConnectCallback, type GatekeeperUser,
 } from "@gadgets/workshop-shared/gatekeeper";
+import {
+  accessTokenExpiry, logoutInferLabSession, type InferOpsConnection, type InferOpsCredentials,
+  type InferOpsWorkspace,
+} from "./inferops-credentials";
 
 const logger = createLogger<{ vendorId: string }>({
   component: "gatekeeper.inferops.login", vendorId: "inferops",
@@ -40,13 +49,25 @@ const MAX_TOKEN_RESPONSE_BYTES = 256 * 1024;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 // Both connect-flow ids are 32 random bytes in lowercase hex; the Durable Object id is 64 hex too.
 const HEX_64 = /^[0-9a-f]{64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const NOT_CONFIGURED = "InferLab sign-in is not configured on this deployment.";
 const FLOW_KEY = "flow";
+const PURPOSE_KEY = "purpose";
 const CALLBACK_KEY = "callback";
 
 /** The deployment settings this flow reads. */
 export type InferLabLoginEnv = { INFERLAB_AUTH_ORIGIN?: string; BASE_URL?: string };
+
+/**
+ * What an attempt is for. A sign-in hands the Workshop a transient account carrying the verified
+ * email; a connect mints a persistent account backed by the person's session; a reconnect replaces
+ * an existing account's session.
+ */
+export type LoginPurpose =
+  | { kind: "signin" }
+  | { kind: "connect" }
+  | { kind: "reconnect"; accountId: string };
 
 /**
  * The configured InferLab auth origin, or null when sign-in is off. Anything but a bare HTTPS origin
@@ -88,43 +109,83 @@ type Flow =
   | { stage: "initiation"; nonce: string; expiresAt: number }
   | { stage: "oauth"; nonce: string; expiresAt: number; codeVerifier: string; redirectUri: string };
 
-/** The identity InferLab vouched for, as the sign-in account carries it. */
-export type InferLabIdentity = { email: string };
+/** What a `POST /auth/token` response yields: the session and whom it belongs to. */
+export type InferLabExchange = InferOpsConnection & {
+  /** Whether InferLab proved the person controls `identity.email`. */
+  emailVerified: boolean;
+};
 
-/** Mints the account handed to the Workshop's callback; it only has to report the email. */
-export type InferLabAccountFactory = (identity: InferLabIdentity) => Fetcher<GatekeeperUser>;
-
-/** Extracts the verified email from a `POST /auth/token` response body, or throws. */
-export function identityFromTokenResponse(body: string): InferLabIdentity {
+/** Parses a `POST /auth/token` response body, or throws a `SignInFailure`. */
+export function exchangeFromTokenResponse(body: string): InferLabExchange {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
   } catch {
     throw new SignInFailure("InferLab returned an unreadable sign-in response.");
   }
-  const user = (parsed as { user?: unknown } | null)?.user as
-    { email?: unknown; emailVerified?: unknown } | undefined;
-  const email = typeof user?.email === "string" ? user.email.trim().toLowerCase() : "";
-  // The Workshop keys accounts by email, so only an address InferLab vouches for may sign in.
-  // InferLab also issues sessions whose email nobody proved (invitations, impersonation), so a
-  // missing flag fails closed.
-  if (!email.includes("@") || email.length > 320 || user?.emailVerified !== true) {
-    throw new SignInFailure("Your InferLab account has no verified email address.");
+  const response = (parsed ?? {}) as { token?: unknown; refreshToken?: unknown; user?: unknown };
+  const user = (response.user ?? {}) as {
+    id?: unknown; email?: unknown; emailVerified?: unknown; tenantId?: unknown; workspaces?: unknown;
+  };
+  const email = typeof user.email === "string" ? user.email.trim().toLowerCase() : "";
+  if (!email.includes("@") || email.length > 320) {
+    throw new SignInFailure("Your InferLab account has no email address.");
   }
-  return { email };
+  if (typeof response.token !== "string" || !response.token ||
+      typeof response.refreshToken !== "string" || !response.refreshToken ||
+      typeof user.id !== "string" || !user.id || typeof user.tenantId !== "string" || !user.tenantId) {
+    throw new SignInFailure("InferLab returned an incomplete sign-in response.");
+  }
+  const workspaces: InferOpsWorkspace[] = [];
+  for (const entry of Array.isArray(user.workspaces) ? user.workspaces : []) {
+    const w = (entry ?? {}) as { workspaceId?: unknown; workspaceName?: unknown; product?: unknown };
+    if (w.product !== "inferops") continue;
+    if (typeof w.workspaceId !== "string" || !UUID.test(w.workspaceId)) {
+      throw new SignInFailure("InferLab returned an incomplete sign-in response.");
+    }
+    workspaces.push({
+      workspaceId: w.workspaceId.toLowerCase(),
+      workspaceName: typeof w.workspaceName === "string" ? w.workspaceName : w.workspaceId,
+    });
+  }
+  return {
+    grant: {
+      accessToken: response.token, accessExpiresAt: accessTokenExpiry(response.token),
+      refreshToken: response.refreshToken,
+    },
+    identity: { userId: user.id, email, tenantId: user.tenantId, workspaces },
+    emailVerified: user.emailVerified === true,
+  };
 }
 
 /**
- * One sign-in attempt: callback, nonces and PKCE verifier, deleted once used or expired. A wrong
+ * The identity a sign-in may key the Workshop account on: only an email InferLab vouches for.
+ * InferLab also issues sessions whose email nobody proved (invitations, impersonation), so a missing
+ * flag fails closed.
+ */
+export function verifiedEmail(exchange: InferLabExchange): string {
+  if (!exchange.emailVerified) {
+    throw new SignInFailure("Your InferLab account has no verified email address.");
+  }
+  return exchange.identity.email;
+}
+
+/** The namespace the flow mints accounts' credential objects in. */
+type CredentialsNamespace = DurableObjectNamespace<InferOpsCredentials>;
+
+/**
+ * One attempt: purpose, callback, nonces and PKCE verifier, deleted once used or expired. A wrong
  * nonce leaves the attempt alone, so only the browser holding the real one can end it.
  */
 @validateRpc()
 export class InferLabLogin extends DurableObject<Cloudflare.Env> {
-  /** Records the Workshop's callback and the initiation nonce the login URL carries. */
+  /** Records what the attempt is for, the Workshop's callback and the initiation nonce the URL carries. */
   @skipRpcValidation()
-  async start(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string): Promise<void> {
+  async start(purpose: LoginPurpose, initiationNonce: string,
+              callback?: Fetcher<GatekeeperConnectCallback>): Promise<void> {
     const now = Date.now();
-    this.ctx.storage.kv.put(CALLBACK_KEY, callback);
+    this.ctx.storage.kv.put(PURPOSE_KEY, purpose);
+    if (callback) this.ctx.storage.kv.put(CALLBACK_KEY, callback);
     this.ctx.storage.kv.put<Flow>(FLOW_KEY, {
       stage: "initiation", nonce: initiationNonce, expiresAt: now + INITIATION_NONCE_LIFETIME_MS,
     });
@@ -157,31 +218,67 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Exchanges the authorization code, then hands the Workshop an account carrying the verified
-   * email. Returns null when the state is unknown, used or expired, and `{ error }` with a message
-   * safe to show the user when the sign-in fails.
+   * Exchanges the authorization code and finishes the attempt for its purpose. Returns null when the
+   * state is unknown, used or expired, and `{ error }` with a message safe to show the user when the
+   * flow fails.
    */
   async complete(code: string, oauthNonce: string)
       : Promise<{ handoff: ConnectHandoff } | { error: string } | null> {
     const flow = this.#claim("oauth", oauthNonce);
     if (flow?.stage !== "oauth") return null;
+    const purpose = this.ctx.storage.kv.get<LoginPurpose>(PURPOSE_KEY);
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>(CALLBACK_KEY);
     try {
-      if (!callback) return null;
+      if (!purpose) return null;
       const origin = inferLabAuthOrigin(this.env);
       if (!origin) return { error: NOT_CONFIGURED };
-      const identity = await exchangeCode(origin, code, flow.codeVerifier, flow.redirectUri);
-      const account = this.ctx.exports.InferOpsAccount({
-        props: { accountId: crypto.randomUUID(), email: identity.email },
-      }) as unknown as Fetcher<GatekeeperUser>;
-      return { handoff: await callback.complete(account) };
+      const exchange = await exchangeCode(origin, code, flow.codeVerifier, flow.redirectUri);
+      return { handoff: await this.#finish(origin, purpose, exchange, callback) };
     } catch (error) {
       if (error instanceof SignInFailure) return { error: error.message };
-      logger.error("InferLab sign-in failed", { event: "inferlab.login.failed", error });
+      logger.error("InferLab flow failed", { event: "inferlab.login.failed", error });
       return { error: "InferLab sign-in failed. Close this window and try again." };
     } finally {
       await this.#forget();
     }
+  }
+
+  async #finish(origin: string, purpose: LoginPurpose, exchange: InferLabExchange,
+                callback: Fetcher<GatekeeperConnectCallback> | undefined): Promise<ConnectHandoff> {
+    const credentials = this.ctx.exports.InferOpsCredentials as unknown as CredentialsNamespace;
+    switch (purpose.kind) {
+      case "signin": {
+        if (!callback) throw new Error("This sign-in attempt has no callback.");
+        // Only the email is kept: the session itself is ended, since signing in grants nothing.
+        const email = verifiedEmail(exchange);
+        await logoutInferLabSession(origin, exchange.grant.refreshToken);
+        return callback.complete(this.#account({ accountId: crypto.randomUUID(), email }));
+      }
+      case "connect": {
+        if (!callback) throw new Error("This connect attempt has no callback.");
+        const accountId = crypto.randomUUID();
+        const store = credentials.get(credentials.idFromName(accountId));
+        await store.install({ grant: exchange.grant, identity: exchange.identity }, callback);
+        try {
+          return await callback.complete(this.#account({
+            accountId, connected: true,
+            email: exchange.emailVerified ? exchange.identity.email : undefined,
+          }));
+        } catch (error) {
+          // Reachable from no Workshop account, so the session is ended and the store wiped.
+          await store.revoke();
+          throw error;
+        }
+      }
+      case "reconnect": {
+        const store = credentials.get(credentials.idFromName(purpose.accountId));
+        return store.completeReconnect({ grant: exchange.grant, identity: exchange.identity });
+      }
+    }
+  }
+
+  #account(props: { accountId: string; email?: string; connected?: boolean }): Fetcher<GatekeeperUser> {
+    return this.ctx.exports.InferOpsAccount({ props }) as unknown as Fetcher<GatekeeperUser>;
   }
 
   async alarm(): Promise<void> {
@@ -205,11 +302,11 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
   }
 }
 
-/** A sign-in failure whose message is safe to show the user. */
+/** A failure whose message is safe to show the user. */
 class SignInFailure extends Error {}
 
 async function exchangeCode(origin: string, code: string, codeVerifier: string,
-                            redirectUri: string): Promise<InferLabIdentity> {
+                            redirectUri: string): Promise<InferLabExchange> {
   const response = await fetch(`${origin}/auth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -221,22 +318,24 @@ async function exchangeCode(origin: string, code: string, codeVerifier: string,
     // The body may echo request details; never surface it.
     throw new SignInFailure(`InferLab rejected the sign-in (HTTP ${response.status}).`);
   }
-  return identityFromTokenResponse(body);
+  return exchangeFromTokenResponse(body);
 }
 
 type LoginNamespace = DurableObjectNamespace<InferLabLogin>;
 
 /**
- * Starts an attempt for `connectAccount`: a fresh Durable Object holding the callback, and the URL
- * the Workshop opens in the sign-in popup.
+ * Starts an attempt: a fresh Durable Object holding its purpose and callback, and the URL the
+ * Workshop opens in the popup. A reconnect has no callback of its own; the account's stored one
+ * reports its completion.
  */
 export async function startInferLabLogin(namespace: LoginNamespace, env: InferLabLoginEnv,
-                                         callback: Fetcher<GatekeeperConnectCallback>)
+                                         purpose: LoginPurpose,
+                                         callback?: Fetcher<GatekeeperConnectCallback>)
     : Promise<{ url: string }> {
   if (!inferLabAuthOrigin(env)) throw new Error(NOT_CONFIGURED);
   const id = namespace.newUniqueId();
   const nonce = generateNonce();
-  await namespace.get(id).start(callback, nonce);
+  await namespace.get(id).start(purpose, nonce, callback);
   return { url: inferLabLoginUrl(env, id.toString(), nonce) };
 }
 

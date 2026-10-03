@@ -7,7 +7,8 @@ import { runInDurableObject } from "cloudflare:test";
 import { pkceChallenge } from "@gadgets/gatekeeper-kit/oauth-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  handleInferLabLogin, identityFromTokenResponse, inferLabAuthOrigin, startInferLabLogin,
+  exchangeFromTokenResponse, handleInferLabLogin, inferLabAuthOrigin, startInferLabLogin,
+  verifiedEmail,
 } from "../src/inferlab-login.js";
 import { signIns, type InferLabLogin, type SignInExports } from "./worker.js";
 
@@ -30,7 +31,7 @@ async function withExports<R>(body: (exports: SignInExports) => Promise<R>): Pro
 async function start(label: string): Promise<string> {
   return withExports(async exports => {
     const callback = exports.TestConnectCallback({ props: { label } });
-    return (await startInferLabLogin(env.INFERLAB_LOGIN, LOGIN_ENV, callback as never)).url;
+    return (await startInferLabLogin(env.INFERLAB_LOGIN, LOGIN_ENV, { kind: "signin" }, callback as never)).url;
   });
 }
 
@@ -47,35 +48,38 @@ async function authorize(label: string): Promise<URLSearchParams> {
   return location.searchParams;
 }
 
-/**
- * The message an RPC call failed with, or "" when it succeeded. Awaited here rather than through
- * `expect(...).rejects`, which leaves the RPC promise's own rejection unhandled.
- */
-async function failure(call: PromiseLike<unknown>): Promise<string> {
-  try {
-    await call;
-    return "";
-  } catch (error) {
-    return String(error);
-  }
-}
-
 type TokenRequest = { clientId: string; code: string; codeVerifier: string; redirectUri: string };
 
-/** Stubs InferLab's token endpoint, recording each exchange it is asked for. */
+/**
+ * Stubs InferLab: the token endpoint answers with `reply`, recording each exchange it is asked for;
+ * `/auth/logout` is recorded in `logouts` and always succeeds.
+ */
 function tokenEndpoint(reply: (request: TokenRequest) => Response) {
   const requests: Array<{ url: string; body: TokenRequest }> = [];
+  const logouts: string[] = [];
   vi.stubGlobal("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input);
+    if (url.endsWith("/auth/logout")) {
+      logouts.push((JSON.parse(String(init.body)) as { refreshToken: string }).refreshToken);
+      return new Response(null, { status: 204 });
+    }
     const body = JSON.parse(String(init.body)) as TokenRequest;
-    requests.push({ url: String(input), body });
+    requests.push({ url, body });
     return reply(body);
   });
-  return requests;
+  return Object.assign(requests, { logouts });
 }
 
+const user = (email: string, emailVerified: unknown = true) => ({
+  id: "u1", email, emailVerified, name: "Ada", tenantId: "t1",
+  workspaces: [{
+    workspaceId: "90000000-0000-4000-8000-000000000001", workspaceName: "Ops", product: "inferops",
+    role: "owner", deniedPermissions: [],
+  }],
+});
+
 const signedIn = (email: string) => () => Response.json({
-  token: "access", refreshToken: "refresh",
-  user: { id: "u1", email, emailVerified: true, name: "Ada", tenantId: "t1" },
+  token: "access", refreshToken: "refresh", user: user(email),
 });
 
 describe("configuration", () => {
@@ -96,13 +100,11 @@ describe("configuration", () => {
     }
   });
 
-  it("describes the vendor as a sign-in provider and keeps board access flow-free", async () => {
+  it("describes the vendor as a sign-in provider whose accounts are connected, not provided", async () => {
     await withExports(async exports => {
       const vendor = exports.GatekeeperVendor({});
-      expect(await vendor.describe()).toMatchObject({ providesAuth: true, autoProvisionsAccount: true });
+      expect(await vendor.describe()).toMatchObject({ providesAuth: true, autoProvisionsAccount: false });
       const callback = exports.TestConnectCallback({ props: { label: "full" } });
-      expect(await failure(vendor.connectAccount(callback as never, { scopes: "full" })))
-        .toContain("no connect flow");
       const { url } = await vendor.connectAccount(callback as never, { scopes: "auth" });
       expect(url).toMatch(/^http:\/\/localhost:8787\/gatekeeper\/inferops\/[0-9a-f]{64}\/[0-9a-f]{64}$/);
     });
@@ -110,19 +112,46 @@ describe("configuration", () => {
 });
 
 describe("token response", () => {
-  it("normalizes a verified email and refuses an unverified, unmarked or missing one", () => {
-    expect(identityFromTokenResponse(
-      JSON.stringify({ user: { email: " Ada@Example.com ", emailVerified: true } })))
-      .toEqual({ email: "ada@example.com" });
+  const envelope = (u: unknown) => JSON.stringify({ token: "a", refreshToken: "r", user: u });
+
+  it("normalizes the email, keeps the session and the InferOps workspaces only", () => {
+    const exchange = exchangeFromTokenResponse(envelope({
+      ...user(" Ada@Example.com "),
+      workspaces: [
+        ...user("x").workspaces,
+        { workspaceId: "90000000-0000-4000-8000-000000000002", workspaceName: "Mind", product: "infermind" },
+      ],
+    }));
+    expect(exchange).toEqual({
+      grant: { accessToken: "a", accessExpiresAt: 0, refreshToken: "r" },
+      identity: {
+        userId: "u1", email: "ada@example.com", tenantId: "t1",
+        workspaces: [{ workspaceId: "90000000-0000-4000-8000-000000000001", workspaceName: "Ops" }],
+      },
+      emailVerified: true,
+    });
+    expect(verifiedEmail(exchange)).toBe("ada@example.com");
+  });
+
+  it("refuses an unreadable or incomplete response", () => {
     for (const body of [
-      "{", "null", "{}", JSON.stringify({ user: { email: "", emailVerified: true } }),
-      JSON.stringify({ user: { email: "no-at-sign", emailVerified: true } }),
-      JSON.stringify({ user: { email: "a@b.c", emailVerified: false } }),
-      JSON.stringify({ user: { email: "a@b.c" } }),
-      JSON.stringify({ user: { email: "a@b.c", emailVerified: "true" } }),
+      "{", "null", "{}", envelope({ ...user("x"), email: "" }), envelope({ ...user("x"), email: "no-at-sign" }),
+      envelope({ ...user("x"), id: "" }), envelope({ ...user("x"), tenantId: undefined }),
+      JSON.stringify({ token: "", refreshToken: "r", user: user("a@b.c") }),
+      JSON.stringify({ token: "a", user: user("a@b.c") }),
+      envelope({ ...user("x"), workspaces: [{ workspaceId: "not-a-uuid", product: "inferops" }] }),
     ]) {
-      expect(() => identityFromTokenResponse(body), body).toThrow();
+      expect(() => exchangeFromTokenResponse(body), body).toThrow();
     }
+  });
+
+  it("vouches for the email only when InferLab marked it verified", () => {
+    for (const flag of [false, null, "true", 1]) {
+      expect(() => verifiedEmail(exchangeFromTokenResponse(envelope(user("a@b.c", flag)))), String(flag))
+        .toThrow("no verified email");
+    }
+    const { emailVerified: _omitted, ...unmarked } = user("a@b.c");
+    expect(() => verifiedEmail(exchangeFromTokenResponse(envelope(unmarked)))).toThrow("no verified email");
   });
 });
 
@@ -137,7 +166,7 @@ describe("sign-in flow", () => {
     expect(params.get("state")).toMatch(/^[0-9a-f]{64}\.[0-9a-f]{64}$/);
   });
 
-  it("exchanges the code once and hands the Workshop the verified email", async () => {
+  it("exchanges the code once, hands the Workshop the verified email and ends the session", async () => {
     const params = await authorize("ok");
     const requests = tokenEndpoint(signedIn("ada@example.com"));
     const callbackUrl = `${REDIRECT_URI}?code=the-code&state=${params.get("state")}`;
@@ -152,6 +181,8 @@ describe("sign-in flow", () => {
     expect(requests[0].body).toMatchObject(
       { clientId: "inferos", code: "the-code", redirectUri: REDIRECT_URI });
     expect(await pkceChallenge(requests[0].body.codeVerifier)).toBe(params.get("code_challenge"));
+    // Signing in grants nothing: the InferLab session it opened is signed out again.
+    expect(requests.logouts).toEqual(["refresh"]);
 
     // The state is single-use: a replay neither exchanges again nor signs in again.
     expect((await get(callbackUrl))?.status).toBe(400);
@@ -209,7 +240,9 @@ describe("sign-in flow", () => {
 
   it("refuses an account InferLab has not verified", async () => {
     const params = await authorize("unverified");
-    tokenEndpoint(() => Response.json({ user: { email: "ada@example.com", emailVerified: false } }));
+    tokenEndpoint(() => Response.json({
+      token: "access", refreshToken: "refresh", user: user("ada@example.com", false),
+    }));
 
     const response = await get(`${REDIRECT_URI}?code=c&state=${params.get("state")}`);
 

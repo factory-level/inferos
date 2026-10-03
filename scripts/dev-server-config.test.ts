@@ -10,6 +10,8 @@ import {
   getDevRouterAssets,
   getInferLabLoginVars,
   getWranglerPortFromBackendHost,
+  inferLabLoginStartupError,
+  isInferLabAuthOrigin,
 } from "./dev-server-config.ts";
 
 describe("run-local asset topology", () => {
@@ -120,5 +122,33 @@ describe("getInferLabLoginVars", () => {
       AUTH_GATEKEEPERS: "google, github", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io",
     }), { AUTH_GATEKEEPERS: "google,github,inferops", INFERLAB_AUTH_ORIGIN: "https://auth.inferlab.io" });
     assert.equal(getInferLabLoginVars(true, { AUTH_GATEKEEPERS: "InferOps" }).AUTH_GATEKEEPERS, "InferOps");
+  });
+});
+
+describe("inferLabLoginStartupError", () => {
+  it("passes when InferOps sign-in is not asked for, whatever else is set", () => {
+    assert.equal(inferLabLoginStartupError({}, false), null);
+    assert.equal(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "google" }, false), null);
+    assert.equal(inferLabLoginStartupError({ INFERLAB_AUTH_ORIGIN: "nope" }, true), null);
+  });
+
+  it("fails clearly when the gatekeeper is off or the InferLab origin is missing or malformed", () => {
+    assert.match(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: DEFAULT_INFERLAB_AUTH_ORIGIN }, false)!,
+      /gatekeeper-inferops is not enabled/);
+    assert.match(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "google,InferOps" }, true)!, /INFERLAB_AUTH_ORIGIN is not set/);
+    assert.match(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "http://auth.example" }, true)!,
+      /not a bare HTTPS origin/);
+    assert.equal(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "inferops", INFERLAB_AUTH_ORIGIN: "https://auth.example" }, true), null);
+    // The resolved wrapper settings always pass: the flag fills in the local origin.
+    assert.equal(inferLabLoginStartupError(getInferLabLoginVars(true, {}), true), null);
+  });
+
+  it("accepts the origins the gatekeeper accepts", () => {
+    for (const ok of ["https://auth.inferlab.io", "https://auth.inferlab.io/", "http://localhost:8080", " http://127.0.0.1:8080 "]) {
+      assert.equal(isInferLabAuthOrigin(ok), true, ok);
+    }
+    for (const bad of [undefined, "", "http://auth.inferlab.io", "https://auth.inferlab.io/sso", "https://u:p@auth.inferlab.io", "not a url"]) {
+      assert.equal(isInferLabAuthOrigin(bad), false, String(bad));
+    }
   });
 });

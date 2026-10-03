@@ -77,7 +77,8 @@ export const capabilitySources: Record<CapabilityName, string | null> = {
   INFEROPS_ENABLED: null,
   INFEROPS_CANVAS_STATE_MACHINE: null,
   HARNESS_HG_ENABLED: null,
-  INFEROPS_AUTH: null,
+  // The InferLab sign-in and per-person connect flows; `features.inferlabLogin` is its v1 spelling.
+  INFEROPS_AUTH: "custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts",
   PUBLISH_CLOUDFLAREOS_WIDGET: null,
   PUBLISH_CLOUDFLAREOS_APP: null,
   AGENT_DEPLOYMENTS: null,

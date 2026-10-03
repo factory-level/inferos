@@ -14,5 +14,5 @@ export const wrangler = DEFAULT_GATEKEEPER_WRANGLER;
 /** DO classes are reached via ctx.exports; no durable_objects binding needed. */
 export const migrations: DurableObjectMigration[] = [
   { tag: "v0", new_sqlite_classes: ["MockInferOps", "InferOpsProjectGatekeeper"] },
-  { tag: "v1", new_sqlite_classes: ["InferLabLogin"] },
+  { tag: "v1", new_sqlite_classes: ["InferLabLogin", "InferOpsCredentials"] },
 ];
