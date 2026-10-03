@@ -28,6 +28,8 @@ const SALES_URL = "inferops://acme.sales/project/board/DEMO";
 const OPS = "90000000-0000-4000-8000-000000000001";
 const SALES = "90000000-0000-4000-8000-000000000002";
 const OTHER = "90000000-0000-4000-8000-00000000ffff";
+const MIND = "90000000-0000-4000-8000-000000000003";
+const HANDBOOK = "60000000-0000-4000-8000-000000000001";
 const DEMO = { id: "10000000-0000-4000-8000-000000000001", identifier: "DEMO", name: "Demo" };
 const READY = "20000000-0000-4000-8000-000000000001";
 const DEMO_1 = "30000000-0000-4000-8000-000000000001";
@@ -54,12 +56,18 @@ class FakeInferLab {
   access = new Set<string>();
   /** Workspaces InferOps lets this person into; the token's user is a member of these. */
   memberships = new Set<string>([OPS]);
+  /** Workspaces whose product is InferMind: the only ones InferOps serves `/knowledge/*` in. */
+  infermind = new Set<string>([MIND]);
+  /** Whether the person lacks `knowledge:read`. */
+  knowledgeDenied = false;
   /** Workspaces InferLab reports at sign-in. */
   workspaces: Array<{ workspaceId: string; workspaceName: string; product: string }> = [
     { workspaceId: OPS, workspaceName: "Ops", product: "inferops" },
   ];
   /** Every workspace of the tenant and its slug, as `GET /workspaces` lists them. */
-  slugs = new Map<string, string>([[OPS, "operations"], [SALES, "sales"], [OTHER, "knowledge"]]);
+  slugs = new Map<string, string>([
+    [OPS, "operations"], [SALES, "sales"], [OTHER, "knowledge"], [MIND, "mind"],
+  ]);
   /** Whether `GET /workspaces` fails. */
   workspaceListDown = false;
   workspaceLists = 0;
@@ -139,6 +147,21 @@ class FakeInferLab {
     }
     if (!workspaceId || !this.memberships.has(workspaceId)) {
       return Response.json({ error: { code: "FORBIDDEN", message: "not a member" } }, { status: 403 });
+    }
+    if (url.pathname.startsWith("/knowledge/")) {
+      // InferOps' product gate, then the permission check: both answer 403 FORBIDDEN.
+      if (!this.infermind.has(workspaceId)) {
+        return Response.json({ error: { code: "FORBIDDEN", message: "Wrong product for this route" } }, { status: 403 });
+      }
+      if (this.knowledgeDenied) {
+        return Response.json({ error: { code: "FORBIDDEN", message: "Missing permission: knowledge:read" } }, { status: 403 });
+      }
+      if (url.pathname === "/knowledge/documents") {
+        return Response.json([{
+          id: HANDBOOK, workspaceId, slug: "handbook", title: "Handbook", summary: null, pathway: null,
+          parentId: null, siblingOrder: 0,
+        }]);
+      }
     }
     if (url.pathname === "/project/projects") return Response.json({ projects: [DEMO] });
     if (url.pathname === "/project/board") {
@@ -512,5 +535,84 @@ describe("workspaces named by board URLs", () => {
     const calls = inferlab.apiCalls.length;
     expect(await hooks().addObserverFrom("shared", outsider)).toContain("cannot open");
     expect(inferlab.apiCalls.length).toBe(calls);
+  });
+});
+
+describe("the InferMind Wiki of a connected person", () => {
+  const WIKI = "inferops://acme.mind/knowledge/wiki";
+
+  /** A person who belongs to the InferOps workspace `operations` and the InferMind workspace `mind`. */
+  async function mindPerson(label: string) {
+    inferlab.workspaces.push({ workspaceId: MIND, workspaceName: "Mind", product: "infermind" });
+    inferlab.memberships.add(MIND);
+    return connect(label);
+  }
+
+  it("binds the person's InferMind workspace by slug and reads it with their own token there", async () => {
+    const account = await mindPerson("mind");
+    expect((await hooks().listWikiWorkspaces(account)).map(w => w.value)).toEqual(["mind"]);
+    expect((await hooks().listWorkspaces(account)).map(w => w.value)).toEqual(["operations"]);
+
+    expect(await hooks().bindAccount("mind-wiki", account, WIKI)).toBeNull();
+    const pages = await hooks().startBoundWikiSession("mind-wiki").listDocuments();
+    expect(pages.map(p => p.slug)).toEqual(["handbook"]);
+    expect(lastApiCall()).toMatchObject({ path: "/knowledge/documents", workspaceId: MIND });
+    expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-1"));
+  });
+
+  it("refuses an InferOps workspace as having no Wiki, before any request", async () => {
+    const account = await mindPerson("nomind");
+    const before = inferlab.apiCalls.length;
+    expect(await hooks().bindAccount("ops-wiki", account, "inferops://acme.operations/knowledge/wiki"))
+      .toBe("FORBIDDEN: acme.operations is an InferOps workspace without InferMind, so it has no Wiki.");
+    // And an InferMind workspace is no board workspace.
+    expect(await hooks().bindAccount("mind-board", account, "inferops://acme.mind/project/board/DEMO"))
+      .toBe("No InferOps project DEMO is available on acme.mind.");
+    expect(inferlab.apiCalls.length).toBe(before);
+  });
+
+  it("refuses a workspace the person does not hold like a missing Wiki, and takes nothing from the tenant label", async () => {
+    const account = await mindPerson("elsewhere");
+    const before = inferlab.apiCalls.length;
+    expect(await hooks().bindAccount("w1", account, "inferops://acme.knowledge/knowledge/wiki"))
+      .toBe("No InferMind Wiki is available on acme.knowledge.");
+    expect(await hooks().bindAccount("w2", account, "inferops://acme.nowhere/knowledge/wiki"))
+      .toBe("No InferMind Wiki is available on acme.nowhere.");
+    expect(inferlab.apiCalls.length).toBe(before);
+
+    // A tampered tenant label still means the person's own `mind` workspace.
+    expect(await hooks().bindAccount("w3", account, "inferops://globex.mind/knowledge/wiki")).toBeNull();
+    await hooks().startBoundWikiSession("w3").listDocuments();
+    expect(lastApiCall().workspaceId).toBe(MIND);
+  });
+
+  it("reports InferOps' refusal (product or knowledge permission) as FORBIDDEN, without expiring the account", async () => {
+    const account = await mindPerson("denied");
+    expect(await hooks().bindAccount("denied-wiki", account, WIKI)).toBeNull();
+
+    inferlab.knowledgeDenied = true;
+    const message = await failure(hooks().startBoundWikiSession("denied-wiki").listDocuments());
+    expect(message).toContain("FORBIDDEN: InferOps refused the Wiki for this connection");
+    expect(message).not.toContain("Missing permission");
+    expect(await hooks().bindAccount("denied-again", account, WIKI)).toContain("FORBIDDEN");
+    expect(expired).not.toContain("denied");
+
+    // The workspace stops being an InferMind one in InferOps after the connect.
+    inferlab.knowledgeDenied = false;
+    inferlab.infermind.delete(MIND);
+    expect(await failure(hooks().startBoundWikiSession("denied-wiki").listDocuments()))
+      .toContain("FORBIDDEN: InferOps refused the Wiki");
+  });
+
+  it("admits a Wiki observer only when their own account reads the binding's Wiki", async () => {
+    const owner = await mindPerson("wikiowner");
+    expect(await hooks().bindAccount("shared-wiki", owner, WIKI)).toBeNull();
+    const member = await connect("wikimember");
+    expect(await hooks().addWikiObserverFrom("shared-wiki", member)).toBeNull();
+
+    inferlab.memberships.delete(MIND);
+    const outsider = await connect("wikioutsider");
+    expect(await hooks().addWikiObserverFrom("shared-wiki", outsider))
+      .toContain("cannot read the InferMind Wiki of acme.mind");
   });
 });

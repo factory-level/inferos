@@ -51,10 +51,18 @@ export type InferOpsGrant = {
   refreshToken: string;
 };
 
+/** The InferLab products a workspace can belong to: InferOps boards, or the InferMind Wiki. */
+export type WorkspaceProduct = "inferops" | "infermind";
+
 /** One InferOps workspace the person belongs to, as InferLab reported it at connect time. */
 export type InferOpsWorkspace = {
   workspaceId: string;
   workspaceName: string;
+  /**
+   * `"infermind"` for an InferMind workspace (its Wiki); absent for an InferOps one, which is what
+   * every identity stored before InferMind workspaces were kept holds.
+   */
+  product?: "infermind";
   /**
    * The workspace's slug, the `<workspace>` of a resource URL, as InferOps listed it at connect
    * time. Absent for a workspace InferOps did not list, or for an identity stored before slugs
@@ -68,7 +76,7 @@ export type InferOpsIdentity = {
   userId: string;
   email: string;
   tenantId: string;
-  /** The person's InferOps workspaces (product `inferops`), in InferLab's order. */
+  /** The person's InferOps and InferMind workspaces, in InferLab's order. */
   workspaces: InferOpsWorkspace[];
 };
 
@@ -233,12 +241,14 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * The id of the person's workspace whose slug is `slug`, the `<workspace>` of a resource URL, or
-   * null when the person holds no such workspace. Null says nothing about whether it exists.
+   * The id of the person's `product` workspace whose slug is `slug`, the `<workspace>` of a
+   * resource URL, or null when the person holds no such workspace of that product. Null says
+   * nothing about whether it exists. Boards resolve InferOps workspaces, the Wiki InferMind ones.
    */
-  async resolveWorkspace(slug: string): Promise<string | null> {
+  async resolveWorkspace(slug: string, product: WorkspaceProduct = "inferops"): Promise<string | null> {
     const identity = this.ctx.storage.kv.get<InferOpsIdentity>(IDENTITY_KEY);
-    return identity?.workspaces.find(w => w.workspaceSlug === slug)?.workspaceId ?? null;
+    return identity?.workspaces.find(w => w.workspaceSlug === slug &&
+      (w.product ?? "inferops") === product)?.workspaceId ?? null;
   }
 
   /**

@@ -10,7 +10,7 @@ Tracking epic: [#6](https://github.com/factory-level/inferos/issues/6); roadmap:
 
 ## Purpose
 
-Expose scoped InferOps project/board/issue reads and approved issue creates, updates and transitions as native capabilities, and, as a separate grant, approved coding dispatch of a project's issues to the local coding runner ([local coding workflows](local-coding-workflows.md#dispatch-grant)).
+Expose scoped InferOps project/board/issue reads and approved issue creates, updates and transitions as native capabilities, and, as separate grants, approved coding dispatch of a project's issues to the local coding runner ([local coding workflows](local-coding-workflows.md#dispatch-grant)) and one workspace's InferMind Wiki: page reads and approved section edits ([InferMind Wiki](#infermind-wiki), [#87](https://github.com/factory-level/inferos/issues/87)).
 
 ## Requirements
 
@@ -54,7 +54,11 @@ InferOps also accepts a service-account key (`iex_…`, as the bearer or as `X-A
 
 `inferops://<tenant>.<workspace>/project/dispatch/<KEY>`
 
+`inferops://<tenant>.<workspace>/knowledge/wiki`
+
 Two project-scoped kinds share the authority and key rules below. `board` grants the board session; `dispatch` grants the coding-dispatch session of the same project ([#70](https://github.com/factory-level/inferos/issues/70)). They are separate grants: neither carries the other, so an agent granted only a board cannot dispatch. `dispatch` is offered and bound only while the deployment has `CODING_WORKBENCH_ENABLED` on.
+
+The third kind, `knowledge/wiki`, grants one person's read of the workspace's InferMind Wiki and proposed section edits ([InferMind Wiki](#infermind-wiki)). It has no key: the binding is the whole Wiki of one workspace, and the authority rules below apply to it unchanged, except that `<workspace>` resolves only among the person's InferMind workspaces (an InferLab workspace belongs to one product, InferOps or InferMind, and only InferMind workspaces have a Wiki). A page of it is referenced as `inferops://<tenant>.<workspace>/knowledge/document/<slug>`. A page reference identifies a page and is never bound or granted: the page is readable only through a Wiki binding of the same workspace, with the person's own InferOps `knowledge:*` permissions. This grammar was proposed to InferOps on [factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326) (owner decision, 2026-10-02).
 
 This is InferOps' own deep-link grammar (`_libs/widgets/shared/inferops-uri.ts` on InferOps `develop`), so a board URL from an InferOps document and one bound in InferOS are the same string. For example, against the local InferOps seeds (tenant `acme`, workspaces `operations` and `knowledge`), `inferops://acme.operations/project/board/ENG` names the ENG board of the Operations workspace ([ADR 0005](../adr/0005-inferops-uri-authority.md)).
 
@@ -86,6 +90,11 @@ All paths are relative to the deployment's API base URL.
 | One run (dispatch) | `GET /project/runs/<runId>` | `run`, kept only when its issue is in the bound project. |
 | Dispatch | `POST /project/issues/<issueId>/dispatch`, body `{ "action": "code", "repoId", "baseRef"?, "expectedRevision" }` | `run`: the queued run. |
 | Cancel (dispatch) | `POST /project/runs/<runId>/cancel` | `run`: the cancelled (queued) or unknown (running) run. |
+| Wiki pages | `GET /knowledge/documents` | Bare array: `id`, `slug`, `title`, `parentId`, `siblingOrder`; `summary`, `pathway` and the rest are dropped. |
+| Wiki page | `GET /knowledge/documents/<id>` | `id`, `slug`, `title`; the read-only page `body` is dropped. `null` (or an empty body) for a page the workspace lacks. |
+| Wiki sections | `GET /knowledge/sections?documentId=<id>` | Bare array of `id`, `documentId`, `tag`, `body`, `version` (an integer), in page order. |
+| Wiki section | `GET /knowledge/sections/<id>` | The section, or `null` for one the workspace lacks. |
+| Section edit | `PATCH /knowledge/sections/<id>`, body `{ "body" }` | The section at its new `version`. |
 
 Writes send only the fields of the agent-facing declaration. A create always names the bound project's UUID (resolved from its key) and the state it lands in, resolved by InferOS from the board when the proposal is made: the caller's `stateId`, which must be one of the board's states, or else the first state of the `software` workflow (of the `content` workflow on a board that has no `software` states). `workflow` is sent only when that state's workflow is `content`; otherwise InferOps' default (`software`) applies. So the issue lands in the column the approver saw. `parentId`, `acceptanceCriteria`, `assigneeId`, dates, refs, `blockedReason` and `leaseGeneration` are not exposed. An update with no changed field is not proposed; a `null` description clears it.
 
@@ -172,6 +181,19 @@ The dispatch session (`InferOpsDispatchSession` in the [declaration](inferops-ga
 
 Applying either rechecks the switch, the allowlist (dispatch) and the fingerprint before sending, under the action's idempotency key. InferOps replays a known dispatch key for the same issue and refuses one reused for another issue, and its own guards (workflow, state, lease, active run, repository, revision, `issue:delegate`) apply at apply time.
 
+### InferMind Wiki
+
+The Wiki session (`InferOpsWikiSession` in the [declaration](inferops-gatekeeper-api.d.ts)) has three observations and one action:
+
+- `listDocuments()` lists the workspace's pages with their place in the page tree (`parentId`, `siblingOrder`), in InferOps' order.
+- `readDocument(slugOrId)` reads one page and its sections, each with its `version` and its `[[target#tag]]` wikilinks (InferOps' v1 grammar, parsed from the body), plus the page's embedded references: the `inferops://` links that stand alone as a paragraph, the rule InferOps' own text resolver uses.
+- `readDocumentText(slugOrId)` is the agent text of the same sections, in the format of InferOps' `renderDocumentAsText`: `# <title>`, then each section's body, separated by blank lines. InferOps replaces each embedded reference with the live state of what it names; InferOS leaves the reference as written and never reads another resource through a Wiki binding. A page with no readable section is `NOT_FOUND`, as InferOps answers it.
+- `updateSection(sectionId, body, expectedVersion)` proposes replacing one section's markdown. Its action kind is `inferops.wiki-section-update`; it is never auto-approvable. Until it is decided, reads show the new body at the unchanged version, marked `pending: "update"`, and a second edit of the section is refused with `CONFLICT`. It is revertible while the section still shows the edit at the version it produced.
+
+Access is InferOps': the product gate (`requiresProduct: 'infermind'`), `knowledge:read` for reads and `knowledge:write` for an edit, row-level security on the workspace, and the InferMind lens on sections, all applied to the person's own token. InferOps answers both a missing product and a missing permission with 403 `FORBIDDEN` and says which only in its message text, which InferOS does not read, so the caller gets one `FORBIDDEN` message naming both causes. A Wiki URL naming one of the person's InferOps workspaces is refused before any request, saying that workspace has no Wiki.
+
+InferOps' section `PATCH` takes no expected version and does not replay an idempotency key. InferOS therefore checks the version itself: applying an edit reads the section first and sends the body only while the section is still at the version the edit was proposed at. A section already showing exactly the approved body at a later version counts as applied without a second write (a retried apply whose first response was lost); any other change refuses the edit as stale. The fingerprint and the idempotency key are as for every other action, and the key is sent although InferOps ignores it today. The page's own `body` is read-only in InferOps and is not part of this contract; root, pillar and Master pages and coverage states are InferOps' to build ([factory-level/inferops#2324](https://github.com/factory-level/inferops/issues/2324), [#2325](https://github.com/factory-level/inferops/issues/2325)).
+
 ### Companion InferOps changes
 
 Wanted from InferOps, tracked in [factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326). None blocks the first live path; each removes a check InferOS otherwise has to make alone.
@@ -179,6 +201,8 @@ Wanted from InferOps, tracked in [factory-level/inferops#2326](https://github.co
 1. **Reject a replayed idempotency key that names a different request.** A replay should fail (a distinct conflict code) when the key was first used for another issue, target state or field values, on transition, create and update alike, instead of returning the first result.
 2. **A distinct error code for a target state outside the issue's project.** Today it is `NOT_FOUND`, the same as a missing issue.
 3. **An optional project constraint on issue read and transition.** A caller-supplied project id that InferOps enforces, answering an issue of another project as `NOT_FOUND`, so the scope check is made in the same transaction as the write.
+4. **An expected version and idempotency on section edits.** `PATCH /knowledge/sections/<id>` accepting `expectedVersion` (refused with a conflict code when it no longer matches) and replaying `X-Idempotency-Key`, so the version check is made in the same transaction as the write.
+5. **Distinct codes for the knowledge refusals.** A product gate refusal distinguishable from a missing permission, and a 404 instead of a 500 for a section `PATCH` naming a section the workspace lacks.
 
 ## Non-Goals
 
@@ -236,6 +260,7 @@ Resolved on 2026-10-02:
 
 - Service versus user authority: each person connects with their own authority ([ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md), proposed).
 - Idempotency: the existing transition endpoint's claim replay is sufficient for retries of an approved action. Detecting a key reused for a different move is a wanted companion change, not a prerequisite.
+- Wiki resource grammar: `inferops://<tenant>.<workspace>/knowledge/wiki` binds one workspace's Wiki and `…/knowledge/document/<slug>` references a page (owner decision, 2026-10-02, [#87](https://github.com/factory-level/inferos/issues/87); proposed on [factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326)).
 - Resource grammar and workspace: board URLs use InferOps' own `inferops://<tenant>.<workspace>/…` grammar, the workspace slug resolved against the person's own workspaces and the deployment taken from configuration ([ADR 0005](../adr/0005-inferops-uri-authority.md), proposed; owner decision, [#24](https://github.com/factory-level/inferos/issues/24), [#25](https://github.com/factory-level/inferos/issues/25)).
 
 Still open:
@@ -250,6 +275,8 @@ Still open:
 - The issue read fetches the description and comment thread only to discard them. A narrower InferOps read would avoid that.
 - InferOps enforces configured workflow policy on content issues only; a software issue's create or update is governed by InferOS's approval alone until InferOps' software policy ships. Live acceptance of a policy refusal therefore needs a content issue.
 - No issue delete is in the contract, so an approved create cannot be undone from InferOS.
+- Whether InferOps registers `knowledge/document` as a widget kind, and whether a page reference names the slug or the page UUID. Slugs look stable (a page's `PATCH` changes only its title), but InferOps has not confirmed it.
+- A section edit's version check and its write are two requests, so an edit made in InferMind between them is overwritten. Companion change 4 closes this.
 
 ## Related
 

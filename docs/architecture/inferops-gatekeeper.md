@@ -46,20 +46,30 @@ through approved actions. It is a separate grant from the board, offered and ser
 `CODING_WORKBENCH_ENABLED` is on, and dispatches only the wrapper's allowlisted repositories; see
 [local coding workflows](local-coding-workflows.md).
 
+A third kind, `inferops://<tenant>.<workspace>/knowledge/wiki`, binds one workspace's InferMind Wiki
+to an `InferOpsWikiGatekeeper` whose `InferOpsWikiSession` (`listDocuments`, `readDocument`,
+`readDocumentText`, `updateSection`) reads pages as observations and proposes section edits as
+approved actions ([#87](https://github.com/factory-level/inferos/issues/87)). Its workspace slug
+resolves only among the person's InferMind workspaces. A page is referenced as
+`…/knowledge/document/<slug>`, which `parseWikiDocumentUrl` parses for the canvas; a reference is
+never bound.
+
 ## Components
 
 | Path | Responsibility |
 | --- | --- |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and InferOps workspaces InferLab reported with each one's slug, slug resolution (`resolveWorkspace`), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and the InferOps and InferMind workspaces InferLab reported with each one's slug (an InferMind one marked `product: "infermind"`), slug resolution per product (`resolveWorkspace(slug, product)`, InferOps by default), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, and the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/wiki.ts` | The Wiki's pure read projections, ported from InferOps: `[[target#tag]]` wikilinks, the standalone-paragraph `inferops://` references, and the agent text (`# <title>` and the section bodies). |
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | The `CODING_WORKBENCH_ENABLED` switch and `CODING_WORKBENCH_REPOS` allowlist for dispatch bindings ([local coding workflows](local-coding-workflows.md)). |
-| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). Also two demo repositories and a run ledger with InferOps' dispatch guards and replay, and `setRunStatus` standing in for the runner. |
-| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. Its coding calls read `GET /project/repos` (dropping `gitUrl`), `GET /project/runs` (filtered to the bound project's issues), `GET /project/runs/<id>`, and send `POST /project/issues/<id>/dispatch` and `POST /project/runs/<id>/cancel`, each after the issue's or run's scope check. The only module that talks InferOps HTTP. |
-| `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<tenant>.<workspace>/project/<kind>/<KEY>` with `<kind>` `board` or `dispatch` (two lowercase slug labels; `demo.local` is the demo data), the two `SupportedResource`s, `projectResourceKind`, `parseHost`, `isSlug`. |
-| `custom-gatekeepers/gatekeeper-inferops/src/actions.ts` | The stored action records, a tagged union (`kind`: `transition`, `create`, `update` on a board binding; `dispatch`, `cancel` on a dispatch binding) each carrying the exact request it sends; `readAction` reads a record without `kind` (written before creates and updates) as a transition; `fingerprintOf`/`matchesFingerprint` hash the normalized request with the project key (SHA-256 over canonical JSON). |
+| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). Also two demo repositories and a run ledger with InferOps' dispatch guards and replay, and `setRunStatus` standing in for the runner. A synthetic Wiki (`src/fixtures/demo-wiki.json`: four pages, one without sections) with InferOps' section semantics (a write advances the version by one, takes no expected version and replays nothing), and `setInferMindEnabled` to make the demo workspace one without InferMind. |
+| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. Its coding calls read `GET /project/repos` (dropping `gitUrl`), `GET /project/runs` (filtered to the bound project's issues), `GET /project/runs/<id>`, and send `POST /project/issues/<id>/dispatch` and `POST /project/runs/<id>/cancel`, each after the issue's or run's scope check. Its Wiki calls read `GET /knowledge/documents`, `/knowledge/documents/<id>`, `/knowledge/sections?documentId=<id>` (after finding the page) and `/knowledge/sections/<id>`, and send `PATCH /knowledge/sections/<id>` with `{body}` only (after finding the section), parsing InferOps' bare responses, answering `null` or an empty body as `NOT_FOUND`, and mapping every 403 to one `FORBIDDEN` message (`WIKI_FORBIDDEN`). The only module that talks InferOps HTTP. |
+| `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<tenant>.<workspace>/project/<kind>/<KEY>` with `<kind>` `board` or `dispatch`, and `inferops://<tenant>.<workspace>/knowledge/wiki` (two lowercase slug labels; `demo.local` is the demo data), the three `SupportedResource`s, `resourceKind`, `projectResourceKind`, `parseHost`, `isSlug`; the page reference `…/knowledge/document/<slug>` (`parseWikiDocumentUrl`, `wikiDocumentUrl`, slugs of URL-unreserved characters). |
+| `custom-gatekeepers/gatekeeper-inferops/src/actions.ts` | The stored action records, a tagged union (`kind`: `transition`, `create`, `update` on a board binding; `dispatch`, `cancel` on a dispatch binding; `section-update` on a Wiki binding) each carrying the exact request it sends; `readAction` reads a record without `kind` (written before creates and updates) as a transition; `fingerprintOf`/`matchesFingerprint` hash the normalized request with the binding's scope, its project key or `knowledge/wiki` (SHA-256 over canonical JSON). |
 | `custom-gatekeepers/gatekeeper-inferops/src/simulation.ts` | Board ordering and read-time overlay of pending actions: an issue's live pending transition or update (`pending` `transition` or `update`), and pending creates as provisional cards (`pending: "create"`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/configurator/wiki-ui.tsx` | The Wiki picker: organization and workspace only, building `…/knowledge/wiki`; the account lists only the person's InferMind workspaces for it (and only InferOps ones for the project pickers). |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx` | The same picker for a dispatch binding, building `…/project/dispatch/<KEY>`; offered only while coding dispatch is on. |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/project-ui.tsx` | Organization, workspace and project picker built by the shared `build:configurator` task. It builds `inferops://<organization>.<workspace>/project/board/<KEY>` from an organization label, a workspace slug from the account's list and a project; with both left empty it asks the gatekeeper for a default host, which only a demo account has (`demo.local`). It duplicates the URL grammar for prefilling, kept in step by `__tests__/resources.test.ts`. |
 | `scripts/run-dev-server.ts` | Passes `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG` from the shell or root `.dev.vars` into the gatekeeper's generated dev config, resolves `INFERLAB_AUTH_ORIGIN` and `AUTH_GATEKEEPERS` for a wrapper's sign-in flag, and refuses to start when InferOps sign-in is asked for without the gatekeeper or an InferLab origin. |
@@ -212,6 +222,32 @@ through approved actions. It is a separate grant from the board, offered and ser
   `CONFLICT`, which only a dispatch can receive), and a refused apply names the missing
   `issue:delegate`, an active run, a stale revision or the switch. The full flow is in
   [local coding workflows](local-coding-workflows.md#data-and-control-flow).
+- **InferMind Wiki.** At connect, InferLab's InferMind memberships are now kept beside the InferOps
+  ones (`product: "infermind"`; an identity stored before has none, so its Wiki needs a
+  reconnect). `getGatekeeperClassFor` parses `…/knowledge/wiki`, resolves the slug among the
+  person's InferMind workspaces (one of their InferOps workspaces is refused with
+  `FORBIDDEN: <host> is an InferOps workspace without InferMind, so it has no Wiki.` before any
+  request), lists the pages once to check the Wiki answers, and returns `InferOpsWikiGatekeeper`
+  with props `{accountId, connected, host, workspaceId}`. A workspace the person lacks and a host
+  no data source serves fail with `No InferMind Wiki is available on <host>.`; InferOps' 403 is
+  passed on as `FORBIDDEN`. The data source is `clientFor`'s, so `INFEROPS_ENABLED` guards every
+  call. The facet shares the action store (`ActionBinding`) with the project facets.
+  `readDocument(slugOrId)` resolves a slug through the page list, reads the page and its sections,
+  overlays a pending edit on a section still at the version it was proposed at, and adds the
+  wikilinks and references (wiki.ts); `readDocumentText` joins the same sections and answers a
+  page without sections `NOT_FOUND`. Each read is an observation; `listDocuments` returns the tree
+  fields only. `updateSection` checks the version (decimal integer, `INVALID_REQUEST` otherwise),
+  the body length (at most 100000), the section's current version (`STALE_REVISION`), a body equal
+  to the shown one (no-op) and a live pending edit (`CONFLICT`), reads the page title, stages a
+  `section-update` with the previous body, and submits it with action kind
+  `inferops.wiki-section-update`, showing page, section, expected version and the current and new
+  text. `applyAction` requires the fingerprint (a record without one is refused), reads the
+  section, PATCHes under `<instance>:<action>` only while it is at the expected version, counts a
+  section already showing the approved body as applied without writing, and otherwise refuses it
+  as stale; it records the version InferOps reported. `revertAction` restores the previous body
+  under `<instance>:<action>:revert` only while the section is at that version with that body.
+  Observers: strategy B through the verifier's `hasWikiAccess(host, workspaceId)`, a page list with
+  the collaborator's own token.
 - **Kanban gadget.** Its Durable Object proxies `loadBoard()` to `env.board.readBoard()` and
   `moveIssue()` to `env.board.openIssue(id).transition(stateId, revision)` (pipelined, then
   disposed), returning failure codes as data. The client renders columns, drag and drop, and a
@@ -222,7 +258,7 @@ through approved actions. It is a separate grant from the board, offered and ser
 
 `cloudflare.config.ts` uses the shared gatekeeper factory (`allow_irrevocable_stub_storage`,
 migrations `v0`: `MockInferOps`, `InferOpsProjectGatekeeper`, `v1`: `InferLabLogin`,
-`InferOpsCredentials`, and `v2`: `InferOpsDispatchGatekeeper`); `wrangler.jsonc` is generated. The worker needs no secrets. `BASE_URL` is
+`InferOpsCredentials`, `v2`: `InferOpsDispatchGatekeeper`, and `v3`: `InferOpsWikiGatekeeper`); `wrangler.jsonc` is generated. The worker needs no secrets. `BASE_URL` is
 set per deployment like every gatekeeper's. Discovery under `custom-gatekeepers/` binds it as
 `GATEKEEPER_INFEROPS`. The release manifest gives it no deploy inputs and marks it install-once.
 
@@ -307,6 +343,12 @@ missing a button.
   next refresh, and a provisional create card is draggable like any other (a move of it fails
   `NOT_FOUND`). The canvas Kanban reads it (see [InferOps canvas](inferops-canvas.md#kanban-board)).
 - The mock starts a created issue at revision 1 and numbers it after the highest existing key.
+- A Wiki section edit's version check and its write are two requests (InferOps' `PATCH` takes no
+  expected version), so an edit made in InferMind between them is overwritten; and a section that
+  someone else set to exactly the approved body counts as the edit applied.
+- InferOps' 403 on a Wiki call does not say whether the product or the permission refused it, so
+  InferOS reports both with one message. Only a connected account's own InferOps workspace is
+  told apart before any request; a stopgap or demo binding learns it from InferOps.
 
 ## Open Questions
 
@@ -318,6 +360,9 @@ missing a button.
   the board read at proposal).
 - The content-only default state for a create (a board without software states) has no test: the
   demo fixture has no such project.
+- The Wiki client has not been run against a live InferOps knowledge API. That a missing page or
+  section is answered `200 null` is read from InferOps' route code (`getDocument`/`getSection`
+  return null), and the client accepts an empty body the same way.
 
 ## Evidence
 
@@ -351,6 +396,22 @@ malformed authorities rejected without a request, `demo.local` staying demo data
 workspace list failing the connect and signing the session out, InferOps denying a workspace
 without expiring the account, observer admission by the collaborator's own membership, and a
 create and an update proposed before the session ended not applied after it.
+`__tests__/wiki.test.ts` (workerd, over the mock) covers the Wiki: its grammar and the page
+reference, binding the demo Wiki and refusing another workspace or tenant, a workspace without
+InferMind refused at binding, on every read and at apply, the page list and page reads as
+observations with versions, wikilinks and only standalone references, the agent text, unknown,
+malformed and section-less pages, an edit queued and shown pending and written once on approval,
+stale, unknown and malformed edits refused at proposal, an unchanged body and a second pending
+edit, an edit made stale in InferOps refused at apply, an edit already in effect counted as
+applied without a second write, a tampered or unsigned record refused by its fingerprint,
+rejection, revert and its refusal, `INFEROPS_ENABLED` off and on, and observer admission.
+`account.test.ts` adds a connected person's InferMind workspace bound by slug with their own token
+there, one of their InferOps workspaces refused as having no Wiki and an InferMind one refused as
+a board (both before any request), an unheld workspace refused like a missing Wiki, a tampered
+tenant label, InferOps' product or permission refusal as one `FORBIDDEN`, and Wiki observer
+admission; `http-inferops.test.ts` the knowledge requests, `null` and empty answers, the 403
+message, a section of another page, and malformed responses; `resources.test.ts` the Wiki
+picker's copy of the grammar.
 `__tests__/resources.test.ts` covers the grammar (two lowercase slug labels, no port, user info,
 or third label) and keeps the configurator's copy in step, and `http-inferops.test.ts` the
 `GET /workspaces` parsing and the stopgap's workspace slug.
@@ -390,7 +451,15 @@ run. With `INFEROPS_ENABLED` turned off by a harness reload, a read through an e
 fails `DISABLED`, a queued move is not applied and stays pending, and a new binding is refused,
 all without a request; turned back on, the read works and the queued move applies. Coding dispatch
 (run with `CODING_WORKBENCH_ENABLED` on and one allowlisted repository) is covered by its own cases,
-listed under [local coding workflows](local-coding-workflows.md#evidence). Remaining
+listed under [local coding workflows](local-coding-workflows.md#evidence). The fake also serves an
+InferMind Wiki in two InferMind workspaces (`mind`, `notes`) with InferOps' product gate,
+`knowledge:read`/`write`, `null` for another workspace's page or section and an unversioned,
+unreplayed section `PATCH`; the Wiki cases cover reads with the person's own token in their
+InferMind workspace recorded as observations, a text projection carrying no board data and nothing
+of the other workspace, another workspace's page never readable or editable by UUID or slug, its
+Wiki and an InferOps workspace's refused before any request, an approved edit written once and a
+lost response not written twice, an edit made stale refused at apply, a read-only person refused
+the edit by InferOps, and no seeded section body in any log or failure message. Remaining
 gaps: it is fake-backed (a live local run is recorded below, through the stopgap connection), no
 cloud smoke has been recorded, and `use`-role viewers are not exercised by it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
 

@@ -25,6 +25,15 @@
 //   and only for repositories on the wrapper's allowlist (`CODING_WORKBENCH_REPOS`), checked before
 //   any request at proposal and again at apply. InferOps itself requires `issue:delegate` of the
 //   person, so a connection without it is refused at apply with FORBIDDEN.
+// - The InferMind Wiki is a third kind, `inferops://<tenant>.<workspace>/knowledge/wiki`, bound into an
+//   `InferOpsWikiGatekeeper` facet whose props fix the account, host and InferMind workspace id. The
+//   workspace slug resolves only among the person's InferMind workspaces; one of their InferOps
+//   workspaces is refused as having no Wiki. `InferOpsWikiSession` lists pages and reads one with
+//   its sections, its `[[target#tag]]` links and its embedded `inferops://` references, or as
+//   agent text (wiki.ts); references are never resolved. Section edits are approved actions,
+//   checked at apply against the section's current version, since InferOps' PATCH has no
+//   expected version (see `InferOpsWikiGatekeeper.applyAction`). InferOps' product gate and
+//   `knowledge:*` permissions apply to the person's token.
 // - Every returned read is authorized as an observation. Every write is checked against the
 //   simulated board, recorded with the exact request it will send and that request's fingerprint
 //   (actions.ts), and submitted as an action; none is auto-approvable. Until it is decided, reads
@@ -70,7 +79,8 @@ import {
   InferOpsError, inferOpsErrorCode, type InferOpsClient, type ProjectSummary, type RunRecord,
 } from "./inferops-client";
 import {
-  connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority, type InferOpsEndpoint,
+  WIKI_FORBIDDEN, connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority,
+  type InferOpsEndpoint,
 } from "./http-inferops";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
 import { assertInferOpsEnabled, whileInferOpsEnabled } from "./enablement";
@@ -83,31 +93,36 @@ import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
 } from "./inferlab-login";
 import {
-  DEMO_HOST, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, parseHost, parseProjectBoardUrl,
-  parseProjectDispatchUrl, projectBoardUrl, projectDispatchUrl, projectResourceKind,
+  DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE,
+  isDocumentSlug, parseHost, parseProjectBoardUrl, parseProjectDispatchUrl, parseWikiUrl,
+  projectBoardUrl, projectDispatchUrl, resourceKind, wikiUrl,
 } from "./resources";
 import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
 } from "./simulation";
 import {
-  fingerprintOf, isCodingAction, isIssueChange, matchesFingerprint, readAction, type ActionRecord,
-  type CancelRunAction, type CreateAction, type DispatchAction, type StagedAction, type UpdateAction,
+  fingerprintOf, isCodingAction, isIssueChange, isWikiAction, matchesFingerprint, readAction,
+  type ActionRecord, type CancelRunAction, type CreateAction, type DispatchAction,
+  type SectionUpdateAction, type StagedAction, type UpdateAction,
 } from "./actions";
+import { documentText, embeddedReferences, wikilinksOf } from "./wiki";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
-  Board, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession, Issue,
-  IssueChanges, NewIssue, Repo, Revision, Run,
+  Board, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession,
+  InferOpsWikiSession, Issue, IssueChanges, NewIssue, Repo, Revision, Run, WikiDocument,
+  WikiDocumentNode, WikiSection,
 } from "./types";
-import type { NewIssueRequest } from "./inferops-client";
+import type { NewIssueRequest, WikiSectionRecord } from "./inferops-client";
 import TYPES_CODE from "./types.txt";
 import PROJECT_CONFIGURATOR_HTML from "./generated/project-ui.txt";
 import DISPATCH_CONFIGURATOR_HTML from "./generated/dispatch-ui.txt";
+import WIKI_CONFIGURATOR_HTML from "./generated/wiki-ui.txt";
 
 export { InferLabLogin, InferOpsCredentials, MockInferOps };
 
 const VENDOR_ID = "inferops";
 
-type LogFields = { vendorId: string; projectKey: string; action: number; code: string };
+type LogFields = { vendorId: string; projectKey: string; host: string; action: number; code: string };
 const logger = createLogger<LogFields>({ component: "gatekeeper.inferops", vendorId: VENDOR_ID });
 
 // The Phosphor "Kanban" glyph as a self-contained SVG data URI.
@@ -152,6 +167,12 @@ type AccountRef = Pick<AccountProps, "accountId" | "connected">;
  * workspace slug resolved to, never an id taken from the URL.
  */
 type ProjectGatekeeperProps = AccountRef & { host: string; projectKey: string; workspaceId?: string };
+
+/**
+ * One Wiki binding, fixed when the Workshop mints it: the workspace's `host` and, for a connected
+ * account, the InferMind workspace its slug resolved to.
+ */
+type WikiGatekeeperProps = AccountRef & { host: string; workspaceId?: string };
 
 type ExportsWithStores = {
   MockInferOps: DurableObjectNamespace<MockInferOps>;
@@ -258,7 +279,13 @@ function codingClientFor(
 /** The resource kinds offered now: coding dispatch only while the deployment has it on. */
 function supportedResources(env: Cloudflare.Env): SupportedResource[] {
   return codingWorkbenchEnabled(env)
-    ? [PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE] : [PROJECT_BOARD_RESOURCE];
+    ? [PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, KNOWLEDGE_WIKI_RESOURCE]
+    : [PROJECT_BOARD_RESOURCE, KNOWLEDGE_WIKI_RESOURCE];
+}
+
+/** The message every refused Wiki binding gets, whatever was missing: workspace or host. */
+function unavailableWiki(host: string): string {
+  return `No InferMind Wiki is available on ${host}.`;
 }
 
 /** The message every refused binding gets, whatever was missing: workspace, host or project. */
@@ -283,11 +310,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       displayName: "InferOps",
       url: "https://github.com/factory-level/inferops",
       logo: INFEROPS_ICON,
-      tagline: "Read project boards and propose issue changes",
+      tagline: "Read project boards and the InferMind Wiki, and propose changes",
       description:
         "Gives Gadgets access to one InferOps project board at a time: read its issues and " +
         "propose creating issues, editing them and moving them between workflow states, each " +
-        "change approved by you. " +
+        "change approved by you. It can also read a workspace's InferMind Wiki and propose " +
+        "section edits, approved the same way. " +
         (identity
           ? "Connecting signs you in with InferLab, so everything happens with your own " +
             "InferOps access."
@@ -372,6 +400,40 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     return labels ? this.#credentials().resolveWorkspace(labels.workspace) : null;
   }
 
+  /**
+   * The InferMind workspace a Wiki URL's host names for this account, as `#workspaceFor` does for
+   * boards. A workspace the person holds that is an InferOps one (no InferMind, so no Wiki) is
+   * refused with FORBIDDEN saying so, before any request; it is their own, so nothing is disclosed.
+   */
+  async #wikiWorkspaceFor(host: string): Promise<string | null | undefined> {
+    if (host === DEMO_HOST || !this.ctx.props.connected) return undefined;
+    const labels = parseHost(host);
+    if (!labels) return null;
+    const store = this.#credentials();
+    const workspaceId = await store.resolveWorkspace(labels.workspace, "infermind");
+    if (workspaceId === null && await store.resolveWorkspace(labels.workspace, "inferops") !== null) {
+      throw new InferOpsError("FORBIDDEN",
+        `${host} is an InferOps workspace without InferMind, so it has no Wiki.`);
+    }
+    return workspaceId;
+  }
+
+  /**
+   * Whether the Wiki of `host` is available to this account: false for a workspace it lacks or a
+   * host no data source serves. InferOps' refusal (no InferMind, no knowledge permission) is
+   * passed on as the FORBIDDEN it is, so the person learns why.
+   */
+  async #hasWiki(host: string, workspaceId: string | null | undefined): Promise<boolean> {
+    if (workspaceId === null) return false;
+    try {
+      await this.#client(host, workspaceId).listDocuments();
+      return true;
+    } catch (error) {
+      if (inferOpsErrorCode(error) === "NOT_FOUND") return false;
+      throw error;
+    }
+  }
+
   /** Whether the project is available on `host` to this account; false for a workspace it lacks. */
   async #hasProject(host: string, workspaceId: string | null | undefined, projectKey: string) {
     if (workspaceId === null) return false;
@@ -397,7 +459,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     resource: SupportedResource;
   }> {
     assertInferOpsEnabled(this.env);
-    const dispatch = projectResourceKind(url) === "dispatch";
+    const kind = resourceKind(url);
+    if (kind === "wiki") return this.#wikiClassFor(url);
+    const dispatch = kind === "dispatch";
     if (dispatch) assertCodingWorkbenchEnabled(this.env);
     const { host, projectKey } = dispatch ? parseProjectDispatchUrl(url) : parseProjectBoardUrl(url);
     const workspaceId = await this.#workspaceFor(host);
@@ -413,12 +477,32 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
       : { class: this.ctx.exports.InferOpsProjectGatekeeper({ props }), resource: PROJECT_BOARD_RESOURCE };
   }
 
+  /**
+   * Bind one workspace's Wiki: the URL's workspace slug must be one of the person's InferMind
+   * workspaces and the Wiki must answer for this account. A workspace the person lacks and a host no
+   * data source serves are refused with one message; an InferOps workspace without InferMind, and
+   * InferOps' own refusal, with the FORBIDDEN that says why.
+   */
+  async #wikiClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+  }> {
+    const { host } = parseWikiUrl(url);
+    const workspaceId = await this.#wikiWorkspaceFor(host);
+    if (!(await this.#hasWiki(host, workspaceId))) throw new Error(unavailableWiki(host));
+    const { accountId, connected } = this.ctx.props;
+    const props: WikiGatekeeperProps = { accountId, connected, host, workspaceId: workspaceId ?? undefined };
+    return { class: this.ctx.exports.InferOpsWikiGatekeeper({ props }), resource: KNOWLEDGE_WIKI_RESOURCE };
+  }
+
   @skipRpcValidation()
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    const wiki = resourceUrlPattern === KNOWLEDGE_WIKI_RESOURCE.urlPattern;
     const iframeHtml = resourceUrlPattern === PROJECT_BOARD_RESOURCE.urlPattern
       ? PROJECT_CONFIGURATOR_HTML
       : resourceUrlPattern === PROJECT_DISPATCH_RESOURCE.urlPattern && codingWorkbenchEnabled(this.env)
-        ? DISPATCH_CONFIGURATOR_HTML : null;
+        ? DISPATCH_CONFIGURATOR_HTML
+        : wiki ? WIKI_CONFIGURATOR_HTML : null;
     if (!iframeHtml) {
       throw new Error(`Unsupported InferOps resource configurator type: ${resourceUrlPattern}`);
     }
@@ -429,8 +513,10 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
       ui: new RpcStub(new InferOpsProjectConfiguratorUI({
         // Demo data needs no organization or workspace; every other account must name both.
         defaultHost: store || stopgap ? null : DEMO_HOST,
+        // The Wiki picker offers InferMind workspaces, the project pickers InferOps ones.
         workspaces: async () => store
-          ? (await store.identity())?.workspaces ?? []
+          ? ((await store.identity())?.workspaces ?? [])
+            .filter(w => (w.product === "infermind") === wiki)
           : stopgap ? [{ workspaceId: stopgap.workspaceId, workspaceName: "Configured workspace",
                          workspaceSlug: stopgap.workspaceSlug }] : [],
         projects: async host => {
@@ -490,6 +576,15 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
 export interface InferOpsVerifierApi extends GatekeeperUserVerifier {
   /** Whether this account can open the project, in the binding's workspace when it names one. */
   hasProjectAccess(host: string, projectKey: string, workspaceId?: string): Promise<boolean>;
+  /** Whether this account can read the Wiki, in the binding's workspace when it names one. */
+  hasWikiAccess(host: string, workspaceId?: string): Promise<boolean>;
+}
+
+/** Whether a verifier's check failed as "no access" rather than as a failure to report. */
+function deniesAccess(error: unknown): boolean {
+  const code = inferOpsErrorCode(error);
+  if (code === "NOT_FOUND" || code === "UNAUTHORIZED" || code === "FORBIDDEN") return true;
+  return error instanceof Error && error.message.includes("not a member");
 }
 
 @validateRpc()
@@ -504,9 +599,19 @@ export class InferOpsVerifier extends WorkerEntrypoint<Cloudflare.Env, AccountPr
     } catch (error) {
       // An unknown host, a refused credential, or no membership of the workspace is "no access";
       // anything else fails the open loudly instead of denying.
-      const code = inferOpsErrorCode(error);
-      if (code === "NOT_FOUND" || code === "UNAUTHORIZED" || code === "FORBIDDEN") return false;
-      if (error instanceof Error && error.message.includes("not a member")) return false;
+      if (deniesAccess(error)) return false;
+      throw error;
+    }
+  }
+
+  async hasWikiAccess(host: string, workspaceId?: string): Promise<boolean> {
+    try {
+      // The observer's own token in the binding's workspace; InferOps' product gate and their
+      // knowledge:read decide, as they do for the owner.
+      await clientFor(this.env, this.ctx.exports, this.ctx.props, host, workspaceId).listDocuments();
+      return true;
+    } catch (error) {
+      if (deniesAccess(error)) return false;
       throw error;
     }
   }
@@ -568,16 +673,16 @@ const ACTION_PREFIX = "action:";
 const NEXT_ACTION_KEY = "nextActionId";
 const INSTANCE_KEY = "instanceId";
 
-/** The facet's state and data source, as the sessions it hands out need them. */
-class ProjectBinding {
+/**
+ * A facet's action store and data source: the parts every kind of binding shares. `scope` keys the
+ * fingerprints: the bound project's key, or `knowledge/wiki`.
+ */
+class ActionBinding<P> {
   constructor(
-    readonly ctx: DurableObjectState<ProjectGatekeeperProps>,
+    readonly ctx: DurableObjectState<P>,
     readonly client: InferOpsClient,
+    readonly scope: string,
   ) {}
-
-  get projectKey(): string {
-    return this.ctx.props.projectKey;
-  }
 
   get kv(): SyncKvStorage {
     return this.ctx.storage.kv;
@@ -610,6 +715,41 @@ class ProjectBinding {
     this.kv.delete(ACTION_PREFIX + actionId);
   }
 
+  /**
+   * Record a pending action, with the fingerprint of the request it will send, before it is
+   * submitted, so an immediate apply can find it.
+   */
+  async stage(staged: StagedAction): Promise<number> {
+    const fingerprint = await fingerprintOf(this.scope, staged);
+    const actionId = this.kv.get<number>(NEXT_ACTION_KEY) ?? 1;
+    this.kv.put(NEXT_ACTION_KEY, actionId + 1);
+    this.putAction({ ...staged, actionId, status: "pending", fingerprint } as ActionRecord);
+    return actionId;
+  }
+
+  /** Submit a staged action; if it was not submitted, forget it so it is no longer simulated. */
+  async submit(queue: RpcStub<ApprovalQueue>, actionId: number,
+               description: Parameters<ApprovalQueue["submitAction"]>[1]): Promise<void> {
+    try {
+      await queue.submitAction(actionId, description);
+    } catch (error) {
+      // Not submitted (unless an auto-approval already applied it), so stop simulating it.
+      if (this.action(actionId)?.status === "pending") this.deleteAction(actionId);
+      throw error;
+    }
+  }
+}
+
+/** A project binding (board or coding dispatch): the bound project and its simulated board. */
+class ProjectBinding extends ActionBinding<ProjectGatekeeperProps> {
+  constructor(ctx: DurableObjectState<ProjectGatekeeperProps>, client: InferOpsClient) {
+    super(ctx, client, ctx.props.projectKey);
+  }
+
+  get projectKey(): string {
+    return this.ctx.props.projectKey;
+  }
+
   pending(): Pending {
     const changes: Pending["changes"][number][] = [];
     const creates: CreateAction[] = [];
@@ -633,30 +773,6 @@ class ProjectBinding {
       else if (record.kind === "cancel") cancels.push(record);
     }
     return { dispatches, cancels };
-  }
-
-  /**
-   * Record a pending action, with the fingerprint of the request it will send, before it is
-   * submitted, so an immediate apply can find it.
-   */
-  async stage(staged: StagedAction): Promise<number> {
-    const fingerprint = await fingerprintOf(this.projectKey, staged);
-    const actionId = this.kv.get<number>(NEXT_ACTION_KEY) ?? 1;
-    this.kv.put(NEXT_ACTION_KEY, actionId + 1);
-    this.putAction({ ...staged, actionId, status: "pending", fingerprint } as ActionRecord);
-    return actionId;
-  }
-
-  /** Submit a staged action; if it was not submitted, forget it so it is no longer simulated. */
-  async submit(queue: RpcStub<ApprovalQueue>, actionId: number,
-               description: Parameters<ApprovalQueue["submitAction"]>[1]): Promise<void> {
-    try {
-      await queue.submitAction(actionId, description);
-    } catch (error) {
-      // Not submitted (unless an auto-approval already applied it), so stop simulating it.
-      if (this.action(actionId)?.status === "pending") this.deleteAction(actionId);
-      throw error;
-    }
   }
 
   async board(): Promise<Board> {
@@ -723,7 +839,9 @@ export class InferOpsProjectGatekeeper
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
     if (record.status === "applied") return;
     if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
-    if (isCodingAction(record)) throw new Error(`InferOps action ${actionId} is not a board action.`);
+    if (isCodingAction(record) || isWikiAction(record)) {
+      throw new Error(`InferOps action ${actionId} is not a board action.`);
+    }
     const fields = { projectKey: binding.projectKey, action: actionId };
     if (!(await matchesFingerprint(binding.projectKey, record))) {
       logger.error("action no longer matches its fingerprint", {
@@ -782,7 +900,7 @@ export class InferOpsProjectGatekeeper
     if (!record || record.status !== "applied") {
       return { message: "This change was never applied, so there is nothing to revert." };
     }
-    if (isCodingAction(record)) return { message: "This is not a board action." };
+    if (isCodingAction(record) || isWikiAction(record)) return { message: "This is not a board action." };
     if (record.kind === "create") {
       return {
         message: `Creating ${record.createdIdentifier ?? "an issue"} cannot be undone here. ` +
@@ -862,6 +980,8 @@ function actionLabel(record: ActionRecord): string {
       return `Dispatching ${record.identifier} to ${plainInline(record.repoSlug, 60)}`;
     case "cancel":
       return `Cancelling the run of ${record.identifier}`;
+    case "section-update":
+      return `The edit of section ${plainInline(record.tag, 60)} of "${plainInline(record.documentTitle, 60)}"`;
   }
 }
 
@@ -871,6 +991,7 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
     const coding = codingFailureMessage(record, what, code);
     if (coding) return coding;
   }
+  if (isWikiAction(record)) return wikiFailureMessage(record, what, code);
   const noun = {
     transition: "move", create: "issue", update: "update", dispatch: "dispatch", cancel: "cancel",
   }[record.kind];
@@ -898,6 +1019,31 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
     case "FORBIDDEN":
       return `${what} was not applied: InferOps does not permit it for this connection (its ` +
         `access or the workflow policy refused it).`;
+    case "DISABLED":
+      return `${what} was not applied: InferOps is turned off for this deployment. It can be ` +
+        `applied once InferOps is turned back on.`;
+    default:
+      return `${what} could not be applied. Try again later.`;
+  }
+}
+
+/** Why a Wiki section edit was not applied. */
+function wikiFailureMessage(record: SectionUpdateAction, what: string, code: string | null): string {
+  switch (code) {
+    case "STALE_REVISION":
+      return `${what} was not applied: the section changed in InferOps after this edit was ` +
+        `proposed (expected version ${record.expectedVersion}). Discard this edit and read the page again.`;
+    case "NOT_FOUND":
+      return `${what} was not applied: the section is no longer in this Wiki.`;
+    case "IDEMPOTENCY_CONFLICT":
+      return `${what} was not applied: the stored request no longer matches the one proposed. ` +
+        `Discard it and propose it again.`;
+    case "UNAUTHORIZED":
+      return `${what} was not applied: InferOps rejected this connection's credential. Reconnect InferOps.`;
+    case "FORBIDDEN":
+      return `${what} was not applied: ${WIKI_FORBIDDEN}`;
+    case "INVALID_REQUEST":
+      return `${what} was not applied: InferOps rejected the request as invalid.`;
     case "DISABLED":
       return `${what} was not applied: InferOps is turned off for this deployment. It can be ` +
         `applied once InferOps is turned back on.`;
@@ -1521,6 +1667,320 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
       ...description,
       implementsRevert: false,
       actionKind: { tag: "inferops.run-cancel", label: "Cancel a coding run" },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiki gatekeeper (a facet of the Overseer, one per Wiki binding)
+
+/** The fingerprint scope of every Wiki binding: its facet is one workspace's Wiki. */
+const WIKI_SCOPE = "knowledge/wiki";
+const MAX_SECTION_BODY = 100_000;
+
+/** A Wiki binding: its action store, data source and the edits still waiting for a decision. */
+class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
+  constructor(ctx: DurableObjectState<WikiGatekeeperProps>, client: InferOpsClient) {
+    super(ctx, client, WIKI_SCOPE);
+  }
+
+  get host(): string {
+    return this.ctx.props.host;
+  }
+
+  /** Pending section edits, oldest first. */
+  pendingEdits(): SectionUpdateAction[] {
+    const edits: SectionUpdateAction[] = [];
+    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
+      const record = readAction(raw);
+      if (record?.status === "pending" && isWikiAction(record)) edits.push(record);
+    }
+    return edits.toSorted((a, b) => a.actionId - b.actionId);
+  }
+
+  /**
+   * The pending edit that still applies to `section`: the newest one proposed at its current
+   * version. An edit made stale by a change in InferOps is no longer shown and blocks nothing.
+   */
+  liveEdit(section: WikiSectionRecord, edits = this.pendingEdits()): SectionUpdateAction | undefined {
+    return edits.findLast(e => e.sectionId === section.id && e.expectedVersion === section.version);
+  }
+
+  /** A section as the caller sees it: with its live pending edit, and its links. */
+  shown(section: WikiSectionRecord, edits = this.pendingEdits()): WikiSection {
+    const edit = this.liveEdit(section, edits);
+    const body = edit?.body ?? section.body;
+    return {
+      id: section.id, tag: section.tag, body, version: section.version,
+      wikilinks: wikilinksOf(body), ...(edit ? { pending: "update" as const } : {}),
+    };
+  }
+}
+
+/** Rethrow a data-source "not found" for a page without saying which way it was not found. */
+function hideDocumentExistence(error: unknown): never {
+  if (inferOpsErrorCode(error) === "NOT_FOUND") fail("NOT_FOUND", "No such page in this Wiki.");
+  throw error;
+}
+
+@validateRpc()
+export class InferOpsWikiGatekeeper
+    extends DurableObject<Cloudflare.Env, WikiGatekeeperProps>
+    implements Gatekeeper<InferOpsWikiSession> {
+  #binding(): WikiBinding {
+    const { accountId, connected, host, workspaceId } = this.ctx.props;
+    return new WikiBinding(
+      this.ctx, clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId));
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    const { host } = this.ctx.props;
+    return {
+      url: wikiUrl({ host }),
+      title: `InferMind Wiki ${host}`,
+      snippet: `The InferMind Wiki of ${host}: read its pages and propose edits to their sections.`,
+      suggestedBindingName: "INFEROPS_WIKI",
+      tsType: "InferOpsWikiSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
+  /** Every section edit waits for review; none is auto-approvable. */
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsWikiSession> {
+    return new WikiSessionImpl(this.#binding(), approvalQueue.dup());
+  }
+
+  /** Strategy B: the binding is one workspace's Wiki, so admit an observer who can read it. */
+  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const { host, workspaceId } = this.ctx.props;
+    const verifier = user as unknown as Fetcher<InferOpsVerifierApi>;
+    if (!(await verifier.hasWikiAccess(host, workspaceId))) {
+      throw new Error(
+        `This collaborator cannot read the InferMind Wiki of ${host}, so they cannot observe data ` +
+        `the Gadget read from it.`);
+    }
+  }
+
+  /** Nothing is tracked per observer under strategy B. */
+  async removeObserver(_id: string): Promise<void> {}
+
+  /**
+   * Apply a section edit. InferOps' section PATCH takes no expected version and ignores the
+   * idempotency key, so the check is made here, by reading the section first:
+   *
+   * - at the version the edit was proposed at: send the body (under the action's key, for when
+   *   InferOps honors it), and record the version InferOps reports;
+   * - already showing exactly this body at a later version: the edit took effect (a retried apply
+   *   whose first response was lost, or the same text written elsewhere), so it counts as applied
+   *   and nothing is sent again;
+   * - anything else: refused as stale, nothing sent.
+   *
+   * The read and the write are two requests, so an edit made in between is overwritten (see the
+   * design's Open Questions). The fingerprint is required: every Wiki record has one.
+   */
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+    const binding = this.#binding();
+    const record = binding.action(actionId);
+    if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
+    if (record.status === "applied") return;
+    if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
+    if (!isWikiAction(record)) throw new Error(`InferOps action ${actionId} is not a Wiki action.`);
+    const fields = { host: binding.host, action: actionId };
+    if (record.fingerprint === undefined || !(await matchesFingerprint(WIKI_SCOPE, record))) {
+      logger.error("action no longer matches its fingerprint", {
+        event: "action.fingerprint.mismatch", ...fields, code: "IDEMPOTENCY_CONFLICT",
+      });
+      throw new Error(applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
+    }
+    let appliedVersion: number;
+    try {
+      const current = await binding.client.readSection(record.sectionId);
+      if (current.version === record.expectedVersion) {
+        const updated = await binding.client.updateSection(
+          record.sectionId, record.body, binding.idempotencyKey(actionId));
+        appliedVersion = updated.version;
+      } else if (current.body === record.body) {
+        logger.info("section edit already in effect", { event: "section-update.apply.in_effect", ...fields });
+        appliedVersion = current.version;
+      } else {
+        throw new InferOpsError("STALE_REVISION", "The section changed since the edit was proposed.");
+      }
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      logger.warn("section-update failed", {
+        event: "section-update.apply.failed", ...fields, code: code ?? "UNKNOWN", error,
+      });
+      throw new Error(applyFailureMessage(record, code), { cause: error });
+    }
+    binding.putAction({ ...record, status: "applied", appliedVersion });
+    logger.info("section-update applied", { event: "section-update.applied", ...fields });
+  }
+
+  /** Forget the pending edit; reads stop showing it at once. */
+  async rejectAction(actionId: number): Promise<void> {
+    const binding = this.#binding();
+    if (binding.action(actionId)?.status === "pending") binding.deleteAction(actionId);
+  }
+
+  /**
+   * Restore the body an applied edit replaced, provided the section is still exactly what the edit
+   * left (its version and body); otherwise explain instead of clobbering a later edit.
+   */
+  async revertAction(actionId: number):
+      Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
+    const binding = this.#binding();
+    const record = binding.action(actionId);
+    if (!record || record.status !== "applied") {
+      return { message: "This change was never applied, so there is nothing to revert." };
+    }
+    if (!isWikiAction(record)) return { message: "This is not a Wiki action." };
+    let current: WikiSectionRecord;
+    try {
+      current = await binding.client.readSection(record.sectionId);
+    } catch (error) {
+      if (inferOpsErrorCode(error) !== "NOT_FOUND") throw error;
+      return { message: `Section ${plainInline(record.tag, 60)} is no longer in this Wiki.` };
+    }
+    if (current.version !== record.appliedVersion || current.body !== record.body) {
+      return {
+        message: `Section ${plainInline(record.tag, 60)} has changed again since this edit, so its previous text ` +
+          `was not restored. Edit it in InferMind if needed.`,
+      };
+    }
+    await binding.client.updateSection(
+      record.sectionId, record.previousBody, binding.idempotencyKey(actionId, ":revert"));
+    binding.putAction({ ...record, status: "reverted" });
+  }
+}
+
+@validateRpc()
+class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
+  #binding: WikiBinding;
+  #queue: RpcStub<ApprovalQueue>;
+
+  constructor(binding: WikiBinding, queue: RpcStub<ApprovalQueue>) {
+    super();
+    this.#binding = binding;
+    this.#queue = queue;
+  }
+
+  [Symbol.dispose]() {
+    this.#queue[Symbol.dispose]();
+  }
+
+  async listDocuments(): Promise<WikiDocumentNode[]> {
+    const documents = await this.#binding.client.listDocuments();
+    await this.#queue.authorizeObservation({
+      title: "List InferMind Wiki pages",
+      description: `Listed the ${documents.length} pages of the InferMind Wiki of ${this.#binding.host}.`,
+    });
+    return documents.map(({ id, slug, title, parentId, siblingOrder }) =>
+      ({ id, slug, title, parentId, siblingOrder }));
+  }
+
+  /** A page's UUID from a slug or UUID; the list is read only for a slug. Not an observation. */
+  async #documentId(slugOrId: string): Promise<string> {
+    if (UUID.test(slugOrId)) return slugOrId.toLowerCase();
+    if (!isDocumentSlug(slugOrId)) {
+      fail("INVALID_REQUEST", "slugOrId must be a page slug, such as handbook, or a page UUID.");
+    }
+    const found = (await this.#binding.client.listDocuments()).find(d => d.slug === slugOrId);
+    if (!found) fail("NOT_FOUND", "No such page in this Wiki.");
+    return found.id;
+  }
+
+  /** The page and its sections as shown (with pending edits), for both reads. */
+  async #page(slugOrId: string) {
+    const binding = this.#binding;
+    const documentId = await this.#documentId(slugOrId);
+    const head = await binding.client.readDocument(documentId).catch(hideDocumentExistence);
+    const records = await binding.client.listSections(head.id).catch(hideDocumentExistence);
+    const edits = binding.pendingEdits();
+    return { head, sections: records.map(section => binding.shown(section, edits)) };
+  }
+
+  async readDocument(slugOrId: string): Promise<WikiDocument> {
+    const { head, sections } = await this.#page(slugOrId);
+    const page: WikiDocument = {
+      id: head.id, slug: head.slug, title: head.title, sections,
+      references: embeddedReferences(sections.map(s => s.body)),
+    };
+    await this.#queue.authorizeObservation({
+      title: `Read Wiki page ${plainInline(head.slug, 80)}`,
+      description: `Read page "${plainInline(head.title, 120)}" of the InferMind Wiki of ` +
+        `${this.#binding.host}: ${sections.length} sections, ${page.references.length} embedded references.`,
+    });
+    return page;
+  }
+
+  /**
+   * InferOps answers a page with no readable section as not readable (its section lens), so this
+   * does too rather than return a bare title.
+   */
+  async readDocumentText(slugOrId: string): Promise<string> {
+    const { head, sections } = await this.#page(slugOrId);
+    if (sections.length === 0) fail("NOT_FOUND", "No section of this page is readable.");
+    const text = documentText(head.title, sections.map(s => s.body));
+    await this.#queue.authorizeObservation({
+      title: `Read Wiki page ${plainInline(head.slug, 80)} as text`,
+      description: `Read page "${plainInline(head.title, 120)}" of the InferMind Wiki of ` +
+        `${this.#binding.host} as text: ${sections.length} sections.`,
+    });
+    return text;
+  }
+
+  /**
+   * Checked against the section as InferOps has it now: its version (STALE_REVISION), a live
+   * pending edit (CONFLICT), and a body equal to the one shown (nothing to do). The section's page
+   * is read for the approval's title. Not an observation: the approval shows what was read.
+   */
+  async updateSection(sectionId: string, body: string, expectedVersion: number): Promise<void> {
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+      fail("INVALID_REQUEST", "expectedVersion must be the version readDocument() returned.");
+    }
+    if (body.length > MAX_SECTION_BODY) {
+      fail("INVALID_REQUEST", `A section body must be at most ${MAX_SECTION_BODY} characters.`);
+    }
+    if (!UUID.test(sectionId)) fail("NOT_FOUND", "No such section in this Wiki.");
+    const binding = this.#binding;
+    const stored = await binding.client.readSection(sectionId);
+    if (stored.version !== expectedVersion) {
+      fail("STALE_REVISION",
+        `Section ${stored.tag} is at version ${stored.version}, not ${expectedVersion}. Read it again.`);
+    }
+    const live = binding.liveEdit(stored);
+    if ((live?.body ?? stored.body) === body) return;
+    if (live) {
+      fail("CONFLICT",
+        `Section ${stored.tag} already has an edit that has not taken effect yet. Wait for it, ` +
+        `then read the page again.`);
+    }
+    const head = await binding.client.readDocument(stored.documentId).catch(hideDocumentExistence);
+    const actionId = await binding.stage({
+      kind: "section-update", sectionId: stored.id, documentTitle: head.title, tag: stored.tag, body,
+      expectedVersion, previousBody: stored.body,
+    });
+    const description = buildDescription(
+      `Replace the markdown of one section of the InferMind Wiki of ${binding.host}. It is applied ` +
+      `only if the section is still at the version below when approved.`)
+      .inline("Page", head.title)
+      .inline("Section", stored.tag)
+      .inline("Expected version", String(expectedVersion))
+      .verbatim("Current text", stored.body)
+      .verbatim("New text", body)
+      .finish();
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Edit Wiki section ${stored.tag} of ${head.title}`),
+      ...description,
+      implementsRevert: true,
+      actionKind: { tag: "inferops.wiki-section-update", label: "Edit a Wiki section" },
     });
   }
 }

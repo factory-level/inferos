@@ -181,13 +181,15 @@ export function exchangeFromTokenResponse(body: string): InferLabExchange {
   const workspaces: InferOpsWorkspace[] = [];
   for (const entry of Array.isArray(user.workspaces) ? user.workspaces : []) {
     const w = (entry ?? {}) as { workspaceId?: unknown; workspaceName?: unknown; product?: unknown };
-    if (w.product !== "inferops") continue;
+    // InferOps workspaces hold boards, InferMind ones the Wiki; any other product is not kept.
+    if (w.product !== "inferops" && w.product !== "infermind") continue;
     if (typeof w.workspaceId !== "string" || !UUID.test(w.workspaceId)) {
       throw new SignInFailure("InferLab returned an incomplete sign-in response.");
     }
     workspaces.push({
       workspaceId: w.workspaceId.toLowerCase(),
       workspaceName: typeof w.workspaceName === "string" ? w.workspaceName : w.workspaceId,
+      ...(w.product === "infermind" ? { product: "infermind" as const } : {}),
     });
   }
   return {

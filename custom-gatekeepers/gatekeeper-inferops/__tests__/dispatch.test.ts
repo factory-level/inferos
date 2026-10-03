@@ -19,6 +19,7 @@ const DISPATCH_URL = "inferops://demo.local/project/dispatch/DEMO";
 const BOARD_URL = "inferops://demo.local/project/board/DEMO";
 const BOARD_PATTERN = "inferops://*/project/board/*";
 const DISPATCH_PATTERN = "inferops://*/project/dispatch/*";
+const WIKI_PATTERN = "inferops://*/knowledge/wiki";
 
 // Deployment vars, flipped as a redeploy with changed vars would (one env object per isolate).
 type Vars = { INFEROPS_ENABLED?: string; CODING_WORKBENCH_ENABLED?: string; CODING_WORKBENCH_REPOS?: string };
@@ -69,11 +70,12 @@ describe("the dispatch resource kind", () => {
   it("is offered only while coding dispatch is on", async () => {
     const { hooks } = setup();
     const account = { accountId: crypto.randomUUID() };
-    expect(await hooks.supportedPatterns(account)).toEqual([BOARD_PATTERN, DISPATCH_PATTERN]);
+    expect(await hooks.supportedPatterns(account))
+      .toEqual([BOARD_PATTERN, DISPATCH_PATTERN, WIKI_PATTERN]);
     expect(await hooks.configuratorFor(account, DISPATCH_PATTERN)).toBeNull();
 
     set("CODING_WORKBENCH_ENABLED", undefined);
-    expect(await hooks.supportedPatterns(account)).toEqual([BOARD_PATTERN]);
+    expect(await hooks.supportedPatterns(account)).toEqual([BOARD_PATTERN, WIKI_PATTERN]);
     expect(await hooks.configuratorFor(account, DISPATCH_PATTERN)).toContain("Unsupported");
   });
 

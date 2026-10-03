@@ -13,14 +13,23 @@
 // the expected revision) and per-key replay. A dispatch advances the issue's revision, as InferOps'
 // move to Queued does, but leaves its state: the demo board has no Queued state. Nothing runs the
 // queued runs; `setRunStatus` stands in for the runner.
+//
+// Wiki: a small synthetic InferMind Wiki (`src/fixtures/demo-wiki.json`), with InferOps' section
+// semantics: a body write advances the section's version by one, takes no expected version and
+// does not replay an idempotency key (the gatekeeper's own re-read is what guards it). Pages are
+// listed by sibling order, then title, and sections in page order. `setInferMindEnabled(false)`
+// turns the demo workspace into one without InferMind, so every Wiki call fails FORBIDDEN as
+// InferOps' product gate does.
 
 import { DurableObject } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/observability/logger";
 import SEED from "./fixtures/demo-board.json";
+import WIKI_SEED from "./fixtures/demo-wiki.json";
 import {
   InferOpsError, type DispatchRequest, type InferOpsClient, type IssueChanges, type NewIssueRequest,
-  type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord,
+  type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord, type WikiDocumentHead,
+  type WikiDocumentRecord, type WikiSectionRecord,
 } from "./inferops-client";
 import type { Issue, Revision, RunResult, RunStatus } from "./types";
 
@@ -30,6 +39,11 @@ export const MOCK_HOST = "demo.local";
 const DATA_KEY = "data:v1";
 const RUNS_KEY = "runs:v1";
 const IDEMPOTENCY_PREFIX = "idem:";
+const WIKI_KEY = "wiki:v1";
+const NO_INFERMIND_KEY = "wiki:no-infermind";
+
+/** The demo Wiki: its pages and their sections. */
+type MockWiki = { documents: WikiDocumentRecord[]; sections: WikiSectionRecord[] };
 
 /** The demo workspace's repositories. Only ids reach a dispatch; there is nothing to clone. */
 export const MOCK_REPOS: readonly RepoRecord[] = [
@@ -307,6 +321,60 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     this.#saveRun({ ...run, status, result: result ?? run.result });
   }
 
+  #wiki(): MockWiki {
+    if (this.ctx.storage.kv.get<boolean>(NO_INFERMIND_KEY)) {
+      throw new InferOpsError("FORBIDDEN",
+        "This demo workspace has no InferMind Wiki (InferMind is turned off for it).");
+    }
+    let wiki = this.ctx.storage.kv.get<MockWiki>(WIKI_KEY);
+    if (!wiki) {
+      const { documents, sections } = structuredClone(WIKI_SEED) as unknown as MockWiki;
+      wiki = { documents, sections };
+      this.ctx.storage.kv.put(WIKI_KEY, wiki);
+    }
+    return wiki;
+  }
+
+  async listDocuments(): Promise<WikiDocumentRecord[]> {
+    return this.#wiki().documents.toSorted((a, b) =>
+      a.siblingOrder - b.siblingOrder || (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
+  }
+
+  async readDocument(documentId: string): Promise<WikiDocumentHead> {
+    const found = this.#wiki().documents.find(d => d.id === documentId);
+    if (!found) throw new InferOpsError("NOT_FOUND", "No such page in this Wiki.");
+    return { id: found.id, slug: found.slug, title: found.title };
+  }
+
+  async listSections(documentId: string): Promise<WikiSectionRecord[]> {
+    await this.readDocument(documentId);
+    return this.#wiki().sections.filter(s => s.documentId === documentId);
+  }
+
+  async readSection(sectionId: string): Promise<WikiSectionRecord> {
+    const found = this.#wiki().sections.find(s => s.id === sectionId);
+    if (!found) throw new InferOpsError("NOT_FOUND", "No such section in this Wiki.");
+    return found;
+  }
+
+  async updateSection(sectionId: string, body: string, idempotencyKey: string):
+      Promise<WikiSectionRecord> {
+    if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+    const wiki = this.#wiki();
+    const section = wiki.sections.find(s => s.id === sectionId);
+    if (!section) throw new InferOpsError("NOT_FOUND", "No such section in this Wiki.");
+    section.body = body;
+    section.version += 1;
+    this.ctx.storage.kv.put(WIKI_KEY, wiki);
+    return section;
+  }
+
+  /** Make the demo workspace one with InferMind (the default) or without it. */
+  async setInferMindEnabled(enabled: boolean): Promise<void> {
+    if (enabled) this.ctx.storage.kv.delete(NO_INFERMIND_KEY);
+    else this.ctx.storage.kv.put(NO_INFERMIND_KEY, true);
+  }
+
   /** The result a key already produced for this operation; throws if it produced another's. */
   #replayed<T>(idempotencyKey: string, operation: string): T | undefined {
     const previous = this.ctx.storage.kv.get<IdempotencyRecord<T>>(IDEMPOTENCY_PREFIX + idempotencyKey);
@@ -369,6 +437,11 @@ export function openInferOpsClient(
     dispatchIssue: (projectKey, issueId, request, idempotencyKey) =>
       stub.dispatchIssue(projectKey, issueId, request, idempotencyKey),
     cancelRun: (projectKey, runId, idempotencyKey) => stub.cancelRun(projectKey, runId, idempotencyKey),
+    listDocuments: () => stub.listDocuments(),
+    readDocument: documentId => stub.readDocument(documentId),
+    listSections: documentId => stub.listSections(documentId),
+    readSection: sectionId => stub.readSection(sectionId),
+    updateSection: (sectionId, body, idempotencyKey) => stub.updateSection(sectionId, body, idempotencyKey),
     forget: () => stub.forget(),
   };
 }

@@ -20,6 +20,13 @@
 //   and enabled in the workspace, and 409 `STALE_REVISION`; it queues a run and advances the issue's
 //   revision. Runs are workspace-wide, as in InferOps: their issue decides their project.
 //
+// - The InferMind Wiki (`/knowledge/*`) is served only in a workspace whose product is `infermind`
+//   (`mind` and `notes` here); in any other InferOps answers 403, as its product gate does, and a
+//   person without knowledge access (`setKnowledgeAccess`) gets 403 too. Its responses are bare,
+//   a page or section of another workspace is `null`, sections carry an integer `version` bumped by
+//   every write, and a section PATCH takes no expected version and does not replay an idempotency
+//   key, all as in InferOps. A PATCH of a section this workspace lacks is InferOps' 500.
+//
 // Failure switches: `failNextRequests` (503 for the next N InferOps calls), `failNextWrites` (503 for
 // the next N writes, before anything is committed), and `loseNextWriteResponse` (commit the next
 // write, store its response under its key, then drop the connection). `revokeSessions` ends a
@@ -38,12 +45,37 @@ export const INFEROPS_ORIGIN = "https://inferops.test";
 /** The tenant slug of every workspace here. */
 export const TENANT = "acme";
 
-/** The InferOps workspaces of tenant `acme`, by slug. */
+/** The workspaces of tenant `acme`, by slug, each an InferOps or an InferMind one. */
 export const WORKSPACES = {
-  operations: { id: "9a000000-0000-4000-8000-000000000001", name: "Operations" },
-  knowledge: { id: "9a000000-0000-4000-8000-000000000002", name: "Knowledge" },
+  operations: { id: "9a000000-0000-4000-8000-000000000001", name: "Operations", product: "inferops" },
+  knowledge: { id: "9a000000-0000-4000-8000-000000000002", name: "Knowledge", product: "inferops" },
+  mind: { id: "9a000000-0000-4000-8000-000000000003", name: "Mind", product: "infermind" },
+  notes: { id: "9a000000-0000-4000-8000-000000000004", name: "Notes", product: "infermind" },
 } as const;
 export type WorkspaceSlug = keyof typeof WORKSPACES;
+
+/** A Wiki URL as InferOps writes it. */
+export function wikiUrl(workspace: string, tenant = TENANT): string {
+  return `inferops://${tenant}.${workspace}/knowledge/wiki`;
+}
+
+/** The body every seeded section starts with: it must never reach a log through InferOS. */
+export function secretSectionBody(slug: string, tag: string): string {
+  return `CONFIDENTIAL section ${slug}#${tag}: not for logs`;
+}
+
+export type FakeDocument = { id: string; workspace: WorkspaceSlug; slug: string; title: string; parentId: string | null };
+export type FakeSection = { id: string; documentId: string; tag: string; body: string; version: number };
+
+/** The Wiki pages every fake starts with, by slug. `handbook` embeds the ENG board. */
+export const DOCUMENTS = {
+  handbook: { id: "6a000000-0000-4000-8000-000000000001", workspace: "mind", title: "Handbook" },
+  runbook: { id: "6a000000-0000-4000-8000-000000000002", workspace: "mind", title: "Runbook" },
+  "private-notes": { id: "6a000000-0000-4000-8000-000000000003", workspace: "notes", title: "Private notes" },
+} as const satisfies Record<string, { id: string; workspace: WorkspaceSlug; title: string }>;
+
+/** The ENG board reference `handbook#current-work` embeds as a paragraph of its own. */
+export const HANDBOOK_EMBED = "inferops://acme.operations/project/board/ENG";
 
 type StateDef = { id: string; name: string; group: string; position: number };
 type ProjectDef = {
@@ -111,7 +143,12 @@ export type FakePerson = {
   workspaces: Set<WorkspaceSlug>;
   /** Whether the person holds InferOps' `issue:delegate`, which dispatch and cancel need. */
   canDelegate: boolean;
+  /** The person's InferMind knowledge permission: `write` (the default), `read` or `none`. */
+  knowledge: "write" | "read" | "none";
 };
+
+/** One Wiki section write InferOps committed. */
+export type FakeSectionWrite = { sectionId: string; body: string; idempotencyKey: string | null; person: string };
 
 /** One coding run, as InferOps stores it. */
 export type FakeRun = {
@@ -166,6 +203,8 @@ export class InferOpsFake {
   readonly replays: FakeRequest[] = [];
   /** Refresh tokens InferLab was asked to sign out. */
   readonly logouts: string[] = [];
+  /** Every Wiki section write committed, in order. */
+  readonly sectionWrites: FakeSectionWrite[] = [];
 
   /** Answer the next N InferOps API calls with a 503, before doing anything. */
   failNextRequests = 0;
@@ -180,6 +219,8 @@ export class InferOpsFake {
   readonly #issues = new Map<string, FakeIssue>();
   readonly #idempotency = new Map<string, Stored>();
   readonly #runs = new Map<string, FakeRun>();
+  readonly #documents = new Map<string, FakeDocument>();
+  readonly #sections = new Map<string, FakeSection>();
   #serial = 0;
 
   constructor() {
@@ -187,6 +228,19 @@ export class InferOpsFake {
     this.#seed("ENG", 2, "Write the isolation suite", "medium");
     this.#seed("WEB", 1, "Refresh the landing page", "low");
     this.#seed("OPS", 1, "Rotate the on-call roster", "low");
+    for (const [slug, doc] of Object.entries(DOCUMENTS)) {
+      this.#documents.set(doc.id, { id: doc.id, workspace: doc.workspace, slug, title: doc.title, parentId: null });
+    }
+    this.#seedSection("handbook", 1, "purpose", secretSectionBody("handbook", "purpose"));
+    this.#seedSection("handbook", 2, "current-work",
+      `${secretSectionBody("handbook", "current-work")}\n\n[ENG board](${HANDBOOK_EMBED})`);
+    this.#seedSection("runbook", 3, "steps", secretSectionBody("runbook", "steps"));
+    this.#seedSection("private-notes", 4, "secret", secretSectionBody("private-notes", "secret"));
+  }
+
+  #seedSection(slug: keyof typeof DOCUMENTS, n: number, tag: string, body: string): void {
+    const id = `6b000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    this.#sections.set(id, { id, documentId: DOCUMENTS[slug].id, tag, body, version: 7 });
   }
 
   #seed(key: keyof typeof PROJECTS, n: number, title: string, priority: string): void {
@@ -214,7 +268,7 @@ export class InferOpsFake {
     if (this.#people.has(label)) throw new Error(`Person ${label} already exists`);
     const person: FakePerson = {
       userId: `user-${label}`, email: `${label}@acme.test`, workspaces: new Set(workspaces),
-      canDelegate: false,
+      canDelegate: false, knowledge: "write",
     };
     this.#people.set(label, person);
     return person;
@@ -223,6 +277,33 @@ export class InferOpsFake {
   /** Give the person InferOps' `issue:delegate`, so they may dispatch and cancel runs. */
   grantDelegate(person: FakePerson): void {
     person.canDelegate = true;
+  }
+
+  /** Set the person's InferMind knowledge permission. */
+  setKnowledgeAccess(person: FakePerson, access: FakePerson["knowledge"]): void {
+    person.knowledge = access;
+  }
+
+  /** The stored section `tag` of page `slug`. */
+  section(slug: keyof typeof DOCUMENTS, tag: string): FakeSection {
+    const found = [...this.#sections.values()].find(s => s.documentId === DOCUMENTS[slug].id && s.tag === tag);
+    if (!found) throw new Error(`No section ${slug}#${tag}`);
+    return found;
+  }
+
+  /** Someone else edits the section in InferMind: its body changes and its version moves on. */
+  editSection(slug: keyof typeof DOCUMENTS, tag: string, body: string): void {
+    const section = this.section(slug, tag);
+    section.body = body;
+    section.version += 1;
+  }
+
+  /** The body of every seeded section. */
+  seededSectionBodies(): string[] {
+    return [
+      secretSectionBody("handbook", "purpose"), secretSectionBody("handbook", "current-work"),
+      secretSectionBody("runbook", "steps"), secretSectionBody("private-notes", "secret"),
+    ];
   }
 
   /** The runs of `identifier`'s issue, oldest first. */
@@ -345,7 +426,7 @@ export class InferOpsFake {
             tenantId: "tenant-acme",
             workspaces: [...person.workspaces].map(slug => ({
               workspaceId: WORKSPACES[slug].id, workspaceName: WORKSPACES[slug].name,
-              product: "inferops", role: "member", deniedPermissions: [],
+              product: WORKSPACES[slug].product, role: "member", deniedPermissions: [],
             })),
           },
         });
@@ -409,7 +490,7 @@ export class InferOpsFake {
     if (url.pathname === "/workspaces" && method === "GET") {
       // The principal lane: every workspace of the tenant, with its slug.
       return json(Object.entries(WORKSPACES).map(([slug, w]) => ({
-        id: w.id, tenant_id: "tenant-acme", product: "inferops", name: w.name, slug,
+        id: w.id, tenant_id: "tenant-acme", product: w.product, name: w.name, slug,
       })));
     }
 
@@ -418,6 +499,7 @@ export class InferOpsFake {
     if (!slug || !person.workspaces.has(slug)) {
       return failure(403, "FORBIDDEN", "not a member of this workspace");
     }
+    if (url.pathname.startsWith("/knowledge/")) return this.#knowledge(url, method, request, record, slug, person);
     const projects = Object.values(PROJECTS).filter(p => p.workspace === slug);
     const issueIn = (id: string) => {
       const issue = this.#issues.get(id);
@@ -573,6 +655,69 @@ export class InferOpsFake {
     this.#runs.set(run.id, run);
     issue.revision = String(Number(issue.revision) + 1);
     return { status: 201, body: { run: this.#wireRun(run) } };
+  }
+
+  /** InferOps' knowledge routes, for one request already authorized into workspace `slug`. */
+  async #knowledge(url: URL, method: string, request: Request, record: FakeRequest,
+                   slug: WorkspaceSlug, person: FakePerson): Promise<Response> {
+    // The product gate, then the route's permission: both InferOps' 403 FORBIDDEN.
+    if (WORKSPACES[slug].product !== "infermind") return failure(403, "FORBIDDEN", "Wrong product for this route");
+    const write = method !== "GET";
+    if (person.knowledge === "none" || (write && person.knowledge !== "write")) {
+      return failure(403, "FORBIDDEN", `Missing permission: knowledge:${write ? "write" : "read"}`);
+    }
+    const documentIn = (id: string) => {
+      const doc = this.#documents.get(id);
+      return doc?.workspace === slug ? doc : undefined;
+    };
+    const sectionIn = (id: string) => {
+      const section = this.#sections.get(id);
+      return section && documentIn(section.documentId) ? section : undefined;
+    };
+    const wireDocument = (doc: FakeDocument) => ({
+      id: doc.id, workspaceId: WORKSPACES[slug].id, slug: doc.slug, title: doc.title,
+      summary: null, pathway: null, parentId: doc.parentId, siblingOrder: 0,
+    });
+    if (method === "GET") {
+      if (url.pathname === "/knowledge/documents") {
+        return json([...this.#documents.values()].filter(d => d.workspace === slug).map(wireDocument));
+      }
+      const documentMatch = /^\/knowledge\/documents\/([^/]+)$/.exec(url.pathname);
+      if (documentMatch) {
+        const doc = documentIn(documentMatch[1]!);
+        return json(doc ? { ...wireDocument(doc), body: "" } : null);
+      }
+      if (url.pathname === "/knowledge/sections") {
+        const documentId = url.searchParams.get("documentId") ?? "";
+        return json(documentIn(documentId)
+          ? [...this.#sections.values()].filter(s => s.documentId === documentId) : []);
+      }
+      const sectionMatch = /^\/knowledge\/sections\/([^/]+)$/.exec(url.pathname);
+      if (sectionMatch) return json(sectionIn(sectionMatch[1]!) ?? null);
+      return failure(404, "NOT_FOUND", "no route");
+    }
+    const patchMatch = /^\/knowledge\/sections\/([^/]+)$/.exec(url.pathname);
+    if (method !== "PATCH" || !patchMatch) return failure(404, "NOT_FOUND", "no route");
+    if (this.failNextWrites > 0) {
+      this.failNextWrites--;
+      return failure(503, "UNAVAILABLE", "upstream down");
+    }
+    const section = sectionIn(patchMatch[1]!);
+    // InferOps' updateSection throws a plain "not found", which its error middleware answers 500.
+    if (!section) return failure(500, "INTERNAL_ERROR", "An unexpected error occurred");
+    const body = await request.json() as { body?: unknown };
+    if (typeof body.body === "string") {
+      section.body = body.body;
+      section.version += 1;
+    }
+    this.sectionWrites.push({
+      sectionId: section.id, body: section.body, idempotencyKey: record.idempotencyKey, person: record.person!,
+    });
+    if (this.loseNextWriteResponse) {
+      this.loseNextWriteResponse = false;
+      throw new Error("The connection was reset after InferOps committed the write.");
+    }
+    return json(section);
   }
 
   issuesOfProject(projectId: string): FakeIssue[] {

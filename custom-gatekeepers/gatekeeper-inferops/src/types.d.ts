@@ -257,3 +257,87 @@ export interface InferOpsDispatchSession {
    */
   cancel(runId: string): Promise<void>;
 }
+
+/** One page of the Wiki, as listed: where it sits in the page tree, without its content. */
+export interface WikiDocumentNode {
+  /** Stable page UUID. */
+  id: string;
+  /** The page's short name, as in inferops://<tenant>.<workspace>/knowledge/document/<slug>. */
+  slug: string;
+  /** Page title. */
+  title: string;
+  /** The parent page's UUID, or null for a top-level page. */
+  parentId: string | null;
+  /** Order among the pages with the same parent, ascending. */
+  siblingOrder: number;
+}
+
+/** A [[target#tag]] link written in a section, naming another page's section. */
+export interface WikiLink {
+  /** The linked page, as written (a page slug or title). */
+  target: string;
+  /** The linked section's tag. */
+  tag: string;
+}
+
+/** One section of a page: the unit that is read, linked and edited. */
+export interface WikiSection {
+  /** Stable section UUID; pass it to updateSection(). */
+  id: string;
+  /** The section's anchor tag. */
+  tag: string;
+  /** The section's markdown. */
+  body: string;
+  /** Version to supply when editing this section. It changes with every edit. */
+  version: number;
+  /** The [[target#tag]] links in the body, each once, in order of first appearance. */
+  wikilinks: WikiLink[];
+  /**
+   * Set while an edit requested through this connection has not taken effect yet; absent
+   * otherwise. The body shown already includes the edit, at the section's unchanged version.
+   */
+  pending?: "update";
+}
+
+/** One page with its sections. */
+export interface WikiDocument {
+  /** Stable page UUID. */
+  id: string;
+  /** The page's short name. */
+  slug: string;
+  /** Page title. */
+  title: string;
+  /** The sections you can read, in page order. May be empty. */
+  sections: WikiSection[];
+  /**
+   * The inferops:// references embedded in the sections: links that stand alone as a paragraph,
+   * such as [ENG board](inferops://acme.operations/project/board/ENG), each once, in order. A
+   * reference names something and grants nothing; reading it needs its own connection.
+   */
+  references: string[];
+}
+
+/**
+ * The InferMind Wiki of one workspace, fixed when this capability is created. Fails with
+ * FORBIDDEN when the workspace is not an InferMind workspace or your InferOps access lacks
+ * knowledge permission, and with NOT_FOUND for a page or section this Wiki does not have.
+ */
+export interface InferOpsWikiSession {
+  /** Every page you can open, ordered by siblingOrder, then title; parentId places each in the tree. */
+  listDocuments(): Promise<WikiDocumentNode[]>;
+  /** One page by its slug or UUID, with its sections and embedded references. */
+  readDocument(slugOrId: string): Promise<WikiDocument>;
+  /**
+   * One page as plain text: "# <title>", then each section's markdown, separated by blank lines.
+   * Embedded references stay as the links they are written as. Fails with NOT_FOUND for a page
+   * with no section you can read.
+   */
+  readDocumentText(slugOrId: string): Promise<string>;
+  /**
+   * Replace a section's markdown. Supply the version you read it at; a section edited since fails
+   * with STALE_REVISION. Reads show the new body at once, marked pending "update". A body equal to
+   * the current one does nothing. While an earlier edit of the section has not taken effect,
+   * another fails with CONFLICT. A body over 100000 characters fails with INVALID_REQUEST.
+   */
+  updateSection(sectionId: string, body: string, expectedVersion: number): Promise<void>;
+}

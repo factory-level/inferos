@@ -22,12 +22,13 @@ import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, Overseer } from "@gadgets/workshop-shared/api";
 import type {
-  InferOpsDispatchSession, InferOpsProjectSession,
+  InferOpsDispatchSession, InferOpsProjectSession, InferOpsWikiSession,
 } from "../../../custom-gatekeepers/gatekeeper-inferops/src/types.js";
 import { startHarness, type Harness } from "../src/harness.js";
 import {
-  INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, REPOS, SEEDED_ISSUES, WORKSPACES, boardUrl,
-  secretDescription, type FakePerson, type WorkspaceSlug,
+  DOCUMENTS, HANDBOOK_EMBED, INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, REPOS,
+  SEEDED_ISSUES, WORKSPACES, boardUrl, secretDescription, secretSectionBody, wikiUrl,
+  type FakePerson, type WorkspaceSlug,
 } from "../src/inferops-fake.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
@@ -731,9 +732,129 @@ describe("the deployment switch", () => {
   });
 });
 
+describe("the InferMind Wiki", () => {
+  const MIND = WORKSPACES.mind.id;
+  const MIND_WIKI = wikiUrl("mind");
+
+  /** A Wiki binding of the user's, and a session on it. */
+  async function bindWiki(user: User, url = MIND_WIKI) {
+    const ws = await user.api.newGadget();
+    const connection = await ws.newGatekeeper(user.account.id, url);
+    if (!connection) throw new Error(`No connection for ${url}`);
+    const session = await connection.openSession() as RpcStub<InferOpsWikiSession>;
+    return { ws, connection, session };
+  }
+
+  it("reads pages with the person's own token in their InferMind workspace, as observations, and the text resolves nothing", async () => {
+    const wren = await newUser("wikireader", ["operations", "mind"]);
+    const { ws, session } = await bindWiki(wren);
+
+    expect((await session.listDocuments()).map(d => d.slug).toSorted()).toEqual(["handbook", "runbook"]);
+    const page = await session.readDocument("handbook");
+    expect(page.sections.map(s => [s.tag, s.version])).toEqual([["purpose", 7], ["current-work", 7]]);
+    expect(page.references).toEqual([HANDBOOK_EMBED]);
+    const text = await session.readDocumentText("handbook");
+    expect(text).toBe(`# Handbook\n\n${page.sections[0]!.body}\n\n${page.sections[1]!.body}`);
+    // The ENG board stays a link: no board data, and nothing of another workspace's Wiki.
+    expect(text).toContain(`[ENG board](${HANDBOOK_EMBED})`);
+    for (const issue of fake.issuesOf("ENG")) expect(text).not.toContain(issue.title);
+    expect(text).not.toContain(secretSectionBody("private-notes", "secret"));
+
+    const titles = (await ws.listActions({ filter: "observation" })).entries.map(e => e.description.title);
+    expect(titles).toEqual(expect.arrayContaining([
+      "List InferMind Wiki pages", "Read Wiki page handbook", "Read Wiki page handbook as text",
+    ]));
+    const requests = requestsBy(wren.person).filter(r => r.path.startsWith("/knowledge/"));
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every(r => r.workspaceId === MIND)).toBe(true);
+    expect(requestsBy(wren.person).some(r => r.path.startsWith("/project/"))).toBe(false);
+  });
+
+  it("attack: another workspace's page is never readable or editable, and other workspaces cannot be bound", async () => {
+    const mallory = await newUser("wikiattack", ["operations", "mind"]);
+    const { ws, session } = await bindWiki(mallory);
+    const notes = DOCUMENTS["private-notes"];
+    const secret = fake.section("private-notes", "secret");
+
+    expect(await failure(session.readDocument(notes.id))).toContain("NOT_FOUND: No such page in this Wiki.");
+    expect(await failure(session.readDocument("private-notes"))).toContain("NOT_FOUND: No such page in this Wiki.");
+    expect(await failure(session.readDocumentText(notes.id))).toContain("NOT_FOUND");
+    expect(await failure(session.updateSection(secret.id, "overwritten", secret.version))).toContain("NOT_FOUND");
+    expect(await pending(ws)).toEqual([]);
+
+    const before = requestsBy(mallory.person).length;
+    expect(await bindRefusal(mallory, wikiUrl("notes"))).toContain("No InferMind Wiki is available on acme.notes.");
+    expect(await bindRefusal(mallory, wikiUrl("operations")))
+      .toContain("acme.operations is an InferOps workspace without InferMind, so it has no Wiki.");
+    expect(requestsBy(mallory.person).length).toBe(before);
+    // A tampered tenant label still means her own `mind` workspace.
+    const { session: tampered } = await bindWiki(mallory, "inferops://globex.mind/knowledge/wiki");
+    expect((await tampered.listDocuments()).map(d => d.id)).not.toContain(notes.id);
+
+    expect(fake.section("private-notes", "secret")).toMatchObject({ body: secretSectionBody("private-notes", "secret") });
+    expect(requestsBy(mallory.person).filter(r => r.path.startsWith("/knowledge/"))
+      .every(r => r.workspaceId === MIND)).toBe(true);
+    expect(fake.sectionWrites.filter(w => w.person === mallory.username)).toEqual([]);
+  });
+
+  it("applies an approved section edit once, after rechecking its version; a lost response is not written twice", async () => {
+    const ed = await newUser("wikieditor", ["mind"]);
+    const { ws, session } = await bindWiki(ed);
+    const page = await session.readDocument("runbook");
+    const steps = page.sections[0]!;
+
+    const action = await proposed(ws, () => session.updateSection(steps.id, "Step one, then step two.", steps.version));
+    expect(action.description.title).toBe("Edit Wiki section steps of Runbook");
+    expect(fake.sectionWrites).toHaveLength(0);
+    expect((await session.readDocument("runbook")).sections[0]).toMatchObject({
+      body: "Step one, then step two.", pending: "update", version: steps.version,
+    });
+
+    fake.loseNextWriteResponse = true;
+    expect(await failure(ws.approveAction(action.id))).toContain("could not be applied");
+    expect(fake.section("runbook", "steps")).toMatchObject({ body: "Step one, then step two.", version: steps.version + 1 });
+    await ws.approveAction(action.id);
+    const writes = fake.sectionWrites.filter(w => w.person === ed.username);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.idempotencyKey).toMatch(/^[0-9a-f-]{36}:\d+$/);
+    expect(fake.section("runbook", "steps").version).toBe(steps.version + 1);
+    expect(await failure(ws.approveAction(action.id))).toContain("not pending");
+  });
+
+  it("failure: an edit made stale before approval is refused and writes nothing", async () => {
+    const sam = await newUser("wikistale", ["mind"]);
+    const { ws, session } = await bindWiki(sam);
+    const purpose = (await session.readDocument("handbook")).sections[0]!;
+    const action = await proposed(ws, () => session.updateSection(purpose.id, "My rewrite.", purpose.version));
+    fake.editSection("handbook", "purpose", "Rewritten in InferMind meanwhile.");
+
+    expect(await failure(ws.approveAction(action.id)))
+      .toContain("the section changed in InferOps after this edit was proposed");
+    expect(fake.section("handbook", "purpose").body).toBe("Rewritten in InferMind meanwhile.");
+    expect(fake.sectionWrites.filter(w => w.person === sam.username)).toEqual([]);
+    await ws.rejectAction(action.id);
+  });
+
+  it("attack: a person with read-only knowledge access is refused the edit by InferOps at apply", async () => {
+    const rita = await newUser("wikireadonly", ["mind"]);
+    fake.setKnowledgeAccess(rita.person, "read");
+    const { ws, session } = await bindWiki(rita);
+    const steps = fake.section("runbook", "steps");
+    const action = await proposed(ws, () => session.updateSection(steps.id, "Not allowed.", steps.version));
+
+    expect(await failure(ws.approveAction(action.id))).toContain("was not applied: InferOps refused the Wiki");
+    expect(fake.section("runbook", "steps").body).not.toBe("Not allowed.");
+    expect(fake.sectionWrites.filter(w => w.person === rita.username)).toEqual([]);
+
+    // Without knowledge access at all, even reads are refused.
+    fake.setKnowledgeAccess(rita.person, "none");
+    expect(await failure(session.listDocuments())).toContain("FORBIDDEN: InferOps refused the Wiki");
+  });
+});
+
 describe("leakage", () => {
   // Must stay last: it inspects what every earlier test logged and failed with.
-  it("no log line or error message carries a token, a refresh token or an issue description", async () => {
+  it("no log line or error message carries a token, a refresh token, an issue description or a section body", async () => {
     // Every Workers runtime log since the harness started, the Workshop's and the gatekeeper's.
     const printed = JSON.stringify([...earlierLogs, ...harness.server.getLogs()]);
     // The capture is live: the gatekeeper's own structured logs from the failures above are in it.
@@ -744,6 +865,7 @@ describe("leakage", () => {
     const secrets = [
       ...fake.issuedTokens(),
       ...SEEDED_ISSUES.map(secretDescription),
+      ...fake.seededSectionBodies(),
     ];
     for (const secret of secrets) {
       expect(printed.includes(secret), `the logs contain ${secret.slice(0, 18)}…`).toBe(false);

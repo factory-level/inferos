@@ -17,6 +17,11 @@
 //   is the workspace's, filtered here to the bound project's issues.
 // - `listWorkspaceSlugs` reads the workspace slugs a connect stores beside the person's memberships
 //   (`GET /workspaces`), since a resource URL names a workspace by slug.
+// - The InferMind Wiki (`/knowledge/*`) is workspace-scoped by InferOps itself (row-level security on
+//   the workspace header), so no extra scope check is made. Its responses are bare (no envelope),
+//   a missing page or section is answered `200 null` (or an empty body), and a 403 means either
+//   that the workspace is not an InferMind workspace or that the person lacks `knowledge:*`;
+//   InferOps says which only in its message text, which is not read, so both get one message.
 // - Nothing here logs a token, a header or a body, and InferOps' own error text is never passed on:
 //   failures are reported by operation name, status and code.
 //
@@ -31,7 +36,8 @@ import { createLogger } from "@gadgets/observability/logger";
 import {
   InferOpsError, type DispatchRequest, type InferOpsClient, type InferOpsErrorCode,
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
-  type RepoRecord, type RunRecord,
+  type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
+  type WikiSectionRecord,
 } from "./inferops-client";
 import { isSlug } from "./resources";
 import type {
@@ -137,6 +143,19 @@ function issueNotFound(): InferOpsError {
   return new InferOpsError("NOT_FOUND", "No such issue in this project.");
 }
 
+/** The one message for a Wiki call InferOps refused with 403, whichever of the two causes it was. */
+export const WIKI_FORBIDDEN =
+  "InferOps refused the Wiki for this connection: the workspace is not an InferMind workspace, or " +
+  "your access lacks knowledge permission (knowledge:read to read, knowledge:write to edit).";
+
+function documentNotFound(): InferOpsError {
+  return new InferOpsError("NOT_FOUND", "No such page in this Wiki.");
+}
+
+function sectionNotFound(): InferOpsError {
+  return new InferOpsError("NOT_FOUND", "No such section in this Wiki.");
+}
+
 // The same for runs: an unknown run and a run of another project's issue read alike.
 function runNotFound(): InferOpsError {
   return new InferOpsError("NOT_FOUND", "No such run in this project.");
@@ -217,6 +236,35 @@ function parseIssue(value: unknown): Issue {
     revision: text(issue.revision, "issue.revision", REVISION),
     assigneeId: nullable(issue.assigneeId, "issue.assigneeId", UUID),
     blockedReason: nullable(issue.blockedReason, "issue.blockedReason"),
+  };
+}
+
+function int(value: unknown, what: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Malformed(`${what} is not valid`);
+  return value;
+}
+
+/** A listed Wiki page; `summary`, `pathway` and the rest are dropped. */
+function parseDocument(value: unknown): WikiDocumentRecord {
+  const document = record(value, "document");
+  return {
+    id: text(document.id, "document.id", UUID).toLowerCase(),
+    slug: text(document.slug, "document.slug"),
+    title: text(document.title, "document.title"),
+    parentId: nullable(document.parentId, "document.parentId", UUID)?.toLowerCase() ?? null,
+    siblingOrder: int(document.siblingOrder, "document.siblingOrder"),
+  };
+}
+
+/** A section; nothing else of InferOps' is on it. */
+function parseSection(value: unknown): WikiSectionRecord {
+  const section = record(value, "section");
+  return {
+    id: text(section.id, "section.id", UUID).toLowerCase(),
+    documentId: text(section.documentId, "section.documentId", UUID).toLowerCase(),
+    tag: text(section.tag, "section.tag"),
+    body: text(section.body, "section.body"),
+    version: int(section.version, "section.version"),
   };
 }
 
@@ -417,6 +465,8 @@ export async function listWorkspaceSlugs(baseUrl: string, token: string,
 
 type Send = {
   method: "GET" | "POST" | "PATCH"; path: string; body?: unknown; idempotencyKey?: string;
+  /** A successful response may have no body (InferOps' answer for a missing Wiki item). */
+  maybeEmpty?: boolean;
 };
 
 /**
@@ -482,8 +532,50 @@ export function openHttpInferOpsClient(
       const policy = code === "FORBIDDEN" && isPolicyRefusal(body);
       throw new InferOpsError(code, policy ? POLICY_REFUSED : FAILURE_DETAIL[code]);
     }
-    if (body === undefined) throw unavailable(response.status);
+    if (body === undefined) {
+      if (send.maybeEmpty) return null;
+      throw unavailable(response.status);
+    }
     return body;
+  }
+
+  /** A Wiki request: a 403 gets the one Wiki message, whichever cause InferOps had. */
+  async function knowledge(operation: string, send: Send): Promise<unknown> {
+    try {
+      return await request(operation, send);
+    } catch (error) {
+      if (error instanceof InferOpsError && error.code === "FORBIDDEN") {
+        throw new InferOpsError("FORBIDDEN", WIKI_FORBIDDEN);
+      }
+      throw error;
+    }
+  }
+
+  async function readDocument(documentId: string): Promise<WikiDocumentHead> {
+    // Also keeps anything that is not an id out of the request path (InferOps answers one with 500).
+    if (!UUID.test(documentId)) throw documentNotFound();
+    const body = await knowledge("wiki.document.get", {
+      method: "GET", path: `/knowledge/documents/${documentId}`, maybeEmpty: true,
+    });
+    if (body === null) throw documentNotFound();
+    return parsed("wiki.document.get", body, raw => {
+      const { id, slug, title } = parseDocument(raw);
+      if (id !== documentId.toLowerCase()) throw new Malformed("another document was returned");
+      return { id, slug, title };
+    });
+  }
+
+  async function readSection(sectionId: string): Promise<WikiSectionRecord> {
+    if (!UUID.test(sectionId)) throw sectionNotFound();
+    const body = await knowledge("wiki.section.get", {
+      method: "GET", path: `/knowledge/sections/${sectionId}`, maybeEmpty: true,
+    });
+    if (body === null) throw sectionNotFound();
+    return parsed("wiki.section.get", body, raw => {
+      const section = parseSection(raw);
+      if (section.id !== sectionId.toLowerCase()) throw new Malformed("another section was returned");
+      return section;
+    });
   }
 
   async function projects(): Promise<Project[]> {
@@ -748,6 +840,47 @@ export function openHttpInferOpsClient(
         const run = parseRun(record(raw, "response").run);
         if (run.id !== current.id) throw new Malformed("another run was returned");
         return { ...run, issueIdentifier: current.issueIdentifier };
+      });
+    },
+
+    async listDocuments(): Promise<WikiDocumentRecord[]> {
+      const body = await knowledge("wiki.document.list", { method: "GET", path: "/knowledge/documents" });
+      return parsed("wiki.document.list", body, raw => list(raw, "documents").map(parseDocument));
+    },
+
+    readDocument,
+
+    async listSections(documentId: string): Promise<WikiSectionRecord[]> {
+      // The page first: InferOps answers sections of an unknown page with an empty list.
+      const document = await readDocument(documentId);
+      const body = await knowledge("wiki.section.list", {
+        method: "GET", path: `/knowledge/sections?documentId=${document.id}`,
+      });
+      return parsed("wiki.section.list", body, raw => list(raw, "sections").map(value => {
+        const section = parseSection(value);
+        if (section.documentId !== document.id) throw new Malformed("a section of another document was returned");
+        return section;
+      }));
+    },
+
+    readSection,
+
+    async updateSection(sectionId: string, body: string, idempotencyKey: string):
+        Promise<WikiSectionRecord> {
+      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+      // A section this workspace does not have is refused here: InferOps answers its PATCH with 500.
+      await readSection(sectionId);
+      const response = await knowledge("wiki.section.update", {
+        method: "PATCH",
+        path: `/knowledge/sections/${sectionId}`,
+        // Only the body: the tag and the wikilink sidecar stay as they are.
+        body: { body },
+        idempotencyKey,
+      });
+      return parsed("wiki.section.update", response, raw => {
+        const updated = parseSection(raw);
+        if (updated.id !== sectionId.toLowerCase()) throw new Malformed("another section was returned");
+        return updated;
       });
     },
 
