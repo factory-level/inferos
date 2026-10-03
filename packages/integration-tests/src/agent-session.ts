@@ -32,6 +32,11 @@ export type AgentSessionOptions = {
   userModel?: UserModel;
   /** The kind of workspace to create; omitted, the default (an app). */
   workspaceKind?: WorkspaceKind;
+  /**
+   * Chat in the account's operate session workspace instead of a new one. It is kept on close,
+   * since an operate session cannot delete its workspace.
+   */
+  operateSession?: boolean;
   ambientVendorIds?: readonly string[];
   usernamePrefix?: string;
   turnTimeoutMs?: number;
@@ -437,6 +442,7 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
   readonly #chatSubscriber = new ChatSubscriber();
   readonly #turnTimeoutMs: number;
   readonly #costAccountingTimeoutMs: number;
+  readonly #deleteWorkspaceOnClose: boolean;
   readonly #pendingRpcs = new Set<Disposable>();
   #chatSubscriberStub: RpcStub<ChatSubscriber> | undefined;
   #chatSubscription: RpcStub<{}> | undefined;
@@ -465,6 +471,7 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
     accounts: ReadonlyMap<string, ConnectedAccount>;
     turnTimeoutMs: number;
     costAccountingTimeoutMs: number;
+    deleteWorkspaceOnClose: boolean;
   }) {
     this.username = options.username;
     this.#baseUrl = options.baseUrl;
@@ -476,6 +483,7 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
     this.#accounts = options.accounts;
     this.#turnTimeoutMs = options.turnTimeoutMs;
     this.#costAccountingTimeoutMs = options.costAccountingTimeoutMs;
+    this.#deleteWorkspaceOnClose = options.deleteWorkspaceOnClose;
     this.#watchSession();
   }
 
@@ -955,9 +963,11 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
         stopError = error instanceof Error ? error : new Error(String(error));
       }
       try {
-        await this.#beforeCancellationDeadline(
-            () => this.#workspace.deleteSelf(), Date.now() + CANCELLATION_TIMEOUT_MS,
-            "Workspace deletion timed out");
+        if (this.#deleteWorkspaceOnClose) {
+          await this.#beforeCancellationDeadline(
+              () => this.#workspace.deleteSelf(), Date.now() + CANCELLATION_TIMEOUT_MS,
+              "Workspace deletion timed out");
+        }
       } catch (error) {
         deleteError = error instanceof Error ? error : new Error(String(error));
       }
@@ -1031,7 +1041,12 @@ export async function openAgentSession(
       accounts.set(vendorId, account);
     }
 
-    workspace = await authenticated.newGadget(options.workspaceKind);
+    if (options.operateSession) {
+      using operate = await authenticated.getOperateSession();
+      workspace = await operate.getWorkspace();
+    } else {
+      workspace = await authenticated.newGadget(options.workspaceKind);
+    }
     const { id: workspaceId } = await workspace.getMetadata();
     session = new WorkshopAgentSessionImpl({
       username,
@@ -1044,6 +1059,7 @@ export async function openAgentSession(
       accounts,
       turnTimeoutMs: options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
       costAccountingTimeoutMs: options.costAccountingTimeoutMs ?? 0,
+      deleteWorkspaceOnClose: !options.operateSession,
     });
     await session.initialize();
     return session;

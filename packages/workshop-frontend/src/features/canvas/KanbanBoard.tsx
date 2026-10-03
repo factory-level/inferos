@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent } from 'react'
 import type { Board, Issue, State } from '@inferos/gatekeeper-inferops/src/types'
+import type { BoardActivityItem } from './boardActivity'
 import type { MoveResult, PendingMove } from './boardData'
 import { KanbanCard } from './KanbanCard'
 import { decidedMoves, moveTargets, pendingMoveOf, sortIssues, stateOf, type MoveDecision } from './kanbanBoard'
@@ -12,6 +13,11 @@ export type KanbanBoardProps = {
   /** The columns this presentation shows; moves may still target any state of the board. */
   columns: Board['columns']
   pending: readonly PendingMove[]
+  /**
+   * Actions in the action log awaiting approval, by the identifier of the issue they move: the
+   * agent's, a gadget's, or a person's from another surface, which this board did not propose.
+   */
+  awaiting: ReadonlyMap<string, BoardActivityItem>
   layout: KanbanLayout
   /** Proposes the move through the approval path with the issue's revision; the result is announced. */
   onMove: (issue: Issue, toState: State) => Promise<MoveResult>
@@ -33,7 +39,7 @@ const issueCard = (root: HTMLElement, issueId: string) =>
  * simulates the move the board re-read places it in the target column, and a decision (applied
  * or rejected) is announced and marked on the card. Focus follows a card across columns.
  */
-export const KanbanBoard = ({ board, columns, pending, layout, onMove }: KanbanBoardProps) => {
+export const KanbanBoard = ({ board, columns, pending, awaiting, layout, onMove }: KanbanBoardProps) => {
   const instructionsId = useId()
   const root = useRef<HTMLDivElement>(null)
   // The issue whose card has focus; restored when its card re-mounts in another column.
@@ -130,9 +136,12 @@ export const KanbanBoard = ({ board, columns, pending, layout, onMove }: KanbanB
           {sortIssues(issues).map(issue => {
             const pendingMove = pendingMoveOf(issue, pending)
             const decision = decisions.get(issue.id)
+            const proposed = pendingMove ? undefined : awaiting.get(issue.identifier)
             return <KanbanCard key={issue.id} issue={issue} state={state} today={day} instructionsId={instructionsId}
-              targets={pendingMove ? [] : moveTargets(board, issue)}
+              // The gatekeeper refuses a second move of an issue whose move awaits approval.
+              targets={pendingMove || proposed ? [] : moveTargets(board, issue)}
               pending={pendingMove && { move: pendingMove, toState: stateOf(board, pendingMove.toStateId) }}
+              proposed={proposed}
               decision={decision && decision.revision === issue.revision ? { outcome: decision.outcome, toState: stateOf(board, decision.toStateId) } : undefined}
               // A keyboard or menu move keeps focus with the card wherever the board places it next.
               onMove={toState => { focused.current = issue.id; void move(issue, toState) }}

@@ -1039,11 +1039,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return { seq, state: { ...INITIAL_OPERATE_PAGE, ...state } };
   }
 
-  /** Appends an operate event if `expectedSeq` is current; see OperateSession.dispatch(). */
-  async dispatchOperateEvent(event: OperateEvent, expectedSeq: number, actor: OperateEventActor)
-      : Promise<OperateSessionSnapshot> {
+  /** The session's current page. */
+  async getOperatePage(): Promise<OperateSessionSnapshot> {
+    return this.#operatePage();
+  }
+
+  /**
+   * Appends an operate event if `expectedSeq` is current; see OperateSession.dispatch(). A null
+   * `expectedSeq` applies it to whatever page is current: the operate agent acts on the latest page
+   * rather than on one it watched.
+   */
+  async dispatchOperateEvent(event: OperateEvent, expectedSeq: number | null,
+                             actor: OperateEventActor): Promise<OperateSessionSnapshot> {
     let current = this.#operatePage();
-    if (expectedSeq !== current.seq) {
+    if (expectedSeq !== null && expectedSeq !== current.seq) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);
     }
     let state;

@@ -5,6 +5,7 @@ import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger } from "./observability";
 import { workspaceKindAllowsFile, workspaceKindContract, workspaceKindStarter } from "@gadgets/workshop-shared/workspace-kind";
+import type { OperateEvent, OperateRef, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { CanvasConflictError, type CanvasCatalog, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { Type, toToolDeclaration } from "@earendil-works/pi-ai";
 import type {
@@ -545,6 +546,20 @@ export interface AgentHooks {
   getWorkspaceKind(): WorkspaceKind;
 
   /**
+   * Whether this is its owner's operate session workspace. Its chats are operate chats: they get
+   * OPERATE_AGENT_TOOLS only, so nothing they do authors software.
+   */
+  isOperateSession(): boolean;
+
+  /**
+   * The owner's operate page (see OperateSession), after first applying `event`, if given, as the
+   * agent's: it goes through the same reducer as a person's and is logged with actor "agent".
+   * Throws an agent-readable error for an event that doesn't apply to the current page. Only
+   * called from operate chats.
+   */
+  operatePage(event?: OperateEvent): Promise<OperateSessionSnapshot>;
+
+  /**
    * Create a new worktree workpiece rooted at the given commit id (a full oid, resolved against
    * the workspace's local git knowledge -- never a remote lookup), provisional to and permanently
    * private to the given chat. Performs the initial pull when the commit is known only from a
@@ -1022,6 +1037,65 @@ let SPAWNED_AGENT_TOOLS = [
   "describeBinding",
   "executeCode",
 ] as const;
+
+// The tools offered in an operate chat (see AgentHooks.isOperateSession): reading, connected
+// resources (whose writes still queue for the person's approval), and the page. Nothing that
+// creates or edits a gadget, worktree, binding, or canvas. An allowlist, so a new tool stays out of
+// operate until it is added here.
+let OPERATE_AGENT_TOOLS = [
+  "readFile",
+  "grep",
+  "webFetch",
+  "observeUserChanges",
+  "describeBinding",
+  "executeCode",
+  "listCanvases",
+  "listConnectableResources",
+  "requestConnection",
+  "operatePage",
+] as const;
+
+// Leads the project-specific prompt slot in an operate chat, overriding the building guidance in
+// SYSTEM_PROMPT that its tools can't act on.
+let OPERATE_SESSION_PROMPT = `
+# Operate session
+
+This chat runs in the user's operate session: they are using finished applications, not building them. You cannot create or edit Gadgets, their code, their bindings, or saved canvases here, and the tools for that are not available; if the user asks for that, tell them to switch to Build. Work through connected resources with \`executeCode\` (changes they make wait for the user's approval) and answer in chat. Use \`operatePage\` to see what the user's page shows, or to open, focus, or close a screen or step through the running flow for them.
+`.trim();
+
+const OPERATE_PAGE_TOOL_DESCRIPTION =
+    "Read or change the user's operate page: what it has open (its working set), what it shows " +
+    "(its focus), its subject, and any flow being run. Returns the page after the change, as " +
+    "JSON. Changes are presentation only and grant no access: a reference the user cannot open " +
+    "shows as unavailable. The change is recorded as yours in the session's history.";
+
+// Builds the operate event an operatePage call asks for, or undefined to only read the page. The
+// tool's flat parameters keep its schema simple for every provider; the reducer (applyOperateEvent)
+// then validates the event against the page like any other.
+function operateEventFromToolInput(input: {
+  action?: string, workspaceId?: string, screenId?: string, step?: number, subject?: string,
+}): OperateEvent | undefined {
+  let ref = (): OperateRef => {
+    if (input.workspaceId === undefined) {
+      throw new Error(`The ${input.action} action needs a workspaceId.`);
+    }
+    return input.screenId === undefined
+        ? {type: "workspace", workspaceId: input.workspaceId}
+        : {type: "screen", workspaceId: input.workspaceId, screenId: input.screenId};
+  };
+  switch (input.action) {
+    case undefined: return undefined;
+    case "open": return {type: "open", ref: ref()};
+    case "focus": return {type: "focus", ref: ref()};
+    case "close": return {type: "close", ref: ref()};
+    case "goToStep":
+      if (input.step === undefined) throw new Error("The goToStep action needs a step.");
+      return {type: "goToStep", index: input.step};
+    case "exitFlow": return {type: "exitFlow"};
+    case "setSubject": return {type: "setSubject", subject: input.subject ?? null};
+    default: throw new Error(`Unknown action: ${input.action}`);
+  }
+}
 
 // How the task reaches an agent spawned with spawn(): as the chat's first message.
 let SPAWNED_TASK_PROMPT = `
@@ -1929,6 +2003,7 @@ async function runAgentPass(
   // The workspace's kind decides what its gadgets are built as. It is read once per turn, so a
   // switch made mid-turn takes effect on the next one.
   let workspaceKind = hooks.getWorkspaceKind();
+  let operateSession = hooks.isOperateSession();
   let assertKindAllowsFile = (workpieceId: WorkpieceId, filename: string) => {
     if (!hooks.isWorktree(workpieceId) && !workspaceKindAllowsFile(workspaceKind, filename)) {
       throw new Error(`This workspace's kind is ${workspaceKind}, which has no UI, so ` +
@@ -2894,7 +2969,8 @@ async function runAgentPass(
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
       SYSTEM_PROMPT,
-      (kindContract ? `${kindContract}\n\n` : "") +
+      (operateSession ? `${OPERATE_SESSION_PROMPT}\n\n` : "") +
+          (kindContract ? `${kindContract}\n\n` : "") +
           (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +
           (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
@@ -3804,6 +3880,44 @@ async function runAgentPass(
         }
       }
     }),
+
+    // Offered only in operate chats (see OPERATE_AGENT_TOOLS).
+    operatePage: defineTool({
+      name: "operatePage",
+      label: "Operate page",
+      description: OPERATE_PAGE_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        action: Type.Optional(Type.String({
+          enum: ["open", "focus", "close", "goToStep", "exitFlow", "setSubject"],
+          description: "The change to make. Omit to only read the page.",
+        })),
+        workspaceId: Type.Optional(Type.String({
+          description: "For open, focus and close: the workspace the reference points into.",
+        })),
+        screenId: Type.Optional(Type.String({
+          description: "For open, focus and close: the screen (saved canvas) to show. Omit to " +
+              "refer to the workspace's app itself.",
+        })),
+        step: Type.Optional(Type.Integer({
+          minimum: 0,
+          description: "For goToStep: the index into the running flow's steps, 0-based.",
+        })),
+        subject: Type.Optional(Type.String({
+          description: "For setSubject: what the page works on, such as an inferops:// board " +
+              "reference. Omit to clear it.",
+        })),
+      }),
+      execute: async (toolCallId, input) => {
+        try {
+          let snapshot = await hooks.operatePage(operateEventFromToolInput(input));
+          let text = JSON.stringify(snapshot.state);
+          return toolResult(text, {output: text});
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    }),
   };
 
   if (!hooks.getCanvasAccess()) {
@@ -3812,12 +3926,20 @@ async function runAgentPass(
         .filter(([name]) => name !== "listCanvases" && name !== "editCanvas"));
   }
 
+  if (operateSession) {
+    tools = Object.fromEntries(OPERATE_AGENT_TOOLS.filter(name => name in tools)
+        .map(name => [name, tools[name]]));
+  } else {
+    delete tools.operatePage;
+  }
+
   if (agentContext.spawnerConfig) {
     // Restrict sub-agents to a narrower set of tools. No user is present to approve changes, so
     // they get nothing that modifies gadgets or requests connections; they can inspect and call
     // bindings, fetch the web, and work on worktrees (writes to gadgets are refused by
     // assertMayModifyWorkpiece).
-    tools = Object.fromEntries(SPAWNED_AGENT_TOOLS.map(name => [name, tools[name]]));
+    tools = Object.fromEntries(SPAWNED_AGENT_TOOLS.filter(name => name in tools)
+        .map(name => [name, tools[name]]));
   }
 
   // Calls that reached a tool's execute(), so tool_execution_end can tell the ones pi rejected.
