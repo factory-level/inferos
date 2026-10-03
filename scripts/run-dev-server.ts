@@ -22,8 +22,8 @@ import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
 import {
-  INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, getDevRouterAssets, getDevServerConfig,
-  getInferLabLoginVars, inferLabLoginStartupError, resolveInferOpsEnabled,
+  INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, gatekeeperBaseUrl, gatekeeperBinding, getDevRouterAssets,
+  getDevRouterConfig, getDevServerConfig, getInferLabLoginVars, inferLabLoginStartupError, resolveInferOpsEnabled,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
@@ -33,6 +33,7 @@ import { parseConsumerConfig } from "./consumer/config.ts";
 import { inferOpsAuthRequested } from "./consumer/config.ts";
 import { unsupportedCapabilities } from "./consumer/runtime.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
+import { prepareConsumerGatekeepers } from "./consumer/gatekeepers.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
 import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
@@ -136,6 +137,9 @@ const consumerConfig = consumerOptions.length
 const blockedCapabilities = consumerConfig ? unsupportedCapabilities(consumerConfig, ROOT) : [];
 if (blockedCapabilities.length) throw new Error(`Enabled capabilities are not supported by this installation: ${blockedCapabilities.join(", ")}`);
 const consumerWorkers = consumerOptions.length ? await prepareConsumerWorkers(consumerOptions[0]) : [];
+// The wrapper's own gatekeepers (its gatekeepers/ directory, behind features.customCloudflareCode).
+// Their wrangler.jsonc is regenerated in the wrapper; nothing in this checkout is edited.
+const consumerGatekeepers = consumerOptions.length ? await prepareConsumerGatekeepers(consumerOptions[0]) : [];
 
 // Composition config: the wrapper's inferos.canvas.json, or this checkout's own when run in-repo.
 // It narrows what canvases offer and which custom gatekeepers run; it never grants access.
@@ -151,8 +155,11 @@ const inferOpsEnabled = resolveInferOpsEnabled({
   canvasSelected: enabledCustomGatekeepers.has(INFEROPS_GATEKEEPER),
   shell: process.env.INFEROPS_ENABLED,
 });
-const gatekeepers = findGatekeepers(ROOT).filter(({ dir, name }) =>
-  basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustomGatekeepers.has(name));
+const gatekeepers = [
+  ...findGatekeepers(ROOT).filter(({ dir, name }) =>
+    basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustomGatekeepers.has(name)),
+  ...consumerGatekeepers.map(({ name, directory }) => ({ name, dir: directory })),
+];
 // In-repo there is no inferos.config.json to carry feature flags, so a canvas config is the switch
 // that turns composition (with saved views) on. A wrapper's own flags always take precedence.
 const canvasFeatures = consumerConfig?.features
@@ -450,11 +457,6 @@ for (const gk of uiWatchers ? gatekeepers : []) {
   }
 }
 
-// Helper: "gatekeeper-github" -> "GATEKEEPER_GITHUB"
-function bindingName(gk: Gatekeeper): string {
-  return gk.name.toUpperCase().replaceAll("-", "_");
-}
-
 // ---------------------------------------------------------------------------
 // Speed up wrangler's per-worker `build.command`.
 //
@@ -514,24 +516,14 @@ function devBuildConfig(build: WranglerBuild | undefined, pkgDir: string): Wrang
 // ---------------------------------------------------------------------------
 {
   const srcPath = join(ROOT, "wrangler.jsonc");
-  const config = parse(readFileSync(srcPath, "utf8"));
-
-  if (serveFrontendAssets) {
-    const routerDirectory = join(PACKAGES_DIR, "router");
-    const productionRouter = parse(readFileSync(join(routerDirectory, "wrangler.jsonc"), "utf8"));
-    config.assets = getDevRouterAssets(productionRouter, routerDirectory);
-  }
-
-  config.services = config.services || [];
-  for (const gk of gatekeepers) {
-    config.services.push({ binding: bindingName(gk), service: gk.name });
-  }
-
-  for (const worker of consumerWorkers) {
-    if (config.services.some((service: ServiceBinding) => service.binding === worker.binding)) throw new Error("Consumer router binding collision");
-    config.services.push({ binding: worker.binding, service: worker.name });
-  }
-  config.vars = { ...config.vars, CUSTOM_CLOUDFLARE_CODE: consumerWorkers.length ? "true" : "false" };
+  const routerDirectory = join(PACKAGES_DIR, "router");
+  const config = getDevRouterConfig(parse(readFileSync(srcPath, "utf8")), {
+    gatekeepers: gatekeepers.map(({ name }) => name),
+    consumerWorkers,
+    assets: serveFrontendAssets
+      ? getDevRouterAssets(parse(readFileSync(join(routerDirectory, "wrangler.jsonc"), "utf8")), routerDirectory)
+      : undefined,
+  });
 
   const outPath = join(ROOT, "wrangler.dev.jsonc");
   writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");
@@ -594,7 +586,7 @@ for (const gk of gatekeepers) {
   const config = parse(readFileSync(srcPath, "utf8"));
   config.build = devBuildConfig(config.build, gk.dir);
   config.vars = config.vars || {};
-  config.vars.BASE_URL = `http://${backendHost}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
+  config.vars.BASE_URL = gatekeeperBaseUrl(backendHost, gk.name);
 
   const shared = SHARED_GATEKEEPER_CREDS[gk.name];
   if (shared && process.env[shared.id] && process.env[shared.secret]) {
@@ -690,7 +682,7 @@ for (const gk of gatekeepers) {
 
   for (const gk of gatekeepers) {
     const binding: ServiceBinding = {
-      binding: bindingName(gk),
+      binding: gatekeeperBinding(gk.name),
       service: gk.name,
       entrypoint: "GatekeeperVendor",
     };

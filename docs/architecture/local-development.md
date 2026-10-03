@@ -13,17 +13,18 @@ covers:
   - cloudflare.config.ts
   - scripts/worker-config.ts
   - scripts/worker-dirs.ts
+  - scripts/consumer/gatekeepers.ts
   - custom-gatekeepers
   - packages/router
   - packages/integration-tests
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Cloudflare-like local development
 
 ## Overview
 
-The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-aware topology ([#9](https://github.com/factory-level/inferos/issues/9)) and cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)) are not implemented. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
+The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)); wrapper-aware cloud packaging and cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)) are not implemented. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
 
 ## Components
 
@@ -37,14 +38,28 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `packages/workshop-backend/scripts/dev-workshop.ts` | What the two operator scripts share: local-only URL check, the browser's password hash, the RPC connection, and finding the seeded workspace and board connection. |
 | `scripts/dev/scripted-model.ts` | `pnpm dev:mock-model`: a scripted, credential-free stand-in model for local agent flows. |
 | `scripts/worker-config.ts` | Shared canonical Worker configuration factory. |
+| `scripts/worker-dirs.ts` | Worker discovery roots: this checkout's `packages/` and `custom-gatekeepers/`, plus a wrapper's `gatekeepers/` when a consumer root is passed. |
+| `scripts/consumer/gatekeepers.ts` | Validates, generates and drift-checks a wrapper's own gatekeepers for local development. |
 | `packages/router` | Public routing and frontend assets/backend fallback. |
 | `packages/integration-tests` | Real Workers and RPC test harness with external network interception. |
 
 ## Data and Control Flow
 
-The repository already has multi-worker Wrangler development and a Vite frontend. Discovery requires a wrangler.jsonc, so gatekeeper-kit is not a Worker. The dev runner scans this repository’s `packages/` and `custom-gatekeepers/` (the fork’s own gatekeepers), both listed once in `scripts/worker-dirs.ts`, which config generation, worker types, the release manifest and previews also use; a package name present in both is rejected. Arbitrary wrapper-owned gatekeeper directories outside this repository are still not a supported discovery contract. The integration harness exercises real RPC and Workers, but is not a consuming-repository bootstrap product. `run-local` assigns frontend assets to the public router, deriving the ASSETS binding, SPA fallback and worker-first paths from the generated production router configuration, and the backend receives no second assets configuration. Normal Vite development (`pnpm dev-server` plus `pnpm dev-client`) still serves the frontend on its separate port.
+The repository already has multi-worker Wrangler development and a Vite frontend. Discovery requires a wrangler.jsonc, so gatekeeper-kit is not a Worker. The dev runner scans this repository’s `packages/` and `custom-gatekeepers/` (the fork’s own gatekeepers), both listed once in `scripts/worker-dirs.ts`, which config generation, worker types, the release manifest and previews also use; a package name present in both is rejected. A wrapper's own `gatekeepers/` directory is a third root only when a caller passes the wrapper explicitly (see [wrapper topology](#wrapper-topology)); nothing infers one from the working directory. The integration harness exercises real RPC and Workers, but is not a consuming-repository bootstrap product. `run-local` assigns frontend assets to the public router, deriving the ASSETS binding, SPA fallback and worker-first paths from the generated production router configuration, and the backend receives no second assets configuration. Normal Vite development (`pnpm dev-server` plus `pnpm dev-client`) still serves the frontend on its separate port.
 
 Before starting Wrangler, `run-dev-server.ts` also resolves the InferOps switches and optional local integrations described under [Configuration](#configuration), and records its pid for `pnpm local stop`.
+
+## Wrapper topology
+
+A consumer wrapper ([consumer configuration](consumer-configuration.md)) runs the pinned submodule's dev server with `--consumer-root <wrapper>`. Besides the extension Workers, that root contributes the wrapper's own gatekeepers, without any file in the pinned checkout changing:
+
+- **Discovery.** `workerPackageDirs(root, { consumerRoot })` adds each child of `<wrapper>/gatekeepers/` (`consumerGatekeeperDirs`). Without `consumerRoot` the result is exactly the pinned checkout's packages, so the release manifest, worker types, `configs:check` and previews are unchanged. The `gatekeepers/` directory, each child and each child's `wrangler.jsonc`/`cloudflare.config.ts` must not be symbolic links, and every child must resolve inside `gatekeepers/`. A child holding a Worker config must be named `gatekeeper-<lowercase-slug>`, the form the router maps back from its `GATEKEEPER_<NAME>` binding; any child whose name a pinned package already uses is rejected. A child with neither config file is a library and never runs, the same `wrangler.jsonc` rule as in-repo.
+- **Switch.** `scripts/consumer/gatekeepers.ts` loads them only while the wrapper's `features.customCloudflareCode` is on; off, the directory is inert (nothing read, validated or imported), as the extension manifest is.
+- **Config generation.** Each gatekeeper's `wrangler.jsonc` is generated in the wrapper from its `cloudflare.config.ts` by the same `renderWorkerConfig` the pinned checkout uses (`syncWorkerConfigs` in `generate-worker-configs.ts`). The rendered Worker name must equal the directory name, the entrypoint must stay inside the directory, and remote bindings are refused. `prepareConsumerGatekeepers` regenerates them when the dev server starts, the wrapper's `pnpm gatekeepers:generate` writes them, and `pnpm gatekeepers:check` exits 1 naming each file that differs from its source. `node scripts/generate-worker-configs.ts --check --consumer-root <wrapper>` checks the pinned and wrapper configs together.
+- **Wiring.** `run-dev-server.ts` appends them to the gatekeeper list, so each gets a dev config, a `GatekeeperVendor` binding on the backend, a router binding and a `BASE_URL` of `http://<host>/gatekeeper/<slug>` (`gatekeeperBaseUrl`) like any pinned gatekeeper. `getDevRouterConfig` (`dev-server-config.ts`) builds the router's dev config from the committed `dev-router`, every gatekeeper, the extension Workers and, in run-local, the production router's assets; it rejects two bindings with one name. Frontend assets, `/api`, `/gatekeeper/<slug>/*` and `/extensions/<id>` therefore share one origin, and an absent optional part (no extensions, no wrapper gatekeepers) contributes no binding, so its route answers 404 or falls through to the assets.
+- **Isolation.** A wrapper's `pnpm dev` passes its own `local.port` (`devLaunchArgs` in `runtime.ts`), and Wrangler runs from the wrapper's own submodule, so its state is `<wrapper>/inferos/.wrangler/state`. Two wrappers therefore share neither port, state, generated configs nor gatekeepers, even when their gatekeepers have the same name.
+
+`scripts/consumer/gatekeepers.test.ts` covers these rules with temporary wrappers: an absent directory and a library-only one, pinned discovery unchanged without a consumer root, generation into the wrapper, drift (never generated, source changed, hand edit, no TypeScript source) through the check CLI, name collisions and non-round-tripping names, symbolic links and an escaping entrypoint, the disabled switch, routing through the real `packages/router` handler with recording stubs for every binding of the generated dev router config, absent optional bindings, and two wrappers side by side.
 
 ## Preparing a local instance
 
@@ -95,7 +110,8 @@ The dev server resolves these before it writes the per-Worker dev configs:
 
 ## Divergences from Design
 
-- Wrapper discovery and a reviewed topology parity contract remain planned. A generated wrapper exposes `pnpm local` by delegating to the pinned operator (see [consumer configuration](consumer-configuration.md#data-and-control-flow)), which runs from the submodule: `status` lists the Workers the pinned checkout would bind rather than the wrapper's custom Workers, and `status` reads InferOps connection variables from the shell and the submodule's local env files, not the wrapper's.
+- Wrapper gatekeepers are discovered for local development only. The release manifest does not package them (cloud parity, [#11](https://github.com/factory-level/inferos/issues/11)), the gatekeeper UI pre-flight (`vp run build:configurator`/`build:app:dev`) covers only workspace packages, and a wrapper gatekeeper's dependencies must resolve from the wrapper, since it is not a package of the pinned workspace. A reviewed topology parity contract remains planned.
+- A generated wrapper exposes `pnpm local` by delegating to the pinned operator (see [consumer configuration](consumer-configuration.md#data-and-control-flow)), which runs from the submodule: `status` lists the Workers the pinned checkout would bind rather than the wrapper's custom Workers and gatekeepers, and `status` reads InferOps connection variables from the shell and the submodule's local env files, not the wrapper's.
 - `stop` relies on the dev server's record file; a stack started by other means (or before this change) is reported but never signalled. Startup-failure cleanup remains the dev server's own responsibility (its pre-flight and signal handlers), not a lifecycle command.
 - Offline interception of external traffic is enforced in the integration harness, where Worker subrequests pass through Node. `pnpm local verify` against a running Wrangler cannot intercept the Workers' own traffic; it reports the configured mode instead.
 - `seed` creates the demo canvas screen only when `inferos.canvas.json` declares one; the synthetic board itself comes from the InferOps gatekeeper's mock data, which is the "mock business operations" the MVP note on #10 excludes from the final walkthrough.
@@ -103,7 +119,8 @@ The dev server resolves these before it writes the per-Worker dev configs:
 ## Open Questions
 
 - Choose the wrapper configuration schema after comparing the upstream starter contract with this fork.
-- Wrapper extension discovery, cloud auth and real binding parity still need proof.
+- Whether wrapper gatekeepers should stay behind `features.customCloudflareCode`, which the design describes only for the extension manifest, or get their own switch.
+- Cloud auth and real binding parity still need proof.
 
 ## Evidence
 

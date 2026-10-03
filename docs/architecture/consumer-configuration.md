@@ -18,7 +18,7 @@ covers:
   - scripts/consumer
   - .agents/skills/bootstrap-inferos
   - .agents/skills/skill-upload
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -116,6 +116,8 @@ Then `inferLabLoginStartupError` checks the result, in-repo and in a wrapper ali
 `scripts/consumer/extensions.ts` reads an explicit v1 manifest only while custom code is enabled. It validates names, directory containment, canonical configs/entrypoints and duplicate destinations, then uses `renderWorkerConfig` to generate per-Worker local configs. All configs validate before writes; generated-file symlinks are rejected. No Worker packages are discovered by name. The canonical config is executable trusted deployer code; path validation is not a JavaScript sandbox.
 
 `run-dev-server.ts --consumer-root` adds those configs to the existing Wrangler invocation and injects only HTTP service bindings into the router. `CUSTOM_CLOUDFLARE_CODE` is a deployer-controlled string switch, separate from AdminConfig and rollout flags. The router requires it plus a matching `CONSUMER_*` binding. Reserved `/extensions` routes run before SPA asset fallback in both canonical and local router configs. Disabled routes return 404 without calling a service. Requests retain their method/body/path; endpoint authentication belongs to the Worker.
+
+With custom code enabled, the wrapper's `gatekeepers/gatekeeper-<slug>/` directories are its own gatekeepers, discovered by directory rather than listed in a manifest (`scripts/consumer/gatekeepers.ts`, through the optional consumer root of `scripts/worker-dirs.ts`). Each has a `cloudflare.config.ts` naming the Worker after its directory and the `wrangler.jsonc` generated from it in the wrapper; a child without either is a library and never runs. Symbolic links, escaping paths and names the pinned checkout already uses are rejected. `run-dev-server.ts --consumer-root` regenerates their configs and binds them to the backend and router as `GATEKEEPER_<SLUG>` exactly like pinned gatekeepers, so their callbacks are served at `/gatekeeper/<slug>` on the wrapper's own origin. Bootstrap adds `gatekeepers:check` (exit 1 on a config that differs from its source) and `gatekeepers:generate` (`node .inferos/runtime.ts gatekeepers [--write]`, which runs the pinned `scripts/consumer/gatekeepers.ts`). They are local only; the release manifest does not package them. See [wrapper topology](local-development.md#wrapper-topology).
 
 Bootstrap creates a disabled public hello example, manifest, validation command and generated-file ignore. The wrapper runtime accepts the custom code flag only on a supporting pin; doctor validates the manifest without importing custom config modules. `extensions:check` additionally renders canonical configs. Remote InferOps remains blocked; view features require a supporting pin. Cloud consumer manifest composition and deployment remain unimplemented; no feature flag grants resource access or triggers deployment.
 
