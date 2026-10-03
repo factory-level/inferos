@@ -15,7 +15,7 @@ import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 // Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
 const BLANK_TEMPLATE = ':blank'
 
-export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent, codingDispatch }: {
+export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent, codingDispatch, wikiEditable }: {
   storage: CanvasStorage
   overseer: RpcStub<Overseer>
   /** Every gadget in the workspace, drafts included, keyed by workpiece ID. */
@@ -37,6 +37,11 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
    * connection for. The workspace's own canvas passes it; an Operate session's screen never does.
    */
   codingDispatch?: boolean
+  /**
+   * Offer Wiki section edits (through approval). The workspace's own canvas passes it; an Operate
+   * session's screen shows Wikis read-only.
+   */
+  wikiEditable?: boolean
 }) => {
   const canvas = useCanvasWorkspace(storage, viewId)
   const selectPortalContainer = useDialogSelectPortalContainer()
@@ -94,7 +99,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
       {canvas.error && <p role="alert" className="text-sm text-kumo-danger">{canvas.error}</p>}
       {!active && <div className="space-y-4">
-        <p className="text-kumo-subtle">Compose gadgets and InferOps boards into a page. Choose a view, create one, or import a definition from your repository. You can also ask the agent in chat to build a screen for you.</p>
+        <p className="text-kumo-subtle">Compose gadgets, InferOps boards and InferMind Wikis into a page. Choose a view, create one, or import a definition from your repository. You can also ask the agent in chat to build a screen for you.</p>
         {createForm}
       </div>}
       {active && !editing && (openWidget
@@ -102,7 +107,8 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
           codingDispatch={codingDispatch} />
         : <>
           <h1 className="text-lg font-semibold text-kumo-default">{active.title}</h1>
-          <CanvasView definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} codingDispatch={codingDispatch} />
+          <CanvasView definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} codingDispatch={codingDispatch}
+            wikiEditable={wikiEditable} />
         </>)}
       {active && editing && <div className="space-y-4">
         {createForm}

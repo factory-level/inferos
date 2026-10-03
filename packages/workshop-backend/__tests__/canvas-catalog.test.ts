@@ -38,6 +38,12 @@ describe("parseCanvasCatalog", () => {
     expect(() => parseCanvasCatalog({ ...catalog, screens })).toThrow("screen template widget");
   });
 
+  it("accepts a template with a Wiki, which, like a board, is a reference rather than a workspace-local ID", () => {
+    const wiki: CanvasWidget = { id: "sops", kind: "inferops.wiki", version: 1, targetRef: "inferops://demo.local/knowledge/wiki", size: "full", params: { page: "handbook" } };
+    const screens = [{ id: "knowledge", content: { title: "Knowledge", sections: [{ id: "s", title: "S", columns: 1, widgets: [board, wiki] }] } }];
+    expect(parseCanvasCatalog({ ...catalog, screens }).screens[0].content.sections[0].widgets).toEqual([board, wiki]);
+  });
+
   it("rejects duplicate blueprint and template IDs", () => {
     expect(() => parseCanvasCatalog({ ...catalog, blueprints: [catalog.blueprints[0], catalog.blueprints[0]] })).toThrow("duplicate blueprint");
     expect(() => parseCanvasCatalog({ ...catalog, screens: [catalog.screens[0], catalog.screens[0]] })).toThrow("duplicate screen template");

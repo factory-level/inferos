@@ -65,5 +65,20 @@ export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGad
         placeholder="inferops://tenant.workspace/project/board/PROJECT" className="min-w-0 flex-1" />
       <Button type="submit" disabled={busy || section.widgets.length >= 48}>Add board</Button>
     </form>}
+    {catalog.widgetKinds.includes('inferops.wiki') && <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
+      event.preventDefault()
+      const form = event.currentTarget
+      const fields = new FormData(form)
+      const page = String(fields.get('page') ?? '').trim()
+      const success = await onEdit([{ type: 'addWidget', sectionId: section.id, index: section.widgets.length,
+        widget: { id: crypto.randomUUID(), kind: 'inferops.wiki', version: 1, targetRef: String(fields.get('wiki') ?? '').trim(),
+          size: 'full', params: { page: page === '' ? null : page } } }])
+      if (success) form.reset()
+    }}>
+      <Input label="InferMind Wiki reference" name="wiki" required maxLength={512} disabled={busy}
+        placeholder="inferops://tenant.workspace/knowledge/wiki" className="min-w-0 flex-1" />
+      <Input label="First page (optional)" name="page" maxLength={200} disabled={busy} placeholder="handbook" />
+      <Button type="submit" disabled={busy || section.widgets.length >= 48}>Add Wiki</Button>
+    </form>}
   </section>
 )

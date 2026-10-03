@@ -66,7 +66,7 @@ test("the CLI edits the config file and only ever writes valid configurations", 
   run("disable", "inferos.gadget");
   run("enable", "inferops.kanban");
   let written = JSON.parse(readFileSync(join(root, CANVAS_CONFIG_FILE), "utf8"));
-  assert.deepEqual(written.widgets, { kinds: ["inferops.project-board", "inferos.gadget"], blueprints: ["inferops.kanban"] });
+  assert.deepEqual(written.widgets, { kinds: ["inferops.project-board", "inferops.wiki", "inferos.gadget"], blueprints: ["inferops.kanban"] });
   run("add-screen", "ops", "Operations", "inferops://demo.local/project/board/ENG");
   assert.throws(() => run("add-screen", "ops", "Again"), /already exists/);
   assert.throws(() => run("add-screen", "bad", "Bad", "https://example.com"), /target reference/);

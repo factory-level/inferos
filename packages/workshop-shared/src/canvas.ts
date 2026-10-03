@@ -42,17 +42,46 @@ export interface CanvasGadgetWidget {
   params: {};
 }
 
+/**
+ * One InferMind workspace's Wiki: its page tree and a page's sections. Like a board, the reference
+ * identifies the Wiki and is resolved only through a separately granted connection; it grants
+ * nothing, and the references a page embeds are each resolved through their own connection.
+ */
+export interface CanvasWikiWidget {
+  /** Stable instance ID, unique across this definition. */
+  id: string;
+  /** Registered InferMind Wiki kind. */
+  kind: "inferops.wiki";
+  /** Widget parameter schema version. */
+  version: 1;
+  /** Canonical Wiki reference, `inferops://<tenant>.<workspace>/knowledge/wiki`. */
+  targetRef: string;
+  /** Curated column span; the renderer clamps it to the section's column count. */
+  size: "normal" | "wide" | "full";
+  /** Presentation only, never an authorization constraint. */
+  params: {
+    /** Slug of the page opened first, or null for the Wiki's first page. */
+    page: string | null;
+  };
+}
+
 /** Registered widget instance; unknown kinds and versions are rejected. */
-export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget;
+export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget;
 
 /** A registered widget kind name. */
 export type CanvasWidgetKind = CanvasWidget["kind"];
 
 /** Every registered widget kind, in display order. */
-export const CANVAS_WIDGET_KINDS: readonly CanvasWidgetKind[] = ["inferops.project-board", "inferos.gadget"];
+export const CANVAS_WIDGET_KINDS: readonly CanvasWidgetKind[] = ["inferops.project-board", "inferos.gadget", "inferops.wiki"];
 
 /** Workspace-local gadget reference syntax accepted by `inferos.gadget` widgets. */
 export const CANVAS_GADGET_REF = /^gadget:(0|[1-9][0-9]{0,15})$/;
+
+/** InferMind Wiki reference syntax accepted by `inferops.wiki` widgets. */
+export const CANVAS_WIKI_REF = /^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/knowledge\/wiki$/;
+
+/** Wiki page slug syntax accepted in an `inferops.wiki` widget's `page` parameter: URL-unreserved characters only. */
+export const CANVAS_WIKI_PAGE = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$/;
 
 /** Ordered group of widgets with a curated responsive column count. */
 export interface CanvasSection {
@@ -142,6 +171,12 @@ function widget(value: unknown): CanvasWidget {
     if (!CANVAS_GADGET_REF.test(w.targetRef)) return invalid("target reference");
     record(w.params, [], "widget parameters");
     return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: {} };
+  }
+  if (w.kind === "inferops.wiki") {
+    if (!CANVAS_WIKI_REF.test(w.targetRef)) return invalid("target reference");
+    const params = record(w.params, ["page"], "widget parameters");
+    if (params.page !== null && (typeof params.page !== "string" || !CANVAS_WIKI_PAGE.test(params.page))) return invalid("wiki page");
+    return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: { page: params.page } };
   }
   if (w.kind !== "inferops.project-board") return invalid("widget kind/version");
   if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
@@ -285,7 +320,7 @@ export interface CanvasCatalogBlueprint {
 export interface CanvasScreenTemplate {
   /** Stable template ID, unique across the catalog. */
   id: string;
-  /** Layout copied into a new canvas; it may contain only `inferops.project-board` widgets. */
+  /** Layout copied into a new canvas; it may contain only `inferops.project-board` and `inferops.wiki` widgets. */
   content: CanvasContent;
 }
 
@@ -333,7 +368,7 @@ export function parseCanvasCatalog(value: unknown): CanvasCatalog {
     // Parse as a definition so stable IDs are checked for uniqueness exactly as on a saved canvas.
     const parsed = parseCanvasDefinition({ ...record(t.content, ["title", "sections"], "screen content"), schemaVersion: 1, id: templateId, revision: "0" });
     // Gadget IDs are workspace-local, so a template that names one would be meaningless elsewhere.
-    if (parsed.sections.some(entry => entry.widgets.some(item => item.kind !== "inferops.project-board"))) {
+    if (parsed.sections.some(entry => entry.widgets.some(item => item.kind === "inferos.gadget"))) {
       return invalid("screen template widget");
     }
     return { id: templateId, content: { title: parsed.title, sections: parsed.sections } };

@@ -126,7 +126,7 @@ export const InferOpsCanvasPage = ({ workspaceId, chatId, viewId, widgetId }: {
           catalog={canvasFeatures.catalog ?? DEFAULT_CANVAS_CATALOG} viewId={viewId} onViewChange={selectView}
           openWidgetId={widgetId} onOpenWidgetChange={openWidget} onAskAgent={askAgent}
           // The workspace's own canvas, for its build collaborators (use-only ones were sent away above).
-          codingDispatch
+          codingDispatch wikiEditable
           storage={canvasFeatures.durableViews ? { kind: 'durable', api: overseer.stub } : { kind: 'temporary' }} />
       </main>
     </div>

@@ -1164,6 +1164,7 @@ To create one, omit \`canvasId\` and pass \`title\`, optionally with \`templateI
 IDs are yours to choose (letters, digits, \`_\`, \`-\`; unique within the canvas). A widget is \`{id, kind, version:1, targetRef, size:"normal"|"wide"|"full", params}\`:
 - \`kind:"inferos.gadget"\`: shows a gadget from this workspace. \`targetRef\` is \`gadget:<gadgetId>\` (the id createGadget returned), \`params\` is \`{}\`. A gadget created in this chat appears once the user accepts the chat's changes.
 - \`kind:"inferops.project-board"\`: a reference to an InferOps board, \`targetRef\` \`inferops://<tenant>.<workspace>/project/board/<KEY>\` (\`inferops://demo.local/project/board/DEMO\` for demo data), \`params\` \`{workflow:"software"|"content", showCompleted:boolean}\`.
+- \`kind:"inferops.wiki"\`: a reference to one InferMind workspace's Wiki, \`targetRef\` \`inferops://<tenant>.<workspace>/knowledge/wiki\` (\`inferops://demo.local/knowledge/wiki\` for demo data), \`params\` \`{page:string|null}\`, the slug of the page shown first or null for the first page. Board and issue references a page embeds show live only where this workspace holds their own connection.
 
 Only kinds listCanvases reports as enabled are accepted. A blueprint offered as a widget (for example an InferOps Kanban board) is placed by creating a gadget from it with createGadget, wiring the binding its notes describe (requesting the connection first if needed), then adding it here as an \`inferos.gadget\` widget. Removing a widget never deletes the gadget or any data.
 `.trim();

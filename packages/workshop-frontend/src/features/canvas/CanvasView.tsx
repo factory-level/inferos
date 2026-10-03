@@ -3,10 +3,11 @@ import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-sha
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { CanvasBoardWidget } from './CanvasBoardWidget'
 import { CanvasGadgetWidget } from './CanvasGadgetWidget'
+import { CanvasWikiWidget } from './CanvasWikiWidget'
 import { gadgetIdOf, sectionGridClass, widgetSpanClass } from './canvasLayout'
 import { useDecidedActionInvalidation } from './useBoardData'
 
-export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, codingDispatch }: {
+export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, codingDispatch, wikiEditable }: {
   definition: CanvasDefinition
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
   overseer: RpcStub<Overseer>
@@ -14,6 +15,8 @@ export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, coding
   onOpenWidget?: (widgetId: string) => void
   /** See `CanvasBoardWidgetProps.codingDispatch`. */
   codingDispatch?: boolean
+  /** Offer Wiki section edits; see `CanvasWikiWidget`'s `editable`. */
+  wikiEditable?: boolean
 }) => {
   useDecidedActionInvalidation(overseer)
   return <div className="space-y-6">
@@ -25,6 +28,7 @@ export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, coding
           {section.widgets.map(widget => <div key={widget.id} className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}>
             {widget.kind === 'inferos.gadget'
               ? <CanvasGadgetWidget widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} />
+              : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget widget={widget} overseer={overseer} editable={wikiEditable} />
               : <CanvasBoardWidget widget={widget} overseer={overseer} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch} />}
           </div>)}
         </div>}
