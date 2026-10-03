@@ -100,7 +100,7 @@ Every report and headline passes through `redact`, which replaces the value of e
 - Whether a wrapper should be able to turn coding on with an empty allowlist. Today the dev server accepts it (every dispatch is refused `FORBIDDEN`), while `pnpm local coding doctor` fails on it and `runner start` refuses it.
 - `listRuns` reads the workspace's newest 200 runs and keeps the project's, so an older run of a busy workspace is not listed.
 - The gatekeeper's half of dispatch has run live against InferOps (stub persona token; see Evidence). No runner has claimed or executed a live run: the owner's live proof (#72) needs the owner's Codex ChatGPT sign-in, deferred, and a running InferOps with the runner from factory-level/inferops#2327.
-- A project whose states predate InferOps' workflow templates (the seed's ENG) has no software `Queued` state, so InferOps answers its dispatches 404 `NOT_FOUND`. The gatekeeper does not check for that state before proposing, and at apply it reports the issue as no longer in the project.
+- A project whose states predate InferOps' workflow templates (the seed's ENG) has no software `Queued` state, so InferOps answers its dispatches 404 `NOT_FOUND`. The gatekeeper does not check for that state before proposing, and at apply it says InferOps found no issue to dispatch or the workflow has no Queued state, since InferOps answers both with one 404.
 
 ## Evidence
 

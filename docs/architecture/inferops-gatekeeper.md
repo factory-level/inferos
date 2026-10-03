@@ -529,8 +529,8 @@ Findings:
   Cancelled) predate InferOps' workflow templates and have no software `Queued` state. InferOps'
   `dispatchCode` then answers `POST /project/issues/:id/dispatch` with 404 `NOT_FOUND` ("Resource
   not found"), the error it uses for a missing issue. The gatekeeper proposes such a dispatch, since
-  it checks the issue, repository and runs but not the target state. At apply it reports "the issue
-  is no longer in this project", which is misleading. The first live attempt, on ENG-14, failed this
+  it checks the issue, repository and runs but not the target state. At apply it now says InferOps found
+  no issue to dispatch or the project's workflow has no Queued state, since the two share one 404. The first live attempt, on ENG-14, failed this
   way, which is why step i uses a templated project (`INFEROPS_LIVE_DISPATCH_PROJECT`, default
   `CODE`).
 - Four earlier runs on the same database, while the suite was being written, made ENG-14 to

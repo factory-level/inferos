@@ -1079,8 +1079,13 @@ function codingFailureMessage(record: DispatchAction | CancelRunAction, what: st
           `longer enrolled).`
         : null;
     case "NOT_FOUND":
-      return `${what} was not applied: the ${record.kind === "dispatch" ? "issue" : "run"} is no ` +
-        `longer in this project.`;
+      // InferOps answers a dispatch with the same 404 when the issue is gone and when the
+      // project's workflow has no Queued state to move it to (older software workflows lack one).
+      return record.kind === "dispatch"
+        ? `${what} was not applied: InferOps found no issue to dispatch, or this project's ` +
+          `workflow has no Queued state for coding runs. Read the board again; if the issue is ` +
+          `still there, the project needs a software workflow with a Queued state.`
+        : `${what} was not applied: the run is no longer in this project.`;
     default:
       return null;
   }
