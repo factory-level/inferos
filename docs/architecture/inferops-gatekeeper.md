@@ -498,3 +498,45 @@ InferOps has no issue delete. The policy step needs a token that holds `project:
 by this run: per-person identity (every request carried one shared persona token; the live Google
 sign-in of #66 remains a manual step), a role-scoped refusal (the policy denies the edge to every
 user, because the stopgap connection carries one persona), and a cloud deployment.
+
+### Wave 3 live run (2026-10-03)
+
+The same suite gained two opt-in steps, each skipped with its reason when its variables are unset:
+step i (coding dispatch, `INFEROPS_LIVE_REPO_ID`) and step j (the InferMind Wiki,
+`INFEROPS_LIVE_WIKI_WORKSPACE_ID` and `INFEROPS_LIVE_WIKI_WORKSPACE_SLUG`). With the repository
+set, the harness runs the gatekeeper with `CODING_WORKBENCH_ENABLED=true` and that id alone on
+`CODING_WORKBENCH_REPOS`. Step j reconfigures the stopgap connection's workspace to the InferMind
+one through a harness restart, because the stopgap names one workspace. No product code changed.
+
+**Stub-token evidence.** Every request carried one `owner` persona bearer token from
+`POST /auth/inferlab-login` (stub auth). This is not per-person Google identity: the Google sign-in
+(#66) and the Codex ChatGPT sign-in were deferred by the owner and not attempted.
+
+Run against InferOps `develop` at `abeca60a4979186a674994091673121a937bdb8b` (the
+`inferops-wave2-live` worktree, offset 2, API `:8280` started without the file watcher, migrated
+and seeded) from InferOS `3eaaf69` (main after #123) plus this change. All ten steps passed in the final run, recorded here.
+Steps a to h repeated the run above (ENG-18 `b351c7aa-86ae-4a21-b24f-4022ebec78d6`, revisions
+496 to 499; CPOL-8 `58dfcae7-43e2-4f4a-a4dc-743bd92d2953`, revisions 510 to 512).
+
+| Step | Result |
+| --- | --- |
+| i. Coding dispatch | Repository `live-fork` (`044a6a45-456e-4e43-9d6d-9a6f6253fb22`) was enrolled beforehand with `POST /project/repos`. Its `gitUrl` is `ssh://localhost/<path>` naming a throwaway local git repository, because InferOps accepts only `https`, `ssh` or `git@` URLs. The suite created project CODE (`68b9d056-60f9-4a44-878d-a8a1aee5551f`, from the workflow templates) and issue CODE-4 (`14080952-cc5d-489f-ada3-936b59b82d80`) in Ready through approval. A board binding's `dispatch` failed ("The RPC receiver does not implement the method "dispatch"."), and InferOps had no run. `inferops://acme.operations/project/dispatch/CODE` was bound. `listRepos` returned 1 repository, the only one allowed. An off-allowlist repository was refused `FORBIDDEN` before any proposal. A dispatch at revision 523 showed a provisional run, and InferOps had none. On approval, run `a7719215-5b69-4ded-9717-0b04655b0c3b` was queued in InferOps: `GET /project/runs/:id` and `getRun` agree, and the issue moved to Queued at revision 524. A second dispatch was refused `RUN_ACTIVE` by the gatekeeper, and the same request made directly got 409 `RUN_ACTIVE`. A dispatch at revision 523 was refused `STALE_REVISION`. A cancel stayed pending, with the run still queued, until it was approved. Then the run was `cancelled` in InferOps, and the issue was at revision 525. A dispatch was proposed at 525, and the issue was then edited directly (revision 529). On approval, InferOps refused it with 409 `STALE_REVISION` ("…the issue changed in InferOps after this dispatch was proposed…"), and no second run was made. No runner was started, so no run was claimed or executed. |
+| j. Wiki | `inferops://acme.operations/knowledge/wiki` was refused while the stopgap was the InferOps workspace. InferOps' product gate answered `GET /knowledge/documents` with 403 "Wrong product for this route", and the gatekeeper passed it on as `FORBIDDEN` ("…the workspace is not an InferMind workspace…"). Restarted on workspace `knowledge` (`00000000-0000-4000-8000-000000000012`, product `infermind`), `inferops://acme.knowledge/knowledge/wiki` was bound. `listDocuments` returned InferOps' 10 pages. `readDocument("gripper-feedback")` (`00000000-0000-4000-8000-000000000363`, 1 section, 0 references) matched InferOps' sections, and `readDocumentText` equalled `# <title>` plus the section bodies. An edit of section `gripper` (`00000000-0000-4000-8000-000000000385`) proposed at version 9 read back as pending while InferOps kept the old body. On approval it was written, and the version went from 9 to 10 (`GET /knowledge/sections/:id`). An edit at version 9 was refused `STALE_REVISION` at proposal. An edit proposed at version 10 and overtaken by a direct `PATCH` (version 11) was refused at apply ("…the section changed in InferOps after this edit…"), and the section stayed at version 11. InferOps' `PATCH` takes no expected version, so this apply-time check is the gatekeeper's own. |
+
+Findings:
+
+- **The seeded ENG project cannot be dispatched.** Its states (Backlog, Todo, In Progress, Done,
+  Cancelled) predate InferOps' workflow templates and have no software `Queued` state. InferOps'
+  `dispatchCode` then answers `POST /project/issues/:id/dispatch` with 404 `NOT_FOUND` ("Resource
+  not found"), the error it uses for a missing issue. The gatekeeper proposes such a dispatch, since
+  it checks the issue, repository and runs but not the target state. At apply it reports "the issue
+  is no longer in this project", which is misleading. The first live attempt, on ENG-14, failed this
+  way, which is why step i uses a templated project (`INFEROPS_LIVE_DISPATCH_PROJECT`, default
+  `CODE`).
+- Four earlier runs on the same database, while the suite was being written, made ENG-14 to
+  ENG-17, CPOL-4 to CPOL-7, CODE-1 to CODE-3 with cancelled runs
+  `9c6b0821-dfd4-4066-9d7d-d6b31ee3daed`, `63e40a7d-5d7e-44c6-935c-51a69b8d9160` and
+  `868b763e-a48f-40d6-ad98-ce3d8c428e16`, and edits of section `gripper` (versions 1 to 9).
+
+Left in InferOps, none of it deletable through the API: the issues above, repository `live-fork`,
+project CODE, the cancelled runs, and section `gripper` at version 11 with the runs' marker lines.

@@ -22,12 +22,23 @@
 //   INFEROPS_LIVE_TENANT         the URL's tenant label (default `acme`; syntax only, ADR 0005)
 //   INFEROPS_LIVE_PROJECT        the project key (default `ENG`)
 //   INFEROPS_LIVE_POLICY_PROJECT the content-policy project key (default `CPOL`); see step h
+//   INFEROPS_LIVE_DISPATCH_PROJECT the coding project key (default `CODE`); see step i
+//   INFEROPS_LIVE_REPO_ID        optional: a repository enrolled in that workspace
+//                                (`POST /project/repos`, `project:manage`) for step i, which the
+//                                gatekeeper then runs with `CODING_WORKBENCH_ENABLED=true` and that
+//                                id alone on `CODING_WORKBENCH_REPOS`. Step i skips without it.
+//   INFEROPS_LIVE_WIKI_WORKSPACE_ID   optional: an InferMind workspace the token's person belongs
+//   INFEROPS_LIVE_WIKI_WORKSPACE_SLUG to (`knowledge` in the seed) for step j. Step j skips
+//                                     without both.
 //
 // It writes to InferOps: one new issue per run, titled `InferOS live <timestamp>`, which it then
 // updates and moves. InferOps has no issue delete, so the issue is left in place. Step h also
 // creates the content-policy project on first use (the token must hold `project:manage`, as the
 // seed's `owner` does), publishes its workflow policy (a no-op once it is the head), and adds one
-// content issue per run.
+// content issue per run. Step i dispatches that run's issue to the enrolled repository: the run is
+// queued (no runner is needed, none picks it up), then cancelled; the run record and the issue's
+// move to `Queued` stay. Step j appends one marker line per run to one Wiki section, and
+// overwrites the same section once directly to prove an apply-time version check.
 //
 // Run, after `pnpm --filter @gadgets/integration-tests run test:prebuild`:
 //   INFEROPS_LIVE_BASE_URL=... INFEROPS_LIVE_TOKEN=... INFEROPS_LIVE_WORKSPACE_ID=... \
@@ -39,7 +50,8 @@ import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, Overseer } from "@gadgets/workshop-shared/api";
 import type {
-  Board, InferOpsProjectSession, Issue, State,
+  Board, InferOpsDispatchSession, InferOpsProjectSession, InferOpsWikiSession, Issue, State,
+  WikiDocument,
 } from "../../../custom-gatekeepers/gatekeeper-inferops/src/types.js";
 import { startHarness, type Harness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
@@ -55,7 +67,12 @@ const LIVE = {
   tenant: process.env.INFEROPS_LIVE_TENANT ?? "acme",
   project: process.env.INFEROPS_LIVE_PROJECT ?? "ENG",
   policyProject: process.env.INFEROPS_LIVE_POLICY_PROJECT ?? "CPOL",
+  dispatchProject: process.env.INFEROPS_LIVE_DISPATCH_PROJECT ?? "CODE",
+  repoId: process.env.INFEROPS_LIVE_REPO_ID?.toLowerCase() ?? "",
+  wikiWorkspaceId: process.env.INFEROPS_LIVE_WIKI_WORKSPACE_ID ?? "",
+  wikiWorkspaceSlug: process.env.INFEROPS_LIVE_WIKI_WORKSPACE_SLUG ?? "",
 };
+const WIKI_LIVE = Boolean(LIVE.wikiWorkspaceId && LIVE.wikiWorkspaceSlug);
 
 const INFEROPS_GATEKEEPER_DIR =
   resolve(import.meta.dirname, "../../../custom-gatekeepers/gatekeeper-inferops");
@@ -64,6 +81,10 @@ const VENDOR = "inferops";
 
 const boardUrl = (key: string) =>
   `inferops://${LIVE.tenant}.${LIVE.workspaceSlug}/project/board/${key}`;
+const dispatchUrl = (key: string) =>
+  `inferops://${LIVE.tenant}.${LIVE.workspaceSlug}/project/dispatch/${key}`;
+const wikiUrl = (workspaceSlug: string) =>
+  `inferops://${LIVE.tenant}.${workspaceSlug}/knowledge/wiki`;
 
 /** One line per step, printed at the end as the run's evidence. Ids and revisions only. */
 const evidence: string[] = [];
@@ -74,20 +95,48 @@ const note = (line: string) => evidence.push(line);
 
 type LiveIssue = Issue & { projectId: string };
 
-async function inferOps(path: string, init?: { method: string; body: unknown }): Promise<unknown> {
-  const response = await fetch(`${LIVE.baseUrl}${path}`, {
+/** One InferOps request with the live token, in `workspaceId` (the board workspace by default). */
+async function inferOpsResponse(path: string, init?: { method: string; body: unknown },
+                                workspaceId = LIVE.workspaceId): Promise<Response> {
+  return fetch(`${LIVE.baseUrl}${path}`, {
     method: init?.method ?? "GET",
     headers: {
       accept: "application/json",
       authorization: `Bearer ${LIVE.token}`,
-      "x-workspace-id": LIVE.workspaceId,
+      "x-workspace-id": workspaceId,
       ...(init ? { "content-type": "application/json" } : {}),
     },
     ...(init ? { body: JSON.stringify(init.body) } : {}),
   });
+}
+
+async function inferOps(path: string, init?: { method: string; body: unknown },
+                        workspaceId?: string): Promise<unknown> {
+  const response = await inferOpsResponse(path, init, workspaceId);
   if (!response.ok) throw new Error(`InferOps ${init?.method ?? "GET"} ${path} answered ${response.status}`);
   return response.json();
 }
+
+/** A refused direct request's status and InferOps error code. */
+async function inferOpsRefusal(path: string, init?: { method: string; body: unknown },
+                               workspaceId?: string): Promise<{ status: number; code: string }> {
+  const response = await inferOpsResponse(path, init, workspaceId);
+  const body = await response.json() as { error?: { code?: string } };
+  return { status: response.status, code: body.error?.code ?? "" };
+}
+
+type LiveRun = { id: string; issueId: string; repoId: string; status: string; baseRef: string | null };
+
+const liveRun = async (id: string) =>
+  ((await inferOps(`/project/runs/${id}`)) as { run: LiveRun }).run;
+
+const liveRunsOf = async (issueId: string) =>
+  ((await inferOps(`/project/runs?issueId=${issueId}`)) as { runs: LiveRun[] }).runs;
+
+type LiveSection = { id: string; documentId: string; tag: string; body: string; version: number };
+
+const liveSection = async (id: string) =>
+  await inferOps(`/knowledge/sections/${id}`, undefined, LIVE.wikiWorkspaceId) as LiveSection;
 
 async function liveProjectId(key: string): Promise<string | null> {
   const { projects } = await inferOps("/project/projects") as {
@@ -110,6 +159,10 @@ const liveIssuesTitled = async (title: string, key = LIVE.project) =>
 const liveIssue = async (id: string) =>
   ((await inferOps(`/project/issues/${id}`)) as { issue: LiveIssue }).issue;
 
+/** The message `call` failed with, or "" when it did not. */
+const failure = (call: PromiseLike<unknown>) => Promise.resolve(call).then(() => "", (error: unknown) =>
+  error instanceof Error ? error.message : String(error));
+
 const boardIssue = (board: Board, id: string) =>
   board.columns.flatMap(c => c.issues).find(i => i.id === id);
 
@@ -123,6 +176,31 @@ const WORKFLOW_ACTIONS = [
   "delegate", "execute", "approve", "publish",
 ] as const;
 
+/** The id of project `key`, created with `name` when the workspace has none. */
+async function ensureProject(key: string, name: string): Promise<string> {
+  return await liveProjectId(key) ??
+    ((await inferOps("/project/projects", {
+      method: "POST", body: { name, identifier: key },
+    })) as { project: { id: string } }).project.id;
+}
+
+/**
+ * Create (or reuse) `key` for coding dispatch. InferOps moves a dispatched issue to its project's
+ * software `Queued` state and answers 404 when the project has none, which is the case for a
+ * project whose states predate the workflow templates (the seed's ENG: Backlog, Todo, In Progress,
+ * Done, Cancelled). A project InferOps creates now gets both template ladders.
+ */
+async function ensureTemplateProject(key: string, name: string): Promise<{ projectId: string; states: State[] }> {
+  const projectId = await ensureProject(key, name);
+  const states = (await liveBoard(key)).columns.map(c => c.state);
+  const software = states.filter(s => s.workflow === "software").map(s => s.name);
+  if (!software.includes("Queued") || !software.includes("Ready")) {
+    throw new Error(`${key} has no software Ready and Queued states (it has ${software.join(", ")}); ` +
+      "InferOps cannot dispatch its issues. Use a project created from the workflow templates.");
+  }
+  return { projectId, states };
+}
+
 type PolicyProject = { projectId: string; revision: string; lanes: Record<string, State> };
 
 /**
@@ -131,10 +209,7 @@ type PolicyProject = { projectId: string; revision: string; lanes: Record<string
  * policy is live with `workflow/explain` before returning.
  */
 async function ensureContentPolicyProject(key: string): Promise<PolicyProject> {
-  const projectId = await liveProjectId(key) ??
-    ((await inferOps("/project/projects", {
-      method: "POST", body: { name: "InferOS content policy", identifier: key },
-    })) as { project: { id: string } }).project.id;
+  const projectId = await ensureProject(key, "InferOS content policy");
   const states = (await liveBoard(key)).columns.map(c => c.state).filter(s => s.workflow === "content");
   const lane = (name: string) => {
     const state = states.find(s => s.name === name);
@@ -220,6 +295,10 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
             INFEROPS_API_TOKEN: LIVE.token,
             INFEROPS_WORKSPACE_ID: LIVE.workspaceId,
             INFEROPS_WORKSPACE_SLUG: LIVE.workspaceSlug,
+            // Step i: coding dispatch on, with the enrolled repository the only one allowed.
+            ...(LIVE.repoId
+              ? { CODING_WORKBENCH_ENABLED: "true", CODING_WORKBENCH_REPOS: LIVE.repoId }
+              : {}),
           };
         },
       }],
@@ -243,7 +322,35 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     }
   });
 
+  /**
+   * Restart every Worker on the same storage with `vars` merged into the gatekeeper's, then log in
+   * again and reopen the shared workspace. A configuration update is the harness' only restart.
+   */
+  async function restartGatekeeper(vars: Record<string, string>) {
+    const { id: gadgetId } = await ws.getMetadata();
+    await harness.server.update(options => ({
+      ...options,
+      workers: options.workers.map(worker => {
+        if (!("config" in worker)) throw new Error("Expected inline harness config");
+        if (worker.config.name !== GATEKEEPER_WORKER) return worker;
+        return { ...worker, config: { ...worker.config, vars: { ...worker.config.vars, ...vars } } };
+      }),
+    }));
+    harness.url = (await harness.server.listen()).url;
+    api = await logIn(connect(harness.url), username);
+    ws = await api.openGadget(gadgetId);
+  }
+
   const pending = async () => (await ws.listActions({ filter: "pending" })).entries;
+
+  /** Approve `id` and answer the apply error, or "" when it applied. A refused action is rejected. */
+  async function approveOrRefusal(id: number): Promise<string> {
+    const message = await ws.approveAction(id).then(() => "", (error: unknown) =>
+      error instanceof Error ? error.message : String(error));
+    if (message) await ws.rejectAction(id);
+    return message;
+  }
+
 
   /** The one action the next proposal queues. */
   async function proposed(propose: () => Promise<unknown>) {
@@ -377,31 +484,17 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
   });
 
   it("g. after a reload, the binding reads the same issue identity and revision", async () => {
-    const { id: gadgetId } = await ws.getMetadata();
     const before = boardIssue(await session.readBoard(), created.id)!;
 
-    // A configuration update restarts every Worker on the same storage. The changed var keeps the
-    // integration on (its default), so only the restart is observable.
-    await harness.server.update(options => ({
-      ...options,
-      workers: options.workers.map(worker => {
-        if (!("config" in worker)) throw new Error("Expected inline harness config");
-        if (worker.config.name !== GATEKEEPER_WORKER) return worker;
-        return { ...worker, config: { ...worker.config,
-          vars: { ...worker.config.vars, INFEROPS_ENABLED: "true" } } };
-      }),
-    }));
-    harness.url = (await harness.server.listen()).url;
-    const reloadedApi = await logIn(connect(harness.url), username);
-    const reloaded = await reloadedApi.openGadget(gadgetId);
-    const binding = await reloaded.getGatekeeperById(connectionId);
+    // The changed var keeps the integration on (its default), so only the restart is observable.
+    await restartGatekeeper({ INFEROPS_ENABLED: "true" });
+    const binding = await ws.getGatekeeperById(connectionId);
     const reopened = await binding.openSession() as RpcStub<InferOpsProjectSession>;
     const after = boardIssue(await reopened.readBoard(), created.id);
     expect(after).toMatchObject({
       id: before.id, identifier: before.identifier, revision: before.revision, stateId: before.stateId,
     });
     expect(after!.revision).toBe((await liveIssue(created.id)).revision);
-    ws = reloaded;
     session = reopened;
     note(`g. after a Worker reload, binding ${connectionId} reads ${after!.identifier} ` +
       `at revision ${after!.revision}`);
@@ -476,5 +569,194 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       `Idea -> Draft applied (revision ${inDraft.revision}); Draft -> Published approved but refused ` +
       `by InferOps ("${refused}"; direct: 403 FORBIDDEN, EXPLICIT_DENY), still Draft at revision ${afterRefusal.revision}; ` +
       `Draft -> Review applied (revision ${inReview.revision})`);
+  });
+
+  it.skipIf(!LIVE.repoId)("i. coding dispatch: an approved dispatch queues a real run, duplicates and stale revisions are refused, an approved cancel stops it (needs INFEROPS_LIVE_REPO_ID)", async () => {
+    const repoId = LIVE.repoId;
+    const key = LIVE.dispatchProject;
+    // A dispatch moves the issue to its project's software `Queued` state, so the project needs
+    // InferOps' software template ladder (see ensureTemplateProject).
+    const { projectId, states: ladder } = await ensureTemplateProject(key, "InferOS coding dispatch");
+    const board = await ws.newGatekeeper(accountId, boardUrl(key));
+    if (!board) throw new Error(`No connection for ${boardUrl(key)}`);
+    const boardSession = await board.openSession() as RpcStub<InferOpsProjectSession>;
+    const ready = ladder.find(s => s.workflow === "software" && s.name === "Ready")!;
+    const codingTitle = `${title} (coding)`;
+    const create = await proposed(() =>
+      boardSession.createIssue({ title: codingTitle, priority: "low", stateId: ready.id }));
+    await ws.approveAction(create.id);
+    const [made] = await liveIssuesTitled(codingTitle, key);
+    if (!made) throw new Error(`The ${key} issue was not created`);
+    const issueId = made.id;
+    const fresh = await liveIssue(issueId);
+    expect(fresh).toMatchObject({ workflow: "software", stateId: ready.id });
+    expect(await liveRunsOf(issueId)).toEqual([]);
+
+    // A board binding has no dispatch: the call fails and InferOps gets no run.
+    const asDispatch = boardSession as unknown as RpcStub<InferOpsDispatchSession>;
+    const boardRefusal = await failure(asDispatch.dispatch(fresh.identifier, { repoId }, fresh.revision));
+    expect(boardRefusal).not.toBe("");
+    expect(await liveRunsOf(issueId)).toEqual([]);
+
+    const connection = await ws.newGatekeeper(accountId, dispatchUrl(key));
+    if (!connection) throw new Error(`No connection for ${dispatchUrl(key)}`);
+    const coding = await connection.openSession() as RpcStub<InferOpsDispatchSession>;
+    // listRepos marks the allowlisted repository, and only it, as allowed.
+    const repos = await coding.listRepos();
+    const repo = repos.find(r => r.id === repoId);
+    expect(repo).toMatchObject({ enabled: true, allowed: true });
+    expect(repos.filter(r => r.allowed).map(r => r.id)).toEqual([repoId]);
+    // A repository off the allowlist is refused before anything is proposed.
+    const offList = crypto.randomUUID();
+    expect(await failure(coding.dispatch(fresh.identifier, { repoId: offList }, fresh.revision)))
+      .toMatch(/FORBIDDEN: .*not on this deployment's coding allowlist/);
+
+    // Propose: listRuns shows a provisional run; InferOps has none until approval.
+    const before = await liveIssue(issueId);
+    const dispatch = await proposed(() => coding.dispatch(before.identifier, { repoId }, before.revision));
+    expect(dispatch.type).toBe("action");
+    expect((await coding.listRuns())[0]).toMatchObject({ issueId, pending: "dispatch", status: "queued" });
+    expect(await liveRunsOf(issueId)).toEqual([]);
+    expect((await liveIssue(issueId)).revision).toBe(before.revision);
+
+    await ws.approveAction(dispatch.id);
+    const runs = await liveRunsOf(issueId);
+    expect(runs).toHaveLength(1);
+    const run = runs[0]!;
+    expect(run).toMatchObject({ issueId, repoId, status: "queued" });
+    expect(await liveRun(run.id)).toMatchObject({ id: run.id, status: "queued" });
+    expect(await coding.getRun(run.id)).toMatchObject({
+      id: run.id, issueId, issueIdentifier: before.identifier, repoId, status: "queued",
+    });
+    const queued = await liveIssue(issueId);
+    const queuedState = ladder.find(s => s.id === queued.stateId);
+    expect(queuedState).toMatchObject({ workflow: "software", name: "Queued" });
+    expect(queued.revision).not.toBe(before.revision);
+
+    // A second dispatch of the issue is refused while its run is queued, by the gatekeeper and by
+    // InferOps itself; a dispatch at the pre-dispatch revision is refused as stale.
+    expect(await failure(coding.dispatch(before.identifier, { repoId }, queued.revision)))
+      .toMatch(/^RUN_ACTIVE: /);
+    const directDuplicate = await inferOpsRefusal(`/project/issues/${issueId}/dispatch`, {
+      method: "POST", body: { action: "code", repoId, expectedRevision: queued.revision },
+    });
+    expect(directDuplicate).toMatchObject({ status: 409, code: "RUN_ACTIVE" });
+    expect(await failure(coding.dispatch(before.identifier, { repoId }, before.revision)))
+      .toMatch(/^STALE_REVISION: /);
+    expect((await liveRunsOf(issueId)).map(r => r.id)).toEqual([run.id]);
+
+    // Cancel through approval: still queued until approved, then cancelled in InferOps.
+    const cancel = await proposed(() => coding.cancel(run.id));
+    expect(await coding.getRun(run.id)).toMatchObject({ status: "queued", pending: "cancel" });
+    expect((await liveRun(run.id)).status).toBe("queued");
+    await ws.approveAction(cancel.id);
+    expect((await liveRun(run.id)).status).toBe("cancelled");
+    expect((await coding.getRun(run.id)).status).toBe("cancelled");
+
+    // A dispatch whose issue changes in InferOps between proposal and approval is refused at apply
+    // by InferOps' own revision check, and no run is made.
+    const afterCancel = await liveIssue(issueId);
+    const again = await proposed(() => coding.dispatch(afterCancel.identifier, { repoId }, afterCancel.revision));
+    const { issue: changed } = await inferOps(`/project/issues/${issueId}`, {
+      method: "PATCH", body: { priority: "medium", expectedRevision: afterCancel.revision },
+    }) as { issue: LiveIssue };
+    const staleApply = await approveOrRefusal(again.id);
+    expect(staleApply).toMatch(/changed in InferOps after this dispatch was proposed/);
+    expect((await liveRunsOf(issueId)).map(r => r.id)).toEqual([run.id]);
+    expect((await liveIssue(issueId)).revision).toBe(changed.revision);
+
+    note(`i. ${key} (${projectId}, template ladder) issue ${fresh.identifier} created in Ready via approval. ` +
+      `Bound ${dispatchUrl(key)} (CODING_WORKBENCH_ENABLED=true, allowlist = repo ` +
+      `${repo!.slug} ${repoId}); listRepos: ${repos.length} repo(s), only it allowed; a board binding's ` +
+      `dispatch failed ("${boardRefusal.slice(0, 80)}"), no run; an off-allowlist repo refused FORBIDDEN. ` +
+      `Dispatched ${before.identifier} (${issueId}) at revision ${before.revision}: absent from InferOps ` +
+      `while pending; after approval run ${run.id} queued in InferOps (GET /project/runs/:id and getRun ` +
+      `agree), issue -> ${queuedState?.name ?? queued.stateId} at revision ${queued.revision}. Duplicate ` +
+      `refused RUN_ACTIVE (gatekeeper) and 409 RUN_ACTIVE (direct); revision ${before.revision} refused ` +
+      `STALE_REVISION. Cancel approved: run ${run.id} cancelled in InferOps; issue at revision ` +
+      `${afterCancel.revision}. A dispatch proposed at ${afterCancel.revision}, then the issue edited ` +
+      `directly (revision ${changed.revision}), was refused at apply ("${staleApply.slice(0, 120)}"); ` +
+      "no second run");
+  });
+
+  it.skipIf(!WIKI_LIVE)("j. the InferMind Wiki: reads, an approved section edit bumps its version, stale versions are refused, an InferOps workspace has no Wiki (needs INFEROPS_LIVE_WIKI_WORKSPACE_ID and _SLUG)", async () => {
+    // While the stopgap connection is the InferOps workspace, its Wiki is refused by InferOps'
+    // product gate (403), passed on as the gatekeeper's FORBIDDEN.
+    const opsRefusal = await failure(ws.newGatekeeper(accountId, wikiUrl(LIVE.workspaceSlug)).then(c => {
+      if (!c) throw new Error("newGatekeeper returned null");
+    }));
+    expect(opsRefusal).toMatch(/not an InferMind workspace/);
+    expect(await inferOpsRefusal("/knowledge/documents")).toEqual({ status: 403, code: "FORBIDDEN" });
+
+    // The stopgap connection names one workspace, so point it at the InferMind one.
+    await restartGatekeeper({
+      INFEROPS_WORKSPACE_ID: LIVE.wikiWorkspaceId, INFEROPS_WORKSPACE_SLUG: LIVE.wikiWorkspaceSlug,
+    });
+    const connection = await ws.newGatekeeper(accountId, wikiUrl(LIVE.wikiWorkspaceSlug));
+    if (!connection) throw new Error(`No connection for ${wikiUrl(LIVE.wikiWorkspaceSlug)}`);
+    const wiki = await connection.openSession() as RpcStub<InferOpsWikiSession>;
+
+    // listDocuments is InferOps' page list.
+    const pages = await wiki.listDocuments();
+    const livePages = await inferOps("/knowledge/documents", undefined, LIVE.wikiWorkspaceId) as
+      Array<{ id: string; slug: string }>;
+    expect(pages.map(p => p.id).toSorted()).toEqual(livePages.map(p => p.id).toSorted());
+
+    // The first page with a section; readDocument is InferOps' sections, in order.
+    let page: WikiDocument | undefined;
+    for (const node of pages) {
+      const read = await wiki.readDocument(node.slug);
+      if (read.sections.length > 0) { page = read; break; }
+    }
+    if (!page) throw new Error("No Wiki page with a section");
+    const liveSections = await inferOps(`/knowledge/sections?documentId=${page.id}`, undefined,
+      LIVE.wikiWorkspaceId) as LiveSection[];
+    expect(page.sections.map(s => ({ id: s.id, body: s.body, version: s.version })))
+      .toEqual(liveSections.map(s => ({ id: s.id, body: s.body, version: s.version })));
+    expect(await wiki.readDocumentText(page.slug))
+      .toBe([`# ${page.title}`, ...liveSections.map(s => s.body)].join("\n\n"));
+
+    // An edit waits for approval: reads show it pending, InferOps still has the old body.
+    const section = page.sections[0]!;
+    const before = await liveSection(section.id);
+    const body = `${before.body}\n\nInferOS live edit ${new Date().toISOString()}`;
+    const edit = await proposed(() => wiki.updateSection(section.id, body, before.version));
+    expect((await wiki.readDocument(page.id)).sections[0]).toMatchObject({
+      id: section.id, body, version: before.version, pending: "update",
+    });
+    expect(await liveSection(section.id)).toMatchObject({ body: before.body, version: before.version });
+    await ws.approveAction(edit.id);
+    const edited = await liveSection(section.id);
+    expect(edited.body).toBe(body);
+    expect(edited.version).toBeGreaterThan(before.version);
+    const shown = (await wiki.readDocument(page.id)).sections[0]!;
+    expect(shown).toMatchObject({ body, version: edited.version });
+    expect(shown.pending).toBeUndefined();
+
+    // A proposal at the old version is refused as stale, before anything is queued.
+    expect(await failure(wiki.updateSection(section.id, `${body} (stale)`, before.version)))
+      .toMatch(/^STALE_REVISION: /);
+
+    // An edit proposed at the current version, overtaken by a direct edit before approval, is
+    // refused at apply: InferOps' PATCH has no expected version, so the gatekeeper checks it.
+    const overtaken = await proposed(() => wiki.updateSection(section.id, `${body} (overtaken)`, edited.version));
+    const direct = await inferOps(`/knowledge/sections/${section.id}`, {
+      method: "PATCH", body: { body: `${body} (direct)` },
+    }, LIVE.wikiWorkspaceId) as LiveSection;
+    const staleApply = await approveOrRefusal(overtaken.id);
+    expect(staleApply).toMatch(/changed in InferOps after this edit/);
+    const final = await liveSection(section.id);
+    expect(final).toMatchObject({ body: `${body} (direct)`, version: direct.version });
+
+    note(`j. ${wikiUrl(LIVE.workspaceSlug)} refused ("${opsRefusal.slice(0, 100)}"; direct GET ` +
+      `/knowledge/documents in ${LIVE.workspaceSlug}: 403 FORBIDDEN). Bound ` +
+      `${wikiUrl(LIVE.wikiWorkspaceSlug)} (${LIVE.wikiWorkspaceId}): ${pages.length} pages; read ` +
+      `${page.slug} (${page.id}, ${page.sections.length} sections, ${page.references.length} references); ` +
+      "readDocumentText equals `# title` + section bodies. Edited section " +
+      `${section.tag} (${section.id}): pending at version ${before.version}, unchanged in InferOps; ` +
+      `after approval version ${before.version} -> ${edited.version}. Version ${before.version} refused ` +
+      `STALE_REVISION at proposal; an edit at ${edited.version} overtaken by a direct PATCH (version ` +
+      `${direct.version}) refused at apply ("${staleApply.slice(0, 120)}"); section left at version ` +
+      `${final.version}`);
   });
 });
