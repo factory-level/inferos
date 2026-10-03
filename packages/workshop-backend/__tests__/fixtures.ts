@@ -106,6 +106,7 @@ export async function openFakeOverseer(
       storage: Object.assign(storage, {
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
+        operateSession: { get: () => false },
       }),
       ...opts.impl,
     },
