@@ -1,8 +1,9 @@
 import { useState, type ReactElement } from 'react'
 import { Button, Dialog, Input, InputArea, Select } from '@cloudflare/kumo'
-import type { Issue, IssueChanges, NewIssue, Priority, State } from '@inferos/gatekeeper-inferops/src/types'
+import type { Issue, IssueChanges, NewIssue, Priority, Run, State } from '@inferos/gatekeeper-inferops/src/types'
 import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import type { ProposalResult } from './boardData'
+import { KanbanCodingForm, type CodingControl } from './KanbanCodingForm'
 import { PRIORITY_LABELS, changedFields, proposalErrorText, type IssueFields } from './kanbanBoard'
 
 const PRIORITIES: readonly Priority[] = ['none', 'urgent', 'high', 'medium', 'low']
@@ -11,9 +12,12 @@ const PRIORITIES: readonly Priority[] = ['none', 'urgent', 'high', 'medium', 'lo
 const TITLE_MAX = 500
 const DESCRIPTION_MAX = 20000
 
-type Mode =
+type FormMode =
   | { kind: 'create'; state: State; onCreate: (issue: NewIssue) => Promise<ProposalResult> }
   | { kind: 'edit'; issue: Issue; onUpdate: (changes: IssueChanges) => Promise<ProposalResult> }
+
+/** `code`: the issue's coding run and a dispatch to the coding runner, through the project's coding-dispatch connection. */
+type Mode = FormMode | { kind: 'code'; issue: Issue; run: Run | undefined; coding: CodingControl }
 
 export type KanbanIssueDialogProps = {
   /** The control that opens the dialog. Focus returns to it when the dialog closes. */
@@ -25,6 +29,9 @@ export type KanbanIssueDialogProps = {
  * priority. Submitting proposes the change through the approval path: the dialog stays open while
  * the proposal is sent and shows a refusal with the gatekeeper's reason, and closes once the
  * change is queued, which the board then shows as waiting for approval.
+ *
+ * In `code` mode it is the issue's coding task instead: it stays open after a dispatch or cancel is
+ * proposed, since it also follows the run (see `KanbanCodingForm`).
  */
 export const KanbanIssueDialog = ({ trigger, ...mode }: KanbanIssueDialogProps) => {
   const [open, setOpen] = useState(false)
@@ -32,12 +39,14 @@ export const KanbanIssueDialog = ({ trigger, ...mode }: KanbanIssueDialogProps) 
     <Dialog.Trigger render={trigger} />
     <Dialog className="responsive-dialog space-y-4 p-6" size="lg">
       {/* Mounted only while open, so every opening starts from the issue as the board shows it. */}
-      <IssueForm mode={mode} onDone={() => setOpen(false)} />
+      {mode.kind === 'code'
+        ? <KanbanCodingForm issue={mode.issue} run={mode.run} coding={mode.coding} />
+        : <IssueForm mode={mode} onDone={() => setOpen(false)} />}
     </Dialog>
   </Dialog.Root>
 }
 
-const IssueForm = ({ mode, onDone }: { mode: Mode; onDone: () => void }) => {
+const IssueForm = ({ mode, onDone }: { mode: FormMode; onDone: () => void }) => {
   const selectPortalContainer = useDialogSelectPortalContainer()
   const [fields, setFields] = useState<IssueFields>(mode.kind === 'edit'
     ? { title: mode.issue.title, description: '', priority: mode.issue.priority }

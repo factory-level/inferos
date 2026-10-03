@@ -25,6 +25,7 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | `.agents/skills/bootstrap-inferos` | Consumer setup, configuration (including applying a reviewed intake) and evidence guidance. |
 | `.agents/skills/skill-upload` | Installing, authoring (with skill-creator) and publishing wrapper skills. |
 | `scripts/consumer` | Atomic scaffolding, profile resolution, preflight, fixture/view/extension/skill-pack validation and intake application ([customer onboarding](customer-onboarding.md)). |
+| `scripts/consumer/settings.ts` | The executable settings table for the selected private customer, validated by wrapper `doctor` and generating the [configuration reference](../wiki/configuration-reference.md#selected-customer-settings) section; `settings.test.ts` fails on drift ([details](consumer-configuration.md#data-and-control-flow)). |
 | `scripts/consumer/skill-packs` | Starter `operate`, `build` and `shared` runtime skills that bootstrap copies to `skills/`. `build/coding-dispatch` drives coding dispatch through the InferOps gatekeeper and reports only the runner's patch and test evidence. |
 | `.agents/skills/local-coding` | Setup, operation and recovery of the local coding runner; see [local coding workflows](local-coding-workflows.md). |
 | `scripts/consumer/skills.ts`, `skill-manifest.ts` | Read `inferos.skills.json`, collect pack files (excludes, includes, limits, no links) and validate `SKILL.md` frontmatter. |
@@ -56,12 +57,12 @@ Use the repo-pinned pnpm and lockfile. Do not edit generated wrangler.jsonc. Ins
 
 ## Divergences from Design
 
-Bootstrap, local startup, profile/style initialization, fixture validation and guarded canvas layouts have local evidence. General lifecycle/health verification, reviewed upgrade/recovery automation, authorized InferOps data loading and consumer cloud deployment remain backlog work. Native fixture/schema checks must not be described as a completed board read/approve/refresh flow. Skill upload reaches only the local Workshop. Packs are not uploaded automatically when `pnpm dev` starts.
+Bootstrap, local startup, profile/style initialization, fixture validation and guarded canvas layouts have local evidence. General lifecycle/health verification, reviewed upgrade/recovery automation, authorized InferOps data loading and consumer cloud deployment remain backlog work. Native fixture/schema checks must not be described as a completed board read/approve/refresh flow. Settings validation covers only the selected private local customer (#19's MVP scope), not the design's full identity, admin, model, gatekeeper, storage, router and observability schema. Skill upload reaches only the local Workshop. Packs are not uploaded automatically when `pnpm dev` starts.
 
 ## Open Questions
 
 - How much of the upstream starter operator skill can be reused verbatim under its license and version contract?
-- Which machine-readable configuration schema best prevents divergence between explanations and executable defaults?
+- The selected customer's settings are now one executable table with a generated reference. Whether the remaining explanatory rows (admin, model, storage, router, observability) move into it is post-release.
 
 ## Evidence
 

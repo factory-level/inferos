@@ -292,7 +292,28 @@ export async function diagnoseConsumer(root: string) {
   add("runtime", unsupported.length ? "error" : "warning", unsupported.length
     ? `Startup is blocked by unavailable adapters: ${unsupported.join(", ")}`
     : "InferOps board data is mocked by the InferOps gatekeeper (no real InferOps adapter yet); profile:init separately initializes branding/instructions on a supported pin");
-  return { ok: !checks.some(check => check.status === "error"), checks, runtimeReady: false, pending };
+  const settings = await diagnoseSettings(root, upstream, config, process.env);
+  checks.push(settings.check);
+  return { ok: !checks.some(check => check.status === "error"), checks, runtimeReady: false, pending, settings: settings.report };
+}
+
+/**
+ * The `settings` doctor check: the pinned settings table validated against the wrapper's resolved
+ * configuration and the shell. Every message is redacted (names and problems, never values); a pin
+ * without the table is a warning, not an error.
+ */
+export async function diagnoseSettings(root: string, upstream: string, config: ConsumerConfig, env: NodeJS.ProcessEnv) {
+  const script = join(upstream, "scripts/consumer/settings.ts");
+  if (!existsSync(script)) {
+    return { check: { name: "settings", status: "warning", message: "Pinned revision has no settings table; required settings are not validated" } as ConsumerDiagnostic, report: null };
+  }
+  try {
+    const { validateSettings, settingsDiagnostic } = await import(pathToFileURL(script).href);
+    const result = validateSettings(config, env, { inferOpsGatekeeperSelected: inferOpsGatekeeperSelected(root, upstream) });
+    return { check: settingsDiagnostic(result) as ConsumerDiagnostic, report: { findings: result.findings, settings: result.settings } };
+  } catch {
+    return { check: { name: "settings", status: "error", message: "Cannot validate settings; run pnpm run setup and check inferos.canvas.json" } as ConsumerDiagnostic, report: null };
+  }
 }
 
 async function main() {
