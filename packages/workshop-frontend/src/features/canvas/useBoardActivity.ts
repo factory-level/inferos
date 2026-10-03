@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import { useActionEntries, useActions } from '../../useActions'
-import { foldBoardActivity, nextActivityChange, type BoardActivity } from './boardActivity'
+import { NO_ACTIVITY, foldBoardActivity, nextActivityChange, type BoardActivity } from './boardActivity'
 
 // Entries received for one scope. Held with the stub they came from, so a render for another
 // scope (another workspace, a reopened session) never reads them.
@@ -14,11 +14,11 @@ const EMPTY_RECORDS: ReadonlyMap<number, ActionLogEntry> = new Map()
  * The activity on one board, from the action log of the workspace whose capability `overseer` is.
  * It combines the log's live entries (replayed on mount) with the actions already pending when
  * the session opened, which the log pages rather than streams. `connected` is whether the board's
- * connection is currently usable; while it is not, nothing shows as awaiting. `clock` is
- * injectable for tests.
+ * connection is currently usable; while it is not, nothing shows as awaiting. A null `targetRef`
+ * has no activity. `clock` is injectable for tests.
  */
 export const useBoardActivity = (
-  overseer: RpcStub<Overseer>, targetRef: string, connected: boolean, clock: () => number = Date.now,
+  overseer: RpcStub<Overseer>, targetRef: string | null, connected: boolean, clock: () => number = Date.now,
 ): { activity: BoardActivity; now: number } => {
   const [log, setLog] = useState<ScopeLog>(() => ({ overseer, records: EMPTY_RECORDS }))
   const { pending } = useActions(overseer)
@@ -37,7 +37,7 @@ export const useBoardActivity = (
   // A live entry is newer than the paged copy of the same record, so it comes last and wins.
   const records = [...pending.filter(record => !live.has(record.id)), ...live.values()]
   const now = clock()
-  const activity = foldBoardActivity(records, targetRef, now, connected)
+  const activity = targetRef === null ? NO_ACTIVITY : foldBoardActivity(records, targetRef, now, connected)
   const wake = nextActivityChange(activity, now)
 
   useEffect(() => {

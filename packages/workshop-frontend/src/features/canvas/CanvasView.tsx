@@ -6,12 +6,14 @@ import { CanvasGadgetWidget } from './CanvasGadgetWidget'
 import { gadgetIdOf, sectionGridClass, widgetSpanClass } from './canvasLayout'
 import { useDecidedActionInvalidation } from './useBoardData'
 
-export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget }: {
+export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, codingDispatch }: {
   definition: CanvasDefinition
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
   overseer: RpcStub<Overseer>
   /** Opens a board widget's full view. Without it, cards offer no full view. */
   onOpenWidget?: (widgetId: string) => void
+  /** See `CanvasBoardWidgetProps.codingDispatch`. */
+  codingDispatch?: boolean
 }) => {
   useDecidedActionInvalidation(overseer)
   return <div className="space-y-6">
@@ -23,7 +25,7 @@ export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget }: {
           {section.widgets.map(widget => <div key={widget.id} className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}>
             {widget.kind === 'inferos.gadget'
               ? <CanvasGadgetWidget widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} />
-              : <CanvasBoardWidget widget={widget} overseer={overseer} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} />}
+              : <CanvasBoardWidget widget={widget} overseer={overseer} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch} />}
           </div>)}
         </div>}
     </section>)}
