@@ -100,6 +100,7 @@ On a pin containing `scripts/local/lifecycle.ts`, `pnpm local status|start|stop|
 
 - `start` first applies every refusal `pnpm dev` applies (unsupported capabilities or schema, unavailable features, remote mode, invalid fixture), then appends `--consumer-root <wrapper>` after any run-local flags, and selects the wrapper's `blueprints/`.
 - `seed` without `--screen` passes the first screen template in the wrapper's `inferos.canvas.json`.
+- `runner start|status|stop` and `coding doctor` get `--consumer-root <wrapper>`, so the local coding runner reads the wrapper's `codingWorkbench.repos` and `.dev.vars` and keeps its state in the wrapper's git-ignored `.inferos/state/runner/` (see [Run the local coding runner](local-coding-runner.md)).
 
 State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as with `pnpm dev`. `status` lists the Workers the pinned checkout would bind, not the wrapper's custom Workers. An older pin fails with "does not support the local lifecycle"; use `pnpm dev` there.
 
@@ -112,6 +113,7 @@ State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as wit
 | `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
 | `.agents/skills/skill-upload/SKILL.md` | Agent guidance for installing, authoring and publishing runtime skills (`/skill-upload`) |
+| `.agents/skills/local-coding/SKILL.md` | Agent SOP for setting up, operating and recovering the local coding runner |
 | `skills/{operate,build,shared}/` | Editable starter runtime skills for the Workshop agent, one pack per public Context Library collection |
 | `inferos.skills.json` | Pack titles, directories, `include` lists (for example `.agents/skills/skill-creator`) and `exclude` globs |
 | `views/operations.json` | Guarded starter composition; import it from the workspace Canvas page on supporting pins |
@@ -165,7 +167,7 @@ This initializes branding, instructions and the deployment fallback theme. Pins 
 
 A wrapper has two skill locations:
 
-- **Coding-agent skills** in `.agents/skills/`. Bootstrap ships `bootstrap-inferos` and `skill-upload`. Run `pnpm skills:install` to add Anthropic's `skill-creator` with the pinned skills.sh CLI (`skills@1.7.0`). To install something else, pass a source and skill: `pnpm skills:install vercel-labs/agent-skills --skill <name>`. The CLI writes `skills-lock.json` and links agent directories such as `.claude/skills`. Commit both.
+- **Coding-agent skills** in `.agents/skills/`. Bootstrap ships `bootstrap-inferos`, `skill-upload` and `local-coding`. Run `pnpm skills:install` to add Anthropic's `skill-creator` with the pinned skills.sh CLI (`skills@1.7.0`). To install something else, pass a source and skill: `pnpm skills:install vercel-labs/agent-skills --skill <name>`. The CLI writes `skills-lock.json` and links agent directories such as `.claude/skills`. Commit both.
 - **Runtime skills** in `skills/<pack>/<name>/SKILL.md`. These become Workshop agent skills and `/` commands in chat. `inferos.skills.json` maps each pack to one public Context Library collection, with titles `InferOS · Operate`, `InferOS · Build` and `InferOS · Shared`. A pack's `include` publishes an installed coding-agent skill as part of the pack. `exclude` drops `evals/`, `*-workspace/` and similar authoring output.
 
 Preload a fresh local deployment after `profile:init`, with the same private session variable:
