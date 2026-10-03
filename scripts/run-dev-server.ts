@@ -89,6 +89,12 @@ const useWorkersAi = process.argv.includes("--use-workers-ai-binding");
 // Vite on :3000 and no `vite build` is required to start the dev server.
 const serveFrontendAssets = process.argv.includes("--serve-frontend-assets");
 
+// Skip the per-gatekeeper configurator and app UI watchers. Each is its own process holding an
+// inotify instance, and a machine near `fs.inotify.max_user_instances` (128 by default, shared with
+// every editor and browser the user runs) cannot start them all. The pre-flight still builds every
+// UI once, so the stack serves current UIs; only edits made after startup need a restart.
+const uiWatchers = !process.argv.includes("--no-ui-watchers");
+
 let backendHost: string;
 let wranglerPort: string | null;
 try {
@@ -413,7 +419,7 @@ try {
 
 // Watchers start only after those builds finish. Both watch modes run a full build before they
 // begin watching, so starting one earlier would put two processes on the same src/generated files.
-for (const gk of gatekeepers) {
+for (const gk of uiWatchers ? gatekeepers : []) {
   // Configurator UI (compiled by build-gatekeeper-configurator.ts). The pre-flight already ran this
   // same build, so each watcher's own initial build is a no-op write -- and it is what keeps the
   // watcher self-contained: it reads the sources itself, immediately before it starts watching them,
