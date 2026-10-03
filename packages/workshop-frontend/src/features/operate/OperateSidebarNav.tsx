@@ -1,5 +1,5 @@
 import { useRouterState } from '@tanstack/react-router'
-import { LayoutIcon, PlusIcon } from '@phosphor-icons/react'
+import { LayoutIcon, PathIcon, PlusIcon } from '@phosphor-icons/react'
 import type { GatekeeperAppInfo } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useServerConfig } from '../../ServerConfigContext'
@@ -7,6 +7,7 @@ import SidebarItem from '../../components/AppShell/SidebarItem'
 import SidebarGatekeeperApps from '../../components/AppShell/SidebarGatekeeperApps'
 import { useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { OPERATE_HOME } from './operateMode'
+import { useOperateSession } from './OperateSessionContext'
 
 const Eyebrow = ({ children }: { children: string }) =>
   <span className="px-2.5 pb-1 text-[11px] leading-4 font-medium uppercase tracking-[0.06em] text-kumo-inactive">
@@ -28,6 +29,8 @@ export const OperateSidebarNav = ({ collapsed, gatekeeperApps }: {
   const { authenticatedApi } = useAuthenticatedApi()
   const durableViews = useServerConfig()?.canvasFeatures?.durableViews === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
+  const operate = useOperateSession()
+  const focus = operate?.snapshot?.state.focus ?? null
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const view = useRouterState({
     select: (s): string | null => {
@@ -41,12 +44,32 @@ export const OperateSidebarNav = ({ collapsed, gatekeeperApps }: {
       (saved ?? []).map(screen => ({ workspaceId: workspace.id, screen })))
     : []
 
+  const flows = screens.status === 'ready'
+    ? screens.workspaces.flatMap(({ workspace, flows: authored }) =>
+      authored.map(flow => ({ workspaceId: workspace.id, flow })))
+    : []
+
   return (
     <div className="flex flex-col gap-4 px-2 pt-4">
       <div className="flex flex-col gap-0.5">
         {!collapsed && <Eyebrow>InferOps Canvas · Screens</Eyebrow>}
         <nav aria-label="Screens" className="flex flex-col gap-0.5">
-          {listed.map(({ workspaceId, screen }) => (
+          {listed.map(({ workspaceId, screen }) => operate ? (
+            // In a session a screen opens into the session page, so every tab follows it.
+            <SidebarItem
+              key={`${workspaceId}/${screen.id}`}
+              to={OPERATE_HOME}
+              onClick={() => {
+                operate.dispatch({ type: 'open', ref: { type: 'screen', workspaceId, screenId: screen.id } })
+                  .catch(caught => console.error('Failed to open the screen in the session:', caught))
+              }}
+              active={pathname === OPERATE_HOME && focus?.type === 'screen' &&
+                focus.workspaceId === workspaceId && focus.screenId === screen.id}
+              label={screen.title}
+              icon={<LayoutIcon size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+          ) : (
             <SidebarItem
               key={`${workspaceId}/${screen.id}`}
               to="/workspace/$id/inferops-canvas"
@@ -69,6 +92,28 @@ export const OperateSidebarNav = ({ collapsed, gatekeeperApps }: {
           collapsed={collapsed}
         />
       </div>
+
+      {operate && flows.length > 0 && (
+        <div className="flex flex-col gap-0.5">
+          {!collapsed && <Eyebrow>Flows</Eyebrow>}
+          <nav aria-label="Flows" className="flex flex-col gap-0.5">
+            {flows.map(({ workspaceId, flow }) => (
+              <SidebarItem
+                key={`${workspaceId}/${flow.id}`}
+                to={OPERATE_HOME}
+                onClick={() => {
+                  operate.dispatch({ type: 'startFlow', workspaceId, flowId: flow.id, title: flow.title, steps: flow.steps })
+                    .catch(caught => console.error('Failed to start the flow:', caught))
+                }}
+                active={false}
+                label={flow.title}
+                icon={<PathIcon size={14} weight="regular" />}
+                collapsed={collapsed}
+              />
+            ))}
+          </nav>
+        </div>
+      )}
 
       {gatekeeperApps.length > 0 && (
         <div className="flex flex-col gap-0.5">
