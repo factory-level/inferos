@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { InferOpsCanvasPage } from '../pages/inferops-canvas/InferOpsCanvasPage'
 
-type InferOpsCanvasSearch = { chat?: number; view?: string }
+type InferOpsCanvasSearch = { chat?: number; view?: string; widget?: string }
 
 /**
  * A workspace's InferOps Canvas: its composed views beside its chat. The file is
@@ -16,12 +16,13 @@ export const Route = createFileRoute('/workspace_/$id/inferops-canvas')({
     return {
       chat: typeof chat === 'number' && Number.isInteger(chat) && chat >= 0 ? chat : undefined,
       view: typeof search.view === 'string' && search.view.length <= 64 ? search.view : undefined,
+      widget: typeof search.widget === 'string' && search.widget.length <= 64 ? search.widget : undefined,
     }
   },
 })
 
 function InferOpsCanvasRoute() {
   const { id } = Route.useParams()
-  const { chat, view } = Route.useSearch()
-  return <InferOpsCanvasPage key={id} workspaceId={id} chatId={chat ?? null} viewId={view ?? null} />
+  const { chat, view, widget } = Route.useSearch()
+  return <InferOpsCanvasPage key={id} workspaceId={id} chatId={chat ?? null} viewId={view ?? null} widgetId={widget ?? null} />
 }

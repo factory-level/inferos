@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import { Button, Input, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
-import type { CanvasCatalog, CanvasContent } from '@gadgets/workshop-shared/canvas'
+import type { CanvasCatalog, CanvasContent, CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
 import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import DeleteConfirmationDialog from '../../components/DeleteConfirmationDialog'
+import { CanvasBoardFullView } from './CanvasBoardFullView'
 import { CanvasMoveWidgetForm } from './CanvasMoveWidgetForm'
 import { CanvasSectionEditor } from './CanvasSectionEditor'
 import { CanvasView } from './CanvasView'
@@ -14,7 +15,7 @@ import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 // Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
 const BLANK_TEMPLATE = ':blank'
 
-export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, onAskAgent }: {
+export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent }: {
   storage: CanvasStorage
   overseer: RpcStub<Overseer>
   /** Every gadget in the workspace, drafts included, keyed by workpiece ID. */
@@ -25,6 +26,10 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   viewId: string | null
   /** Reports the selected view so the page can keep it in its URL. */
   onViewChange: (viewId: string | null) => void
+  /** The board widget of the active view to show on its own (its full view), if any. */
+  openWidgetId: string | null
+  /** Reports the opened widget so the page can keep it in its URL; null closes the full view. */
+  onOpenWidgetChange: (widgetId: string | null) => void
   /** Hands a request to the chat agent. */
   onAskAgent: (request: string) => Promise<void>
 }) => {
@@ -39,6 +44,12 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   }, [activeId, viewId, canvas.busy, onViewChange])
   const [confirmDelete, setConfirmDelete] = useState(false)
   const active = canvas.active
+  const openWidget = active?.sections.flatMap(section => section.widgets)
+    .find((widget): widget is CanvasProjectBoardWidget => widget.id === openWidgetId && widget.kind === 'inferops.project-board')
+  // An opened widget that the view on screen no longer has (removed, or another view) closes.
+  useEffect(() => {
+    if (openWidgetId !== null && !openWidget && !canvas.busy) onOpenWidgetChange(null)
+  }, [openWidgetId, openWidget, canvas.busy, onOpenWidgetChange])
   const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined).toSorted((a, b) => a.id - b.id)
 
   const createForm = <div className="flex flex-wrap items-end gap-3">
@@ -81,10 +92,12 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
         <p className="text-kumo-subtle">Compose gadgets and InferOps boards into a page. Choose a view, create one, or import a definition from your repository. You can also ask the agent in chat to build a screen for you.</p>
         {createForm}
       </div>}
-      {active && !editing && <>
-        <h1 className="text-lg font-semibold text-kumo-default">{active.title}</h1>
-        <CanvasView definition={active} gadgets={gadgets} overseer={overseer} />
-      </>}
+      {active && !editing && (openWidget
+        ? <CanvasBoardFullView widget={openWidget} viewTitle={active.title} overseer={overseer} onBack={() => onOpenWidgetChange(null)} />
+        : <>
+          <h1 className="text-lg font-semibold text-kumo-default">{active.title}</h1>
+          <CanvasView definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} />
+        </>)}
       {active && editing && <div className="space-y-4">
         {createForm}
         <div className="flex flex-wrap items-center justify-between gap-2">

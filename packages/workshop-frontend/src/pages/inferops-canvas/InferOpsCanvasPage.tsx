@@ -23,7 +23,13 @@ const Centered = ({ children }: { children: React.ReactNode }) =>
   <div className="flex min-h-full flex-col items-center justify-center gap-4 bg-kumo-base px-6 text-center">{children}</div>
 
 /** A workspace's InferOps Canvas: composed views beside its chat, gadgets and InferOps widgets on one page. */
-export const InferOpsCanvasPage = ({ workspaceId, chatId, viewId }: { workspaceId: string; chatId: number | null; viewId: string | null }) => {
+export const InferOpsCanvasPage = ({ workspaceId, chatId, viewId, widgetId }: {
+  workspaceId: string
+  chatId: number | null
+  viewId: string | null
+  /** A board widget of the view opened in its full view. */
+  widgetId: string | null
+}) => {
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
   const { authenticatedApi } = useAuthenticatedApi()
@@ -44,7 +50,12 @@ export const InferOpsCanvasPage = ({ workspaceId, chatId, viewId }: { workspaceI
   const goToWorkspaces = () => navigate({ to: '/workspaces' })
   const selectView = (view: string | null) => navigate({
     to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, replace: true,
-    search: (prev: Record<string, unknown>) => ({ ...prev, view: view ?? undefined }),
+    search: (prev: Record<string, unknown>) => ({ ...prev, view: view ?? undefined, widget: undefined }),
+  })
+  // Opening a widget is a step the back button undoes; closing it replaces that step.
+  const openWidget = (widget: string | null) => navigate({
+    to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, replace: widget === null,
+    search: (prev: Record<string, unknown>) => ({ ...prev, widget: widget ?? undefined }),
   })
   // Blueprint widgets are built by the agent (create the gadget, wire its connection, place it),
   // so the canvas hands the request to a new chat with the user's last-chosen model.
@@ -113,7 +124,7 @@ export const InferOpsCanvasPage = ({ workspaceId, chatId, viewId }: { workspaceI
       <main className={`min-h-0 min-w-0 flex-1 ${mobilePane === 'canvas' ? '' : 'max-md:hidden'}`}>
         <CanvasWorkspacePane key={workspaceId} overseer={overseer.stub} gadgets={gadgets}
           catalog={canvasFeatures.catalog ?? DEFAULT_CANVAS_CATALOG} viewId={viewId} onViewChange={selectView}
-          onAskAgent={askAgent}
+          openWidgetId={widgetId} onOpenWidgetChange={openWidget} onAskAgent={askAgent}
           storage={canvasFeatures.durableViews ? { kind: 'durable', api: overseer.stub } : { kind: 'temporary' }} />
       </main>
     </div>
