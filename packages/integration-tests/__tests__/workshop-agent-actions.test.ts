@@ -122,8 +122,8 @@ it.concurrent("approving every held write applies each and resumes the agent onc
   const [first, second] = await waitForPendingActions(session, 2);
   expect(firstTurn.outcome).toEqual({ status: "completed" });
   expect([first, second]).toMatchObject([
-    { description: { title: "Set the test value to 7" } },
-    { description: { title: "Set the test value to 8" } },
+    { requestedBy: "agent", description: { title: "Set the test value to 7" } },
+    { requestedBy: "agent", description: { title: "Set the test value to 8" } },
   ]);
   expect(await actionState(label)).toEqual({
     pending: [{ id: 1, value: 7 }, { id: 2, value: 8 }],

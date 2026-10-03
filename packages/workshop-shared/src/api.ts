@@ -1973,6 +1973,9 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
  */
 export type ActionState = "pending" | "approved" | "rejected";
 
+/** The kind of caller that asked for an action log entry (see `ActionLogEntry.requestedBy`). */
+export type ActionRequester = "agent" | "person" | "gadget" | "hook";
+
 export type ActionLogEntry = {
   /** Sequential ID number for the action. Counts up from when the workspace was created. */
   id: number;
@@ -1990,6 +1993,14 @@ export type ActionLogEntry = {
   appliedAt?: Date;
 
   state: ActionState;
+
+  /**
+   * What kind of caller asked for this entry: the agent, a person (through the Workshop UI), a
+   * gadget's code, or a hook. An attribution label for display only, never authority; which chat,
+   * gadget or person it was is deliberately not exposed. Absent on records written before callers
+   * were tracked.
+   */
+  requestedBy?: ActionRequester;
 } & ({
   type: "action";
   description: ActionDescription;
