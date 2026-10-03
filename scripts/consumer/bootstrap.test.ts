@@ -101,6 +101,8 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     assert.equal(diagnostic.checks.find(check => check.name === "configuration")?.status, "pass");
     assert.equal(diagnostic.checks.find(check => check.name === "runner")?.status, "error");
     assert.equal(diagnostic.checks.find(check => check.name === "dependencies")?.status, "error");
+    // This bare pin ships no settings table: reported, never an error of its own.
+    assert.equal(diagnostic.checks.find(check => check.name === "settings")?.status, "warning");
     const enabled = JSON.parse(readFileSync(join(clone, "inferos.config.json"), "utf8"));
     enabled.features.composableViews = true;
     writeFileSync(join(clone, "inferos.config.json"), JSON.stringify(enabled));
