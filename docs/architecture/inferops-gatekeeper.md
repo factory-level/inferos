@@ -175,9 +175,10 @@ so every account that has no identity acts with it and observer verification can
 people apart. It never backs a connected person, and the release manifest offers no input for any
 of these vars, so a deployed instance cannot be given them through the deploy wizard.
 
-Startup checks: `run-dev-server.ts` refuses to start when `AUTH_GATEKEEPERS` names `inferops`
-(from the shell, or from a wrapper's `features.inferlabLogin` or `INFEROPS_AUTH`) but the
-gatekeeper is not enabled or `INFERLAB_AUTH_ORIGIN` is unset or malformed, naming the problem. The
+Startup checks: `run-dev-server.ts` refuses to start when `DISABLE_PASSWORD_AUTH=true` leaves no
+gatekeeper allowlisted, or when `AUTH_GATEKEEPERS` names `inferops` (from the shell, or from a
+wrapper's `features.inferlabLogin` or `INFEROPS_AUTH`) but the gatekeeper is not enabled or
+`INFERLAB_AUTH_ORIGIN` is unset or malformed, naming the problem. The
 Workshop backend checks the same allowlist on its first API request
 (`assertAuthGatekeepersConfigured` in `auth/config.ts`): a listed vendor that is unbound or does not
 report `providesAuth` fails every request with a clear message rather than a login page quietly

@@ -149,7 +149,8 @@ const canvasFeatures = consumerConfig?.features
 const inferLabLoginEnabled = consumerConfig ? inferOpsAuthRequested(consumerConfig) : false;
 const inferLabLogin = getInferLabLoginVars(inferLabLoginEnabled, process.env);
 const inferLabLoginError = inferLabLoginStartupError(
-  inferLabLogin, gatekeepers.some(({ name }) => name === INFERLAB_LOGIN_GATEKEEPER));
+  { ...inferLabLogin, DISABLE_PASSWORD_AUTH: process.env.DISABLE_PASSWORD_AUTH },
+  gatekeepers.some(({ name }) => name === INFERLAB_LOGIN_GATEKEEPER));
 if (inferLabLoginError) throw new Error(inferLabLoginError);
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound

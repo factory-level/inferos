@@ -107,20 +107,21 @@ export function authGatekeeperVendors(value: string | undefined): string[] {
 }
 
 /**
- * The reason InferOps sign-in cannot start, or null when it can. Checked before the dev server
- * starts: with `inferops` allowlisted for sign-in, the gatekeeper has to run and has to know the
- * InferLab origin, or the login page would silently offer fewer ways in (none, with password login
- * off) and no error would say why.
+ * The reason sign-in cannot start, or null when it can. Checked before the dev server starts: with
+ * password login off, some gatekeeper has to be allowlisted (the backend would otherwise keep
+ * password login on rather than lock everyone out, silently overriding the setting), and with
+ * `inferops` allowlisted, the gatekeeper has to run and has to know the InferLab origin, or the
+ * login page would silently offer fewer ways in and no error would say why.
  */
 export function inferLabLoginStartupError(settings: {
-  AUTH_GATEKEEPERS?: string; INFERLAB_AUTH_ORIGIN?: string;
+  AUTH_GATEKEEPERS?: string; INFERLAB_AUTH_ORIGIN?: string; DISABLE_PASSWORD_AUTH?: string;
 }, gatekeeperEnabled: boolean): string | null {
   const vendors = authGatekeeperVendors(settings.AUTH_GATEKEEPERS);
-  if (!vendors.includes(INFERLAB_LOGIN_VENDOR)) {
-    // Not asked for. Another sign-in mode has to be on; the backend keeps password login on when
-    // no gatekeeper is allowlisted, so there is no silent lock-out to catch here.
-    return null;
+  if (settings.DISABLE_PASSWORD_AUTH === "true" && vendors.length === 0) {
+    return "DISABLE_PASSWORD_AUTH=true leaves no way to sign in: list a sign-in gatekeeper in " +
+      `AUTH_GATEKEEPERS (for InferOps identity, ${INFERLAB_LOGIN_VENDOR}) or unset DISABLE_PASSWORD_AUTH`;
   }
+  if (!vendors.includes(INFERLAB_LOGIN_VENDOR)) return null;
   if (!gatekeeperEnabled) {
     return `AUTH_GATEKEEPERS lists ${INFERLAB_LOGIN_VENDOR}, but ${INFERLAB_LOGIN_GATEKEEPER} is not enabled; ` +
       `enable it with pnpm canvas enable ${INFERLAB_LOGIN_GATEKEEPER}`;

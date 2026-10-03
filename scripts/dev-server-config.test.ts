@@ -128,8 +128,14 @@ describe("getInferLabLoginVars", () => {
 describe("inferLabLoginStartupError", () => {
   it("passes when InferOps sign-in is not asked for, whatever else is set", () => {
     assert.equal(inferLabLoginStartupError({}, false), null);
-    assert.equal(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "google" }, false), null);
+    assert.equal(inferLabLoginStartupError({ AUTH_GATEKEEPERS: "google", DISABLE_PASSWORD_AUTH: "true" }, false), null);
     assert.equal(inferLabLoginStartupError({ INFERLAB_AUTH_ORIGIN: "nope" }, true), null);
+  });
+
+  it("fails clearly when password login is off and no gatekeeper could sign anyone in", () => {
+    assert.match(inferLabLoginStartupError({ DISABLE_PASSWORD_AUTH: "true" }, true)!, /no way to sign in/);
+    assert.match(inferLabLoginStartupError({ DISABLE_PASSWORD_AUTH: "true", AUTH_GATEKEEPERS: " , " }, true)!, /no way to sign in/);
+    assert.equal(inferLabLoginStartupError({ DISABLE_PASSWORD_AUTH: "false" }, false), null);
   });
 
   it("fails clearly when the gatekeeper is off or the InferLab origin is missing or malformed", () => {

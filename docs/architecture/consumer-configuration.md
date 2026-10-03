@@ -101,7 +101,7 @@ The frontend reads deployment density from its existing server-config context. C
 - It appends `inferops` to the backend's `AUTH_GATEKEEPERS`, keeping vendors the shell lists.
 - It sets the gatekeeper's `INFERLAB_AUTH_ORIGIN` to the shell value, or `http://localhost:8080`.
 
-Then `inferLabLoginStartupError` checks the result, in-repo and in a wrapper alike: with `inferops` allowlisted, `gatekeeper-inferops` must be enabled in the canvas config and `INFERLAB_AUTH_ORIGIN` must be a bare HTTPS origin or HTTP on loopback, else startup stops with the reason. Disabled, both variables pass through from the shell unchanged. Password login is unaffected. See [sign-in](../oauth-signin.md#inferlab).
+Then `inferLabLoginStartupError` checks the result, in-repo and in a wrapper alike: with `DISABLE_PASSWORD_AUTH=true`, some gatekeeper must be allowlisted (the backend would otherwise keep password login on rather than lock everyone out); with `inferops` allowlisted, `gatekeeper-inferops` must be enabled in the canvas config and `INFERLAB_AUTH_ORIGIN` must be a bare HTTPS origin or HTTP on loopback. Otherwise startup stops with the reason. Disabled, both variables pass through from the shell unchanged. Password login is unaffected. See [sign-in](../oauth-signin.md#inferlab).
 
 ## Consumer Workers
 
