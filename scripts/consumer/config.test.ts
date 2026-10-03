@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CAPABILITY_NAMES, LEGACY_FLAG_COMPATIBILITY, inferOpsAuthRequested, initialConsumerConfig, migrateConsumerConfig, parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
+import { CAPABILITY_NAMES, LEGACY_FLAG_COMPATIBILITY, codingRepoIds, inferOpsAuthRequested, initialConsumerConfig, migrateConsumerConfig, parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
 
 const candidate = () => ({
   ...initialConsumerConfig("https://github.com/factory-level/inferos", "a".repeat(40)),
@@ -125,7 +125,10 @@ test("version 2 rejects unknown keys, wrong types and unmet dependencies without
   const flow = parseConsumerConfig(v2({ INFEROPS_CANVAS_STATE_MACHINE: true, INFEROPS_ENABLED: true }));
   assert.equal(flow.schemaVersion === 2 && flow.capabilities.INFEROPS_CANVAS_STATE_MACHINE, true);
   // Independent capabilities need neither HG nor the InferOps integration.
-  for (const name of ["AGENT_DEPLOYMENTS", "CODING_WORKBENCH_ENABLED", "HARNESS_HG_ENABLED"]) parseConsumerConfig(v2({ [name]: true }));
+  for (const name of ["AGENT_DEPLOYMENTS", "HARNESS_HG_ENABLED"]) parseConsumerConfig(v2({ [name]: true }));
+  // Coding dispatch goes through the InferOps gatekeeper, so it needs the integration, not HG.
+  assert.throws(() => parseConsumerConfig(v2({ CODING_WORKBENCH_ENABLED: true })), /^Error: CODING_WORKBENCH_ENABLED requires INFEROPS_ENABLED$/);
+  parseConsumerConfig(v2({ CODING_WORKBENCH_ENABLED: true, INFEROPS_ENABLED: true, HARNESS_HG_ENABLED: false }));
   // Legacy dependency rules still apply in version 2.
   assert.throws(() => parseConsumerConfig({ ...v2(), features: { composableViews: false } }), /durableViews requires composableViews/);
 });
@@ -201,4 +204,48 @@ test("INFEROPS_ENABLED is explicit: migration carries the gatekeeper selection o
   const enabled = resolveConsumerConfig(v2({ INFEROPS_ENABLED: true }));
   assert.equal(enabled.provenance.capabilities?.INFEROPS_ENABLED, "override");
   assert.equal(inferOpsAuthRequested(enabled.config), false);
+});
+
+const REPO_A = "4a000000-0000-4000-8000-00000000000a";
+const REPO_B = "40000000-0000-4000-8000-000000000002";
+const workbench = (repos: unknown) => ({ ...v2({ INFEROPS_ENABLED: true, CODING_WORKBENCH_ENABLED: true }), codingWorkbench: { repos } });
+
+test("codingWorkbench is a version 2 allowlist whose ids alone reach the gatekeeper", () => {
+  const config = parseConsumerConfig(workbench([
+    { repoId: REPO_A, path: "/home/dev/acme/web", testCommands: ["pnpm test"], baseRef: "main" },
+    { repoId: REPO_B, path: "C:\\work\\api", testCommands: ["pnpm lint", "pnpm test"] },
+  ]));
+  assert.equal(config.schemaVersion === 2 && config.codingWorkbench?.repos.length, 2);
+  assert.equal(codingRepoIds(config), `${REPO_A},${REPO_B}`);
+  // Omitted, nothing is allowed; version 1 never allows anything and cannot declare it.
+  assert.equal(codingRepoIds(parseConsumerConfig(v2())), "");
+  assert.equal(codingRepoIds(parseConsumerConfig(candidate())), "");
+  assert.throws(() => parseConsumerConfig({ ...candidate(), codingWorkbench: { repos: [] } }), /codingWorkbench: requires schemaVersion 2/);
+  // An empty allowlist is valid: coding can be on with nothing to dispatch yet.
+  assert.equal(codingRepoIds(parseConsumerConfig(workbench([]))), "");
+});
+
+test("codingWorkbench rejects malformed entries without echoing their values", () => {
+  const entry = { repoId: REPO_A, path: "/srv/repo", testCommands: ["pnpm test"] };
+  for (const [repos, message] of [
+    ["nope", /codingWorkbench.repos: expected an array/],
+    [[{ ...entry, repoId: "sk-secret-not-a-uuid" }], /repos\[0\].repoId: expected lowercase UUID/],
+    [[{ ...entry, repoId: REPO_A.toUpperCase() }], /expected lowercase UUID/],
+    [[entry, { ...entry }], /repos\[1\].repoId: listed twice/],
+    [[{ ...entry, path: "relative/secret-dir" }], /path: expected absolute local path/],
+    [[{ ...entry, testCommands: [] }], /testCommands: expected 1 to 20 commands/],
+    [[{ ...entry, testCommands: ["pnpm test\nrm -rf /"] }], /testCommands\[0\]: expected one line/],
+    [[{ ...entry, baseRef: "--upload-pack=secret" }], /baseRef: expected git ref name/],
+    [[{ ...entry, baseRef: "a..b" }], /baseRef: expected git ref name/],
+    [[{ repoId: REPO_A, testCommands: ["x"] }], /path: required/],
+    [[{ ...entry, token: "sk-secret" }], /expected exactly/],
+  ] as const) {
+    assert.throws(() => parseConsumerConfig(workbench(repos)), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, message);
+      assert.doesNotMatch(error.message, /secret/);
+      return true;
+    });
+  }
+  assert.throws(() => parseConsumerConfig({ ...workbench([]), codingWorkbench: { repos: [], extra: 1 } }), /codingWorkbench: expected exactly repos/);
 });

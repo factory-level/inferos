@@ -18,7 +18,8 @@ Create documents from [`_template.md`](_template.md).
 | [Operate mode](operate-mode.md) | `packages/workshop-shared/src/operate-session.ts`, `packages/workshop-shared/src/api.ts`, `packages/workshop-backend/src/user.ts`, `packages/workshop-backend/src/server.ts` | One operate session per person: a page state replayed from an ordered event log, live across tabs, plus an owner-only workspace for its operate chat. |
 | [Vertical extension research and decision matrix](vertical-extension-research.md) | `docs/blueprints.md`, `packages/gatekeeper-kit`, `packages/gatekeeper-context`, `packages/gatekeeper-scheduler`, `packages/mcp-shared` | Make extension choices from documented native capabilities and concrete workflow requirements instead of assuming every vertical requires a kernel fork. |
 | [Consumer configuration](consumer-configuration.md) | `scripts/consumer`, bootstrap skill, admin configuration/API, Workshop theme | Bootstrap, wrapper blueprints, profile initialization and theme fallback; remaining adapters tracked |
-| [Customer feature capabilities](feature-capabilities.md) | `scripts/consumer/config.ts`, `scripts/consumer/runtime.ts`, `custom-gatekeepers/gatekeeper-inferops/src/enablement.ts` | Schema version 2 vocabulary; `INFEROPS_ENABLED` and `INFEROPS_AUTH` supported, six capabilities unsupported |
+| [Customer feature capabilities](feature-capabilities.md) | `scripts/consumer/config.ts`, `scripts/consumer/runtime.ts`, `custom-gatekeepers/gatekeeper-inferops/src/enablement.ts`, `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | Schema version 2 vocabulary; `INFEROPS_ENABLED`, `INFEROPS_AUTH` and `CODING_WORKBENCH_ENABLED` supported, five capabilities unsupported |
+| [Local coding workflows and agent dispatch](local-coding-workflows.md) | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts`, `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx`, `scripts/consumer/config.ts`, `scripts/dev-server-config.ts` | Governed coding dispatch through the InferOps gatekeeper behind `CODING_WORKBENCH_ENABLED`; the runner itself is InferOps' |
 
 ## Designs with no implementation yet
 
@@ -26,7 +27,6 @@ These draft designs from the 2026-10-02 baseline have no architecture page becau
 
 | Design | Current state |
 | --- | --- |
-| [Local coding workflows](../design/local-coding-workflows.md) | No code. `CODING_WORKBENCH_ENABLED` is accepted by the configuration schema and reported unsupported ([feature capabilities](feature-capabilities.md)). Tracked by [#48](https://github.com/factory-level/inferos/issues/48). |
 | [Customer OS onboarding](../design/customer-onboarding.md) | No intake or onboarding code. The wrapper bootstrap it builds on is described in [consumer configuration](consumer-configuration.md). Tracked by [#82](https://github.com/factory-level/inferos/issues/82). |
 | [Connection packages and reviewed fork updates](../design/connection-extensions.md) | No connection-package, scaffolder or upgrade code. Its precursors are the fork's `custom-gatekeepers/` root ([local development](local-development.md)) and the wrapper Worker manifest ([consumer configuration](consumer-configuration.md#consumer-workers)). Tracked by [#51](https://github.com/factory-level/inferos/issues/51). |
 | [External-agent platform integrations](../design/agent-platform-integrations.md) | No code. `HARNESS_HG_ENABLED` is accepted by the configuration schema and reported unsupported. Tracked by [#52](https://github.com/factory-level/inferos/issues/52). |

@@ -23,14 +23,14 @@ import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
 import {
   INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, getDevRouterAssets, getDevServerConfig,
-  getInferLabLoginVars, inferLabLoginStartupError, resolveInferOpsEnabled,
+  getInferLabLoginVars, inferLabLoginStartupError, resolveCodingWorkbenchEnabled, resolveInferOpsEnabled,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
 import { parseConsumerConfig } from "./consumer/config.ts";
-import { inferOpsAuthRequested } from "./consumer/config.ts";
+import { codingRepoIds, inferOpsAuthRequested } from "./consumer/config.ts";
 import { unsupportedCapabilities } from "./consumer/runtime.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
@@ -151,6 +151,16 @@ const inferOpsEnabled = resolveInferOpsEnabled({
   canvasSelected: enabledCustomGatekeepers.has(INFEROPS_GATEKEEPER),
   shell: process.env.INFEROPS_ENABLED,
 });
+// Coding dispatch through the gatekeeper: a version 2 wrapper's CODING_WORKBENCH_ENABLED switches it
+// (and its codingWorkbench.repos is the allowlist, passed on as ids only, never paths); otherwise
+// off unless the shell turns it on, with the shell's CODING_WORKBENCH_REPOS as the allowlist.
+const codingWorkbenchEnabled = resolveCodingWorkbenchEnabled({
+  capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.CODING_WORKBENCH_ENABLED : null,
+  inferOpsEnabled,
+  shell: process.env.CODING_WORKBENCH_ENABLED,
+});
+const codingWorkbenchRepos = consumerConfig?.schemaVersion === 2
+  ? codingRepoIds(consumerConfig) : process.env.CODING_WORKBENCH_REPOS ?? "";
 const gatekeepers = findGatekeepers(ROOT).filter(({ dir, name }) =>
   basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustomGatekeepers.has(name));
 // In-repo there is no inferos.config.json to carry feature flags, so a canvas config is the switch
@@ -586,6 +596,8 @@ const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined
   [INFERLAB_LOGIN_GATEKEEPER]: {
     INFERLAB_AUTH_ORIGIN: inferLabLogin.INFERLAB_AUTH_ORIGIN,
     INFEROPS_ENABLED: inferOpsEnabled,
+    CODING_WORKBENCH_ENABLED: codingWorkbenchEnabled,
+    CODING_WORKBENCH_REPOS: codingWorkbenchRepos,
   },
 };
 

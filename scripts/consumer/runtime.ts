@@ -83,7 +83,9 @@ export const capabilitySources: Record<CapabilityName, string | null> = {
   PUBLISH_CLOUDFLAREOS_WIDGET: null,
   PUBLISH_CLOUDFLAREOS_APP: null,
   AGENT_DEPLOYMENTS: null,
-  CODING_WORKBENCH_ENABLED: null,
+  // The gatekeeper's coding-dispatch switch and repository allowlist (#69, #70): off refuses new
+  // dispatch bindings and every call on existing ones (DISABLED).
+  CODING_WORKBENCH_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts",
 };
 
 const installed = (upstream: string, source: string | null) => source !== null && existsSync(join(upstream, source));

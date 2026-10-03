@@ -1,5 +1,6 @@
-// The actions a project binding records between proposal and decision: a transition, an issue
-// create, or an issue update. Each is stored in the facet's KV under `action:<n>` (inferops.ts)
+// The actions a binding records between proposal and decision: on a board binding a transition, an
+// issue create or an issue update; on a coding-dispatch binding a dispatch or a run cancel. Each is
+// stored in the facet's KV under `action:<n>` (inferops.ts)
 // and carries the exact request it will send when applied, plus a fingerprint of that request.
 //
 // - Records written before creates and updates existed have no `kind`; `readAction` reads them as
@@ -56,8 +57,38 @@ export type UpdateAction = ActionBase & {
   appliedRevision?: Revision;
 };
 
+/** A proposed hand-off of a software issue to the coding runner. */
+export type DispatchAction = ActionBase & {
+  kind: "dispatch";
+  issueId: string;
+  identifier: string;
+  repoId: string;
+  /** The repository's slug, for messages. */
+  repoSlug: string;
+  baseRef?: string;
+  expectedRevision: Revision;
+  /** When it was proposed (ISO), for the provisional run shown until it is decided. */
+  proposedAt: string;
+  /** The queued run's id, once applied. */
+  runId?: string;
+};
+
+/** A proposed stop of a queued or running run. */
+export type CancelRunAction = ActionBase & {
+  kind: "cancel";
+  runId: string;
+  /** The run's issue key, for messages. */
+  identifier: string;
+};
+
 /** Any recorded action. */
-export type ActionRecord = TransitionAction | CreateAction | UpdateAction;
+export type ActionRecord = TransitionAction | CreateAction | UpdateAction | DispatchAction | CancelRunAction;
+
+/** An action a board binding records. */
+export type BoardAction = TransitionAction | CreateAction | UpdateAction;
+
+/** An action a coding-dispatch binding records. */
+export type CodingAction = DispatchAction | CancelRunAction;
 
 /** A pending change to an existing issue: what simulation overlays and what blocks another. */
 export type PendingIssueChange = TransitionAction | UpdateAction;
@@ -66,7 +97,9 @@ export type PendingIssueChange = TransitionAction | UpdateAction;
 export type StagedAction =
   | Omit<TransitionAction, "actionId" | "status">
   | Omit<CreateAction, "actionId" | "status">
-  | Omit<UpdateAction, "actionId" | "status">;
+  | Omit<UpdateAction, "actionId" | "status">
+  | Omit<DispatchAction, "actionId" | "status">
+  | Omit<CancelRunAction, "actionId" | "status">;
 
 /** A stored record, with legacy records (no `kind`) read as the transitions they are. */
 export function readAction(raw: unknown): ActionRecord | undefined {
@@ -91,7 +124,17 @@ export function requestOf(record: StagedAction | ActionRecord): unknown {
     case "update":
       return { kind: record.kind, issueId: record.issueId, changes: record.changes,
                expectedRevision: record.expectedRevision };
+    case "dispatch":
+      return { kind: record.kind, issueId: record.issueId, action: "code", repoId: record.repoId,
+               baseRef: record.baseRef, expectedRevision: record.expectedRevision };
+    case "cancel":
+      return { kind: record.kind, runId: record.runId };
   }
+}
+
+/** Whether an action belongs to a coding-dispatch binding. */
+export function isCodingAction(record: ActionRecord): record is CodingAction {
+  return record.kind === "dispatch" || record.kind === "cancel";
 }
 
 /** JSON with object keys sorted and undefined members dropped, so equal requests hash equally. */

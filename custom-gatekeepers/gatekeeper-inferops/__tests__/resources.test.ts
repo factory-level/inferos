@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import dispatchUi from "../src/configurator/dispatch-ui";
 import projectUi from "../src/configurator/project-ui";
 import type { InferOpsProjectConfiguratorRpc } from "../src/configurator/project-configurator-types";
-import { parseProjectBoardUrl, projectBoardUrl } from "../src/resources";
+import { parseProjectBoardUrl, parseProjectDispatchUrl, projectBoardUrl } from "../src/resources";
 
 const URL = "inferops://acme.operations/project/board/ENG";
 const DEMO = "inferops://demo.local/project/board/DEMO";
@@ -66,5 +67,30 @@ describe("project board URLs", () => {
     expect(await projectUi.resourceUrl({ values, ui: uiWith("demo.local") })).toBe(DEMO);
     await expect(projectUi.resourceUrl({ values, ui: uiWith(null) }))
       .rejects.toThrow("Enter your organization and choose a workspace.");
+  });
+});
+
+describe("coding-dispatch URLs", () => {
+  const DISPATCH = "inferops://acme.operations/project/dispatch/ENG";
+  const DEMO_DISPATCH = "inferops://demo.local/project/dispatch/DEMO";
+
+  it("never parses as a board, nor a board as a dispatch", () => {
+    expect(() => parseProjectBoardUrl(DISPATCH)).toThrow(EXPECTED);
+    expect(() => parseProjectDispatchUrl(URL)).toThrow(/project\/dispatch\/<KEY>/);
+  });
+
+  // The dispatch picker duplicates the grammar too; keep it in step.
+  it.each([DISPATCH, DEMO_DISPATCH])("round-trips %s through the dispatch picker", async url => {
+    const values = await dispatchUi.initialValuesFromResourceUrl({
+      resourceUrl: url, resourceUrlPattern: "inferops://*/project/dispatch/*", ui: uiWith(null),
+    });
+    const { tenant, workspace, projectKey } = parseProjectDispatchUrl(url);
+    expect(values).toEqual({ tenant, workspace, projectKey });
+    const built = await dispatchUi.resourceUrl({ values: { ...dispatchUi.initial, ...values }, ui: uiWith(null) });
+    expect(parseProjectDispatchUrl(built)).toEqual(parseProjectDispatchUrl(url));
+    // A board URL does not prefill the dispatch picker.
+    expect(await dispatchUi.initialValuesFromResourceUrl({
+      resourceUrl: URL, resourceUrlPattern: "inferops://*/project/dispatch/*", ui: uiWith(null),
+    })).toEqual({});
   });
 });

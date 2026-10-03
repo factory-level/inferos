@@ -1,7 +1,7 @@
 ---
 title: Customer feature capabilities
 status: draft
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Customer feature capabilities
@@ -52,6 +52,7 @@ Provider and runtime adapter versions, resource references, policies, publicatio
 - `INFEROPS_CANVAS_STATE_MACHINE` requires the InferOps integration and valid configured flow and runtime dependencies.
 - Native deployments do not require HG.
 - Local coding requires neither HG nor native ChatGPT subscription inference.
+- `CODING_WORKBENCH_ENABLED` requires `INFEROPS_ENABLED`: coding dispatch reaches the runner only through the InferOps gatekeeper.
 - Validate each dependency explicitly. Never turn on another flag silently.
 
 ### Enforcement

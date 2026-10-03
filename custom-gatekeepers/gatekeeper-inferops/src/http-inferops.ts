@@ -12,6 +12,9 @@
 //   one request.
 // - The board response also lists every workspace project and each card's lease and run, and the
 //   issue response the description and comments; the parsers copy only the `Issue` fields.
+// - Coding runs carry an issue id, not a project: a run is in scope only when its issue is, checked
+//   the same way, and a run of another project is answered exactly as an unknown one. The runs list
+//   is the workspace's, filtered here to the bound project's issues.
 // - `listWorkspaceSlugs` reads the workspace slugs a connect stores beside the person's memberships
 //   (`GET /workspaces`), since a resource URL names a workspace by slug.
 // - Nothing here logs a token, a header or a body, and InferOps' own error text is never passed on:
@@ -26,11 +29,14 @@
 
 import { createLogger } from "@gadgets/observability/logger";
 import {
-  InferOpsError, type InferOpsClient, type InferOpsErrorCode, type IssueChanges,
-  type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
+  InferOpsError, type DispatchRequest, type InferOpsClient, type InferOpsErrorCode,
+  type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
+  type RepoRecord, type RunRecord,
 } from "./inferops-client";
 import { isSlug } from "./resources";
-import type { Issue, Project, Revision, State, StateGroup, Workflow } from "./types";
+import type {
+  Issue, Project, Revision, RunPatch, RunResult, RunStatus, State, StateGroup, Workflow,
+} from "./types";
 
 type LogFields = { vendorId: string; operation: string; status: number; code: string };
 const logger = createLogger<LogFields>({ component: "gatekeeper.inferops.http", vendorId: "inferops" });
@@ -122,10 +128,18 @@ const WIRE_CODE = /^[A-Z_]{1,40}$/;
 const STATE_GROUPS: readonly StateGroup[] = ["backlog", "unstarted", "started", "completed", "cancelled"];
 const WORKFLOWS: readonly Workflow[] = ["content", "software"];
 const PRIORITIES: readonly Issue["priority"][] = ["urgent", "high", "medium", "low", "none"];
+const RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "succeeded", "failed", "cancelled", "unknown"];
+/** How many of the workspace's newest runs `listRuns` reads before keeping the project's. */
+const RUN_LIST_LIMIT = 200;
 
 // One message for "no such issue" and "issue of another project", so a caller cannot probe.
 function issueNotFound(): InferOpsError {
   return new InferOpsError("NOT_FOUND", "No such issue in this project.");
+}
+
+// The same for runs: an unknown run and a run of another project's issue read alike.
+function runNotFound(): InferOpsError {
+  return new InferOpsError("NOT_FOUND", "No such run in this project.");
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +220,68 @@ function parseIssue(value: unknown): Issue {
   };
 }
 
+function parseRepo(value: unknown): RepoRecord {
+  const repo = record(value, "repo");
+  if (typeof repo.enabled !== "boolean") throw new Malformed("repo.enabled is not valid");
+  return {
+    id: text(repo.id, "repo.id", UUID).toLowerCase(),
+    slug: text(repo.slug, "repo.slug"),
+    defaultBaseRef: text(repo.defaultBaseRef, "repo.defaultBaseRef"),
+    enabled: repo.enabled,
+  };
+}
+
+const count = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+/**
+ * The patch a result names, or undefined. The field is new in InferOps and still settling, so a
+ * shape that does not match is left out rather than failing the whole run read.
+ */
+function parsePatch(value: unknown): RunPatch | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const patch = value as Record<string, unknown>;
+  if (typeof patch.path !== "string" || typeof patch.sha256 !== "string" || !count(patch.files) ||
+      !count(patch.insertions) || !count(patch.deletions)) {
+    return undefined;
+  }
+  return {
+    path: patch.path, sha256: patch.sha256, files: patch.files as number,
+    insertions: patch.insertions as number, deletions: patch.deletions as number,
+  };
+}
+
+/** A run's result: the summary is required; the optional fields are copied only when well formed. */
+function parseResult(value: unknown): RunResult | null {
+  if (value === null) return null;
+  const result = record(value, "run.result");
+  const optional = (key: "branch" | "commitSha" | "prUrl" | "testSummary") =>
+    typeof result[key] === "string" ? { [key]: result[key] } : {};
+  const patch = parsePatch(result.patch);
+  return {
+    summary: text(result.summary, "run.result.summary"),
+    ...optional("testSummary"), ...(patch ? { patch } : {}),
+    ...optional("branch"), ...optional("commitSha"), ...optional("prUrl"),
+  };
+}
+
+/** A run, before its issue's key is known; requestedBy, the lease generation and the rest are dropped. */
+function parseRun(value: unknown): Omit<RunRecord, "issueIdentifier"> {
+  const run = record(value, "run");
+  return {
+    id: text(run.id, "run.id", UUID).toLowerCase(),
+    issueId: text(run.issueId, "run.issueId", UUID).toLowerCase(),
+    repoId: text(run.repoId, "run.repoId", UUID).toLowerCase(),
+    status: oneOf(run.status, RUN_STATUSES, "run.status"),
+    baseRef: nullable(run.baseRef, "run.baseRef"),
+    externalRunId: nullable(run.externalRunId, "run.externalRunId"),
+    result: parseResult(run.result),
+    error: nullable(run.error, "run.error"),
+    queuedAt: text(run.queuedAt, "run.queuedAt"),
+    startedAt: nullable(run.startedAt, "run.startedAt"),
+    finishedAt: nullable(run.finishedAt, "run.finishedAt"),
+  };
+}
+
 /** A board response for `project`: its states and issues only, never the workspace project list. */
 function parseBoard(body: unknown, project: Project): ProjectSnapshot {
   const board = record(body, "response");
@@ -254,6 +330,7 @@ const FAILURE_DETAIL: Record<InferOpsErrorCode, string> = {
   IDEMPOTENCY_CONFLICT: "This idempotency key was already used for a different change.",
   INVALID_REQUEST: "InferOps rejected the request as malformed.",
   CONFLICT: "InferOps refused the change in the issue's current condition.",
+  RUN_ACTIVE: "The issue already has a queued or running coding run.",
   UNAUTHORIZED: "InferOps rejected this connection's credential. Reconnect InferOps.",
   FORBIDDEN: "This connection is not permitted to do that in InferOps.",
   UNAVAILABLE: "InferOps could not be reached or returned an unusable response.",
@@ -267,7 +344,8 @@ function failureCode(status: number, code: string | null): InferOpsErrorCode {
   if (status === 403) return "FORBIDDEN";
   if (status === 404) return "NOT_FOUND";
   if (status === 409) {
-    return code === "STALE_REVISION" || code === "WORKFLOW_MISMATCH" ? code : "CONFLICT";
+    return code === "STALE_REVISION" || code === "WORKFLOW_MISMATCH" || code === "RUN_ACTIVE"
+      ? code : "CONFLICT";
   }
   if (status === 400) return "INVALID_REQUEST";
   return "UNAVAILABLE";
@@ -444,6 +522,32 @@ export function openHttpInferOpsClient(
     return issue;
   }
 
+  /** The run, provided its issue belongs to `projectKey`'s project; otherwise the one NOT_FOUND. */
+  async function readRun(projectKey: string, runId: string): Promise<RunRecord> {
+    if (!UUID.test(runId)) throw runNotFound();
+    let body: unknown;
+    try {
+      body = await request("run.get", { method: "GET", path: `/project/runs/${runId}` });
+    } catch (error) {
+      if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw runNotFound();
+      throw error;
+    }
+    const run = parsed("run.get", body, raw => {
+      const found = parseRun(record(raw, "response").run);
+      if (found.id !== runId.toLowerCase()) throw new Malformed("another run was returned");
+      return found;
+    });
+    // InferOps would hand out a run of any project in the workspace; its issue decides here.
+    let issue: Issue;
+    try {
+      issue = await readIssue(projectKey, run.issueId);
+    } catch (error) {
+      if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw runNotFound();
+      throw error;
+    }
+    return { ...run, issueIdentifier: issue.identifier };
+  }
+
   return {
     async listProjects(): Promise<ProjectSummary[]> {
       return (await projects()).map(({ identifier, name }) => ({ identifier, name }));
@@ -557,6 +661,93 @@ export function openHttpInferOpsClient(
           throw new Malformed("another issue was returned");
         }
         return updated;
+      });
+    },
+
+    async listRepos(): Promise<RepoRecord[]> {
+      const body = await request("repo.list", { method: "GET", path: "/project/repos" });
+      return parsed("repo.list", body, raw => list(record(raw, "response").repos, "repos").map(parseRepo));
+    },
+
+    async listRuns(projectKey: string, issueId?: string): Promise<RunRecord[]> {
+      // The project's issues and their keys: one issue (scope-checked), or the whole board.
+      const keys = new Map<string, string>();
+      if (issueId !== undefined) {
+        const issue = await readIssue(projectKey, issueId);
+        keys.set(issue.id.toLowerCase(), issue.identifier);
+      } else {
+        const bound = await project(projectKey);
+        const board = await request("project.board", {
+          method: "GET", path: `/project/board?projectId=${bound.id}`,
+        });
+        for (const issue of parsed("project.board", board, raw => parseBoard(raw, bound)).issues) {
+          keys.set(issue.id.toLowerCase(), issue.identifier);
+        }
+      }
+      const query = new URLSearchParams({ limit: String(RUN_LIST_LIMIT) });
+      if (issueId !== undefined) query.set("issueId", issueId);
+      const body = await request("run.list", { method: "GET", path: `/project/runs?${query}` });
+      const runs = parsed("run.list", body, raw => list(record(raw, "response").runs, "runs").map(parseRun));
+      return runs.flatMap(run => {
+        const issueIdentifier = keys.get(run.issueId);
+        return issueIdentifier === undefined ? [] : [{ ...run, issueIdentifier }];
+      });
+    },
+
+    readRun,
+
+    async dispatchIssue(
+      projectKey: string, issueId: string, dispatch: DispatchRequest, idempotencyKey: string,
+    ): Promise<RunRecord> {
+      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+      if (!REVISION.test(dispatch.expectedRevision)) {
+        throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
+      }
+      if (!UUID.test(dispatch.repoId)) {
+        throw new InferOpsError("INVALID_REQUEST", "The repository id must be a UUID.");
+      }
+      // InferOps would dispatch an issue of any project in the workspace; refuse it here first.
+      const issue = await readIssue(projectKey, issueId);
+      let body: unknown;
+      try {
+        body = await request("issue.dispatch", {
+          method: "POST",
+          path: `/project/issues/${issueId}/dispatch`,
+          // Only the named fields: the `code` action, the repository, the ref and the revision.
+          body: {
+            action: "code", repoId: dispatch.repoId, baseRef: dispatch.baseRef,
+            expectedRevision: dispatch.expectedRevision,
+          },
+          idempotencyKey,
+        });
+      } catch (error) {
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw issueNotFound();
+        throw error;
+      }
+      return parsed("issue.dispatch", body, raw => {
+        const run = parseRun(record(raw, "response").run);
+        if (run.issueId !== issueId.toLowerCase()) throw new Malformed("a run of another issue was returned");
+        return { ...run, issueIdentifier: issue.identifier };
+      });
+    },
+
+    async cancelRun(projectKey: string, runId: string, idempotencyKey: string): Promise<RunRecord> {
+      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+      // The run must be one of this project's before InferOps is asked to stop it.
+      const current = await readRun(projectKey, runId);
+      let body: unknown;
+      try {
+        body = await request("run.cancel", {
+          method: "POST", path: `/project/runs/${runId}/cancel`, body: {}, idempotencyKey,
+        });
+      } catch (error) {
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw runNotFound();
+        throw error;
+      }
+      return parsed("run.cancel", body, raw => {
+        const run = parseRun(record(raw, "response").run);
+        if (run.id !== current.id) throw new Malformed("another run was returned");
+        return { ...run, issueIdentifier: current.issueIdentifier };
       });
     },
 

@@ -7,22 +7,35 @@
 //
 // One `MockInferOps` Durable Object per (host, account) holds a private copy of the seed fixture,
 // so each auto-provisioned account starts from the same demo board and its moves stay its own.
+//
+// Coding dispatch: two seeded repositories (one enabled, one disabled) and a run ledger with
+// InferOps' dispatch guards (software workflow, an open state, no active run, an enabled repository,
+// the expected revision) and per-key replay. A dispatch advances the issue's revision, as InferOps'
+// move to Queued does, but leaves its state: the demo board has no Queued state. Nothing runs the
+// queued runs; `setRunStatus` stands in for the runner.
 
 import { DurableObject } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/observability/logger";
 import SEED from "./fixtures/demo-board.json";
 import {
-  InferOpsError, type InferOpsClient, type IssueChanges, type NewIssueRequest, type ProjectSnapshot,
-  type ProjectSummary,
+  InferOpsError, type DispatchRequest, type InferOpsClient, type IssueChanges, type NewIssueRequest,
+  type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord,
 } from "./inferops-client";
-import type { Issue, Revision } from "./types";
+import type { Issue, Revision, RunResult, RunStatus } from "./types";
 
 /** The only InferOps host the mock serves; resource URLs naming another host are refused. */
 export const MOCK_HOST = "demo.local";
 
 const DATA_KEY = "data:v1";
+const RUNS_KEY = "runs:v1";
 const IDEMPOTENCY_PREFIX = "idem:";
+
+/** The demo workspace's repositories. Only ids reach a dispatch; there is nothing to clone. */
+export const MOCK_REPOS: readonly RepoRecord[] = [
+  { id: "40000000-0000-4000-8000-000000000001", slug: "demo-app", defaultBaseRef: "main", enabled: true },
+  { id: "40000000-0000-4000-8000-000000000002", slug: "legacy-app", defaultBaseRef: "main", enabled: false },
+];
 
 const logger = createLogger<{ vendorId: string; projectKey: string; replayed: boolean }>({
   component: "gatekeeper.inferops", vendorId: "inferops",
@@ -32,10 +45,10 @@ const logger = createLogger<{ vendorId: string; projectKey: string; replayed: bo
 type MockData = { projects: ProjectSnapshot[]; descriptions?: Record<string, string | null> };
 
 /**
- * What one idempotency key was used for, and the issue it produced. The operation is its JSON
- * text, built in a fixed member order, so two uses compare as strings.
+ * What one idempotency key was used for, and what it produced (an issue, or a run). The operation is
+ * its JSON text, built in a fixed member order, so two uses compare as strings.
  */
-type IdempotencyRecord = { operation: string; result: Issue };
+type IdempotencyRecord<T = Issue> = { operation: string; result: T };
 
 function notFound(): InferOpsError {
   // One message for "no such issue" and "issue of another project", so a caller cannot probe.
@@ -96,7 +109,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
 
     // Replay first: a retried apply must succeed even though its own first attempt already moved
     // the revision on.
-    const previous = this.#replay(idempotencyKey, operation);
+    const previous = this.#replayed<Issue>(idempotencyKey, operation);
     if (previous) return previous;
 
     const data = this.#data();
@@ -126,7 +139,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
     const operation = JSON.stringify(["create", projectKey, request.title,
       request.description ?? null, request.priority ?? null, request.stateId, request.workflow ?? null]);
-    const previous = this.#replay(idempotencyKey, operation);
+    const previous = this.#replayed<Issue>(idempotencyKey, operation);
     if (previous) return previous;
 
     const data = this.#data();
@@ -170,7 +183,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     }
     const operation = JSON.stringify(["update", projectKey, issueId, title ?? null,
       description === undefined ? "(unchanged)" : description, priority ?? null, expectedRevision]);
-    const previous = this.#replay(idempotencyKey, operation);
+    const previous = this.#replayed<Issue>(idempotencyKey, operation);
     if (previous) return previous;
 
     const data = this.#data();
@@ -186,9 +199,117 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return this.#commit(data, issue, idempotencyKey, operation, projectKey);
   }
 
+  #runs(): RunRecord[] {
+    return this.ctx.storage.kv.get<RunRecord[]>(RUNS_KEY) ?? [];
+  }
+
+  #run(projectKey: string, runId: string): RunRecord {
+    const project = this.#project(this.#data(), projectKey);
+    const run = this.#runs().find(r => r.id === runId);
+    if (!run || !project.issues.some(i => i.id === run.issueId)) {
+      throw new InferOpsError("NOT_FOUND", "No such run in this project.");
+    }
+    return run;
+  }
+
+  #saveRun(run: RunRecord): void {
+    this.ctx.storage.kv.put(RUNS_KEY, [run, ...this.#runs().filter(r => r.id !== run.id)]);
+  }
+
+  async listRepos(): Promise<RepoRecord[]> {
+    return MOCK_REPOS.map(repo => ({ ...repo }));
+  }
+
+  async listRuns(projectKey: string, issueId?: string): Promise<RunRecord[]> {
+    const issues = this.#project(this.#data(), projectKey).issues;
+    if (issueId !== undefined && !issues.some(i => i.id === issueId)) throw notFound();
+    return this.#runs().filter(run => issueId === undefined
+      ? issues.some(i => i.id === run.issueId) : run.issueId === issueId);
+  }
+
+  async readRun(projectKey: string, runId: string): Promise<RunRecord> {
+    return this.#run(projectKey, runId);
+  }
+
+  async dispatchIssue(
+    projectKey: string, issueId: string, request: DispatchRequest, idempotencyKey: string,
+  ): Promise<RunRecord> {
+    if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+    if (!/^\d+$/.test(request.expectedRevision)) {
+      throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
+    }
+    const operation = JSON.stringify(["dispatch", projectKey, issueId, request.repoId,
+      request.baseRef ?? null, request.expectedRevision]);
+    // Replay before every guard, as InferOps does: a retry gets the run it already queued, not
+    // RUN_ACTIVE for it.
+    const previous = this.#replayed<RunRecord>(idempotencyKey, operation);
+    if (previous) return previous;
+
+    const data = this.#data();
+    const project = this.#project(data, projectKey);
+    const issue = project.issues.find(i => i.id === issueId);
+    if (!issue) throw notFound();
+    if (issue.workflow !== "software") {
+      throw new InferOpsError("WORKFLOW_MISMATCH", `${issue.identifier} is content work; only software issues can be coded.`);
+    }
+    const group = project.states.find(s => s.id === issue.stateId)?.group;
+    if (group === "completed" || group === "cancelled") {
+      throw new InferOpsError("CONFLICT", `${issue.identifier} is already ${group}.`);
+    }
+    if (this.#runs().some(r => r.issueId === issueId && (r.status === "queued" || r.status === "running"))) {
+      throw new InferOpsError("RUN_ACTIVE", `${issue.identifier} already has an active run.`);
+    }
+    const repo = MOCK_REPOS.find(r => r.id === request.repoId);
+    if (!repo?.enabled) {
+      throw new InferOpsError("INVALID_REQUEST", "The repository is not enrolled in this workspace, or is disabled.");
+    }
+    if (issue.revision !== request.expectedRevision) {
+      throw new InferOpsError("STALE_REVISION",
+        `${issue.identifier} is at revision ${issue.revision}, not ${request.expectedRevision}.`);
+    }
+    const run: RunRecord = {
+      id: crypto.randomUUID(), issueId, issueIdentifier: issue.identifier, repoId: repo.id,
+      status: "queued", baseRef: request.baseRef ?? null, externalRunId: null, result: null,
+      error: null, queuedAt: new Date().toISOString(), startedAt: null, finishedAt: null,
+    };
+    issue.revision = (BigInt(issue.revision) + 1n).toString();
+    this.ctx.storage.kv.put(DATA_KEY, data);
+    this.#saveRun(run);
+    this.#remember(idempotencyKey, operation, run);
+    return run;
+  }
+
+  async cancelRun(projectKey: string, runId: string, idempotencyKey: string): Promise<RunRecord> {
+    if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+    const operation = JSON.stringify(["cancel", projectKey, runId]);
+    const previous = this.#replayed<RunRecord>(idempotencyKey, operation);
+    if (previous) return previous;
+    const run = this.#run(projectKey, runId);
+    if (run.status !== "queued" && run.status !== "running") {
+      throw new InferOpsError("CONFLICT", `The run is already ${run.status}.`);
+    }
+    const cancelled: RunRecord = {
+      ...run, status: run.status === "queued" ? "cancelled" : "unknown",
+      error: `Cancelled while ${run.status}`, finishedAt: new Date().toISOString(),
+    };
+    this.#saveRun(cancelled);
+    this.#remember(idempotencyKey, operation, cancelled);
+    return cancelled;
+  }
+
+  /**
+   * Stand in for the runner: move a run of this account's demo data to `status`, with a result
+   * when it succeeded. There is no runner for demo data; tests and demos drive runs with this.
+   */
+  async setRunStatus(runId: string, status: RunStatus, result?: RunResult): Promise<void> {
+    const run = this.#runs().find(r => r.id === runId);
+    if (!run) throw new InferOpsError("NOT_FOUND", "No such run.");
+    this.#saveRun({ ...run, status, result: result ?? run.result });
+  }
+
   /** The result a key already produced for this operation; throws if it produced another's. */
-  #replay(idempotencyKey: string, operation: string): Issue | undefined {
-    const previous = this.ctx.storage.kv.get<IdempotencyRecord>(IDEMPOTENCY_PREFIX + idempotencyKey);
+  #replayed<T>(idempotencyKey: string, operation: string): T | undefined {
+    const previous = this.ctx.storage.kv.get<IdempotencyRecord<T>>(IDEMPOTENCY_PREFIX + idempotencyKey);
     if (!previous) return undefined;
     if (previous.operation !== operation) {
       throw new InferOpsError(
@@ -198,13 +319,16 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return previous.result;
   }
 
+  #remember<T>(idempotencyKey: string, operation: string, result: T): void {
+    this.ctx.storage.kv.put<IdempotencyRecord<T>>(IDEMPOTENCY_PREFIX + idempotencyKey, { operation, result });
+  }
+
   /** Advance the issue's revision, store the data and the key's result, and return the issue. */
   #commit(data: MockData, issue: Issue, idempotencyKey: string, operation: string,
           projectKey: string): Issue {
     issue.revision = (BigInt(issue.revision) + 1n).toString();
     this.ctx.storage.kv.put(DATA_KEY, data);
-    this.ctx.storage.kv.put<IdempotencyRecord>(
-      IDEMPOTENCY_PREFIX + idempotencyKey, { operation, result: issue });
+    this.#remember(idempotencyKey, operation, issue);
     logger.info("write applied", { event: "mock.write.applied", projectKey, replayed: false });
     return issue;
   }
@@ -239,6 +363,12 @@ export function openInferOpsClient(
     updateIssue: (projectKey, issueId, changes, expectedRevision, idempotencyKey) =>
       stub.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey),
     hasProject: projectKey => stub.hasProject(projectKey),
+    listRepos: () => stub.listRepos(),
+    listRuns: (projectKey, issueId) => stub.listRuns(projectKey, issueId),
+    readRun: (projectKey, runId) => stub.readRun(projectKey, runId),
+    dispatchIssue: (projectKey, issueId, request, idempotencyKey) =>
+      stub.dispatchIssue(projectKey, issueId, request, idempotencyKey),
+    cancelRun: (projectKey, runId, idempotencyKey) => stub.cancelRun(projectKey, runId, idempotencyKey),
     forget: () => stub.forget(),
   };
 }

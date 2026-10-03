@@ -16,7 +16,8 @@ declare namespace Cloudflare {
     // Populates Cloudflare.Exports, the type of ctx.exports.
     mainModule: typeof import("./inferops.js");
     // Durable Object classes exposed as namespaces on ctx.exports.
-    durableNamespaces: "MockInferOps" | "InferOpsProjectGatekeeper" | "InferLabLogin" | "InferOpsCredentials";
+    durableNamespaces: "MockInferOps" | "InferOpsProjectGatekeeper" | "InferOpsDispatchGatekeeper" |
+      "InferLabLogin" | "InferOpsCredentials";
   }
 
   // Deployment vars the committed wrangler.jsonc deliberately leaves unset.
@@ -33,5 +34,15 @@ declare namespace Cloudflare {
      * The dev server always sets it; unset counts as on (see enablement.ts).
      */
     INFEROPS_ENABLED?: string;
+    /**
+     * `"true"` or `"false"`: whether coding dispatch is on (capability `CODING_WORKBENCH_ENABLED`).
+     * Unset counts as off (see enablement.ts); it also needs `INFEROPS_ENABLED`.
+     */
+    CODING_WORKBENCH_ENABLED?: string;
+    /**
+     * The InferOps repository ids the wrapper's `codingWorkbench.repos` allowlists, comma-separated.
+     * Ids only, never local paths. Unset allows no repository.
+     */
+    CODING_WORKBENCH_REPOS?: string;
   }
 }
