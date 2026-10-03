@@ -199,14 +199,26 @@ export function parseConsumerConfig(input: unknown): ConsumerConfig {
   return resolveConsumerConfig(input).config;
 }
 
+/** What a migration needs to know that a version 1 file cannot say. */
+export interface MigrationContext {
+  /**
+   * Whether the wrapper runs the InferOps gatekeeper today: version 1 selects it through
+   * `inferos.canvas.json`, version 2 through `INFEROPS_ENABLED`, so the caller reads that file and
+   * says. Omitted, the integration is written off.
+   */
+  inferOpsGatekeeperSelected?: boolean;
+}
+
 /**
  * Rewrite a version 1 file as version 2 without changing resolved behaviour. Every written setting is
  * kept as written, omitted ones still inherit, and no legacy flag turns a capability on: all eight are
- * written as explicit `false` so a later default or profile change cannot enable one unreviewed.
+ * written explicitly so a later default or profile change cannot enable one unreviewed. They are
+ * `false` except `INFEROPS_ENABLED`, which carries over whether the gatekeeper ran (`context`).
  */
-export function migrateConsumerConfig(input: unknown): Record<string, unknown> {
+export function migrateConsumerConfig(input: unknown, context: MigrationContext = {}): Record<string, unknown> {
   if (resolveConsumerConfig(input).config.schemaVersion !== 1) throw new Error("schemaVersion: migration expects version 1");
-  return { ...structuredClone(input as Record<string, unknown>), schemaVersion: 2, capabilities: { ...capabilityDefaults } };
+  const capabilities = { ...capabilityDefaults, INFEROPS_ENABLED: context.inferOpsGatekeeperSelected === true };
+  return { ...structuredClone(input as Record<string, unknown>), schemaVersion: 2, capabilities };
 }
 
 /** Initial explicit settings; materialize the operations profile so later profile changes cannot silently alter a wrapper. */

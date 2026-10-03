@@ -12,6 +12,7 @@ import {
   getWranglerPortFromBackendHost,
   inferLabLoginStartupError,
   isInferLabAuthOrigin,
+  resolveInferOpsEnabled,
 } from "./dev-server-config.ts";
 
 describe("run-local asset topology", () => {
@@ -156,5 +157,27 @@ describe("inferLabLoginStartupError", () => {
     for (const bad of [undefined, "", "http://auth.inferlab.io", "https://auth.inferlab.io/sso", "https://u:p@auth.inferlab.io", "not a url"]) {
       assert.equal(isInferLabAuthOrigin(bad), false, String(bad));
     }
+  });
+});
+
+describe("resolveInferOpsEnabled", () => {
+  it("keeps a version 1 wrapper and the plain checkout on unless the shell turns it off", () => {
+    for (const canvasSelected of [true, false]) {
+      assert.equal(resolveInferOpsEnabled({ capability: null, canvasSelected, shell: undefined }), "true");
+      assert.equal(resolveInferOpsEnabled({ capability: null, canvasSelected, shell: "true" }), "true");
+      assert.equal(resolveInferOpsEnabled({ capability: null, canvasSelected, shell: "false" }), "false");
+    }
+    assert.throws(() => resolveInferOpsEnabled({ capability: null, canvasSelected: true, shell: "off" }),
+      /INFEROPS_ENABLED must be "true" or "false"/);
+  });
+
+  it("switches a version 2 wrapper with its capability, whatever the shell says", () => {
+    assert.equal(resolveInferOpsEnabled({ capability: true, canvasSelected: true, shell: "false" }), "true");
+    assert.equal(resolveInferOpsEnabled({ capability: false, canvasSelected: true, shell: "true" }), "false");
+    assert.equal(resolveInferOpsEnabled({ capability: false, canvasSelected: true, shell: undefined }), "false");
+    // Off with the gatekeeper not installed is consistent; on without it is a conflict.
+    assert.equal(resolveInferOpsEnabled({ capability: false, canvasSelected: false, shell: undefined }), "false");
+    assert.throws(() => resolveInferOpsEnabled({ capability: true, canvasSelected: false, shell: undefined }),
+      /INFEROPS_ENABLED is on, but inferos.canvas.json leaves gatekeeper-inferops out/);
   });
 });

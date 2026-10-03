@@ -212,6 +212,7 @@ sign-in flag (default `http://localhost:8080`, the local InferLab stack).
 
 | Var | Meaning |
 | --- | --- |
+| `INFEROPS_ENABLED` | `"true"` or `"false"`: the integration switch (below). Unset counts as on, so deployments that predate it keep working; anything else is off. `pnpm dev-server` always sets it. |
 | `INFERLAB_AUTH_ORIGIN` | InferLab central-auth origin (bare HTTPS, or HTTP on loopback). Set, it turns on sign-in and makes every account a connected person; the exchange, refresh and logout go here. Unset means demo accounts. |
 | `INFEROPS_BASE_URL` | InferOps API base URL connected people call with their own session. It never appears in a resource URL; the account's display name shows its host. Unset, the InferLab origin serves as the API too (locally one server serves both). |
 | `INFEROPS_API_TOKEN` | Stopgap bearer token (a user access token or an `iex_` service-account key) for accounts with no identity. Requires the base URL, the workspace id and the workspace slug, else an error names the missing variable. |
@@ -224,6 +225,19 @@ sign-in flag (default `http://localhost:8080`, the local InferLab stack).
 so every account that has no identity acts with it and observer verification cannot tell those
 people apart. It never backs a connected person, and the release manifest offers no input for any
 of these vars, so a deployed instance cannot be given them through the deploy wizard.
+
+### Integration switch
+
+`src/enablement.ts` enforces the `INFEROPS_ENABLED` capability ([#33](https://github.com/factory-level/inferos/issues/33)) inside the gatekeeper, so it does not depend on the UI. While the var is off:
+
+- `InferOpsAccount.getGatekeeperClassFor` refuses before reading the URL, so no new binding is created.
+- `clientFor` returns a client that checks the switch on **every call**, not when a binding or session is made (`whileInferOpsEnabled`). Every call through an existing binding or session (`readBoard`, `openIssue`, `read`, `transition`), observer admission (`addObserver` through the verifier), the project picker and `revertAction` fail with `DISABLED: InferOps is turned off for this deployment.` The proxy guards every client method except `forget`, including methods added later, so an account can still delete its own data (`revoke`).
+- `applyAction` of a queued move fails with a message saying InferOps is turned off; the move is not applied and its record stays pending. `rejectAction` still works, since it only discards.
+- Nothing is deleted: bindings, queued moves, credentials and accounts are kept. Turning it back on restores exactly those; it creates no binding, grant or account. Sign-in (`connectAccount`), account description and `createAccount` are unaffected: an account is an id with no data until a binding is made, and bindings are refused.
+
+`DISABLED` is an `InferOpsErrorCode` (`inferops-client.ts`) the gatekeeper raises itself; no InferOps response maps to it. The agent-facing types (`src/types.d.ts`, the design's API verbatim) do not list it; the error message names it. The canvas board card shows it as its own state ([canvas](inferops-canvas.md#board-data-adapter)). `__tests__/enablement.test.ts` covers a refused binding, every session call on an existing binding refused and served again once on, a queued move never applied while off and applied once on, revocation while off and observer admission refused.
+
+Who sets the var: `run-dev-server.ts` resolves it with `resolveInferOpsEnabled` (`scripts/dev-server-config.ts`). A version 2 wrapper sets it from its capability, whatever the shell says, and turning the capability on while `inferos.canvas.json` leaves the gatekeeper out is a startup error. A version 1 wrapper, or this checkout without a wrapper, keeps today's behaviour (on), unless the shell sets `INFEROPS_ENABLED=false` to try the off state; any other shell value fails startup. `inferos.canvas.json` still decides whether the gatekeeper is installed at all; installed and off, it keeps running so its sign-in works and existing board cards say InferOps is off instead of losing their connection. The release manifest does not set the var, so a cloud install is on (see Divergences).
 
 Startup checks: `run-dev-server.ts` refuses to start when `DISABLE_PASSWORD_AUTH=true` leaves no
 gatekeeper allowlisted, or when `AUTH_GATEKEEPERS` names `inferops` (from the shell, or from a
@@ -244,6 +258,9 @@ missing a button.
   vars lends those accounts one deployment-wide token, for local development only.
 - The release manifest has no deploy input for `INFERLAB_AUTH_ORIGIN` or `INFEROPS_BASE_URL`, so
   cloud installs can't turn on InferLab sign-in from the wizard yet.
+- The release manifest has no deploy input for `INFEROPS_ENABLED` and leaves it unset, so a cloud
+  install always has the integration on. Turning it off there needs the var set on the deployed
+  worker by hand until the deploy service carries the wrapper's resolved capability.
 - The tenant label of a resource URL is checked for syntax only. The design asks for it to match
   the identity's tenant slug when the identity carries one; InferLab's identity carries only the
   tenant id, so that comparison never applies today.

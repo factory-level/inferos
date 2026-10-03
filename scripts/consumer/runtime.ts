@@ -74,7 +74,8 @@ const unavailableFeatures = (config: ReturnType<typeof parseConsumerConfig>, ups
  * it on is an error. A mock or unflagged implementation does not count: nothing reads the flag.
  */
 export const capabilitySources: Record<CapabilityName, string | null> = {
-  INFEROPS_ENABLED: null,
+  // The gatekeeper's switch: off refuses new bindings and every call on existing ones (DISABLED).
+  INFEROPS_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/enablement.ts",
   INFEROPS_CANVAS_STATE_MACHINE: null,
   HARNESS_HG_ENABLED: null,
   // The InferLab sign-in and per-person connect flows; `features.inferlabLogin` is its v1 spelling.
@@ -346,7 +347,7 @@ async function main() {
   const blueprints = consumerBlueprintDirectory(root);
   if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;
   else delete env.BUNDLED_BLUEPRINTS_DIR;
-  const child = spawn(process.execPath, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...(Object.values(config.features).some(Boolean) ? ["--consumer-root", root] : [])], {
+  const child = spawn(process.execPath, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...(config.schemaVersion === 2 || Object.values(config.features).some(Boolean) ? ["--consumer-root", root] : [])], {
     cwd: upstream, stdio: "inherit", env,
   });
   const { relayTermination } = await import(pathToFileURL(join(upstream, "scripts/relay-termination.ts")).href);
