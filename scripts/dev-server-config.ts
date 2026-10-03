@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { WranglerConfig } from "./release/manifest-lib.ts";
+import type { ServiceBinding, WranglerConfig } from "./release/manifest-lib.ts";
 
 /** Keep run-local asset ownership and route precedence identical to the production router. */
 export function getDevRouterAssets(router: WranglerConfig, routerDirectory: string): NonNullable<WranglerConfig["assets"]> {
@@ -7,6 +7,46 @@ export function getDevRouterAssets(router: WranglerConfig, routerDirectory: stri
     throw new Error("The production router must declare its ASSETS binding and asset directory");
   }
   return { ...router.assets, directory: resolve(routerDirectory, router.assets.directory) };
+}
+
+/** The backend and router binding of a gatekeeper Worker: "gatekeeper-github" -> "GATEKEEPER_GITHUB". */
+export function gatekeeperBinding(name: string): string {
+  return name.toUpperCase().replaceAll("-", "_");
+}
+
+/**
+ * Where a gatekeeper's OAuth callbacks and UI are served: under `/gatekeeper/<slug>` on the same
+ * public origin as the frontend and `/api`, which the router maps back from {@link gatekeeperBinding}.
+ */
+export function gatekeeperBaseUrl(backendHost: string, name: string): string {
+  return `http://${backendHost}/gatekeeper/${name.slice("gatekeeper-".length)}`;
+}
+
+/**
+ * The dev router's config: the committed `dev-router` plus a service binding per running gatekeeper
+ * (pinned or wrapper-owned alike) and per wrapper extension Worker, and optionally the production
+ * router's assets. The router discovers its routes from these bindings, so this is the whole of the
+ * public-origin topology. An absent optional part (no extensions, no wrapper gatekeepers, no assets)
+ * simply contributes nothing. Two bindings with one name are rejected.
+ */
+export function getDevRouterConfig(base: WranglerConfig, parts: {
+  gatekeepers: readonly string[];
+  consumerWorkers: readonly { binding: string; name: string }[];
+  assets?: WranglerConfig["assets"];
+}): WranglerConfig {
+  const services: ServiceBinding[] = [...base.services ?? []];
+  const add = (binding: string, service: string) => {
+    if (services.some(existing => existing.binding === binding)) throw new Error(`Dev router binding collision: ${binding}`);
+    services.push({ binding, service });
+  };
+  for (const name of parts.gatekeepers) add(gatekeeperBinding(name), name);
+  for (const worker of parts.consumerWorkers) add(worker.binding, worker.name);
+  return {
+    ...base,
+    ...(parts.assets ? { assets: parts.assets } : {}),
+    services,
+    vars: { ...base.vars, CUSTOM_CLOUDFLARE_CODE: parts.consumerWorkers.length ? "true" : "false" },
+  };
 }
 
 /**

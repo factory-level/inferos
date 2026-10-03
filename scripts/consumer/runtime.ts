@@ -259,7 +259,7 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|skills|skills-upload|skills-install|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|skills|skills-upload|skills-install|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -288,6 +288,12 @@ async function main() {
     const script = join(upstream, "scripts/consumer/extensions.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support custom Workers");
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
+  if (command === "gatekeepers") {
+    const script = join(upstream, "scripts/consumer/gatekeepers.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision does not support wrapper gatekeepers; use a reviewed newer pin");
+    execFileSync(process.execPath, [script, root, ...process.argv.slice(3)], { cwd: upstream, stdio: "inherit" });
     return;
   }
   if (command === "profile") {
@@ -340,8 +346,17 @@ async function main() {
   }
   await assertStartable(root, { config, upstream, blocked, modifiedUpstream });
   await assertLocalPortAvailable(config.local.port);
+  await relayPinned(upstream, [join(upstream, "scripts/run-local.ts"), ...devLaunchArgs(root, config)], launchEnv(root, config));
+}
+
+/**
+ * The pinned `run-local.ts` arguments `dev` passes: the wrapper's own `local.port`, so two wrappers
+ * listen apart, and `--consumer-root` whenever the wrapper has anything for the launcher to read
+ * (a version 2 file's capabilities, or any feature flag, `customCloudflareCode` included).
+ */
+export function devLaunchArgs(root: string, config: ConsumerConfig): string[] {
   const consumerRoot = config.schemaVersion === 2 || Object.values(config.features).some(Boolean) ? ["--consumer-root", root] : [];
-  await relayPinned(upstream, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...consumerRoot], launchEnv(root, config));
+  return ["--port", String(config.local.port), ...consumerRoot];
 }
 
 /** Everything `dev` and `local start` refuse to start without; the port is checked by each launcher itself. */
