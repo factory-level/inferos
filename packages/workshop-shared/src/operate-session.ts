@@ -19,6 +19,23 @@ export const MAX_OPERATE_FLOW_STEPS = 32;
 export const MAX_OPERATE_FLOW_TITLE_LENGTH = 120;
 
 /**
+ * An approval named by the page: one entry of a workspace's action log. Action ids count up per
+ * workspace (`ActionLogEntry.id`), so the workspace is part of the name. Naming an approval grants
+ * nothing and resolves nothing.
+ */
+export type OperateApprovalRef = {
+  workspaceId: string;
+  /** The action's `ActionLogEntry.id` in that workspace: a non-negative integer. */
+  actionId: number;
+};
+
+/**
+ * How a reviewed approval ended, as the page reports it: `applied` (approved, and the gatekeeper
+ * applied it), `rejected`, or `failed` (approved, but the gatekeeper's apply failed).
+ */
+export type OperateApprovalOutcome = "applied" | "rejected" | "failed";
+
+/**
  * Something opened in an operate session, by reference only. A reference identifies a target but
  * grants nothing: it is rendered through the viewer's own access, and shows as unavailable if the
  * viewer can no longer open it.
@@ -63,6 +80,16 @@ export type OperatePageState = {
    * canvas" state); the working set and focus are kept, and return when the flow is exited.
    */
   flow: OperateFlowRun | null;
+  /**
+   * The pending approval the page shows for review, or null. Presentation only: the action's real
+   * state is in its workspace's action log.
+   */
+  reviewing: OperateApprovalRef | null;
+  /**
+   * The outcome of the last approval the page reported resolved, or null. Presentation only: it is
+   * what the page displays, not a record of what happened to the action.
+   */
+  lastApprovalOutcome: (OperateApprovalRef & { outcome: OperateApprovalOutcome }) | null;
 };
 
 /** A change to an operate session's page state. Events change presentation only. */
@@ -84,7 +111,18 @@ export type OperateEvent =
   /** Show another step of the running flow. */
   | { type: "goToStep"; index: number }
   /** Stop running the flow and return to the working set. */
-  | { type: "exitFlow" };
+  | { type: "exitFlow" }
+  /**
+   * Show a pending approval for review, replacing any approval already under review. Presentation
+   * only: it never approves, rejects or applies anything.
+   */
+  | { type: "reviewApproval"; approval: OperateApprovalRef }
+  /**
+   * Record how an approval ended, for display, and stop reviewing it if it is under review. It
+   * resolves nothing: an action is resolved only through its workspace's `approveAction` /
+   * `rejectAction`, and the gatekeeper's apply result is the truth this event reports.
+   */
+  | { type: "approvalResolved"; approval: OperateApprovalRef; outcome: OperateApprovalOutcome };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -112,6 +150,8 @@ export const INITIAL_OPERATE_PAGE: OperatePageState = {
   chatOpen: true,
   appPresentation: "app",
   flow: null,
+  reviewing: null,
+  lastApprovalOutcome: null,
 };
 
 /** Thrown by `applyOperateEvent` for an event that is invalid in the current state. */
@@ -135,6 +175,17 @@ function checkIds(ids: string[]): void {
       throw new OperateEventError(`Reference ids must be 1-${MAX_OPERATE_ID_LENGTH} characters.`);
     }
   }
+}
+
+function checkApproval(approval: OperateApprovalRef): void {
+  checkIds([approval.workspaceId]);
+  if (!Number.isSafeInteger(approval.actionId) || approval.actionId < 0) {
+    throw new OperateEventError("An action id must be a non-negative integer.");
+  }
+}
+
+function sameApproval(a: OperateApprovalRef, b: OperateApprovalRef): boolean {
+  return a.workspaceId === b.workspaceId && a.actionId === b.actionId;
 }
 
 /**
@@ -201,6 +252,21 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
     case "exitFlow": {
       if (!state.flow) throw new OperateEventError("No flow is running in this session.");
       return { ...state, flow: null };
+    }
+    case "reviewApproval": {
+      checkApproval(event.approval);
+      let { workspaceId, actionId } = event.approval;
+      return { ...state, reviewing: { workspaceId, actionId } };
+    }
+    case "approvalResolved": {
+      checkApproval(event.approval);
+      let { workspaceId, actionId } = event.approval;
+      let reviewing = state.reviewing && sameApproval(state.reviewing, event.approval)
+          ? null
+          : state.reviewing;
+      return {
+        ...state, reviewing, lastApprovalOutcome: { workspaceId, actionId, outcome: event.outcome },
+      };
     }
   }
 }

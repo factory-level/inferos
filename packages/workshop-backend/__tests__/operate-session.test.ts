@@ -7,11 +7,13 @@ import {
   OperateEventError,
   replayOperateEvents,
   type OperateEvent,
+  type OperatePageState,
   type OperateRef,
 } from "@gadgets/workshop-shared/operate-session";
 
 const screen = (screenId: string, workspaceId = "ws1"): OperateRef =>
   ({ type: "screen", workspaceId, screenId });
+const approval = (actionId: number, workspaceId = "ws1") => ({ workspaceId, actionId });
 
 describe("operate page state machine", () => {
   it("opens, focuses and closes references, moving focus to the latest remaining one", () => {
@@ -102,5 +104,64 @@ describe("operate page state machine", () => {
     expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
         start(Array.from({ length: MAX_OPERATE_FLOW_STEPS + 1 }, (_, i) => `s${i}`)))).toThrow(OperateEventError);
     expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, start([""]))).toThrow(OperateEventError);
+  });
+
+  describe("approval review", () => {
+    it("reviewing then resolving the same approval clears the review and records the outcome", () => {
+      let state = applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "reviewApproval", approval: approval(7) });
+      expect(state.reviewing).toEqual(approval(7));
+
+      state = applyOperateEvent(state, { type: "approvalResolved", approval: approval(7), outcome: "applied" });
+      expect(state.reviewing).toBeNull();
+      expect(state.lastApprovalOutcome).toEqual({ ...approval(7), outcome: "applied" });
+    });
+
+    it("resolving another approval records its outcome but keeps the one under review", () => {
+      let state = replayOperateEvents([
+        { type: "reviewApproval", approval: approval(7) },
+        { type: "approvalResolved", approval: approval(7, "ws2"), outcome: "failed" },
+        { type: "approvalResolved", approval: approval(8), outcome: "rejected" },
+      ]);
+      expect(state.reviewing).toEqual(approval(7));
+      expect(state.lastApprovalOutcome).toEqual({ ...approval(8), outcome: "rejected" });
+    });
+
+    it("reviewing another approval replaces the one under review", () => {
+      let state = replayOperateEvents([
+        { type: "reviewApproval", approval: approval(7) },
+        { type: "reviewApproval", approval: approval(9) },
+      ]);
+      expect(state.reviewing).toEqual(approval(9));
+    });
+
+    it("rejects malformed approval references", () => {
+      for (let bad of [approval(-1), approval(1.5), approval(Number.NaN), approval(2 ** 53), approval(1, "")]) {
+        expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "reviewApproval", approval: bad }))
+            .toThrow(OperateEventError);
+        expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
+            { type: "approvalResolved", approval: bad, outcome: "applied" })).toThrow(OperateEventError);
+      }
+    });
+
+    it("applies to a page stored before approvals existed once it is filled from the initial page", () => {
+      // How the user DO reads a stored snapshot: missing fields come from INITIAL_OPERATE_PAGE.
+      let { reviewing: _r, lastApprovalOutcome: _o, ...old } =
+          replayOperateEvents([{ type: "open", ref: screen("a") }]);
+      let stored: OperatePageState = { ...INITIAL_OPERATE_PAGE, ...old };
+      expect(stored.reviewing).toBeNull();
+      expect(stored.lastApprovalOutcome).toBeNull();
+      let state = applyOperateEvent(stored, { type: "approvalResolved", approval: approval(3), outcome: "applied" });
+      expect(state.reviewing).toBeNull();
+      expect(state.focus).toEqual(screen("a"));
+    });
+
+    it("replays a log written before approvals existed with no review and no outcome", () => {
+      let state = replayOperateEvents([
+        { type: "open", ref: screen("a") },
+        { type: "setChatOpen", open: false },
+      ]);
+      expect(state.reviewing).toBeNull();
+      expect(state.lastApprovalOutcome).toBeNull();
+    });
   });
 });
