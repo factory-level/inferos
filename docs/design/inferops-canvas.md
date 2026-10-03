@@ -1,7 +1,7 @@
 ---
 title: InferOps canvas and transactional widgets
 status: draft
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # InferOps canvas and transactional widgets
@@ -82,6 +82,16 @@ Tracking issue: [#28](https://github.com/factory-level/inferos/issues/28) (`canv
 - Use small/large boards and repeated widgets under recorded device/network conditions; agree numeric budgets from evidence.
 - Address full-board payload limits explicitly; propose cursor/delta contracts upstream if necessary.
 - Prove duplicate widgets share reads, offscreen work is bounded, stale polling does not clobber edits and performance meets the agreed budgets.
+
+### Host the InferMind Wiki beside the Kanban
+
+Tracking issue: [#87](https://github.com/factory-level/inferos/issues/87); MVP decision of 2026-10-02 in [#1](https://github.com/factory-level/inferos/issues/1) (InferOps Kanban and the InferMind Wiki, hosted by InferOS).
+
+- Register a Wiki widget kind whose reference is one InferMind workspace's Wiki, `inferops://<tenant>.<workspace>/knowledge/wiki` (owner decision, 2026-10-02), with an optional first page. Like a board, it is resolved through a separately granted connection and authorizes nothing.
+- Show the page tree and a page's sections as Markdown, never rendering raw HTML. `inferops://` board and issue references that stand alone as a paragraph render as live embeds through the shared board adapter, resolved with the viewer's own connections, so they show the same issue identity, state and revision as the Kanban; a reference the workspace holds no connection to shows as not connected, with its text.
+- Propose section edits through the gatekeeper's approval path at the version read, and never show an edit as saved before the Wiki shows it applied.
+- Let a person compare the page with the text an agent reads.
+- Test denied, missing, stale, partially failing, revoked and wrong-tenant references, and that the agent text equals the content shown.
 
 ### Later: add maps using the shared widget contract
 
