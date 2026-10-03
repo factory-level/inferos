@@ -259,7 +259,7 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|skills|skills-upload|skills-install|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|skills|skills-upload|skills-install|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -296,6 +296,14 @@ async function main() {
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
     return;
   }
+  if (command === "local") {
+    const script = join(upstream, "scripts/local/lifecycle.ts");
+    if (!existsSync(script)) throw new Error("Pinned InferOS revision does not support the local lifecycle (pnpm local); use a reviewed newer pin, or pnpm dev");
+    const args = process.argv.slice(3);
+    if (args[0] === "start") await assertStartable(root, { config, upstream, blocked, modifiedUpstream });
+    await relayPinned(upstream, [script, ...localLifecycleArgs(root, args)], launchEnv(root, config));
+    return;
+  }
   if (command === "skills" || command === "skills-upload") {
     const script = join(upstream, command === "skills" ? "scripts/consumer/skills.ts" : "packages/workshop-backend/scripts/upload-consumer-skills.ts");
     if (!existsSync(script)) throw new Error("Pinned InferOS revision does not support skill packs; use a reviewed newer pin");
@@ -330,26 +338,64 @@ async function main() {
     console.log(JSON.stringify({ ok: true, operation: "setup", pending }));
     return;
   }
-  const requested = unavailableFeatures(config, upstream);
+  await assertStartable(root, { config, upstream, blocked, modifiedUpstream });
+  await assertLocalPortAvailable(config.local.port);
+  const consumerRoot = config.schemaVersion === 2 || Object.values(config.features).some(Boolean) ? ["--consumer-root", root] : [];
+  await relayPinned(upstream, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...consumerRoot], launchEnv(root, config));
+}
+
+/** Everything `dev` and `local start` refuse to start without; the port is checked by each launcher itself. */
+async function assertStartable(root: string, { config, upstream, blocked, modifiedUpstream }: Pick<ReturnType<typeof checkConsumer>, "config" | "upstream" | "blocked" | "modifiedUpstream">) {
   if (blocked.length) throw new Error(`Enabled capabilities are not supported by this installation: ${blocked.join(", ")}. No server was started.`);
   if (!await pinnedSchemaSupported(root, upstream, config)) throw new Error(`Pinned revision does not support ${unsupportedSchema}. No server was started.`);
-  if (requested.length || config.inferops.mode === "remote") {
+  if (unavailableFeatures(config, upstream).length || config.inferops.mode === "remote") {
     throw new Error("Requested consumer runtime adapters are not implemented; use check for details. No server was started.");
   }
   if (config.features.customCloudflareCode && !existsSync(join(upstream, "scripts/consumer/extensions.ts"))) {
     throw new Error("Pinned revision does not support custom Workers");
   }
   await validateConsumerFixture(root, upstream);
-  await assertLocalPortAvailable(config.local.port);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
   console.error("Starting the native Workshop baseline. InferOps board data is mocked by the InferOps gatekeeper; profile:init is a separate administrator operation.");
+}
+
+/** The wrapper's port and blueprint directory, which take precedence over the shell's. */
+function launchEnv(root: string, config: ConsumerConfig): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, VITE_BACKEND_HOST: `localhost:${config.local.port}` };
   const blueprints = consumerBlueprintDirectory(root);
   if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;
   else delete env.BUNDLED_BLUEPRINTS_DIR;
-  const child = spawn(process.execPath, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...(config.schemaVersion === 2 || Object.values(config.features).some(Boolean) ? ["--consumer-root", root] : [])], {
-    cwd: upstream, stdio: "inherit", env,
-  });
+  return env;
+}
+
+/**
+ * Point the pinned lifecycle operator at this wrapper. It runs from the pinned checkout, whose own
+ * `inferos.canvas.json` is not the wrapper's, so `start` serves the wrapper (`--consumer-root`, after
+ * any run-local flags) and `seed` opens the wrapper's first screen template unless one is named.
+ */
+export function localLifecycleArgs(root: string, args: readonly string[]): string[] {
+  const separator = args.indexOf("--");
+  const own = separator === -1 ? [...args] : args.slice(0, separator);
+  const passthrough = separator === -1 ? [] : args.slice(separator + 1);
+  if (own[0] === "start") passthrough.push("--consumer-root", root);
+  if (own[0] === "seed" && !own.some(arg => arg === "--screen" || arg.startsWith("--screen="))) {
+    const screen = firstScreenTemplate(root);
+    if (screen) own.push("--screen", screen);
+  }
+  return passthrough.length ? [...own, "--", ...passthrough] : own;
+}
+
+/** The first screen template id in the wrapper's `inferos.canvas.json`; the dev server validates the file itself. */
+function firstScreenTemplate(root: string): string | undefined {
+  try {
+    const id = JSON.parse(readFileSync(join(root, "inferos.canvas.json"), "utf8"))?.screens?.[0]?.id;
+    return typeof id === "string" ? id : undefined;
+  } catch { return undefined; }
+}
+
+/** Run a pinned script in the foreground; this process exits the way it does. */
+async function relayPinned(upstream: string, args: string[], env: NodeJS.ProcessEnv) {
+  const child = spawn(process.execPath, args, { cwd: upstream, stdio: "inherit", env });
   const { relayTermination } = await import(pathToFileURL(join(upstream, "scripts/relay-termination.ts")).href);
   relayTermination(child);
 }
