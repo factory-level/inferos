@@ -89,7 +89,7 @@ Every report and headline passes through `redact`, which replaces the value of e
 
 ## Divergences from Design
 
-- The runner's patch-result mode, local worktree, environment allowlist, test evidence, pause on login or quota failure and retention are InferOps work in [factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327) (factory-level/inferops#2330 and #2332, not merged when this was written). The lifecycle here targets that contract; it has only run against the mock CLI.
+- The runner's patch-result mode, local worktree, environment allowlist, test evidence, pause on login or quota failure and retention are InferOps work in [factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327) (factory-level/inferops#2330 and #2332, merged to InferOps `develop` on 2026-10-03). The lifecycle here targets that contract; it has only run against the mock CLI, and no signed-in patch run has been executed.
 - The pause file is cleared by hand; there is no `runner resume` command.
 - The design names binding the dispatch to source and workflow revisions. A dispatch binds the issue revision, repository, base ref, project and caller; there is no source commit or workflow revision in InferOps' dispatch request.
 - The design's states include waiting for input and quota or login blocked. Runs report InferOps' six states; a failed run's `reasonCode` (`AUTH_BLOCKED`, `QUOTA_BLOCKED`) is shown as blocked, and `TESTS_FAILED` as failed tests. There is no waiting-for-input state.
