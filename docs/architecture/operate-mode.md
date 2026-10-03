@@ -41,20 +41,23 @@ A session can run a **flow**: `startFlow` copies an ordered list of one workspac
 
 Flows are authored per workspace and stored in its Overseer (`flows` collection), next to the canvases whose ids are a flow's steps. The flow methods need build access and both view flags, exactly like the canvas methods, and the use-role capability denies them. A flow is saved only over canvases that exist in that workspace, in the author's order; a step may repeat. Replacing or deleting compares the revision and rejects a stale one with the canvas conflict error. The store never touches a session: a client reads a flow and dispatches `startFlow` with its steps, so the kernel does not check that a run's steps match a stored flow, and a step whose canvas was deleted later is for the client to show as unavailable.
 
-A stored snapshot may predate a page-state field. The user DO fills missing fields from `INITIAL_OPERATE_PAGE` whenever it reads the snapshot, so such a session reads as if it always had the field.
+A session can show an **approval** under review. `reviewApproval` names one pending action as `{workspaceId, actionId}` (the workspace's `ActionLogEntry.id`, a non-negative integer, since action ids count up per workspace) and sets `reviewing`, replacing any approval already under review. `approvalResolved` records `{workspaceId, actionId, outcome}` (`applied`, `rejected` or `failed`) as `lastApprovalOutcome` and clears `reviewing` only if it names the same approval. Both events change presentation only: they never approve, reject or apply anything. An action is resolved only through its workspace's `approveAction` / `rejectAction`, the gatekeeper's apply result is the truth `approvalResolved` reports, and the reducer does not check either event against the action log.
+
+A stored snapshot may predate a page-state field. The user DO fills missing fields from `INITIAL_OPERATE_PAGE` whenever it reads the snapshot, so such a session reads as if it always had the field (a session stored before approvals reads `reviewing` and `lastApprovalOutcome` as null).
 
 References in the page state (`screen`, `workspace`, and a flow's workspace and steps) identify targets only. The session never opens them and grants no access.
 
 ## Configuration
 
-None. Limits are constants in `operate-session.ts`: references and screen ids up to 128 characters, a subject up to 512, at most 24 references in the working set (opening one more drops the oldest), and 1 to 32 steps in a flow run with a title up to 120 characters. One `listEvents()` page returns at most 200 entries.
+None. Limits are constants in `operate-session.ts`: references and screen ids up to 128 characters, a subject up to 512, at most 24 references in the working set (opening one more drops the oldest), and 1 to 32 steps in a flow run with a title up to 120 characters. The page holds at most one approval under review and one last outcome. One `listEvents()` page returns at most 200 entries.
 
 ## Divergences from Design
 
 Against [the design](../design/operate-mode.md):
 
 - A flow is a single ordered list of one workspace's screens. Views that lay out several screens at once, steps from other workspaces, and steps that must be completed before moving on are not implemented.
-- Views, subject-bound views, approvals in the page state and handover events are not implemented. The page state covers the working set, focus, subject, chat panel, app presentation and a running flow.
+- Views, subject-bound views and handover events are not implemented. The page state covers the working set, focus, subject, chat panel, app presentation, a running flow, the approval under review and the last reported approval outcome.
+- `reviewApproval` and `approvalResolved` are reducer events only. No client or workflow dispatches them yet, and nothing checks a reported outcome against the action log.
 - The session workspace exposes the full `Overseer`, including authoring methods. The operate-only chat mode is the next step.
 - The URL mirror, presence, and agent-dispatched events (`actor: "agent"`) are not implemented.
 - The event log is kept in full, with no compaction or retention policy.

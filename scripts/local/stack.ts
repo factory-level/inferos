@@ -134,21 +134,23 @@ export function localEnv(root: string, env: NodeJS.ProcessEnv = process.env): No
 }
 
 /** The names the gatekeeper reads a live connection from (see its `connectionFromEnv`). */
-export const INFEROPS_CONNECTION_VARS = ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"] as const;
+export const INFEROPS_CONNECTION_VARS = [
+  "INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG",
+] as const;
 
 /** How the InferOps gatekeeper is configured. Reports which variables are set, never their values. */
 export interface InferOpsConfiguration {
   /** `mock`: the bundled demo board. `live`: an InferOps instance named by `INFEROPS_BASE_URL`. */
   mode: "mock" | "live";
-  /** The live instance's host (the `<host>` a board URL must name), when configured. */
+  /** The live instance's host, when configured. Display only: a board URL never names it. */
   host?: string;
   /** Variables a live connection needs that are unset; the gatekeeper refuses to start with these. */
   missing: string[];
 }
 
 /**
- * Mock unless `INFEROPS_BASE_URL` is set. The token and workspace id are checked for presence
- * only -- this mirrors the gatekeeper's own rule that a base URL without them is an error, not a
+ * Mock unless `INFEROPS_BASE_URL` is set. The token, workspace id and workspace slug are checked
+ * for presence only -- this mirrors the gatekeeper's own rule that a base URL without them is an error, not a
  * silent fallback to demo data.
  */
 export function inferOpsConfiguration(env: NodeJS.ProcessEnv): InferOpsConfiguration {

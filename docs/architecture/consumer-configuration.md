@@ -71,6 +71,8 @@ The initial profile is inferops-operations, with composable and durable views en
 
 The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Site name, profile instructions, fallback theme, listing density, local custom Workers and canvas layout persistence are implemented. Authorized InferOps data, agent composition tools, complete view-sharing and cloud extension deployment remain pending. The native development runner's state/topology and lifecycle limitations remain. Bootstrap is not yet an upgrade/recovery service and does not copy production domain storage.
 
+Durable views ship as the bounded #34 slice (MVP scope in #1): the one private Kanban/Operate view persists through reload and local Worker restart, rejects stale expected revisions with a conflict, and is scoped to the workspace's build-access boundary. The design's export-with-binding-requirements and import-time rebind, independent view sharing, deployment-update recovery and supported schema migration are post-release. Import today validates content and mints a new definition without rebinding authority, and a view is shared only by sharing its workspace. Evidence is in [canvas architecture](inferops-canvas.md#resolving-a-board-reference).
+
 The [capability design](../design/feature-capabilities.md) requires each flag to be enforced at server operations, declared tools, the CLI and the UI, with a named owner, default and disable policy. Only the configuration contract, its migration and the CLI support report exist. No capability has an implementation, so all eight report `unsupported` and none can be switched on.
 
 ## Open Questions
@@ -113,7 +115,7 @@ Bootstrap creates a disabled public hello example, manifest, validation command 
 
 ## Durable-view server boundary
 
-The native Overseer capability now offers workspace-scoped definition storage behind exact-string `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` deployment bindings. Owner/build sessions can use it; use-only sessions cannot. The consumer launcher maps view flags to these bindings. Public server configuration advertises the effective flags to the builder Canvas page. Starter definitions are imported explicitly; no automatic installation or board data access occurs. See [canvas architecture](inferops-canvas.md) for transaction, sharing and resource-authorization boundaries.
+The native Overseer capability now offers workspace-scoped definition storage behind exact-string `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` deployment bindings. Owner/build sessions can use it; use-only sessions cannot. The consumer launcher maps view flags to these bindings. Public server configuration advertises the effective flags to the builder Canvas page. Starter definitions are imported explicitly; no automatic installation or board data access occurs. See [canvas architecture](inferops-canvas.md) for transaction, sharing and resource-authorization boundaries. An integration test proves, for one view with a live `inferops://demo.local/project/board/DEMO` reference, persistence across a Worker restart, stale-revision conflicts, single-winner concurrent edits, use-role and other-account denial, and that the Operate session still opens it after the restart.
 
 ## Profile resolution and provenance
 

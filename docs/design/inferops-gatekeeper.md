@@ -42,21 +42,26 @@ Each person connects InferOps with their own authority, through InferOps' PKCE s
 | Header | Value |
 | --- | --- |
 | `Authorization` | `Bearer <token>`: the connected person's InferOps access token. |
-| `X-Workspace-Id` | The InferOps workspace UUID of the connected account. |
+| `X-Workspace-Id` | The InferOps workspace UUID of the binding: the connected person's own workspace that the resource URL's workspace slug resolved to. |
 | `X-Idempotency-Key` | On the transition write only; see [Idempotency](#idempotency). |
 
 InferOps also accepts a service-account key (`iex_…`, as the bearer or as `X-API-Key`). The gatekeeper does not use one for a connected person. InferOps permission and row-level rules apply to every call as they do for any other client: `project:read` for the project list and board, `issue:read` for an issue, `issue:write` for a transition.
 
 ### Resource grammar
 
-`inferops://<host>/project/board/<KEY>`
+`inferops://<tenant>.<workspace>/project/board/<KEY>`
 
-- `<host>` identifies an InferOps deployment by the host (and port, when not the default) of its API. It selects which configured connection a binding uses. It is an identifier, not an address: the base URL, the workspace id and the credentials come from the connected account and the deployment's configuration, never from the URI. A host with no configured connection is refused. `demo.local` names the built-in demo data.
-- `<KEY>` is the project's short identifier within the connected account's workspace. InferOS resolves it to the project UUID through the project list on each use; the UUID is never taken from the caller.
-- The tenant and workspace are properties of the connected account, so they do not appear in the URI and cannot be changed through it.
-- Discovery is the connected account's project list, shown in the resource picker. There is no runtime catalog in a session.
+This is InferOps' own deep-link grammar (`_libs/widgets/shared/inferops-uri.ts` on InferOps `develop`), so a board URL from an InferOps document and one bound in InferOS are the same string. For example, against the local InferOps seeds (tenant `acme`, workspaces `operations` and `knowledge`), `inferops://acme.operations/project/board/ENG` names the ENG board of the Operations workspace ([ADR 0005](../adr/0005-inferops-uri-authority.md)).
 
-A URI names a target and grants nothing. Changing the host or key of a URI yields either a binding the person's own account is allowed to open or a refusal.
+- The authority is exactly two labels, `<tenant>.<workspace>`, each an InferOps slug: lowercase letters and digits with interior hyphens, at most 63 characters. Anything else (one or three labels, uppercase, a port, user info) is not a board URL.
+- `<workspace>` is resolved against the signed-in person's own InferOps workspaces, by slug, as InferOps' widgets resolve it against the reader's workspace list. The resolved workspace id is fixed into the binding and its requests use the person's own credentials for it. A slug the person does not hold is refused with the same message as a project that does not exist, so a URL cannot probe for workspaces or projects elsewhere.
+- `<tenant>` is checked for syntax and kept in the URL, but authorizes nothing. The identity InferLab reports names the tenant by id, not slug, so there is nothing to compare the label with; InferOps' widgets do not check it either. When the account's identity carries the tenant slug, the label must match it.
+- The URL never names a deployment. The API base URL comes from the deployment's configuration and the credentials from the connected account; nothing in the URL is used as an address.
+- `demo.local` names the built-in demo data and nothing else. It is never resolved against InferOps.
+- `<KEY>` is the project's short identifier within the resolved workspace. InferOS resolves it to the project UUID through the project list on each use; the UUID is never taken from the caller.
+- Discovery is the connected person's workspaces and each workspace's project list, shown in the resource picker. There is no runtime catalog in a session.
+
+A URI names a target and grants nothing. Changing the tenant, workspace or key of a URI yields either a binding the person's own account is allowed to open or a refusal.
 
 ### Endpoints
 
@@ -64,6 +69,7 @@ All paths are relative to the deployment's API base URL.
 
 | Use | Request | Response used |
 | --- | --- | --- |
+| Workspace slugs, at connect | `GET /workspaces` (no `X-Workspace-Id`) | `[]`: `id`, `slug`, for the memberships InferLab reported only. |
 | Discovery, key to UUID | `GET /project/projects` | `projects[]`: `id`, `identifier`, `name`. |
 | Board | `GET /project/board?projectId=<uuid>` | `projectId`, `columns[]` of `state` and `issues[]`. |
 | Issue | `GET /project/issues/<issueId>` | `issue`, including its `projectId`. |
@@ -113,17 +119,19 @@ InferOps reports errors as `{ "error": { "code", "message", "details"? } }`. Inf
 
 ### Denied cross-scope requests
 
-With a binding for `inferops://ops.example/project/board/DEMO`:
+With a binding for `inferops://acme.operations/project/board/DEMO`:
 
 | Request | Result |
 | --- | --- |
 | `openIssue(<UUID of an issue in project ENG>)` | `NOT_FOUND: No such issue in this project.`, identical to an unknown UUID. InferOps would have returned the issue; InferOS refuses on its `projectId`. |
 | `openIssue(<issue>).transition(<UUID of a state of ENG>, revision)` | `INVALID_STATE`; nothing is proposed. |
 | A gadget's binding URL edited to `…/project/board/ENG` | A different resource: it is granted only if the person's own account can open ENG, through the normal connection flow. The existing binding's scope does not change. |
-| A URL naming another host, `inferops://other.example/project/board/DEMO` | Refused unless the account has a connection for that host. No request is sent to a host taken from the URI. |
+| A URL naming another workspace, `inferops://acme.knowledge/project/board/DEMO` | Granted only if `knowledge` is one of the person's own workspaces; otherwise refused like a missing project, before any request. |
+| A URL naming another tenant, `inferops://globex.operations/project/board/DEMO` | The tenant label grants nothing: `operations` still resolves only among the person's own workspaces. |
+| A URL naming a deployment, `inferops://ops.example:8443/project/board/DEMO` | Not a board URL. No request is ever sent to an address taken from the URI. |
 | A collaborator opening a shared gadget without access to DEMO | Refused: their own InferOps account must be able to open the project. |
 | A person whose InferOps permission was removed, or whose token was revoked | `FORBIDDEN` or `UNAUTHORIZED` from InferOps; a pending move is not applied. |
-| A second workspace's project with the same key | Not reachable: the workspace comes from the connected account, not the URI. |
+| A second workspace's project with the same key | Reachable only through a URL naming that workspace, and only if the person belongs to it. |
 
 ### Companion InferOps changes
 
@@ -187,13 +195,16 @@ Resolved on 2026-10-02:
 
 - Service versus user authority: each person connects with their own authority ([ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md), proposed).
 - Idempotency: the existing transition endpoint's claim replay is sufficient for retries of an approved action. Detecting a key reused for a different move is a wanted companion change, not a prerequisite.
+- Resource grammar and workspace: board URLs use InferOps' own `inferops://<tenant>.<workspace>/…` grammar, the workspace slug resolved against the person's own workspaces and the deployment taken from configuration ([ADR 0005](../adr/0005-inferops-uri-authority.md), proposed; owner decision, [#24](https://github.com/factory-level/inferos/issues/24), [#25](https://github.com/factory-level/inferos/issues/25)).
 
 Still open:
 
 - The contract was derived by InferOS from the InferOps source and posted to [factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326). InferOps has not yet confirmed it, or accepted the companion changes.
 - Token lifetime, refresh and the reconnect flow for a PKCE-connected account are defined by [#66](https://github.com/factory-level/inferos/issues/66), not here.
-- How a connected account learns its workspace id, and whether one account may hold connections to several workspaces or hosts.
-- InferOps accepts mixed-case project identifiers of up to 10 characters (`[A-Za-z][A-Za-z0-9]{0,9}`); the resource grammar accepts uppercase keys only. Whether to widen the grammar or to leave such projects unbindable is undecided.
+- Whether the tenant label should be verified. InferLab's identity carries the tenant id only; InferLab's public `GET /auth/tenant?slug=` could map a label to an id for comparison, at the cost of a request per binding. Until then it is checked for syntax only, as in InferOps.
+- Workspace slugs are read once per connect or reconnect; a workspace joined or renamed later is reachable by URL only after the person reconnects. Whether to refresh them with the access token is undecided.
+- One account per deployment: the deployment is configuration, not part of the URI, so an InferOS deployment talks to one InferOps API.
+- InferOps accepts mixed-case project identifiers of up to 10 characters (`[A-Za-z][A-Za-z0-9]{0,9}`); the resource grammar accepts uppercase keys only (up to 16). Whether to widen the grammar or to leave such projects unbindable is undecided; adopting the URI authority left the key grammar unchanged.
 - The scope check and the transition are two requests, so an issue moved to another project between them would still be transitioned. Companion change 3 closes this; whether InferOps allows an issue to change project at all has not been confirmed.
 - The issue read fetches the description and comment thread only to discard them. A narrower InferOps read would avoid that.
 

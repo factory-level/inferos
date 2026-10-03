@@ -279,6 +279,23 @@ describe("the operate session", () => {
     expect((await sessionWorkspace.getMetadata()).id).not.toBe(workspaceId);
     expect((await operator.listGadgets()).map(listed => listed.id)).not.toContain(workspaceId);
   });
+
+  it("shows an approval for review and reports its outcome, resolving nothing itself", async () => {
+    using person = await user("approvalreview");
+    using workspace = await person.newGadget("app");
+    const approval = { workspaceId: (await workspace.getMetadata()).id, actionId: 1 };
+
+    using session = await person.getOperateSession();
+    const reviewing = await session.dispatch({ type: "reviewApproval", approval }, 0);
+    expect(reviewing.state.reviewing).toEqual(approval);
+    expect(await currentPage(session)).toEqual(reviewing);
+
+    const resolved = await session.dispatch(
+        { type: "approvalResolved", approval, outcome: "rejected" }, reviewing.seq);
+    expect(resolved.state).toMatchObject({ reviewing: null, lastApprovalOutcome: { ...approval, outcome: "rejected" } });
+    // The workspace's action log is untouched: the session only presents.
+    expect((await workspace.listActions()).entries).toEqual([]);
+  });
 });
 
 describe("a workflow", () => {

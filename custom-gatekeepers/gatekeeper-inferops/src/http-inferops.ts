@@ -8,6 +8,8 @@
 //   another project exactly as an unknown one.
 // - The board response also lists every workspace project and each card's lease and run, and the
 //   issue response the description and comments; the parsers copy only the `Issue` fields.
+// - `listWorkspaceSlugs` reads the workspace slugs a connect stores beside the person's memberships
+//   (`GET /workspaces`), since a resource URL names a workspace by slug.
 // - Nothing here logs a token, a header or a body, and InferOps' own error text is never passed on:
 //   failures are reported by operation name, status and code.
 //
@@ -23,6 +25,7 @@ import {
   InferOpsError, type InferOpsClient, type InferOpsErrorCode, type ProjectSnapshot,
   type ProjectSummary,
 } from "./inferops-client";
+import { isSlug } from "./resources";
 import type { Issue, Project, Revision, State, StateGroup, Workflow } from "./types";
 
 type LogFields = { vendorId: string; operation: string; status: number; code: string };
@@ -32,7 +35,7 @@ const logger = createLogger<LogFields>({ component: "gatekeeper.inferops.http", 
 export type InferOpsEndpoint = {
   /** API base URL without a trailing slash. */
   baseUrl: string;
-  /** The base URL's host, which is what `<host>` in a resource URL must name to use it. */
+  /** The base URL's host (with port), for display only: a resource URL never names a deployment. */
   host: string;
 };
 
@@ -49,14 +52,18 @@ export type Authorize = <T>(operation: (authority: InferOpsAuthority) => Promise
 /** An endpoint whose authority is fetched per request: a connected person's own token. */
 export type InferOpsAuthorizedEndpoint = InferOpsEndpoint & { authorize: Authorize };
 
-/** Where and as whom the stopgap client calls InferOps: one fixed credential. */
-export type InferOpsConnection = InferOpsEndpoint & InferOpsAuthority;
+/**
+ * Where and as whom the stopgap client calls InferOps: one fixed credential, and the slug of its
+ * workspace, which is the `<workspace>` a resource URL must name to use it.
+ */
+export type InferOpsConnection = InferOpsEndpoint & InferOpsAuthority & { workspaceSlug: string };
 
 /** The worker vars that configure the API endpoint and the stopgap connection. */
 export type InferOpsConnectionVars = {
   INFEROPS_BASE_URL?: string;
   INFEROPS_API_TOKEN?: string;
   INFEROPS_WORKSPACE_ID?: string;
+  INFEROPS_WORKSPACE_SLUG?: string;
 };
 
 /** Normalizes an API base URL, or throws naming the variable (never its value). */
@@ -83,18 +90,22 @@ export function endpointFromEnv(env: InferOpsConnectionVars): InferOpsEndpoint |
 
 /**
  * The stopgap connection configured through worker vars, or null when `INFEROPS_API_TOKEN` is
- * unset. A token without its base URL or workspace id throws, naming the missing variable, rather
- * than silently serving demo data. Local-development stopgap; see the module comment.
+ * unset. A token without its base URL, workspace id or workspace slug throws, naming the missing
+ * variable, rather than silently serving demo data. Local-development stopgap; see the module
+ * comment.
  */
 export function connectionFromEnv(env: InferOpsConnectionVars): InferOpsConnection | null {
   if (!env.INFEROPS_API_TOKEN) return null;
-  for (const name of ["INFEROPS_BASE_URL", "INFEROPS_WORKSPACE_ID"] as const) {
+  for (const name of ["INFEROPS_BASE_URL", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG"] as const) {
     if (!env[name]) throw new Error(`INFEROPS_API_TOKEN is set but ${name} is not.`);
   }
+  const workspaceSlug = env.INFEROPS_WORKSPACE_SLUG!.trim();
+  if (!isSlug(workspaceSlug)) throw new Error("INFEROPS_WORKSPACE_SLUG is not a workspace slug.");
   return {
     ...parseInferOpsBaseUrl(env.INFEROPS_BASE_URL!, "INFEROPS_BASE_URL"),
     token: env.INFEROPS_API_TOKEN,
     workspaceId: env.INFEROPS_WORKSPACE_ID!,
+    workspaceSlug,
   };
 }
 
@@ -256,6 +267,53 @@ function parsed<T>(operation: string, body: unknown, parse: (body: unknown) => T
     });
     throw new InferOpsError("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
   }
+}
+
+/** One workspace of the caller's tenant, as `GET /workspaces` lists it: its id and its slug. */
+export type WorkspaceSlug = { workspaceId: string; slug: string };
+
+/**
+ * The slugs of the workspaces `token` can list (`GET /workspaces`, InferLab's principal lane, so
+ * no workspace header). Slugs are what a resource URL names; the caller maps them onto the
+ * memberships it already holds and never widens those. Throws an `InferOpsError` like every
+ * request, `UNAVAILABLE` for a response that does not match.
+ */
+export async function listWorkspaceSlugs(baseUrl: string, token: string,
+                                         fetcher: typeof fetch = fetch): Promise<WorkspaceSlug[]> {
+  const operation = "workspace.list";
+  let response: Response;
+  try {
+    response = await fetcher(`${baseUrl}/workspaces`, {
+      method: "GET",
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
+      redirect: "manual",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    logger.warn("InferOps request failed", {
+      event: "http.request.failed", operation, status: 0, code: "UNAVAILABLE", error,
+    });
+    throw new InferOpsError("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  if (!response.ok || body === undefined) {
+    const code = response.ok ? "UNAVAILABLE" : failureCode(response.status, wireCode(body));
+    logger.warn("InferOps request failed", {
+      event: "http.request.failed", operation, status: response.status, code,
+    });
+    throw new InferOpsError(code, FAILURE_DETAIL[code]);
+  }
+  return parsed(operation, body, raw => list(raw, "workspaces").map(value => {
+    const workspace = record(value, "workspace");
+    const slug = text(workspace.slug, "workspace.slug");
+    if (!isSlug(slug)) throw new Malformed("workspace.slug is not valid");
+    return { workspaceId: text(workspace.id, "workspace.id", UUID).toLowerCase(), slug };
+  }));
 }
 
 // ---------------------------------------------------------------------------

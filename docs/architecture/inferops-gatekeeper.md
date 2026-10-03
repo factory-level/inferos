@@ -27,7 +27,10 @@ the default, and what the tests and the demo use) and `src/http-inferops.ts` (th
 API). With `INFERLAB_AUTH_ORIGIN` set, the vendor provides "Sign in with InferLab" and every
 account is **connected through an InferLab PKCE sign-in**: the person's own session is held per
 account and every InferOps request carries their token and one of their workspaces
-([ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md)). Without it, accounts are
+([ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md)). Boards are addressed with
+InferOps' own URI grammar, `inferops://<tenant>.<workspace>/project/board/<KEY>`, whose workspace
+slug is resolved against the person's own workspaces
+([ADR 0005](../adr/0005-inferops-uri-authority.md)). Without it, accounts are
 auto-provisioned demo accounts, and the HTTP client is reachable only through a
 **local-development stopgap** connection in worker vars. The bundled `inferops.kanban` blueprint
 renders a bound board as a Kanban gadget.
@@ -37,15 +40,15 @@ renders a bound board as a Kanban gadget.
 | Path | Responsibility |
 | --- | --- |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange and what each purpose does with the session. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and InferOps workspaces InferLab reported, the selected workspace, refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and InferOps workspaces InferLab reported with each one's slug, slug resolution (`resolveWorkspace`), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. |
-| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. The only module that talks InferOps HTTP. |
-| `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<host>/project/board/<KEY>` (default host `demo.local`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. The only module that talks InferOps HTTP. |
+| `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<tenant>.<workspace>/project/board/<KEY>` (two lowercase slug labels; `demo.local` is the demo data), `parseHost`, `isSlug`. |
 | `custom-gatekeepers/gatekeeper-inferops/src/simulation.ts` | Board ordering and read-time overlay of an issue's live pending transition. |
-| `custom-gatekeepers/gatekeeper-inferops/src/configurator/project-ui.tsx` | Workspace and project picker built by the shared `build:configurator` task. It asks the gatekeeper for the default host instead of assuming `demo.local`, and records the chosen workspace on the account, since a resource URL never carries one. |
-| `scripts/run-dev-server.ts` | Passes `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN` and `INFEROPS_WORKSPACE_ID` from the shell or root `.dev.vars` into the gatekeeper's generated dev config, resolves `INFERLAB_AUTH_ORIGIN` and `AUTH_GATEKEEPERS` for a wrapper's sign-in flag, and refuses to start when InferOps sign-in is asked for without the gatekeeper or an InferLab origin. |
+| `custom-gatekeepers/gatekeeper-inferops/src/configurator/project-ui.tsx` | Organization, workspace and project picker built by the shared `build:configurator` task. It builds `inferops://<organization>.<workspace>/project/board/<KEY>` from an organization label, a workspace slug from the account's list and a project; with both left empty it asks the gatekeeper for a default host, which only a demo account has (`demo.local`). It duplicates the URL grammar for prefilling, kept in step by `__tests__/resources.test.ts`. |
+| `scripts/run-dev-server.ts` | Passes `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG` from the shell or root `.dev.vars` into the gatekeeper's generated dev config, resolves `INFERLAB_AUTH_ORIGIN` and `AUTH_GATEKEEPERS` for a wrapper's sign-in flag, and refuses to start when InferOps sign-in is asked for without the gatekeeper or an InferLab origin. |
 | `packages/bundled-blueprints/blueprints/inferops-kanban` | Kanban gadget expecting a `board` binding of type `InferOpsProjectSession`. |
 | `scripts/release/manifest-lib.ts` | Lists the gatekeeper as taking no default OAuth inputs and as install-once. |
 
@@ -67,8 +70,11 @@ renders a bound board as a Kanban gadget.
   with an S256 challenge. The `/oauth` leg claims the state once and POSTs
   `{clientId, code, codeVerifier, redirectUri}` to `<origin>/auth/token` (30 s timeout, capped
   body), parsing the session (`token`, `refreshToken`) and the identity (`user.id`, `email`,
-  `tenantId`, the `product: "inferops"` entries of `user.workspaces`, `emailVerified`). Then, by
-  purpose:
+  `tenantId`, the `product: "inferops"` entries of `user.workspaces`, `emailVerified`). A connect
+  or reconnect then reads `GET <api>/workspaces` with the new token (no `X-Workspace-Id`) and
+  stores each membership's `slug` beside it; a listed workspace that is not a membership is
+  ignored, and a failed or malformed list fails the attempt and signs the new session out. Then,
+  by purpose:
   - **Sign-in** requires `emailVerified: true` (InferLab also issues sessions for emails nobody
     proved, such as invitations and impersonation), signs the session out again with
     `POST /auth/logout`, and hands `callback.complete` an account carrying only the normalized
@@ -83,30 +89,37 @@ renders a bound board as a Kanban gadget.
   or a replayed or forged state ends the attempt with an error page; the alarm deletes the
   attempt's object after at most 20 minutes.
 - **The person's authority.** `InferOpsCredentials` keeps the session under gatekeeper-kit's
-  `CredentialCoordinator`. `getCredentials(workspaceId?)` refreshes the access token ahead of its
+  `CredentialCoordinator`. `getCredentials(workspaceId)` refreshes the access token ahead of its
   `exp` claim (`POST /auth/refresh {refreshToken}`, which rotates both tokens) and serves the token
-  with one workspace id: the one requested, else the selected one, else the person's only one,
-  always one InferLab listed them in; anything else is refused before a request is made. A 401 from
+  with the requested workspace id, which must be one InferLab listed the person in; anything else
+  is refused before a request is made. `resolveWorkspace(slug)` returns the id of the person's
+  workspace with that stored slug, or null. A 401 from
   the refresh is the session's death: it is recorded, announced once through the callback's
   `credentialsExpired()`, and the account is refused until a reconnect. A token InferOps rejects
   (401) is reported back through `reportCredentialsRejected`, which heals by refreshing and lets the
   request retry once. The refresh token never leaves the object. `revoke()` signs the session out
   and wipes the object.
-- **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses the URL, checks the project
-  exists for the account, and returns `InferOpsProjectGatekeeper` with props
-  `{accountId, connected, host, projectKey, workspaceId}`, the workspace being the account's
-  current one when the host is the configured API's. Sessions read scope only from those props; no
-  method takes a project, host, account or workspace. The configurator lists the person's
-  workspaces and stores their choice on the account (`selectWorkspace`); with several workspaces
-  and no choice, binding and listing projects fail asking for one.
-- **Data source.** `clientFor` in `inferops.ts` is the one place a client is chosen. A connected
-  account whose binding names the configured API host (`INFEROPS_BASE_URL`, or the InferLab origin
-  when only that is set) gets the HTTP client with its own authority, fetched per request through
-  the kit's `CredentialSource`; a dead session surfaces as `UNAUTHORIZED`, a session replaced
-  mid-request as `UNAVAILABLE`. Any other account whose binding names the stopgap connection's host
-  gets the HTTP client with that fixed credential; everything else gets the mock, which serves only
-  `demo.local` and refuses other hosts. The host only selects one of these: no address or
-  credential is taken from a URL, and the person's own token always wins over the stopgap.
+- **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
+  `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
+  port; anything else is not a board URL), resolves the workspace, checks the project exists there
+  for the account, and returns `InferOpsProjectGatekeeper` with props
+  `{accountId, connected, host, projectKey, workspaceId}`, where `host` is `<tenant>.<workspace>`.
+  For a connected account the workspace is `resolveWorkspace(<workspace>)`; a slug the person does
+  not hold, a host no data source serves and a missing project all fail with the one message
+  `No InferOps project <KEY> is available on <host>.`, before any request for the first two. The
+  tenant label is not compared with anything: the identity carries the tenant id, never its slug.
+  Sessions read scope only from those props; no method takes a project, host, account or
+  workspace. The configurator lists the person's workspaces by slug and their projects for the
+  host the form would name; nothing is stored on the account.
+- **Data source.** `clientFor` in `inferops.ts` is the one place a client is chosen. `demo.local`
+  always gets the mock. A connected account with a resolved workspace gets the HTTP client against
+  `inferOpsApiEndpoint` (`INFEROPS_BASE_URL`, or the InferLab origin when only that is set) with
+  its own authority, fetched per request through the kit's `CredentialSource`; a dead session
+  surfaces as `UNAUTHORIZED`, a session replaced mid-request as `UNAVAILABLE`. An account with no
+  identity whose binding's workspace label is the stopgap's `INFEROPS_WORKSPACE_SLUG` gets the HTTP
+  client with that fixed credential. Everything else gets the mock, which refuses any host but
+  `demo.local` as `NOT_FOUND`. No address or credential is taken from a URL, and the stopgap never
+  backs a connected person.
 - **HTTP client.** Each call sends `Authorization: Bearer`, `X-Workspace-Id` and, on a
   transition, `X-Idempotency-Key`, with a 15 s timeout and redirects not followed. A project key is
   resolved to its UUID through `GET /project/projects` on every use. `readProject` requests
@@ -163,12 +176,12 @@ sign-in flag (default `http://localhost:8080`, the local InferLab stack).
 | Var | Meaning |
 | --- | --- |
 | `INFERLAB_AUTH_ORIGIN` | InferLab central-auth origin (bare HTTPS, or HTTP on loopback). Set, it turns on sign-in and makes every account a connected person; the exchange, refresh and logout go here. Unset means demo accounts. |
-| `INFEROPS_BASE_URL` | InferOps API base URL connected people call with their own session. Its host (with port) is the `<host>` a resource URL must name, for example `inferops://localhost:8080/project/board/ENG`. Unset, the InferLab origin serves as the API too (locally one server serves both). |
-| `INFEROPS_API_TOKEN` | Stopgap bearer token (a user access token or an `iex_` service-account key) for accounts with no identity. Requires the base URL and the workspace id, else an error names the missing variable. |
+| `INFEROPS_BASE_URL` | InferOps API base URL connected people call with their own session. It never appears in a resource URL; the account's display name shows its host. Unset, the InferLab origin serves as the API too (locally one server serves both). |
+| `INFEROPS_API_TOKEN` | Stopgap bearer token (a user access token or an `iex_` service-account key) for accounts with no identity. Requires the base URL, the workspace id and the workspace slug, else an error names the missing variable. |
 | `INFEROPS_WORKSPACE_ID` | The workspace UUID the stopgap sends as `X-Workspace-Id`. |
+| `INFEROPS_WORKSPACE_SLUG` | The stopgap workspace's slug: a resource URL whose `<workspace>` is this slug (for example `inferops://acme.operations/project/board/ENG` with `operations`) uses the stopgap connection. |
 
-With an API configured the project picker defaults to its host and lists its projects;
-`demo.local` bindings keep working beside it.
+`demo.local` bindings keep working beside a configured API.
 
 **The stopgap is for local development.** Its token is one credential for the whole dev server,
 so every account that has no identity acts with it and observer verification cannot tell those
@@ -194,8 +207,14 @@ missing a button.
   vars lends those accounts one deployment-wide token, for local development only.
 - The release manifest has no deploy input for `INFERLAB_AUTH_ORIGIN` or `INFEROPS_BASE_URL`, so
   cloud installs can't turn on InferLab sign-in from the wizard yet.
-- The workspace a binding is made in is the account's selection at the time, recorded by the
-  configurator; two configurators open at once could race over it.
+- The tenant label of a resource URL is checked for syntax only. The design asks for it to match
+  the identity's tenant slug when the identity carries one; InferLab's identity carries only the
+  tenant id, so that comparison never applies today.
+- Workspace slugs are read once per connect or reconnect, so a workspace joined or renamed later
+  cannot be named until the person reconnects. An identity stored before slugs were kept has none,
+  so every non-demo URL is refused for it until a reconnect.
+- Bindings minted before the URI grammar changed keep working when they carry a workspace id
+  (connected accounts) or name `demo.local`; a stopgap binding that named the API host does not.
 - The transition endpoint's 404 does not say whether the issue or the target state is missing, so
   the HTTP client reports both as `NOT_FOUND`. `INVALID_STATE` is decided from the board when a
   move is proposed.
@@ -232,9 +251,15 @@ single-use links and states, forged states, InferLab errors, rejected exchanges 
 emails. `__tests__/account.test.ts` drives connected accounts against a fake InferLab and InferOps
 behind one `fetch`: the connect keeps the session, every request carries the person's token and
 workspace, refresh ahead of expiry, healing a rejected token, a dead session reported once, revoke
-signing out, a staged reconnect committed by the Workshop, the only workspace chosen without
-asking, a choice required among several, a workspace outside the person's membership refused
-locally, InferOps denying a workspace without expiring the account, and observer admission by the
-collaborator's own membership.
+signing out, a staged reconnect committed by the Workshop, workspace slugs stored at connect and
+offered by slug, a URL's workspace slug resolving to the person's own workspace and credentials,
+several workspaces each bound by its own slug, a workspace the person does not hold refused
+exactly like a missing project before any request, a tampered tenant label granting nothing,
+malformed authorities rejected without a request, `demo.local` staying demo data, a failed
+workspace list failing the connect and signing the session out, InferOps denying a workspace
+without expiring the account, and observer admission by the collaborator's own membership.
+`__tests__/resources.test.ts` covers the grammar (two lowercase slug labels, no port, user info,
+or third label) and keeps the configurator's copy in step, and `http-inferops.test.ts` the
+`GET /workspaces` parsing and the stopgap's workspace slug.
 `packages/bundled-blueprints/blueprints/inferops-kanban/__tests__/` covers the gadget's server and
 board rules. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
