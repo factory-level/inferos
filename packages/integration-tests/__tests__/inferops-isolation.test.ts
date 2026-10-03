@@ -556,6 +556,53 @@ async function setVar(name: "INFEROPS_ENABLED" | "CODING_WORKBENCH_ENABLED", ena
     }),
   }));
   harness.url = (await harness.server.listen()).url;
+  await settled(harness.url);
+}
+
+/**
+ * Wait until the reloaded server answers steadily. Right after `server.update` the runtime can
+ * still be restarting, so a WebSocket opened at once is sometimes dropped mid-test ("WebSocket
+ * connection failed"). Two fresh connections in a row must each answer pings spread over about a
+ * second; any failure starts the count again.
+ */
+async function settled(url: URL): Promise<void> {
+  const pause = (ms: number) => new Promise(done => setTimeout(done, ms));
+  let last: unknown;
+  let steady = 0;
+  for (let attempt = 0; attempt < 40 && steady < 2; attempt++) {
+    const api = connect(url);
+    try {
+      for (let ping = 0; ping < 4; ping++) {
+        await api.ping();
+        await pause(250);
+      }
+      steady++;
+    } catch (error) {
+      last = error;
+      steady = 0;
+      await pause(500);
+    } finally {
+      api[Symbol.dispose]();
+    }
+  }
+  if (steady < 2) throw new Error(`The reloaded server never settled: ${String(last)}`);
+}
+
+/**
+ * Run `phase` over fresh connections until one survives. Even a settled server can drop a socket
+ * opened just after a reload, which surfaces as "WebSocket connection failed." (thrown, or as the
+ * message `failure` returns). Only side-effect-free phases may be repeated; any other failure is
+ * the test's real result.
+ */
+async function overFreshConnection<T>(phase: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await phase();
+    } catch (error) {
+      if (attempt >= 3 || !String(error).includes("WebSocket connection failed")) throw error;
+      await settled(harness.url);
+    }
+  }
 }
 
 const setEnabled = (enabled: boolean) => setVar("INFEROPS_ENABLED", enabled);
@@ -670,18 +717,20 @@ describe("coding dispatch", () => {
 
     await setVar("CODING_WORKBENCH_ENABLED", false);
     try {
-      const api = await logIn(connect(harness.url), hal.username);
-      const reopened = await api.openGadget(gadgetId);
-      const stale = await (await reopened.getGatekeeperById(connectionId)).openSession() as
-        RpcStub<InferOpsDispatchSession>;
-      const before = fake.requests.length;
-      expect(await failure(stale.listRuns())).toContain("DISABLED: Coding dispatch is turned off");
-      expect(await failure(reopened.approveAction(action.id))).toContain("coding dispatch is turned off");
-      expect(await failure(reopened.newGatekeeper(hal.account.id, ENG_DISPATCH)))
-        .toContain("Coding dispatch is turned off");
-      expect(fake.requests.slice(before)).toEqual([]);
-      // The board stays available: the switch covers coding dispatch only.
-      expect(await (await api.newGadget()).newGatekeeper(hal.account.id, ENG_BOARD)).toBeTruthy();
+      await overFreshConnection(async () => {
+        const api = await logIn(connect(harness.url), hal.username);
+        const reopened = await api.openGadget(gadgetId);
+        const stale = await (await reopened.getGatekeeperById(connectionId)).openSession() as
+          RpcStub<InferOpsDispatchSession>;
+        const before = fake.requests.length;
+        expect(await failure(stale.listRuns())).toContain("DISABLED: Coding dispatch is turned off");
+        expect(await failure(reopened.approveAction(action.id))).toContain("coding dispatch is turned off");
+        expect(await failure(reopened.newGatekeeper(hal.account.id, ENG_DISPATCH)))
+          .toContain("Coding dispatch is turned off");
+        expect(fake.requests.slice(before)).toEqual([]);
+        // The board stays available: the switch covers coding dispatch only.
+        expect(await (await api.newGadget()).newGatekeeper(hal.account.id, ENG_BOARD)).toBeTruthy();
+      });
     } finally {
       await setVar("CODING_WORKBENCH_ENABLED", true);
     }
@@ -690,6 +739,7 @@ describe("coding dispatch", () => {
 
 describe("the deployment switch", () => {
   it("failure: with INFEROPS_ENABLED off, bindings, reads and queued applies are refused without a request; on again restores them", async () => {
+    await settled(harness.url);
     const alice = await newUser("switcha", ["operations"]);
     const { ws, connection, session } = await bind(alice, ENG_BOARD);
     const issue = await (await session.openIssue(fake.issue("ENG-2").id)).read();
@@ -711,23 +761,35 @@ describe("the deployment switch", () => {
 
     await setEnabled(false);
     try {
-      const off = await reopen();
-      const before = fake.requests.length;
-      expect(await failure(off.session.readBoard()))
-        .toContain("DISABLED: InferOps is turned off for this deployment.");
-      expect(await failure(off.ws.approveAction(action.id)))
-        .toContain("was not applied: InferOps is turned off for this deployment");
-      expect(await failure(off.ws.newGatekeeper(alice.account.id, ENG_BOARD)))
-        .toContain("InferOps is turned off for this deployment.");
-      expect(fake.requests.slice(before)).toEqual([]);
-      expect((await pending(off.ws)).map(a => a.id)).toEqual([action.id]);
+      await overFreshConnection(async () => {
+        const off = await reopen();
+        const before = fake.requests.length;
+        expect(await failure(off.session.readBoard()))
+          .toContain("DISABLED: InferOps is turned off for this deployment.");
+        expect(await failure(off.ws.approveAction(action.id)))
+          .toContain("was not applied: InferOps is turned off for this deployment");
+        expect(await failure(off.ws.newGatekeeper(alice.account.id, ENG_BOARD)))
+          .toContain("InferOps is turned off for this deployment.");
+        expect(fake.requests.slice(before)).toEqual([]);
+        expect((await pending(off.ws)).map(a => a.id)).toEqual([action.id]);
+      });
     } finally {
       await setEnabled(true);
     }
 
-    const on = await reopen();
-    expect((await on.session.readBoard()).project.identifier).toBe("ENG");
-    await on.ws.approveAction(action.id);
+    const on = await overFreshConnection(async () => {
+      const reopened = await reopen();
+      expect((await reopened.session.readBoard()).project.identifier).toBe("ENG");
+      return reopened;
+    });
+    // A dropped socket after the request went out leaves the approval applied; the issue state decides.
+    await on.ws.approveAction(action.id).catch(async (error: unknown) => {
+      if (!String(error).includes("WebSocket connection failed")) throw error;
+      await settled(harness.url);
+      if (fake.issue("ENG-2").stateId !== DONE.id) {
+        await overFreshConnection(async () => (await reopen()).ws.approveAction(action.id));
+      }
+    });
     expect(fake.issue("ENG-2").stateId).toBe(DONE.id);
   });
 });
