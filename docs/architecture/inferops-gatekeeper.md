@@ -6,6 +6,8 @@ covers:
   - packages/gatekeeper-kit
   - packages/workshop-shared/src/gatekeeper.ts
   - packages/workshop-backend/src/user.ts
+  - packages/workshop-backend/src/auth/config.ts
+  - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
 updated: 2026-10-02

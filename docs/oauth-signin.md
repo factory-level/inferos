@@ -109,7 +109,8 @@ INFERLAB_AUTH_ORIGIN=https://auth.inferlab.io
   file) instead. `run-dev-server.ts` then appends `inferops` to `AUTH_GATEKEEPERS` and defaults
   `INFERLAB_AUTH_ORIGIN` to `http://localhost:8080`, the local InferLab stack. In-repo, set both
   variables in the shell. Listing `inferops` without the gatekeeper enabled or without a valid
-  origin stops the dev server with the reason.
+  origin stops the dev server with the reason, and the backend refuses to serve while
+  `AUTH_GATEKEEPERS` names a vendor that is unbound or does not provide sign-in.
 
 ## Storage / bindings
 

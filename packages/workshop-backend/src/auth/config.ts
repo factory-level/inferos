@@ -6,6 +6,8 @@
 // "Continue with ..." button alongside the normal username/password form (unless password auth is
 // disabled). All OFF by default.
 
+import { getAuthVendorBinding } from "./auth-vendors.js";
+
 /**
  * Parse the AUTH_GATEKEEPERS allowlist into a list of gatekeeper vendor ids (lowercased). These are
  * the gatekeepers permitted to drive sign-in; a vendor must also actually advertise `providesAuth`
@@ -30,4 +32,25 @@ export function hasAuthGatekeepers(env: Cloudflare.Env): boolean {
 export function isPasswordAuthEnabled(env: Cloudflare.Env): boolean {
   if (env.DISABLE_PASSWORD_AUTH !== "true") return true;
   return !hasAuthGatekeepers(env);
+}
+
+/**
+ * Checks that the sign-in allowlist can be honoured: every vendor in AUTH_GATEKEEPERS must be bound
+ * (`GATEKEEPER_<NAME>`) and must advertise `providesAuth`. A listed vendor that is not configured
+ * for sign-in (for example the InferOps gatekeeper without its InferLab origin) would otherwise
+ * just be left off the login page, which with password auth disabled offers no way in at all; the
+ * deployment fails with the reason instead. Run once before the API serves.
+ */
+export async function assertAuthGatekeepersConfigured(env: Cloudflare.Env): Promise<void> {
+  for (const vendorId of getAuthGatekeeperAllowlist(env)) {
+    const binding = getAuthVendorBinding(env, vendorId);
+    if (!binding) {
+      throw new Error(`AUTH_GATEKEEPERS lists "${vendorId}", but no gatekeeper is bound as ` +
+        `GATEKEEPER_${vendorId.toUpperCase()}.`);
+    }
+    if (!(await binding.describe()).providesAuth) {
+      throw new Error(`AUTH_GATEKEEPERS lists "${vendorId}", but that gatekeeper is not configured ` +
+        `to provide sign-in; configure it, or remove it from AUTH_GATEKEEPERS.`);
+    }
+  }
 }
