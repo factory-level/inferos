@@ -652,6 +652,29 @@ describe("coding runs", () => {
       .toBe("UNAVAILABLE");
   });
 
+  it("keeps well-formed test evidence and a known reason code, and leaves out what it cannot read", async () => {
+    const command = {
+      index: 1, argv: ["pnpm", "test"], exitCode: 1, timedOut: false, durationMs: 8123, truncated: false,
+      artifacts: { stdout: "/w/r/.a/test-1.stdout", stderr: "/w/r/.a/test-1.stderr", record: "/w/r/.a/test-1.json" },
+    };
+    const timedOut = { ...command, index: 2, exitCode: null, timedOut: true };
+    const tests = { directory: "/w/r/.a", passed: 0, failed: 2, commands: [command, timedOut] };
+    const finished = (result: unknown) => codingFake(call => call.path === `/project/runs/${RUN_DEMO}`
+      ? Response.json({ run: wireRun(RUN_DEMO, DEMO_1, { status: "failed", result }) }) : undefined);
+    const read = async (result: unknown) => (await finished(result).client.readRun("DEMO", RUN_DEMO)).result;
+
+    expect(await read({ summary: "s", tests, reasonCode: "TESTS_FAILED", extra: 1 }))
+      .toEqual({ summary: "s", tests, reasonCode: "TESTS_FAILED" });
+    expect(await read({ summary: "s", reasonCode: "AUTH_BLOCKED" })).toEqual({ summary: "s", reasonCode: "AUTH_BLOCKED" });
+    expect(await read({ summary: "s", reasonCode: "QUOTA_BLOCKED" })).toEqual({ summary: "s", reasonCode: "QUOTA_BLOCKED" });
+    // An unknown reason, and test evidence with any malformed command, are left out whole.
+    expect(await read({ summary: "s", reasonCode: "SOMETHING_NEW" })).toEqual({ summary: "s" });
+    expect(await read({ summary: "s", tests: { ...tests, commands: [command, { ...command, argv: [] }] } })).toEqual({ summary: "s" });
+    expect(await read({ summary: "s", tests: { ...tests, commands: [{ ...command, artifacts: null }] } })).toEqual({ summary: "s" });
+    expect(await read({ summary: "s", tests: { ...tests, passed: -1 } })).toEqual({ summary: "s" });
+    expect(await read({ summary: "s", tests: { ...tests, commands: Array.from({ length: 101 }, () => command) } })).toEqual({ summary: "s" });
+  });
+
   it("dispatches with only the named fields and the idempotency key, after the scope check", async () => {
     const { client, calls } = codingFake();
 
