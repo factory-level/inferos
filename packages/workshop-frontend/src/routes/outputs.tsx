@@ -88,7 +88,7 @@ function OutputMenu({
             <button
               type="button"
               aria-label="Output actions"
-              className="cursor-pointer rounded-md p-1.5 text-kumo-subtle transition-colors hover:bg-kumo-fill hover:text-kumo-default focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+              className="grid h-8 w-8 cursor-pointer place-items-center rounded-md text-kumo-subtle transition-colors hover:bg-kumo-control hover:text-kumo-default focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring data-[popup-open]:bg-kumo-control data-[popup-open]:text-kumo-default sm:opacity-0 sm:group-hover:opacity-100 sm:data-[popup-open]:opacity-100"
             >
               <DotsThreeVertical size={16} />
             </button>
@@ -154,18 +154,18 @@ function OutputCard({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
-      className="themed-card-hover-shadow press group flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill"
+      className="press group flex cursor-pointer flex-col overflow-hidden rounded-xl bg-kumo-elevated text-left transition-[background-color,transform] duration-150 ease-out hover:-translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
     >
       <div className="relative aspect-[4/3] w-full border-b border-kumo-line">
         <FormatThumbnail output={output.output} />
       </div>
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
+      <div className="flex items-center gap-2.5 py-2.5 pl-3 pr-2">
         <FormatTile output={output.output} size="sm" />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
+          <p className="truncate text-[13px] font-medium leading-[18px] text-kumo-default">
             {output.title || 'Untitled'}
           </p>
-          <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+          <p className="mt-0.5 truncate text-[12px] leading-4 text-kumo-subtle">
             {subtitle(output)}
           </p>
         </div>
@@ -185,7 +185,7 @@ function OutputRow({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
+      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-elevated focus-visible:bg-kumo-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
     >
       <FormatTile output={output.output} />
       <div className="min-w-0 flex-1">
@@ -227,10 +227,11 @@ function FilterChip({
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium tracking-[-0.25px] transition-colors ${
+      aria-pressed={active}
+      className={`inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${
         active
-          ? 'bg-kumo-fill text-kumo-strong'
-          : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'
+          ? 'bg-kumo-control text-kumo-default'
+          : 'text-kumo-subtle hover:bg-kumo-elevated hover:text-kumo-default'
       }`}
     >
       {label}
@@ -274,10 +275,10 @@ function ScopeSelect({
         render={
           <button
             type="button"
-            className={`inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium tracking-[-0.25px] transition-colors ${
+            className={`inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${
               value === 'all'
-                ? 'border-kumo-line text-kumo-subtle hover:text-kumo-default'
-                : 'border-kumo-line bg-kumo-fill text-kumo-strong'
+                ? 'bg-kumo-elevated text-kumo-subtle hover:bg-kumo-control hover:text-kumo-default'
+                : 'bg-kumo-control text-kumo-default hover:bg-kumo-fill-hover'
             }`}
           >
             <CurrentIcon size={14} className="shrink-0" />
@@ -367,7 +368,7 @@ function RenameOutputDialog({
               value={value}
               disabled={busy}
               onChange={(event) => onValueChange(event.target.value)}
-              className="mt-1.5 h-9 w-full rounded-lg border border-kumo-line bg-kumo-base px-3 text-[13px] text-kumo-default focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+              className="mt-1.5 h-9 w-full rounded-md border-0 bg-kumo-control px-3 text-[13px] text-kumo-default focus:outline-none focus:ring-2 focus:ring-kumo-ring"
             />
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-kumo-line px-5 py-3">
@@ -574,10 +575,10 @@ function OutputsPage() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-3 sm:px-10">
-      <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-6 sm:pt-10">
+      <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-6">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Outputs</h1>
-          <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+          <h1 className="m-0 text-[18px] leading-[26px] font-semibold tracking-[-0.01em] text-kumo-default">Outputs</h1>
+          <p className="mt-1 text-[14px] leading-5 text-kumo-subtle">
             Everything your workspaces have produced, in one place.
           </p>
         </div>
@@ -588,7 +589,7 @@ function OutputsPage() {
           refining controls). Configured categories stay visible with zero counts. */}
       <div className={`flex flex-col gap-3 px-3 pb-3 sm:flex-row sm:items-center sm:justify-between ${
         !showToolbar ? 'hidden' : ''}`}>
-        <div className="-mx-1 flex items-center gap-1 overflow-x-auto px-1 sidebar-scroll">
+        <div role="group" aria-label="Format" className="-mx-1 flex items-center gap-1 overflow-x-auto px-1 sidebar-scroll">
           {showTypeFilters && (
             <>
               <FilterChip active={typeFilter === 'all'} label="All" count={inTypeScope.length}
@@ -618,13 +619,14 @@ function OutputsPage() {
             />
           )}
           <div className="relative min-w-0 flex-1 sm:w-56 sm:flex-none">
-            <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
+            <MagnifyingGlass size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search outputs…"
-              className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[13px]"
+              aria-label="Search outputs"
+              className="h-10 w-full rounded-md border-0 bg-kumo-control pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-shadow duration-150 ease-out focus:outline-none focus:ring-2 focus:ring-kumo-ring sm:h-9 sm:text-[13px]"
             />
           </div>
         </div>
@@ -646,7 +648,7 @@ function OutputsPage() {
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-3 py-20 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-control text-kumo-subtle">
               <Stack size={18} />
             </div>
             <div>

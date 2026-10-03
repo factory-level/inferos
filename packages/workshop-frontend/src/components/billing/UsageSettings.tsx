@@ -90,7 +90,7 @@ export default function UsageSettings() {
       <h2 className="px-1 text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
         Usage &amp; billing
       </h2>
-      <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
+      <div className="rounded-xl bg-kumo-elevated p-5">
       {loading || !usage ? (
         <p className="text-sm text-kumo-subtle">Loading usage…</p>
       ) : (

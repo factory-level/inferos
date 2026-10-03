@@ -16,7 +16,7 @@ export default function ViewToggle({
     { value: 'grid' as const, Icon: GridFour, label: 'Grid view' },
   ]
   return (
-    <div className="inline-flex shrink-0 items-center gap-0.5 rounded-lg border border-kumo-line bg-kumo-base p-0.5">
+    <div role="group" aria-label="View" className="inline-flex shrink-0 items-center gap-0.5 rounded-lg bg-kumo-elevated p-0.5">
       {options.map(({ value, Icon, label }) => (
         <button
           key={value}
@@ -24,9 +24,9 @@ export default function ViewToggle({
           onClick={() => onChange(value)}
           aria-label={label}
           aria-pressed={view === value}
-          className={`grid h-8 w-8 cursor-pointer place-items-center rounded-md transition-colors ${
+          className={`grid h-8 w-8 cursor-pointer place-items-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${
             view === value
-              ? 'bg-kumo-fill text-kumo-strong'
+              ? 'bg-kumo-control text-kumo-default'
               : 'text-kumo-inactive hover:text-kumo-default'
           }`}
         >

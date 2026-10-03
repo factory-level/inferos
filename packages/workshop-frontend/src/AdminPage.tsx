@@ -20,6 +20,20 @@ const ACCENT_PRESETS: { label: string; value: string }[] = [
   { label: 'Teal', value: '#0d9488' },
 ]
 
+// Settings cards separate from the page by tone alone (no border), per the InferOS surface ladder.
+const CARD = 'rounded-xl bg-kumo-elevated p-6'
+const CARD_TITLE = 'mb-1 text-[16px] leading-6 font-semibold text-kumo-default'
+const CARD_DESCRIPTION = 'mb-5 text-[14px] leading-5 text-kumo-subtle'
+// Filled pill used for the accent and banner-type pickers; the chosen one takes the accent tint.
+const chipClass = (selected: boolean) =>
+  `flex h-8 items-center gap-2 rounded-full pl-1.5 pr-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${
+    selected
+      ? 'bg-kumo-info-tint text-kumo-brand ring-1 ring-inset ring-kumo-ring'
+      : 'bg-kumo-control text-kumo-subtle hover:bg-kumo-fill-hover hover:text-kumo-default'
+  }`
+// Rows that toggle on click inside the Gatekeepers card.
+const TOGGLE_ROW_FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring'
+
 // Swatch background per banner color, matching AnnouncementBanner's accent styles.
 const BANNER_SWATCH: Record<BannerColor, string> = {
   neutral: 'var(--color-kumo-tint)',
@@ -407,13 +421,13 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[1040px] px-4 sm:px-8 py-8 space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-kumo-default">Admin</h1>
-        <p className="text-sm text-kumo-subtle mt-1">
+    <div className="mx-auto w-full max-w-[1040px] px-4 sm:px-8 pt-6 pb-8 space-y-6">
+      <header>
+        <h1 className="text-[18px] leading-[26px] font-semibold text-kumo-default">Admin</h1>
+        <p className="text-[14px] leading-5 text-kumo-subtle mt-1">
           Deployment-wide settings. Changes apply to all users on their next connection.
         </p>
-      </div>
+      </header>
 
       <Tabs
         variant="underline"
@@ -439,14 +453,14 @@ export default function AdminPage() {
       {/* Sign-ups and user search */}
       {activeTab === 'access' && (
         <>
-          <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
+          <div className={CARD}>
             <div className="flex items-center gap-4">
-              <div className="w-9 h-9 rounded-lg flex-shrink-0 flex items-center justify-center bg-kumo-tint">
+              <div className="w-9 h-9 rounded-lg flex-shrink-0 flex items-center justify-center bg-kumo-control">
                 <UserPlus size={18} className="text-kumo-subtle" />
               </div>
               <div className="flex-1 min-w-0">
-                <h2 className="text-lg font-semibold text-kumo-strong">Allow new sign-ups</h2>
-                <p className="text-sm text-kumo-subtle mt-0.5">
+                <h2 className="text-[16px] leading-6 font-semibold text-kumo-default">Allow new sign-ups</h2>
+                <p className="text-[14px] leading-5 text-kumo-subtle mt-0.5">
                   When off, existing users can still log in but no new accounts can be created.
                 </p>
               </div>
@@ -459,14 +473,14 @@ export default function AdminPage() {
             </div>
           </div>
 
-          <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
+          <div className={CARD}>
             <div className="flex items-center gap-4">
-              <div className="w-9 h-9 rounded-lg flex-shrink-0 flex items-center justify-center bg-kumo-tint">
+              <div className="w-9 h-9 rounded-lg flex-shrink-0 flex items-center justify-center bg-kumo-control">
                 <MagnifyingGlass size={18} className="text-kumo-subtle" />
               </div>
               <div className="flex-1 min-w-0">
-                <h2 className="text-lg font-semibold text-kumo-strong">Allow user search</h2>
-                <p className="text-sm text-kumo-subtle mt-0.5">
+                <h2 className="text-[16px] leading-6 font-semibold text-kumo-default">Allow user search</h2>
+                <p className="text-[14px] leading-5 text-kumo-subtle mt-0.5">
                   Let users find other accounts by name or email when sharing a workspace. When off,
                   people can only be invited by their exact username or email. Applies on each
                   user&rsquo;s next connection.
@@ -485,14 +499,15 @@ export default function AdminPage() {
 
       {/* Site name */}
       {activeTab === 'general' && (
-        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Site name</h2>
-          <p className="text-sm text-kumo-subtle mb-5">
+        <div className={CARD}>
+          <h2 className={CARD_TITLE}>Site name</h2>
+          <p className={CARD_DESCRIPTION}>
             Shown next to the logo in the top bar. Leave empty to use the default
             (&ldquo;{DEFAULT_SITE_NAME}&rdquo;). Applies on each user&rsquo;s next connection.
           </p>
 
           <Input
+            aria-label="Site name"
             value={siteNameDraft}
             onChange={(e) => setSiteNameDraft(e.target.value)}
             placeholder={DEFAULT_SITE_NAME}
@@ -525,16 +540,16 @@ export default function AdminPage() {
 
       {/* Site logo */}
       {activeTab === 'general' && (
-        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Logo</h2>
-          <p className="text-sm text-kumo-subtle mb-5">
+        <div className={CARD}>
+          <h2 className={CARD_TITLE}>Logo</h2>
+          <p className={CARD_DESCRIPTION}>
             Shown in the app chrome, sign-in screens, and browser tab. Images are scaled without
             cropping and converted to a static PNG. Square images work best. Applies on each
             user&rsquo;s next connection.
           </p>
 
           <div className="flex flex-wrap items-center gap-4">
-            <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-kumo-line bg-kumo-base p-2">
+            <div className="flex h-16 w-16 items-center justify-center rounded-xl bg-kumo-base p-2">
               <SiteLogo size={40} srcOverride={siteLogoUrl}>
                 <Hexagon size={32} weight="bold" className="text-kumo-brand" />
               </SiteLogo>
@@ -574,15 +589,15 @@ export default function AdminPage() {
 
       {/* Theme / accent color */}
       {activeTab === 'general' && (
-        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Theme</h2>
-          <p className="text-sm text-kumo-subtle mb-5">
+        <div className={CARD}>
+          <h2 className={CARD_TITLE}>Theme</h2>
+          <p className={CARD_DESCRIPTION}>
             Accent color used for buttons, links, and highlights. Changes preview live here; click
             Save to apply for everyone (on their next connection). Backgrounds keep the default
-            warm theme.
+            theme.
           </p>
 
-          <div className="flex flex-wrap items-center gap-2 mb-4">
+          <div role="group" aria-label="Accent color" className="flex flex-wrap items-center gap-2 mb-4">
             {ACCENT_PRESETS.map((preset) => {
               const selected = accentDraft === preset.value
               const swatch = preset.value || DEFAULT_ACCENT_COLOR
@@ -591,14 +606,11 @@ export default function AdminPage() {
                   key={preset.label}
                   type="button"
                   onClick={() => setAccentDraft(preset.value)}
-                  className={`flex items-center gap-2 pl-1.5 pr-3 py-1.5 rounded-full border text-xs font-medium transition-colors ${
-                    selected
-                      ? 'border-kumo-default text-kumo-default bg-kumo-tint'
-                      : 'border-kumo-line text-kumo-subtle hover:bg-kumo-tint'
-                  }`}
+                  aria-pressed={selected}
+                  className={chipClass(selected)}
                 >
                   <span
-                    className="w-4 h-4 rounded-full border border-kumo-line"
+                    className="size-4.5 rounded-full"
                     style={{ background: swatch }}
                   />
                   {preset.label}
@@ -613,7 +625,7 @@ export default function AdminPage() {
                 type="color"
                 value={accentDraft || DEFAULT_ACCENT_COLOR}
                 onChange={(e) => setAccentDraft(e.target.value)}
-                className="w-9 h-9 rounded-md border border-kumo-line bg-transparent cursor-pointer p-0.5"
+                className="w-9 h-9 rounded-md border-0 bg-kumo-control cursor-pointer p-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
               />
               Custom
             </label>
@@ -646,9 +658,9 @@ export default function AdminPage() {
 
       {/* Full-width banner */}
       {activeTab === 'general' && (
-        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Banner</h2>
-          <p className="text-sm text-kumo-subtle mb-5">
+        <div className={CARD}>
+          <h2 className={CARD_TITLE}>Banner</h2>
+          <p className={CARD_DESCRIPTION}>
             A dismissible bar across the very top of the app (logged in or not). Markdown is
             supported, so you can include links. Leave empty to hide it. Applies on each
             user&rsquo;s next connection.
@@ -656,6 +668,7 @@ export default function AdminPage() {
 
           <Textarea
             className="w-full"
+            aria-label="Banner text"
             value={bannerTextDraft}
             onValueChange={setBannerTextDraft}
             rows={1}
@@ -671,7 +684,7 @@ export default function AdminPage() {
           <div className="mt-4 flex items-end justify-between gap-4">
             <div className="min-w-0">
               <p className="text-xs font-medium text-kumo-subtle mb-2">Type</p>
-              <div className="flex flex-wrap items-center gap-2">
+              <div role="group" aria-label="Banner type" className="flex flex-wrap items-center gap-2">
                 {BANNER_COLORS.map((c) => {
                   const selected = bannerColorDraft === c
                   return (
@@ -679,14 +692,11 @@ export default function AdminPage() {
                       key={c}
                       type="button"
                       onClick={() => setBannerColorDraft(c)}
-                      className={`flex items-center gap-2 pl-1.5 pr-3 py-1.5 rounded-full border text-xs font-medium transition-colors ${
-                        selected
-                          ? 'border-kumo-default text-kumo-default bg-kumo-tint'
-                          : 'border-kumo-line text-kumo-subtle hover:bg-kumo-tint'
-                      }`}
+                      aria-pressed={selected}
+                      className={chipClass(selected)}
                     >
                       <span
-                        className="w-4 h-4 rounded-full border border-kumo-line"
+                        className="size-4.5 rounded-full ring-1 ring-inset ring-kumo-line"
                         style={{ background: BANNER_SWATCH[c] }}
                       />
                       {c.charAt(0).toUpperCase() + c.slice(1)}
@@ -726,9 +736,9 @@ export default function AdminPage() {
 
       {/* Top-bar notice */}
       {activeTab === 'general' && (
-        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Top-bar notice</h2>
-          <p className="text-sm text-kumo-subtle mb-5">
+        <div className={CARD}>
+          <h2 className={CARD_TITLE}>Top-bar notice</h2>
+          <p className={CARD_DESCRIPTION}>
             Shown centered in the top navigation bar. Markdown is supported, so you can include
             links. Keep it short — it renders on a single line. Leave empty to show nothing. Applies
             on each user&rsquo;s next connection.
@@ -736,6 +746,7 @@ export default function AdminPage() {
 
           <Textarea
             className="w-full"
+            aria-label="Top-bar notice"
             value={announcementDraft}
             onValueChange={setAnnouncementDraft}
             rows={1}
@@ -782,15 +793,16 @@ export default function AdminPage() {
 
       {/* Agent system prompt additions */}
       {activeTab === 'general' && (
-      <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-kumo-strong mb-1">Agent instructions</h2>
-        <p className="text-sm text-kumo-subtle mb-5">
+      <div className={CARD}>
+        <h2 className={CARD_TITLE}>Agent instructions</h2>
+        <p className={CARD_DESCRIPTION}>
           Extra instructions added to every agent&rsquo;s system prompt on this deployment. Use this
           for instance-specific context, conventions, or guardrails.
         </p>
 
         <Textarea
           className="w-full"
+          aria-label="Agent instructions"
           value={instructionsDraft}
           onValueChange={setInstructionsDraft}
           rows={6}
@@ -837,9 +849,9 @@ export default function AdminPage() {
 
       {/* Gatekeeper resources */}
       {activeTab === 'gatekeepers' && (
-        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Gatekeepers</h2>
-          <p className="text-sm text-kumo-subtle mb-5">
+        <div className={CARD}>
+          <h2 className={CARD_TITLE}>Gatekeepers</h2>
+          <p className={CARD_DESCRIPTION}>
             Turn connectors and resource types on or off for each service. Auto-provisioned
             gatekeepers (like the Context Library) have three modes &mdash; disabled, optional, or
             enabled for everyone. Changes are soft: they don&rsquo;t revoke access a gadget already
@@ -877,21 +889,22 @@ export default function AdminPage() {
                       <h3 className={`flex-1 text-sm font-semibold ${mode === 'disabled' ? 'text-kumo-subtle' : 'text-kumo-default'}`}>
                         {vendor.displayName}
                       </h3>
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-fill text-kumo-subtle">
                         auto-provisioned
                       </span>
                     </div>
-                    <div className="flex gap-2 px-3 py-1">
+                    <div role="group" aria-label={`${vendor.displayName} availability`} className="flex gap-2 px-3 py-1">
                       {options.map((opt) => (
                         <button
                           key={opt.value}
                           type="button"
                           disabled={resourceBusy.has(gkKey)}
                           onClick={() => handleGatekeeperMode(vendor.vendorId, opt.value)}
-                          className={`flex-1 rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 ${
+                          aria-pressed={mode === opt.value}
+                          className={`flex-1 rounded-lg px-3 py-2 text-left transition-colors disabled:opacity-50 ${TOGGLE_ROW_FOCUS} ${
                             mode === opt.value
-                              ? 'border-kumo-brand bg-kumo-brand/10'
-                              : 'border-kumo-line hover:bg-kumo-tint'
+                              ? 'bg-kumo-info-tint ring-1 ring-inset ring-kumo-ring'
+                              : 'bg-kumo-control hover:bg-kumo-fill-hover'
                           }`}
                         >
                           <span className="block text-sm font-medium text-kumo-default">{opt.label}</span>
@@ -918,7 +931,7 @@ export default function AdminPage() {
                       if (!resourceBusy.has(gkKey)) handleGatekeeperToggle(vendor.vendorId, !vendor.enabled)
                     }
                   }}
-                  className="flex cursor-pointer items-center gap-3 mb-2 px-3 py-2 rounded-lg bg-kumo-tint/50 hover:bg-kumo-tint transition-colors"
+                  className={`flex cursor-pointer items-center gap-3 mb-2 px-3 py-2 rounded-lg bg-kumo-tint/50 hover:bg-kumo-tint transition-colors ${TOGGLE_ROW_FOCUS}`}
                 >
                   {vendor.logo && (
                     <img
@@ -930,7 +943,7 @@ export default function AdminPage() {
                   <h3 className={`flex-1 text-sm font-semibold ${vendor.enabled ? 'text-kumo-default' : 'text-kumo-subtle'}`}>
                     {vendor.displayName}
                     {!vendor.enabled && (
-                      <span className="ml-2 text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
+                      <span className="ml-2 text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-fill text-kumo-subtle">
                         disabled
                       </span>
                     )}
@@ -940,6 +953,7 @@ export default function AdminPage() {
                   </span>
                   <span onClick={(e) => e.stopPropagation()}>
                     <Switch
+                      aria-label={`Enable ${vendor.displayName}`}
                       checked={vendor.enabled}
                       disabled={resourceBusy.has(gkKey)}
                       onCheckedChange={(enabled) => handleGatekeeperToggle(vendor.vendorId, enabled)}
@@ -965,7 +979,7 @@ export default function AdminPage() {
                               if (!resourceBusy.has(key)) handleResourceToggle(vendor.vendorId, resource.urlPattern, !resource.enabled)
                             }
                           }}
-                          className="flex cursor-pointer items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-kumo-tint transition-colors"
+                          className={`flex cursor-pointer items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-kumo-tint transition-colors ${TOGGLE_ROW_FOCUS}`}
                         >
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-kumo-default truncate">
@@ -975,6 +989,7 @@ export default function AdminPage() {
                           </div>
                           <span onClick={(e) => e.stopPropagation()}>
                             <Switch
+                              aria-label={resource.title}
                               checked={resource.enabled}
                               disabled={resourceBusy.has(key)}
                               onCheckedChange={(enabled) =>

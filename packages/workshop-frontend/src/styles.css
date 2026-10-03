@@ -45,6 +45,8 @@
   /* Border / line tokens */
   --color-kumo-line: #e0dded;
   --color-kumo-ring: #1d4ed8;
+  /* Kumo draws its own focus rings with kumo-focus; keep them on the accent like ours. */
+  --color-kumo-focus: var(--color-kumo-ring);
 
   /* Chat surface tokens */
   --color-kumo-bubble-user: #eceaf6;
@@ -159,6 +161,7 @@
   --color-kumo-interact: #4a4767;
   --color-kumo-line: #93c5fd1f;
   --color-kumo-ring: #60a5fa;
+  --color-kumo-focus: var(--color-kumo-ring);
   --color-kumo-bubble-user: #1b1930;
 
   --color-kumo-brand: #60a5fa;
@@ -352,17 +355,6 @@ html {
 }
 .demo-link:hover {
   color: var(--color-kumo-brand);
-}
-
-/* Connection chip */
-.connection-chip {
-  border-color: var(--color-kumo-line);
-  background: var(--color-kumo-elevated);
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-.connection-chip:hover {
-  border-color: var(--color-kumo-fill);
-  background: var(--color-kumo-tint);
 }
 
 .themed-surface-inset {
