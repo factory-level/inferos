@@ -3,6 +3,7 @@
 //
 //   pnpm dev:setup [--url http://localhost:8787] [--user dev] [--password devpassword]
 //                  [--mock-model [http://localhost:11434]] [--inferops] [--screen operations]
+//                  [--console]
 //
 // It signs in (creating the account on first run) with the same password hash the browser derives,
 // so the printed username and password also work on the login page, and they match the
@@ -10,7 +11,10 @@
 //   --mock-model  registers the scripted model served by `pnpm dev:mock-model` and makes it the
 //                 preferred model, so chats work with no model credentials;
 //   --inferops    opts into the auto-provisioned InferOps gatekeeper (mock data);
-//   --screen ID   ensures a demo workspace with an InferOps Canvas screen from catalog template ID.
+//   --screen ID   ensures a demo workspace with an InferOps Canvas screen from catalog template ID;
+//   --console     ensures test data for Operate: in the demo workspace, a connection to the mock
+//                 demo board, Board and Activity screens over it, and an "Operations lead" console
+//                 whose views are Overview (a rollup of both), Board and Activity. Implies --inferops.
 // It prints a JSON report including the session token, which a browser can adopt with
 // `localStorage.setItem("authToken", token)`.
 //
@@ -20,9 +24,10 @@
 import { parseArgs } from "node:util";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, PublicApi } from "@gadgets/workshop-shared/api";
+import type { CanvasContent } from "@gadgets/workshop-shared/canvas";
 import {
-  connectWorkshop, DEMO_WORKSPACE_TITLE, ensureWorkspace, INFEROPS_VENDOR_ID, localWorkshopUrl,
-  passwordHash,
+  connectWorkshop, DEMO_BOARD_URL, DEMO_WORKSPACE_TITLE, ensureWorkspace, INFEROPS_VENDOR_ID,
+  listConnectedAccounts, localWorkshopUrl, passwordHash,
 } from "./dev-workshop.ts";
 
 const SCRIPTED_MODEL_ID = "scripted-inferops";
@@ -35,6 +40,7 @@ const { values: options } = parseArgs({
     "mock-model": { type: "string" },
     inferops: { type: "boolean", default: false },
     screen: { type: "string" },
+    console: { type: "boolean", default: false },
   },
   // `--mock-model` with no value means the default local endpoint.
   args: process.argv.slice(2).flatMap((arg, index, all) =>
@@ -97,6 +103,61 @@ async function ensureScreen(api: RpcStub<PublicApi>, user: RpcStub<Authenticated
   }
 }
 
+const CONSOLE_TITLE = "Operations lead";
+
+/** A screen of one section holding one demo board widget. */
+function boardScreen(title: string, size: "wide" | "full", showCompleted: boolean): CanvasContent {
+  return {
+    title,
+    sections: [{
+      id: "main", title, columns: 2,
+      widgets: [{
+        id: "board", kind: "inferops.project-board", version: 1, targetRef: DEMO_BOARD_URL, size,
+        params: { workflow: "software", showCompleted },
+      }],
+    }],
+  };
+}
+
+async function ensureConsole(api: RpcStub<PublicApi>, user: RpcStub<AuthenticatedApi>) {
+  const config = await api.getServerConfig();
+  if (!config.canvasFeatures?.durableViews) {
+    throw new Error("Saved canvases are off: create inferos.canvas.json (pnpm canvas init) and restart the dev server");
+  }
+  const account = (await listConnectedAccounts(user)).find(candidate => candidate.vendorId === INFEROPS_VENDOR_ID);
+  if (!account) throw new Error("The InferOps account is not connected");
+
+  const { overseer } = await ensureWorkspace(user, DEMO_WORKSPACE_TITLE, "pnpm dev:setup");
+  try {
+    const workspaceId = (await overseer.getMetadata()).id;
+    // A board widget reads through the workspace's own connection to the board it names.
+    using existingConnection = await overseer.getGatekeeperByResourceUrl(DEMO_BOARD_URL);
+    if (!existingConnection) {
+      using connection = await overseer.newGatekeeper(account.id, DEMO_BOARD_URL);
+      if (!connection) throw new Error(`The InferOps account cannot open ${DEMO_BOARD_URL}`);
+    }
+    const screens = await overseer.listCanvases();
+    const screen = async (content: CanvasContent) =>
+      screens.find(entry => entry.title === content.title) ?? await overseer.createCanvas(content);
+    const board = await screen(boardScreen("Board", "full", false));
+    const activity = await screen(boardScreen("Activity", "wide", true));
+
+    const existing = (await overseer.listConsoles()).find(entry => entry.title === CONSOLE_TITLE);
+    const saved = existing ?? await overseer.createConsole({
+      title: CONSOLE_TITLE, fullChat: "available",
+      views: [
+        { id: "overview", title: "Overview", type: "rollup", screens: [board.id, activity.id] },
+        { id: "board", title: "Board", type: "screen", screen: board.id },
+        { id: "activity", title: "Activity", type: "screen", screen: activity.id },
+      ],
+    });
+    return { workspaceId, consoleId: saved.id, screens: { board: board.id, activity: activity.id },
+      url: new URL("/inferops-canvas", base).toString() };
+  } finally {
+    overseer[Symbol.dispose]();
+  }
+}
+
 const { api, close } = connectWorkshop(base);
 try {
   const { token, created } = await signIn(api);
@@ -107,8 +168,9 @@ try {
     report.model = await ensureMockModel(user, options["mock-model"]);
     report.modelServer = `${options["mock-model"]} (start it with pnpm dev:mock-model)`;
   }
-  if (options.inferops) report.inferops = await ensureInferOps(user);
+  if (options.inferops || options.console) report.inferops = await ensureInferOps(user);
   if (options.screen !== undefined) report.screen = await ensureScreen(api, user, options.screen);
+  if (options.console) report.console = await ensureConsole(api, user);
   // The token is a session for a throwaway local account; printing it lets a browser or agent adopt it.
   report.browserLogin = `localStorage.setItem("authToken", ${JSON.stringify(token)})`;
   console.log(JSON.stringify(report, null, 2));

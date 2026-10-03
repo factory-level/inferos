@@ -43,6 +43,10 @@
       "types": "./src/theme.ts",
       "import": "./src/theme.ts"
     },
+    "./operate-console": {
+      "types": "./src/operate-console.ts",
+      "import": "./src/operate-console.ts"
+    },
     "./operate-flow": {
       "types": "./src/operate-flow.ts",
       "import": "./src/operate-flow.ts"

@@ -3,6 +3,8 @@
 // operate agent use the same function, so every party derives the same page from the same log.
 // See docs/design/operate-mode.md ("Sessions").
 
+import type { ConsoleFullChat } from "./operate-console.js";
+
 /** Longest workspace or screen id an operate reference may carry. */
 export const MAX_OPERATE_ID_LENGTH = 128;
 
@@ -63,6 +65,28 @@ export type OperateFlowRun = {
   index: number;
 };
 
+/**
+ * How the page presents the open console: its `canvas` (views and screens, with the operate chat
+ * beside them) or `chat` (the operate conversation filling the page).
+ */
+export type OperatePresentation = "canvas" | "chat";
+
+/**
+ * The console open in a session. What later events are checked against (its full chat setting) is
+ * copied in when it opens, like a flow's steps, so the reducer needs nothing but the event.
+ */
+export type OperateConsoleRun = {
+  workspaceId: string;
+  consoleId: string;
+  title: string;
+  /** The console's full chat setting when it was opened. */
+  fullChat: ConsoleFullChat;
+  /** The id of the view shown from the console's menu. */
+  viewId: string;
+  /** A screen opened from that view (for example from a rollup's tile), or null to show the view. */
+  screenId: string | null;
+};
+
 /** The full page state of an operate session. */
 export type OperatePageState = {
   /** What the session has open, in the order it was opened. */
@@ -90,6 +114,10 @@ export type OperatePageState = {
    * what the page displays, not a record of what happened to the action.
    */
   lastApprovalOutcome: (OperateApprovalRef & { outcome: OperateApprovalOutcome }) | null;
+  /** The console being worked in, or null for the console mosaic. */
+  console: OperateConsoleRun | null;
+  /** How the open console is presented. Always `canvas` when no console is open. */
+  presentation: OperatePresentation;
 };
 
 /** A change to an operate session's page state. Events change presentation only. */
@@ -122,7 +150,23 @@ export type OperateEvent =
    * resolves nothing: an action is resolved only through its workspace's `approveAction` /
    * `rejectAction`, and the gatekeeper's apply result is the truth this event reports.
    */
-  | { type: "approvalResolved"; approval: OperateApprovalRef; outcome: OperateApprovalOutcome };
+  | { type: "approvalResolved"; approval: OperateApprovalRef; outcome: OperateApprovalOutcome }
+  /**
+   * Open a console at one of its views, replacing any console already open. The presentation
+   * becomes `chat` when the console's full chat is `default` or `only`, and `canvas` otherwise.
+   */
+  | {
+    type: "openConsole"; workspaceId: string; consoleId: string; title: string;
+    fullChat: ConsoleFullChat; viewId: string;
+  }
+  /** Show another view of the open console. */
+  | { type: "openView"; viewId: string }
+  /** Open a screen from the shown view, or return to the view itself with null. */
+  | { type: "showScreen"; screenId: string | null }
+  /** Close the console and return to the console mosaic. */
+  | { type: "closeConsole" }
+  /** Present the open console as its canvas or as full chat, as its full chat setting allows. */
+  | { type: "setPresentation"; presentation: OperatePresentation };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -152,6 +196,8 @@ export const INITIAL_OPERATE_PAGE: OperatePageState = {
   flow: null,
   reviewing: null,
   lastApprovalOutcome: null,
+  console: null,
+  presentation: "canvas",
 };
 
 /** Thrown by `applyOperateEvent` for an event that is invalid in the current state. */
@@ -183,6 +229,19 @@ function checkApproval(approval: OperateApprovalRef): void {
     throw new OperateEventError("An action id must be a non-negative integer.");
   }
 }
+
+function checkTitle(title: string): void {
+  if (title.length === 0 || title.length > MAX_OPERATE_FLOW_TITLE_LENGTH) {
+    throw new OperateEventError(`A title must be 1-${MAX_OPERATE_FLOW_TITLE_LENGTH} characters.`);
+  }
+}
+
+function requireConsole(state: OperatePageState): OperateConsoleRun {
+  if (!state.console) throw new OperateEventError("No console is open in this session.");
+  return state.console;
+}
+
+const FULL_CHAT_MODES: readonly string[] = ["off", "available", "default", "only"];
 
 function sameApproval(a: OperateApprovalRef, b: OperateApprovalRef): boolean {
   return a.workspaceId === b.workspaceId && a.actionId === b.actionId;
@@ -267,6 +326,44 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
       return {
         ...state, reviewing, lastApprovalOutcome: { workspaceId, actionId, outcome: event.outcome },
       };
+    }
+    case "openConsole": {
+      let { workspaceId, consoleId, title, fullChat, viewId } = event;
+      checkIds([workspaceId, consoleId, viewId]);
+      checkTitle(title);
+      if (!FULL_CHAT_MODES.includes(fullChat)) {
+        throw new OperateEventError("A console's full chat must be off, available, default or only.");
+      }
+      let presentation: OperatePresentation =
+          fullChat === "default" || fullChat === "only" ? "chat" : "canvas";
+      return {
+        ...state, presentation,
+        console: { workspaceId, consoleId, title, fullChat, viewId, screenId: null },
+      };
+    }
+    case "openView": {
+      let open = requireConsole(state);
+      checkIds([event.viewId]);
+      return { ...state, console: { ...open, viewId: event.viewId, screenId: null } };
+    }
+    case "showScreen": {
+      let open = requireConsole(state);
+      if (event.screenId !== null) checkIds([event.screenId]);
+      return { ...state, console: { ...open, screenId: event.screenId } };
+    }
+    case "closeConsole": {
+      requireConsole(state);
+      return { ...state, console: null, presentation: "canvas" };
+    }
+    case "setPresentation": {
+      let open = requireConsole(state);
+      if (event.presentation === "chat" && open.fullChat === "off") {
+        throw new OperateEventError("This console does not offer full chat.");
+      }
+      if (event.presentation === "canvas" && open.fullChat === "only") {
+        throw new OperateEventError("This console is chat-only.");
+      }
+      return { ...state, presentation: event.presentation };
     }
   }
 }
