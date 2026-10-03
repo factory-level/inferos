@@ -2,11 +2,14 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import { ChatCircleIcon, LayoutIcon, XIcon, AppWindowIcon } from '@phosphor-icons/react'
 import { sameOperateRef, type OperateEvent, type OperateRef } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
-import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
 import { useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useOperateSession } from './OperateSessionContext'
 import { AgentActivityNote } from './AgentActivityNote'
+import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
+import { ConsoleMosaic } from './ConsoleMosaic'
+import { ConsolePage } from './ConsolePage'
+import { findConsole, openConsoleEvent } from './consoles'
 import { FlowPage } from './FlowPage'
 import { OperateChatPanel } from './OperateChatPanel'
 import { SessionApprovals } from './SessionApprovals'
@@ -16,8 +19,10 @@ import { useSessionWorkspace } from './useSessionWorkspace'
 const refKey = (ref: OperateRef) => ref.type === 'screen' ? `${ref.workspaceId}/${ref.screenId}` : ref.workspaceId
 
 /**
- * Operate: the person's one operate session. Its tabs are the working set, the main region shows the
- * focused reference, and the operate chat sits beside it. While a flow runs, the flow's current
+ * Operate: the person's one operate session. With a console open, the page is that console. With
+ * none, the home is the console mosaic, and anything the session has open (the working set, for
+ * example screens the operate agent opened) shows as tabs, with the focused one in the main region
+ * and the operate chat beside it on the right. While a flow runs, the flow's current
  * step takes the whole page instead. Every change goes through the session, so
  * every tab and device of theirs shows the same page. Pending approvals of the session workspace
  * and the focused screen's workspace are decided above the main region.
@@ -42,6 +47,13 @@ export const OperateSessionPage = () => {
     })
   }
   if (state.flow) return <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} sessionWorkspace={sessionWorkspace} />
+  if (state.console) return (
+    <ConsolePage run={state.console} loading={screens.status === 'loading'}
+      entry={screens.status === 'ready' ? findConsole(screens.workspaces, state.console) : undefined}
+      presentation={state.presentation} chatOpen={state.chatOpen} sessionWorkspace={sessionWorkspace} onEvent={send}
+      approvals={<SessionApprovals session={sessionWorkspace} screenWorkspaceId={state.console.workspaceId}
+        reviewing={state.reviewing} lastOutcome={state.lastApprovalOutcome} onEvent={operate.dispatch} />} />
+  )
 
   const titleOf = (ref: OperateRef) => {
     if (ref.type === 'workspace') return 'Workspace'
@@ -71,7 +83,6 @@ export const OperateSessionPage = () => {
               </div>
             )
           })}
-          {state.workingSet.length === 0 && <span className="px-1 text-[13px] text-kumo-inactive">Nothing open yet</span>}
         </div>
         <div className="max-w-[40%] min-w-0"><AgentActivityNote records={operate.recentEvents} titleOf={titleOf} /></div>
         <span className="text-[11px] text-kumo-inactive" title="Session sequence number">#{operate.snapshot.seq}</span>
@@ -81,7 +92,6 @@ export const OperateSessionPage = () => {
         </button>
       </header>
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {state.chatOpen && <OperateChatPanel workspace={sessionWorkspace} />}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <SessionApprovals session={sessionWorkspace}
             screenWorkspaceId={state.focus?.type === 'screen' ? state.focus.workspaceId : null}
@@ -93,9 +103,15 @@ export const OperateSessionPage = () => {
                   onClose={() => state.focus && send({ type: 'close', ref: state.focus })} />
               : state.focus?.type === 'workspace'
                 ? <p className="p-6 text-sm text-kumo-subtle">Workspaces open in a session come next.</p>
-                : <InferOpsCanvasHome />}
+                : <>
+                    <ConsoleMosaic screens={screens} onOpen={entry => send(openConsoleEvent(entry))} />
+                    {/* Creating screens and starting flows has no home in Build yet, so it stays
+                        here, below the consoles, until the console builder lands. */}
+                    <section aria-label="Screens and flows" className="border-t border-kumo-line"><InferOpsCanvasHome /></section>
+                  </>}
           </main>
         </div>
+        {state.chatOpen && <OperateChatPanel workspace={sessionWorkspace} />}
       </div>
     </div>
   )

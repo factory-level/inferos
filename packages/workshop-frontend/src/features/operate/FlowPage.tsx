@@ -57,11 +57,11 @@ export const FlowPage = ({ flow, chatOpen, onEvent, sessionWorkspace }: {
         </button>
       </header>
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {chatOpen && <OperateChatPanel workspace={sessionWorkspace} />}
-        <main className="min-h-0 min-w-0 flex-1 overflow-auto">
+        <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-kumo-tint">
           <FlowScreen key={`${flow.index}/${flow.steps[flow.index]}`} workspaceId={flow.workspaceId}
             screenId={flow.steps[flow.index]!} onTitle={setStepTitle} />
         </main>
+        {chatOpen && <OperateChatPanel workspace={sessionWorkspace} />}
       </div>
     </div>
   )

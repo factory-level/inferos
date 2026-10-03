@@ -7,10 +7,24 @@ const DEFAULT_CHAT_WIDTH = 420
 
 const isBrowser = typeof window !== 'undefined'
 
-const clampChatWidth = (width: number) => {
-  if (!isBrowser) return Math.max(MIN_CHAT_WIDTH, Math.min(DEFAULT_CHAT_WIDTH, width))
-  const max = Math.max(MIN_CHAT_WIDTH, window.innerWidth - MIN_WORKSPACE_WIDTH)
+// `available` is the width the chat and the workspace share: the split's container when known,
+// else the window.
+const clampChatWidth = (width: number, available = isBrowser ? window.innerWidth : undefined) => {
+  if (available === undefined) return Math.max(MIN_CHAT_WIDTH, Math.min(DEFAULT_CHAT_WIDTH, width))
+  const max = Math.max(MIN_CHAT_WIDTH, available - MIN_WORKSPACE_WIDTH)
   return Math.max(MIN_CHAT_WIDTH, Math.min(max, width))
+}
+
+/** Which side of the workspace pane the chat column sits on. */
+export type SplitSide = 'left' | 'right'
+
+// The chat width a pointer at `clientX` asks for, measured from the edge of the split's container
+// (the handle's parent) that the chat sits against, so a sidebar beside the split doesn't count.
+const widthAt = (handle: HTMLElement, clientX: number, side: SplitSide) => {
+  const container = handle.parentElement?.getBoundingClientRect()
+  if (!container) return clampChatWidth(side === 'left' ? clientX : window.innerWidth - clientX)
+  const width = side === 'left' ? clientX - container.left : container.right - clientX
+  return clampChatWidth(width, container.width)
 }
 
 const getInitialChatWidth = () => {
@@ -35,11 +49,11 @@ const persistChatWidth = (width: number) => {
 }
 
 /**
- * Width of a left chat column beside a workspace pane, dragged from a handle between them. The
- * width is remembered across workspaces and pages and re-clamped when the window resizes.
- * Pointer capture keeps resizing reliable when dragging across a gadget iframe.
+ * Width of a chat column beside a workspace pane, on its `side`, dragged from a handle between
+ * them. The width is remembered across workspaces and pages and re-clamped when the window
+ * resizes. Pointer capture keeps resizing reliable when dragging across a gadget iframe.
  */
-export const useResizableSplit = (enabled: boolean) => {
+export const useResizableSplit = (enabled: boolean, side: SplitSide = 'left') => {
   const [width, setWidth] = useState(getInitialChatWidth)
   const widthRef = useRef(width)
   widthRef.current = width
@@ -65,7 +79,7 @@ export const useResizableSplit = (enabled: boolean) => {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId)
     }
-    const next = e.type === 'pointercancel' ? widthRef.current : clampChatWidth(e.clientX)
+    const next = e.type === 'pointercancel' ? widthRef.current : widthAt(e.currentTarget, e.clientX, side)
     setWidth(next)
     persistChatWidth(next)
     setIsResizing(false)
@@ -83,7 +97,7 @@ export const useResizableSplit = (enabled: boolean) => {
       },
       onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => {
         if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
-        setWidth(clampChatWidth(e.clientX))
+        setWidth(widthAt(e.currentTarget, e.clientX, side))
       },
       onPointerUp,
       onPointerCancel: onPointerUp,
