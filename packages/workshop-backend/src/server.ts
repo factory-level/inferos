@@ -269,7 +269,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async #openGadgetInternal(id: string, shareKey?: string,
-                            configureObservers?: RpcStub<ObserverConfigCallback>)
+                            configureObservers?: RpcStub<ObserverConfigCallback>,
+                            asOperateSession = false)
       : Promise<NativeRpcStub<Overseer>> {
     let userId = this.#userId.toString();
     let profileId = this.#userId.name!;
@@ -307,7 +308,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     let result;
     try {
-      result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
+      result = await overseer.open(
+          userId, profileId, notifyClosed, shareKey, configureObservers, asOperateSession);
     } catch (err) {
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries
@@ -660,7 +662,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return new OperateSessionImpl(() => this.#user, async () => {
       let id = await this.#user.claimOperateSessionWorkspace(
           this.overseers.newUniqueId().toString());
-      return this.#openGadgetInternal(id);
+      return this.#openGadgetInternal(id, undefined, undefined, true);
     });
   }
 }

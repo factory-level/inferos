@@ -3,8 +3,11 @@ import { ArrowClockwise, ArrowsOutSimple } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
+import { awaitingByIssue } from './boardActivity'
 import { visibleColumns } from './boardData'
+import { BoardActivityLine } from './BoardActivityLine'
 import { KanbanBoard } from './KanbanBoard'
+import { useBoardActivity } from './useBoardActivity'
 import { useBoardData } from './useBoardData'
 
 export type CanvasBoardWidgetProps = {
@@ -20,12 +23,16 @@ export type CanvasBoardWidgetProps = {
 /**
  * A live board: its request served by the scope's shared adapter, so every presentation of one
  * reference shows the same board from one read. Shows the adapter's state explicitly (loading,
- * not connected, InferOps turned off, error, stale, pending moves) and the Kanban once a board is held.
+ * not connected, InferOps turned off, error, stale, pending moves), the board's activity from the
+ * scope's action log, and the Kanban once a board is held.
  */
 export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   const { widget, overseer, presentation } = props
   const { state, refresh, move } = useBoardData(overseer, widget)
   const board = 'board' in state ? state.board : undefined
+  // Awaiting actions show only while a board is held: once the connection is revoked or the board
+  // cannot be read, nothing here can say what became of them.
+  const { activity, now } = useBoardActivity(overseer, widget.targetRef, board !== undefined)
   const columns = board ? visibleColumns(board, widget.params) : []
   const full = presentation === 'full'
   return <article aria-label={`Project board ${widget.targetRef}`} data-presentation={presentation}
@@ -45,6 +52,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
         disabled={state.status === 'loading'} onClick={refresh} />
       {presentation === 'card' && props.onOpen && <Button size="sm" variant="ghost" icon={ArrowsOutSimple} onClick={props.onOpen}>Open</Button>}
     </header>
+    <BoardActivityLine activity={activity} now={now} compact={!full} />
     <div className={`min-h-0 flex-1 p-3 ${full ? 'flex flex-col' : ''}`}>
       {state.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the board…</p>}
       {state.status === 'unbound' && <p className="text-sm text-kumo-subtle">
@@ -60,7 +68,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
       {state.status === 'stale' && state.error && <p role="alert" className="mb-2 text-xs text-kumo-danger">Showing the last board read; refresh failed: {state.error}</p>}
       {board && (columns.length === 0
         ? <p className="text-sm text-kumo-subtle">No {widget.params.workflow} states to show. {widget.params.showCompleted ? '' : 'Completed and cancelled states are hidden on this card.'}</p>
-        : <KanbanBoard board={board} columns={columns} pending={'pending' in state ? state.pending : []} layout={full ? 'full' : 'embedded'}
+        : <KanbanBoard board={board} columns={columns} pending={'pending' in state ? state.pending : []} awaiting={awaitingByIssue(activity)} layout={full ? 'full' : 'embedded'}
           onMove={(issue, toState) => move(issue.id, toState.id, issue.revision)} />)}
     </div>
   </article>

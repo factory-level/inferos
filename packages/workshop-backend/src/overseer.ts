@@ -1,4 +1,5 @@
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
+import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { WorkspaceFlowStore } from "./flow-store";
@@ -1131,6 +1132,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // The workspace kind (see WorkspaceKind). Workspaces stored before kinds existed read the
       // default.
       kind: <WorkspaceKind>DEFAULT_WORKSPACE_KIND,
+
+      // Whether this is its owner's operate session workspace (see OperateSession.getWorkspace()).
+      // Set, never cleared, when the session first opens it; from then on every open is the
+      // owner's, through OperateOverseerInterface, and its chats run with the operate tool set.
+      operateSession: false,
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -8907,6 +8913,23 @@ class OverseerImpl implements AgentHooks {
     return this.storage.kind.get();
   }
 
+  isOperateSession(): boolean {
+    return this.storage.operateSession.get();
+  }
+
+  // The owner's user DO holds the session (one per person, and only the owner opens this
+  // workspace), so the agent's event joins the same serialized log as the person's tabs.
+  async operatePage(event?: OperateEvent): Promise<OperateSessionSnapshot> {
+    if (!this.storage.operateSession.get() || !this.ownerId) {
+      throw new Error("This chat is not part of an operate session.");
+    }
+    let owner = wrapDoStubForTelemetry(
+        this.users.get(this.users.idFromString(this.ownerId)), this.logger);
+    return event
+        ? await owner.dispatchOperateEvent(event, null, "agent")
+        : await owner.getOperatePage();
+  }
+
   async getInstanceInstructions(): Promise<string> {
     try {
       // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.
@@ -9957,7 +9980,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async open(userId: string, profileId: string,
              notifyClosed: NativeRpcStub<() => void>,
              shareKey?: string,
-             configureObservers?: RpcStub<ObserverConfigCallback>): Promise<Overseer> {
+             configureObservers?: RpcStub<ObserverConfigCallback>,
+             asOperateSession = false): Promise<Overseer> {
     let firstOpen = !this.impl.ownerId;
     if (firstOpen) {
       // This Overseer hasn't been initialized yet.
@@ -9988,6 +10012,17 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     let isOwner = (userId == this.impl.ownerId);
+
+    // An operate session workspace is its owner's alone, so it is never shared: any other caller
+    // is refused before a share key is redeemed. Only the session (server.ts) marks one, for the
+    // workspace its owner's user DO recorded; the mark is what every later open checks.
+    if (asOperateSession && isOwner) {
+      this.impl.storage.operateSession.put(true);
+    }
+    let operateSession = this.impl.storage.operateSession.get();
+    if (operateSession && !isOwner) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
 
     // Cache the owner's profileId in memory when the owner opens.
     if (isOwner) {
@@ -10086,9 +10121,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           this.impl, profileId, userId, notifyClosed.dup());
     }
 
-    return new OverseerClientInterface(
+    let client = new OverseerClientInterface(
         this.impl, profileId, userId, isOwner, notifyClosed.dup(),
         ensureCapsules);
+    return operateSession ? new OperateOverseerInterface(client) : client;
   }
 
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
@@ -12725,6 +12761,207 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       : Promise<{ key: string; linkId: string }> {
     this.#deny();
   }
+  async newShareLinkKey(_linkId: string): Promise<{ key: string }> { this.#deny(); }
+  async listShareLinks(): Promise<ShareLinkInfo[]> { this.#deny(); }
+  async updateShareLink(_linkId: string, _note?: string): Promise<void> { this.#deny(); }
+  async revokeShareLink(_linkId: string, _keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    this.#deny();
+  }
+  async previewRevokeShareLink(_linkId: string): Promise<AffectedCollaborator[]> { this.#deny(); }
+}
+
+// The owner's capability for their operate session workspace (see OperateSession.getWorkspace()),
+// minted by open() for every open of a workspace marked `operateSession`. It forwards what the
+// operate chat needs -- metadata and presence, the chat itself, the action log and approvals,
+// connection requests, and reads of saved canvases and flows -- to the owner's own
+// OverseerClientInterface, and denies everything that authors software: gadgets, code, canvas and
+// flow edits, hooks, blueprints, sharing, and the workspace itself. The chats it starts run with
+// the operate tool set (see OPERATE_AGENT_TOOLS in agent.ts), which the agent loop derives from
+// the same mark, so neither half depends on what the client asks for.
+//
+// Like UseOverseerInterface, `implements Overseer` makes this default-deny at compile time: a new
+// Overseer method fails to compile here until someone decides whether operate may call it.
+@validateRpc()
+class OperateOverseerInterface extends RpcTarget implements Overseer {
+  constructor(private owner: OverseerClientInterface) {
+    super();
+  }
+
+  [Symbol.dispose]() {
+    this.owner[Symbol.dispose]();
+  }
+
+  #deny(): never {
+    throw new Error("Unauthorized: an operate session cannot change the workspace's software.");
+  }
+
+  // --- Allowed: the page around the chat ---
+
+  async getMetadata(): Promise<GadgetMetadata> { return this.owner.getMetadata(); }
+  async subscribeToMetadata(callback: RpcStub<(metadata: GadgetMetadata) => void>)
+      : Promise<RpcStub<{}>> {
+    return this.owner.subscribeToMetadata(callback);
+  }
+  async subscribeToPresence(subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>> {
+    return this.owner.subscribeToPresence(subscriber);
+  }
+  async subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>): Promise<RpcStub<{}>> {
+    return this.owner.subscribeToWorkpieces(subscriber);
+  }
+  async subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
+    return this.owner.subscribeToConsoleLogs(subscriber);
+  }
+  async listCanvases(): Promise<CanvasDefinition[]> { return this.owner.listCanvases(); }
+  async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.owner.getCanvas(id); }
+  async listFlows(): Promise<OperateFlow[]> { return this.owner.listFlows(); }
+
+  // --- Allowed: the chat ---
+
+  async listChats(): Promise<AiChatMetadata[]> { return this.owner.listChats(); }
+  async listModels(): Promise<AiChatAuthorInfo[]> { return this.owner.listModels(); }
+  async getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage> {
+    return this.owner.getChatHistory(chatId, beforeSequence);
+  }
+  async getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined> {
+    return this.owner.getChatMessage(chatId, sequence);
+  }
+  async listSlashCommands(): Promise<SlashCommandChoice[]> { return this.owner.listSlashCommands(); }
+  async subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date)
+      : Promise<RpcStub<{}>> {
+    return this.owner.subscribeToChat(subscriber, startAfter);
+  }
+  async newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
+                capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])
+      : Promise<number> {
+    return this.owner.newChat(initialMessage, modelId, capsules, attachments);
+  }
+  async sendChatMessage(chatId: number, message: string | SlashCommandRequest,
+                        modelId: string | null,
+                        capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])
+      : Promise<void> {
+    return this.owner.sendChatMessage(chatId, message, modelId, capsules, attachments);
+  }
+  async uploadChatAttachment(attachment: ChatAttachmentUpload, modelId: string | null)
+      : Promise<ChatAttachmentHandle> {
+    return this.owner.uploadChatAttachment(attachment, modelId);
+  }
+  async getChatAttachmentContent(chatId: number, id: string): Promise<Uint8Array> {
+    return this.owner.getChatAttachmentContent(chatId, id);
+  }
+  async deleteChatAttachment(id: string): Promise<void> { return this.owner.deleteChatAttachment(id); }
+  async setChatTitle(chatId: number, title: string): Promise<void> {
+    return this.owner.setChatTitle(chatId, title);
+  }
+  async deleteChat(chatId: number): Promise<void> { return this.owner.deleteChat(chatId); }
+  async stopAgent(chatId: number): Promise<void> { return this.owner.stopAgent(chatId); }
+  async retryAgent(chatId: number, modelId: string): Promise<void> {
+    return this.owner.retryAgent(chatId, modelId);
+  }
+
+  // --- Allowed: actions and connections, which wait for the person as they do in Build ---
+
+  async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
+      : Promise<RpcStub<{}>> {
+    return this.owner.subscribeToActions(subscriber, startAfter);
+  }
+  async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
+      : Promise<ActionHistoryPage> {
+    return this.owner.listActions(options);
+  }
+  async approveAction(id: number): Promise<void> { return this.owner.approveAction(id); }
+  async rejectAction(id: number): Promise<void> { return this.owner.rejectAction(id); }
+  async listPreApprovableActions(): Promise<PreApprovableAction[]> {
+    return this.owner.listPreApprovableActions();
+  }
+  async setAutoApprovedActionKind(gatekeeperId: WorkpieceId, actionKind: ActionKind)
+      : Promise<void> {
+    return this.owner.setAutoApprovedActionKind(gatekeeperId, actionKind);
+  }
+  async removeAutoApprovedActionKind(gatekeeperId: WorkpieceId, tag: string): Promise<void> {
+    return this.owner.removeAutoApprovedActionKind(gatekeeperId, tag);
+  }
+  async listAutoApprovedActionKinds()
+      : Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>> {
+    return this.owner.listAutoApprovedActionKinds();
+  }
+  async acceptConnectionRequest(requestId: string, result: {gatekeeperId: number})
+      : Promise<void> {
+    return this.owner.acceptConnectionRequest(requestId, result);
+  }
+  async denyConnectionRequest(requestId: string): Promise<void> {
+    return this.owner.denyConnectionRequest(requestId);
+  }
+  async newGatekeeper(accountId: number, resourceUrl: string)
+      : Promise<GatekeeperClient<any> | null> {
+    return this.owner.newGatekeeper(accountId, resourceUrl);
+  }
+  async getGatekeeperById(id: number): Promise<GatekeeperClient<any>> {
+    return this.owner.getGatekeeperById(id);
+  }
+  async getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
+    return this.owner.getGatekeeperByResourceUrl(resourceUrl);
+  }
+
+  // --- Denied: authoring ---
+
+  async setTitle(_title: string): Promise<void> { this.#deny(); }
+  async setKind(_kind: WorkspaceKind): Promise<void> { this.#deny(); }
+  async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
+  async deleteSelf(): Promise<void> { this.#deny(); }
+  async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
+  async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[])
+      : Promise<CanvasDefinition> { this.#deny(); }
+  async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
+  async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent)
+      : Promise<OperateFlow> { this.#deny(); }
+  async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
+      : Promise<{generation: number, revision: number}> { this.#deny(); }
+  async listTree(_commitId: string): Promise<TreeNode[]> { this.#deny(); }
+  async readFilesAtCommit(_commitId: string, _paths: string[])
+      : Promise<[path: string, FileAtCommit][]> { this.#deny(); }
+  async getCommitLog(_fromCommit: string, _depth?: number): Promise<CommitInfo[]> { this.#deny(); }
+  async updateChatFromMainline(_chatId: number): Promise<{conflictPaths: string[]}> {
+    this.#deny();
+  }
+  async mergeChanges(_chatId: number): Promise<MergeChangesResult> { this.#deny(); }
+  async revertChanges(_chatId: number, _revertFrom: number): Promise<void> { this.#deny(); }
+  async finalizeChatDraft(_chatId: number): Promise<void> { this.#deny(); }
+  async discardChatDraftChanges(_chatId: number): Promise<void> { this.#deny(); }
+  async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
+    this.#deny();
+  }
+  async listHooks(): Promise<BoundHookInfo[]> { this.#deny(); }
+  async enableHook(_id: number): Promise<void> { this.#deny(); }
+  async disableHook(_id: number): Promise<void> { this.#deny(); }
+  async deleteHook(_id: number): Promise<void> { this.#deny(); }
+  async listBlueprints(): Promise<BlueprintGadgetSummary[]> { this.#deny(); }
+  async updateBlueprint(_blueprintId: string, _options: {
+    title?: string;
+    description?: string;
+    updateCode?: boolean;
+    updateBindings?: boolean;
+    screenshot?: BlueprintScreenshotUpload | null;
+  }): Promise<void> { this.#deny(); }
+  async deleteBlueprint(_blueprintId: string): Promise<void> { this.#deny(); }
+  async retryBlueprintPublish(_blueprintId: string): Promise<void> { this.#deny(); }
+  async listObserverRequirements(_role: CollaboratorRole): Promise<ObserverBindingNeed[]> {
+    this.#deny();
+  }
+  async listCollaborators(): Promise<CollaboratorInfo[]> { this.#deny(); }
+  async addCollaborator(_username: string, _role: CollaboratorRole, _note?: string)
+      : Promise<CollaboratorInfo | null> { this.#deny(); }
+  async removeCollaborator(_profileId: string, _keepUsers: string[])
+      : Promise<AffectedCollaborator[]> { this.#deny(); }
+  async previewRemoveCollaborator(_profileId: string): Promise<AffectedCollaborator[]> {
+    this.#deny();
+  }
+  async createShareLink(_role: CollaboratorRole, _note?: string)
+      : Promise<{ key: string; linkId: string }> { this.#deny(); }
   async newShareLinkKey(_linkId: string): Promise<{ key: string }> { this.#deny(); }
   async listShareLinks(): Promise<ShareLinkInfo[]> { this.#deny(); }
   async updateShareLink(_linkId: string, _note?: string): Promise<void> { this.#deny(); }

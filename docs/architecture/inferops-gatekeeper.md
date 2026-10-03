@@ -20,8 +20,9 @@ updated: 2026-10-02
 `custom-gatekeepers/gatekeeper-inferops` (package `@inferos/gatekeeper-inferops`, vendor id
 `inferops`) implements the reviewed agent-facing API from the
 [design](../design/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
-`inferops-gatekeeper-api.d.ts` verbatim: `InferOpsProjectSession` (`readBoard`, `openIssue`) and
-`InferOpsIssueSession` (`read`, `transition`). The gatekeeper code is written against a data-source
+`inferops-gatekeeper-api.d.ts` verbatim: `InferOpsProjectSession` (`readBoard`, `openIssue`,
+`createIssue`) and `InferOpsIssueSession` (`read`, `transition`, `update`), with `Issue.pending`
+marking simulated changes. The gatekeeper code is written against a data-source
 contract (`src/inferops-client.ts`) with two implementations: `src/mock-inferops.ts` (**demo data**,
 the default, and what the tests and the demo use) and `src/http-inferops.ts` (the InferOps HTTP
 API). With `INFERLAB_AUTH_ORIGIN` set, the vendor provides "Sign in with InferLab" and every
@@ -43,10 +44,11 @@ renders a bound board as a Kanban gadget.
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and InferOps workspaces InferLab reported with each one's slug, slug resolution (`resolveWorkspace`), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`). |
-| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. |
+| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. The only module that talks InferOps HTTP. |
 | `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<tenant>.<workspace>/project/board/<KEY>` (two lowercase slug labels; `demo.local` is the demo data), `parseHost`, `isSlug`. |
-| `custom-gatekeepers/gatekeeper-inferops/src/simulation.ts` | Board ordering and read-time overlay of an issue's live pending transition. |
+| `custom-gatekeepers/gatekeeper-inferops/src/actions.ts` | The stored action records, a tagged union (`kind`: `transition`, `create`, `update`) each carrying the exact request it sends; `readAction` reads a record without `kind` (written before creates and updates) as a transition; `fingerprintOf`/`matchesFingerprint` hash the normalized request with the project key (SHA-256 over canonical JSON). |
+| `custom-gatekeepers/gatekeeper-inferops/src/simulation.ts` | Board ordering and read-time overlay of pending actions: an issue's live pending transition or update (`pending` `transition` or `update`), and pending creates as provisional cards (`pending: "create"`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/project-ui.tsx` | Organization, workspace and project picker built by the shared `build:configurator` task. It builds `inferops://<organization>.<workspace>/project/board/<KEY>` from an organization label, a workspace slug from the account's list and a project; with both left empty it asks the gatekeeper for a default host, which only a demo account has (`demo.local`). It duplicates the URL grammar for prefilling, kept in step by `__tests__/resources.test.ts`. |
 | `scripts/run-dev-server.ts` | Passes `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG` from the shell or root `.dev.vars` into the gatekeeper's generated dev config, resolves `INFERLAB_AUTH_ORIGIN` and `AUTH_GATEKEEPERS` for a wrapper's sign-in flag, and refuses to start when InferOps sign-in is asked for without the gatekeeper or an InferLab origin. |
 | `packages/bundled-blueprints/blueprints/inferops-kanban` | Kanban gadget expecting a `board` binding of type `InferOpsProjectSession`. |
@@ -121,14 +123,20 @@ renders a bound board as a Kanban gadget.
   `demo.local` as `NOT_FOUND`. No address or credential is taken from a URL, and the stopgap never
   backs a connected person.
 - **HTTP client.** Each call sends `Authorization: Bearer`, `X-Workspace-Id` and, on a
-  transition, `X-Idempotency-Key`, with a 15 s timeout and redirects not followed. A project key is
+  write, `X-Idempotency-Key`, with a 15 s timeout and redirects not followed. A project key is
   resolved to its UUID through `GET /project/projects` on every use. `readProject` requests
   `GET /project/board?projectId=<uuid>`, requires the response's `projectId` to match, and keeps
   only states and the `Issue` fields, dropping the workspace `projects[]`, leases and runs.
   `readIssue` requests `GET /project/issues/<id>` and answers
   `NOT_FOUND: No such issue in this project.` for a 404, for an issue whose `projectId` is another
   project's, and for an id that is not a UUID. `transition` makes that same scope check first, then
-  `POST /project/issues/<id>/transition` with `{toStateId, expectedRevision}`. A response that
+  `POST /project/issues/<id>/transition` with `{toStateId, expectedRevision}`. `updateIssue` makes
+  the same scope check, then `PATCH /project/issues/<id>` with only `title`, `description` (null
+  clears), `priority` and the required `expectedRevision`, and requires the returned card to be the
+  same issue. `createIssue` resolves the project's UUID and `POST /project/issues` with
+  `{projectId, title, description?, priority?, stateId, workflow?}`; a 404 is reported as the
+  project or state being gone. A 403 whose body carries `error.details.decision` is still
+  `FORBIDDEN`, with a message naming the workflow policy. A response that
   fails parsing, a non-JSON body, a redirect, a 5xx or a network failure is `UNAVAILABLE`; 401 is
   `UNAUTHORIZED`; 403 `FORBIDDEN`; 404 `NOT_FOUND`; 409 `STALE_REVISION` or `WORKFLOW_MISMATCH` by
   code and otherwise `CONFLICT`; 400 `INVALID_REQUEST`. InferOps' message text is not passed on,
@@ -137,19 +145,48 @@ renders a bound board as a Kanban gadget.
   `authorizeObservation` before returning. `openIssue(id)` is not an observation (UUID existence) and
   fails with the same `NOT_FOUND: No such issue in this project.` for an unknown issue and for an
   issue of another project.
+- **Writes.** Every write is staged in the facet's KV as an `ActionRecord` (actions.ts) with the
+  request it will send and its fingerprint, then submitted with `submitAction`; if submission
+  throws, the record is deleted. None is auto-approvable.
 - **Transitions.** `transition(toStateId, expectedRevision)` checks state membership
   (`INVALID_STATE`), workflow (`WORKFLOW_MISMATCH`) and the simulated revision (`STALE_REVISION`),
   records a pending action in the facet's KV, then calls `submitAction` (no auto-approvable kinds).
   Until decided, reads show the issue in the target state at its unchanged revision. The revision
   is opaque (InferOps' is a ledger position shared by all issues), so moves do not chain: a second
-  move of an issue whose pending move still applies fails with `CONFLICT`, while proposing the
-  same target again is a no-op. A pending move made stale by an outside change is no longer
-  simulated and does not block a new one.
-  `applyAction` calls the data source with idempotency key `<facet instance id>:<action id>`; the
-  data source rechecks scope, state, workflow and revision, and a replayed key returns the issue
-  without re-applying. A stale apply fails with a message telling the approver to discard the
-  move. `rejectAction` deletes the record, which ends the simulation. `revertAction` moves the issue
-  back only if it is still where the move left it.
+  move or update of an issue whose pending change still applies fails with `CONFLICT`, while
+  proposing the same target again is a no-op. A pending change made stale by an outside change is
+  no longer simulated and does not block a new one.
+- **Updates.** `update({title?, description?, priority?}, expectedRevision)` requires a decimal
+  revision (`INVALID_REQUEST`), trims the title and refuses an empty or overlong one (1 to 500) or
+  a description over 20000 characters (`INVALID_REQUEST`), checks the simulated revision
+  (`STALE_REVISION`), drops a title or priority equal to the current one (a change of nothing is a
+  no-op), refuses a second pending change (`CONFLICT`), and records the previous title and
+  priority. Until decided, reads show the new title and priority with `pending: "update"` at the
+  unchanged revision. The approval shows an inline `Issue` field (as transitions do), the current
+  and new title, `old → new` priority, the new description in full (or that it is cleared) and the
+  expected revision; its title is `Update <KEY>-<n>: <fields>`.
+- **Creates.** `createIssue({title, description?, priority?, stateId?})` validates the fields the
+  same way, resolves the state from the board (`INVALID_STATE` outside the project; default the
+  first `software` state in board order, or the first state when there is none) and sends it
+  explicitly, with `workflow: "content"` only for a content state. Until decided, `readBoard()`
+  shows a provisional card at the end of that column: id `pending-<action id>`, identifier
+  `<KEY>-new`, revision `"0"`, `pending: "create"`; `openIssue` does not accept it. The approval
+  shows project, title, state, workflow, priority and description; its title is
+  `Create issue: <title>`.
+- **Applying.** `applyAction` reads the record (a record without `kind` is a transition and has no
+  fingerprint to check), recomputes the fingerprint of the request it is about to send and refuses
+  a mismatch without sending anything, then calls the data source with idempotency key
+  `<facet instance id>:<action id>`; the data source rechecks scope, state, workflow and revision,
+  and a replayed key returns the original result without writing again, so a create whose
+  response was lost is retried into the same issue. An applied create records the new identifier,
+  an applied update the revision it produced. A failed apply names the action and the reason
+  (stale, invalid state, gone, refused, not permitted, fingerprint mismatch) and keeps the record
+  pending. `rejectAction` deletes the record, which ends the simulation.
+- **Reverting.** A transition moves the issue back only if it is still where the move left it. A
+  title or priority update restores the previous values with the then-current revision only if
+  the issue is still at the revision the update produced and still shows its values. Creates and
+  description updates are submitted with `implementsRevert: false`, and `revertAction` explains
+  instead of acting.
 - **Observers.** Strategy B: `addObserver` asks the collaborator's own `InferOpsVerifier` whether
   their account can open the bound project in the binding's workspace, with their own token;
   `removeObserver` is a no-op. `NOT_FOUND`, `UNAUTHORIZED`, `FORBIDDEN` and no membership of that
@@ -235,14 +272,18 @@ missing a button.
 - The transition endpoint's 404 does not say whether the issue or the target state is missing, so
   the HTTP client reports both as `NOT_FOUND`. `INVALID_STATE` is decided from the board when a
   move is proposed.
-- The scope check and the transition are two requests; InferOps does not enforce the project.
-- InferOps does not reject an idempotency key reused for a different move; only the mock does
-  (`IDEMPOTENCY_CONFLICT`). The gatekeeper never reuses a key.
+- The scope check and the transition or update are two requests; InferOps does not enforce the
+  project.
+- InferOps does not reject an idempotency key reused for a different request; only the mock does
+  (`IDEMPOTENCY_CONFLICT`). The gatekeeper never reuses a key, and its stored fingerprint refuses
+  to send a request that differs from the one approved.
 - The mock still advances a revision by one per transition. Nothing depends on that.
 - InferOps accepts mixed-case project identifiers; the resource grammar accepts uppercase keys
   only, so such a project is listed by the picker but cannot be bound.
-- No "pending" marker is exposed on `Issue`; the Kanban gadget marks moves it requested itself
-  until the next refresh.
+- The Kanban gadget and the canvas do not read `Issue.pending` yet; they mark moves they requested
+  themselves until the next refresh, and a provisional create card is draggable like any other
+  (a move of it fails `NOT_FOUND`).
+- The mock starts a created issue at revision 1 and numbers it after the highest existing key.
 
 ## Open Questions
 
@@ -250,17 +291,28 @@ missing a button.
   ([factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326)).
 - The HTTP client and the InferLab flows have not been run against a live InferOps; their
   evidence is a fake `fetch`.
-- Nothing is cached, so an issue read costs two requests and a transition three.
+- Nothing is cached, so an issue read costs two requests and a transition or update three (plus
+  the board read at proposal).
+- The content-only default state for a create (a board without software states) has no test: the
+  demo fixture has no such project.
 
 ## Evidence
 
 `custom-gatekeepers/gatekeeper-inferops/__tests__/gatekeeper.test.ts` (workerd, over the mock)
 covers board reads and observations, cross-project denial, invalid state, workflow mismatch, stale
 revision at proposal and at apply, refusal of a second move while one is pending, duplicate apply
-replay, rejection clearing the simulation, revert, and observer admission.
+replay, rejection clearing the simulation, revert, and observer admission; for creates and
+updates, approval queued and not applied, the provisional card and update overlay, field
+validation, change-of-nothing, conflict with a pending move or update, denial leaving nothing,
+duplicate apply writing once, stale apply, update revert and its refusals, creates not revertible,
+a legacy record without `kind` applied as a transition, and a tampered record refused by its
+fingerprint.
 `__tests__/http-inferops.test.ts` drives the HTTP client against a fake `fetch`: board mapping and
 stripping, cross-project issue refused identically to an unknown one, stale revision, workflow
-mismatch, replay of one idempotency key, rejected credential, 5xx, redirect, non-JSON and
+mismatch, replay of one idempotency key, create and update request shapes and headers, a create
+whose response was lost retried under the same key into one issue, update replay, no PATCH for an
+issue of another project, error mapping (400, 404, 409 conflict and workflow mismatch, 5xx, 403
+workflow-policy refusal), rejected credential, 5xx, redirect, non-JSON and
 malformed responses, and connection configuration. The gatekeeper has no test that runs its
 sessions over the HTTP client. `__tests__/inferlab-login.test.ts` covers origin validation,
 `providesAuth`, the authorize redirect, the PKCE exchange, the sign-in's logout and handoff,
@@ -274,7 +326,8 @@ several workspaces each bound by its own slug, a workspace the person does not h
 exactly like a missing project before any request, a tampered tenant label granting nothing,
 malformed authorities rejected without a request, `demo.local` staying demo data, a failed
 workspace list failing the connect and signing the session out, InferOps denying a workspace
-without expiring the account, and observer admission by the collaborator's own membership.
+without expiring the account, observer admission by the collaborator's own membership, and a
+create and an update proposed before the session ended not applied after it.
 `__tests__/resources.test.ts` covers the grammar (two lowercase slug labels, no port, user info,
 or third label) and keeps the configurator's copy in step, and `http-inferops.test.ts` the
 `GET /workspaces` parsing and the stopgap's workspace slug.
