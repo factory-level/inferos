@@ -34,6 +34,7 @@ import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
 import { startOpenAiCompanion } from './openai-companion.ts';
 import { installLocalSecrets } from './local-secrets.ts';
+import { recordDevServer } from "./local/stack.ts";
 import { parseEnv } from 'node:util';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -693,6 +694,10 @@ const wranglerEntry = resolveBinEntry(ROOT, "wrangler");
 const [wranglerCommand, wranglerArgv]: [string, string[]] = wranglerEntry
   ? [process.execPath, [wranglerEntry, "dev", ...args]]
   : pnpmCommand(["exec", "wrangler", "dev", ...args]);
+
+// Recorded so `pnpm local status|stop` (scripts/local/lifecycle.ts) can find this server.
+process.on("exit", recordDevServer(ROOT,
+    { port: Number(wranglerPort ?? DEFAULT_WRANGLER_PORT), mode: serveFrontendAssets ? "run-local" : "dev-server" }));
 
 // `spawn`, not `execFileSync`, so the deferred watchers can start once the server is up. It stays in
 // this process group with the terminal attached, so Ctrl-C reaches it as before.

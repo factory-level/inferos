@@ -1,0 +1,387 @@
+#!/usr/bin/env node
+
+// Lifecycle of this checkout's local stack, for people and agents alike:
+//
+//   pnpm local status [--json]                   Is the stack up, which Workers answer, mock or live InferOps
+//   pnpm local start [-- <run-local flags>]      Start the public origin (scripts/run-local.ts) after a port check
+//   pnpm local stop [--json]                     Signal the recorded dev server and wait for it to exit
+//   pnpm local seed [--json] [--screen ID] [--no-approval]
+//                                                Local user, mock model, InferOps account, demo screen and board connection
+//   pnpm local verify [--json] [--board URL]     Readiness over the authenticated RPC: what an agent would see
+//   pnpm local reset [--json] --yes              Delete this checkout's .wrangler/state (and nothing else)
+//   pnpm local logs [--json] [--lines N]         Where Wrangler's log files are, and the newest one's tail
+//
+// Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and
+// exits 0 when its check passed, 1 when it failed, 2 on a usage error. With `--json` the only
+// stdout is one JSON object; without it a headline precedes the same object, pretty-printed.
+//
+// `start` and `stop` are thin: the stack itself is `scripts/run-local.ts` and
+// `scripts/run-dev-server.ts`, which records its pid so `stop` and `status` can find it. `seed`
+// and `verify` drive the Workshop through the operator scripts under
+// `packages/workshop-backend/scripts/` (dev-setup.ts and dev-verify.ts), which hold the RPC code.
+
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { readCanvasConfig } from "../consumer/canvas.ts";
+import { assertLocalPortAvailable } from "../consumer/runtime.ts";
+import { relayTermination } from "../relay-termination.ts";
+import {
+  configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
+  probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack,
+  wranglerLogDir, type LocalStack,
+} from "./stack.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const OPERATORS = join(ROOT, "packages", "workshop-backend", "scripts");
+
+export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs"] as const;
+export type Command = (typeof COMMANDS)[number];
+
+/** Exit codes every command shares. */
+export const EXIT_OK = 0;
+export const EXIT_FAILED = 1;
+export const EXIT_USAGE = 2;
+
+export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
+  status                  Report the stack: port, Workers, InferOps mode, state directory
+  start [-- flags]        Start the public origin via scripts/run-local.ts (checks the port first)
+  stop                    Stop the recorded dev server and wait for it to exit
+  seed [--screen ID] [--no-approval] [--user U] [--password P]
+                          Prepare a running stack: account, mock model, InferOps account, demo screen, board connection
+  verify [--board URL] [--user U] [--password P]
+                          Sign in, read the demo board through the gatekeeper, reach the approval queue
+  reset --yes             Delete this checkout's .wrangler/state; refuses while the stack runs
+  logs [--lines N]        Locate Wrangler's log directory and show the newest file's tail`;
+
+/** What one operator script run produced: its JSON report, or why there is none. */
+export interface OperatorResult {
+  exitCode: number;
+  report: Record<string, unknown> | null;
+  stderr: string;
+}
+
+/** Everything the commands touch outside their own logic, injectable so tests need no stack. */
+export interface LifecycleDeps {
+  root: string;
+  env: NodeJS.ProcessEnv;
+  isPortListening: (port: number) => Promise<boolean>;
+  fetchImpl: typeof fetch;
+  /** Run an operator script from packages/workshop-backend/scripts and parse its JSON. */
+  runOperator: (script: string, args: string[], env: NodeJS.ProcessEnv) => OperatorResult;
+  /** Start the stack in the foreground; resolves only in tests, which stub it. */
+  startStack: (stack: LocalStack, passthrough: string[]) => Promise<void>;
+  signal: (pid: number, signal: NodeJS.Signals) => void;
+  processAlive: (pid: number) => boolean;
+  sleep: (ms: number) => Promise<void>;
+  wranglerLogDir: () => string;
+  now: () => number;
+}
+
+/** A command's outcome: the exit code, the report to print, and a one-line headline. */
+export interface LifecycleResult {
+  exitCode: number;
+  report: Record<string, unknown>;
+  headline: string;
+}
+
+function runOperatorScript(script: string, args: string[], env: NodeJS.ProcessEnv): OperatorResult {
+  const result = spawnSync(process.execPath, [join(OPERATORS, script), ...args],
+    { cwd: ROOT, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] });
+  let report: Record<string, unknown> | null = null;
+  try {
+    report = JSON.parse(result.stdout);
+  } catch {
+    // The script died before printing a report; its stderr says why.
+  }
+  return { exitCode: result.status ?? 1, report, stderr: result.stderr.trim() };
+}
+
+function startStackForeground(stack: LocalStack, passthrough: string[]): Promise<void> {
+  const child = spawn(process.execPath,
+    [join(ROOT, "scripts", "run-local.ts"), "--port", String(stack.port), ...passthrough],
+    { cwd: ROOT, stdio: "inherit" });
+  relayTermination(child);
+  // The relay exits this process the way the child did; nothing resolves before that.
+  return new Promise(() => {});
+}
+
+export const defaultDeps: LifecycleDeps = {
+  root: ROOT,
+  env: process.env,
+  isPortListening: port => isPortListening(port),
+  fetchImpl: fetch,
+  runOperator: runOperatorScript,
+  startStack: startStackForeground,
+  signal: (pid, signal) => process.kill(pid, signal),
+  processAlive,
+  sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+  wranglerLogDir: () => wranglerLogDir(),
+  now: Date.now,
+};
+
+type Parsed = {
+  command: Command;
+  json: boolean;
+  port?: string;
+  screen?: string;
+  approval: boolean;
+  user?: string;
+  password?: string;
+  board?: string;
+  yes: boolean;
+  lines: number;
+  passthrough: string[];
+};
+
+class UsageError extends Error {}
+
+function parse(argv: readonly string[]): Parsed {
+  const [command, ...rest] = argv;
+  if (!command || !(COMMANDS as readonly string[]).includes(command)) {
+    throw new UsageError(command ? `Unknown command "${command}".\n${USAGE}` : USAGE);
+  }
+  // Flags for the stack itself follow `--` and are forwarded to run-local untouched.
+  const separator = rest.indexOf("--");
+  const own = separator === -1 ? rest : rest.slice(0, separator);
+  const passthrough = separator === -1 ? [] : rest.slice(separator + 1);
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: own,
+      options: {
+        json: { type: "boolean", default: false },
+        port: { type: "string" },
+        screen: { type: "string" },
+        approval: { type: "boolean", default: true },
+        user: { type: "string" },
+        password: { type: "string" },
+        board: { type: "string" },
+        yes: { type: "boolean", default: false },
+        lines: { type: "string", default: "50" },
+      },
+      allowNegative: true,
+    }));
+  } catch (error) {
+    throw new UsageError(`${error instanceof Error ? error.message : String(error)}\n${USAGE}`);
+  }
+  if (!/^\d+$/.test(values.lines)) throw new UsageError("--lines must be a whole number");
+  return { command: command as Command, json: values.json, port: values.port, screen: values.screen,
+    approval: values.approval, user: values.user, password: values.password, board: values.board,
+    yes: values.yes, lines: Number(values.lines), passthrough };
+}
+
+function credentialArgs(parsed: Parsed, stack: LocalStack): string[] {
+  const args = ["--url", stack.url];
+  if (parsed.user !== undefined) args.push("--user", parsed.user);
+  if (parsed.password !== undefined) args.push("--password", parsed.password);
+  return args;
+}
+
+/** The screen template `seed` ensures: an explicit id, else the first in inferos.canvas.json. */
+export function seedScreenTemplate(root: string, explicit?: string): string | null {
+  if (explicit) return explicit;
+  try {
+    return readCanvasConfig(root)?.config.screens[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Fail early when the command needs a Workshop and nothing listens. */
+async function requireListening(stack: LocalStack, deps: LifecycleDeps, command: Command): Promise<LifecycleResult | null> {
+  if (await deps.isPortListening(stack.port)) return null;
+  return {
+    exitCode: EXIT_FAILED,
+    report: { ok: false, command, url: stack.url, error: `Nothing listens on ${stack.backendHost}; start the stack first (pnpm local start)` },
+    headline: `${command}: nothing listens on ${stack.backendHost}`,
+  };
+}
+
+async function status(stack: LocalStack, deps: LifecycleDeps): Promise<LifecycleResult> {
+  const listening = await deps.isPortListening(stack.port);
+  const workers = configuredWorkers(deps.root);
+  const probes = listening
+    ? await probeWorkers(stack.url, workers, deps.fetchImpl)
+    : workers.map(worker => ({ ...worker, state: "down" as const }));
+  const inferops = inferOpsConfiguration(localEnv(deps.root, deps.env));
+  const devServer = readDevServerRecord(stack.recordPath);
+  const down = probes.filter(probe => probe.state !== "up").map(probe => probe.name);
+  const ok = listening && down.length === 0 && inferops.missing.length === 0;
+  const report = {
+    ok, command: "status", url: stack.url, port: stack.port, listening,
+    devServer: devServer ? { pid: devServer.pid, mode: devServer.mode, startedAt: devServer.startedAt } : null,
+    workers: probes, inferops,
+    state: { directory: stack.stateDir, present: existsSync(stack.stateDir) },
+    logs: deps.wranglerLogDir(),
+  };
+  const headline = !listening ? `down: nothing listens on ${stack.backendHost}`
+    : down.length ? `degraded: ${down.join(", ")} not answering on ${stack.url}`
+    : inferops.missing.length ? `misconfigured: INFEROPS_BASE_URL is set but ${inferops.missing.join(", ")} is not`
+    : `up: ${probes.length} workers answering on ${stack.url} (InferOps ${inferops.mode})`;
+  return { exitCode: ok ? EXIT_OK : EXIT_FAILED, report, headline };
+}
+
+async function start(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Promise<LifecycleResult> {
+  try {
+    await assertLocalPortAvailable(stack.port);
+  } catch (error) {
+    const running = readDevServerRecord(stack.recordPath);
+    const detail = running ? `this checkout's dev server (pid ${running.pid}) already runs there`
+      : (error as Error).message;
+    return {
+      exitCode: EXIT_FAILED,
+      report: { ok: false, command: "start", url: stack.url, error: `Port ${stack.port} is busy: ${detail}` },
+      headline: `start: port ${stack.port} is busy`,
+    };
+  }
+  await deps.startStack(stack, parsed.passthrough);
+  return { exitCode: EXIT_OK, report: { ok: true, command: "start", url: stack.url }, headline: `started ${stack.url}` };
+}
+
+const STOP_TIMEOUT_MS = 30_000;
+
+async function stop(stack: LocalStack, deps: LifecycleDeps): Promise<LifecycleResult> {
+  const record = readDevServerRecord(stack.recordPath);
+  if (!record) {
+    const listening = await deps.isPortListening(stack.port);
+    return {
+      exitCode: listening ? EXIT_FAILED : EXIT_OK,
+      report: { ok: !listening, command: "stop", stopped: false, url: stack.url, listening,
+        error: listening ? `Something listens on ${stack.backendHost} but this checkout recorded no dev server; stop it from its own terminal` : undefined },
+      headline: listening ? `stop: ${stack.backendHost} is busy but not recorded as ours` : "stop: nothing to stop",
+    };
+  }
+  deps.signal(record.pid, "SIGTERM");
+  const deadline = deps.now() + STOP_TIMEOUT_MS;
+  while (deps.processAlive(record.pid)) {
+    if (deps.now() >= deadline) {
+      return {
+        exitCode: EXIT_FAILED,
+        report: { ok: false, command: "stop", stopped: false, pid: record.pid, error: `pid ${record.pid} did not exit within ${STOP_TIMEOUT_MS / 1000}s` },
+        headline: `stop: pid ${record.pid} is still running`,
+      };
+    }
+    await deps.sleep(200);
+  }
+  return { exitCode: EXIT_OK, report: { ok: true, command: "stop", stopped: true, pid: record.pid }, headline: `stopped pid ${record.pid}` };
+}
+
+async function seed(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Promise<LifecycleResult> {
+  const notListening = await requireListening(stack, deps, "seed");
+  if (notListening) return notListening;
+  const screen = seedScreenTemplate(deps.root, parsed.screen);
+  const setupArgs = [...credentialArgs(parsed, stack), "--mock-model", "--inferops"];
+  if (screen) setupArgs.push("--screen", screen);
+  const setup = deps.runOperator("dev-setup.ts", setupArgs, deps.env);
+  if (setup.exitCode !== 0 || !setup.report?.ok) {
+    return {
+      exitCode: EXIT_FAILED,
+      report: { ok: false, command: "seed", url: stack.url, step: "setup", error: setup.stderr || "dev-setup.ts failed" },
+      headline: `seed failed: ${setup.stderr || "dev-setup.ts failed"}`,
+    };
+  }
+  // The session token is for `pnpm dev:setup` users; a lifecycle report should be safe to share.
+  const { browserLogin: _token, ...prepared } = setup.report;
+  const verifyArgs = [...credentialArgs(parsed, stack), "--ensure-board"];
+  if (parsed.approval) verifyArgs.push("--approval-scenario");
+  const verified = deps.runOperator("dev-verify.ts", verifyArgs, deps.env);
+  const ok = verified.exitCode === 0 && verified.report?.ok === true;
+  return {
+    exitCode: ok ? EXIT_OK : EXIT_FAILED,
+    report: {
+      ok, command: "seed", url: stack.url,
+      screen: screen ?? "skipped: no screen template in inferos.canvas.json (pnpm canvas add-screen)",
+      setup: prepared,
+      verify: verified.report ?? { ok: false, error: verified.stderr || "dev-verify.ts failed" },
+    },
+    headline: ok ? `seeded ${stack.url}: ${summarizeVerify(verified.report)}`
+      : `seed failed at verify: ${verified.report?.error ?? verified.stderr}`,
+  };
+}
+
+function summarizeVerify(report: Record<string, unknown> | null): string {
+  const view = report?.agentView as { board?: { project?: string; issues?: number; states?: number }; approvalQueue?: { pending?: number } } | undefined;
+  if (!view?.board) return "no agent view";
+  return `board ${view.board.project} (${view.board.issues} issues in ${view.board.states} states), ` +
+    `${view.approvalQueue?.pending ?? 0} pending approval(s)`;
+}
+
+async function verify(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Promise<LifecycleResult> {
+  const notListening = await requireListening(stack, deps, "verify");
+  if (notListening) return notListening;
+  const args = credentialArgs(parsed, stack);
+  if (parsed.board) args.push("--board", parsed.board);
+  const result = deps.runOperator("dev-verify.ts", args, deps.env);
+  const report = result.report ?? { ok: false, step: "connect", error: result.stderr || "dev-verify.ts failed" };
+  const ok = result.exitCode === 0 && report.ok === true;
+  return {
+    exitCode: ok ? EXIT_OK : EXIT_FAILED,
+    report: { ...report, command: "verify" },
+    headline: ok ? `ready: ${summarizeVerify(report)}` : `not ready (${report.step}): ${report.error}`,
+  };
+}
+
+function reset(stack: LocalStack, parsed: Parsed): LifecycleResult {
+  try {
+    const { removed } = resetLocalState(stack, { confirm: parsed.yes });
+    return {
+      exitCode: EXIT_OK,
+      report: { ok: true, command: "reset", stateDir: stack.stateDir, removed },
+      headline: removed.length ? `reset: removed ${removed.join(", ")}` : `reset: ${stack.stateDir} was already absent`,
+    };
+  } catch (error) {
+    return {
+      exitCode: EXIT_FAILED,
+      report: { ok: false, command: "reset", stateDir: stack.stateDir, error: (error as Error).message },
+      headline: `reset refused: ${(error as Error).message}`,
+    };
+  }
+}
+
+function logs(parsed: Parsed, deps: LifecycleDeps): LifecycleResult {
+  const directory = deps.wranglerLogDir();
+  const latest = latestWranglerLog(directory, parsed.lines);
+  return {
+    exitCode: EXIT_OK,
+    report: { ok: true, command: "logs", directory, file: latest?.file ?? null, lines: latest?.lines ?? [],
+      note: "Wrangler's debug log is per user, not per checkout; the terminal running the stack shows request logs" },
+    headline: latest ? `newest Wrangler log: ${latest.file}` : `no Wrangler log files in ${directory}`,
+  };
+}
+
+/** Run one command. Usage errors surface as exit 2 with the usage text in `report.error`. */
+export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps = defaultDeps): Promise<LifecycleResult & { json: boolean }> {
+  let parsed: Parsed;
+  let stack: LocalStack;
+  try {
+    parsed = parse(argv);
+    stack = resolveLocalStack(deps.root, parsed.port === undefined ? [] : ["--port", parsed.port], deps.env);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { exitCode: EXIT_USAGE, json: argv.includes("--json"), headline: message,
+      report: { ok: false, command: argv[0] ?? null, error: message } };
+  }
+  const result = await (async (): Promise<LifecycleResult> => {
+    switch (parsed.command) {
+      case "status": return status(stack, deps);
+      case "start": return start(stack, parsed, deps);
+      case "stop": return stop(stack, deps);
+      case "seed": return seed(stack, parsed, deps);
+      case "verify": return verify(stack, parsed, deps);
+      case "reset": return reset(stack, parsed);
+      case "logs": return logs(parsed, deps);
+    }
+  })();
+  return { ...result, json: parsed.json };
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { exitCode, report, headline, json } = await runLifecycle(process.argv.slice(2));
+  if (exitCode === EXIT_USAGE) console.error(headline);
+  else if (!json) console.log(headline);
+  console.log(json ? JSON.stringify(report) : JSON.stringify(report, null, 2));
+  process.exitCode = exitCode;
+}

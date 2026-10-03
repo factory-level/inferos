@@ -18,6 +18,8 @@
     "dev-server": "node scripts/run-dev-server.ts",
     "canvas": "node scripts/consumer/canvas.ts .",
     "dev:setup": "node packages/workshop-backend/scripts/dev-setup.ts",
+    "dev:verify": "node packages/workshop-backend/scripts/dev-verify.ts",
+    "local": "node scripts/local/lifecycle.ts",
     "dev:mock-model": "node scripts/dev/scripted-model.ts",
     "clean": "node scripts/vp/run.ts --filter=!cloudflare-os clean",
     "docs:check": "scripts/check-docs.sh",

@@ -24,6 +24,8 @@ it.each([
   "packages/bundled-blueprints/libraries/ui/client.ts",
   "packages/integration-tests/fixtures/gatekeeper-test/wrangler.jsonc",
   "packages/integration-tests/fixtures/gatekeeper-test/src/test-gatekeeper.ts",
+  "custom-gatekeepers/gatekeeper-inferops/wrangler.jsonc",
+  "custom-gatekeepers/gatekeeper-inferops/src/inferops.ts",
   "pnpm-lock.yaml",
 ])("treats %s as a Worker input", path => {
   expect(isWorkerInput(inWorkspace(path))).toBe(true);
@@ -35,6 +37,8 @@ it.each([
   "packages/typed-storage/dist/index.js",
   "packages/workshop-backend/.wrangler/validate/src/server.ts",
   "packages/integration-tests/fixtures/gatekeeper-test/.wrangler/validate/src/test-gatekeeper.ts",
+  "custom-gatekeepers/gatekeeper-inferops/src/generated/project-ui.txt",
+  "custom-gatekeepers/gatekeeper-inferops/.wrangler/validate/src/inferops.ts",
   "packages/workshop-backend/node_modules/capnweb/index.js",
   "packages/typed-storage/node_modules/.bin/tsc",
   // Another package's tests reach the Worker through none of this.
@@ -65,6 +69,8 @@ it("watches a root covering every entry in the table", () => {
       : []),
     "packages/integration-tests/fixtures",
     "packages/integration-tests/fixtures/gatekeeper-test",
+    "custom-gatekeepers/gatekeeper-inferops",
+    "custom-gatekeepers/gatekeeper-inferops/src",
     "tsconfig.json",
     "pnpm-lock.yaml",
   ].map(inWorkspace);
