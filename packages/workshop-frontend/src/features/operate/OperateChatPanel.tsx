@@ -1,41 +1,17 @@
-import { useEffect, useState } from 'react'
-import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import { useState } from 'react'
 import ChatInterface from '../../ChatInterface'
 import { useResizableSplit } from '../../hooks/useResizableSplit'
-import { useOperateSession } from './OperateSessionContext'
+import type { SessionWorkspace } from './useSessionWorkspace'
 
 const noConsoleLogs = () => ''
 const ignore = () => {}
 
-type SessionWorkspace = { stub: RpcStub<Overseer>; id: string; restricted: boolean }
-
-/** The session's owner-only workspace, where its operate chat runs. */
-const useSessionWorkspace = () => {
-  const session = useOperateSession()?.session ?? null
-  const [workspace, setWorkspace] = useState<SessionWorkspace | null>(null)
-  useEffect(() => {
-    if (!session) return
-    let cancelled = false
-    const stub = session.stub.getWorkspace()
-    stub.getMetadata().then(metadata => {
-      if (!cancelled) setWorkspace({ stub, id: metadata.id, restricted: metadata.containsRestrictedData === true })
-    }).catch(caught => console.error('Failed to open the operate session workspace:', caught))
-    return () => {
-      cancelled = true
-      stub[Symbol.dispose]()
-      setWorkspace(null)
-    }
-  }, [session])
-  return workspace
-}
-
 /**
  * The operate chat, as a resizable column beside whatever the session shows. It is the same chat on
- * the session page and while a flow runs, since both render the one session.
+ * the session page and while a flow runs, since both render the one session workspace. That
+ * workspace's capability is operate-only, so the chat is shown without authoring affordances.
  */
-export const OperateChatPanel = () => {
-  const workspace = useSessionWorkspace()
+export const OperateChatPanel = ({ workspace }: { workspace: SessionWorkspace | null }) => {
   const split = useResizableSplit(true)
   const [chatId, setChatId] = useState<number | null>(null)
   return (
@@ -46,7 +22,7 @@ export const OperateChatPanel = () => {
               restricted={workspace.restricted} selectedChatId={chatId} onNavigateToChat={setChatId}
               pendingConsoleLogCount={0} consoleLogPreview="" consoleLogSeverity="info"
               onConsumeConsoleLogs={noConsoleLogs} onDiscardConsoleLogs={ignore} constrainChatWidth
-              onOpenGadget={ignore} outputOfWorkpiece={() => undefined} />
+              onOpenGadget={ignore} outputOfWorkpiece={() => undefined} operateOnly />
           : <p role="status" className="p-4 text-sm text-kumo-subtle">Opening the operate chat…</p>}
       </section>
       <div role="separator" aria-orientation="vertical" aria-label="Resize operate chat"
