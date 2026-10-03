@@ -23,8 +23,8 @@ export type CanvasBoardWidgetProps = {
 /**
  * A live board: its request served by the scope's shared adapter, so every presentation of one
  * reference shows the same board from one read. Shows the adapter's state explicitly (loading,
- * not connected, error, stale, pending moves), the board's activity from the scope's action log,
- * and the Kanban once a board is held.
+ * not connected, InferOps turned off, error, stale, pending moves), the board's activity from the
+ * scope's action log, and the Kanban once a board is held.
  */
 export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   const { widget, overseer, presentation } = props
@@ -57,6 +57,9 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
       {state.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the board…</p>}
       {state.status === 'unbound' && <p className="text-sm text-kumo-subtle">
         Not connected. This workspace has no connection to this board. Connect it, for example by asking in the chat, to see it live.
+      </p>}
+      {state.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
+        {state.message} The connection to this board is kept; it shows the board again once InferOps is turned back on.
       </p>}
       {state.status === 'error' && <div className="space-y-2">
         <p role="alert" className="text-sm text-kumo-danger">Could not read the board: {state.message}</p>

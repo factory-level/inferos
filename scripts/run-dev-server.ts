@@ -22,8 +22,8 @@ import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
 import {
-  INFERLAB_LOGIN_GATEKEEPER, getDevRouterAssets, getDevServerConfig, getInferLabLoginVars,
-  inferLabLoginStartupError,
+  INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, getDevRouterAssets, getDevServerConfig,
+  getInferLabLoginVars, inferLabLoginStartupError, resolveInferOpsEnabled,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
@@ -137,6 +137,14 @@ const canvasRoot = consumerOptions[0] ?? ROOT;
 const canvasInventoryForRoot = canvasInventory(canvasRoot);
 const canvasConfig = readCanvasConfig(canvasRoot, canvasInventoryForRoot);
 const enabledCustomGatekeepers = new Set(selectedCustomGatekeepers(canvasConfig?.config, canvasInventoryForRoot));
+// The InferOps integration: a version 2 wrapper's INFEROPS_ENABLED switches it; otherwise it is on
+// unless the shell turns it off. The gatekeeper enforces the resulting var itself (enablement.ts),
+// refusing bindings and data while it is "false", so the switch is not UI-only.
+const inferOpsEnabled = resolveInferOpsEnabled({
+  capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_ENABLED : null,
+  canvasSelected: enabledCustomGatekeepers.has(INFEROPS_GATEKEEPER),
+  shell: process.env.INFEROPS_ENABLED,
+});
 const gatekeepers = findGatekeepers(ROOT).filter(({ dir, name }) =>
   basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustomGatekeepers.has(name));
 // In-repo there is no inferos.config.json to carry feature flags, so a canvas config is the switch
@@ -569,7 +577,10 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
 };
 // Vars resolved here rather than read raw from the shell.
 const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined>> = {
-  [INFERLAB_LOGIN_GATEKEEPER]: { INFERLAB_AUTH_ORIGIN: inferLabLogin.INFERLAB_AUTH_ORIGIN },
+  [INFERLAB_LOGIN_GATEKEEPER]: {
+    INFERLAB_AUTH_ORIGIN: inferLabLogin.INFERLAB_AUTH_ORIGIN,
+    INFEROPS_ENABLED: inferOpsEnabled,
+  },
 };
 
 for (const gk of gatekeepers) {

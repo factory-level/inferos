@@ -180,3 +180,25 @@ test("INFEROPS_AUTH and features.inferlabLogin are one switch for InferOps-backe
   assert.equal(migrated.schemaVersion === 2 && migrated.capabilities.INFEROPS_AUTH, false);
   assert.equal(inferOpsAuthRequested(migrated), true);
 });
+
+test("INFEROPS_ENABLED is explicit: migration carries the gatekeeper selection over, and sign-in does not need it", () => {
+  // A version 1 wrapper selects the gatekeeper through inferos.canvas.json, which the caller reads.
+  const selected = parseConsumerConfig(migrateConsumerConfig(candidate(), { inferOpsGatekeeperSelected: true }));
+  assert.equal(selected.schemaVersion === 2 && selected.capabilities.INFEROPS_ENABLED, true);
+  for (const context of [undefined, {}, { inferOpsGatekeeperSelected: false }]) {
+    const off = parseConsumerConfig(migrateConsumerConfig(candidate(), context));
+    assert.ok(off.schemaVersion === 2);
+    assert.deepEqual(CAPABILITY_NAMES.filter(name => off.capabilities[name]), []);
+  }
+  // No profile or other flag turns it on, and sign-in is an identity mode that stands alone.
+  for (const profile of ["personal", "inferops-operations"] as const) {
+    const { config, provenance } = resolveConsumerConfig({ ...v2(), profile });
+    assert.equal(config.schemaVersion === 2 && config.capabilities.INFEROPS_ENABLED, false);
+    assert.equal(provenance.capabilities?.INFEROPS_ENABLED, "default");
+  }
+  const signInOnly = parseConsumerConfig(v2({ INFEROPS_AUTH: true }));
+  assert.equal(signInOnly.schemaVersion === 2 && signInOnly.capabilities.INFEROPS_ENABLED, false);
+  const enabled = resolveConsumerConfig(v2({ INFEROPS_ENABLED: true }));
+  assert.equal(enabled.provenance.capabilities?.INFEROPS_ENABLED, "override");
+  assert.equal(inferOpsAuthRequested(enabled.config), false);
+});

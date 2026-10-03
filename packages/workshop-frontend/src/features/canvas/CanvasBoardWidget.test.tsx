@@ -97,6 +97,20 @@ it('reports a failed read with a retry, keeps the last board as stale when a ref
   expect(container.textContent).toContain('No content states to show')
 })
 
+it('says InferOps is turned off, not that the read failed, and shows the board again once it is on', async () => {
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" />)
+  expect(card('1')).toBeDefined()
+  readBoard.mockRejectedValueOnce(new Error('Error: DISABLED: InferOps is turned off for this deployment.'))
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
+  const statuses = [...article().querySelectorAll('[role="status"]')].map(s => s.textContent)
+  expect(statuses).toContainEqual(expect.stringContaining('InferOps is turned off for this deployment.'))
+  expect(article().querySelector('[role="alert"]')).toBeNull()
+  expect(article().querySelector('[data-issue-id]')).toBeNull()
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
+  expect(article().textContent).not.toContain('turned off')
+  expect(card('1')).toBeDefined()
+})
+
 it('proposes a keyboard move through the adapter with the issue id, target state and the revision read', async () => {
   await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" />)
   const first = card('1')

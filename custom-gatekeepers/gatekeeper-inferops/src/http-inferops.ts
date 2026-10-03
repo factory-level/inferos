@@ -257,6 +257,8 @@ const FAILURE_DETAIL: Record<InferOpsErrorCode, string> = {
   UNAUTHORIZED: "InferOps rejected this connection's credential. Reconnect InferOps.",
   FORBIDDEN: "This connection is not permitted to do that in InferOps.",
   UNAVAILABLE: "InferOps could not be reached or returned an unusable response.",
+  // Never mapped from a response: the gatekeeper raises it itself (enablement.ts).
+  DISABLED: "InferOps is turned off for this deployment.",
 };
 
 /** The gatekeeper code for a failed response, from its status and InferOps error code. */
