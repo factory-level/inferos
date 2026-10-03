@@ -24,6 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
+import type { OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
@@ -2131,6 +2132,19 @@ export interface Overseer extends RpcTarget {
   replaceFlow(id: string, expectedRevision: string, content: OperateFlowContent): Promise<OperateFlow>;
   /** Delete a flow at its expected revision. */
   deleteFlow(id: string, expectedRevision: string): Promise<void>;
+
+  /**
+   * List this workspace's consoles: one operator role's menu of views over this workspace's
+   * screens, opened in an operate session. Console methods require build access and both view
+   * flags, like canvases and flows.
+   */
+  listConsoles(): Promise<OperateConsole[]>;
+  /** Create a console under a server-minted ID and revision zero. Its views must reference canvases of this workspace; limit 16 per workspace. */
+  createConsole(content: OperateConsoleContent): Promise<OperateConsole>;
+  /** Replace a console's content at its expected revision. Sessions that already have it open keep what they copied in. */
+  replaceConsole(id: string, expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole>;
+  /** Delete a console at its expected revision. */
+  deleteConsole(id: string, expectedRevision: string): Promise<void>;
 
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;

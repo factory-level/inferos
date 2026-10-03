@@ -164,4 +164,71 @@ describe("operate page state machine", () => {
       expect(state.lastApprovalOutcome).toBeNull();
     });
   });
+
+  describe("consoles", () => {
+    const openConsole = (fullChat: "off" | "available" | "default" | "only" = "available"): OperateEvent =>
+      ({ type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations lead", fullChat, viewId: "overview" });
+
+    it("opens a console at a view, drills into a screen and back, and switches views", () => {
+      let state = replayOperateEvents([openConsole(), { type: "showScreen", screenId: "board" }]);
+      expect(state.console).toEqual({
+        workspaceId: "ws1", consoleId: "c1", title: "Operations lead", fullChat: "available",
+        viewId: "overview", screenId: "board",
+      });
+      expect(state.presentation).toBe("canvas");
+
+      state = applyOperateEvent(state, { type: "showScreen", screenId: null });
+      expect(state.console?.screenId).toBeNull();
+
+      state = replayOperateEvents([openConsole(), { type: "showScreen", screenId: "board" }, { type: "openView", viewId: "activity" }]);
+      expect(state.console).toMatchObject({ viewId: "activity", screenId: null });
+    });
+
+    it("opens in full chat when the console defaults to it or is chat-only", () => {
+      expect(applyOperateEvent(INITIAL_OPERATE_PAGE, openConsole("default")).presentation).toBe("chat");
+      expect(applyOperateEvent(INITIAL_OPERATE_PAGE, openConsole("only")).presentation).toBe("chat");
+      expect(applyOperateEvent(INITIAL_OPERATE_PAGE, openConsole("off")).presentation).toBe("canvas");
+    });
+
+    it("switches presentation only as the console's full chat setting allows", () => {
+      let available = applyOperateEvent(INITIAL_OPERATE_PAGE, openConsole("available"));
+      let chat = applyOperateEvent(available, { type: "setPresentation", presentation: "chat" });
+      expect(chat.presentation).toBe("chat");
+      expect(applyOperateEvent(chat, { type: "setPresentation", presentation: "canvas" }).presentation).toBe("canvas");
+
+      let off = applyOperateEvent(INITIAL_OPERATE_PAGE, openConsole("off"));
+      expect(() => applyOperateEvent(off, { type: "setPresentation", presentation: "chat" })).toThrow(/does not offer full chat/);
+      let only = applyOperateEvent(INITIAL_OPERATE_PAGE, openConsole("only"));
+      expect(() => applyOperateEvent(only, { type: "setPresentation", presentation: "canvas" })).toThrow(/chat-only/);
+    });
+
+    it("closing the console returns to the mosaic in the canvas presentation", () => {
+      let state = replayOperateEvents([openConsole("only"), { type: "closeConsole" }]);
+      expect(state.console).toBeNull();
+      expect(state.presentation).toBe("canvas");
+    });
+
+    it("rejects console events with no console open, and malformed consoles", () => {
+      for (let event of [
+        { type: "openView", viewId: "x" },
+        { type: "showScreen", screenId: "x" },
+        { type: "closeConsole" },
+        { type: "setPresentation", presentation: "chat" },
+      ] as OperateEvent[]) {
+        expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, event)).toThrow(OperateEventError);
+      }
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { ...openConsole(), title: "" } as OperateEvent)).toThrow(OperateEventError);
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { ...openConsole(), viewId: "" } as OperateEvent)).toThrow(OperateEventError);
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
+          { ...openConsole(), fullChat: "sometimes" } as unknown as OperateEvent)).toThrow(OperateEventError);
+    });
+
+    it("applies to a page stored before consoles existed once it is filled from the initial page", () => {
+      let { console: _c, presentation: _p, ...old } = replayOperateEvents([{ type: "open", ref: screen("a") }]);
+      let stored: OperatePageState = { ...INITIAL_OPERATE_PAGE, ...old };
+      let state = applyOperateEvent(stored, openConsole());
+      expect(state.console?.consoleId).toBe("c1");
+      expect(state.focus).toEqual(screen("a"));
+    });
+  });
 });
