@@ -29,7 +29,7 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 
 | Path | Responsibility |
 | --- | --- |
-| `scripts/run-dev-server.ts` | Discovers configured workers, generates dev wiring, builds gatekeeper UIs and starts Wrangler/watchers. |
+| `scripts/run-dev-server.ts` | Discovers configured workers, generates dev wiring, builds gatekeeper UIs and starts Wrangler/watchers. `--no-ui-watchers` (also through `pnpm local start -- --no-ui-watchers`) skips the per-gatekeeper configurator and app UI watcher processes, each of which holds an inotify instance, for machines near `fs.inotify.max_user_instances`; the UIs are still built once at startup. |
 | `scripts/run-local.ts` | Convenience local install/build/run flow. |
 | `scripts/local/lifecycle.ts`, `scripts/local/stack.ts` | `pnpm local <command>`: status, start, stop, seed, verify, reset and logs for this checkout's stack, with JSON reports and stable exit codes. |
 | `packages/workshop-backend/scripts/dev-setup.ts` | `pnpm dev:setup`: prepares a running local Workshop (account, onboarding, mock model, InferOps, demo screen). |
