@@ -1,7 +1,7 @@
 ---
 title: InferOps canvas and transactional widgets
 status: draft
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # InferOps canvas and transactional widgets
@@ -28,7 +28,7 @@ The v1 portable definition stores id, revision, sections and widget instances. T
 
 The data adapter keys caches by principal/capability scope plus kind, version, canonical target and normalized params. It rejects cross-scope targets, coalesces duplicate in-flight reads, bounds concurrency and supports cancellation. It must not claim batching where the domain exposes only independent board reads. Board revisions prevent stale snapshots from overwriting newer optimistic changes. Transition actions use the gatekeeper approval path, show pending status and reconcile from authoritative data; failed writes restore or reload the affected board.
 
-Kanban supplies an embedded overview, keyboard-accessible transition actions and a full view using the same domain contract. Offscreen widgets suspend optional polling; visible boards refresh according to freshness policy. Large boards require measured pagination/windowing work rather than an assumption that DOM virtualization fixes oversized payloads.
+Kanban is a widget kind over a referenced InferOps board, never a Build output: InferOS does not create boards, it opens and transitions the ones InferOps owns. Kanban supplies an embedded overview, keyboard-accessible transition actions and a full view using the same domain contract. Offscreen widgets suspend optional polling; visible boards refresh according to freshness policy. Large boards require measured pagination/windowing work rather than an assumption that DOM virtualization fixes oversized payloads.
 
 Activity events are emitted only after authorization, carry canvas/widget/run identity and bounded status metadata, and use sequence/expiry rules. UI states include reading, proposing, awaiting approval, applying, finished and failed; pending approval is not an active edit. Stop, failure, revoke and disconnect clear or expire active indicators. Reconnect loads current activity plus separately labeled recent history. No prompts or transaction payloads enter presence telemetry.
 

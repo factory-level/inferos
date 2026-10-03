@@ -58,6 +58,10 @@ Against [the design](../design/operate-mode.md):
 - The session workspace exposes the full `Overseer`, including authoring methods. The operate-only chat mode is the next step.
 - The URL mirror, presence, and agent-dispatched events (`actor: "agent"`) are not implemented.
 - The event log is kept in full, with no compaction or retention policy.
+- Role consoles are not implemented: no console definition, no per-role menu or mosaic, no console state machine (`openConsole`, `consoleEvent`, `navigateBack`), and no grid layout for rollups.
+- Build is not gated by role. Any signed-in user can author, and the Build | Operate toggle depends only on the `operate-mode` flag and composable views.
+- There is no derived console inventory and no admin or observability view of which apps and widgets each console uses.
+- Build still offers the bundled `inferops.kanban` blueprint as a creatable output, and it does not yet offer Widgets or Agent workflows as outputs.
 
 ## Open Questions
 
