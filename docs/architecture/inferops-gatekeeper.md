@@ -390,17 +390,19 @@ this suite, with an `owner` persona bearer token. All eight steps passed:
 | Step | Result |
 | --- | --- |
 | Bind and read | `inferops://acme.operations/project/board/ENG` bound; its five columns (Backlog, Todo, In Progress, Done, Cancelled) and every card at its revision match InferOps' own board; the read is recorded as an observation. |
-| Create | `createIssue` queued an action and nothing in InferOps; on approval ENG-9 (`c2b5fb00-952c-442a-97f1-33ca0172aac2`) existed exactly once, in Todo, at revision 39, and the board showed it at that revision. |
-| Update | Title and priority proposed at 39, InferOps unchanged until approval, then new values at revision 41. |
-| Transition | Move to In Progress at 41, applied on approval, revision 42. |
-| Stale revision | An update at revision 39 refused at proposal with `STALE_REVISION`; InferOps stayed at 42. |
-| Duplicate | Approving each of the three applied actions again refused (`not pending`); revision 42, one issue. |
-| Reload | After a harness configuration update restarted the Workers, the same binding read ENG-9 at revision 42. |
-| Policy refusal | Not run: no content-workflow project with a published approval policy exists in the workspace (`INFEROPS_LIVE_POLICY_PROJECT` unset). |
+| Create | `createIssue` queued an action and nothing in InferOps; on approval ENG-12 (`d908ec1b-6fac-4043-a67a-121c458e4080`) existed exactly once, in Todo, at revision 221, and the board showed it at that revision. |
+| Update | Title and priority proposed at 221, InferOps unchanged until approval, then new values at revision 223. |
+| Transition | Move to In Progress at 223, applied on approval, revision 224. |
+| Stale revision | An update at revision 221 refused at proposal with `STALE_REVISION`; InferOps stayed at 224. |
+| Duplicate | Approving each of the three applied actions again refused (`not pending`); revision 224, one issue. |
+| Reload | After a harness configuration update restarted the Workers, the same binding read ENG-12 at revision 224. |
+| Policy refusal (content issue) | The suite created project CPOL (`94809123-d93d-4d87-bcc8-5f5bac2877f9`, reused on later runs) and published content workflow policy revision 1: every user may take every action and any edge (`*` to `*`), except that the Draft to Published edge denies `move-in` to every user (`workflow/validate` clean, `workflow/explain` answers `EXPLICIT_DENY` for that edge and allows Draft to Review). Bound `inferops://acme.operations/project/board/CPOL`, created content issue CPOL-3 (`956b0e27-79a0-49d7-89fa-4df827da5fdd`) in Idea at revision 235 through approval, and moved it to Draft (applied, revision 236). Draft to Published was proposed and approved; proposing only simulates, so InferOps was first asked at apply and refused it. The approval failed with "CPOL-3 → Published was not applied: InferOps does not permit it for this connection (its access or the workflow policy refused it)." The issue stayed in Draft at revision 236, and the same move made directly answered 403 `FORBIDDEN` with `EXPLICIT_DENY`. Draft to Review then applied (revision 237). |
 
-Revisions are InferOps' own and are treated as opaque (an update advanced ENG-9 by two). A run with
+Revisions are InferOps' own and are treated as opaque (an update advanced ENG-12 by two). A run with
 an expired persona token failed the first read with `UNAUTHORIZED` and wrote nothing. Each run
-leaves its `InferOS live <timestamp>` issue in place, since InferOps has no issue delete. Not
-proven by this run: per-person identity (every request carried one shared persona token; the live
-Google sign-in of #66 remains a manual step), a policy refusal against live data, and a cloud
-deployment.
+leaves its `InferOS live <timestamp>` issue in ENG and its content issue in CPOL in place, since
+InferOps has no issue delete. The policy step needs a token that holds `project:manage` (the seed's
+`owner` does) for the first publish. A later publish of the same document is a no-op. Not proven
+by this run: per-person identity (every request carried one shared persona token; the live Google
+sign-in of #66 remains a manual step), a role-scoped refusal (the policy denies the edge to every
+user, because the stopgap connection carries one persona), and a cloud deployment.

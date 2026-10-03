@@ -21,11 +21,13 @@
 //   INFEROPS_LIVE_WORKSPACE_SLUG that workspace's slug (`operations` in the seed)
 //   INFEROPS_LIVE_TENANT         the URL's tenant label (default `acme`; syntax only, ADR 0005)
 //   INFEROPS_LIVE_PROJECT        the project key (default `ENG`)
-//   INFEROPS_LIVE_POLICY_PROJECT optional: a content-workflow project in the same workspace with a
-//                                published approval policy, to prove a policy refusal surfaces
+//   INFEROPS_LIVE_POLICY_PROJECT the content-policy project key (default `CPOL`); see step h
 //
 // It writes to InferOps: one new issue per run, titled `InferOS live <timestamp>`, which it then
-// updates and moves. InferOps has no issue delete, so the issue is left in place.
+// updates and moves. InferOps has no issue delete, so the issue is left in place. Step h also
+// creates the content-policy project on first use (the token must hold `project:manage`, as the
+// seed's `owner` does), publishes its workflow policy (a no-op once it is the head), and adds one
+// content issue per run.
 //
 // Run, after `pnpm --filter @gadgets/integration-tests run test:prebuild`:
 //   INFEROPS_LIVE_BASE_URL=... INFEROPS_LIVE_TOKEN=... INFEROPS_LIVE_WORKSPACE_ID=... \
@@ -52,7 +54,7 @@ const LIVE = {
   workspaceSlug: process.env.INFEROPS_LIVE_WORKSPACE_SLUG ?? "",
   tenant: process.env.INFEROPS_LIVE_TENANT ?? "acme",
   project: process.env.INFEROPS_LIVE_PROJECT ?? "ENG",
-  policyProject: process.env.INFEROPS_LIVE_POLICY_PROJECT ?? "",
+  policyProject: process.env.INFEROPS_LIVE_POLICY_PROJECT ?? "CPOL",
 };
 
 const INFEROPS_GATEKEEPER_DIR =
@@ -72,15 +74,18 @@ const note = (line: string) => evidence.push(line);
 
 type LiveIssue = Issue & { projectId: string };
 
-async function inferOps(path: string): Promise<unknown> {
+async function inferOps(path: string, init?: { method: string; body: unknown }): Promise<unknown> {
   const response = await fetch(`${LIVE.baseUrl}${path}`, {
+    method: init?.method ?? "GET",
     headers: {
       accept: "application/json",
       authorization: `Bearer ${LIVE.token}`,
       "x-workspace-id": LIVE.workspaceId,
+      ...(init ? { "content-type": "application/json" } : {}),
     },
+    ...(init ? { body: JSON.stringify(init.body) } : {}),
   });
-  if (!response.ok) throw new Error(`InferOps ${path} answered ${response.status}`);
+  if (!response.ok) throw new Error(`InferOps ${init?.method ?? "GET"} ${path} answered ${response.status}`);
   return response.json();
 }
 
@@ -99,14 +104,82 @@ async function liveBoard(key = LIVE.project): Promise<LiveBoard> {
   return await inferOps(`/project/board?projectId=${id}`) as LiveBoard;
 }
 
-const liveIssuesTitled = async (title: string) =>
-  (await liveBoard()).columns.flatMap(c => c.issues).filter(i => i.title === title);
+const liveIssuesTitled = async (title: string, key = LIVE.project) =>
+  (await liveBoard(key)).columns.flatMap(c => c.issues).filter(i => i.title === title);
 
 const liveIssue = async (id: string) =>
   ((await inferOps(`/project/issues/${id}`)) as { issue: LiveIssue }).issue;
 
 const boardIssue = (board: Board, id: string) =>
   board.columns.flatMap(c => c.issues).find(i => i.id === id);
+
+// ---------------------------------------------------------------------------
+// The content-policy project step h runs against. InferOps enforces a published workflow policy
+// on `content` issues only, and the seed has none, so the run sets one up itself: the project is
+// created once and reused, and the publish is a no-op when the policy is already the head.
+
+const WORKFLOW_ACTIONS = [
+  "read", "create", "edit", "comment", "assign", "reprioritize", "move-out", "move-in", "claim",
+  "delegate", "execute", "approve", "publish",
+] as const;
+
+type PolicyProject = { projectId: string; revision: string; lanes: Record<string, State> };
+
+/**
+ * Create (or reuse) `key` and publish a content policy on it: every user may do everything and
+ * take any edge, except that the Draft -> Published edge denies `move-in` to every user. Proves the
+ * policy is live with `workflow/explain` before returning.
+ */
+async function ensureContentPolicyProject(key: string): Promise<PolicyProject> {
+  const projectId = await liveProjectId(key) ??
+    ((await inferOps("/project/projects", {
+      method: "POST", body: { name: "InferOS content policy", identifier: key },
+    })) as { project: { id: string } }).project.id;
+  const states = (await liveBoard(key)).columns.map(c => c.state).filter(s => s.workflow === "content");
+  const lane = (name: string) => {
+    const state = states.find(s => s.name === name);
+    if (!state) throw new Error(`${key} has no content state ${name}`);
+    return state;
+  };
+  const lanes = Object.fromEntries(
+    ["Idea", "Draft", "Review", "Published"].map(name => [name, lane(name)]));
+  const policy = {
+    schemaVersion: 2,
+    workflow: "content",
+    entryLaneId: states[0]!.id,
+    lanes: states.map(s => ({ id: s.id, name: s.name, group: s.group })),
+    rules: [{ id: "people-work", effect: "allow", subjects: [{ kind: "user" }], actions: WORKFLOW_ACTIONS }],
+    transitions: [
+      { id: "any-move", from: "*", to: "*", subjects: [] },
+      {
+        id: "draft-to-published", from: lanes.Draft!.id, to: lanes.Published!.id, subjects: [],
+        rules: [{
+          id: "review-before-publish", effect: "deny", subjects: [{ kind: "user" }],
+          actions: ["move-in"], reason: "A draft is reviewed before it is published",
+        }],
+      },
+    ],
+  };
+  const base = `/project/projects/${projectId}/workflow`;
+  const validated = await inferOps(`${base}/validate`, { method: "POST", body: { policy } }) as {
+    valid: boolean; errors: unknown[]; baseRevision: string;
+  };
+  expect(validated.errors).toEqual([]);
+  expect(validated.valid).toBe(true);
+  const { head } = await inferOps(base, {
+    method: "PUT", body: { expectedRevision: validated.baseRevision, policy },
+  }) as { head: { configured: boolean; revision: string } };
+  expect(head.configured).toBe(true);
+
+  const explain = async (from: State, to: State) => (await inferOps(`${base}/explain?action=move-in` +
+    `&fromLaneId=${from.id}&toLaneId=${to.id}`) as {
+    decision: { allowed: boolean; reasonCodes: string[] }; legacy: boolean;
+  });
+  const denied = await explain(lanes.Draft!, lanes.Published!);
+  expect(denied).toMatchObject({ legacy: false, decision: { allowed: false, reasonCodes: ["EXPLICIT_DENY"] } });
+  expect((await explain(lanes.Draft!, lanes.Review!)).decision.allowed).toBe(true);
+  return { projectId, revision: head.revision, lanes };
+}
 
 // ---------------------------------------------------------------------------
 
@@ -334,29 +407,74 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       `at revision ${after!.revision}`);
   });
 
-  it("h. a transition refused by a published approval policy surfaces FORBIDDEN (when configured)", async () => {
-    if (!LIVE.policyProject) {
-      note("h. not run: INFEROPS_LIVE_POLICY_PROJECT unset (no content-workflow project with a " +
-        "published policy in the workspace)");
-      return;
-    }
+  it("h. on a content issue, a move the published policy denies surfaces FORBIDDEN; an allowed one applies", async () => {
+    const policy = await ensureContentPolicyProject(LIVE.policyProject);
+    const { Idea: idea, Draft: draft, Review: review, Published: published } = policy.lanes;
     const connection = await ws.newGatekeeper(accountId, boardUrl(LIVE.policyProject));
     if (!connection) throw new Error(`No connection for ${LIVE.policyProject}`);
     const policySession = await connection.openSession() as RpcStub<InferOpsProjectSession>;
-    const board = await policySession.readBoard();
-    const issue = board.columns.flatMap(c => c.issues)[0];
-    if (!issue) throw new Error(`${LIVE.policyProject} has no issues`);
-    const target = board.columns.map(c => c.state)
-      .find(s => s.id !== issue.stateId && s.workflow === issue.workflow && s.group === "completed");
-    if (!target) throw new Error(`${LIVE.policyProject} has no completed state`);
-    const action = await proposed(async () =>
-      (await policySession.openIssue(issue.id)).transition(target.id, issue.revision));
-    const before = await liveIssue(issue.id);
-    const message = await ws.approveAction(action.id).then(() => "", (error: unknown) =>
-      error instanceof Error ? error.message : String(error));
-    expect(message).toMatch(/FORBIDDEN|does not permit/);
-    expect((await liveIssue(issue.id)).revision).toBe(before.revision);
-    await ws.rejectAction(action.id);
-    note(`h. ${issue.identifier} -> ${target.name} refused by policy: ${message}`);
+    expect((await policySession.readBoard()).project.id).toBe(policy.projectId);
+
+    // A content issue, created in the entry lane through the approval path.
+    const contentTitle = `${title} (content)`;
+    const create = await proposed(() =>
+      policySession.createIssue({ title: contentTitle, priority: "medium", stateId: idea!.id }));
+    await ws.approveAction(create.id);
+    const [made] = await liveIssuesTitled(contentTitle, LIVE.policyProject);
+    expect(made).toBeDefined();
+    let issue = await liveIssue(made!.id);
+    expect(issue).toMatchObject({ workflow: "content", stateId: idea!.id });
+
+    /** Propose moving the issue, approve it, and answer the apply error ("" when it applied). */
+    const move = async (to: State) => {
+      const action = await proposed(async () =>
+        (await policySession.openIssue(issue.id)).transition(to.id, issue.revision));
+      // Proposing only simulates: InferOps is not asked until approval.
+      expect((await liveIssue(issue.id)).stateId).toBe(issue.stateId);
+      const message = await ws.approveAction(action.id).then(() => "", (error: unknown) =>
+        error instanceof Error ? error.message : String(error));
+      if (message) await ws.rejectAction(action.id);
+      return message;
+    };
+
+    // Idea -> Draft is allowed by the open wildcard edge.
+    expect(await move(draft!)).toBe("");
+    const inDraft = await liveIssue(issue.id);
+    expect(inDraft.stateId).toBe(draft!.id);
+    const createdAt = issue.revision;
+    issue = inDraft;
+
+    // Draft -> Published is denied by the edge rule: approved in InferOS, refused by InferOps.
+    const refused = await move(published!);
+    expect(refused).toMatch(/does not permit it for this connection .*workflow policy/);
+    const afterRefusal = await liveIssue(issue.id);
+    expect(afterRefusal).toMatchObject({ stateId: draft!.id, revision: inDraft.revision });
+    // The same move made directly is InferOps' policy refusal: 403 FORBIDDEN naming the edge rule.
+    const direct = await fetch(`${LIVE.baseUrl}/project/issues/${issue.id}/transition`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${LIVE.token}`, "x-workspace-id": LIVE.workspaceId,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ toStateId: published!.id, expectedRevision: inDraft.revision }),
+    });
+    expect(direct.status).toBe(403);
+    expect(await direct.json()).toMatchObject({ error: {
+      code: "FORBIDDEN",
+      details: { decision: { allowed: false, reasonCodes: expect.arrayContaining(["EXPLICIT_DENY"]) } },
+    } });
+    expect((await liveIssue(issue.id)).revision).toBe(inDraft.revision);
+
+    // Draft -> Review is allowed and applies.
+    expect(await move(review!)).toBe("");
+    const inReview = await liveIssue(issue.id);
+    expect(inReview.stateId).toBe(review!.id);
+    expect(inReview.revision).not.toBe(inDraft.revision);
+    note(`h. ${LIVE.policyProject} (${policy.projectId}) content policy revision ${policy.revision} ` +
+      "(Draft -> Published denies move-in to every user; explain: EXPLICIT_DENY). " +
+      `Created ${inReview.identifier} (${inReview.id}) in Idea at revision ${createdAt}; ` +
+      `Idea -> Draft applied (revision ${inDraft.revision}); Draft -> Published approved but refused ` +
+      `by InferOps ("${refused}"; direct: 403 FORBIDDEN, EXPLICIT_DENY), still Draft at revision ${afterRefusal.revision}; ` +
+      `Draft -> Review applied (revision ${inReview.revision})`);
   });
 });
