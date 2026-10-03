@@ -44,6 +44,8 @@ test("bootstrap produces a recursively cloneable pin and preserves consumer edit
     assert.equal(bootstrapConsumer(target, source, revision).created, true);
     assert.ok(existsSync(join(target, ".agents/skills/bootstrap-inferos/SKILL.md")));
     assert.ok(existsSync(join(target, ".agents/skills/skill-upload/SKILL.md")));
+    assert.ok(existsSync(join(target, ".agents/skills/local-coding/SKILL.md")));
+    assert.ok(existsSync(join(target, "skills/build/coding-dispatch/SKILL.md")));
     const skills = checkConsumerSkills(target);
     assert.deepEqual(skills.packs.map(pack => pack.id), ["operate", "build", "shared"]);
     assert.ok(skills.packs.every(pack => pack.skills.length > 0));

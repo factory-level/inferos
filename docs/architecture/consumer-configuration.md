@@ -18,6 +18,7 @@ covers:
   - scripts/consumer
   - .agents/skills/bootstrap-inferos
   - .agents/skills/skill-upload
+  - .agents/skills/local-coding
 updated: 2026-10-03
 ---
 
@@ -39,10 +40,11 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 | `scripts/consumer/bootstrap.test.ts` | Fresh recursive clone, rerun preservation, drift rejection, failure cleanup, configuration failures, the version 2 customer shell and wrapper `pnpm local` delegation |
 | `.agents/skills/bootstrap-inferos` | Coding-agent setup guidance with honest readiness reporting |
 | `.agents/skills/skill-upload` | Coding-agent guidance for installing, authoring and publishing wrapper skill packs, copied into wrappers |
+| `.agents/skills/local-coding` | Coding-agent SOP for the local coding runner (setup, `pnpm local runner`/`coding doctor`, recovery, applying a patch), copied into wrappers |
 
 ## Data and Control Flow
 
-The bootstrap accepts destination, repository and full commit SHA, plus optional `--profile` and repeatable `--capability` flags (`InitialConsumerOptions` in `config.ts`). It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers (reached through the `inferos` script, `node .inferos/runtime.ts`, as well as the named scripts), the `bootstrap-inferos` and `skill-upload` skills and the starter skill packs (`skills/`, with a default `inferos.skills.json`; see [repo setup skills](repo-setup-skills.md#skill-packs)) into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
+The bootstrap accepts destination, repository and full commit SHA, plus optional `--profile` and repeatable `--capability` flags (`InitialConsumerOptions` in `config.ts`). It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers (reached through the `inferos` script, `node .inferos/runtime.ts`, as well as the named scripts), the `bootstrap-inferos`, `skill-upload` and `local-coding` skills and the starter skill packs (`skills/`, with a default `inferos.skills.json`; see [repo setup skills](repo-setup-skills.md#skill-packs)) into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
 
 ### Customer shell options
 

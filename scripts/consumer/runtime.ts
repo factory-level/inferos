@@ -440,13 +440,18 @@ function launchEnv(root: string, config: ConsumerConfig): NodeJS.ProcessEnv {
 /**
  * Point the pinned lifecycle operator at this wrapper. It runs from the pinned checkout, whose own
  * `inferos.canvas.json` is not the wrapper's, so `start` serves the wrapper (`--consumer-root`, after
- * any run-local flags) and `seed` opens the wrapper's first screen template unless one is named.
+ * any run-local flags), `seed` opens the wrapper's first screen template unless one is named, and
+ * `runner`/`coding` read the wrapper's coding configuration (`--consumer-root`).
  */
 export function localLifecycleArgs(root: string, args: readonly string[]): string[] {
   const separator = args.indexOf("--");
   const own = separator === -1 ? [...args] : args.slice(0, separator);
   const passthrough = separator === -1 ? [] : args.slice(separator + 1);
   if (own[0] === "start") passthrough.push("--consumer-root", root);
+  // The coding runner reads this wrapper's codingWorkbench.repos and keeps its state in .inferos/state.
+  if ((own[0] === "runner" || own[0] === "coding") && !own.some(arg => arg === "--consumer-root" || arg.startsWith("--consumer-root="))) {
+    own.push("--consumer-root", root);
+  }
   if (own[0] === "seed" && !own.some(arg => arg === "--screen" || arg.startsWith("--screen="))) {
     const screen = firstScreenTemplate(root);
     if (screen) own.push("--screen", screen);
