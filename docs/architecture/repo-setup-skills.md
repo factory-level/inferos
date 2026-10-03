@@ -20,7 +20,7 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | Path | Responsibility |
 | --- | --- |
 | `scripts/run-dev-server.ts` | Existing local startup orchestration. |
-| `scripts/generate-worker-configs.ts` | Generated config synchronization. |
+| `scripts/generate-worker-configs.ts` | Generated config synchronization. `--consumer-root <wrapper>` also covers the wrapper's own gatekeepers, and `syncWorkerConfigs` generates or checks any given set of Worker directories ([wrapper topology](local-development.md#wrapper-topology)). |
 | `scripts/release/manifest-lib.ts` | Deployable discovery and inputs. |
 | `.agents/skills/bootstrap-inferos` | Consumer setup, configuration (including applying a reviewed intake) and evidence guidance. |
 | `.agents/skills/skill-upload` | Installing, authoring (with skill-creator) and publishing wrapper skills. |

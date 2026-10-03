@@ -8,7 +8,11 @@
 // TypeScript file is the source of truth and wrangler.jsonc a generated artifact every existing
 // consumer keeps reading; `pnpm configs:check` (CI's lint job) keeps the two in step.
 //
-// Usage: node scripts/generate-worker-configs.ts [--check]
+// With `--consumer-root <wrapper>`, the wrapper's own gatekeepers (its `gatekeepers/` children, see
+// worker-dirs.ts) are generated and checked too; their wrangler.jsonc is written in the wrapper,
+// never in this checkout.
+//
+// Usage: node scripts/generate-worker-configs.ts [--check] [--consumer-root WRAPPER]
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -16,7 +20,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { convertToWranglerConfig, resolveAndParseConfig } from "@cloudflare/config";
 import type { WranglerConfig } from "./release/manifest-lib.ts";
 import type { WranglerExtras } from "./worker-config.ts";
-import { workerPackageDirs } from "./worker-dirs.ts";
+import { workerPackageDirs, type WorkerDirOptions } from "./worker-dirs.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -36,11 +40,12 @@ const subdirs = (dir: string) => readdirSync(dir, { withFileTypes: true })
 
 /**
  * Every directory holding a Worker config: the root dev router, each package (upstream and custom
- * gatekeepers alike), and each integration fixture. A directory with only a wrangler.jsonc is kept
- * so that a hand-written one fails.
+ * gatekeepers alike, plus a wrapper's own gatekeepers when `options.consumerRoot` is given), and
+ * each integration fixture. A directory with only a wrangler.jsonc is kept so that a hand-written
+ * one fails.
  */
-export function workerConfigDirs(): string[] {
-  return [ROOT, ...workerPackageDirs(ROOT), ...subdirs(FIXTURES_DIR)]
+export function workerConfigDirs(options: WorkerDirOptions = {}): string[] {
+  return [ROOT, ...workerPackageDirs(ROOT, options), ...subdirs(FIXTURES_DIR)]
     .filter((dir) => existsSync(join(dir, SOURCE_NAME)) || existsSync(join(dir, GENERATED_NAME)))
     .toSorted();
 }
@@ -97,16 +102,15 @@ export async function renderWorkerConfig(dir: string): Promise<string> {
 }
 
 /**
- * Regenerates every Worker's wrangler.jsonc, writing only files whose content changed. With
- * `check`, writes nothing. Returns the repo-relative paths that differed.
+ * Regenerates the wrangler.jsonc of each directory in `dirs`, writing only files whose content
+ * changed. With `check`, writes nothing. Returns the paths that differed, relative to `base`.
  */
-export async function generateWorkerConfigs({ check }: { check: boolean }): Promise<string[]> {
-  const dirs = workerConfigDirs();
+export async function syncWorkerConfigs(dirs: readonly string[], { check, base = ROOT }: { check: boolean; base?: string }): Promise<string[]> {
   const rendered = await Promise.all(dirs.map(renderWorkerConfig));
   return dirs.flatMap((dir, i) => {
     const path = join(dir, GENERATED_NAME);
     if (existsSync(path) && readFileSync(path, "utf8") === rendered[i]) return [];
-    const rel = relative(ROOT, path);
+    const rel = relative(base, path);
     if (!check) {
       writeFileSync(path, rendered[i]);
       console.log(`gen ${rel}`);
@@ -115,9 +119,22 @@ export async function generateWorkerConfigs({ check }: { check: boolean }): Prom
   });
 }
 
+/**
+ * Regenerates every Worker's wrangler.jsonc, writing only files whose content changed. With
+ * `check`, writes nothing. Returns the repo-relative paths that differed.
+ */
+export async function generateWorkerConfigs({ check, consumerRoot }: { check: boolean } & WorkerDirOptions): Promise<string[]> {
+  return syncWorkerConfigs(workerConfigDirs({ consumerRoot }), { check });
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const check = process.argv.includes("--check");
-  const stale = await generateWorkerConfigs({ check });
+  const consumerIndex = process.argv.indexOf("--consumer-root");
+  const consumerRoot = consumerIndex === -1 ? undefined : process.argv[consumerIndex + 1];
+  if (consumerIndex !== -1 && (!consumerRoot || consumerRoot.startsWith("--"))) {
+    throw new Error("--consumer-root requires one wrapper directory");
+  }
+  const stale = await generateWorkerConfigs({ check, consumerRoot });
   if (check && stale.length > 0) {
     console.error(`worker configs out of date (run \`pnpm configs:generate\`):\n  ${stale.join("\n  ")}`);
     process.exitCode = 1;
