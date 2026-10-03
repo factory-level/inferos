@@ -561,8 +561,11 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
   ],
   "gatekeeper-mcp": ["MCP_ALLOW_INSECURE"],
   // The InferOps API. The base URL is what connected people call with their own InferLab session;
-  // the token and workspace id are a local-development stopgap for accounts with no identity.
-  "gatekeeper-inferops": ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"],
+  // the token, workspace id and workspace slug are a local-development stopgap for accounts with no
+  // identity (the slug is the `<workspace>` a board URL names to use it).
+  "gatekeeper-inferops": [
+    "INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG",
+  ],
 };
 // Vars resolved here rather than read raw from the shell.
 const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined>> = {

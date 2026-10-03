@@ -1,7 +1,7 @@
 ---
 title: InferOps canvas and transactional widgets
 status: draft
-updated: 2026-10-01
+updated: 2026-10-02
 ---
 
 # InferOps canvas and transactional widgets
@@ -24,7 +24,7 @@ Make operational data easy to load, compose and act on through a simple canvas, 
 
 ## Behavior
 
-The v1 portable definition stores id, revision, sections and widget instances. The future authoritative storage record separately owns scope and sharing policy; imports cannot assert either. Each instance has a stable id, registered kind/version, targetRef, schema-validated params and an allowed size. Composition operations add/remove/move/configure instances against an expected canvas revision; preview and undo operate on composition changes, not on silently reversing domain writes. No free-form CSS, absolute pixel placement or arbitrary executable renderer arrives through this interface. Existing InferOps personal pins require explicit migration/import, not silent conversion to shared canvases.
+The v1 portable definition stores id, revision, sections and widget instances. The future authoritative storage record separately owns scope and sharing policy; imports cannot assert either. Each instance has a stable id, registered kind/version, targetRef, schema-validated params and an allowed size. An InferOps board's targetRef uses InferOps' own deep-link grammar, `inferops://<tenant>.<workspace>/project/board/<KEY>` (for example `inferops://acme.operations/project/board/ENG`), so a reference from an InferOps document works unchanged; it never names a deployment, and its workspace is resolved against the viewer's own workspaces when a connection is made ([ADR 0005](../adr/0005-inferops-uri-authority.md)). `inferops://demo.local/project/board/DEMO` names the demo data. Composition operations add/remove/move/configure instances against an expected canvas revision; preview and undo operate on composition changes, not on silently reversing domain writes. No free-form CSS, absolute pixel placement or arbitrary executable renderer arrives through this interface. Existing InferOps personal pins require explicit migration/import, not silent conversion to shared canvases.
 
 The data adapter keys caches by principal/capability scope plus kind, version, canonical target and normalized params. It rejects cross-scope targets, coalesces duplicate in-flight reads, bounds concurrency and supports cancellation. It must not claim batching where the domain exposes only independent board reads. Board revisions prevent stale snapshots from overwriting newer optimistic changes. Transition actions use the gatekeeper approval path, show pending status and reconcile from authoritative data; failed writes restore or reload the affected board.
 

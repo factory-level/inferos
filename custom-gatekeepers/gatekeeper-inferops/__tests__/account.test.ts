@@ -1,7 +1,8 @@
 // A connected InferOps account acts with the person's own InferLab session: the connect flow stores
 // it, every InferOps request carries that person's token and one of their workspaces, the session
 // is refreshed and rotated at InferLab, its death is reported once, revoking signs it out, and a
-// workspace the person does not belong to is refused before any request.
+// board URL (`inferops://<tenant>.<workspace>/…`) resolves only to a workspace the person belongs
+// to, by its slug; anything else is refused before any request.
 //
 // The Workshop holds an account as a stub rebuilt from its props, and a stub cannot leave the
 // Durable Object that made it, so the tests learn each account's id by fixing `crypto.randomUUID`
@@ -20,8 +21,9 @@ const LOGIN_ENV = {
   BASE_URL: "http://localhost:8787/gatekeeper/inferops",
 };
 const REDIRECT_URI = "http://localhost:8787/gatekeeper/inferops/oauth";
-const HOST = "localhost:8080";
-const BOARD_URL = `inferops://${HOST}/project/board/DEMO`;
+const API_HOST = "localhost:8080";
+const BOARD_URL = "inferops://acme.operations/project/board/DEMO";
+const SALES_URL = "inferops://acme.sales/project/board/DEMO";
 
 const OPS = "90000000-0000-4000-8000-000000000001";
 const SALES = "90000000-0000-4000-8000-000000000002";
@@ -56,6 +58,11 @@ class FakeInferLab {
   workspaces: Array<{ workspaceId: string; workspaceName: string; product: string }> = [
     { workspaceId: OPS, workspaceName: "Ops", product: "inferops" },
   ];
+  /** Every workspace of the tenant and its slug, as `GET /workspaces` lists them. */
+  slugs = new Map<string, string>([[OPS, "operations"], [SALES, "sales"], [OTHER, "knowledge"]]);
+  /** Whether `GET /workspaces` fails. */
+  workspaceListDown = false;
+  workspaceLists = 0;
   emailVerified = true;
   accessTtlMs = HOUR;
   logouts: string[] = [];
@@ -115,6 +122,17 @@ class FakeInferLab {
     const headers = new Headers(init.headers);
     const token = headers.get("authorization")?.replace(/^Bearer /, "") ?? null;
     const workspaceId = headers.get("x-workspace-id");
+    if (url.pathname === "/workspaces") {
+      // The principal lane: a valid token, no workspace header.
+      this.workspaceLists++;
+      if (this.workspaceListDown) return new Response("down", { status: 502 });
+      if (!token || !this.access.has(token) || workspaceId) {
+        return Response.json({ error: { code: "UNAUTHORIZED", message: "bad token" } }, { status: 401 });
+      }
+      return Response.json([...this.slugs].map(([id, slug]) => ({
+        id, tenant_id: "t1", product: "inferops", name: slug, slug,
+      })));
+    }
     this.apiCalls.push({ path: url.pathname + url.search, token, workspaceId });
     if (!token || !this.access.has(token)) {
       return Response.json({ error: { code: "UNAUTHORIZED", message: "bad token" } }, { status: 401 });
@@ -191,9 +209,9 @@ async function connect(label: string): Promise<AccountProps> {
 
 const hooks = () => env.TEST_HOOKS.get(env.TEST_HOOKS.idFromName("accounts"));
 
-/** A board session over the binding `account` mints for `BOARD_URL`, named `name`. */
-async function bindBoard(account: AccountProps, name: string) {
-  expect(await hooks().bindAccount(name, account, BOARD_URL)).toBeNull();
+/** A board session over the binding `account` mints for `url`, named `name`. */
+async function bindBoard(account: AccountProps, name: string, url = BOARD_URL) {
+  expect(await hooks().bindAccount(name, account, url)).toBeNull();
   return hooks().startBoundSession(name);
 }
 
@@ -225,7 +243,7 @@ describe("connecting", () => {
     expect(inferlab.logouts).toEqual([]);
     expect(signIns).toContainEqual({ label: "keep", email: "ada@example.com" });
     expect(await hooks().describeAccount(account)).toMatchObject({
-      displayName: `InferOps (${HOST})`, uniqueName: "ada@example.com",
+      displayName: `InferOps (${API_HOST})`, uniqueName: "ada@example.com",
     });
   });
 
@@ -335,44 +353,115 @@ describe("reconnecting", () => {
   });
 });
 
-describe("workspaces", () => {
-  it("binds in the person's only workspace without asking", async () => {
-    const account = await connect("single");
-    expect(await hooks().listWorkspaces(account)).toEqual([{ value: OPS, title: "Ops", subtitle: OPS }]);
-    await bindBoard(account, "single");
-    expect(lastApiCall().workspaceId).toBe(OPS);
+describe("workspaces named by board URLs", () => {
+  it("stores each membership's slug at connect time and offers them by slug", async () => {
+    const account = await connect("slugs");
+    expect(inferlab.workspaceLists).toBe(1);
+    expect(await hooks().listWorkspaces(account))
+      .toEqual([{ value: "operations", title: "Ops", subtitle: "operations" }]);
+    // A connected person names organization and workspace; only demo data has a default.
+    expect(await hooks().defaultHost(account)).toBeNull();
   });
 
-  it("requires a choice among several, refuses one the person is not a member of, and binds in the chosen one", async () => {
+  it("resolves the URL's workspace slug to the person's own workspace and its credentials", async () => {
+    const account = await connect("resolve");
+    const session = await bindBoard(account, "resolve");
+    await session.readBoard();
+    expect(inferlab.apiCalls.length).toBeGreaterThan(0);
+    for (const call of inferlab.apiCalls) {
+      expect(call.workspaceId).toBe(OPS);
+      expect(call.token).toBe(inferlab.accessOf("refresh-1"));
+    }
+  });
+
+  it("binds each of several workspaces by its own slug", async () => {
     inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
     inferlab.memberships.add(SALES);
     const account = await connect("several");
 
-    expect(await hooks().bindAccount("several", account, BOARD_URL)).toContain("choose one");
-    expect(await hooks().listProjects(account)).toContain("choose one");
-    expect(await hooks().selectWorkspace(account, OTHER)).toContain("not a member");
-    expect(inferlab.apiCalls).toEqual([]);
+    expect(await hooks().listProjects(account, "acme.sales")).toEqual(["DEMO"]);
+    expect(lastApiCall().workspaceId).toBe(SALES);
+    const sales = await bindBoard(account, "several-sales", SALES_URL);
+    const ops = await bindBoard(account, "several-ops", BOARD_URL);
 
-    expect(await hooks().selectWorkspace(account, SALES)).toBeNull();
-    expect(await hooks().listProjects(account)).toEqual(["DEMO"]);
-    const session = await bindBoard(account, "several");
+    await sales.readBoard();
+    expect(lastApiCall().workspaceId).toBe(SALES);
+    await ops.readBoard();
+    expect(lastApiCall().workspaceId).toBe(OPS);
+  });
+
+  it("refuses a workspace the person does not hold exactly like a missing project, before any request", async () => {
+    const account = await connect("outside");
+    // `knowledge` is a workspace of the tenant the person is not a member of; `nowhere` does not exist.
+    const outside = await hooks().bindAccount("outside-1", account,
+      "inferops://acme.knowledge/project/board/DEMO");
+    const missing = await hooks().bindAccount("outside-2", account,
+      "inferops://acme.nowhere/project/board/DEMO");
+    const unknownProject = await hooks().bindAccount("outside-3", account,
+      "inferops://acme.operations/project/board/NOPE");
+    expect(outside).toBe("No InferOps project DEMO is available on acme.knowledge.");
+    expect(missing).toBe("No InferOps project DEMO is available on acme.nowhere.");
+    expect(unknownProject).toBe("No InferOps project NOPE is available on acme.operations.");
+    expect(await hooks().listProjects(account, "acme.knowledge")).toEqual([]);
+    // Only the unknown project's lookup reached InferOps, in the person's own workspace.
+    for (const call of inferlab.apiCalls) expect(call.workspaceId).toBe(OPS);
+  });
+
+  it("takes no authority from the tenant label: a tampered tenant still means the person's own workspace", async () => {
+    const account = await connect("tenant");
+    // The identity carries a tenant id, never its slug, so the label is not compared (as in
+    // InferOps); the workspace still resolves only among the person's own memberships.
+    const session = await bindBoard(account, "tenant", "inferops://globex.operations/project/board/DEMO");
     await session.readBoard();
-    for (const call of inferlab.apiCalls) expect(call.workspaceId).toBe(SALES);
+    for (const call of inferlab.apiCalls) expect(call.workspaceId).toBe(OPS);
+    expect(await hooks().bindAccount("tenant-2", account, "inferops://globex.knowledge/project/board/DEMO"))
+      .toBe("No InferOps project DEMO is available on globex.knowledge.");
+  });
+
+  it.each([
+    "inferops://localhost:8080/project/board/DEMO",
+    "inferops://operations/project/board/DEMO",
+    "inferops://acme.operations.extra/project/board/DEMO",
+    "inferops://ACME.operations/project/board/DEMO",
+  ])("rejects the malformed authority of %s without a request", async url => {
+    const account = await connect(`malformed-${url}`);
+    expect(await hooks().bindAccount("malformed", account, url)).toContain("Not an InferOps project board URL");
+    expect(inferlab.apiCalls).toEqual([]);
+  });
+
+  it("keeps demo.local the built-in demo data, never InferOps", async () => {
+    const account = await connect("demo");
+    const session = await bindBoard(account, "demo", "inferops://demo.local/project/board/DEMO");
+    const board = await session.readBoard();
+    expect(board.project.identifier).toBe("DEMO");
+    expect(inferlab.apiCalls).toEqual([]);
+  });
+
+  it("fails the connect and signs the session out when InferOps cannot list the workspaces", async () => {
+    inferlab.workspaceListDown = true;
+    const url = await withExports(async exports => {
+      const vendor = exports.GatekeeperVendor({});
+      const callback = exports.TestConnectCallback({ props: { label: "list-down" } });
+      return (await vendor.connectAccount(callback as never, { scopes: "full" })).url;
+    });
+    const response = await finish(url);
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("could not list your workspaces");
+    expect(inferlab.logouts).toEqual(["refresh-1"]);
+    expect(signIns.find(s => s.label === "list-down")).toBeUndefined();
   });
 
   it("is denied by InferOps for a workspace the token cannot enter, without expiring the account", async () => {
     // InferLab listed Sales at sign-in, but InferOps no longer admits this person there.
     inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
     const account = await connect("denied");
-    expect(await hooks().selectWorkspace(account, SALES)).toBeNull();
 
-    expect(await hooks().bindAccount("denied", account, BOARD_URL)).toContain("FORBIDDEN");
+    expect(await hooks().bindAccount("denied", account, SALES_URL)).toContain("FORBIDDEN");
     expect(lastApiCall().workspaceId).toBe(SALES);
     expect(inferlab.refreshes).toEqual([]);
     expect(expired).not.toContain("denied");
 
-    // Back in a workspace the person belongs to, the same account works.
-    expect(await hooks().selectWorkspace(account, OPS)).toBeNull();
+    // In a workspace the person belongs to, the same account works.
     await bindBoard(account, "denied");
   });
 
@@ -380,8 +469,7 @@ describe("workspaces", () => {
     inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
     inferlab.memberships.add(SALES);
     const owner = await connect("owner");
-    expect(await hooks().selectWorkspace(owner, SALES)).toBeNull();
-    await bindBoard(owner, "shared");
+    await bindBoard(owner, "shared", SALES_URL);
 
     // A collaborator who belongs to Sales too.
     const member = await connect("member");

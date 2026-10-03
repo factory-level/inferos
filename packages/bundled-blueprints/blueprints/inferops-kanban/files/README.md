@@ -8,8 +8,9 @@ through its binding on every load.
 
 The gadget needs one binding named exactly **`board`**: an InferOps project board from the
 `inferops` gatekeeper, whose agent-facing type is `InferOpsProjectSession`. Its resource URL is
-`inferops://<host>/project/board/<KEY>`, for example `inferops://demo.local/project/board/DEMO`
-(the demo deployment also has `ENG`). To wire it up from chat:
+`inferops://<tenant>.<workspace>/project/board/<KEY>`, InferOps' own address for a board (for
+example `inferops://acme.operations/project/board/ENG`, where `operations` must be one of your
+workspaces), or `inferops://demo.local/project/board/DEMO` for the demo data (which also has `ENG`). To wire it up from chat:
 
 1. If your env has no suitable InferOps board, call `requestConnection` with vendorId `inferops`
    and that resource URL.

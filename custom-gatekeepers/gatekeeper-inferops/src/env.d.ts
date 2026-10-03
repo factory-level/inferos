@@ -3,12 +3,13 @@
 declare namespace Cloudflare {
   // The InferOps API (see http-inferops.ts): unset in the committed wrangler.jsonc and passed
   // through by `pnpm dev-server`. INFEROPS_BASE_URL names the API connected people call with their
-  // own session; the token and workspace id are the local-development stopgap connection shared
-  // by every account that has no identity.
+  // own session; the token, workspace id and workspace slug are the local-development stopgap
+  // connection shared by every account that has no identity.
   interface Env {
     INFEROPS_BASE_URL?: string;
     INFEROPS_API_TOKEN?: string;
     INFEROPS_WORKSPACE_ID?: string;
+    INFEROPS_WORKSPACE_SLUG?: string;
   }
 
   interface GlobalProps {
