@@ -178,6 +178,23 @@ test("capability report states enabled, supported and unsupported against the in
   } finally { rmSync(upstream, { recursive: true, force: true }); }
 });
 
+test("INFEROPS_ENABLED is supported by this revision; a version 1 wrapper never requests it", () => {
+  const repository = join(import.meta.dirname, "../..");
+  assert.equal(capabilitySources.INFEROPS_ENABLED, "custom-gatekeepers/gatekeeper-inferops/src/enablement.ts");
+  assert.ok(existsSync(join(repository, capabilitySources.INFEROPS_ENABLED!)));
+  const base = initialConsumerConfig("https://github.com/factory-level/inferos", "a".repeat(40));
+  const legacy = resolveConsumerConfig(base);
+  assert.deepEqual(reportCapabilities(legacy, repository).INFEROPS_ENABLED, { state: "supported", requested: false, source: "default" });
+  const on = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { INFEROPS_ENABLED: true } });
+  assert.deepEqual(reportCapabilities(on, repository).INFEROPS_ENABLED, { state: "enabled", requested: true, source: "override" });
+  assert.deepEqual(unsupportedCapabilities(on.config, repository), []);
+  const off = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { INFEROPS_ENABLED: false } });
+  assert.deepEqual(reportCapabilities(off, repository).INFEROPS_ENABLED, { state: "supported", requested: false, source: "override" });
+  // CODING_WORKBENCH_ENABLED has no code yet (#69): switching it on still fails.
+  const coding = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { INFEROPS_ENABLED: true, CODING_WORKBENCH_ENABLED: true } });
+  assert.deepEqual(unsupportedCapabilities(coding.config, repository), ["CODING_WORKBENCH_ENABLED"]);
+});
+
 const runtime = (target: string, command: string) => spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), command], { encoding: "utf8" });
 const rewrite = (target: string, edit: (config: Record<string, any>) => unknown) => {
   const path = join(target, "inferos.config.json");

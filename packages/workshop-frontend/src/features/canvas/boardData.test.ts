@@ -128,6 +128,26 @@ describe('BoardData', () => {
     expect(data.get(request())).toEqual({ status: 'unbound' })
   })
 
+  it('reports InferOps turned off distinctly, drops the held board, and shows it again once it is back on', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+    data.refresh(request())
+    await flush()
+    // The gatekeeper's code survives RPC as the message prefix, after any error-class name.
+    ws.reads[1]!.reject(new Error('Error: DISABLED: InferOps is turned off for this deployment.'))
+    await flush()
+    expect(data.get(request())).toEqual({ status: 'disabled', message: 'InferOps is turned off for this deployment.' })
+    data.refresh(request())
+    await flush()
+    ws.reads[2]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+    expect(columns(data.get(request()))).toEqual([['1'], [], []])
+  })
+
   it('never lets a stale response overwrite a newer one', async () => {
     const ws = workspace()
     const data = new BoardData(ws.overseer)

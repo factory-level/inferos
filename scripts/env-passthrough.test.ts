@@ -103,6 +103,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "DISABLE_PASSWORD_AUTH",
       // run-dev-server.ts starts the companion at runtime; the frontend reads its flag over RPC.
       "ENABLE_OPENAI_ASSISTANT_PLUGIN",
+      // run-dev-server.ts resolves the InferOps gatekeeper's switch; a version 2 wrapper overrides it.
+      "INFEROPS_ENABLED",
       "ANTHROPIC_API_KEY",
       "GITHUB_REPOSITORY", "GITHUB_TOKEN", "PREVIEW_ADMINS", "PREVIEW_GITHUB_CLIENT_ID",
       "PREVIEW_GITHUB_CLIENT_SECRET", "PREVIEW_NAME", "PREVIEW_PR_NUMBER",

@@ -153,3 +153,43 @@ export function getInferLabLoginVars(enabled: boolean, shell: {
     INFERLAB_AUTH_ORIGIN: shell.INFERLAB_AUTH_ORIGIN?.trim() || DEFAULT_INFERLAB_AUTH_ORIGIN,
   };
 }
+
+/** The custom gatekeeper that serves InferOps boards, switched by `INFEROPS_ENABLED`; it also serves sign-in. */
+export const INFEROPS_GATEKEEPER = INFERLAB_LOGIN_GATEKEEPER;
+
+/**
+ * The `INFEROPS_ENABLED` var the InferOps gatekeeper gets, which it checks on
+ * every binding and data call (`enablement.ts`). The var is always set here, so the gatekeeper's
+ * "unset counts as on" rule only applies to deployments this server did not configure.
+ *
+ * `inferos.canvas.json` still decides whether the gatekeeper is installed (it selects every custom
+ * gatekeeper by default). Installed and off, it keeps running: its sign-in still works, existing
+ * bindings and queued moves are kept, and every binding and data call is refused with DISABLED, so
+ * a board card says InferOps is off rather than that it lost its connection.
+ *
+ * - A version 2 wrapper switches it with the capability, whatever the shell says. Turning the
+ *   capability on while `inferos.canvas.json` leaves the gatekeeper out is a conflict and fails.
+ * - A version 1 wrapper, or this checkout with no wrapper, behaves as before: on, unless the shell
+ *   sets `INFEROPS_ENABLED=false` to try the off state locally.
+ */
+export function resolveInferOpsEnabled(options: {
+  /** The wrapper's version 2 capability, or null for a version 1 wrapper or no wrapper. */
+  capability: boolean | null;
+  /** Whether `inferos.canvas.json` selects the gatekeeper. */
+  canvasSelected: boolean;
+  /** The shell's `INFEROPS_ENABLED`, used only without a version 2 wrapper. */
+  shell: string | undefined;
+}): "true" | "false" {
+  const { capability, canvasSelected, shell } = options;
+  if (capability === null) {
+    if (shell !== undefined && shell !== "true" && shell !== "false") {
+      throw new Error('INFEROPS_ENABLED must be "true" or "false"');
+    }
+    return shell === "false" ? "false" : "true";
+  }
+  if (capability && !canvasSelected) {
+    throw new Error(`INFEROPS_ENABLED is on, but inferos.canvas.json leaves ${INFEROPS_GATEKEEPER} out; ` +
+      `enable it with pnpm canvas gatekeeper enable ${INFEROPS_GATEKEEPER}, or turn the capability off`);
+  }
+  return capability ? "true" : "false";
+}
