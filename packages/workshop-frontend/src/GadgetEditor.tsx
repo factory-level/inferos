@@ -69,6 +69,14 @@ import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
 import { isImeComposing } from './keyboardEvent'
+import { useUiFeatureFlags } from './FeatureFlagsContext'
+import { WorkspaceKindHeader } from './features/workspace-kind/WorkspaceKindHeader'
+import { WorkflowTriggersPanel } from './features/workspace-kind/WorkflowTriggersPanel'
+import {
+  hasAppViewToggle,
+  kindOf,
+  workspaceOutputView,
+} from './features/workspace-kind/workspaceKinds'
 
 const NO_GADGETS: ReadonlySet<WorkpieceId> = new Set()
 
@@ -122,11 +130,14 @@ function formatHeaderCost(cost: number) {
 
 // The first tab is named after what the selected workpiece is ("Document" for a gadget built from
 // a document blueprint), falling back to "App" when it declares no format. A worktree has no app
-// and no bindings, so it gets only Code.
-function rightTabs(summary: WorkpieceSummary | undefined): { value: RightTab; label: string }[] {
+// and no bindings, so it gets only Code. A workflow has no app, so its first tab shows its triggers.
+function rightTabs(
+  summary: WorkpieceSummary | undefined,
+  outputView: 'app' | 'triggers',
+): { value: RightTab; label: string }[] {
   if (summary?.type === 'worktree') return [{ value: 'code', label: 'Code' }]
   return [
-    { value: 'app', label: formatOf(summary?.output).noun },
+    { value: 'app', label: outputView === 'triggers' ? 'Triggers' : formatOf(summary?.output).noun },
     { value: 'code', label: 'Code' },
     { value: 'connections', label: 'Connections' },
   ]
@@ -431,6 +442,13 @@ export default function GadgetEditor() {
   // telemetry subscriptions this component opens, so no client-side gating is needed here.
   const isUseOnly = metadata?.role === 'use'
 
+  // ── workspace kind (operate-mode) ─────────────────────────────────────────────
+  // Read from the live metadata, never copied: the kind changes only by an explicit setKind().
+  // With the flag off every workspace behaves as an app, exactly as before kinds existed.
+  const operateMode = useUiFeatureFlags().flags['operate-mode']
+  const workspaceKind = operateMode && metadata ? kindOf(metadata) : 'app'
+  const outputView = workspaceOutputView(workspaceKind)
+
   // ── layout ───────────────────────────────────────────────────────────────────
   const [chosenTab, setActiveTab] = useState<RightTab>('app')
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(() =>
@@ -442,7 +460,10 @@ export default function GadgetEditor() {
   const [activityClosing, setActivityClosing] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
-  const [previewMode, _setPreviewMode] = useState(false)
+  // The app on its own, filling the content area (the Chat ↔ App toggle). Only an app has one, so
+  // a choice made before switching kind lapses rather than lingering.
+  const [appViewChosen, setAppViewChosen] = useState(false)
+  const previewMode = appViewChosen && hasAppViewToggle(workspaceKind)
   const [workpieceRailExpanded, setWorkpieceRailExpanded] = useState(getInitialAppRailExpanded)
   const workpieceRailWidth = workpieceRailExpanded
     ? WORKPIECE_RAIL_EXPANDED_WIDTH
@@ -777,9 +798,13 @@ export default function GadgetEditor() {
   // list.
   const hasAnyApps = allGadgets.length > 0 || allWorktrees.length > 0
   const hasVisibleWorkpieces = visibleWorkpieces.length > 0
+  // A workflow always has pane content (its triggers), even before it has any gadget.
+  const hasPaneContent = hasVisibleWorkpieces || outputView === 'triggers'
   const showingActivity = workspaceView?.mode === 'activity'
   const showFullEditor = layoutModeReady && (
-    showingActivity || (hasVisibleWorkpieces && (workspaceView === null ? !simpleMode : workspaceView.mode === 'app'))
+    showingActivity || (hasPaneContent && (workspaceView === null
+      ? !simpleMode || outputView === 'triggers'
+      : workspaceView.mode === 'app'))
   )
   const { width: chatWidth, isResizing, handleProps: resizeHandleProps } = useResizableSplit(showFullEditor)
   const showOutputRail = layoutModeReady && hasAnyApps && !showFullEditor
@@ -1012,6 +1037,7 @@ export default function GadgetEditor() {
     knownWorkpieceIdsRef.current = null
     turnOutputRef.current = null
     setUserNavigatedToList(false)
+    setAppViewChosen(false)
   }, [id])
 
   // ── navigation helper ────────────────────────────────────────────────────────
@@ -1373,6 +1399,13 @@ export default function GadgetEditor() {
               by {metadata.owner.name}
             </span>
           )}
+
+          <WorkspaceKindHeader
+            metadata={metadata}
+            onSetKind={kind => overseer.stub.setKind(kind)}
+            appView={previewMode}
+            onAppViewChange={setAppViewChosen}
+          />
         </div>
 
         {canvasFeatures?.composableViews && <WorkshopButton onClick={() => navigate({ to: '/workspace/$id/inferops-canvas', params: { id: id! }, search: {} })}>InferOps Canvas</WorkshopButton>}
@@ -1462,7 +1495,7 @@ export default function GadgetEditor() {
             mobilePrimaryActive ? 'bg-kumo-tint text-kumo-default' : 'text-kumo-subtle'
           }`}
         >
-          {mobilePrimaryTab === 'app' ? 'Preview' : 'Code'}
+          {mobilePrimaryTab === 'code' ? 'Code' : outputView === 'triggers' ? 'Triggers' : 'Preview'}
         </button>
         <button
           type="button"
@@ -1543,13 +1576,15 @@ export default function GadgetEditor() {
                 >
                   Blueprints
                 </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  disabled={!mobilePreviewActive}
-                  onClick={enterGadgetFullscreen}
-                  className={MENU_ITEM}
-                >
-                  Full-screen preview
-                </DropdownMenu.Item>
+                {outputView === 'app' && (
+                  <DropdownMenu.Item
+                    disabled={!mobilePreviewActive}
+                    onClick={enterGadgetFullscreen}
+                    className={MENU_ITEM}
+                  >
+                    Full-screen preview
+                  </DropdownMenu.Item>
+                )}
               </>
             )}
             {!metadata.owner && (
@@ -1698,7 +1733,7 @@ export default function GadgetEditor() {
                       onClick={() => setActivityView(tab.value)}
                     />
                   ))
-                  : rightTabs(selectedWorkpieceSummary).map(tab => (
+                  : rightTabs(selectedWorkpieceSummary, outputView).map(tab => (
                     <PaneTab
                       key={tab.value}
                       active={activeTab === tab.value}
@@ -1716,7 +1751,8 @@ export default function GadgetEditor() {
                 />
               )}
 
-              {!paneShowsActivity && selectedWorkpieceSummary?.type !== 'worktree' && (
+              {!paneShowsActivity && selectedWorkpieceSummary?.type !== 'worktree' &&
+                  outputView === 'app' && (
                 <WorkshopIconButton
                   aria-label="Enter full screen"
                   title={activeTab === 'app' && !previewMode
@@ -1782,7 +1818,16 @@ export default function GadgetEditor() {
                     : 'h-full'
               }
             >
-              {selectedGadgetStub && !previewMode ? (
+              {outputView === 'triggers' ? (
+                <WorkflowTriggersPanel
+                  key={id}
+                  overseer={overseer.stub}
+                  gadgets={visibleGadgets}
+                  refreshKey={hookSignature}
+                  pendingActionCount={pendingActionCount}
+                  onOpenActivity={() => openActivity('review')}
+                />
+              ) : selectedGadgetStub && !previewMode ? (
                 <GadgetUI
                   key={selectedGadgetId}
                   gadget={selectedGadgetStub}
@@ -1878,7 +1923,7 @@ export default function GadgetEditor() {
       {/* ═══ PREVIEW OVERLAY ══════════════════════════════════════════════════ */}
       {previewMode && (
         <div className="absolute inset-x-0 bottom-0 bg-kumo-base z-10" style={{ top: TOPBAR_H }}>
-          {selectedGadgetStub && (
+          {selectedGadgetStub ? (
             <GadgetUI
               key={selectedGadgetId}
               gadget={selectedGadgetStub}
@@ -1888,6 +1933,8 @@ export default function GadgetEditor() {
               chatId={previewChatId}
               onConsoleLog={handleClientConsoleLog}
             />
+          ) : (
+            <NoGadgetPlaceholder height="100%" />
           )}
         </div>
       )}

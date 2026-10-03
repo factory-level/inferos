@@ -337,7 +337,7 @@ function CollectionIconTile({
   const { tile, book } = ICON_TILE_SIZES[size];
   return (
     <div
-      className={`grid ${tile} shrink-0 place-items-center bg-kumo-fill leading-none text-kumo-subtle`}
+      className={`grid ${tile} shrink-0 place-items-center bg-kumo-control leading-none text-kumo-subtle`}
     >
       {icon ? <span>{icon}</span> : <BookOpen size={book} weight="regular" />}
     </div>
@@ -377,15 +377,15 @@ function CollectionRow({
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => handleCardKeyDown(e, onClick)}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-150 ease-out hover:bg-kumo-tint"
+      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-150 ease-out hover:bg-kumo-elevated focus-visible:bg-kumo-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
     >
       <CollectionIconTile icon={collection.icon} size="sm" />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">
+        <p className="truncate text-sm font-medium text-kumo-default">
           {collection.title}
         </p>
         <p
-          className={`mt-0.5 line-clamp-1 text-[12px] leading-4 tracking-[-0.2px] ${
+          className={`mt-0.5 line-clamp-1 text-[12px] leading-4 ${
             hasDescription ? "text-kumo-subtle" : "italic text-kumo-inactive"
           }`}
         >
@@ -432,7 +432,7 @@ const wsButtonTone = {
   primary:
     "!h-9 bg-kumo-contrast px-3 text-kumo-inverse enabled:hover:bg-kumo-strong disabled:opacity-50",
   secondary:
-    "!h-8 border border-kumo-line bg-kumo-base px-3 text-kumo-default enabled:hover:bg-kumo-elevated disabled:opacity-40",
+    "!h-8 border-0 bg-kumo-control px-3 text-kumo-default enabled:hover:bg-kumo-fill-hover disabled:opacity-40",
   danger: "!h-8 bg-kumo-danger px-3 text-white enabled:hover:opacity-90 disabled:opacity-50",
 } as const;
 
@@ -485,7 +485,7 @@ function WorkshopInput({ className = "", ...props }: ComponentProps<typeof Input
   return (
     <Input
       {...props}
-      className={`!h-9 rounded-lg border border-kumo-line bg-kumo-base px-3 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none focus:border-kumo-ring focus:outline-none focus:ring-1 focus:ring-kumo-ring/15 ${className}`}
+      className={`!h-9 rounded-md border-0 bg-kumo-control px-3 text-[13px] leading-[18px] font-normal text-kumo-default placeholder:text-kumo-inactive shadow-none focus:outline-none focus:ring-2 focus:ring-kumo-ring ${className}`}
     />
   );
 }
@@ -494,7 +494,7 @@ function WorkshopInputArea({ className = "", ...props }: ComponentProps<typeof I
   return (
     <InputArea
       {...props}
-      className={`rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none focus:border-kumo-ring focus:outline-none focus:ring-1 focus:ring-kumo-ring/15 ${className}`}
+      className={`rounded-md border-0 bg-kumo-control px-3 py-2 text-[13px] leading-[18px] font-normal text-kumo-default placeholder:text-kumo-inactive shadow-none focus:outline-none focus:ring-2 focus:ring-kumo-ring ${className}`}
     />
   );
 }
@@ -769,10 +769,10 @@ function CreateCollectionView({
           <CaretLeft size={14} />
           Context &amp; Skills
         </button>
-        <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">
+        <h1 className="m-0 text-[18px] leading-[26px] font-semibold tracking-[-0.01em] text-kumo-default">
           New collection
         </h1>
-        <p className="mt-1 max-w-2xl text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+        <p className="mt-1 max-w-2xl text-[14px] leading-5 text-kumo-subtle">
           A collection of documents, skills, and other files your agents can use.
         </p>
       </header>
@@ -1012,13 +1012,13 @@ export default function ContextLibraryPage() {
   }
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-6 sm:px-10">
+    <div className="mx-auto flex h-full w-full max-w-[896px] flex-col px-6 sm:px-10">
       <header className="flex items-end justify-between gap-4 px-3 pb-3 pt-10">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">
+          <h1 className="m-0 text-[18px] leading-[26px] font-semibold tracking-[-0.01em] text-kumo-default">
             Context &amp; Skills
           </h1>
-          <p className="mt-1 max-w-2xl text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+          <p className="mt-1 max-w-2xl text-[14px] leading-5 text-kumo-subtle">
             Collections of documents, skills, and other files your agents can use.
           </p>
         </div>
@@ -1026,7 +1026,7 @@ export default function ContextLibraryPage() {
           <button
             type="button"
             onClick={() => setCreating(true)}
-            className="press inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-kumo-brand px-3.5 text-[13px] font-medium tracking-[-0.25px] text-white transition-colors hover:bg-kumo-brand-hover"
+            className="press inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-md bg-kumo-brand px-3.5 text-[13px] font-medium text-kumo-inverse transition-colors hover:bg-kumo-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base"
           >
             <Plus size={14} weight="bold" />
             New collection
@@ -1039,14 +1039,15 @@ export default function ContextLibraryPage() {
           <div className="relative">
             <MagnifyingGlass
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
             />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search collections…"
-              className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+              aria-label="Search collections"
+              className="h-9 w-full rounded-md border-0 bg-kumo-control pl-9 pr-4 text-[13px] text-kumo-default placeholder:text-kumo-inactive transition-shadow duration-150 ease-out focus:outline-none focus:ring-2 focus:ring-kumo-ring"
             />
           </div>
         </div>
@@ -1057,7 +1058,7 @@ export default function ContextLibraryPage() {
           <CollectionsSkeleton />
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-3 py-20 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-control text-kumo-subtle">
               <BookOpen size={18} />
             </div>
             <div>
@@ -1074,7 +1075,7 @@ export default function ContextLibraryPage() {
               <button
                 type="button"
                 onClick={() => setCreating(true)}
-                className="press mt-1 inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg bg-kumo-brand px-3.5 text-[13px] font-medium tracking-[-0.25px] text-white transition-colors hover:bg-kumo-brand-hover"
+                className="press mt-1 inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-md bg-kumo-brand px-3.5 text-[13px] font-medium text-kumo-inverse transition-colors hover:bg-kumo-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base"
               >
                 <Plus size={14} weight="bold" />
                 New collection

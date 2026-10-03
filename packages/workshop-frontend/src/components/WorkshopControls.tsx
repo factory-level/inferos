@@ -8,9 +8,9 @@ const buttonToneClassNames = {
   primary:
     '!h-9 bg-kumo-contrast px-3 text-kumo-inverse enabled:hover:bg-kumo-strong disabled:opacity-50',
   secondary:
-    '!h-8 border border-kumo-line bg-kumo-base px-3 text-kumo-default enabled:hover:bg-kumo-elevated disabled:opacity-40',
+    '!h-8 bg-kumo-control px-3 text-kumo-default enabled:hover:bg-kumo-fill-hover disabled:opacity-40',
   danger:
-    '!h-8 bg-kumo-danger px-3 text-white enabled:hover:opacity-90 disabled:opacity-50',
+    '!h-8 bg-kumo-danger px-3 text-kumo-inverse enabled:hover:opacity-90 disabled:opacity-50',
 } as const
 
 type WorkshopButtonTone = keyof typeof buttonToneClassNames
@@ -78,7 +78,7 @@ export function WorkshopInput({ className = '', ...props }: WorkshopInputProps) 
   return (
     <Input
       {...props}
-      className={`!h-9 rounded-lg border border-kumo-line bg-kumo-base px-3 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none focus:border-kumo-ring focus:outline-none focus:ring-1 focus:ring-kumo-ring/15 ${className}`}
+      className={`!h-9 rounded-md border-0 bg-kumo-control px-3 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none ring-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${className}`}
     />
   )
 }
@@ -89,7 +89,7 @@ export function WorkshopInputArea({ className = '', ...props }: WorkshopInputAre
   return (
     <InputArea
       {...props}
-      className={`rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none focus:border-kumo-ring focus:outline-none focus:ring-1 focus:ring-kumo-ring/15 ${className}`}
+      className={`rounded-md border-0 bg-kumo-control px-3 py-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none ring-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${className}`}
     />
   )
 }

@@ -14,6 +14,7 @@ import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
+import { useAppMode, useOperateModeAvailable } from '../features/operate/useAppMode'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -137,6 +138,10 @@ function AuthenticatedShell({
   authenticatedApi: RpcStub<AuthenticatedApi>
   isWorkspaceEditor: boolean
 }) {
+  // Called here rather than only in the sidebar so Build locations are remembered for the
+  // Operate → Build toggle even while the fullscreen workspace editor has no sidebar.
+  const mode = useAppMode()
+  const operateShell = useOperateModeAvailable() && mode === 'operate'
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
 
@@ -167,9 +172,10 @@ function AuthenticatedShell({
   }
 
   // Normal app shell. The workspace editor is rendered fullscreen (no chrome); everything else
-  // gets the persistent left-rail AppShell. Connection loss is surfaced by a chip in whichever of
+  // gets the persistent left-rail AppShell. With Operate mode available, a workspace's InferOps
+  // Canvas page is part of Operate and keeps the shell (and its Operate sidebar). Connection loss is surfaced by a chip in whichever of
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
-  const fullscreen = isWorkspaceEditor
+  const fullscreen = isWorkspaceEditor && !operateShell
   return (
     <>
       <AccountSelectionModal />

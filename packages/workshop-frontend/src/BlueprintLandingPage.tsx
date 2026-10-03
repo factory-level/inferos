@@ -775,7 +775,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
   return (
     <div className="min-h-full bg-kumo-base">
-      <div className="mx-auto w-full max-w-5xl px-6 pb-16 pt-10 sm:px-10">
+      <div className="mx-auto w-full max-w-5xl px-6 pb-16 pt-6 sm:px-10">
         <button
           type="button"
           onClick={() => {
@@ -785,7 +785,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               navigate({ to: '/explore' })
             }
           }}
-          className="mb-8 inline-flex cursor-pointer items-center gap-2 px-1 py-1 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-subtle transition-[color,transform] duration-150 ease-out hover:text-kumo-default active:scale-[0.98]"
+          className="mb-6 inline-flex h-8 cursor-pointer items-center gap-2 rounded-md px-1 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-subtle transition-[color,transform] duration-150 ease-out hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring active:scale-[0.98]"
         >
           <ArrowLeft size={14} weight="bold" />
           Back
@@ -794,16 +794,16 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         <header className="mb-10 grid gap-7 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start">
           <div className="min-w-0">
             {isFeatured && (
-              <span className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-[rgba(255,72,1,0.10)] px-2 py-1 text-[11px] leading-4 font-semibold tracking-[-0.1px] text-kumo-brand">
+              <span className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-kumo-info-tint px-2 py-1 text-[11px] leading-4 font-semibold tracking-[-0.1px] text-kumo-brand">
                 <Star size={12} weight="fill" />
                 Featured
               </span>
             )}
-            <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-kumo-default">
+            <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.02em] text-kumo-default">
               {meta.title}
             </h1>
             {meta.description && (
-              <p className="mt-3 max-w-[640px] text-[15px] leading-[22px] font-normal tracking-[-0.25px] text-kumo-subtle">
+              <p className="mt-3 max-w-[640px] text-[16px] leading-6 font-normal text-kumo-subtle">
                 {meta.description}
               </p>
             )}
@@ -829,7 +829,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   type="button"
                   onClick={handleStartConfigure}
                   disabled={createDisabled}
-                  className="press inline-flex h-10 w-full cursor-pointer items-center justify-center rounded-lg bg-kumo-brand px-4 text-[14px] leading-5 font-semibold tracking-[-0.25px] text-white transition-colors duration-150 ease-out hover:bg-kumo-brand-hover disabled:cursor-not-allowed disabled:opacity-60"
+                  className="press inline-flex h-10 w-full cursor-pointer items-center justify-center rounded-md bg-kumo-brand px-4 text-[14px] leading-5 font-semibold tracking-[-0.25px] text-kumo-inverse transition-colors duration-150 ease-out hover:bg-kumo-brand-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {creating ? 'Creating...' : primaryActionLabel}
                 </button>
@@ -842,7 +842,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   aria-label={isAuthenticated ? 'Add blueprint to library' : 'Log in to add blueprint to library'}
                   onClick={handleAddToLibrary}
                   disabled={addingToLibrary || loadingLibraryState}
-                  className="press inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-kumo-line bg-kumo-base p-0 text-kumo-subtle transition-colors duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
+                  className="press inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-md bg-kumo-control p-0 text-kumo-subtle transition-colors duration-150 ease-out hover:bg-kumo-fill-hover hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Plus size={17} weight="bold" />
                 </button>
@@ -854,7 +854,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 render={(
                   <WorkshopIconButton
                     aria-label="More blueprint actions"
-                    className="!h-10 !w-10 shrink-0 rounded-lg border border-kumo-line bg-kumo-base text-kumo-subtle hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default data-[popup-open]:border-kumo-fill data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default"
+                    className="!h-10 !w-10 shrink-0 !bg-kumo-control text-kumo-subtle hover:text-kumo-default enabled:hover:!bg-kumo-fill-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring data-[popup-open]:!bg-kumo-fill-hover data-[popup-open]:text-kumo-default"
                   >
                     <DotsThree size={18} weight="bold" />
                   </WorkshopIconButton>
@@ -950,24 +950,25 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
         <main className="space-y-6">
           {bindingEntries.length > 0 ? (
-            <section>
+            <section aria-labelledby="blueprint-required-connections">
               <div className="mb-2 flex items-center gap-2 px-1">
-                <h2 className="text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+                <h2 id="blueprint-required-connections" className="m-0 text-[12px] leading-4 font-medium uppercase tracking-[0.08em] text-kumo-inactive">
                   Required connections
                 </h2>
                 <span className="text-[12px] font-medium tracking-[-0.1px] text-kumo-inactive">
                   {bindingEntries.length}
                 </span>
               </div>
-              <div className="mb-3 px-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+              <p className="m-0 mb-3 px-1 text-[13px] leading-[18px] font-normal text-kumo-subtle">
                 {readyCount === bindingEntries.length
                   ? 'Everything is ready. You can change any connection before creating the Gadget.'
                   : `${readyCount} of ${bindingEntries.length} ready. Suggestions are used automatically when they match one of your connected accounts.`}
-              </div>
-              <div className="overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base">
-                {bindingEntries.map(([name, binding]) => (
+              </p>
+              <div className="overflow-hidden rounded-xl bg-kumo-elevated">
+                {bindingEntries.map(([name, binding], index) => (
                   <BlueprintBindingSummaryCard
                     key={name}
+                    separated={index > 0}
                     name={name}
                     binding={binding}
                     assignment={draftAssignments[name]}
@@ -979,7 +980,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               </div>
             </section>
           ) : (
-            <section className="rounded-2xl border border-kumo-line bg-kumo-base px-5 py-5">
+            <section className="rounded-xl bg-kumo-elevated px-5 py-5">
               <p className="m-0 text-[15px] leading-5 font-medium tracking-[-0.25px] text-kumo-default">
                 No connections required
               </p>
@@ -990,9 +991,9 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           )}
 
           {error && (
-            <div className="flex items-center justify-between gap-3 rounded-2xl border border-kumo-danger/30 bg-kumo-danger-tint px-4 py-3 text-[13px] leading-[18px] text-kumo-danger">
+            <div className="flex items-center justify-between gap-3 rounded-xl bg-kumo-danger-tint px-4 py-3 text-[13px] leading-[18px] text-kumo-danger">
               <span>{error}</span>
-              <button onClick={() => setError(null)} className="cursor-pointer text-kumo-danger hover:text-kumo-default">&times;</button>
+              <button type="button" aria-label="Dismiss error" onClick={() => setError(null)} className="cursor-pointer rounded text-kumo-danger hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">&times;</button>
             </div>
           )}
         </main>
@@ -1116,15 +1117,15 @@ function BlueprintScreenshotHero({
         render={(
           <button
             type="button"
-            className="themed-compact-shadow themed-card-hover-shadow group relative block w-full cursor-zoom-in overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill active:scale-[0.995]"
+            className="themed-card-hover-shadow group relative block w-full cursor-zoom-in overflow-hidden rounded-2xl bg-kumo-elevated p-3 text-left transition-[background-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:bg-kumo-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring active:scale-[0.995]"
             aria-label={`Open larger screenshot of ${title}`}
           >
             <img
               src={screenshotUrl}
               alt={`Screenshot of ${title}`}
-              className="aspect-[16/9] w-full object-cover"
+              className="aspect-[16/9] w-full rounded-lg object-cover"
             />
-            <span className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full border border-kumo-line bg-kumo-base/90 text-kumo-subtle opacity-0 shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-[opacity,color,background-color] duration-150 ease-out group-hover:opacity-100 group-hover:text-kumo-default">
+            <span className="absolute right-5 top-5 grid h-7 w-7 place-items-center rounded-md bg-kumo-control text-kumo-subtle opacity-0 transition-[opacity,color,background-color] duration-150 ease-out group-hover:opacity-100 group-hover:text-kumo-default group-focus-visible:opacity-100">
               <ArrowsOutSimple size={14} weight="bold" />
             </span>
           </button>
@@ -1140,7 +1141,7 @@ function BlueprintScreenshotHero({
             <WorkshopIconButton
               {...props}
               aria-label="Close screenshot"
-              className="!absolute !right-3 !top-3 !z-10 !h-8 !w-8 rounded-full border border-kumo-line bg-kumo-base/90 text-kumo-subtle shadow-[0_1px_2px_rgba(0,0,0,0.05)] backdrop-blur-sm hover:bg-kumo-base hover:text-kumo-default"
+              className="!absolute !right-3 !top-3 !z-10 !h-8 !w-8 !bg-kumo-control text-kumo-subtle hover:text-kumo-default enabled:hover:!bg-kumo-fill-hover"
             >
               <X size={18} />
             </WorkshopIconButton>
@@ -1174,7 +1175,7 @@ function BlueprintStatePage({
   return (
     <div className="min-h-full bg-kumo-base">
       <div className="mx-auto flex min-h-[60vh] w-full max-w-[1040px] items-center justify-center px-4 py-12 sm:px-8">
-        <div className="themed-compact-shadow w-full max-w-md rounded-2xl border border-kumo-line bg-kumo-base px-6 py-8 text-center">
+        <div className="w-full max-w-md rounded-2xl bg-kumo-elevated px-6 py-8 text-center">
           {loading && (
             <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
           )}
@@ -1190,7 +1191,7 @@ function BlueprintStatePage({
             <button
               type="button"
               onClick={onAction}
-              className="mt-5 inline-flex h-9 cursor-pointer items-center justify-center rounded-full border border-kumo-line bg-kumo-base px-4 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default transition-[background-color,border-color,transform] duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint active:scale-[0.98]"
+              className="mt-5 inline-flex h-9 cursor-pointer items-center justify-center rounded-md bg-kumo-control px-4 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default transition-[background-color,transform] duration-150 ease-out hover:bg-kumo-fill-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring active:scale-[0.98]"
             >
               {actionLabel}
             </button>
@@ -1225,13 +1226,14 @@ function BindingIconTile({
   }
 
   return (
-    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
+    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-control text-kumo-subtle">
       {icon}
     </div>
   )
 }
 
 function BlueprintBindingSummaryCard({
+  separated,
   name,
   binding,
   assignment,
@@ -1239,6 +1241,8 @@ function BlueprintBindingSummaryCard({
   models,
   onConfigure,
 }: {
+  /** Draws the inset hairline that separates this row from the one above it. */
+  separated: boolean
   name: string
   binding: BlueprintBinding
   assignment?: BlueprintBindingAssignment
@@ -1283,6 +1287,8 @@ function BlueprintBindingSummaryCard({
     return modelsByIdLabel(assignment.modelId)
   })()
   const status = assignment ? 'Ready' : suggestion ? 'Suggested' : 'Needs setup'
+  // Gatekeeper values are resource URLs, which read better in monospace than model names do.
+  const resourceClassName = binding.type === 'gatekeeper' ? 'font-mono text-[11px]' : undefined
   const actionLabel = assignment ? 'Change' : 'Configure'
 
   function modelsByIdLabel(modelId: string) {
@@ -1290,7 +1296,9 @@ function BlueprintBindingSummaryCard({
   }
 
   return (
-    <div className="grid min-h-[72px] min-w-0 grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-3 border-b border-kumo-line px-4 py-3 text-left last:border-b-0">
+    <div className={`relative grid min-h-[72px] min-w-0 grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left ${
+      separated ? 'before:absolute before:inset-x-4 before:top-0 before:h-px before:bg-kumo-line' : ''
+    }`}>
       <BindingIconTile binding={binding} vendor={vendor} />
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -1301,24 +1309,24 @@ function BlueprintBindingSummaryCard({
             assignment
               ? 'bg-kumo-success-tint text-kumo-success'
               : suggestion
-                ? 'bg-kumo-tint text-kumo-subtle'
-                : 'bg-[rgba(255,72,1,0.10)] text-kumo-brand'
+                ? 'bg-kumo-control text-kumo-subtle'
+                : 'bg-kumo-info-tint text-kumo-brand'
           }`}>
             {status}
           </span>
         </div>
         <p className="mt-0.5 truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
           {usingLabel
-            ? <>Using: <span>{usingLabel}</span></>
+            ? <>Using: <span className={resourceClassName}>{usingLabel}</span></>
             : suggestion
-              ? `Suggested: ${suggestion}`
+              ? <>Suggested: <span className={resourceClassName}>{suggestion}</span></>
               : detail}
         </p>
       </div>
       <button
         type="button"
         onClick={onConfigure}
-        className="press inline-flex h-8 cursor-pointer items-center justify-center rounded-lg border border-kumo-line bg-kumo-base px-3 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default transition-colors duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint"
+        className="press inline-flex h-8 cursor-pointer items-center justify-center rounded-md bg-kumo-control px-3 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default transition-colors duration-150 ease-out hover:bg-kumo-fill-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
       >
         {actionLabel}
       </button>
@@ -1621,7 +1629,7 @@ function BlueprintGatekeeperBindingField({
   // offered by the vendor. The binding can't be satisfied in either case.
   if (!vendor) {
     return (
-      <div className="rounded-lg border border-kumo-danger/30 bg-kumo-danger-tint px-3 py-2.5 text-sm text-kumo-danger">
+      <div className="rounded-lg bg-kumo-danger-tint px-3 py-2.5 text-sm text-kumo-danger">
         <p className="font-semibold mb-0.5">{title}</p>
         <p>The "{binding.gatekeeperName}" gatekeeper is not available on this workshop, so this connection can't be configured.</p>
       </div>
@@ -1629,7 +1637,7 @@ function BlueprintGatekeeperBindingField({
   }
   if (!resource) {
     return (
-      <div className="rounded-lg border border-kumo-danger/30 bg-kumo-danger-tint px-3 py-2.5 text-sm text-kumo-danger">
+      <div className="rounded-lg bg-kumo-danger-tint px-3 py-2.5 text-sm text-kumo-danger">
         <p className="font-semibold mb-0.5">{title}</p>
         <p>The required resource type for this binding isn't offered by {vendor.description.displayName}.</p>
       </div>

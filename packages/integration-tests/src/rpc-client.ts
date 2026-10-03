@@ -67,6 +67,11 @@ export function stubFor<T extends RpcTarget>(target: T): RpcStub<T> {
   return new RpcStub(target) as unknown as RpcStub<T>;
 }
 
+/** `stubFor()` for a callback the server calls as a function (for example a subscriber). */
+export function callbackStubFor<F extends (...args: never[]) => unknown>(fn: F): RpcStub<F> {
+  return new RpcStub(fn) as unknown as RpcStub<F>;
+}
+
 // The server stores and compares these bytes verbatim and never re-derives them, so the tests skip
 // the frontend's argon2id (64 MiB per call) in favour of a deterministic stand-in.
 function passwordHashFor(username: string): Uint8Array {

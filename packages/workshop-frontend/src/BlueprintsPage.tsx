@@ -78,11 +78,11 @@ export default function BlueprintsPage() {
   });
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-3 sm:px-10">
-      <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-6 sm:pt-10">
+    <div className="mx-auto flex h-full w-full max-w-[944px] flex-col px-3 sm:px-10">
+      <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-6">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Explore</h1>
-          <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+          <h1 className="m-0 text-[18px] leading-6 font-semibold tracking-[-0.01em] text-kumo-default">Explore</h1>
+          <p className="mt-1 max-w-[620px] text-[14px] leading-5 text-kumo-subtle">
             Discover featured blueprints to use as starting points. Open one to create a workspace
             from it, or save it to reuse later.
           </p>
@@ -96,16 +96,21 @@ export default function BlueprintsPage() {
           Featured
         </span>
         <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
+          <label htmlFor="explore-search" className="sr-only">
+            Search blueprints
+          </label>
           <MagnifyingGlass
             size={16}
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
+            aria-hidden="true"
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
           />
           <input
+            id="explore-search"
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search blueprints…"
-            className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[13px]"
+            className="h-10 w-full rounded-md bg-kumo-control pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-shadow duration-150 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring sm:h-9 sm:text-[13px]"
           />
         </div>
       </div>
@@ -154,7 +159,7 @@ export default function BlueprintsPage() {
 
 function BlueprintThumbnail({ blueprint }: { blueprint: BlueprintPublicInfo }) {
   return (
-    <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-kumo-line bg-kumo-tint">
+    <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-kumo-line bg-kumo-overlay">
       {blueprint.screenshotUrl ? (
         <img
           src={blueprint.screenshotUrl}
@@ -163,7 +168,7 @@ function BlueprintThumbnail({ blueprint }: { blueprint: BlueprintPublicInfo }) {
           loading="lazy"
         />
       ) : (
-        <BlueprintPreviewPlaceholder id={blueprint.id} />
+        <BlueprintPreviewPlaceholder />
       )}
     </div>
   );
@@ -180,18 +185,18 @@ function FeaturedBlueprintCard({
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 2);
 
   return (
-    <div className="themed-card-hover-shadow press group relative flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill">
+    <div className="themed-card-hover-shadow press group relative flex cursor-pointer flex-col overflow-hidden rounded-xl bg-kumo-elevated text-left transition-[background-color,box-shadow] duration-150 ease-out hover:bg-kumo-overlay">
       <Link
         to="/blueprint/$id"
         params={{ id: blueprint.id }}
         aria-label={`Open featured blueprint ${blueprint.metadata.title}`}
-        className="absolute inset-0 z-10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
+        className="absolute inset-0 z-10 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-kumo-ring"
       />
 
       <BlueprintThumbnail blueprint={blueprint} />
 
       <div className={`flex flex-1 items-start gap-2.5 px-3 py-2.5 ${compact ? "sm:py-1.5" : ""}`}>
-        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
+        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-kumo-control text-kumo-subtle">
           <BlueprintIcon size={15} weight="regular" />
         </div>
         <div className="min-w-0 flex-1">
@@ -236,9 +241,9 @@ function FeaturedBlueprintRow({
     <Link
       to="/blueprint/$id"
       params={{ id: blueprint.id }}
-      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint ${compact ? "sm:py-1" : ""}`}
+      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-kumo-ring ${compact ? "sm:py-1" : ""}`}
     >
-      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
+      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-control text-kumo-subtle transition-colors duration-150 ease-out group-hover:bg-kumo-fill-hover group-hover:text-kumo-default">
         <BlueprintIcon size={16} weight="regular" />
       </div>
       <div className="min-w-0 flex-1">
@@ -284,14 +289,14 @@ function LoadingSkeleton({ view }: { view: "grid" | "list" }) {
       {[1, 2, 3, 4, 5, 6].map((i) => (
         <div
           key={i}
-          className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base"
+          className="overflow-hidden rounded-xl bg-kumo-elevated"
         >
-          <div className="aspect-[16/9] w-full animate-pulse bg-kumo-elevated" />
+          <div className="aspect-[16/9] w-full animate-pulse border-b border-kumo-line bg-kumo-overlay" />
           <div className="flex items-start gap-2.5 px-3 py-2.5">
-            <div className="h-8 w-8 shrink-0 animate-pulse rounded-lg bg-kumo-elevated" />
+            <div className="h-8 w-8 shrink-0 animate-pulse rounded-lg bg-kumo-control" />
             <div className="flex-1 space-y-2 py-1">
-              <div className="h-2.5 w-2/3 animate-pulse rounded bg-kumo-elevated" />
-              <div className="h-2 w-full animate-pulse rounded bg-kumo-elevated" />
+              <div className="h-2.5 w-2/3 animate-pulse rounded bg-kumo-control" />
+              <div className="h-2 w-full animate-pulse rounded bg-kumo-control" />
             </div>
           </div>
         </div>
@@ -302,8 +307,8 @@ function LoadingSkeleton({ view }: { view: "grid" | "list" }) {
 
 function EmptySection({ title, message }: { title: string; message: string }) {
   return (
-    <div className="flex flex-col items-center gap-3 px-3 py-20 text-center">
-      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
+    <div className="mx-3 flex flex-col items-center gap-3 rounded-xl bg-kumo-elevated px-6 py-16 text-center">
+      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-control text-kumo-subtle">
         <BookOpen size={18} />
       </div>
       <div>

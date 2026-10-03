@@ -30,7 +30,7 @@ type BlueprintItem = {
 // Chrome shared by the page's secondary actions. `w-full` + `justify-center` are what let a pair of
 // these sit in a 2-column grid and come out the same width whatever their labels say.
 const ACTION_BUTTON =
-  'press inline-flex h-9 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-kumo-line bg-kumo-base px-3.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default transition-colors hover:bg-kumo-tint disabled:cursor-default disabled:opacity-50'
+  'press inline-flex h-9 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md bg-kumo-control px-3.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default transition-colors hover:bg-kumo-fill-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring disabled:cursor-default disabled:opacity-50 [&>svg]:text-kumo-subtle'
 
 function formatRelativeTime(date: Date): string {
   const diff = Date.now() - date.getTime()
@@ -64,10 +64,10 @@ function BlueprintRow({
     <Link
       to="/blueprint/$id"
       params={{ id: item.id }}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
+      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-kumo-ring"
     >
       {/* Neutral monogram */}
-      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-kumo-subtle">
+      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-control text-kumo-subtle transition-colors duration-150 ease-out group-hover:bg-kumo-fill-hover group-hover:text-kumo-default">
         <BlueprintIcon size={16} weight="regular" />
       </div>
 
@@ -96,7 +96,8 @@ function BlueprintRow({
             render={
               <button
                 type="button"
-                className="rounded-md p-1.5 text-kumo-subtle transition-colors hover:bg-kumo-fill hover:text-kumo-default focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                aria-label="Blueprint actions"
+                className="grid h-8 w-8 place-items-center rounded-md text-kumo-subtle transition-colors hover:bg-kumo-fill-hover hover:text-kumo-default focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring data-[popup-open]:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
               >
                 <DotsThreeVertical size={16} />
               </button>
@@ -259,15 +260,17 @@ export default function BlueprintList() {
       {/* Toolbar — search plus the page's actions. Hidden when the user has no blueprints, since
           the empty state carries its own copies of the same two actions. */}
       {!loading && items.length > 0 && (
-        <div className="mb-4 flex flex-col gap-2 px-3 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-2 px-3 pb-4 pt-1 sm:flex-row sm:items-center">
           <div className="relative flex-1">
-            <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
+            <label htmlFor="blueprints-search" className="sr-only">Search blueprints</label>
+            <MagnifyingGlass size={16} aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
             <input
+              id="blueprints-search"
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search blueprints…"
-              className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+              className="h-9 w-full rounded-md bg-kumo-control pl-9 pr-4 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-shadow duration-150 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
             />
           </div>
           {/* Grid, not flex: 1fr columns give the two buttons a matching width, where flex would
@@ -297,7 +300,7 @@ export default function BlueprintList() {
         {loading ? (
           <div className="flex flex-col gap-0.5 px-3">
             {[1, 2, 3].map((i) => (
-              <div key={i} className="h-[56px] rounded-xl bg-kumo-elevated animate-pulse" />
+              <div key={i} className="h-[56px] rounded-lg bg-kumo-elevated animate-pulse" />
             ))}
           </div>
         ) : loadError ? (
@@ -309,8 +312,8 @@ export default function BlueprintList() {
           search ? (
             <div className="py-12 text-center text-sm text-kumo-inactive">No blueprints found</div>
           ) : (
-            <div className="flex flex-col items-center gap-3 px-3 py-16 text-center">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
+            <div className="mx-3 flex flex-col items-center gap-3 rounded-xl bg-kumo-elevated px-6 py-14 text-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-control text-kumo-subtle">
                 <BlueprintIcon size={18} />
               </div>
               <div>

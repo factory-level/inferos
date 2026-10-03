@@ -1,6 +1,8 @@
 ---
 title: InferOps canvas and transactional widgets
 covers:
+  - packages/workshop-frontend/src/features/operate
+  - packages/workshop-frontend/src/features/workspace-kind
   - packages/workshop-frontend/src/GadgetUI.tsx
   - packages/workshop-frontend/src/features/canvas
   - packages/workshop-frontend/src/pages/inferops-canvas
@@ -177,4 +179,6 @@ The kind decides what the workspace builds, through three pure functions in `wor
 
 The agent's `writeFile` and `editFile` refuse `client.js` in a workflow workspace's gadgets (`workspaceKindAllowsFile`), so a workflow cannot gain a UI through the agent. Worktrees are exempt. The agent reads the kind once per turn through the `getWorkspaceKind` hook.
 
-`AuthenticatedApi.newGadget(kind?)` creates a workspace of a kind, storing it before the workspace is returned. `newGadgetFromBlueprint()` does not take or carry a kind, so a workspace installed from a blueprint is an app until switched. The frontend surfaces that act on the kind (the Build/Operate toggle, the kind switch, and kind-specific canvas tiles) are separate, flag-gated work. An agent tool to change the kind, publishing to Operate and the operate chat are not implemented.
+`AuthenticatedApi.newGadget(kind?)` creates a workspace of a kind, storing it before the workspace is returned. `newGadgetFromBlueprint()` does not take or carry a kind, so a workspace installed from a blueprint is an app until switched.
+
+Behind the `operate-mode` UI flag (on in local development; also requires composable views), the frontend acts on the kind. The Build home page shows a kind picker (App, Widget, Workflow) above the composer; the chosen kind is set on the new workspace in the same batch as its first chat, ahead of it, so that chat's agent builds that kind. The workspace editor header shows a kind switch, with a confirmation step, for the build role. Apps get a Chat ↔ App toggle. Workflows replace the app preview with a Triggers panel listing their bound hooks (scheduled tasks register as hooks) and the pending-approval count. The workspace list shows a kind chip. The sidebar gains a Build | Operate toggle whose mode is derived from the URL: the InferOps Canvas routes are Operate, where the sidebar lists saved screens. Publishing to Operate and the operate chat are designed in [operate-mode](../design/operate-mode.md) but not implemented.

@@ -15,17 +15,11 @@ export function EmptyState({
   icon?: Icon
 }) {
   return (
-    <div className="relative overflow-hidden rounded-xl border border-dashed border-kumo-line bg-kumo-base px-6 py-9 text-center">
-      <div
-        className="themed-accent-glow pointer-events-none absolute left-1/2 top-1/2 h-48 w-48 -translate-x-1/2 -translate-y-1/2 rounded-full"
-        style={{
-          filter: 'blur(14px)',
-        }}
-      />
-      <div className="themed-user-bubble-shadow relative mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-kumo-line bg-kumo-elevated text-kumo-subtle">
+    <div className="rounded-xl bg-kumo-elevated px-6 py-9 text-center">
+      <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-kumo-control text-kumo-subtle">
         <EmptyIcon size={18} />
       </div>
-      <div className="relative">
+      <div>
         <p className="m-0 text-[14px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
           {title}
         </p>
@@ -35,7 +29,7 @@ export function EmptyState({
       </div>
       {actionLabel && onAction && (
         <WorkshopButton
-          className="relative mx-auto mt-4"
+          className="mx-auto mt-4"
           onClick={onAction}
         >
           {actionLabel}
