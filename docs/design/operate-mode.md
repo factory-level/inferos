@@ -22,6 +22,7 @@ InferOS has two modes. Build is where people author software: apps, widgets and 
 - **Build is for admins and leads.** Creating and changing apps, widgets, workflows, skills, gadgets and consoles needs a build role. Employees get Operate only and work in the consoles assigned to their role. The role comes from server-enforced authority, never from a UI flag, a deployment profile or the console itself.
 - Each console can carry an authored **state machine**: named states, the screens or views each shows, and the guarded transitions between them. It drives navigation and presentation only. Domain writes still go through gatekeepers and approvals.
 - Admins and leads can see, for every console and view, which apps and widgets are assigned to it, at which pinned version, with their health and pending approvals. Operators see the same inventory, read-only and scoped to what their role can open.
+- Operate has three surfaces, kept distinct: an **app** owns a full page, a **widget** is a bounded piece that can be placed on a screen or rendered in the operate chat, and **full chat** is a ChatGPT-style assistant page with no canvas that loads widgets into the conversation. All three are presentations of the same session.
 - Operate is **a single session**. One continuous operate chat runs across every view and screen in the space. Shared screens and views share their definitions, never a session: each person's conversation and page state are their own.
 - A **page state machine** owns the full Operate page state. User actions, the operate agent and the URL all change it through the same validated events. The state is serializable, so a reload or link restores it.
 - The operate chat is a kernel **chat mode**. Its agent may use the space's installed gadgets and connected gatekeepers through `executeCode`, read screens and views, and send page events. It has no authoring tools (`readFile`, `writeFile`, `editFile`, `createGadget`, `createWorktree`, `setGadgetBinding`). Writes still go through gatekeeper approvals, and InferOps stays authoritative.
@@ -54,6 +55,28 @@ From a Build workspace, Publish to Operate creates or updates a blueprint for it
 | `app` | Opens full-page in a view, with the operate chat beside it (Chat ↔ App). |
 | `widget` | Placed on screens. The operate agent can also show it in the conversation. |
 | `workflow` | Runs on its triggers, has no UI, and reports its runs and approvals into the session. |
+
+### Surfaces: apps, widgets and full chat
+
+Operate presents published things on three surfaces. They differ in who owns the page and how the operate agent can use them:
+
+| Surface | What it is | Owns | The operate agent |
+| --- | --- | --- | --- |
+| **App** | A sandboxed gadget from an `app` workspace | A full page with its own navigation. The operate chat sits beside it (Chat ↔ App). | Opens and closes it through page events. It can't render an app inside the conversation. |
+| **Widget** | A bounded, embeddable piece with declared inputs (schema-validated params and the current subject), a curated size and declared actions | Only its region. It has no navigation of its own. | Places it on screens. It can also render the widget inside the conversation and receive the widget's actions as events. |
+| **Full chat** | A ChatGPT-style assistant page: the operate conversation fills the page, with no canvas | The page, as one presentation of the session | Answers freely and loads widgets into the conversation inline. |
+
+The rule: something that needs its own navigation or a full page is an app. Something that takes declared inputs and fits a region is a widget. An app placed in a view region is still an app and keeps its whole region; it is never squeezed into a widget size.
+
+"Widget" covers three kinds, and the design keeps them apart:
+
+- **InferOps transactional widgets**, such as `inferops.project-board`. These are registered kinds the host renders itself, reading through the InferOps gatekeeper.
+- **Gadget widgets**: the `inferos.gadget` kind, a published `widget`-kind workspace rendered through the sandboxed gadget host.
+- **Declarative chat widgets**: template widgets (a schema, states and actions, like InferOps `widget-kit` or ChatKit widgets) that the operate agent fills with data and shows in the conversation, with no sandboxed code. Whether InferOS adopts this kind is an open question.
+
+Placing a widget in the conversation is presentation only, as it is on a screen. The widget reads under the viewer's own authority, and its actions reach the agent as events. Any domain write still goes through gatekeeper approval.
+
+**Full chat** is how Operate works for a role that needs no canvas, and for anyone who prefers to just ask. It uses the same session: one conversation, one page state, one event log. Switching between full chat and a console's canvas is a page event (`setPresentation`), so it keeps the conversation and restores on reload. A console may set full chat as its default presentation, or be chat-only. In full chat the agent can load only the widgets assigned to the person's consoles, the same set it could place on their screens.
 
 ### Views and screens
 
@@ -122,6 +145,7 @@ The page state is one value:
 - the open view, and the screen shown in each of its regions
 - the focused widget, if any
 - the open app, if any, and its Chat or App presentation
+- the presentation: a console's canvas or full chat
 - whether the chat panel is open
 - the approval being reviewed, if any
 
@@ -130,7 +154,7 @@ Every change is an event, applied by one pure transition function:
 - `openConsole`, `consoleEvent`, `navigateBack`
 - `openView`, `showScreen`, `focusWidget`
 - `openApp`, `closeApp`, `setAppPresentation`
-- `toggleChat`
+- `toggleChat`, `setPresentation`
 - `reviewApproval`, `approvalResolved`
 
 The transition function validates each event against the current definitions and the viewer's access. An event that names a missing view, screen or app is rejected without a partial change. The state is mirrored to the URL, so reload, back and links are deterministic.
@@ -184,6 +208,7 @@ Still open:
 - **The console's name.** "Role console" is a working name for the collection of screens, views and the flows between them. Candidates: console, station, desk, post, playbook.
 - Where console definitions live: in the operate space's Overseer next to screens and flows, or also as portable consumer config (`inferos.canvas.json`, the wrapper's `views/`).
 - Where an operator's role comes from: workspace collaborator roles alone, an InferOps membership or role read through the gatekeeper, or both.
+- Whether InferOS adopts declarative chat widgets (template widgets like InferOps `widget-kit` or ChatKit) alongside gadget widgets, or renders only gadget and InferOps widgets in the conversation. If it does, decide whether one template format serves both InferOps and InferOS.
 - The state machine definition format: a small native statechart JSON, or an existing format such as XState's, validated like canvases.
 
 - Which subject types come first, and where their authoritative data lives (InferOps, or another system behind a gatekeeper).
