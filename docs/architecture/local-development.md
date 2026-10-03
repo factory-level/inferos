@@ -70,6 +70,8 @@ Every step is idempotent. The JSON report includes the session token, which a br
 | `reset --yes` | Deletes `.wrangler/state` (Wrangler's Durable Object, KV, R2 and cache state; the dev server starts Wrangler from the repo root, so every Worker's state lives there) and the dev-server record, nothing else. | `--yes` is missing, or the recorded dev server is still running. |
 | `logs [--lines N]` | Reports Wrangler's log directory (`WRANGLER_LOG_PATH`, else `logs/` under its global config directory, which is per user, not per checkout) and the newest file's tail. The terminal running `start` holds the request log. | Never. |
 
+A generated wrapper's `pnpm local` runs this operator from its pinned submodule, with the wrapper's `local.port`; `start` adds `--consumer-root <wrapper>` after the wrapper's own startup refusals, and `seed` defaults `--screen` to the wrapper's first screen template ([consumer configuration](consumer-configuration.md#data-and-control-flow), [walkthrough](../wiki/consumer-bootstrap.md#wrapper-pnpm-local)).
+
 `stack.ts` holds the inspection: port probing, Worker discovery mirroring `run-dev-server.ts` (every `gatekeeper-*` package with a `wrangler.jsonc`, the fork's own gatekeepers filtered by `inferos.canvas.json`), the record file, the state directory and the log location. `lifecycle.ts` takes its process, network and subprocess access as an injectable `LifecycleDeps`, so `scripts/local/lifecycle.test.ts` covers usage errors, the status JSON shape, a stopped and a degraded stack, an occupied port, repeated seeding, failure attribution, reset boundaries, stop, record ownership and log tailing without a running Workshop.
 
 ## Readiness as an agent sees it
@@ -93,7 +95,7 @@ The dev server resolves these before it writes the per-Worker dev configs:
 
 ## Divergences from Design
 
-- Wrapper discovery and a reviewed topology parity contract remain planned. The lifecycle commands exist for this checkout only; a generated wrapper still reaches the stack through its own `pnpm dev`/`doctor` and does not yet expose `pnpm local`.
+- Wrapper discovery and a reviewed topology parity contract remain planned. A generated wrapper exposes `pnpm local` by delegating to the pinned operator (see [consumer configuration](consumer-configuration.md#data-and-control-flow)), which runs from the submodule: `status` lists the Workers the pinned checkout would bind rather than the wrapper's custom Workers, and `status` reads InferOps connection variables from the shell and the submodule's local env files, not the wrapper's.
 - `stop` relies on the dev server's record file; a stack started by other means (or before this change) is reported but never signalled. Startup-failure cleanup remains the dev server's own responsibility (its pre-flight and signal handlers), not a lifecycle command.
 - Offline interception of external traffic is enforced in the integration harness, where Worker subrequests pass through Node. `pnpm local verify` against a running Wrangler cannot intercept the Workers' own traffic; it reports the configured mode instead.
 - `seed` creates the demo canvas screen only when `inferos.canvas.json` declares one; the synthetic board itself comes from the InferOps gatekeeper's mock data, which is the "mock business operations" the MVP note on #10 excludes from the final walkthrough.

@@ -221,12 +221,30 @@ export function migrateConsumerConfig(input: unknown, context: MigrationContext 
   return { ...structuredClone(input as Record<string, unknown>), schemaVersion: 2, capabilities };
 }
 
-/** Initial explicit settings; materialize the operations profile so later profile changes cannot silently alter a wrapper. */
-export function initialConsumerConfig(repository: string, revision: string): ConsumerConfig {
-  return parseConsumerConfig({
-    schemaVersion: 1, upstream: { repository, revision }, profile: "inferops-operations",
+/** What a new wrapper starts with beyond the defaults. Each choice is the deployer's, made explicitly. */
+export interface InitialConsumerOptions {
+  /** The profile whose defaults are materialized. Omitted, `inferops-operations`. */
+  profile?: ConsumerConfig["profile"];
+  /**
+   * Capabilities switched on. Any at all makes the file version 2, with all eight written explicitly
+   * (as {@link migrateConsumerConfig} does) so a later default cannot switch one on unreviewed.
+   * Omitted or empty, the file stays version 1.
+   */
+  capabilities?: readonly CapabilityName[];
+}
+
+/** Initial explicit settings; materialize the selected profile so later profile changes cannot silently alter a wrapper. */
+export function initialConsumerConfig(repository: string, revision: string, options: InitialConsumerOptions = {}): ConsumerConfig {
+  const settings = {
+    upstream: { repository, revision }, profile: options.profile ?? "inferops-operations",
     features: {}, styling: {},
     local: { port: 8787 },
     inferops: { mode: "fixture", fixture: "fixtures/project-board.json", targetRef: "inferops://demo.local/project/board/DEMO" },
-  });
+  };
+  const requested = options.capabilities ?? [];
+  if (!requested.length) return parseConsumerConfig({ schemaVersion: 1, ...settings });
+  const unknown = requested.find(name => !CAPABILITY_NAMES.includes(name));
+  if (unknown !== undefined) throw new Error(`Unknown capability; expected one of ${CAPABILITY_NAMES.join(", ")}`);
+  const capabilities = { ...capabilityDefaults, ...Object.fromEntries(requested.map(name => [name, true])) };
+  return parseConsumerConfig({ schemaVersion: 2, ...settings, capabilities });
 }

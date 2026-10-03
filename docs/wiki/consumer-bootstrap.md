@@ -26,6 +26,45 @@ The example pins the consumer implementation, not a moving branch. Select a revi
 
 Review and commit the wrapper files and staged gitlink before publishing it. Another developer can then use `git clone --recurse-submodules` on the wrapper. Use the wrapper's pinned pnpm version. `.dev.vars` and local state remain uncommitted.
 
+## Kanban customer shell
+
+One private Kanban + operations shell per customer is a wrapper bootstrapped with the InferOps capabilities switched on. Profiles never switch a capability on, so the bootstrap command takes them explicitly:
+
+```bash
+# from an InferOS checkout, pinning a reviewed commit that contains the InferOps gatekeeper
+node scripts/consumer/bootstrap.ts /path/to/acme-shell https://github.com/factory-level/inferos <full-sha> \
+  --capability INFEROPS_ENABLED --capability INFEROPS_AUTH
+cd /path/to/acme-shell
+pnpm inferos:check          # schemaVersion 2; INFEROPS_ENABLED and INFEROPS_AUTH "enabled", source "override"
+pnpm run setup
+pnpm run doctor
+pnpm local start            # foreground; in a second terminal:
+pnpm local seed             # local account, mock model, InferOps account, the "operations" screen
+pnpm local verify           # reads the board through the gatekeeper, as an agent would
+pnpm profile:init           # after signing in as administrator; see below
+```
+
+What the options write, and only on creation:
+
+- `inferos.config.json` is schema version 2 with profile `inferops-operations` (or `--profile personal`) and all eight capabilities written explicitly, the named ones `true`. `--capability` takes a name per flag or a comma-separated list; an unknown name fails.
+- `inferos.canvas.json` is written by the pinned `pnpm canvas` CLI: `customGatekeepers` is `["gatekeeper-inferops"]` (either InferOps capability needs it), and with `INFEROPS_ENABLED` the starter board is the first screen template, `operations`, which `pnpm local seed` opens.
+- The new wrapper must pass its own `inferos:check` before it is created. A pin without the canvas CLI, without version 2 parsing or without a requested capability's code fails, and nothing is left at the destination.
+
+`INFEROPS_AUTH` adds "Sign in with InferLab" against `INFERLAB_AUTH_ORIGIN` (default `http://localhost:8080`, the local InferLab stack); see [sign-in](../oauth-signin.md#inferlab). To keep password sign-in only, set `capabilities.INFEROPS_AUTH` to `false`. Board data is the InferOps gatekeeper's mock unless `INFEROPS_BASE_URL` and its companions are set in the shell that runs `pnpm local start`; `pnpm local status` reports which.
+
+A rerun of the same command validates the pin and changes nothing: options never rewrite an existing wrapper's configuration or canvas file, so edited branding, switched-off capabilities and replaced screen templates survive. `pnpm profile:init` is likewise one-time on the server, and later administrator edits win (covered by the `workshop-profile` integration test).
+
+Not yet verified in a browser for this walkthrough: the Operate page and Kanban at narrow and wide widths, and a screen-reader pass. The Kumo kind picker's keyboard behaviour is covered by jsdom tests only.
+
+## Wrapper `pnpm local`
+
+On a pin containing `scripts/local/lifecycle.ts`, `pnpm local status|start|stop|seed|verify|reset|logs` runs the pinned lifecycle operator from `inferos/`, with the wrapper's `local.port` as `VITE_BACKEND_HOST` (`--port` still overrides it). Flags and exit codes are the operator's (see [local development](../architecture/local-development.md#lifecycle-commands)). Two arguments are added so it operates the wrapper rather than the pinned checkout:
+
+- `start` first applies every refusal `pnpm dev` applies (unsupported capabilities or schema, unavailable features, remote mode, invalid fixture), then appends `--consumer-root <wrapper>` after any run-local flags, and selects the wrapper's `blueprints/`.
+- `seed` without `--screen` passes the first screen template in the wrapper's `inferos.canvas.json`.
+
+State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as with `pnpm dev`. `status` lists the Workers the pinned checkout would bind, not the wrapper's custom Workers. An older pin fails with "does not support the local lifecycle"; use `pnpm dev` there.
+
 ## Generated contract
 
 | File | Meaning |
@@ -38,10 +77,11 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 | `skills/{operate,build,shared}/` | Editable starter runtime skills for the Workshop agent, one pack per public Context Library collection |
 | `inferos.skills.json` | Pack titles, directories, `include` lists (for example `.agents/skills/skill-creator`) and `exclude` globs |
 | `views/operations.json` | Guarded starter composition; import it from the workspace Canvas page on supporting pins |
+| `inferos.canvas.json` | Only with `--capability INFEROPS_ENABLED` or `INFEROPS_AUTH`: selects the InferOps gatekeeper and, with `INFEROPS_ENABLED`, the `operations` board screen template. Otherwise create it with `pnpm canvas` |
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
-| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/skills:check/skills:install/skills:upload/dev entrypoints |
+| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/local/skills:check/skills:install/skills:upload/dev entrypoints |
 
 ## What check proves
 
@@ -114,9 +154,9 @@ The deployment theme is a fallback, not an enforced setting. A browser's saved `
 
 ## Current limits
 
-`dev` launches native Workshop through run-local. It does not yet load the included InferOps fixture into board widgets or automatically initialize the profile. Supporting pins persist compositions in the native workspace store when both view flags are enabled. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence, lifecycle controls and cloud parity remain in [the roadmap](implementation-roadmap.md).
+`dev` launches native Workshop through run-local. It does not yet load the included InferOps fixture into board widgets or automatically initialize the profile. Supporting pins persist compositions in the native workspace store when both view flags are enabled. It uses the pinned native runner's local state and asset-serving behavior. The example pin includes a router asset-parity fix; an older pinned revision does not gain that change automatically. `dev` checks the selected local port before building and asks you to choose another port if it is occupied. Full setup/read/propose/approve/refresh evidence and cloud parity remain in [the roadmap](implementation-roadmap.md).
 
-The tests cover fresh creation, recursive clone, paths with spaces, customized rerun, revision drift, Git failure cleanup and all flag combinations. No cloud deployment or live provider login is performed by bootstrap or those tests.
+The tests cover fresh creation, recursive clone, paths with spaces, customized rerun, revision drift, Git failure cleanup, all flag combinations, the version 2 customer shell (capabilities, canvas selection, rerun preservation, unsupported pins) and the wrapper's `pnpm local` delegation against a stand-in operator. No cloud deployment or live provider login is performed by bootstrap or those tests.
 
 ## Custom Cloudflare Workers in local development
 
@@ -138,7 +178,7 @@ Views are wrapper-owned source. Bootstrap reruns preserve edits; changing `infer
 
 ## Profile defaults and explicit overrides
 
-New wrappers select `inferops-operations` and write an explicit snapshot: composable/durable layouts enabled, custom Workers disabled, InferOS name, compact listing density and system theme. Use a pin containing canvas support; older pins report unsupported flags instead of silently dropping them. Previously generated wrappers keep their explicit settings, including disabled views.
+New wrappers select `inferops-operations` (unless bootstrapped with `--profile personal`) and write an explicit snapshot: composable/durable layouts enabled, custom Workers disabled, InferOS name, compact listing density and system theme. Use a pin containing canvas support; older pins report unsupported flags instead of silently dropping them. Previously generated wrappers keep their explicit settings, including disabled views.
 
 On supporting pins, `features` and `styling` must be objects but their individual fields may be omitted. Resolution is base defaults → profile → explicit settings. `personal` inherits disabled features, InferOS branding, comfortable density and system theme. `inferops-operations` supplies the defaults above. `pnpm inferos:check` reports the effective values and a `provenance` map (`default`, `profile`, `override`). An explicit false wins. For a temporary operations canvas, set `features.durableViews` to false; to disable the canvas entirely, set both view flags false. Disabling only composition while inheriting durable views is an error.
 

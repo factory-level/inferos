@@ -8,11 +8,12 @@ covers:
   - packages/workshop-backend/src/user.ts
   - packages/workshop-backend/src/auth/config.ts
   - packages/integration-tests/__tests__/inferops-isolation.test.ts
+  - packages/integration-tests/__tests__/inferops-live.test.ts
   - packages/integration-tests/src/inferops-fake.ts
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # InferOps gatekeeper
@@ -368,6 +369,40 @@ issue description in any Workers runtime log (`TestHarness.getLogs()`) or failur
 run. With `INFEROPS_ENABLED` turned off by a harness reload, a read through an existing binding
 fails `DISABLED`, a queued move is not applied and stays pending, and a new binding is refused,
 all without a request; turned back on, the read works and the queued move applies. Remaining
-gaps: it is fake-backed, so neither a live local InferOps run (#23's walkthrough) nor a cloud
-smoke has been recorded, and the stopgap connection and `use`-role viewers are not exercised by
-it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
+gaps: it is fake-backed (a live local run is recorded below, through the stopgap connection), no
+cloud smoke has been recorded, and `use`-role viewers are not exercised by it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
+
+### Live run
+
+`packages/integration-tests/__tests__/inferops-live.test.ts` is an opt-in suite, skipped unless
+`INFEROPS_LIVE_BASE_URL` is set (so CI never runs it), that drives the same real Workshop and
+gatekeeper Worker against a running InferOps and checks every step by also reading InferOps
+directly with the same token. It uses the local-development stopgap connection
+(`INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID`, `INFEROPS_WORKSPACE_SLUG`, no
+`INFERLAB_AUTH_ORIGIN`) on an auto-provisioned account, because InferOps refuses SSO codes for
+non-Google sessions (inferops ADR 0012) and so the per-person connect cannot complete against a
+stub-auth InferOps. Its file header lists the variables and the run command.
+
+Run on 2026-10-03 against InferOps `develop` at `9bc02d68` (`bun run dev up`, stub auth, seeded:
+tenant `acme`, workspace `operations`, project ENG) from InferOS `4a4504c` (main after #107) plus
+this suite, with an `owner` persona bearer token. All eight steps passed:
+
+| Step | Result |
+| --- | --- |
+| Bind and read | `inferops://acme.operations/project/board/ENG` bound; its five columns (Backlog, Todo, In Progress, Done, Cancelled) and every card at its revision match InferOps' own board; the read is recorded as an observation. |
+| Create | `createIssue` queued an action and nothing in InferOps; on approval ENG-12 (`d908ec1b-6fac-4043-a67a-121c458e4080`) existed exactly once, in Todo, at revision 221, and the board showed it at that revision. |
+| Update | Title and priority proposed at 221, InferOps unchanged until approval, then new values at revision 223. |
+| Transition | Move to In Progress at 223, applied on approval, revision 224. |
+| Stale revision | An update at revision 221 refused at proposal with `STALE_REVISION`; InferOps stayed at 224. |
+| Duplicate | Approving each of the three applied actions again refused (`not pending`); revision 224, one issue. |
+| Reload | After a harness configuration update restarted the Workers, the same binding read ENG-12 at revision 224. |
+| Policy refusal (content issue) | The suite created project CPOL (`94809123-d93d-4d87-bcc8-5f5bac2877f9`, reused on later runs) and published content workflow policy revision 1: every user may take every action and any edge (`*` to `*`), except that the Draft to Published edge denies `move-in` to every user (`workflow/validate` clean, `workflow/explain` answers `EXPLICIT_DENY` for that edge and allows Draft to Review). Bound `inferops://acme.operations/project/board/CPOL`, created content issue CPOL-3 (`956b0e27-79a0-49d7-89fa-4df827da5fdd`) in Idea at revision 235 through approval, and moved it to Draft (applied, revision 236). Draft to Published was proposed and approved; proposing only simulates, so InferOps was first asked at apply and refused it. The approval failed with "CPOL-3 → Published was not applied: InferOps does not permit it for this connection (its access or the workflow policy refused it)." The issue stayed in Draft at revision 236, and the same move made directly answered 403 `FORBIDDEN` with `EXPLICIT_DENY`. Draft to Review then applied (revision 237). |
+
+Revisions are InferOps' own and are treated as opaque (an update advanced ENG-12 by two). A run with
+an expired persona token failed the first read with `UNAUTHORIZED` and wrote nothing. Each run
+leaves its `InferOS live <timestamp>` issue in ENG and its content issue in CPOL in place, since
+InferOps has no issue delete. The policy step needs a token that holds `project:manage` (the seed's
+`owner` does) for the first publish. A later publish of the same document is a no-op. Not proven
+by this run: per-person identity (every request carried one shared persona token; the live Google
+sign-in of #66 remains a manual step), a role-scoped refusal (the policy denies the edge to every
+user, because the stopgap connection carries one persona), and a cloud deployment.
