@@ -25,10 +25,18 @@ vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticate
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true } }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
   useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
-    { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [] },
+    { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], consoles: [
+      { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',
+        views: [{ id: 'overview', title: 'Overview', type: 'rollup', screens: ['board'] }] },
+    ] },
   ] }),
 }))
 vi.mock('../../pages/inferops-canvas/InferOpsCanvasHome', () => ({ InferOpsCanvasHome: () => <div data-testid="home" /> }))
+vi.mock('./ConsoleMosaic', () => ({ ConsoleMosaic: () => <div data-testid="mosaic" /> }))
+vi.mock('./ConsolePage', () => ({
+  ConsolePage: ({ entry, presentation }: { entry?: { console: { title: string } }; presentation: string }) =>
+    <div data-testid="console">{entry?.console.title}/{presentation}</div>,
+}))
 vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: () => <div data-testid="chat" /> }))
 vi.mock('./SessionApprovals', () => ({
   SessionApprovals: ({ screenWorkspaceId }: { screenWorkspaceId: string | null }) =>
@@ -98,6 +106,21 @@ describe('OperateSessionPage', () => {
     testState.recentEvents = [{ seq: 1, event: { type: 'open', ref: BOARD }, actor: 'person', at: new Date() }]
     render(OPEN)
     expect(container.textContent).not.toContain('Agent ')
+  })
+
+  it('opens on the console mosaic when nothing is open', () => {
+    render({ ...INITIAL_OPERATE_PAGE })
+    expect(container.querySelector('[data-testid="mosaic"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="home"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="console"]')).toBeNull()
+  })
+
+  it('gives the page to the open console, found among the saved ones', () => {
+    render({ ...OPEN, presentation: 'chat', console: {
+      workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', fullChat: 'available', viewId: 'overview', screenId: null,
+    } })
+    expect(container.querySelector('[data-testid="console"]')?.textContent).toBe('Operations lead/chat')
+    expect(container.querySelector('[role="tablist"]')).toBeNull()
   })
 
   it('gives the whole page to a running flow, keeping the working set for afterwards', () => {
