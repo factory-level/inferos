@@ -28,6 +28,8 @@ export default defineConfig({
           // Declared so the class is a Durable Object class here, as the generated wrangler.jsonc's
           // migrations make it in production; the tests reach it only through ctx.facets.
           PROJECT_GATEKEEPER: { className: "InferOpsProjectGatekeeper", useSQLite: true },
+          // The same, with a test-only hook for writing raw action records; `TestHooks` drives it.
+          TEST_PROJECT_GATEKEEPER: { className: "TestProjectGatekeeper", useSQLite: true },
           // One sign-in attempt per object; the tests seed its callback from inside the object.
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
           // One per connected account; the tests reach it through the account entrypoints.

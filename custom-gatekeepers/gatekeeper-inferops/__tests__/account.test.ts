@@ -154,6 +154,15 @@ class FakeInferLab {
         }],
       });
     }
+    if (url.pathname === `/project/issues/${DEMO_1}` && (init.method ?? "GET") === "GET") {
+      return Response.json({
+        issue: {
+          id: DEMO_1, identifier: "DEMO-1", title: "First", priority: "high", stateId: READY,
+          targetDate: null, workflow: "software", revision: "1041", assigneeId: null,
+          blockedReason: null, projectId: DEMO.id,
+        },
+      });
+    }
     return Response.json({ error: { code: "NOT_FOUND", message: "no route" } }, { status: 404 });
   };
 }
@@ -311,6 +320,28 @@ describe("requests as the person", () => {
 
     expect(inferlab.refreshes).toEqual(["refresh-1"]);
     expect(expired.filter(label => label === "dead")).toEqual(["dead"]);
+  });
+});
+
+describe("writes as the person", () => {
+  it("does not apply a create or update proposed before the person's session ended", async () => {
+    const account = await connect("ended-write");
+    const session = await bindBoard(account, "ended-write");
+    await session.createIssue({ title: "Proposed while signed in" });
+    await session.openIssue(DEMO_1).update({ title: "Renamed" }, "1041");
+    const proposed = (await hooks().log()).actions.slice(-2);
+    expect(proposed.map(a => a.title))
+      .toEqual(["Create issue: Proposed while signed in", "Update DEMO-1: title"]);
+    inferlab.endSession("refresh-1");
+    const writesBefore = inferlab.apiCalls.length;
+
+    for (const action of proposed) {
+      expect(await hooks().applyBound("ended-write", action.id))
+        .toContain("does not permit it for this connection");
+    }
+    // Nothing reached InferOps' write endpoints with the dead token.
+    expect(inferlab.apiCalls.slice(writesBefore).every(c => !c.path.startsWith("/project/issues")))
+      .toBe(true);
   });
 });
 

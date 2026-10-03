@@ -3,9 +3,13 @@
 //
 // - Every response is parsed field by field; nothing is cast. A response that does not match is a
 //   provider failure (`UNAVAILABLE`), never partial data.
-// - InferOps authorizes an issue read or transition against the workspace, not a project, so this
-//   client checks the issue's `projectId` against the bound project itself, and answers an issue of
-//   another project exactly as an unknown one.
+// - InferOps authorizes an issue read, transition or update against the workspace, not a project,
+//   so this client checks the issue's `projectId` against the bound project itself before every
+//   one, and answers an issue of another project exactly as an unknown one. A create names the
+//   bound project's UUID, resolved from its key on every use.
+// - Every write carries `X-Idempotency-Key`. InferOps replays a known key per operation but does
+//   not compare bodies; the gatekeeper's action fingerprint (actions.ts) is what keeps one key to
+//   one request.
 // - The board response also lists every workspace project and each card's lease and run, and the
 //   issue response the description and comments; the parsers copy only the `Issue` fields.
 // - `listWorkspaceSlugs` reads the workspace slugs a connect stores beside the person's memberships
@@ -22,8 +26,8 @@
 
 import { createLogger } from "@gadgets/observability/logger";
 import {
-  InferOpsError, type InferOpsClient, type InferOpsErrorCode, type ProjectSnapshot,
-  type ProjectSummary,
+  InferOpsError, type InferOpsClient, type InferOpsErrorCode, type IssueChanges,
+  type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
 } from "./inferops-client";
 import { isSlug } from "./resources";
 import type { Issue, Project, Revision, State, StateGroup, Workflow } from "./types";
@@ -230,6 +234,18 @@ function wireCode(body: unknown): string | null {
   }
 }
 
+/** Whether a 403 body is a workflow-policy refusal (`details.decision`) rather than a permission. */
+function isPolicyRefusal(body: unknown): boolean {
+  try {
+    const details = record(record(record(body, "response").error, "error").details, "details");
+    return "decision" in details;
+  } catch {
+    return false;
+  }
+}
+
+const POLICY_REFUSED = "InferOps' workflow policy does not allow this change.";
+
 const FAILURE_DETAIL: Record<InferOpsErrorCode, string> = {
   NOT_FOUND: "InferOps has no such item.",
   STALE_REVISION: "The issue changed in InferOps. Read it again.",
@@ -319,7 +335,9 @@ export async function listWorkspaceSlugs(baseUrl: string, token: string,
 // ---------------------------------------------------------------------------
 // Client
 
-type Send = { method: "GET" | "POST"; path: string; body?: unknown; idempotencyKey?: string };
+type Send = {
+  method: "GET" | "POST" | "PATCH"; path: string; body?: unknown; idempotencyKey?: string;
+};
 
 /**
  * The InferOps HTTP data source for one connection: a fixed credential, or an endpoint whose
@@ -381,7 +399,8 @@ export function openHttpInferOpsClient(
       logger.warn("InferOps request failed", {
         event: "http.request.failed", operation, status: response.status, code: wire ?? code,
       });
-      throw new InferOpsError(code, FAILURE_DETAIL[code]);
+      const policy = code === "FORBIDDEN" && isPolicyRefusal(body);
+      throw new InferOpsError(code, policy ? POLICY_REFUSED : FAILURE_DETAIL[code]);
     }
     if (body === undefined) throw unavailable(response.status);
     return body;
@@ -475,6 +494,67 @@ export function openHttpInferOpsClient(
           throw new Malformed("another issue was returned");
         }
         return moved;
+      });
+    },
+
+    async createIssue(projectKey: string, issue: NewIssueRequest, idempotencyKey: string):
+        Promise<Issue> {
+      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+      if (!UUID.test(issue.stateId)) throw new InferOpsError("INVALID_STATE", FAILURE_DETAIL.INVALID_STATE);
+      const bound = await project(projectKey);
+      let body: unknown;
+      try {
+        body = await request("issue.create", {
+          method: "POST",
+          path: "/project/issues",
+          // Only the named fields, so nothing else of the caller's can reach InferOps.
+          body: {
+            projectId: bound.id, title: issue.title, description: issue.description,
+            priority: issue.priority, stateId: issue.stateId, workflow: issue.workflow,
+          },
+          idempotencyKey,
+        });
+      } catch (error) {
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") {
+          throw new InferOpsError("NOT_FOUND", "The project or the target state is no longer available.");
+        }
+        throw error;
+      }
+      return parsed("issue.create", body, raw => parseIssue(record(raw, "response").issue));
+    },
+
+    async updateIssue(
+      projectKey: string, issueId: string, changes: IssueChanges, expectedRevision: Revision,
+      idempotencyKey: string,
+    ): Promise<Issue> {
+      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+      if (!REVISION.test(expectedRevision)) {
+        throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
+      }
+      const { title, description, priority } = changes;
+      if (title === undefined && description === undefined && priority === undefined) {
+        throw new InferOpsError("INVALID_REQUEST", "An update must change at least one field.");
+      }
+      // InferOps would update an issue of any project in the workspace; refuse it here first.
+      await readIssue(projectKey, issueId);
+      let body: unknown;
+      try {
+        body = await request("issue.update", {
+          method: "PATCH",
+          path: `/project/issues/${issueId}`,
+          body: { title, description, priority, expectedRevision },
+          idempotencyKey,
+        });
+      } catch (error) {
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw issueNotFound();
+        throw error;
+      }
+      return parsed("issue.update", body, raw => {
+        const updated = parseIssue(record(raw, "response").issue);
+        if (updated.id.toLowerCase() !== issueId.toLowerCase()) {
+          throw new Malformed("another issue was returned");
+        }
+        return updated;
       });
     },
 

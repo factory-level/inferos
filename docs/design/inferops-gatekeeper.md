@@ -10,20 +10,21 @@ Tracking epic: [#6](https://github.com/factory-level/inferos/issues/6); roadmap:
 
 ## Purpose
 
-Expose scoped InferOps project/board/issue reads and approved issue transitions as native capabilities.
+Expose scoped InferOps project/board/issue reads and approved issue creates, updates and transitions as native capabilities.
 
 ## Requirements
 
 - Define and review the agent-facing capability API before implementation, following write-gatekeeper.
 - Bind tenant, workspace and project scope to the issued capability; never accept broader authority from a URI or widget parameter.
-- Record reads as observations and transitions as proposed actions with simulation/approval before dispatch.
-- Recheck authorization and expected revision when executing; stale approval must not silently apply to changed data.
+- Record reads as observations and every write (create, update, transition) as a proposed action with simulation/approval before dispatch.
+- Recheck authorization, project scope and expected revision when executing; stale approval must not silently apply to changed data.
+- Bind each approval to the normalized request it will send; an idempotency key is only ever sent with that one request, and a retried or replayed execution never writes twice.
 - Keep InferOps domain storage authoritative and preserve its permission/business rules; no direct database bypass.
 - Optionally sign Workshop users in with their InferLab account, as an opt-in deployment setting that is off by default and leaves password login available.
 
 ## Behavior
 
-The user connects an InferOps account, selects a project and receives a scoped session. The session reads a board or issue through validated InferOps APIs. A transition proposal names the issue, target state and expected revision; preview reports the intended change without writing. Approval executes using the original scope, a deduplication key and current domain checks. Conflicts return structured reload/review instructions. Revocation and reconnect clear affected caches. Shared Gadgets cannot gain the owner’s wider scope by changing a target URI. Installation alone never asserts ambience; provisioning follows admin policy.
+The user connects an InferOps account, selects a project and receives a scoped session. The session reads a board or issue through validated InferOps APIs. A transition proposal names the issue, target state and expected revision; an update proposal names the issue, the changed title, description or priority and the expected revision; a create proposal names the new issue's fields and the state it lands in. Preview reports the intended change without writing. Approval executes using the original scope, a deduplication key and current domain checks. Conflicts return structured reload/review instructions. Revocation and reconnect clear affected caches. Shared Gadgets cannot gain the owner’s wider scope by changing a target URI. Installation alone never asserts ambience; provisioning follows admin policy.
 
 ### Sign in and connect with InferLab
 
@@ -43,9 +44,9 @@ Each person connects InferOps with their own authority, through InferOps' PKCE s
 | --- | --- |
 | `Authorization` | `Bearer <token>`: the connected person's InferOps access token. |
 | `X-Workspace-Id` | The InferOps workspace UUID of the binding: the connected person's own workspace that the resource URL's workspace slug resolved to. |
-| `X-Idempotency-Key` | On the transition write only; see [Idempotency](#idempotency). |
+| `X-Idempotency-Key` | On every write (create, update, transition); see [Idempotency](#idempotency). |
 
-InferOps also accepts a service-account key (`iex_…`, as the bearer or as `X-API-Key`). The gatekeeper does not use one for a connected person. InferOps permission and row-level rules apply to every call as they do for any other client: `project:read` for the project list and board, `issue:read` for an issue, `issue:write` for a transition.
+InferOps also accepts a service-account key (`iex_…`, as the bearer or as `X-API-Key`). The gatekeeper does not use one for a connected person. InferOps permission and row-level rules apply to every call as they do for any other client: `project:read` for the project list and board, `issue:read` for an issue, `issue:write` for a create, an update or a transition. InferOps' configured workflow policy can also refuse a write (`403 FORBIDDEN` with `details.decision`); InferOS reports it as `FORBIDDEN` and never retries it.
 
 ### Resource grammar
 
@@ -74,6 +75,10 @@ All paths are relative to the deployment's API base URL.
 | Board | `GET /project/board?projectId=<uuid>` | `projectId`, `columns[]` of `state` and `issues[]`. |
 | Issue | `GET /project/issues/<issueId>` | `issue`, including its `projectId`. |
 | Transition | `POST /project/issues/<issueId>/transition`, body `{ "toStateId", "expectedRevision" }` | `issue`: the moved card. |
+| Create | `POST /project/issues`, body `{ "projectId", "title", "description"?, "priority"?, "stateId", "workflow"? }` | `issue`: the new card. |
+| Update | `PATCH /project/issues/<issueId>`, body `{ "title"?, "description"?, "priority"?, "expectedRevision" }` | `issue`: the updated card; `deliveries` is dropped. |
+
+Writes send only the fields of the agent-facing declaration. A create always names the bound project's UUID (resolved from its key) and the state it lands in, resolved by InferOS from the board when the proposal is made: the caller's `stateId`, which must be one of the board's states, or else the first state of the `software` workflow (of the `content` workflow on a board that has no `software` states). `workflow` is sent only when that state's workflow is `content`; otherwise InferOps' default (`software`) applies. So the issue lands in the column the approver saw. `parentId`, `acceptanceCriteria`, `assigneeId`, dates, refs, `blockedReason` and `leaseGeneration` are not exposed. An update with no changed field is not proposed; a `null` description clears it.
 
 Every response is validated before any of it is used; a response that does not match is a provider failure, not partial data. The board response also carries every project of the workspace (`projects[]`) and each card's lease and run; the issue response also carries the description, acceptance criteria, refs and comments. InferOS drops all of these, so a session returns only the bound project and the `Issue` fields of the [declaration](inferops-gatekeeper-api.d.ts).
 
@@ -81,23 +86,31 @@ There is no pagination in v1: the board endpoint returns the whole board and Inf
 
 ### Project scope is checked by InferOS
 
-InferOps' issue read and issue transition authorize against the workspace, not a project, so the binding's project scope is enforced by InferOS:
+InferOps' issue read, transition and update authorize against the workspace, not a project, so the binding's project scope is enforced by InferOS:
 
-- Before an issue is read or moved, InferOS reads it and compares its `projectId` with the UUID of the bound project.
+- Before an issue is read, moved or updated, at proposal and again at execution, InferOS reads it and compares its `projectId` with the UUID of the bound project.
+- A create names only the bound project's UUID, resolved from its key at execution; its state must belong to that project, which InferOps checks.
 - An issue of another project is answered exactly as an unknown issue: `NOT_FOUND: No such issue in this project.`
 - The board is requested for the bound project's UUID only, and the response's `projectId` must match it.
 
 ### Revision
 
-An issue's `revision` is InferOps' `head_seq`: a position in a ledger shared by all issues, serialized as a decimal string. It is not a per-issue counter and a transition does not advance it by one. InferOS treats it as opaque: it compares revisions for equality only, never increments or orders them, and sends the revision the caller read as `expectedRevision` on every transition (InferOps treats an omitted `expectedRevision` as last-write-wins, which the gatekeeper never uses).
+An issue's `revision` is InferOps' `head_seq`: a position in a ledger shared by all issues, serialized as a decimal string. It is not a per-issue counter and a transition does not advance it by one. InferOS treats it as opaque: it compares revisions for equality only, never increments or orders them, and sends the revision the caller read as `expectedRevision` on every transition and every update. InferOps makes it optional on both (an omitted `expectedRevision` is last-write-wins); the agent-facing API requires it and the gatekeeper never omits it.
 
-Because the revision a move will produce cannot be known in advance, a pending move is simulated by showing the issue in its target state at its unchanged revision, and a second move of an issue whose earlier move is still undecided is refused with `CONFLICT`.
+Because the revision a change will produce cannot be known in advance, a pending move or update is simulated by showing the issue with its new state or fields at its unchanged revision, marked `pending`, and a second move or update of an issue whose earlier change is still undecided is refused with `CONFLICT`. A pending create is shown as a provisional card in its target column, marked `pending: "create"`, with a provisional id that `openIssue` does not accept and revision `"0"`.
 
 ### Idempotency
 
-The idempotency key of an approved transition is `<instanceId>:<actionId>`, and of its revert `<instanceId>:<actionId>:revert`. `instanceId` is a random id generated once per binding and `actionId` is the binding's action number, so a key is never shared between bindings, actions, or an action and its revert. A retried apply sends the same key.
+The idempotency key of an approved write (create, update or transition) is `<instanceId>:<actionId>`, and of its revert `<instanceId>:<actionId>:revert`. `instanceId` is a random id generated once per binding and `actionId` is the binding's action number, so a key is never shared between bindings, actions, or an action and its revert. A retried apply sends the same key and the same body.
 
-InferOps replays a known key by returning the issue's current card without applying the move or firing its hooks again. It does not detect a key reused for a different issue or target state; see [Companion InferOps changes](#companion-inferops-changes). InferOS never reuses a key for a different move, and does not rely on InferOps to catch that.
+InferOps replays a known key per operation (its claim correlation id is namespaced by operation) by returning the original result without writing or firing hooks again. A create whose response was lost is therefore retried with the same key and returns the issue it created; no second issue is made. InferOps does not compare the body of a replayed request, so a key reused for a different issue, target or field values would silently return the first result; see [Companion InferOps changes](#companion-inferops-changes). InferOS never reuses a key, and does not rely on InferOps to catch that: each proposed action is stored with the exact request it will send and a SHA-256 fingerprint of that request and the bound project, and execution recomputes the fingerprint and refuses to send a request that does not match.
+
+### Reverting
+
+- A transition is reverted by moving the issue back, only while it is still in the state the move left it in.
+- An update of the title or priority is reverted by sending the previous values with the then-current revision, only while the issue is still at the revision the update produced and still shows the values it set.
+- An update that changed the description is not revertible: InferOS never reads an issue's description, so it cannot restore one.
+- A create is not revertible: InferOps has no issue delete in this contract. The approver cancels or deletes it in InferOps.
 
 ### Errors
 
@@ -107,12 +120,13 @@ InferOps reports errors as `{ "error": { "code", "message", "details"? } }`. Inf
 | --- | --- | --- |
 | 404 `NOT_FOUND` on a read | `NOT_FOUND` | No such issue (or project) in this binding. |
 | 404 `NOT_FOUND` on a transition | `NOT_FOUND` | The issue is gone, or the target state is not in its project; InferOps does not say which. |
+| 404 `NOT_FOUND` on a create | `NOT_FOUND` | The project or the target state is gone. |
 | 409 `STALE_REVISION` | `STALE_REVISION` | The issue changed; read it again. |
 | 409 `WORKFLOW_MISMATCH` | `WORKFLOW_MISMATCH` | The target state belongs to the other workflow. |
 | 409 `LEASE_HELD`, `LEASE_LOST`, `LEASE_QUARANTINED`, `RUN_ACTIVE`, `CONFLICT` | `CONFLICT` | InferOps refused the move in the issue's current condition. |
 | 400 `VALIDATION_ERROR` (and other 400s) | `INVALID_REQUEST` | The request was malformed. |
 | 401 | `UNAUTHORIZED` | The credential was rejected or revoked; reconnect. |
-| 403 `FORBIDDEN` (and other 403s) | `FORBIDDEN` | The connected person may not do this in InferOps. |
+| 403 `FORBIDDEN` (and other 403s) | `FORBIDDEN` | The connected person may not do this in InferOps, or (with `details.decision`) the project's workflow policy refused the change. |
 | 5xx, any other status, a network failure, or a response that fails validation | `UNAVAILABLE` | Provider failure; nothing is assumed about the outcome. |
 
 `INVALID_STATE` (the target state is not part of the bound project) is decided by InferOS from the board when a move is proposed. InferOps has no distinct code for it.
@@ -137,7 +151,7 @@ With a binding for `inferops://acme.operations/project/board/DEMO`:
 
 Wanted from InferOps, tracked in [factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326). None blocks the first live path; each removes a check InferOS otherwise has to make alone.
 
-1. **Reject a replayed idempotency key that names a different move.** A replay should fail (a distinct conflict code) when the key was first used for another issue or another target state, instead of returning the current card.
+1. **Reject a replayed idempotency key that names a different request.** A replay should fail (a distinct conflict code) when the key was first used for another issue, target state or field values, on transition, create and update alike, instead of returning the first result.
 2. **A distinct error code for a target state outside the issue's project.** Today it is `NOT_FOUND`, the same as a missing issue.
 3. **An optional project constraint on issue read and transition.** A caller-supplied project id that InferOps enforces, answering an issue of another project as `NOT_FOUND`, so the scope check is made in the same transaction as the write.
 
@@ -158,7 +172,7 @@ Tracking issue: [#21](https://github.com/factory-level/inferos/issues/21) (`gate
 
 ### Implement observed board reads and approved issue transitions
 
-Tracking issue: [#22](https://github.com/factory-level/inferos/issues/22) (`gatekeeper-actions`).
+Tracking issue: [#22](https://github.com/factory-level/inferos/issues/22) (`gatekeeper-actions`). Its MVP scope (2026-10-02) expands this to governed issue create, read, update and transition within one project: every write keeps approval and rechecks scope and current grants, updates and transitions require a delegated `expectedRevision`, approval binds the normalized fields and scope, an idempotency key is never sent with a different payload, and a create whose response was lost is reconciled through its key rather than duplicated.
 
 - Implement the gatekeeper using kit handoff/reconnect and existing approval mechanisms.
 - Validate responses; record all reads; simulate transitions without side effects.
@@ -181,7 +195,9 @@ Tracking issue: [#23](https://github.com/factory-level/inferos/issues/23) (`gate
 The concrete [agent-facing declaration](inferops-gatekeeper-api.d.ts) proposes two capabilities:
 
 - `InferOpsProjectSession.readBoard()` returns only the connected project's metadata and board. `openIssue(issueId)` narrows to an issue in that project.
-- `InferOpsIssueSession.read()` reads that fixed issue. `transition(toStateId, expectedRevision)` changes its state with mandatory revision checking and same-project/workflow validation.
+- `InferOpsIssueSession.read()` reads that fixed issue. `transition(toStateId, expectedRevision)` changes its state with mandatory revision checking and same-project/workflow validation. `update({title?, description?, priority?}, expectedRevision)` changes those fields with mandatory revision checking.
+- `InferOpsProjectSession.createIssue({title, description?, priority?, stateId?})` proposes a new issue in the bound project.
+- `Issue.pending` marks a card whose shown values include a change that has not taken effect yet, including the provisional card of an issue being created.
 
 The first installation exposes project-bound resources. Direct issue-only grants can use the same issue session contract after resource-picker support is added; a workspace-wide catalog is deliberately absent from the runtime session. A resource URI identifies a target and never supplies permission.
 
@@ -189,7 +205,7 @@ The declaration contains only caller-facing types and behavior; approval queue, 
 
 The scoped board projection omits other workspace projects and initial lease/run details. It does not invent a cursor API over the existing full-board endpoint. Cross-project resources, unknown issue UUIDs and revoked credentials fail closed. Sharing uses project access verification for each observer; it must not use the low-stakes no-op observer strategy.
 
-**Review status (2026-10-02):** the operator approved this API, and `custom-gatekeepers/gatekeeper-inferops` ships the declaration over demo data. The external contract is stated under [InferOps contract](#inferops-contract); the current implementation and its gaps are in the [current architecture](../architecture/inferops-gatekeeper.md#divergences-from-design).
+**Review status (2026-10-02):** the operator approved this API; the create/update methods and `Issue.pending` were added under [#22](https://github.com/factory-level/inferos/issues/22)'s MVP scope, and `custom-gatekeepers/gatekeeper-inferops` ships the declaration over demo data. The external contract is stated under [InferOps contract](#inferops-contract); the current implementation and its gaps are in the [current architecture](../architecture/inferops-gatekeeper.md#divergences-from-design).
 
 Resolved on 2026-10-02:
 
@@ -205,8 +221,10 @@ Still open:
 - Workspace slugs are read once per connect or reconnect; a workspace joined or renamed later is reachable by URL only after the person reconnects. Whether to refresh them with the access token is undecided.
 - One account per deployment: the deployment is configuration, not part of the URI, so an InferOS deployment talks to one InferOps API.
 - InferOps accepts mixed-case project identifiers of up to 10 characters (`[A-Za-z][A-Za-z0-9]{0,9}`); the resource grammar accepts uppercase keys only (up to 16). Whether to widen the grammar or to leave such projects unbindable is undecided; adopting the URI authority left the key grammar unchanged.
-- The scope check and the transition are two requests, so an issue moved to another project between them would still be transitioned. Companion change 3 closes this; whether InferOps allows an issue to change project at all has not been confirmed.
+- The scope check and the transition or update are two requests, so an issue moved to another project between them would still be changed. Companion change 3 closes this; whether InferOps allows an issue to change project at all has not been confirmed.
 - The issue read fetches the description and comment thread only to discard them. A narrower InferOps read would avoid that.
+- InferOps enforces configured workflow policy on content issues only; a software issue's create or update is governed by InferOS's approval alone until InferOps' software policy ships. Live acceptance of a policy refusal therefore needs a content issue.
+- No issue delete is in the contract, so an approved create cannot be undone from InferOS.
 
 ## Related
 

@@ -3,7 +3,7 @@
 // `http-inferops.ts` implements it over the InferOps HTTP API. `clientFor` in inferops.ts is the one
 // place that chooses between them.
 
-import type { Board, Issue, Project, Revision } from "./types";
+import type { Board, Issue, IssueChanges, Priority, Project, Revision } from "./types";
 
 /** Error codes a data source reports. Callers branch on these, never on message text. */
 export type InferOpsErrorCode =
@@ -59,6 +59,21 @@ export type ProjectSnapshot = {
   issues: Issue[];
 };
 
+/**
+ * A new issue as the gatekeeper sends it: the caller's fields, trimmed, with the state resolved
+ * and the workflow named only when it is not InferOps' default (`software`).
+ */
+export type NewIssueRequest = {
+  title: string;
+  description?: string;
+  priority?: Priority;
+  stateId: string;
+  workflow?: "content";
+};
+
+/** Changed fields of an issue as the gatekeeper sends them (trimmed, unchanged ones dropped). */
+export type { IssueChanges } from "./types";
+
 /** One project an account can reach, as listed for the resource picker. */
 export type ProjectSummary = Pick<Project, "identifier" | "name">;
 
@@ -90,6 +105,25 @@ export interface InferOpsClient {
    */
   transition(
     projectKey: string, issueId: string, toStateId: string, expectedRevision: Revision,
+    idempotencyKey: string,
+  ): Promise<Issue>;
+
+  /**
+   * Create an issue in the project, in the state `issue.stateId` names, which must belong to the
+   * project and to the issue's workflow. A repeated `idempotencyKey` returns the issue the first
+   * request created instead of creating another, including when the first response was lost. The
+   * mock refuses a key reused for a different request with IDEMPOTENCY_CONFLICT; InferOps does not
+   * detect that, so callers must never reuse one.
+   */
+  createIssue(projectKey: string, issue: NewIssueRequest, idempotencyKey: string): Promise<Issue>;
+
+  /**
+   * Change fields of an issue of the project, after checking scope and the expected revision,
+   * which is always sent. The returned issue carries its new revision. Idempotency as for
+   * `createIssue`.
+   */
+  updateIssue(
+    projectKey: string, issueId: string, changes: IssueChanges, expectedRevision: Revision,
     idempotencyKey: string,
   ): Promise<Issue>;
 
