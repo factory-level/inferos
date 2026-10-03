@@ -11,6 +11,10 @@
       "types": "./src/api.ts",
       "import": "./src/api.ts"
     },
+    "./workspace-kind": {
+      "types": "./src/workspace-kind.ts",
+      "import": "./src/workspace-kind.ts"
+    },
     "./feature-flags": {
       "types": "./src/feature-flags.ts",
       "import": "./src/feature-flags.ts"
@@ -46,6 +50,10 @@
     "./password-salt": {
       "types": "./src/password-salt.ts",
       "import": "./src/password-salt.ts"
+    },
+    "./operate-session": {
+      "types": "./src/operate-session.ts",
+      "import": "./src/operate-session.ts"
     }
   },
   "scripts": {

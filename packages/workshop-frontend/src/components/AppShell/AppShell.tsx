@@ -143,7 +143,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         {/* Top bar. Same height as the sidebar's brand row (h-14) so they read as one continuous
             chrome strip across the top. Mostly empty — carries the mobile hamburger on the left,
             any admin TopBarNotice centered, and the reconnecting chip on the right. */}
-        <div className="relative flex h-14 shrink-0 items-center justify-between border-b border-kumo-line bg-kumo-base px-3">
+        <div className="relative flex h-14 shrink-0 items-center justify-between bg-kumo-base px-3">
           <button
             type="button"
             ref={menuButtonRef}

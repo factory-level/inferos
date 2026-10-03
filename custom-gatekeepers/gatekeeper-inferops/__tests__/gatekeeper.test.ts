@@ -123,9 +123,9 @@ describe("transitions", () => {
     const { actions } = await hooks.log();
     expect(actions).toHaveLength(1);
     expect(actions[0]!.title).toBe("Move DEMO-1 to Working");
-    // Simulated: in its target column, at the revision the move will produce.
+    // Simulated: in its target column, at its unchanged revision (a move's result is not guessed).
     expect(await stateOf(await session.readBoard(), DEMO_1))
-      .toEqual({ stateId: STATE.working, revision: "2" });
+      .toEqual({ stateId: STATE.working, revision: "1" });
     expect(await session.openIssue(DEMO_1).read()).toMatchObject({ stateId: STATE.working });
     // ...but nothing has reached InferOps yet.
     expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: STATE.ready, revision: "1" });
@@ -137,19 +137,36 @@ describe("transitions", () => {
       .toEqual({ stateId: STATE.working, revision: "2" });
   });
 
-  it("chains moves on the simulated revision", async () => {
+  it("refuses a second move of an issue until the first is decided", async () => {
     const { props, hooks, mock, session } = setup();
     const issue = session.openIssue(DEMO_1);
 
     await issue.transition(STATE.working, "1");
     const simulated = await issue.read();
-    await issue.transition(STATE.review, simulated.revision);
+    expect(simulated).toMatchObject({ stateId: STATE.working, revision: "1" });
+    expect(await failure(issue.transition(STATE.review, simulated.revision))).toMatch(/CONFLICT/);
+    // Proposing the pending move again is a no-op, not a conflict.
+    await issue.transition(STATE.working, simulated.revision);
+    expect((await hooks.log()).actions.map(a => a.title)).toEqual(["Move DEMO-1 to Working"]);
 
-    const { actions } = await hooks.log();
-    expect(actions.map(a => a.title)).toEqual(["Move DEMO-1 to Working", "Move DEMO-1 to In Review"]);
-    expect(await hooks.apply(props, actions[0]!.id)).toBeNull();
-    expect(await hooks.apply(props, actions[1]!.id)).toBeNull();
-    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: STATE.review, revision: "3" });
+    // Once applied, the next move uses the revision InferOps actually reports.
+    expect(await hooks.apply(props, 1)).toBeNull();
+    const applied = await issue.read();
+    await issue.transition(STATE.review, applied.revision);
+    expect(await hooks.apply(props, 2)).toBeNull();
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: STATE.review });
+  });
+
+  it("allows a new move once a stale pending one no longer applies", async () => {
+    const { hooks, mock, session } = setup();
+    const issue = session.openIssue(DEMO_1);
+    await issue.transition(STATE.working, "1");
+    await mock.transition("DEMO", DEMO_1, STATE.done, "1", "someone-else");
+
+    const current = await issue.read();
+    await issue.transition(STATE.review, current.revision);
+
+    expect((await hooks.log()).actions).toHaveLength(2);
   });
 
   it("refuses a stale revision when proposing", async () => {

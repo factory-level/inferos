@@ -29,6 +29,7 @@ import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
 import { parseConsumerConfig } from "./consumer/config.ts";
+import { unsupportedCapabilities } from "./consumer/runtime.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
 import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
@@ -122,6 +123,9 @@ if (consumerOptions.length > 1 || (consumerOptions.length && (!consumerOptions[0
 }
 const consumerConfig = consumerOptions.length
   ? parseConsumerConfig(JSON.parse(readFileSync(join(consumerOptions[0], "inferos.config.json"), "utf8"))) : null;
+// A capability this checkout has no code for must stop the launch; starting without it would be a silent no-op.
+const blockedCapabilities = consumerConfig ? unsupportedCapabilities(consumerConfig, ROOT) : [];
+if (blockedCapabilities.length) throw new Error(`Enabled capabilities are not supported by this installation: ${blockedCapabilities.join(", ")}`);
 const consumerWorkers = consumerOptions.length ? await prepareConsumerWorkers(consumerOptions[0]) : [];
 
 // Composition config: the wrapper's inferos.canvas.json, or this checkout's own when run in-repo.
@@ -550,6 +554,9 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_PORTAL_HIDDEN_SERVER_IDS", "MCP_ALLOW_INSECURE",
   ],
   "gatekeeper-mcp": ["MCP_ALLOW_INSECURE"],
+  // A live InferOps connection for local development. One token for the whole dev server is a
+  // stopgap until each person connects with their own InferOps sign-in (inferos#66).
+  "gatekeeper-inferops": ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"],
 };
 // Vars resolved here rather than read raw from the shell.
 const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined>> = {

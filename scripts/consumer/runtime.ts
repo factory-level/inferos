@@ -5,7 +5,8 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
+import { CAPABILITY_NAMES, parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
+import type { CapabilityName, ConsumerConfig, SettingSource } from "./config.ts";
 
 /** Select the wrapper's complete format set, retaining upstream defaults for older empty wrappers. */
 export function consumerBlueprintDirectory(root: string): string | undefined {
@@ -52,6 +53,9 @@ export async function assertLocalPortAvailable(port: number): Promise<void> {
   }
 }
 
+/** The skills.sh CLI version `skills:install` runs, pinned so installs are reproducible. */
+export const SKILLS_CLI = "skills@1.7.0";
+
 const featureSources = {
   // The composition contract, not a UI file: UI files are renamed as the page evolves.
   composableViews: "packages/workshop-shared/src/canvas.ts",
@@ -64,9 +68,67 @@ const unavailableFeatures = (config: ReturnType<typeof parseConsumerConfig>, ups
   (Object.keys(featureSources) as (keyof typeof featureSources)[])
     .filter(name => config.features[name] && !existsSync(join(upstream, featureSources[name])));
 
+/**
+ * The pinned source that makes an installation honour each capability, or null while no revision
+ * ships one. The change that implements a capability registers its path here; until then switching
+ * it on is an error. A mock or unflagged implementation does not count: nothing reads the flag.
+ */
+export const capabilitySources: Record<CapabilityName, string | null> = {
+  INFEROPS_ENABLED: null,
+  INFEROPS_CANVAS_STATE_MACHINE: null,
+  HARNESS_HG_ENABLED: null,
+  INFEROPS_AUTH: null,
+  PUBLISH_CLOUDFLAREOS_WIDGET: null,
+  PUBLISH_CLOUDFLAREOS_APP: null,
+  AGENT_DEPLOYMENTS: null,
+  CODING_WORKBENCH_ENABLED: null,
+};
+
+const installed = (upstream: string, source: string | null) => source !== null && existsSync(join(upstream, source));
+
+/** Capabilities switched on that the installation cannot honour. Callers fail on these; they never no-op. */
+export function unsupportedCapabilities(config: ConsumerConfig, upstream: string, sources = capabilitySources): CapabilityName[] {
+  return CAPABILITY_NAMES.filter(name => config.schemaVersion === 2 && config.capabilities[name] && !installed(upstream, sources[name]));
+}
+
+/** One capability's availability in this installation. It describes configuration, never a grant or activation. */
+export interface CapabilityStatus {
+  /** `enabled`: switched on and installed. `supported`: installed, switched off. `unsupported`: code absent. */
+  state: "enabled" | "supported" | "unsupported";
+  /** Whether the configuration switches it on; with `unsupported` that is an error. */
+  requested: boolean;
+  /** Where the requested value came from. Version 1 files cannot declare capabilities, so theirs are defaults. */
+  source: SettingSource;
+}
+
+/** Report every capability truthfully against the pinned source, whatever the configuration asks for. */
+export function reportCapabilities(resolved: ReturnType<typeof resolveConsumerConfig>, upstream: string, sources = capabilitySources) {
+  const { config, provenance } = resolved;
+  return Object.fromEntries(CAPABILITY_NAMES.map(name => {
+    const requested = config.schemaVersion === 2 && config.capabilities[name];
+    const state = !installed(upstream, sources[name]) ? "unsupported" : requested ? "enabled" : "supported";
+    return [name, { state, requested, source: provenance.capabilities?.[name] ?? "default" }];
+  })) as Record<CapabilityName, CapabilityStatus>;
+}
+
+/** The pinned launcher parses the same file, so a version 2 file needs a pin whose parser accepts it. */
+export async function pinnedSchemaSupported(root: string, upstream: string, config: ConsumerConfig): Promise<boolean> {
+  if (config.schemaVersion === 1) return true;
+  const script = join(upstream, "scripts/consumer/config.ts");
+  if (!existsSync(script)) return false;
+  try {
+    const pinned = await import(pathToFileURL(script).href);
+    pinned.parseConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
+    return true;
+  } catch { return false; }
+}
+
+const unsupportedSchema = "configuration schemaVersion 2 (keep version 1 or select a reviewed supporting pin)";
+
 /** Check the actual submodule pin; configuration alone is not proof of the running revision. */
 export function checkConsumer(root: string) {
-  const { config, provenance } = resolveConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
+  const resolved = resolveConsumerConfig(JSON.parse(readFileSync(join(root, "inferos.config.json"), "utf8")));
+  const { config, provenance } = resolved;
   const upstream = join(root, "inferos");
   const head = execFileSync("git", ["-C", upstream, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (head !== config.upstream.revision) throw new Error("Submodule HEAD differs from configured upstream.revision");
@@ -79,7 +141,9 @@ export function checkConsumer(root: string) {
   }
   const pending = ["InferOps fixture/remote adapter", "profile initialization not checked"];
   pending.push(...unavailableFeatures(config, upstream));
-  return { config, provenance, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream };
+  const capabilities = reportCapabilities(resolved, upstream);
+  const blocked = unsupportedCapabilities(config, upstream);
+  return { config, provenance, upstream, packageManager: packageJson.packageManager as string, pending, modifiedUpstream, capabilities, blocked };
 }
 
 /** Load the pinned fixture validator without copying its canonical schema into wrapper helpers. */
@@ -159,7 +223,8 @@ export async function diagnoseConsumer(root: string) {
       add("fixture", "pass", "Synthetic board matches the pinned schema and configured project; data loading remains pending");
     } catch { add("fixture", "error", "Run pnpm fixtures:check after setup; check the fixture schema, project reference and supporting pin"); }
   }
-  const unsupported: string[] = unavailableFeatures(config, upstream);
+  const unsupported: string[] = [...unavailableFeatures(config, upstream), ...consumer.blocked];
+  if (!await pinnedSchemaSupported(root, upstream, config)) unsupported.push(unsupportedSchema);
   if (config.features.customCloudflareCode) {
     const extensionScript = join(upstream, "scripts/consumer/extensions.ts");
     try {
@@ -168,6 +233,19 @@ export async function diagnoseConsumer(root: string) {
       const workers = readConsumerWorkers(root);
       add("extensions", "pass", `${workers.length} explicit custom Workers; run pnpm extensions:check to validate canonical configs`);
     } catch { add("extensions", "error", "Cannot validate custom Workers; check the manifest, contained paths and supported pin"); }
+  }
+  const skillScript = join(upstream, "scripts/consumer/skills.ts");
+  if (existsSync(join(root, "inferos.skills.json")) && existsSync(skillScript)) {
+    try {
+      const { checkConsumerSkills } = await import(pathToFileURL(skillScript).href);
+      const { packs, warnings } = checkConsumerSkills(root);
+      const skills = packs.reduce((total: number, pack: { skills: unknown[] }) => total + pack.skills.length, 0);
+      add("skills", warnings.length ? "warning" : "pass", warnings.length ? warnings.join("; ")
+        : `${skills} skills in ${packs.length} packs validate; run pnpm skills:upload against a running Workshop to publish them`);
+    } catch (error) {
+      add("skills", "error", error instanceof Error && error.message.includes("Cannot find package")
+        ? "Run pnpm run setup before validating skill packs" : `Skill packs are invalid: ${(error as Error).message}`);
+    }
   }
   if (config.inferops.mode === "remote") unsupported.push("remote InferOps");
   add("runtime", unsupported.length ? "error" : "warning", unsupported.length
@@ -179,14 +257,14 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|skills|skills-upload|skills-install|setup|dev");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
     if (!report.ok) process.exitCode = 1;
     return;
   }
-  const { config, provenance, upstream, packageManager, pending, modifiedUpstream } = checkConsumer(root);
+  const { config, provenance, upstream, packageManager, pending, modifiedUpstream, capabilities, blocked } = checkConsumer(root);
   if (command === "fixtures") {
     const result = await validateConsumerFixture(root, upstream);
     console.log(JSON.stringify({ ok: true, operation: "fixtures", ...result, runtimeReady: false }));
@@ -216,16 +294,34 @@ async function main() {
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
     return;
   }
+  if (command === "skills" || command === "skills-upload") {
+    const script = join(upstream, command === "skills" ? "scripts/consumer/skills.ts" : "packages/workshop-backend/scripts/upload-consumer-skills.ts");
+    if (!existsSync(script)) throw new Error("Pinned InferOS revision does not support skill packs; use a reviewed newer pin");
+    execFileSync(process.execPath, [script, root, ...(command === "skills" ? [] : process.argv.slice(3))], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
   if (command === "blueprints") {
     validateConsumerBlueprints(root, upstream);
     console.log(JSON.stringify({ ok: true, operation: "blueprints", source: consumerBlueprintDirectory(root) ? "wrapper" : "upstream" }));
     return;
   }
   if (command === "check") {
-    console.log(JSON.stringify({ ok: true, revision: config.upstream.revision, modifiedUpstream, packageManager, profile: config.profile, features: config.features, styling: config.styling, provenance, pending }, null, 2));
+    const schemaSupported = await pinnedSchemaSupported(root, upstream, config);
+    const ok = schemaSupported && !blocked.length;
+    console.log(JSON.stringify({ ok, schemaVersion: config.schemaVersion, revision: config.upstream.revision, modifiedUpstream, packageManager, profile: config.profile, features: config.features, styling: config.styling, capabilities, provenance, pending }, null, 2));
+    if (!schemaSupported) throw new Error(`Pinned revision does not support ${unsupportedSchema}`);
+    if (!ok) throw new Error(`Enabled capabilities are not supported by this installation: ${blocked.join(", ")}`);
     return;
   }
   const { pnpmCommand } = await import(pathToFileURL(join(upstream, "scripts/pnpm-command.ts")).href);
+  if (command === "skills-install") {
+    // The skills.sh CLI, pinned, writes .agents/skills/<name>, agent links and skills-lock.json in the
+    // wrapper. Packs publish those copies through their `include` lists; nothing is vendored twice.
+    const source = process.argv.length > 3 ? process.argv.slice(3) : ["anthropics/skills", "--skill", "skill-creator"];
+    const [binary, args] = pnpmCommand(["dlx", SKILLS_CLI, "add", ...source, "--yes"]);
+    execFileSync(binary, args, { cwd: root, stdio: "inherit" });
+    return;
+  }
   if (command === "setup") {
     const [binary, args] = pnpmCommand(["install", "--frozen-lockfile"]);
     execFileSync(binary, args, { cwd: upstream, stdio: "inherit" });
@@ -233,6 +329,8 @@ async function main() {
     return;
   }
   const requested = unavailableFeatures(config, upstream);
+  if (blocked.length) throw new Error(`Enabled capabilities are not supported by this installation: ${blocked.join(", ")}. No server was started.`);
+  if (!await pinnedSchemaSupported(root, upstream, config)) throw new Error(`Pinned revision does not support ${unsupportedSchema}. No server was started.`);
   if (requested.length || config.inferops.mode === "remote") {
     throw new Error("Requested consumer runtime adapters are not implemented; use check for details. No server was started.");
   }

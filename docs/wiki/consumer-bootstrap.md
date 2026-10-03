@@ -34,11 +34,14 @@ Review and commit the wrapper files and staged gitlink before publishing it. Ano
 | `inferos/` | Pinned Git submodule |
 | `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
+| `.agents/skills/skill-upload/SKILL.md` | Agent guidance for installing, authoring and publishing runtime skills (`/skill-upload`) |
+| `skills/{operate,build,shared}/` | Editable starter runtime skills for the Workshop agent, one pack per public Context Library collection |
+| `inferos.skills.json` | Pack titles, directories, `include` lists (for example `.agents/skills/skill-creator`) and `exclude` globs |
 | `views/operations.json` | Guarded starter composition; import it from the workspace Canvas page on supporting pins |
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
-| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/dev entrypoints |
+| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/skills:check/skills:install/skills:upload/dev entrypoints |
 
 ## What check proves
 
@@ -79,6 +82,30 @@ The command applies the configured `styling.siteName` (maximum 40 characters), i
 
 This initializes branding, instructions and the deployment fallback theme. Pins containing the density extension also initialize curated listing spacing: compact reduces desktop workspace-row and Explore card/list spacing. Mobile touch targets and gadget-owned layouts remain unchanged. Starter views, remote InferOps data and profile-specific component catalogs remain pending. Cloud application needs a separate explicit deployment-origin contract.
 
+
+## Skills
+
+A wrapper has two skill locations:
+
+- **Coding-agent skills** in `.agents/skills/`. Bootstrap ships `bootstrap-inferos` and `skill-upload`. Run `pnpm skills:install` to add Anthropic's `skill-creator` with the pinned skills.sh CLI (`skills@1.7.0`). To install something else, pass a source and skill: `pnpm skills:install vercel-labs/agent-skills --skill <name>`. The CLI writes `skills-lock.json` and links agent directories such as `.claude/skills`. Commit both.
+- **Runtime skills** in `skills/<pack>/<name>/SKILL.md`. These become Workshop agent skills and `/` commands in chat. `inferos.skills.json` maps each pack to one public Context Library collection, with titles `InferOS · Operate`, `InferOS · Build` and `InferOS · Shared`. A pack's `include` publishes an installed coding-agent skill as part of the pack. `exclude` drops `evals/`, `*-workspace/` and similar authoring output.
+
+Preload a fresh local deployment after `profile:init`, with the same private session variable:
+
+```bash
+pnpm skills:install                 # optional: skill-creator for coding agents and the build pack
+pnpm skills:check                   # offline: frontmatter, names, paths and size limits
+pnpm skills:upload --dry-run        # needs pnpm dev and INFEROS_ADMIN_SESSION
+pnpm skills:upload                  # or: pnpm skills:upload operate build
+```
+
+How `skills:upload` behaves:
+- If the administrator has not added the Context Library yet, it opts them in (a dry run only reports `provisionContextAccount`).
+- It creates a missing collection, writes only new or changed files, and checks that the Context Library indexed every `SKILL.md`.
+- Files that exist only in the collection, such as edits made in the UI, are listed as `stale`. They are deleted only with `--prune`.
+- The `skill-upload` agent skill walks a coding agent through this, including drafting a new skill with skill-creator.
+- Uploads reach the configured localhost port only. Deployed instances need the pending deployment-origin contract.
+
 ## Theme preference precedence
 
 The deployment theme is a fallback, not an enforced setting. A browser's saved `light`, `dark` or explicit `system` preference wins. Without a valid saved preference, the browser uses `ServerConfig.defaultTheme`, falling back to `system` on older deployments or before config loads. Choosing a theme keeps that choice for the session even if local storage is unavailable. A deployment fallback is never written into the browser's preference storage.
@@ -111,9 +138,9 @@ Views are wrapper-owned source. Bootstrap reruns preserve edits; changing `infer
 
 ## Profile defaults and explicit overrides
 
-New wrappers select `inferops-operations` and write an explicit snapshot: composable/durable layouts enabled, custom Workers disabled, InferOps Workspace name, compact listing density and system theme. Use a pin containing canvas support; older pins report unsupported flags instead of silently dropping them. Previously generated wrappers keep their explicit settings, including disabled views.
+New wrappers select `inferops-operations` and write an explicit snapshot: composable/durable layouts enabled, custom Workers disabled, InferOS name, compact listing density and system theme. Use a pin containing canvas support; older pins report unsupported flags instead of silently dropping them. Previously generated wrappers keep their explicit settings, including disabled views.
 
-On supporting pins, `features` and `styling` must be objects but their individual fields may be omitted. Resolution is base defaults → profile → explicit settings. `personal` inherits disabled features, My Workspace branding, comfortable density and system theme. `inferops-operations` supplies the defaults above. `pnpm inferos:check` reports the effective values and a `provenance` map (`default`, `profile`, `override`). An explicit false wins. For a temporary operations canvas, set `features.durableViews` to false; to disable the canvas entirely, set both view flags false. Disabling only composition while inheriting durable views is an error.
+On supporting pins, `features` and `styling` must be objects but their individual fields may be omitted. Resolution is base defaults → profile → explicit settings. `personal` inherits disabled features, InferOS branding, comfortable density and system theme. `inferops-operations` supplies the defaults above. `pnpm inferos:check` reports the effective values and a `provenance` map (`default`, `profile`, `override`). An explicit false wins. For a temporary operations canvas, set `features.durableViews` to false; to disable the canvas entirely, set both view flags false. Disabling only composition while inheriting durable views is an error.
 
 Generated settings are deliberately explicit: changing only the profile name does not rewrite them. Remove chosen nested fields to inherit a profile after verifying the pinned parser supports partial objects. Old pins may require every field; fully explicit settings remain the portable form. Profile resolution controls startup and initial customization; it never reapplies over existing administrator settings or authorizes a resource.
 

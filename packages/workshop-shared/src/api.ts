@@ -27,6 +27,7 @@ import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
+import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from "./operate-session.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
@@ -405,6 +406,68 @@ export const createAuthError = authErrors.create;
 export const getAuthErrorCode = authErrors.getCode;
 
 /**
+ * A person's operate session (docs/design/operate-mode.md, "Sessions"): one continuous operate
+ * chat plus a page state that is the replay of an ordered event log. The person's tabs, devices and
+ * (later) the operate agent all change the page through `dispatch()`, applied by the shared
+ * `applyOperateEvent`. The session holds references only and grants no access.
+ */
+export interface OperateSession extends RpcTarget {
+  /**
+   * Calls `subscriber` with the current snapshot, then again after every event, with the event that
+   * produced it. Dispose the returned stub to stop.
+   */
+  subscribe(subscriber: RpcStub<(update: OperateSessionUpdate) => void>): Promise<RpcStub<{}>>;
+
+  /**
+   * Appends `event` if `expectedSeq` is the session's current sequence number, and returns the new
+   * snapshot. Rejects with `OPERATE_SESSION_ERROR_CODES.conflict` when another change landed first,
+   * and with `invalidEvent` when the event doesn't apply to the current page. Either way nothing
+   * changes.
+   */
+  dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot>;
+
+  /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
+  listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
+
+  /**
+   * The owner-only workspace behind the session, where its operate chat runs. It is created on first
+   * call and is never listed by `listGadgets()`.
+   */
+  getWorkspace(): Promise<RpcStub<Overseer>>;
+}
+
+/** What `OperateSession.subscribe()` delivers: a snapshot, plus the event that produced it. */
+export type OperateSessionUpdate = OperateSessionSnapshot & {
+  /** The appended entry that produced this snapshot; absent on the first, current-state call. */
+  record?: OperateEventRecord;
+};
+
+/** Machine-readable codes for expected `OperateSession.dispatch()` failures. */
+export const OPERATE_SESSION_ERROR_CODES = {
+  /** Another tab or the agent appended an event first; resubscribe or retry at the new seq. */
+  conflict: "OPERATE_SESSION_CONFLICT",
+  /** The event is invalid in the session's current page state (see `applyOperateEvent`). */
+  invalidEvent: "OPERATE_SESSION_INVALID_EVENT",
+} as const;
+
+/** An expected `OperateSession.dispatch()` failure code. */
+export type OperateSessionErrorCode =
+    typeof OPERATE_SESSION_ERROR_CODES[keyof typeof OPERATE_SESSION_ERROR_CODES];
+
+const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
+  [OPERATE_SESSION_ERROR_CODES.conflict]:
+      "The operate session changed since you last saw it. Retry from the latest state.",
+  [OPERATE_SESSION_ERROR_CODES.invalidEvent]:
+      "That change is not valid for the operate session's current page.",
+});
+
+/** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */
+export const createOperateSessionError = operateSessionErrors.create;
+
+/** Reads the machine-readable code from an `OperateSession.dispatch()` failure. */
+export const getOperateSessionErrorCode = operateSessionErrors.getCode;
+
+/**
  * One user as listed in the deployment-wide user directory (see
  * `AuthenticatedApi.searchUsers`).
  */
@@ -612,9 +675,12 @@ export interface AuthenticatedApi extends RpcTarget {
    *   into a gadget), so provisional gadgets are useful to allow the user to write an initial
    *   chat message without explicitly creating a new gadget.
    *
+   * `kind` is what the workspace builds (see `WorkspaceKind`); omitted, it is the default, an app.
+   * It is stored before the workspace is returned, so its first chat already builds that kind.
+   *
    * TODO(multi-gadget): This should be renamed to newWorkspace().
    */
-  newGadget(): Promise<RpcStub<Overseer>>;
+  newGadget(kind?: WorkspaceKind): Promise<RpcStub<Overseer>>;
 
   /**
    * List metadata about all the user's Gadgets. Used to display the front-page listing.
@@ -853,6 +919,12 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getAdminApi(): Promise<RpcStub<AdminApi> | null>;
 
+  /**
+   * Returns the caller's operate session: exactly one per person, created on first use and shared
+   * live by every tab and device they open. See `OperateSession`.
+   */
+  getOperateSession(): Promise<RpcStub<OperateSession>>;
+
   // TODO:
   // - Edit permissions on a connected account.
 }
@@ -979,7 +1051,7 @@ export const MAX_SITE_NAME_LENGTH = 40;
  * What this deployment calls itself when the admin has not set a custom `siteName`. Also the
  * product's own name, so it appears in prose the server and UI address to the user.
  */
-export const DEFAULT_SITE_NAME = "Cloudflare OS";
+export const DEFAULT_SITE_NAME = "InferOS";
 
 /**
  * The name to display for this deployment. Accepts an unset or not-yet-loaded `siteName` so both
@@ -1636,10 +1708,30 @@ export type GadgetMetadata = {
    */
   defaultGadgetId?: WorkpieceId;
 
+  /**
+   * How the workspace runs and where it appears (see `WorkspaceKind`). Absent means "app": every
+   * workspace created before kinds existed, and records the owner's list stored before then.
+   */
+  kind?: WorkspaceKind;
+
   // TODO:
   // - created / modified / activity times
   // - icon? thumbnail?
 }
+
+/**
+ * What a workspace is, which decides exactly how it runs and where it is presented: an "app" is a
+ * full-screen gadget its users open (with a chat/app toggle), a "widget" is a small gadget shown as
+ * a tile on InferOps Canvas screens, and a "workflow" has no UI and runs on timed or event
+ * triggers. The kind changes only through an explicit `Overseer.setKind()`; nothing infers it.
+ */
+export type WorkspaceKind = "app" | "widget" | "workflow";
+
+/** Every `WorkspaceKind`, in the order they are offered. */
+export const WORKSPACE_KINDS: readonly WorkspaceKind[] = ["app", "widget", "workflow"];
+
+/** The kind a workspace has when none was ever set. */
+export const DEFAULT_WORKSPACE_KIND: WorkspaceKind = "app";
 
 /**
  * GadgetMetadata extended with timestamps. These are available when listing gadgets from the
@@ -2032,6 +2124,9 @@ export interface Overseer extends RpcTarget {
 
   /** Change the workspace title. */
   setTitle(title: string): Promise<void>;
+
+  /** Change the workspace kind (see `WorkspaceKind`). Build role only. */
+  setKind(kind: WorkspaceKind): Promise<void>;
 
   /** Pin or unpin this workspace in the user's list. */
   setPinned(pinned: boolean): Promise<void>;
@@ -3626,8 +3721,13 @@ export type AiToolCall = {
    * `blueprintNotes` is present for blueprint instantiations: formatted text describing the files
    * copied in and the bindings the blueprint expects the agent to wire up. Recorded so replay
    * doesn't have to re-fetch the blueprint (whose content may have changed since).
+   *
+   * `starterNotes` is present when the gadget started from its workspace kind's starter files
+   * instead (see `workspaceKindStarter`), naming the files copied in.
    */
-  output?: {gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string};
+  output?: {
+    gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string, starterNotes?: string,
+  };
 } | {
   /**
    * Create a new worktree workpiece: a file tree rooted at a git commit, private to the creating
