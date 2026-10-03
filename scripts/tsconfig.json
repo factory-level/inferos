@@ -20,12 +20,14 @@
   // The packages' Node-only build/import tools are excluded from their Worker tsconfigs and need the
   // same Node runtime and erasable-syntax checks as the repo-level scripts. So do the Worker configs,
   // which scripts/generate-worker-configs.ts imports under `node`.
-  // The profile, dev-setup and skill operators consume the full Workers RPC types as well as Node
+  // The profile, dev-setup, dev-verify and skill operators consume the full Workers RPC types as well as Node
   // globals. Their separate tsconfig.operator.json is checked by the backend build without widening
   // every build script.
   "exclude": [
     "../packages/workshop-backend/scripts/initialize-consumer-profile.ts",
     "../packages/workshop-backend/scripts/dev-setup.ts",
+    "../packages/workshop-backend/scripts/dev-verify.ts",
+    "../packages/workshop-backend/scripts/dev-workshop.ts",
     "../packages/workshop-backend/scripts/upload-consumer-skills.ts"
   ],
   "include": [

@@ -17,13 +17,14 @@
 // Deliberately local-only: it refuses any host but localhost, since it creates accounts and sends a
 // session to the target.
 
-import { argon2Sync } from "node:crypto";
 import { parseArgs } from "node:util";
-import { newWebSocketRpcSession, type RpcStub } from "capnweb";
-import type { AuthenticatedApi, Overseer, PublicApi } from "@gadgets/workshop-shared/api";
-import { SERVICE_SALT } from "@gadgets/workshop-shared/password-salt";
+import type { RpcStub } from "capnweb";
+import type { AuthenticatedApi, PublicApi } from "@gadgets/workshop-shared/api";
+import {
+  connectWorkshop, DEMO_WORKSPACE_TITLE, ensureWorkspace, INFEROPS_VENDOR_ID, localWorkshopUrl,
+  passwordHash,
+} from "./dev-workshop.ts";
 
-const DEMO_WORKSPACE_TITLE = "InferOps Canvas demo";
 const SCRIPTED_MODEL_ID = "scripted-inferops";
 
 const { values: options } = parseArgs({
@@ -41,17 +42,12 @@ const { values: options } = parseArgs({
       ? [arg, "http://localhost:11434"] : [arg]),
 });
 
-const base = new URL(options.url);
-if (base.hostname !== "localhost" && base.hostname !== "127.0.0.1") {
-  console.error("dev:setup only targets a local Workshop (localhost or 127.0.0.1)");
+let base: URL;
+try {
+  base = localWorkshopUrl(options.url);
+} catch (error) {
+  console.error(`dev:setup: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
-}
-
-/** The browser's password hash (see `PublicApi.login()`), derived with Node's own Argon2id. */
-function passwordHash(username: string, password: string): Uint8Array {
-  const salt = Buffer.concat([SERVICE_SALT, Buffer.from(username, "utf8")]);
-  return new Uint8Array(argon2Sync("argon2id",
-    { message: password, nonce: salt, parallelism: 1, passes: 3, memory: 65536, tagLength: 32 }));
 }
 
 async function signIn(api: RpcStub<PublicApi>): Promise<{ token: string; created: boolean }> {
@@ -75,8 +71,8 @@ async function ensureMockModel(user: RpcStub<AuthenticatedApi>, apiUrl: string):
 
 async function ensureInferOps(user: RpcStub<AuthenticatedApi>): Promise<"provisioned" | "already connected"> {
   const addable = await user.listAddableGatekeepers();
-  if (!addable.some(vendor => vendor.id === "inferops")) return "already connected";
-  await user.provisionAmbientAccount("inferops");
+  if (!addable.some(vendor => vendor.id === INFEROPS_VENDOR_ID)) return "already connected";
+  await user.provisionAmbientAccount(INFEROPS_VENDOR_ID);
   return "provisioned";
 }
 
@@ -88,17 +84,7 @@ async function ensureScreen(api: RpcStub<PublicApi>, user: RpcStub<Authenticated
   const template = config.canvasFeatures.catalog?.screens.find(screen => screen.id === templateId);
   if (!template) throw new Error(`No screen template "${templateId}"; add one with pnpm canvas add-screen`);
 
-  const existing = (await user.listGadgets()).find(workspace => workspace.title === DEMO_WORKSPACE_TITLE);
-  let overseer: RpcStub<Overseer>;
-  if (existing) {
-    overseer = user.openGadget(existing.id);
-  } else {
-    overseer = user.newGadget();
-    await overseer.setTitle(DEMO_WORKSPACE_TITLE);
-    // A workspace stays provisional (hidden, and eventually reaped) until it has activity; a chat
-    // with no agent is the lightest activity that keeps it.
-    await overseer.newChat("Workspace prepared by pnpm dev:setup.", null);
-  }
+  const { overseer } = await ensureWorkspace(user, DEMO_WORKSPACE_TITLE, "pnpm dev:setup");
   try {
     const workspaceId = (await overseer.getMetadata()).id;
     const screens = await overseer.listCanvases();
@@ -111,9 +97,7 @@ async function ensureScreen(api: RpcStub<PublicApi>, user: RpcStub<Authenticated
   }
 }
 
-const wsUrl = new URL("/api", base);
-wsUrl.protocol = base.protocol === "https:" ? "wss:" : "ws:";
-const api = newWebSocketRpcSession<PublicApi>(wsUrl.toString());
+const { api, close } = connectWorkshop(base);
 try {
   const { token, created } = await signIn(api);
   using user = await api.authenticate(token);
@@ -132,5 +116,5 @@ try {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 } finally {
-  api[Symbol.dispose]();
+  close();
 }
