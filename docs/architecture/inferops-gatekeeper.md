@@ -8,11 +8,12 @@ covers:
   - packages/workshop-backend/src/user.ts
   - packages/workshop-backend/src/auth/config.ts
   - packages/integration-tests/__tests__/inferops-isolation.test.ts
+  - packages/integration-tests/__tests__/inferops-live.test.ts
   - packages/integration-tests/src/inferops-fake.ts
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # InferOps gatekeeper
@@ -368,6 +369,38 @@ issue description in any Workers runtime log (`TestHarness.getLogs()`) or failur
 run. With `INFEROPS_ENABLED` turned off by a harness reload, a read through an existing binding
 fails `DISABLED`, a queued move is not applied and stays pending, and a new binding is refused,
 all without a request; turned back on, the read works and the queued move applies. Remaining
-gaps: it is fake-backed, so neither a live local InferOps run (#23's walkthrough) nor a cloud
-smoke has been recorded, and the stopgap connection and `use`-role viewers are not exercised by
-it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
+gaps: it is fake-backed (a live local run is recorded below, through the stopgap connection), no
+cloud smoke has been recorded, and `use`-role viewers are not exercised by it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
+
+### Live run
+
+`packages/integration-tests/__tests__/inferops-live.test.ts` is an opt-in suite, skipped unless
+`INFEROPS_LIVE_BASE_URL` is set (so CI never runs it), that drives the same real Workshop and
+gatekeeper Worker against a running InferOps and checks every step by also reading InferOps
+directly with the same token. It uses the local-development stopgap connection
+(`INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID`, `INFEROPS_WORKSPACE_SLUG`, no
+`INFERLAB_AUTH_ORIGIN`) on an auto-provisioned account, because InferOps refuses SSO codes for
+non-Google sessions (inferops ADR 0012) and so the per-person connect cannot complete against a
+stub-auth InferOps. Its file header lists the variables and the run command.
+
+Run on 2026-10-03 against InferOps `develop` at `9bc02d68` (`bun run dev up`, stub auth, seeded:
+tenant `acme`, workspace `operations`, project ENG) from InferOS `4a4504c` (main after #107) plus
+this suite, with an `owner` persona bearer token. All eight steps passed:
+
+| Step | Result |
+| --- | --- |
+| Bind and read | `inferops://acme.operations/project/board/ENG` bound; its five columns (Backlog, Todo, In Progress, Done, Cancelled) and every card at its revision match InferOps' own board; the read is recorded as an observation. |
+| Create | `createIssue` queued an action and nothing in InferOps; on approval ENG-9 (`c2b5fb00-952c-442a-97f1-33ca0172aac2`) existed exactly once, in Todo, at revision 39, and the board showed it at that revision. |
+| Update | Title and priority proposed at 39, InferOps unchanged until approval, then new values at revision 41. |
+| Transition | Move to In Progress at 41, applied on approval, revision 42. |
+| Stale revision | An update at revision 39 refused at proposal with `STALE_REVISION`; InferOps stayed at 42. |
+| Duplicate | Approving each of the three applied actions again refused (`not pending`); revision 42, one issue. |
+| Reload | After a harness configuration update restarted the Workers, the same binding read ENG-9 at revision 42. |
+| Policy refusal | Not run: no content-workflow project with a published approval policy exists in the workspace (`INFEROPS_LIVE_POLICY_PROJECT` unset). |
+
+Revisions are InferOps' own and are treated as opaque (an update advanced ENG-9 by two). A run with
+an expired persona token failed the first read with `UNAUTHORIZED` and wrote nothing. Each run
+leaves its `InferOS live <timestamp>` issue in place, since InferOps has no issue delete. Not
+proven by this run: per-person identity (every request carried one shared persona token; the live
+Google sign-in of #66 remains a manual step), a policy refusal against live data, and a cloud
+deployment.
