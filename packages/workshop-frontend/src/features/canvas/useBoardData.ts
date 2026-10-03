@@ -43,6 +43,19 @@ export const useDecidedActionInvalidation = (overseer: RpcStub<Overseer>): void 
   })
 }
 
+/**
+ * Re-read, in every open scope, any board an action of this workspace touched once it leaves
+ * `pending`. For a workspace that shows no boards itself but proposes moves on them, such as an
+ * operate session's: a decided move there changes the board a screen shows through its own
+ * workspace. Each scope re-reads through its own capability, so nothing crosses between them.
+ */
+export const useDecidedActionInvalidationInEveryScope = (overseer: RpcStub<Overseer> | null): void => {
+  useActionEntries(overseer, record => {
+    if (record.type !== 'action' || record.state === 'pending' || !record.resourceUrl) return
+    for (const { data } of adapters.values()) data.invalidate(record.resourceUrl)
+  })
+}
+
 /** The live state of one board card's request in the given scope, with its actions. */
 export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest): {
   state: BoardState

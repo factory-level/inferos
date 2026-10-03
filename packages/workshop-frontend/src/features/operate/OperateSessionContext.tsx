@@ -5,15 +5,29 @@ import {
   OPERATE_SESSION_ERROR_CODES,
   type OperateSession,
 } from '@gadgets/workshop-shared/api'
-import type { OperateEvent, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session'
+import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
 
 /** How long a conflicting dispatch waits for the newer snapshot before giving up. */
 const CONFLICT_WAIT_MS = 2000
 
+/** How many of the latest log entries a tab keeps, to say who last changed the page and how. */
+const RECENT_EVENTS = 20
+
+const mergeRecords = (held: OperateEventRecord[], more: OperateEventRecord[]) => {
+  const bySeq = new Map(held.map(record => [record.seq, record]))
+  for (const record of more) bySeq.set(record.seq, record)
+  return [...bySeq.values()].toSorted((a, b) => a.seq - b.seq).slice(-RECENT_EVENTS)
+}
+
 type OperateSessionValue = {
   /** The session's page as of its latest event; null until the first snapshot arrives. */
   snapshot: OperateSessionSnapshot | null
+  /**
+   * The latest log entries, oldest first: the tail as of opening, then each later one as it lands.
+   * Each names its actor, so the page can say what the operate agent did.
+   */
+  recentEvents: OperateEventRecord[]
   /** Set when the session could not be reached. */
   error: string | null
   /**
@@ -36,6 +50,7 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
   const [snapshot, setSnapshot] = useState<OperateSessionSnapshot | null>(null)
   const [session, setSession] = useState<{ stub: RpcStub<OperateSession> } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [recentEvents, setRecentEvents] = useState<OperateEventRecord[]>([])
   // The latest seq seen and the waiters for a newer one, outside render so dispatch reads them fresh.
   const latest = useRef<{ seq: number; waiters: Array<() => void> }>({ seq: 0, waiters: [] })
 
@@ -46,6 +61,16 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
     setSession({ stub })
     stub.subscribe(update => {
       if (cancelled) return
+      if (update.record) {
+        const record = update.record
+        setRecentEvents(held => mergeRecords(held, [record]))
+      } else {
+        // The first, current-state call: fetch the tail it summarizes. Live entries may land
+        // first; merging by seq keeps each once.
+        stub.listEvents(Math.max(0, update.seq - RECENT_EVENTS), RECENT_EVENTS).then(tail => {
+          if (!cancelled) setRecentEvents(held => mergeRecords(held, tail))
+        }).catch(caught => console.error('Failed to read the operate session log:', caught))
+      }
       if (update.seq < latest.current.seq) return
       latest.current.seq = update.seq
       setSnapshot({ seq: update.seq, state: update.state })
@@ -65,6 +90,7 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
       subscription?.[Symbol.dispose]()
       stub[Symbol.dispose]()
       setSession(null)
+      setRecentEvents([])
     }
   }, [authenticatedApi])
 
@@ -95,7 +121,7 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
   }
 
   return (
-    <OperateSessionContext.Provider value={{ snapshot, error, dispatch, session }}>
+    <OperateSessionContext.Provider value={{ snapshot, recentEvents, error, dispatch, session }}>
       {children}
     </OperateSessionContext.Provider>
   )

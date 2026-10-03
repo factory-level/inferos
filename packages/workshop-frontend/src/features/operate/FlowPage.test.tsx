@@ -35,7 +35,7 @@ afterEach(() => {
 })
 
 const render = (index: number, chatOpen = false) => act(() => root.render(
-  <FlowPage flow={{ ...FLOW, index }} chatOpen={chatOpen} onEvent={onEvent} />,
+  <FlowPage flow={{ ...FLOW, index }} chatOpen={chatOpen} onEvent={onEvent} sessionWorkspace={null} />,
 ))
 const button = (name: string) => {
   const found = [...container.querySelectorAll('button')]
