@@ -1,8 +1,8 @@
-// MOCK InferOps data source: the only module that holds or serves project data. It stands in for
-// the InferOps HTTP API until its external auth/idempotency contract is agreed (inferos#21), and
-// enforces the same rules that API will: project scope, state membership, workflow compatibility,
-// expected-revision checks and idempotent replay. Replace this module (keeping `openInferOpsClient`)
-// with an HTTP client to go live; nothing else in the gatekeeper reads data from anywhere else.
+// MOCK InferOps data source: the only module that holds project data. It is the default data source
+// (the demo host, and every test), beside the HTTP client in http-inferops.ts, and enforces the
+// rules the gatekeeper relies on: project scope, state membership, workflow compatibility,
+// expected-revision checks and idempotent replay. It advances a revision by one per move; InferOps
+// does not, and nothing may depend on it.
 //
 // One `MockInferOps` Durable Object per (host, account) holds a private copy of the seed fixture,
 // so each auto-provisioned account starts from the same demo board and its moves stay its own.

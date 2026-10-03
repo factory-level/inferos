@@ -545,6 +545,9 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_PORTAL_HIDDEN_SERVER_IDS", "MCP_ALLOW_INSECURE",
   ],
   "gatekeeper-mcp": ["MCP_ALLOW_INSECURE"],
+  // A live InferOps connection for local development. One token for the whole dev server is a
+  // stopgap until each person connects with their own InferOps sign-in (inferos#66).
+  "gatekeeper-inferops": ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"],
 };
 
 for (const gk of gatekeepers) {
