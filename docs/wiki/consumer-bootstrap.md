@@ -1,6 +1,6 @@
 ---
 title: Bootstrap a consuming repository
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Bootstrap a consuming repository
@@ -56,6 +56,44 @@ A rerun of the same command validates the pin and changes nothing: options never
 
 Not yet verified in a browser for this walkthrough: the Operate page and Kanban at narrow and wide widths, and a screen-reader pass. The Kumo kind picker's keyboard behaviour is covered by jsdom tests only.
 
+## Configure a customer from a reviewed intake
+
+A reviewed intake describes one customer: tenant and workspace, projects and their workflow kinds, requested capabilities, selected Wiki pillars, the operational inventory and the requirements. Its format is `scripts/consumer/intake.schema.json` in the pinned InferOS, and `scripts/consumer/fixtures/intake/acme-field-ops.json` is a clearly synthetic sample. Keep the customer's intake in the wrapper and apply it:
+
+```bash
+mkdir -p intake && cp inferos/scripts/consumer/fixtures/intake/acme-field-ops.json intake/acme.json
+pnpm inferos intake apply intake/acme.json
+pnpm inferos:check
+```
+
+What it does:
+
+- A version 1 `inferos.config.json` is migrated to version 2 first.
+- It switches on only the capabilities this pin implements. A `kanban` request turns on `INFEROPS_ENABLED` and `INFEROPS_AUTH`. A capability the pin cannot honour, such as `CODING_WORKBENCH_ENABLED` today, stays off and is reported.
+- It sets the `inferops-operations` profile.
+- With Kanban, it selects `gatekeeper-inferops` and adds a `customer-operations` screen template first in `inferos.canvas.json`, so `pnpm local seed` opens it. It also writes `views/customer-operations.json`. Both show one board per project, referenced as `inferops://<tenant>.<workspace>/project/board/<KEY>`.
+- It writes `intake-report.json` and `intake-report.md`. Every requirement is `supported`, `unsupported` or `custom-work`, with a reason, the capability or issue it maps to, and a drafted issue for each gap. Wiki pillars are recorded as pending [#87](https://github.com/factory-level/inferos/issues/87).
+- It runs the wrapper's `inferos:check` and rolls every write back if that fails.
+
+It never deploys, starts a server or contacts InferOps. A draft intake (`review.status: "draft"`) is refused. Validation errors name the field, never the value.
+
+`.inferos/intake-managed.json` records each value the intake wrote. Commit it. A rerun:
+
+- updates a managed value only if it still holds what the intake last wrote;
+- keeps a value you changed and reports it as `customized`;
+- reports a `conflict`, and does not overwrite your value, when the intake's value changed too (or your value predates the first apply);
+- never touches a field the intake does not manage, such as branding or the port.
+
+Resolve a conflict by setting the value by hand, then rerun. `inferops.targetRef` and `fixtures/project-board.json` stay on the synthetic fixture board.
+
+To file the drafted gap issues, name the repository explicitly. This uses your `gh` login, and a rerun never files the same requirement twice:
+
+```bash
+pnpm inferos intake apply intake/acme.json --file-issues acme-corp/acme-shell
+```
+
+`pnpm inferos config migrate` rewrites a version 1 `inferos.config.json` as version 2 on its own. It carries over whether the InferOps gatekeeper runs, and refuses without writing when the pin could not honour the result. Wrappers bootstrapped before the `inferos` script was added need the newer `.inferos/runtime.ts` and a `"inferos": "node .inferos/runtime.ts"` script first.
+
 ## Wrapper `pnpm local`
 
 On a pin containing `scripts/local/lifecycle.ts`, `pnpm local status|start|stop|seed|verify|reset|logs` runs the pinned lifecycle operator from `inferos/`, with the wrapper's `local.port` as `VITE_BACKEND_HOST` (`--port` still overrides it). Flags and exit codes are the operator's (see [local development](../architecture/local-development.md#lifecycle-commands)). Two arguments are added so it operates the wrapper rather than the pinned checkout:
@@ -81,7 +119,7 @@ State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as wit
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
-| `package.json` | Pinned package manager and check/setup/doctor/blueprints:check/profile:init/local/skills:check/skills:install/skills:upload/dev entrypoints |
+| `package.json` | Pinned package manager and inferos (`intake apply`, `config migrate`)/check/setup/doctor/blueprints:check/profile:init/local/skills:check/skills:install/skills:upload/dev entrypoints |
 
 ## What check proves
 
@@ -161,6 +199,8 @@ The tests cover fresh creation, recursive clone, paths with spaces, customized r
 ## Custom Cloudflare Workers in local development
 
 New wrappers include `inferos.extensions.json` and a disabled `workers/hello` example. Set `features.customCloudflareCode` to true, run `pnpm extensions:check`, then `pnpm dev`. The example returns JSON at `/extensions/hello`. `extensions:check` executes trusted canonical config modules and writes generated `wrangler.consumer.jsonc` files; review that code before running it. A disabled flag does not read the manifest or import its configs. Disabling it and restarting removes activation while retaining source and local state.
+
+The same flag runs the wrapper's own gatekeepers. Each lives in `gatekeepers/gatekeeper-<slug>/` with a `cloudflare.config.ts` whose Worker name is the directory name. `pnpm gatekeepers:generate` writes its `wrangler.jsonc` beside it (commit it), and `pnpm gatekeepers:check` exits 1 when one has drifted from its source. `pnpm dev` binds each to the backend as `GATEKEEPER_<SLUG>` and serves its callbacks at `/gatekeeper/<slug>` on the wrapper's own origin. A directory with no config is a library and never runs; symbolic links and names the pinned InferOS already uses are rejected. The gatekeeper's imports must resolve from the wrapper (for example `../../inferos/scripts/worker-config.ts`), and cloud packaging does not include it yet.
 
 The v1 manifest is `{ "schemaVersion": 1, "workers": [{ "id": "hello", "directory": "workers/hello" }] }`. IDs are unique lowercase hyphenated slugs; directories and entrypoints stay under the wrapper's `workers/`. Each entry requires `cloudflare.config.ts`, whose Worker name is `consumer-<id>`. The generated config uses the same canonical converter as native Workers and retains bindings/migrations. Never edit generated configs. Only explicit entries are activated; library directories are not discovered automatically.
 

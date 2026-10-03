@@ -23,7 +23,7 @@ The detailed current state lives in [consumer configuration](consumer-configurat
 | Path | Responsibility |
 | --- | --- |
 | `scripts/consumer/config.ts` | `CAPABILITY_NAMES`, the version 2 parser, `CAPABILITY_REQUIREMENTS`, `LEGACY_FLAG_COMPATIBILITY`, `migrateConsumerConfig` and `inferOpsAuthRequested`. |
-| `scripts/consumer/runtime.ts` | `capabilitySources` (the pinned file that makes an installation honour each capability), `unsupportedCapabilities` and the `inferos:check` capability report. |
+| `scripts/consumer/runtime.ts` | `capabilitySources` (the pinned file that makes an installation honour each capability), `unsupportedCapabilities`, the `inferos:check` capability report and `migrateWrapperConfig` (`pnpm inferos config migrate`). |
 | `scripts/dev-server-config.ts` | `resolveInferOpsEnabled`, `resolveCodingWorkbenchEnabled` and the InferLab sign-in variables, used by `run-dev-server.ts`. |
 | `custom-gatekeepers/gatekeeper-inferops/src/enablement.ts` | Server enforcement of `INFEROPS_ENABLED`: every data-source call is refused with `DISABLED` while it is off. |
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | Server enforcement of `CODING_WORKBENCH_ENABLED` and the wrapper's repository allowlist: the dispatch resource kind is refused, and every call of a dispatch binding fails `DISABLED`, while it is off. |
@@ -46,13 +46,12 @@ A version 2 file resolves each capability from its default (off), then its profi
 
 ## Configuration
 
-`inferos.config.json` `schemaVersion: 2` with a required `capabilities` object. New wrappers are still written as version 1, and no wrapper command runs the migration. In-repo, without a wrapper, the shell's `INFEROPS_ENABLED` (`"true"` or `"false"`, default on), `CODING_WORKBENCH_ENABLED` (default off) with `CODING_WORKBENCH_REPOS`, and `AUTH_GATEKEEPERS`/`INFERLAB_AUTH_ORIGIN` stand in.
+`inferos.config.json` `schemaVersion: 2` with a required `capabilities` object. New wrappers are written as version 1 unless bootstrapped with `--capability`. `pnpm inferos config migrate` migrates an existing wrapper, and `pnpm inferos intake apply` migrates before it switches on the capabilities a reviewed intake asks for that the pin supports ([customer onboarding](customer-onboarding.md)). In-repo, without a wrapper, the shell's `INFEROPS_ENABLED` (`"true"` or `"false"`, default on), `CODING_WORKBENCH_ENABLED` (default off) with `CODING_WORKBENCH_REPOS`, and `AUTH_GATEKEEPERS`/`INFERLAB_AUTH_ORIGIN` stand in.
 
 ## Divergences from Design
 
 - The [design](../design/feature-capabilities.md) still says current code accepts only the legacy flags. Since #84 the eight names are accepted in version 2; that sentence describes the state before #84.
 - The design requires each capability to be enforced at server operations, declared tools, the CLI and the UI, with a named owner, default and disable policy. Only `INFEROPS_ENABLED` has all of these recorded. `INFEROPS_AUTH` has startup and sign-in enforcement only. `CODING_WORKBENCH_ENABLED` is enforced by the gatekeeper and has a default (off), but no declared-tool, CLI or UI surface yet. None has a cloud deployment path: the release manifest sets neither `INFEROPS_ENABLED` (so cloud installs are always on) nor `CODING_WORKBENCH_ENABLED` (always off).
-- The design asks for an explicit migration. `migrateConsumerConfig` exists as a function, but no command applies it to a wrapper.
 
 ## Open Questions
 

@@ -1,11 +1,11 @@
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CAPABILITY_NAMES, parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
+import { CAPABILITY_NAMES, migrateConsumerConfig, parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
 import type { CapabilityName, ConsumerConfig, SettingSource } from "./config.ts";
 
 /** Select the wrapper's complete format set, retaining upstream defaults for older empty wrappers. */
@@ -56,7 +56,8 @@ export async function assertLocalPortAvailable(port: number): Promise<void> {
 /** The skills.sh CLI version `skills:install` runs, pinned so installs are reproducible. */
 export const SKILLS_CLI = "skills@1.7.0";
 
-const featureSources = {
+/** The pinned source that makes an installation honour each `features` flag. */
+export const featureSources = {
   // The composition contract, not a UI file: UI files are renamed as the page evolves.
   composableViews: "packages/workshop-shared/src/canvas.ts",
   durableViews: "packages/workshop-backend/src/canvas-store.ts",
@@ -113,6 +114,42 @@ export function reportCapabilities(resolved: ReturnType<typeof resolveConsumerCo
     const state = !installed(upstream, sources[name]) ? "unsupported" : requested ? "enabled" : "supported";
     return [name, { state, requested, source: provenance.capabilities?.[name] ?? "default" }];
   })) as Record<CapabilityName, CapabilityStatus>;
+}
+
+/**
+ * Whether the wrapper runs the InferOps gatekeeper today. With no `inferos.canvas.json` the launcher binds
+ * every custom gatekeeper the pin builds; otherwise `customGatekeepers` decides ("all" or a list).
+ */
+export function inferOpsGatekeeperSelected(root: string, upstream: string): boolean {
+  const built = existsSync(join(upstream, "custom-gatekeepers/gatekeeper-inferops/wrangler.jsonc"));
+  const path = join(root, "inferos.canvas.json");
+  if (!existsSync(path)) return built;
+  let selected: unknown;
+  try { selected = JSON.parse(readFileSync(path, "utf8"))?.customGatekeepers; } catch { throw new Error("inferos.canvas.json is not valid JSON"); }
+  return selected === "all" ? built : Array.isArray(selected) && selected.includes("gatekeeper-inferops") && built;
+}
+
+/**
+ * Rewrite a version 1 `inferos.config.json` as version 2 in place (`pnpm inferos config migrate`), carrying
+ * over whether the gatekeeper runs. Refuses, writing nothing, when the pin could not honour the result.
+ * A version 2 file is left untouched.
+ */
+export async function migrateWrapperConfig(root: string, upstream: string) {
+  const path = join(root, "inferos.config.json");
+  const input = JSON.parse(readFileSync(path, "utf8"));
+  if (parseConsumerConfig(input).schemaVersion === 2) return { ok: true, operation: "config-migrate", migrated: false, schemaVersion: 2 };
+  const migrated = migrateConsumerConfig(input, { inferOpsGatekeeperSelected: inferOpsGatekeeperSelected(root, upstream) });
+  const config = parseConsumerConfig(migrated);
+  const blocked = unsupportedCapabilities(config, upstream);
+  if (blocked.length) throw new Error(`Migration would enable capabilities this installation does not support: ${blocked.join(", ")}. Nothing was written.`);
+  const script = join(upstream, "scripts/consumer/config.ts");
+  let readable = existsSync(script);
+  if (readable) {
+    try { (await import(pathToFileURL(script).href)).parseConsumerConfig(migrated); } catch { readable = false; }
+  }
+  if (!readable) throw new Error(`Pinned revision does not support ${unsupportedSchema}. Nothing was written.`);
+  writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
+  return { ok: true, operation: "config-migrate", migrated: true, schemaVersion: 2, capabilities: config.schemaVersion === 2 ? config.capabilities : null };
 }
 
 /** The pinned launcher parses the same file, so a version 2 file needs a pin whose parser accepts it. */
@@ -261,7 +298,7 @@ export async function diagnoseConsumer(root: string) {
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "skills", "skills-upload", "skills-install", "setup", "dev"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|skills|skills-upload|skills-install|setup|dev");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "skills", "skills-upload", "skills-install", "setup", "dev", "intake", "config"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|skills|skills-upload|skills-install|setup|dev|intake|config");
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));
@@ -269,6 +306,21 @@ async function main() {
     return;
   }
   const { config, provenance, upstream, packageManager, pending, modifiedUpstream, capabilities, blocked } = checkConsumer(root);
+  if (command === "config") {
+    if (process.argv[3] !== "migrate" || process.argv.length !== 4) throw new Error("Usage: pnpm inferos config migrate");
+    console.log(JSON.stringify(await migrateWrapperConfig(root, upstream), null, 2));
+    return;
+  }
+  if (command === "intake") {
+    const script = join(upstream, "scripts/consumer/intake.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision does not support customer intake; select a reviewed newer pin");
+    const [action, file, ...rest] = process.argv.slice(3);
+    if (action !== "apply" || !file) throw new Error("Usage: pnpm inferos intake apply <file> [--file-issues OWNER/REPO]");
+    // The pinned script prints its own result or error; relay only its exit status.
+    const result = spawnSync(process.execPath, [script, "apply", root, resolve(file), ...rest], { cwd: upstream, stdio: "inherit" });
+    process.exitCode = result.status ?? 1;
+    return;
+  }
   if (command === "fixtures") {
     const result = await validateConsumerFixture(root, upstream);
     console.log(JSON.stringify({ ok: true, operation: "fixtures", ...result, runtimeReady: false }));
@@ -290,6 +342,12 @@ async function main() {
     const script = join(upstream, "scripts/consumer/extensions.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support custom Workers");
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
+  if (command === "gatekeepers") {
+    const script = join(upstream, "scripts/consumer/gatekeepers.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision does not support wrapper gatekeepers; use a reviewed newer pin");
+    execFileSync(process.execPath, [script, root, ...process.argv.slice(3)], { cwd: upstream, stdio: "inherit" });
     return;
   }
   if (command === "profile") {
@@ -342,8 +400,17 @@ async function main() {
   }
   await assertStartable(root, { config, upstream, blocked, modifiedUpstream });
   await assertLocalPortAvailable(config.local.port);
+  await relayPinned(upstream, [join(upstream, "scripts/run-local.ts"), ...devLaunchArgs(root, config)], launchEnv(root, config));
+}
+
+/**
+ * The pinned `run-local.ts` arguments `dev` passes: the wrapper's own `local.port`, so two wrappers
+ * listen apart, and `--consumer-root` whenever the wrapper has anything for the launcher to read
+ * (a version 2 file's capabilities, or any feature flag, `customCloudflareCode` included).
+ */
+export function devLaunchArgs(root: string, config: ConsumerConfig): string[] {
   const consumerRoot = config.schemaVersion === 2 || Object.values(config.features).some(Boolean) ? ["--consumer-root", root] : [];
-  await relayPinned(upstream, [join(upstream, "scripts/run-local.ts"), "--port", String(config.local.port), ...consumerRoot], launchEnv(root, config));
+  return ["--port", String(config.local.port), ...consumerRoot];
 }
 
 /** Everything `dev` and `local start` refuse to start without; the port is checked by each launcher itself. */
