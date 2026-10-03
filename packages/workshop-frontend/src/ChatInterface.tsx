@@ -926,6 +926,10 @@ interface ChatInterfaceProps {
   // The output format a workpiece was built as, so a created-app card can name and draw it as the
   // Document (or whatever) it is rather than a generic app.
   outputOfWorkpiece: (gadgetId: WorkpieceId) => BlueprintOutput | undefined;
+
+  // An operate session's chat: its workspace capability denies every authoring method, so
+  // controls that could only fail there (enabling or disabling a bound hook) are not offered.
+  operateOnly?: boolean;
 }
 
 // Whether a chat proposes changes the client can act on: the server delivers the touched
@@ -1047,6 +1051,7 @@ function ChatInterface({
   constrainChatWidth,
   onOpenGadget,
   outputOfWorkpiece,
+  operateOnly = false,
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
@@ -3236,7 +3241,7 @@ function ChatInterface({
                   </div>
                 )}
               </div>
-              {!isDeleted && (
+              {!isDeleted && !operateOnly && (
                 <div className="ml-3 flex flex-shrink-0 items-center self-center">
                   <HookToggle
                     enabled={log.enabled}

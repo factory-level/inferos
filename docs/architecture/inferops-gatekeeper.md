@@ -7,6 +7,8 @@ covers:
   - packages/workshop-shared/src/gatekeeper.ts
   - packages/workshop-backend/src/user.ts
   - packages/workshop-backend/src/auth/config.ts
+  - packages/integration-tests/__tests__/inferops-isolation.test.ts
+  - packages/integration-tests/src/inferops-fake.ts
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
@@ -280,9 +282,9 @@ missing a button.
 - The mock still advances a revision by one per transition. Nothing depends on that.
 - InferOps accepts mixed-case project identifiers; the resource grammar accepts uppercase keys
   only, so such a project is listed by the picker but cannot be bound.
-- The Kanban gadget and the canvas do not read `Issue.pending` yet; they mark moves they requested
-  themselves until the next refresh, and a provisional create card is draggable like any other
-  (a move of it fails `NOT_FOUND`).
+- The Kanban gadget does not read `Issue.pending` yet; it marks moves it requested itself until the
+  next refresh, and a provisional create card is draggable like any other (a move of it fails
+  `NOT_FOUND`). The canvas Kanban reads it (see [InferOps canvas](inferops-canvas.md#kanban-board)).
 - The mock starts a created issue at revision 1 and numbers it after the highest existing key.
 
 ## Open Questions
@@ -313,8 +315,8 @@ mismatch, replay of one idempotency key, create and update request shapes and he
 whose response was lost retried under the same key into one issue, update replay, no PATCH for an
 issue of another project, error mapping (400, 404, 409 conflict and workflow mismatch, 5xx, 403
 workflow-policy refusal), rejected credential, 5xx, redirect, non-JSON and
-malformed responses, and connection configuration. The gatekeeper has no test that runs its
-sessions over the HTTP client. `__tests__/inferlab-login.test.ts` covers origin validation,
+malformed responses, and connection configuration. The gatekeeper's own tests never run its
+sessions over the HTTP client; the integration suite below does. `__tests__/inferlab-login.test.ts` covers origin validation,
 `providesAuth`, the authorize redirect, the PKCE exchange, the sign-in's logout and handoff,
 single-use links and states, forged states, InferLab errors, rejected exchanges and unverified
 emails. `__tests__/account.test.ts` drives connected accounts against a fake InferLab and InferOps
@@ -332,4 +334,40 @@ create and an update proposed before the session ended not applied after it.
 or third label) and keeps the configurator's copy in step, and `http-inferops.test.ts` the
 `GET /workspaces` parsing and the stopgap's workspace slug.
 `packages/bundled-blueprints/blueprints/inferops-kanban/__tests__/` covers the gadget's server and
-board rules. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
+board rules.
+
+`packages/integration-tests/__tests__/inferops-isolation.test.ts` is the end-to-end isolation suite
+(#23): the real Workshop and the real gatekeeper Worker under `createTestHarness`, driven over the
+Workshop's RPC API, against a fake InferLab and InferOps (`packages/integration-tests/src/inferops-fake.ts`)
+behind the network interceptor, with no request escaping it. The gatekeeper runs with
+`INFERLAB_AUTH_ORIGIN` and `INFEROPS_BASE_URL` set and no stopgap token, so every case uses a
+person's own account from the real connect flow: `connectAccount`, the gatekeeper's redirect to
+`/authorize`, the `/oauth` callback whose PKCE exchange the fake verifies, `GET /workspaces`, and
+the handoff ticket redeemed with `completeConnectHandoff` (a reconnect redeems it over a second
+session, as the popup does). The fake has two workspaces of tenant `acme` (`operations` with ENG
+and WEB, `knowledge` with OPS), people with mutable memberships, decimal-string revisions, writes
+replayed by idempotency key, revocable sessions, a 503 switch for reads and for writes, and a
+switch that commits a write and then drops the connection. It covers: a board read recorded as an
+observation, with only the person's token and resolved workspace on every request and no
+description on the wire to the caller; a workspace the person lacks, a missing workspace and a
+missing project refused with one message shape and no request for the unheld workspace; another
+workspace's project key, a changed tenant label (resolves only to the person's own workspace, per
+ADR 0005), the API host as authority, and malformed authorities; a session bound to ENG unable to
+open an issue of WEB (same workspace) or OPS; a collaborator without the project refused at
+`openGadget` before any request with their token, and one with it verified with their own token
+and seeing board data but no credential; writes queued without a request, one write per approval
+with an idempotency key, a second approval refused, a stale revision refused at proposal and at
+apply with nothing written; a create and an update whose responses were lost after commit retried
+under the same key into one write; a session revoked at InferLab failing reads (`UNAUTHORIZED`)
+and applies with nothing written, the account marked expired, and a reconnect restoring both; a
+5xx surfacing `UNAVAILABLE` with nothing committed and a retry succeeding; a membership dropped in
+InferOps refused by InferOps (`FORBIDDEN`) and, after a reconnect, by the gatekeeper before any
+request, for old and new bindings alike; a disconnect signing the session out and failing the
+account's bindings without a request; and no access token, refresh token, `Bearer` header or
+issue description in any Workers runtime log (`TestHarness.getLogs()`) or failure message of the
+run. With `INFEROPS_ENABLED` turned off by a harness reload, a read through an existing binding
+fails `DISABLED`, a queued move is not applied and stays pending, and a new binding is refused,
+all without a request; turned back on, the read works and the queued move applies. Remaining
+gaps: it is fake-backed, so neither a live local InferOps run (#23's walkthrough) nor a cloud
+smoke has been recorded, and the stopgap connection and `use`-role viewers are not exercised by
+it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.

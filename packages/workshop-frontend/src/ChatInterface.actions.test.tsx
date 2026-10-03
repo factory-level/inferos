@@ -84,7 +84,7 @@ function withChatApi(
 
 function renderChat(
   overseer: RpcStub<Overseer>,
-  props: { restricted?: boolean, selectedChatId?: number } = {},
+  props: { restricted?: boolean, selectedChatId?: number, operateOnly?: boolean } = {},
 ) {
   return testRoot.render(
     <ChatInterface
@@ -100,6 +100,7 @@ function renderChat(
       onDiscardConsoleLogs={() => {}}
       onOpenGadget={() => {}}
       outputOfWorkpiece={() => undefined}
+      operateOnly={props.operateOnly}
     />,
   )
 }
@@ -288,4 +289,35 @@ describe('action fields', () => {
       expect(document.body.textContent).toContain('Send the following email to alice@example.com:')
     })
   }
+})
+
+describe('operate-only chat', () => {
+  const hookLog = entry(1, {
+    type: 'bindHook', hookId: 3, enabled: true, state: 'approved',
+    description: { title: 'New issues', description: 'Wakes on new issues.' },
+  })
+
+  async function renderHookCard(operateOnly: boolean) {
+    const server = makeOverseer()
+    const chat = withChatApi(server, undefined, [
+      { id: 1, title: 'Chat', started: new Date(), lastActive: new Date() },
+    ])
+    await renderChat(server.overseer, { selectedChatId: 1, operateOnly })
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [] })
+    chat.emitMessage({ ...actionMessage, actionLog: hookLog } as AiChatMessage)
+  }
+
+  const hookToggle = () => document.querySelector('[aria-label="Disable hook"]')
+
+  it('offers no hook toggle, which the operate capability would refuse', async () => {
+    await renderHookCard(true)
+    expect(document.body.textContent).toContain('Hook: New issues')
+    expect(hookToggle()).toBeNull()
+  })
+
+  it('keeps the hook toggle in a Build chat', async () => {
+    await renderHookCard(false)
+    expect(hookToggle()).not.toBeNull()
+  })
 })

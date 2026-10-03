@@ -1,9 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent } from 'react'
-import type { Board, Issue, State } from '@inferos/gatekeeper-inferops/src/types'
+import { Button } from '@cloudflare/kumo'
+import { Plus } from '@phosphor-icons/react'
+import type { Board, Issue, IssueChanges, NewIssue, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
-import type { MoveResult, PendingMove } from './boardData'
+import type { PendingChange, PendingMove, ProposalResult } from './boardData'
 import { KanbanCard } from './KanbanCard'
-import { decidedMoves, moveTargets, pendingMoveOf, sortIssues, stateOf, type MoveDecision } from './kanbanBoard'
+import { KanbanIssueDialog } from './KanbanIssueDialog'
+import { decidedChanges, decidedMoves, moveTargets, pendingMoveOf, sortIssues, stateOf, type ChangeDecision, type MoveDecision } from './kanbanBoard'
 
 /** `embedded`: fixed-width columns that scroll sideways in the card's cell. `full`: columns share the width and the height. */
 export type KanbanLayout = 'embedded' | 'full'
@@ -13,6 +16,8 @@ export type KanbanBoardProps = {
   /** The columns this presentation shows; moves may still target any state of the board. */
   columns: Board['columns']
   pending: readonly PendingMove[]
+  /** Creates and edits this scope proposed that the board does not show as pending yet. */
+  changes: readonly PendingChange[]
   /**
    * Actions in the action log awaiting approval, by the identifier of the issue they move: the
    * agent's, a gadget's, or a person's from another surface, which this board did not propose.
@@ -20,7 +25,11 @@ export type KanbanBoardProps = {
   awaiting: ReadonlyMap<string, BoardActivityItem>
   layout: KanbanLayout
   /** Proposes the move through the approval path with the issue's revision; the result is announced. */
-  onMove: (issue: Issue, toState: State) => Promise<MoveResult>
+  onMove: (issue: Issue, toState: State) => Promise<ProposalResult>
+  /** Proposes a new issue (in a column's state) through the approval path. */
+  onCreate: (issue: NewIssue) => Promise<ProposalResult>
+  /** Proposes an edit of the issue at its revision through the approval path. */
+  onUpdate: (issue: Issue, changes: IssueChanges) => Promise<ProposalResult>
 }
 
 type Announcement = { text: string; tone: 'info' | 'error' }
@@ -33,50 +42,71 @@ const today = () => new Date().toISOString().slice(0, 10)
 const issueCard = (root: HTMLElement, issueId: string) =>
   [...root.querySelectorAll<HTMLElement>('[data-issue-id]')].find(card => card.dataset.issueId === issueId)
 
+const changeAnnouncement = (decision: ChangeDecision): string => decision.kind === 'update'
+  ? decision.outcome === 'applied' ? `Edit of ${decision.identifier} applied.` : `Edit of ${decision.identifier} was rejected; it keeps its previous values.`
+  : decision.outcome === 'applied' ? `New issue ${decision.identifier} created: ${decision.title}.` : `New issue "${decision.title}" was rejected.`
+
 /**
  * The board: a column per state with its issue cards. Moves go through `onMove` only. A card
  * stays where the authoritative board puts it, showing its pending move; once the gatekeeper
  * simulates the move the board re-read places it in the target column, and a decision (applied
  * or rejected) is announced and marked on the card. Focus follows a card across columns.
+ *
+ * Each column offers a new issue in its state, and each card an edit, both through `onCreate` and
+ * `onUpdate`. Once queued they show as the gatekeeper's provisional card or overlaid values,
+ * marked waiting for approval; the board read that drops the marker decides them, which is
+ * announced too (whoever proposed them, as the board alone cannot tell).
  */
-export const KanbanBoard = ({ board, columns, pending, awaiting, layout, onMove }: KanbanBoardProps) => {
+export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout, onMove, onCreate, onUpdate }: KanbanBoardProps) => {
   const instructionsId = useId()
   const root = useRef<HTMLDivElement>(null)
   // The issue whose card has focus; restored when its card re-mounts in another column.
   const focused = useRef<string | null>(null)
   const seen = useRef<readonly PendingMove[]>(pending)
+  const seenBoard = useRef<Board>(board)
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>())
   const [dragging, setDragging] = useState<Issue | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState<Announcement | null>(null)
   const [decisions, setDecisions] = useState<ReadonlyMap<string, MoveDecision>>(new Map())
+  const [editDecisions, setEditDecisions] = useState<ReadonlyMap<string, Extract<ChangeDecision, { kind: 'update' }>>>(new Map())
 
-  const forget = (issueIds: string[]) => setDecisions(previous => {
-    const next = new Map(previous)
-    for (const id of issueIds) next.delete(id)
-    return next
-  })
+  const forget = (issueIds: string[]) => {
+    const without = <T,>(previous: ReadonlyMap<string, T>) => {
+      const next = new Map(previous)
+      for (const id of issueIds) next.delete(id)
+      return next
+    }
+    setDecisions(without)
+    setEditDecisions(without)
+  }
+  const later = (issueIds: string[]) => {
+    if (issueIds.length === 0) return
+    const timer = setTimeout(() => { timers.current.delete(timer); forget(issueIds) }, APPLIED_MARK_MS)
+    timers.current.add(timer)
+  }
 
   // The adapter drops an awaiting move once the authoritative board decided it; what the board
-  // then shows for the issue says how.
+  // then shows for the issue says how. Creates and edits are decided by the board alone: the read
+  // that no longer marks them pending.
   useEffect(() => {
     const decided = decidedMoves(seen.current, pending, board)
+    const changed = decidedChanges(seenBoard.current, board)
     seen.current = pending
-    if (decided.length === 0) return
+    seenBoard.current = board
+    if (decided.length === 0 && changed.length === 0) return
     setDecisions(previous => new Map([...previous, ...decided.map(decision => [decision.issueId, decision] as const)]))
-    const applied = decided.filter(decision => decision.outcome === 'applied').map(decision => decision.issueId)
-    if (applied.length > 0) {
-      const timer = setTimeout(() => { timers.current.delete(timer); forget(applied) }, APPLIED_MARK_MS)
-      timers.current.add(timer)
-    }
+    const edits = changed.filter(decision => decision.kind === 'update')
+    setEditDecisions(previous => new Map([...previous, ...edits.map(decision => [decision.issueId, decision] as const)]))
+    later([...decided, ...edits].filter(decision => decision.outcome === 'applied').map(decision => decision.issueId))
     const issues = new Map(board.columns.flatMap(column => column.issues.map(issue => [issue.id, issue] as const)))
     setAnnouncement({
-      tone: decided.some(decision => decision.outcome === 'rejected') ? 'error' : 'info',
-      text: decided.map(decision => {
+      tone: [...decided, ...changed].some(decision => decision.outcome === 'rejected') ? 'error' : 'info',
+      text: [...decided.map(decision => {
         const label = issues.get(decision.issueId)?.identifier ?? 'An issue'
         const target = stateOf(board, decision.toStateId)?.name ?? 'another state'
         return decision.outcome === 'applied' ? `${label} moved to ${target}.` : `Move of ${label} to ${target} was rejected; it stays where it was.`
-      }).join(' '),
+      }), ...changed.map(changeAnnouncement)].join(' '),
     })
   }, [pending, board])
   useEffect(() => () => { for (const timer of timers.current) clearTimeout(timer) }, [])
@@ -86,6 +116,24 @@ export const KanbanBoard = ({ board, columns, pending, awaiting, layout, onMove 
     if (!id || !root.current || root.current.contains(document.activeElement)) return
     issueCard(root.current, id)?.focus()
   }, [columns, pending])
+
+  const create = (state: State) => async (issue: NewIssue) => {
+    setAnnouncement({ tone: 'info', text: `Proposing a new issue in ${state.name}…` })
+    const result = await onCreate(issue)
+    // A refusal is shown in the form, which stays open.
+    setAnnouncement(result.ok ? { tone: 'info', text: `New issue "${issue.title}" proposed in ${state.name}. Waiting for approval.` } : null)
+    return result
+  }
+
+  const update = (issue: Issue) => async (fields: IssueChanges) => {
+    // The card loses its edit control once the edit is pending; focus then stays with the card.
+    focused.current = issue.id
+    forget([issue.id])
+    setAnnouncement({ tone: 'info', text: `Proposing changes to ${issue.identifier}…` })
+    const result = await onUpdate(issue, fields)
+    setAnnouncement(result.ok ? { tone: 'info', text: `Changes to ${issue.identifier} proposed. Waiting for approval.` } : null)
+    return result
+  }
 
   const move = async (issue: Issue, toState: State) => {
     forget([issue.id])
@@ -127,19 +175,30 @@ export const KanbanBoard = ({ board, columns, pending, awaiting, layout, onMove 
       return <section key={state.id} data-state-id={state.id} aria-labelledby={headingId}
         className={`flex max-h-full flex-col rounded-lg border bg-kumo-tint ${layout === 'full' ? 'min-w-64 flex-1' : 'w-64 shrink-0'} ${dropOk ? 'border-kumo-brand' : 'border-kumo-line'} ${dropNo ? 'opacity-60' : ''}`}
         onDragOver={onDragOver(state.id)} onDragLeave={() => { if (dropTarget === state.id) setDropTarget(null) }} onDrop={onDrop(state)}>
-        <h3 id={headingId} className="flex items-baseline gap-2 px-3 py-2 text-sm font-medium text-kumo-default">
-          <span className="truncate">{state.name}</span>
-          <span className="text-xs text-kumo-subtle" aria-label={`${issues.length} ${issues.length === 1 ? 'issue' : 'issues'}`}>{issues.length}</span>
-        </h3>
+        <div className="flex items-center gap-2 px-3 py-2">
+          <h3 id={headingId} className="flex min-w-0 flex-1 items-baseline gap-2 text-sm font-medium text-kumo-default">
+            <span className="truncate">{state.name}</span>
+            <span className="text-xs text-kumo-subtle" aria-label={`${issues.length} ${issues.length === 1 ? 'issue' : 'issues'}`}>{issues.length}</span>
+          </h3>
+          <KanbanIssueDialog kind="create" state={state} onCreate={create(state)}
+            trigger={<Button size="xs" shape="square" variant="ghost" aria-label={`New issue in ${state.name}`} icon={Plus} />} />
+        </div>
         <ul aria-labelledby={headingId} className="flex min-h-12 flex-col gap-2 overflow-y-auto px-2 pb-2">
           {issues.length === 0 && <li className="px-1 text-xs text-kumo-subtle">No issues</li>}
           {sortIssues(issues).map(issue => {
             const pendingMove = pendingMoveOf(issue, pending)
+            const edit = changes.find((change): change is Extract<PendingChange, { kind: 'update' }> => change.kind === 'update' && change.issueId === issue.id)
             const decision = decisions.get(issue.id)
+            const editDecision = editDecisions.get(issue.id)
             const proposed = pendingMove ? undefined : awaiting.get(issue.identifier)
+            // The gatekeeper refuses a second change of an issue whose change awaits approval, and
+            // a provisional card has no issue behind it yet.
+            const locked = pendingMove !== undefined || edit !== undefined || proposed !== undefined || issue.pending !== undefined
             return <KanbanCard key={issue.id} issue={issue} state={state} today={day} instructionsId={instructionsId}
-              // The gatekeeper refuses a second move of an issue whose move awaits approval.
-              targets={pendingMove || proposed ? [] : moveTargets(board, issue)}
+              targets={locked ? [] : moveTargets(board, issue)}
+              edit={edit}
+              editDecision={editDecision && editDecision.revision === issue.revision ? editDecision.outcome : undefined}
+              onUpdate={locked ? undefined : update(issue)}
               pending={pendingMove && { move: pendingMove, toState: stateOf(board, pendingMove.toStateId) }}
               proposed={proposed}
               decision={decision && decision.revision === issue.revision ? { outcome: decision.outcome, toState: stateOf(board, decision.toStateId) } : undefined}

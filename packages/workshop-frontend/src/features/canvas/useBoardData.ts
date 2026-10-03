@@ -2,8 +2,8 @@ import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { useActionEntries } from '../../useActions'
-import { BoardData, LOADING_BOARD, boardRequestKey, type BoardRequest, type BoardState, type MoveResult } from './boardData'
-import type { Revision } from '@inferos/gatekeeper-inferops/src/types'
+import { BoardData, LOADING_BOARD, boardRequestKey, type BoardRequest, type BoardState, type ProposalResult } from './boardData'
+import type { IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
 
 // One adapter per scope, the Overseer stub being the user's capability on the workspace. A new
 // stub (another workspace, a reopened session) gets an empty adapter; the old one is disposed with
@@ -43,11 +43,28 @@ export const useDecidedActionInvalidation = (overseer: RpcStub<Overseer>): void 
   })
 }
 
+/**
+ * Re-read, in every open scope, any board an action of this workspace touched once it leaves
+ * `pending`. For a workspace that shows no boards itself but proposes moves on them, such as an
+ * operate session's: a decided move there changes the board a screen shows through its own
+ * workspace. Each scope re-reads through its own capability, so nothing crosses between them.
+ */
+export const useDecidedActionInvalidationInEveryScope = (overseer: RpcStub<Overseer> | null): void => {
+  useActionEntries(overseer, record => {
+    if (record.type !== 'action' || record.state === 'pending' || !record.resourceUrl) return
+    for (const { data } of adapters.values()) data.invalidate(record.resourceUrl)
+  })
+}
+
+const NOT_LOADED: ProposalResult = { ok: false, code: 'NOT_LOADED', message: 'The board is not loaded.' }
+
 /** The live state of one board card's request in the given scope, with its actions. */
 export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest): {
   state: BoardState
   refresh: () => void
-  move: (issueId: string, toStateId: string, expectedRevision: Revision) => Promise<MoveResult>
+  move: (issueId: string, toStateId: string, expectedRevision: Revision) => Promise<ProposalResult>
+  create: (issue: NewIssue) => Promise<ProposalResult>
+  update: (issueId: string, changes: IssueChanges, expectedRevision: Revision) => Promise<ProposalResult>
 } => {
   const key = boardRequestKey(request)
   // Held for the component's life as well as per subscription, so a request change does not
@@ -64,13 +81,12 @@ export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   [overseer, key])
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const data = () => adapters.get(overseer)?.data
   return {
     state,
-    refresh: () => adapters.get(overseer)?.data.refresh(request),
-    move: (issueId, toStateId, expectedRevision) => {
-      const data = adapters.get(overseer)?.data
-      return data ? data.move(request, issueId, toStateId, expectedRevision)
-        : Promise.resolve({ ok: false, code: 'NOT_LOADED', message: 'The board is not loaded.' })
-    },
+    refresh: () => data()?.refresh(request),
+    move: (issueId, toStateId, expectedRevision) => data()?.move(request, issueId, toStateId, expectedRevision) ?? Promise.resolve(NOT_LOADED),
+    create: issue => data()?.create(request, issue) ?? Promise.resolve(NOT_LOADED),
+    update: (issueId, changes, expectedRevision) => data()?.update(request, issueId, changes, expectedRevision) ?? Promise.resolve(NOT_LOADED),
   }
 }

@@ -67,7 +67,7 @@ Against [the design](../design/operate-mode.md):
 
 - A flow is a single ordered list of one workspace's screens. Views that lay out several screens at once, steps from other workspaces, and steps that must be completed before moving on are not implemented.
 - Views, subject-bound views and handover events are not implemented. The page state covers the working set, focus, subject, chat panel, app presentation, a running flow, the approval under review and the last reported approval outcome.
-- `reviewApproval` and `approvalResolved` are reducer events only. No client or workflow dispatches them yet, and nothing checks a reported outcome against the action log.
+- The session page dispatches `reviewApproval` and `approvalResolved` (see the approvals on the [operate session page](inferops-canvas.md#operate-session-page)) and reports only the outcome it read back from the workspace's action log, but the kernel does not check a reported outcome against the log. The page covers the session workspace and the focused screen's workspace only. Workflow runs started by a schedule, their approval waits and a generic workflow-run view are not shown in the session (post-release).
 - The URL mirror and presence are not implemented. The agent can open, focus and close references, step or exit a running flow and set the subject, but cannot start a flow, and it learns the page only by calling `operatePage` rather than from its prompt.
 - A session workspace claimed before the `operateSession` mark existed is marked on its next `getWorkspace()`. Until then an `openGadget()` by id returns the full owner capability.
 - The event log is kept in full, with no compaction or retention policy.
