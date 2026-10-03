@@ -1,22 +1,17 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
-import { act, type ReactElement, type ReactNode } from 'react'
+import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Board, Issue, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
-import type { MoveResult, PendingMove } from './boardData'
+import type { IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
+import type { PendingChange, PendingMove, ProposalResult } from './boardData'
 import { KanbanBoard, type KanbanLayout } from './KanbanBoard'
+import { dialogField, setFieldValue } from './kumoPopupDoubles'
 
-// Kumo's menu is a Base UI popup, which jsdom cannot open; the trigger and items are what matter here.
-vi.mock('@cloudflare/kumo', async importOriginal => ({
-  ...await importOriginal<typeof import('@cloudflare/kumo')>(),
-  DropdownMenu: Object.assign(({ children }: { children: ReactNode }) => <div>{children}</div>, {
-    Trigger: ({ render }: { render: ReactElement }) => render,
-    Content: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
-    Item: ({ children, onClick }: { children: ReactNode; onClick?: () => void }) => <button type="button" role="menuitem" onClick={onClick}>{children}</button>,
-  }),
-}))
+vi.mock('@cloudflare/kumo', async importOriginal =>
+  (await import('./kumoPopupDoubles')).withKumoPopupDoubles(await importOriginal<typeof import('@cloudflare/kumo')>()))
 
 let root: Root
 let container: HTMLDivElement
@@ -34,23 +29,33 @@ const board = (...columns: [State, Issue[]][]): Board =>
   ({ project: { id: 'p', identifier: 'DEMO', name: 'Demo' }, columns: columns.map(([s, issues]) => ({ state: s, issues })) })
 const basic = board([TODO, [issue('1', 'todo', { priority: 'high', assigneeId: '40000000-0000-4000-8000-000000000001', blockedReason: 'Waiting on access', targetDate: '2026-10-09' })]],
   [DOING, []], [DONE, [issue('2', 'done')]], [IDEAS, [issue('3', 'ideas', { workflow: 'content' })]])
-const onMove = vi.fn<(issue: Issue, toState: State) => Promise<MoveResult>>(async () => ({ ok: true }))
+const onMove = vi.fn<(issue: Issue, toState: State) => Promise<ProposalResult>>(async () => ({ ok: true }))
+const onCreate = vi.fn<(issue: NewIssue) => Promise<ProposalResult>>(async () => ({ ok: true }))
+const onUpdate = vi.fn<(issue: Issue, changes: IssueChanges) => Promise<ProposalResult>>(async () => ({ ok: true }))
 
 const render = async (b: Board, pending: PendingMove[] = [], layout: KanbanLayout = 'embedded', columns = b.columns,
-  awaiting: ReadonlyMap<string, BoardActivityItem> = new Map()) => {
-  await act(async () => root.render(<KanbanBoard board={b} columns={columns} pending={pending} awaiting={awaiting} layout={layout} onMove={onMove} />))
+  awaiting: ReadonlyMap<string, BoardActivityItem> = new Map(), changes: PendingChange[] = []) => {
+  await act(async () => root.render(<KanbanBoard board={b} columns={columns} pending={pending} changes={changes} awaiting={awaiting} layout={layout}
+    onMove={onMove} onCreate={onCreate} onUpdate={onUpdate} />))
 }
 const card = (id: string) => [...container.querySelectorAll<HTMLElement>('[data-issue-id]')].find(item => item.dataset.issueId === id)!
 const column = (id: string) => [...container.querySelectorAll<HTMLElement>('[data-state-id]')].find(item => item.dataset.stateId === id)!
 const status = () => container.querySelector('[role="status"]')?.textContent
 const key = (element: HTMLElement, name: string) => act(async () => { element.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true })) })
 const menuItems = (id: string) => [...card(id).querySelectorAll('[role="menuitem"]')].map(item => item.textContent)
+const button = (label: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
+const dialog = () => container.querySelector<HTMLElement>('[role="dialog"]')
+const field = <T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(label: string) => dialogField<T>(container, label)
+const enter = (element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string) => act(async () => setFieldValue(element, value))
+const submit = () => act(async () => { dialog()!.querySelector<HTMLButtonElement>('button[type="submit"]')!.click() })
 const dragEvent = (type: string, dataTransfer: object) => Object.assign(new Event(type, { bubbles: true, cancelable: true }), { dataTransfer })
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
   onMove.mockClear().mockResolvedValue({ ok: true })
+  onCreate.mockClear().mockResolvedValue({ ok: true })
+  onUpdate.mockClear().mockResolvedValue({ ok: true })
 })
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
@@ -181,4 +186,110 @@ it("marks a card whose move another caller proposed as awaiting approval, with w
   expect(card('1').getAttribute('draggable')).toBe('false')
   expect(menuItems('1')).toEqual([])
   expect(menuItems('2').length).toBeGreaterThan(0)
+})
+
+it('proposes a new issue in a column\'s state from its New issue control, and announces it queued', async () => {
+  await render(basic)
+  await act(async () => button('New issue in Doing')!.click())
+  expect(dialog()?.querySelector('h2')?.textContent).toBe('New issue in Doing')
+  // A title is required.
+  expect(dialog()!.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true)
+  await enter(field('Title'), 'Write the runbook')
+  await enter(field('Description'), 'Steps for on-call.')
+  await enter(field('Priority'), 'high')
+  await submit()
+  expect(onCreate).toHaveBeenCalledWith({ title: 'Write the runbook', description: 'Steps for on-call.', priority: 'high', stateId: 'doing' })
+  expect(dialog()).toBeNull()
+  expect(status()).toBe('New issue "Write the runbook" proposed in Doing. Waiting for approval.')
+})
+
+it('edits an issue sending only the fields that changed, and nothing at all when nothing did', async () => {
+  await render(basic)
+  await act(async () => button('Edit DEMO-1')!.click())
+  expect(dialog()?.querySelector('h2')?.textContent).toBe('Edit DEMO-1')
+  expect(field<HTMLInputElement>('Title').value).toBe('Issue 1')
+  expect(field<HTMLSelectElement>('Priority').value).toBe('high')
+  expect(dialog()!.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true)
+  expect(dialog()!.textContent).toContain('Nothing changed yet.')
+  await enter(field('Priority'), 'low')
+  await submit()
+  expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ id: '1', revision: '1' }), { priority: 'low' })
+  expect(dialog()).toBeNull()
+  expect(status()).toBe('Changes to DEMO-1 proposed. Waiting for approval.')
+  await act(async () => button('Edit DEMO-1')!.click())
+  await enter(field('Title'), '  Renamed  ')
+  await enter(field('Description'), 'More detail.')
+  await submit()
+  expect(onUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ id: '1' }), { title: 'Renamed', description: 'More detail.' })
+})
+
+it('keeps the form open with the reason when a proposal is refused: a stale revision, or the gatekeeper\'s own message', async () => {
+  await render(basic)
+  onUpdate.mockResolvedValueOnce({ ok: false, code: 'STALE_REVISION', message: 'DEMO-1 is at revision 2, not 1.' })
+  await act(async () => button('Edit DEMO-1')!.click())
+  await enter(field('Title'), 'Renamed')
+  await submit()
+  expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('This issue changed; refresh and try again.')
+  onUpdate.mockResolvedValueOnce({ ok: false, code: 'FORBIDDEN', message: 'The workflow policy does not allow this change.' })
+  await submit()
+  expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('The workflow policy does not allow this change.')
+  await act(async () => { [...dialog()!.querySelectorAll('button')].find(b => b.textContent === 'Cancel')!.click() })
+  expect(dialog()).toBeNull()
+  onCreate.mockResolvedValueOnce({ ok: false, code: 'FORBIDDEN', message: 'You may not create issues in this project.' })
+  await act(async () => button('New issue in Todo')!.click())
+  await enter(field('Title'), 'New')
+  await submit()
+  expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('You may not create issues in this project.')
+})
+
+it('shows an issue not created yet as a provisional card that cannot be dragged, moved or edited', async () => {
+  const provisional = issue('pending-9', 'todo', { identifier: 'DEMO-new', title: 'Write docs', revision: '0', pending: 'create', priority: 'urgent' })
+  await render(board([TODO, [issue('1', 'todo'), provisional]], [DOING, []]))
+  const card9 = card('pending-9')
+  expect(card9.getAttribute('aria-label')).toBe('DEMO-new: Write docs (not created yet)')
+  expect(card9.textContent).toContain('New issue, waiting for approval')
+  expect(card9.getAttribute('draggable')).toBe('false')
+  expect(menuItems('pending-9')).toEqual([])
+  expect(button('Edit DEMO-new')).toBeNull()
+  // Listed after the issues that exist, whatever its priority.
+  expect([...column('todo').querySelectorAll('[data-issue-id]')].map(c => c.getAttribute('data-issue-id'))).toEqual(['1', 'pending-9'])
+  await act(async () => card9.focus())
+  await key(card9, 'ArrowRight')
+  await key(card9, 'Enter')
+  expect(onMove).not.toHaveBeenCalled()
+  const transfer = { setData: vi.fn<(type: string, data: string) => void>(), effectAllowed: '', dropEffect: '' }
+  await act(async () => { card9.dispatchEvent(dragEvent('dragstart', transfer)) })
+  const over = dragEvent('dragover', transfer)
+  await act(async () => { column('doing').dispatchEvent(over) })
+  expect(over.defaultPrevented).toBe(false)
+})
+
+it('marks a pending edit, proposing or waiting for approval, and withholds edits and moves meanwhile', async () => {
+  const proposing: PendingChange = { kind: 'update', issueId: '1', changes: { title: 'x' }, expectedRevision: '1', phase: 'proposing' }
+  await render(basic, [], 'embedded', basic.columns, new Map(), [proposing])
+  expect(card('1').textContent).toContain('Proposing edit…')
+  expect(card('1').getAttribute('aria-busy')).toBe('true')
+  expect(button('Edit DEMO-1')).toBeNull()
+  expect(menuItems('1')).toEqual([])
+  // Queued, the gatekeeper's read overlays the new values at the unchanged revision.
+  await render(board([TODO, [issue('1', 'todo', { title: 'x', pending: 'update' })]], [DOING, []]))
+  expect(card('1').textContent).toContain('Edit waiting for approval')
+  expect(card('1').getAttribute('draggable')).toBe('false')
+  expect(button('Edit DEMO-1')).toBeNull()
+  expect(menuItems('1')).toEqual([])
+})
+
+it('announces creates and edits once the board stops marking them pending: a new revision or issue is applied, else rejected', async () => {
+  const provisional = issue('pending-9', 'todo', { identifier: 'DEMO-new', title: 'Write docs', revision: '0', pending: 'create' })
+  await render(board([TODO, [issue('1', 'todo', { title: 'New title', pending: 'update' }), provisional]], [DOING, []]))
+  await render(board([TODO, [issue('1', 'todo', { title: 'New title', revision: '2' }), issue('4', 'todo', { title: 'Write docs', revision: '3' })]], [DOING, []]))
+  expect(status()).toBe('Edit of DEMO-1 applied. New issue DEMO-4 created: Write docs.')
+  expect(card('1').textContent).toContain('Edit applied')
+  expect(button('Edit DEMO-1')).not.toBeNull()
+
+  const another = issue('pending-10', 'todo', { identifier: 'DEMO-new', title: 'Nope', revision: '0', pending: 'create' })
+  await render(board([TODO, [issue('5', 'todo', { title: 'Overlaid', pending: 'update' }), another]], [DOING, []]))
+  await render(board([TODO, [issue('5', 'todo', { title: 'Old title' })]], [DOING, []]))
+  expect(status()).toBe('Edit of DEMO-5 was rejected; it keeps its previous values. New issue "Nope" was rejected.')
+  expect(card('5').textContent).toContain('Edit rejected')
 })

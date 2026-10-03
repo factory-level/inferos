@@ -1,10 +1,11 @@
 import { useState, type KeyboardEvent } from 'react'
 import { Badge, Button, DropdownMenu } from '@cloudflare/kumo'
-import { ArrowRight, DotsThree } from '@phosphor-icons/react'
-import type { Issue, State } from '@inferos/gatekeeper-inferops/src/types'
+import { ArrowRight, DotsThree, PencilSimple } from '@phosphor-icons/react'
+import type { Issue, IssueChanges, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
-import type { PendingMove } from './boardData'
-import { PRIORITY_LABELS, formatTargetDate, isOverdue, type MoveDecision } from './kanbanBoard'
+import type { PendingChange, PendingMove, ProposalResult } from './boardData'
+import { KanbanIssueDialog } from './KanbanIssueDialog'
+import { PRIORITY_LABELS, formatTargetDate, isOverdue, type ChangeDecision, type MoveDecision } from './kanbanBoard'
 
 const PRIORITY_VARIANT = { urgent: 'error', high: 'warning', medium: 'info', low: 'neutral', none: 'neutral' } as const
 
@@ -20,6 +21,12 @@ export type KanbanCardProps = {
   proposed?: BoardActivityItem
   /** How the issue's last move was decided, until it moves again or changes. */
   decision?: { outcome: MoveDecision['outcome']; toState: State | undefined }
+  /** An edit of the issue this board proposed that the board does not show as pending yet. */
+  edit?: Extract<PendingChange, { kind: 'update' }>
+  /** How the issue's last edit was decided, until it changes again. */
+  editDecision?: ChangeDecision['outcome']
+  /** Proposes an edit at the issue's revision; absent while the issue cannot be edited (anything pending). */
+  onUpdate?: (changes: IssueChanges) => Promise<ProposalResult>
   /** `YYYY-MM-DD`, for the overdue mark. */
   today: string
   /** The element id of the board's keyboard instructions. */
@@ -29,12 +36,26 @@ export type KanbanCardProps = {
   onDragEnd: () => void
 }
 
+// The one badge that says what is waiting on the issue, most specific first: this board's own move
+// or edit, then a request from the action log (which names who asked), then the gatekeeper's own
+// pending marker, which also covers changes requested elsewhere that the log does not tie to it.
+const pendingBadge = ({ issue, pending, edit, proposed }: Pick<KanbanCardProps, 'issue' | 'pending' | 'edit' | 'proposed'>): string | null => {
+  if (pending) return `${pending.move.phase === 'proposing' ? 'Proposing move to' : 'Awaiting approval:'} ${pending.toState?.name ?? 'another state'}`
+  if (edit?.phase === 'proposing') return 'Proposing edit…'
+  if (issue.pending === 'create') return 'New issue, waiting for approval'
+  if (proposed) return `Awaiting approval${proposed.actor ? ` (${proposed.actor})` : ''}: ${proposed.title}`
+  if (edit || issue.pending === 'update') return 'Edit waiting for approval'
+  if (issue.pending === 'transition') return 'Move waiting for approval'
+  return null
+}
+
 /**
  * One issue on the board. It is a focusable card: the arrow keys pick a target column and Enter
  * proposes the move, the "Move to" menu offers the same targets, and it can be dragged to a
- * column. A pending move keeps its controls disabled, since the gatekeeper refuses a second.
+ * column; its Edit button opens the edit form. Anything pending on the issue (a move, an edit, or
+ * its own creation) withholds every control, since the gatekeeper allows one pending change.
  */
-export const KanbanCard = ({ issue, state, targets, pending, proposed, decision, today, instructionsId, onMove, onDragStart, onDragEnd }: KanbanCardProps) => {
+export const KanbanCard = ({ issue, state, targets, pending, proposed, decision, edit, editDecision, today, instructionsId, onMove, onUpdate, onDragStart, onDragEnd }: KanbanCardProps) => {
   const [choice, setChoice] = useState<State | null>(null)
   const movable = targets.length > 0 && !pending
   const chosen = choice && targets.find(target => target.id === choice.id) ? choice : null
@@ -59,17 +80,25 @@ export const KanbanCard = ({ issue, state, targets, pending, proposed, decision,
   }
 
   const overdue = isOverdue(issue, state, today)
-  return <li data-issue-id={issue.id} tabIndex={0} draggable={movable} aria-label={`${issue.identifier}: ${issue.title}`}
-    aria-describedby={instructionsId} aria-busy={pending?.move.phase === 'proposing' || undefined}
+  const waiting = pendingBadge({ issue, pending, edit, proposed })
+  return <li data-issue-id={issue.id} data-pending={issue.pending} tabIndex={0} draggable={movable}
+    aria-label={`${issue.identifier}: ${issue.title}${issue.pending === 'create' ? ' (not created yet)' : ''}`}
+    aria-describedby={instructionsId} aria-busy={pending?.move.phase === 'proposing' || edit?.phase === 'proposing' || undefined}
     onKeyDown={onKeyDown} onBlur={() => setChoice(null)}
-    onDragStart={event => { event.dataTransfer.setData('text/plain', issue.id); event.dataTransfer.effectAllowed = 'move'; onDragStart() }}
+    // A drag can still start from inside a card that is not draggable (selected text, say).
+    onDragStart={event => {
+      if (!movable) { event.preventDefault(); return }
+      event.dataTransfer.setData('text/plain', issue.id); event.dataTransfer.effectAllowed = 'move'; onDragStart()
+    }}
     onDragEnd={onDragEnd}
-    className={`space-y-1.5 rounded-md border border-kumo-line bg-kumo-base p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${movable ? 'cursor-grab' : ''} ${pending ? 'opacity-80' : ''}`}>
+    className={`space-y-1.5 rounded-md border border-kumo-line bg-kumo-base p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${movable ? 'cursor-grab' : ''} ${waiting ? 'opacity-80' : ''} ${issue.pending === 'create' ? 'border-dashed' : ''}`}>
     <div className="flex items-center gap-2">
       <span className="font-mono text-xs text-kumo-subtle">{issue.identifier}</span>
       {issue.priority !== 'none' && <Badge variant={PRIORITY_VARIANT[issue.priority]}>{PRIORITY_LABELS[issue.priority]}</Badge>}
+      {onUpdate && <KanbanIssueDialog kind="edit" issue={issue} onUpdate={onUpdate}
+        trigger={<Button size="xs" shape="square" variant="ghost" className="ml-auto" aria-label={`Edit ${issue.identifier}`} icon={PencilSimple} />} />}
       {movable && <DropdownMenu>
-        <DropdownMenu.Trigger render={<Button size="xs" shape="square" variant="ghost" className="ml-auto" aria-label={`Move ${issue.identifier} to…`} icon={DotsThree} />} />
+        <DropdownMenu.Trigger render={<Button size="xs" shape="square" variant="ghost" className={onUpdate ? '' : 'ml-auto'} aria-label={`Move ${issue.identifier} to…`} icon={DotsThree} />} />
         <DropdownMenu.Content align="end">
           {targets.map(target => <DropdownMenu.Item key={target.id} onClick={() => onMove(target)}>Move to {target.name}</DropdownMenu.Item>)}
         </DropdownMenu.Content>
@@ -81,15 +110,11 @@ export const KanbanCard = ({ issue, state, targets, pending, proposed, decision,
       {issue.targetDate && <span className={overdue ? 'text-kumo-danger' : ''}>{overdue ? 'Overdue' : 'Due'} {formatTargetDate(issue.targetDate)}</span>}
     </div>
     {issue.blockedReason && <p className="rounded bg-kumo-danger-tint px-2 py-1 text-xs text-kumo-danger">Blocked: {issue.blockedReason}</p>}
-    {pending && <Badge variant="warning" icon={ArrowRight}>
-      {pending.move.phase === 'proposing' ? 'Proposing move to' : 'Awaiting approval:'} {pending.toState?.name ?? 'another state'}
-    </Badge>}
-    {proposed && !pending && <Badge variant="warning" icon={ArrowRight}>
-      Awaiting approval{proposed.actor ? ` (${proposed.actor})` : ''}: {proposed.title}
-    </Badge>}
-    {decision && !pending && !proposed && <Badge variant={decision.outcome === 'rejected' ? 'error' : 'success'}>
+    {waiting && <Badge variant="warning" icon={pending ? ArrowRight : undefined}>{waiting}</Badge>}
+    {decision && !waiting && <Badge variant={decision.outcome === 'rejected' ? 'error' : 'success'}>
       Move to {decision.toState?.name ?? 'another state'} {decision.outcome}
     </Badge>}
+    {editDecision && !waiting && <Badge variant={editDecision === 'rejected' ? 'error' : 'success'}>Edit {editDecision}</Badge>}
     {chosen && <p className="text-xs text-kumo-brand">Move to {chosen.name}? Enter to propose, Escape to cancel.</p>}
   </li>
 }
