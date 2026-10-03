@@ -123,11 +123,11 @@ type TestExports = {
   InferOpsAccount(options: { props: AccountProps }): Fetcher<GatekeeperUser>;
 };
 
-/** The workspace half of the project configurator's capability. */
-type WorkspaceRpc = {
+/** The project configurator's capability, as the picker iframe receives it. */
+type ConfiguratorRpc = {
+  defaultHost(): Promise<string | null>;
   listWorkspaces(): Promise<Array<{ value: string; title: string }>>;
-  selectWorkspace(workspaceId: string | null): Promise<void>;
-  listProjects(query: string): Promise<Array<{ value: string }>>;
+  listProjects(query: string, host: string): Promise<Array<{ value: string }>>;
 };
 
 function messageOf(error: unknown): string {
@@ -212,29 +212,23 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async #configurator(props: AccountProps): Promise<WorkspaceRpc> {
+  async #configurator(props: AccountProps): Promise<ConfiguratorRpc> {
     const frame = await this.#account(props).startResourceConfigurator("inferops://*/project/board/*");
-    return frame.ui as unknown as WorkspaceRpc;
+    return frame.ui as unknown as ConfiguratorRpc;
+  }
+
+  async defaultHost(props: AccountProps): Promise<string | null> {
+    return (await this.#configurator(props)).defaultHost();
   }
 
   async listWorkspaces(props: AccountProps) {
     return (await this.#configurator(props)).listWorkspaces();
   }
 
-  /** The failure message, or null on success. */
-  async selectWorkspace(props: AccountProps, workspaceId: string | null): Promise<string | null> {
+  /** The project keys the configurator lists on `host`, or the failure message. */
+  async listProjects(props: AccountProps, host: string, query = ""): Promise<string[] | string> {
     try {
-      await (await this.#configurator(props)).selectWorkspace(workspaceId);
-      return null;
-    } catch (error) {
-      return messageOf(error);
-    }
-  }
-
-  /** The project keys the configurator lists, or the failure message. */
-  async listProjects(props: AccountProps, query = ""): Promise<string[] | string> {
-    try {
-      return (await (await this.#configurator(props)).listProjects(query)).map(p => p.value);
+      return (await (await this.#configurator(props)).listProjects(query, host)).map(p => p.value);
     } catch (error) {
       return messageOf(error);
     }

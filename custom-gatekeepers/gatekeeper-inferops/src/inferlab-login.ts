@@ -15,6 +15,9 @@
 //   - A connect stores the session in the account's `InferOpsCredentials` object, so the person's
 //     own authority backs every request the account makes (inferops-credentials.ts).
 //   - A reconnect stages the session there until the Workshop commits it.
+//   Before either stores a session, the slugs of the person's workspaces are read from InferOps
+//   (`GET /workspaces`) and kept beside the memberships InferLab reported, since a resource URL
+//   names its workspace by slug. A failure there ends the attempt and signs the session out.
 
 import { DurableObject } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
@@ -34,6 +37,7 @@ import {
   accessTokenExpiry, logoutInferLabSession, type InferOpsConnection, type InferOpsCredentials,
   type InferOpsWorkspace,
 } from "./inferops-credentials";
+import { endpointFromEnv, listWorkspaceSlugs, type InferOpsEndpoint } from "./http-inferops";
 
 const logger = createLogger<{ vendorId: string }>({
   component: "gatekeeper.inferops.login", vendorId: "inferops",
@@ -57,7 +61,9 @@ const PURPOSE_KEY = "purpose";
 const CALLBACK_KEY = "callback";
 
 /** The deployment settings this flow reads. */
-export type InferLabLoginEnv = { INFERLAB_AUTH_ORIGIN?: string; BASE_URL?: string };
+export type InferLabLoginEnv = {
+  INFERLAB_AUTH_ORIGIN?: string; BASE_URL?: string; INFEROPS_BASE_URL?: string;
+};
 
 /**
  * What an attempt is for. A sign-in hands the Workshop a transient account carrying the verified
@@ -89,6 +95,42 @@ export function inferLabAuthOrigin(env: InferLabLoginEnv): string | null {
     return null;
   }
   return url.origin;
+}
+
+/**
+ * The API endpoint connected accounts call: `INFEROPS_BASE_URL`, or the InferLab origin itself when
+ * only that is configured (locally one server serves both). Null while neither is set. This is the
+ * only place a connected account's deployment comes from; a resource URL never names one.
+ */
+export function inferOpsApiEndpoint(env: InferLabLoginEnv): InferOpsEndpoint | null {
+  const configured = endpointFromEnv(env);
+  if (configured) return configured;
+  const origin = inferLabAuthOrigin(env);
+  return origin ? { baseUrl: origin, host: new URL(origin).host } : null;
+}
+
+/**
+ * The connection with each membership's workspace slug, as InferOps lists it for the new token.
+ * Only memberships InferLab reported are kept; a listed workspace outside them is ignored.
+ */
+async function withWorkspaceSlugs(env: InferLabLoginEnv, exchange: InferLabExchange)
+    : Promise<InferOpsConnection> {
+  const endpoint = inferOpsApiEndpoint(env);
+  if (!endpoint) throw new SignInFailure(NOT_CONFIGURED);
+  let slugs: Map<string, string>;
+  try {
+    const listed = await listWorkspaceSlugs(endpoint.baseUrl, exchange.grant.accessToken);
+    slugs = new Map(listed.map(w => [w.workspaceId, w.slug]));
+  } catch (error) {
+    logger.warn("InferOps workspace list failed", { event: "inferlab.workspaces.failed", error });
+    throw new SignInFailure(
+      "InferOps could not list your workspaces. Close this window and try again.");
+  }
+  const workspaces = exchange.identity.workspaces.map(w => {
+    const workspaceSlug = slugs.get(w.workspaceId);
+    return workspaceSlug ? { ...w, workspaceSlug } : w;
+  });
+  return { grant: exchange.grant, identity: { ...exchange.identity, workspaces } };
 }
 
 function baseUrl(env: InferLabLoginEnv): string {
@@ -256,9 +298,10 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
       }
       case "connect": {
         if (!callback) throw new Error("This connect attempt has no callback.");
+        const connection = await this.#withSlugs(origin, exchange);
         const accountId = crypto.randomUUID();
         const store = credentials.get(credentials.idFromName(accountId));
-        await store.install({ grant: exchange.grant, identity: exchange.identity }, callback);
+        await store.install(connection, callback);
         try {
           return await callback.complete(this.#account({
             accountId, connected: true,
@@ -271,9 +314,20 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
         }
       }
       case "reconnect": {
+        const connection = await this.#withSlugs(origin, exchange);
         const store = credentials.get(credentials.idFromName(purpose.accountId));
-        return store.completeReconnect({ grant: exchange.grant, identity: exchange.identity });
+        return store.completeReconnect(connection);
       }
+    }
+  }
+
+  /** `withWorkspaceSlugs`, signing the new session out when it fails, since nothing will hold it. */
+  async #withSlugs(origin: string, exchange: InferLabExchange): Promise<InferOpsConnection> {
+    try {
+      return await withWorkspaceSlugs(this.env, exchange);
+    } catch (error) {
+      await logoutInferLabSession(origin, exchange.grant.refreshToken);
+      throw error;
     }
   }
 

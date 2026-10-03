@@ -331,8 +331,8 @@ test("stop signals the recorded server and waits for it, or reports there is not
 test("InferOps configuration is reported by presence only, never by value", () => {
   assert.deepEqual(inferOpsConfiguration({}), { mode: "mock", missing: [] });
   const partial = inferOpsConfiguration({ INFEROPS_BASE_URL: "https://ops.example.com/api" });
-  assert.deepEqual(partial, { mode: "live", host: "ops.example.com", missing: ["INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID"] });
-  const live = inferOpsConfiguration({ INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_API_TOKEN: "tok-secret", INFEROPS_WORKSPACE_ID: "ws-1" });
+  assert.deepEqual(partial, { mode: "live", host: "ops.example.com", missing: ["INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG"] });
+  const live = inferOpsConfiguration({ INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_API_TOKEN: "tok-secret", INFEROPS_WORKSPACE_ID: "ws-1", INFEROPS_WORKSPACE_SLUG: "operations" });
   assert.deepEqual(live, { mode: "live", host: "localhost:8080", missing: [] });
   assert.equal(JSON.stringify(live).includes("tok-secret"), false);
   assert.equal(inferOpsConfiguration({ INFEROPS_BASE_URL: "nonsense" }).host, undefined);
@@ -342,7 +342,7 @@ test("status reads the dev server's .dev.vars and .env with shell precedence", a
   const root = tempRoot();
   try {
     writeFileSync(join(root, ".dev.vars"), "INFEROPS_BASE_URL=https://vars.example\nINFEROPS_API_TOKEN=\"dev-vars-secret-token\"\n");
-    writeFileSync(join(root, ".env"), "INFEROPS_BASE_URL=https://env.example\nINFEROPS_WORKSPACE_ID=w\n");
+    writeFileSync(join(root, ".env"), "INFEROPS_BASE_URL=https://env.example\nINFEROPS_WORKSPACE_ID=w\nINFEROPS_WORKSPACE_SLUG=operations\n");
     const merged = localEnv(root, {});
     assert.equal(merged.INFEROPS_BASE_URL, "https://vars.example");
     assert.equal(merged.INFEROPS_WORKSPACE_ID, "w");
