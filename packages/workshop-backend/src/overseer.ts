@@ -11176,6 +11176,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.clientUserId, this.#mintedCapabilityKind());
   }
 
+  async getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
+    // Records list in id order, so the first match is the oldest connection. Only the URL the
+    // gatekeeper described itself with is compared -- the vendor's canonical form, never what the
+    // creator typed into newGatekeeper(). Vendorless records have no URL and never match.
+    for (let record of this.impl.storage.gatekeepers.list()) {
+      if (record.resourceUrl === resourceUrl) return this.getGatekeeperById(record.id);
+    }
+    return null;
+  }
+
   private async recordConnectionCreated(
       result: GatekeeperClient<any>, connectionType: ProductAnalyticsConnectionType,
       vendorId?: string): Promise<void> {
@@ -12576,6 +12586,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async getGatekeeperByResourceUrl(_resourceUrl: string): Promise<GatekeeperClient<any> | null> {
+    this.#deny();
+  }
   async newGatekeeper(_accountId: number, _resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
