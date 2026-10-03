@@ -561,25 +561,30 @@ async function setVar(name: "INFEROPS_ENABLED" | "CODING_WORKBENCH_ENABLED", ena
 /**
  * Wait until the reloaded server answers steadily. Right after `server.update` the runtime can
  * still be restarting, so a WebSocket opened at once is sometimes dropped mid-test ("WebSocket
- * connection failed"). Two pings a short gap apart over one connection must both succeed.
+ * connection failed"). Two fresh connections in a row must each answer pings spread over about a
+ * second; any failure starts the count again.
  */
 async function settled(url: URL): Promise<void> {
+  const pause = (ms: number) => new Promise(done => setTimeout(done, ms));
   let last: unknown;
-  for (let attempt = 0; attempt < 20; attempt++) {
+  let steady = 0;
+  for (let attempt = 0; attempt < 40 && steady < 2; attempt++) {
     const api = connect(url);
     try {
-      await api.ping();
-      await new Promise(done => setTimeout(done, 250));
-      await api.ping();
-      return;
+      for (let ping = 0; ping < 4; ping++) {
+        await api.ping();
+        await pause(250);
+      }
+      steady++;
     } catch (error) {
       last = error;
-      await new Promise(done => setTimeout(done, 250));
+      steady = 0;
+      await pause(500);
     } finally {
       api[Symbol.dispose]();
     }
   }
-  throw new Error(`The reloaded server never settled: ${String(last)}`);
+  if (steady < 2) throw new Error(`The reloaded server never settled: ${String(last)}`);
 }
 
 /**
@@ -733,6 +738,7 @@ describe("coding dispatch", () => {
 
 describe("the deployment switch", () => {
   it("failure: with INFEROPS_ENABLED off, bindings, reads and queued applies are refused without a request; on again restores them", async () => {
+    await settled(harness.url);
     const alice = await newUser("switcha", ["operations"]);
     const { ws, connection, session } = await bind(alice, ENG_BOARD);
     const issue = await (await session.openIssue(fake.issue("ENG-2").id)).read();
@@ -775,7 +781,14 @@ describe("the deployment switch", () => {
       expect((await reopened.session.readBoard()).project.identifier).toBe("ENG");
       return reopened;
     });
-    await on.ws.approveAction(action.id);
+    // A dropped socket after the request went out leaves the approval applied; the issue state decides.
+    await on.ws.approveAction(action.id).catch(async (error: unknown) => {
+      if (!String(error).includes("WebSocket connection failed")) throw error;
+      await settled(harness.url);
+      if (fake.issue("ENG-2").stateId !== DONE.id) {
+        await overFreshConnection(async () => (await reopen()).ws.approveAction(action.id));
+      }
+    });
     expect(fake.issue("ENG-2").stateId).toBe(DONE.id);
   });
 });
