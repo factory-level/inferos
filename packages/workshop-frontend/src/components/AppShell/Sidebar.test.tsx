@@ -124,8 +124,8 @@ describe('Sidebar modes', () => {
     testState.screens = {
       status: 'ready',
       workspaces: [
-        { workspace: { id: 'w1' }, screens: [screen('s1', 'Ops board'), screen('s2', 'Weekly review')] },
-        { workspace: { id: 'w2' }, screens: null },
+        { workspace: { id: 'w1' }, screens: [screen('s1', 'Ops board'), screen('s2', 'Weekly review')], flows: [] },
+        { workspace: { id: 'w2' }, screens: null, flows: [] },
       ],
     }
     goTo('/workspace/w1/inferops-canvas?view=s2')
@@ -146,7 +146,7 @@ describe('Sidebar modes', () => {
   })
 
   it('says when there are no saved screens yet', () => {
-    testState.screens = { status: 'ready', workspaces: [{ workspace: { id: 'w1' }, screens: [] }] }
+    testState.screens = { status: 'ready', workspaces: [{ workspace: { id: 'w1' }, screens: [], flows: [] }] }
     goTo('/inferops-canvas')
     render()
     expect(container.textContent).toContain('No saved screens yet.')

@@ -7,7 +7,9 @@ import { WorkshopButton, WorkshopInput } from '../../components/WorkshopControls
 import { useServerConfig } from '../../ServerConfigContext'
 import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import { useDocumentTitle } from '../../useDocumentTitle'
-import { MAX_SCREEN_WORKSPACES, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
+import { MAX_SCREEN_WORKSPACES, invalidateWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
+import { useOperateSession } from '../../features/operate/OperateSessionContext'
+import { WorkspaceFlows } from '../../features/operate/WorkspaceFlows'
 
 // Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
 const BLANK_TEMPLATE = ':blank'
@@ -26,14 +28,34 @@ const PageHeading = ({ subtitle }: { subtitle: string }) =>
 
 const widgetCount = (screen: CanvasDefinition) => screen.sections.reduce((sum, section) => sum + section.widgets.length, 0)
 
-const ScreenLink = ({ workspaceId, screen }: { workspaceId: string; screen: CanvasDefinition }) =>
-  <Link to="/workspace/$id/inferops-canvas" params={{ id: workspaceId }} search={{ view: screen.id }}
-    className="flex flex-col gap-1 rounded-xl bg-kumo-elevated p-4 transition-colors hover:bg-kumo-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">
-    <span className="truncate text-[14px] leading-5 font-medium text-kumo-default">{screen.title}</span>
-    <span className="text-[12px] leading-4 text-kumo-subtle">
-      {screen.sections.length} {screen.sections.length === 1 ? 'section' : 'sections'} · {widgetCount(screen)} {widgetCount(screen) === 1 ? 'widget' : 'widgets'}
-    </span>
-  </Link>
+const SCREEN_CARD = 'flex cursor-pointer flex-col gap-1 rounded-xl bg-kumo-elevated p-4 text-left transition-colors hover:bg-kumo-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring'
+
+const ScreenSummary = ({ screen }: { screen: CanvasDefinition }) => <>
+  <span className="truncate text-[14px] leading-5 font-medium text-kumo-default">{screen.title}</span>
+  <span className="text-[12px] leading-4 text-kumo-subtle">
+    {screen.sections.length} {screen.sections.length === 1 ? 'section' : 'sections'} · {widgetCount(screen)} {widgetCount(screen) === 1 ? 'widget' : 'widgets'}
+  </span>
+</>
+
+// In a session a screen opens into the session, so the person stays in Operate and every tab of
+// theirs follows; without one it opens on its workspace's page.
+const ScreenLink = ({ workspaceId, screen }: { workspaceId: string; screen: CanvasDefinition }) => {
+  const operate = useOperateSession()
+  if (operate) return (
+    <button type="button" className={SCREEN_CARD}
+      onClick={() => {
+        operate.dispatch({ type: 'open', ref: { type: 'screen', workspaceId, screenId: screen.id } })
+          .catch(caught => console.error('Failed to open the screen in the session:', caught))
+      }}>
+      <ScreenSummary screen={screen} />
+    </button>
+  )
+  return (
+    <Link to="/workspace/$id/inferops-canvas" params={{ id: workspaceId }} search={{ view: screen.id }} className={SCREEN_CARD}>
+      <ScreenSummary screen={screen} />
+    </Link>
+  )
+}
 
 const WorkspaceRow = ({ entry }: { entry: WorkspaceScreens }) =>
   <section className="space-y-2" aria-label={entry.workspace.title}>
@@ -49,6 +71,7 @@ const WorkspaceRow = ({ entry }: { entry: WorkspaceScreens }) =>
         : <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {entry.screens.map(screen => <ScreenLink key={screen.id} workspaceId={entry.workspace.id} screen={screen} />)}
         </div>}
+    {entry.screens && <WorkspaceFlows workspaceId={entry.workspace.id} screens={entry.screens} flows={entry.flows} />}
   </section>
 
 /** Every InferOps Canvas screen the user can build, across workspaces, and a way to start one. */
@@ -60,6 +83,7 @@ export const InferOpsCanvasHome = () => {
   const catalog = canvasFeatures?.catalog ?? DEFAULT_CANVAS_CATALOG
   const durableViews = canvasFeatures?.durableViews === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
+  const operate = useOperateSession()
   const selectPortalContainer = useDialogSelectPortalContainer()
   const [workspaceId, setWorkspaceId] = useState('')
   const [template, setTemplate] = useState(BLANK_TEMPLATE)
@@ -79,7 +103,10 @@ export const InferOpsCanvasHome = () => {
     const overseer = authenticatedApi.openGadget(workspaceId)
     try {
       const created = await overseer.createCanvas(content)
-      navigate({ to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, search: { view: created.id } })
+      invalidateWorkspaceScreens()
+      // In Operate the new screen opens into the person's session; otherwise on its workspace page.
+      if (operate) await operate.dispatch({ type: 'open', ref: { type: 'screen', workspaceId, screenId: created.id } })
+      else navigate({ to: '/workspace/$id/inferops-canvas', params: { id: workspaceId }, search: { view: created.id } })
     } catch {
       setCreateFailed(true)
     } finally {
