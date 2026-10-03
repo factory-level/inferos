@@ -1,6 +1,6 @@
 ---
 title: Consumer local verification evidence
-updated: 2026-10-01
+updated: 2026-10-03
 ---
 
 # Consumer local verification evidence
@@ -133,3 +133,34 @@ Pointer automation initially dismissed the dialog when targeting the offscreen s
 ## Final canvas labels and focus verification
 
 At clean pin `d374dc51ace5992ff89010b984e26b449f0824bc`, the retained consumer started successfully and browser sign-in reopened the saved layout. The move form was scrolled into view; ArrowDown/Enter selected the board and destination. Values displayed readable section names and the board reference. After Move board completed, the DOM reported the focused element as the board combobox with its updated source label, and section membership confirmed the move. Escape closed Canvas and restored focus to its trigger. Browser errors were empty; the screenshot was inspected and the browser/server were stopped. This closes the label/focus browser-retest gap recorded above without extending the proof to live InferOps data or cloud deployment.
+
+## Fresh-wrapper custom Worker rerun (2026-10-03, #36)
+
+This reran the #36 local slice on current `main` from a new wrapper, without a browser. Every row in the table was actually run. The automated tests are listed separately below the table. The machine used Node 24.14.0 and pnpm 11.17.0. Ports 8787 and 18787 were already in use by other services, so the wrapper's `local.port` was set to 28787.
+
+Pin: `a38ac8b1bd9a1a68926466f0b099ee723c20043c` (`main`, #115), cloned from a local worktree at that commit.
+
+| Step | Command (in the wrapper unless noted) | Result |
+| --- | --- | --- |
+| Bootstrap | `node scripts/consumer/bootstrap.ts <scratch>/wrapper36 <worktree> a38ac8b…` from the InferOS checkout | The first attempt **failed**: `ERR_MODULE_NOT_FOUND` for `yaml`, imported by `scripts/consumer/skill-manifest.ts`, because the checkout had no `node_modules`. After `pnpm install --frozen-lockfile` in the checkout, bootstrap **passed** (`created: true`) in about 1 s. The submodule was at the exact SHA |
+| Setup | `pnpm run setup` | **Pass.** Frozen install of 712 packages in 14.5 s. Reported `ok: true` with pending items "InferOps fixture/remote adapter" and "profile initialization not checked" |
+| Config check | `pnpm inferos:check` | **Pass.** `ok: true`, `modifiedUpstream: false`, `customCloudflareCode: false` (the bootstrap default) |
+| Extensions, flag off | `pnpm extensions:check` | **Pass.** `{"ok":true,"workers":[]}` |
+| Extensions, flag on | Set `features.customCloudflareCode: true`, then `pnpm extensions:check` | **Pass.** `{"ok":true,"workers":[{"id":"hello","name":"consumer-hello","route":"/extensions/hello"}]}`. It also wrote `workers/hello/wrangler.consumer.jsonc` |
+| Gatekeepers, flag on | `pnpm gatekeepers:check` | **Pass.** `{"ok":true,"enabled":true,"gatekeepers":[],"stale":[]}` (the wrapper has no gatekeepers of its own) |
+| Start, flag on | `pnpm local start -- --no-ui-watchers` | **Pass.** Wrangler was ready on `http://localhost:28787`, and the startup log listed the `env.CONSUMER_HELLO (consumer-hello)` binding |
+| Route, flag on | `curl http://localhost:28787/extensions/hello` | **200** with `{"message":"Hello from the consumer Worker"}`. `/` returned 200, and the unlisted `/extensions/nope` returned 404 |
+| Stop | `pnpm local status`, then `pnpm local stop` | **Pass.** `stopped: true`. The port was free afterwards |
+| Disable | Set the flag back to `false`, then `pnpm extensions:check` | **Pass.** `{"ok":true,"workers":[]}`. The SHA-256 of `workers/hello/src.ts` and `cloudflare.config.ts` matched the values from before the flag was enabled, so the files were left intact |
+| Start, flag off | `pnpm local start -- --no-ui-watchers` | **Pass.** The startup log had no `consumer-hello` binding |
+| Route, flag off | `curl http://localhost:28787/extensions/hello` | **404**. `/` returned 200 |
+| Stop | `pnpm local stop` | **Pass.** The Worker source hashes still matched |
+| Path escape | With the flag on, set the manifest's `directory` to `../outside`, then run `node inferos/scripts/consumer/extensions.ts <wrapper>` | **Rejected**, exit 1: "Worker directory must be a normalized relative path beneath workers/". The manifest and flag were restored afterwards |
+
+The scratch wrapper (including its `.wrangler` state) was deleted afterwards, and no wrapper processes were left running.
+
+**Unit-tested, not executed against the wrapper:** duplicate IDs and aliases, invalid IDs and unknown fields, symlinked sources and generated outputs, mismatched canonical names, and a disabled flag never reading the manifest or importing config (`scripts/consumer/extensions.test.ts`). The bootstrap tests cover recursive clone, rerun, non-managed destinations and an incompatible pin (`bootstrap.test.ts`). `node --test scripts/consumer/extensions.test.ts scripts/consumer/bootstrap.test.ts` passed 15 of 15 at this pin. The route gating is covered by `packages/router/__tests__/router.test.ts`, which was not rerun here.
+
+**Not covered by this run:** a browser load of the Workshop, a service call from another Worker to the extension, restarting with the flag still enabled, a deployment dry-run, behaviour with credentials absent, and any cloud packaging. #36's MVP scope moves the deployment dry-run and cloud release packaging to post-release.
+
+**Finding:** bootstrap needs the InferOS checkout it runs from to have its dependencies installed (`pnpm install`), because the scaffolder imports `yaml` through `skill-manifest.ts`. [Bootstrap a consumer](consumer-bootstrap.md) now lists this prerequisite.

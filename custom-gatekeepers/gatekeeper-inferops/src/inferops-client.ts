@@ -3,7 +3,7 @@
 // `http-inferops.ts` implements it over the InferOps HTTP API. `clientFor` in inferops.ts is the one
 // place that chooses between them.
 
-import type { Board, Issue, IssueChanges, Priority, Project, Revision } from "./types";
+import type { Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run } from "./types";
 
 /** Error codes a data source reports. Callers branch on these, never on message text. */
 export type InferOpsErrorCode =
@@ -21,6 +21,8 @@ export type InferOpsErrorCode =
   | "INVALID_REQUEST"
   /** The change is refused in the issue's current condition, such as a move already in progress. */
   | "CONFLICT"
+  /** The issue already has a queued or running coding run (or a dispatch waiting for approval). */
+  | "RUN_ACTIVE"
   /** InferOps rejected the connection's credential (expired or revoked). */
   | "UNAUTHORIZED"
   /** The connection is not permitted to do this in InferOps. */
@@ -32,7 +34,7 @@ export type InferOpsErrorCode =
 
 const ERROR_CODES: ReadonlySet<string> = new Set<InferOpsErrorCode>([
   "NOT_FOUND", "STALE_REVISION", "WORKFLOW_MISMATCH", "INVALID_STATE", "IDEMPOTENCY_CONFLICT",
-  "INVALID_REQUEST", "CONFLICT", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE", "DISABLED",
+  "INVALID_REQUEST", "CONFLICT", "RUN_ACTIVE", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE", "DISABLED",
 ]);
 
 /**
@@ -75,6 +77,15 @@ export type NewIssueRequest = {
 
 /** Changed fields of an issue as the gatekeeper sends them (trimmed, unchanged ones dropped). */
 export type { IssueChanges } from "./types";
+
+/** A workspace repository as InferOps lists it; whether this deployment allows it is added later. */
+export type RepoRecord = Omit<Repo, "allowed">;
+
+/** A coding run of an issue of the bound project, with that issue's key. */
+export type RunRecord = Omit<Run, "pending">;
+
+/** What a dispatch sends: always the `code` action, a repository and the revision it was read at. */
+export type DispatchRequest = { repoId: string; baseRef?: string; expectedRevision: Revision };
 
 /** One project an account can reach, as listed for the resource picker. */
 export type ProjectSummary = Pick<Project, "identifier" | "name">;
@@ -128,6 +139,32 @@ export interface InferOpsClient {
     projectKey: string, issueId: string, changes: IssueChanges, expectedRevision: Revision,
     idempotencyKey: string,
   ): Promise<Issue>;
+
+  /** The workspace's repositories (not project-scoped in InferOps). */
+  listRepos(): Promise<RepoRecord[]>;
+
+  /**
+   * The project's recent coding runs, newest first: only runs of the project's own issues, each
+   * with the issue's key. With `issueId`, only that issue's runs; an issue of another project fails
+   * with NOT_FOUND.
+   */
+  listRuns(projectKey: string, issueId?: string): Promise<RunRecord[]>;
+
+  /** One run, provided its issue belongs to the project; otherwise the one NOT_FOUND. */
+  readRun(projectKey: string, runId: string): Promise<RunRecord>;
+
+  /**
+   * Hand an issue of the project to the coding runner (InferOps `issue:delegate`), after checking
+   * scope. InferOps rechecks the workflow, the issue's state and lease, an active run (RUN_ACTIVE),
+   * the repository and the expected revision. A repeated `idempotencyKey` for the same issue returns
+   * the run the first request queued without queuing another.
+   */
+  dispatchIssue(
+    projectKey: string, issueId: string, request: DispatchRequest, idempotencyKey: string,
+  ): Promise<RunRecord>;
+
+  /** Cancel a queued or running run of the project (InferOps `issue:delegate`). */
+  cancelRun(projectKey: string, runId: string, idempotencyKey: string): Promise<RunRecord>;
 
   /** Whether the account can open the project; used to admit observers of a shared gadget. */
   hasProject(projectKey: string): Promise<boolean>;

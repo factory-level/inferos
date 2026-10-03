@@ -32,7 +32,7 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 
 ## Data and Control Flow
 
-Bootstrap generates an exact submodule gitlink, copied command helpers and skill, explicit profile settings, synthetic data, starter views and editable extension directories. Generated commands delegate to the pinned native implementation. Checks report configuration provenance, dirty upstream state and pending runtime adapters; setup uses frozen dependencies. See [consumer configuration](consumer-configuration.md) for current implementation details. The external cloudflare-os-starter remains a research reference, not a dependency of this scaffolder.
+Bootstrap generates an exact submodule gitlink, copied command helpers and skill, explicit profile settings, synthetic data, starter views and editable extension directories. Generated commands delegate to the pinned native implementation. Checks report configuration provenance, dirty upstream state and pending runtime adapters; setup uses frozen dependencies. See [consumer configuration](consumer-configuration.md) for current implementation details. The external cloudflare-os-starter remains a research reference, not a dependency of this scaffolder. The [starter inventory](../wiki/starter-inventory.md) maps each step of its operator flow to an InferOS command, says what was adapted and what was not adopted, and records its licence review.
 
 ### Skill packs
 

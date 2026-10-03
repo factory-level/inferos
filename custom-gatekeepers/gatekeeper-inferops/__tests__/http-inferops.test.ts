@@ -563,3 +563,139 @@ describe("workspace slugs", () => {
       .toBe("UNAUTHORIZED");
   });
 });
+
+describe("coding runs", () => {
+  const REPO = "40000000-0000-4000-8000-000000000001";
+  const RUN_DEMO = "50000000-0000-4000-8000-000000000001";
+  const RUN_ENG = "50000000-0000-4000-8000-000000000002";
+
+  function wireRun(id: string, issueId: string, extra: Record<string, unknown> = {}) {
+    return {
+      id, issueId, repoId: REPO, action: "code", status: "queued", externalRunId: null,
+      baseRef: null, requestedBy: "70000000-0000-4000-8000-000000000001", leaseGeneration: "3",
+      result: null, error: null, queuedAt: "2026-10-03T00:00:00.000Z", startedAt: null,
+      finishedAt: null, ...extra,
+    };
+  }
+
+  /** The base fake plus runs, repos, dispatch and cancel, answering as InferOps does. */
+  function codingFake(answer?: (call: Call) => Response | undefined) {
+    return fakeInferOps(call => {
+      const answered = answer?.(call);
+      if (answered) return answered;
+      if (call.path === "/project/repos") {
+        return Response.json({ repos: [
+          { id: REPO, slug: "web-app", gitUrl: "git@forge:acme/web-app.git", defaultBaseRef: "main", enabled: true },
+        ] });
+      }
+      if (call.path.startsWith("/project/runs?")) {
+        return Response.json({ runs: [wireRun(RUN_ENG, ENG_41), wireRun(RUN_DEMO, DEMO_1)] });
+      }
+      if (call.path === `/project/runs/${RUN_DEMO}`) return Response.json({ run: wireRun(RUN_DEMO, DEMO_1) });
+      if (call.path === `/project/runs/${RUN_ENG}`) return Response.json({ run: wireRun(RUN_ENG, ENG_41) });
+      if (call.method === "POST" && call.path === `/project/issues/${DEMO_1}/dispatch`) {
+        return Response.json({ run: wireRun(RUN_DEMO, DEMO_1) }, { status: 201 });
+      }
+      if (call.method === "POST" && call.path === `/project/runs/${RUN_DEMO}/cancel`) {
+        return Response.json({ run: wireRun(RUN_DEMO, DEMO_1, { status: "cancelled" }) });
+      }
+      return undefined;
+    });
+  }
+
+  const paths = (calls: Call[]) => calls.map(c => `${c.method} ${c.path}`);
+
+  it("lists repositories without their clone URLs", async () => {
+    const { client } = codingFake();
+
+    expect(await client.listRepos()).toEqual([
+      { id: REPO, slug: "web-app", defaultBaseRef: "main", enabled: true },
+    ]);
+  });
+
+  it("lists only the bound project's runs, with each issue's key, dropping requester and lease", async () => {
+    const { client, calls } = codingFake();
+
+    const runs = await client.listRuns("DEMO");
+
+    expect(runs).toEqual([{
+      id: RUN_DEMO, issueId: DEMO_1, issueIdentifier: "DEMO-1", repoId: REPO, status: "queued",
+      baseRef: null, externalRunId: null, result: null, error: null,
+      queuedAt: "2026-10-03T00:00:00.000Z", startedAt: null, finishedAt: null,
+    }]);
+    expect(paths(calls).at(-1)).toBe("GET /project/runs?limit=200");
+  });
+
+  it("refuses a run of another project exactly as an unknown one", async () => {
+    const { client } = codingFake();
+
+    const otherProject = await failure(client.readRun("DEMO", RUN_ENG));
+    const unknown = await failure(client.readRun("DEMO", "50000000-0000-4000-8000-0000000000ff"));
+    const notAnId = await failure(client.readRun("DEMO", "../issues"));
+
+    expect(otherProject.message).toContain("NOT_FOUND: No such run in this project.");
+    expect(unknown.message).toBe(otherProject.message);
+    expect(notAnId.message).toBe(otherProject.message);
+    expect((await client.readRun("DEMO", RUN_DEMO)).issueIdentifier).toBe("DEMO-1");
+  });
+
+  it("keeps a well-formed patch and test summary, and leaves out a patch it cannot read", async () => {
+    const patch = { path: "/w/r/result.patch", sha256: "ab".repeat(32), files: 1, insertions: 2, deletions: 0 };
+    const finished = (result: unknown) => codingFake(call => call.path === `/project/runs/${RUN_DEMO}`
+      ? Response.json({ run: wireRun(RUN_DEMO, DEMO_1, { status: "succeeded", result }) }) : undefined);
+
+    expect((await finished({ summary: "ok", testSummary: "3 passed", patch }).client.readRun("DEMO", RUN_DEMO)).result)
+      .toEqual({ summary: "ok", testSummary: "3 passed", patch });
+    expect((await finished({ summary: "ok", patch: { path: 1 } }).client.readRun("DEMO", RUN_DEMO)).result)
+      .toEqual({ summary: "ok" });
+    expect((await failure(finished({ testSummary: "x" }).client.readRun("DEMO", RUN_DEMO))).code)
+      .toBe("UNAVAILABLE");
+  });
+
+  it("dispatches with only the named fields and the idempotency key, after the scope check", async () => {
+    const { client, calls } = codingFake();
+
+    const run = await client.dispatchIssue("DEMO", DEMO_1, { repoId: REPO, baseRef: "main", expectedRevision: "1041" }, "inst:7");
+
+    expect(run.id).toBe(RUN_DEMO);
+    const post = calls.at(-1)!;
+    expect(`${post.method} ${post.path}`).toBe(`POST /project/issues/${DEMO_1}/dispatch`);
+    expect(post.body).toEqual({ action: "code", repoId: REPO, baseRef: "main", expectedRevision: "1041" });
+    expect(post.headers.get("x-idempotency-key")).toBe("inst:7");
+  });
+
+  it("never dispatches an issue of another project", async () => {
+    const { client, calls } = codingFake();
+
+    expect((await failure(client.dispatchIssue("DEMO", ENG_41, { repoId: REPO, expectedRevision: "977" }, "k"))).code)
+      .toBe("NOT_FOUND");
+    expect(calls.some(c => c.method === "POST")).toBe(false);
+  });
+
+  it.each([
+    [403, "FORBIDDEN", "FORBIDDEN"],
+    [409, "RUN_ACTIVE", "RUN_ACTIVE"],
+    [409, "STALE_REVISION", "STALE_REVISION"],
+    [409, "LEASE_QUARANTINED", "CONFLICT"],
+    [409, "WORKFLOW_MISMATCH", "WORKFLOW_MISMATCH"],
+    [400, "VALIDATION", "INVALID_REQUEST"],
+  ])("maps a dispatch answered %i %s to %s", async (status, wire, code) => {
+    const { client } = codingFake(call => call.path.endsWith("/dispatch")
+      ? Response.json({ error: { code: wire, message: "server detail" } }, { status }) : undefined);
+
+    const refused = await failure(client.dispatchIssue("DEMO", DEMO_1, { repoId: REPO, expectedRevision: "1041" }, "k"));
+
+    expect(refused.code).toBe(code);
+    expect(refused.message).not.toContain("server detail");
+  });
+
+  it("cancels a run of the project only", async () => {
+    const { client, calls } = codingFake();
+
+    expect((await client.cancelRun("DEMO", RUN_DEMO, "inst:9")).status).toBe("cancelled");
+    expect(calls.at(-1)!.headers.get("x-idempotency-key")).toBe("inst:9");
+    const before = calls.length;
+    expect((await failure(client.cancelRun("DEMO", RUN_ENG, "inst:10"))).code).toBe("NOT_FOUND");
+    expect(calls.slice(before).some(c => c.method === "POST")).toBe(false);
+  });
+});

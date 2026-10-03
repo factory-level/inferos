@@ -233,3 +233,33 @@ export function resolveInferOpsEnabled(options: {
   }
   return capability ? "true" : "false";
 }
+
+/**
+ * The `CODING_WORKBENCH_ENABLED` var the InferOps gatekeeper gets, which it checks on every
+ * coding-dispatch binding and call (`coding-workbench.ts`). Always set here.
+ *
+ * - A version 2 wrapper switches it with the capability, whatever the shell says. The config parser
+ *   already refuses it without `INFEROPS_ENABLED`.
+ * - A version 1 wrapper, or this checkout with no wrapper, leaves it off unless the shell sets
+ *   `CODING_WORKBENCH_ENABLED=true` to try it locally. Any other shell value fails startup.
+ * - It is never on while the InferOps integration is off: the gatekeeper would refuse everything
+ *   anyway, so asking for it then is a configuration error rather than a silent no-op.
+ */
+export function resolveCodingWorkbenchEnabled(options: {
+  /** The wrapper's version 2 capability, or null for a version 1 wrapper or no wrapper. */
+  capability: boolean | null;
+  /** The resolved `INFEROPS_ENABLED`. */
+  inferOpsEnabled: "true" | "false";
+  /** The shell's `CODING_WORKBENCH_ENABLED`, used only without a version 2 wrapper. */
+  shell: string | undefined;
+}): "true" | "false" {
+  const { capability, inferOpsEnabled, shell } = options;
+  if (capability === null && shell !== undefined && shell !== "true" && shell !== "false") {
+    throw new Error('CODING_WORKBENCH_ENABLED must be "true" or "false"');
+  }
+  const on = capability ?? shell === "true";
+  if (on && inferOpsEnabled !== "true") {
+    throw new Error("CODING_WORKBENCH_ENABLED is on, but the InferOps integration (INFEROPS_ENABLED) is off");
+  }
+  return on ? "true" : "false";
+}

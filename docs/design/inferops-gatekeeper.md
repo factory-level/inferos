@@ -1,7 +1,7 @@
 ---
 title: InferOps gatekeeper
 status: draft
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # InferOps gatekeeper
@@ -10,7 +10,7 @@ Tracking epic: [#6](https://github.com/factory-level/inferos/issues/6); roadmap:
 
 ## Purpose
 
-Expose scoped InferOps project/board/issue reads and approved issue creates, updates and transitions as native capabilities.
+Expose scoped InferOps project/board/issue reads and approved issue creates, updates and transitions as native capabilities, and, as a separate grant, approved coding dispatch of a project's issues to the local coding runner ([local coding workflows](local-coding-workflows.md#dispatch-grant)).
 
 ## Requirements
 
@@ -46,11 +46,15 @@ Each person connects InferOps with their own authority, through InferOps' PKCE s
 | `X-Workspace-Id` | The InferOps workspace UUID of the binding: the connected person's own workspace that the resource URL's workspace slug resolved to. |
 | `X-Idempotency-Key` | On every write (create, update, transition); see [Idempotency](#idempotency). |
 
-InferOps also accepts a service-account key (`iex_…`, as the bearer or as `X-API-Key`). The gatekeeper does not use one for a connected person. InferOps permission and row-level rules apply to every call as they do for any other client: `project:read` for the project list and board, `issue:read` for an issue, `issue:write` for a create, an update or a transition. InferOps' configured workflow policy can also refuse a write (`403 FORBIDDEN` with `details.decision`); InferOS reports it as `FORBIDDEN` and never retries it.
+InferOps also accepts a service-account key (`iex_…`, as the bearer or as `X-API-Key`). The gatekeeper does not use one for a connected person. InferOps permission and row-level rules apply to every call as they do for any other client: `project:read` for the project list, the board and the repository list, `issue:read` for an issue, `issue:write` for a create, an update or a transition, `run:read` for runs, and `issue:delegate` for a dispatch or a run cancel. InferOps' configured workflow policy can also refuse a write (`403 FORBIDDEN` with `details.decision`); InferOS reports it as `FORBIDDEN` and never retries it.
 
 ### Resource grammar
 
 `inferops://<tenant>.<workspace>/project/board/<KEY>`
+
+`inferops://<tenant>.<workspace>/project/dispatch/<KEY>`
+
+Two project-scoped kinds share the authority and key rules below. `board` grants the board session; `dispatch` grants the coding-dispatch session of the same project ([#70](https://github.com/factory-level/inferos/issues/70)). They are separate grants: neither carries the other, so an agent granted only a board cannot dispatch. `dispatch` is offered and bound only while the deployment has `CODING_WORKBENCH_ENABLED` on.
 
 This is InferOps' own deep-link grammar (`_libs/widgets/shared/inferops-uri.ts` on InferOps `develop`), so a board URL from an InferOps document and one bound in InferOS are the same string. For example, against the local InferOps seeds (tenant `acme`, workspaces `operations` and `knowledge`), `inferops://acme.operations/project/board/ENG` names the ENG board of the Operations workspace ([ADR 0005](../adr/0005-inferops-uri-authority.md)).
 
@@ -77,12 +81,19 @@ All paths are relative to the deployment's API base URL.
 | Transition | `POST /project/issues/<issueId>/transition`, body `{ "toStateId", "expectedRevision" }` | `issue`: the moved card. |
 | Create | `POST /project/issues`, body `{ "projectId", "title", "description"?, "priority"?, "stateId", "workflow"? }` | `issue`: the new card. |
 | Update | `PATCH /project/issues/<issueId>`, body `{ "title"?, "description"?, "priority"?, "expectedRevision" }` | `issue`: the updated card; `deliveries` is dropped. |
+| Repositories (dispatch) | `GET /project/repos` | `repos[]`: `id`, `slug`, `defaultBaseRef`, `enabled`; `gitUrl` is dropped. |
+| Runs (dispatch) | `GET /project/runs?limit=200[&issueId=<uuid>]` | `runs[]`, newest first; kept only when the run's issue is in the bound project. |
+| One run (dispatch) | `GET /project/runs/<runId>` | `run`, kept only when its issue is in the bound project. |
+| Dispatch | `POST /project/issues/<issueId>/dispatch`, body `{ "action": "code", "repoId", "baseRef"?, "expectedRevision" }` | `run`: the queued run. |
+| Cancel (dispatch) | `POST /project/runs/<runId>/cancel` | `run`: the cancelled (queued) or unknown (running) run. |
 
 Writes send only the fields of the agent-facing declaration. A create always names the bound project's UUID (resolved from its key) and the state it lands in, resolved by InferOS from the board when the proposal is made: the caller's `stateId`, which must be one of the board's states, or else the first state of the `software` workflow (of the `content` workflow on a board that has no `software` states). `workflow` is sent only when that state's workflow is `content`; otherwise InferOps' default (`software`) applies. So the issue lands in the column the approver saw. `parentId`, `acceptanceCriteria`, `assigneeId`, dates, refs, `blockedReason` and `leaseGeneration` are not exposed. An update with no changed field is not proposed; a `null` description clears it.
 
 Every response is validated before any of it is used; a response that does not match is a provider failure, not partial data. The board response also carries every project of the workspace (`projects[]`) and each card's lease and run; the issue response also carries the description, acceptance criteria, refs and comments. InferOS drops all of these, so a session returns only the bound project and the `Issue` fields of the [declaration](inferops-gatekeeper-api.d.ts).
 
 There is no pagination in v1: the board endpoint returns the whole board and InferOS does not invent a cursor over it.
+
+A run keeps `id`, `issueId`, `repoId`, `status`, `baseRef`, `externalRunId`, `result`, `error` and its timestamps; `requestedBy`, `action` and `leaseGeneration` are dropped. A result keeps its required `summary` and, when well formed, `testSummary`, `patch` (`path`, `sha256`, `files`, `insertions`, `deletions`), `branch`, `commitSha` and `prUrl`; `patch` and `testSummary` are new in InferOps ([factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327)) and a shape that does not match is left out rather than failing the read.
 
 ### Project scope is checked by InferOS
 
@@ -92,6 +103,8 @@ InferOps' issue read, transition and update authorize against the workspace, not
 - A create names only the bound project's UUID, resolved from its key at execution; its state must belong to that project, which InferOps checks.
 - An issue of another project is answered exactly as an unknown issue: `NOT_FOUND: No such issue in this project.`
 - The board is requested for the bound project's UUID only, and the response's `projectId` must match it.
+- A run carries an issue, not a project. A run is read, listed or cancelled only when its issue is in the bound project (checked the same way), and one of another project is answered exactly as an unknown run: `NOT_FOUND: No such run in this project.` A dispatch makes the issue's scope check first, and names the issue by its key, resolved from the bound project's board.
+- Repositories are workspace-wide in InferOps. A dispatch names only a repository on the deployment's coding allowlist (the wrapper's `codingWorkbench.repos`, passed to the gatekeeper as ids), checked before any request at proposal and again at apply.
 
 ### Revision
 
@@ -123,10 +136,11 @@ InferOps reports errors as `{ "error": { "code", "message", "details"? } }`. Inf
 | 404 `NOT_FOUND` on a create | `NOT_FOUND` | The project or the target state is gone. |
 | 409 `STALE_REVISION` | `STALE_REVISION` | The issue changed; read it again. |
 | 409 `WORKFLOW_MISMATCH` | `WORKFLOW_MISMATCH` | The target state belongs to the other workflow. |
-| 409 `LEASE_HELD`, `LEASE_LOST`, `LEASE_QUARANTINED`, `RUN_ACTIVE`, `CONFLICT` | `CONFLICT` | InferOps refused the move in the issue's current condition. |
+| 409 `RUN_ACTIVE` | `RUN_ACTIVE` | The issue already has a queued or running coding run. |
+| 409 `LEASE_HELD`, `LEASE_LOST`, `LEASE_QUARANTINED`, `CONFLICT` | `CONFLICT` | InferOps refused the change in the issue's current condition (for a cancel: the run has already stopped). |
 | 400 `VALIDATION_ERROR` (and other 400s) | `INVALID_REQUEST` | The request was malformed. |
 | 401 | `UNAUTHORIZED` | The credential was rejected or revoked; reconnect. |
-| 403 `FORBIDDEN` (and other 403s) | `FORBIDDEN` | The connected person may not do this in InferOps, or (with `details.decision`) the project's workflow policy refused the change. |
+| 403 `FORBIDDEN` (and other 403s) | `FORBIDDEN` | The connected person may not do this in InferOps (for a dispatch or cancel: they lack `issue:delegate`), or (with `details.decision`) the project's workflow policy refused the change. |
 | 5xx, any other status, a network failure, or a response that fails validation | `UNAVAILABLE` | Provider failure; nothing is assumed about the outcome. |
 
 `INVALID_STATE` (the target state is not part of the bound project) is decided by InferOS from the board when a move is proposed. InferOps has no distinct code for it.
@@ -146,6 +160,17 @@ With a binding for `inferops://acme.operations/project/board/DEMO`:
 | A collaborator opening a shared gadget without access to DEMO | Refused: their own InferOps account must be able to open the project. |
 | A person whose InferOps permission was removed, or whose token was revoked | `FORBIDDEN` or `UNAUTHORIZED` from InferOps; a pending move is not applied. |
 | A second workspace's project with the same key | Reachable only through a URL naming that workspace, and only if the person belongs to it. |
+
+### Coding dispatch
+
+The dispatch session (`InferOpsDispatchSession` in the [declaration](inferops-gatekeeper-api.d.ts)) has three observations and two actions:
+
+- `listRepos()` lists the workspace's repositories, each marked `allowed` when it is on the deployment's allowlist.
+- `listRuns()` and `getRun(runId)` read the bound project's runs. A dispatch waiting for approval is shown as a provisional run (`pending: "dispatch"`, id `pending-<n>`), and a run with a cancel waiting as `pending: "cancel"`.
+- `dispatch(issueKey, {repoId, baseRef?}, expectedRevision)` proposes handing a software issue to the runner. Before proposing, InferOS checks the switch, the arguments (`baseRef` by InferOps' git ref rule) and the allowlist without a request, then the issue's workflow, state and revision, the repository, and any active or pending run, so a dispatch InferOps would refuse is not proposed. The approval shows the issue, its title, the repository, the base ref and the expected revision. Its action kind is `inferops.code-dispatch`; it is never auto-approvable and not revertible (a run is stopped by a cancel).
+- `cancel(runId)` proposes stopping a queued or running run of the project. Its action kind is `inferops.run-cancel`. A cancel whose approval finds the run already stopped counts as applied.
+
+Applying either rechecks the switch, the allowlist (dispatch) and the fingerprint before sending, under the action's idempotency key. InferOps replays a known dispatch key for the same issue and refuses one reused for another issue, and its own guards (workflow, state, lease, active run, repository, revision, `issue:delegate`) apply at apply time.
 
 ### Companion InferOps changes
 

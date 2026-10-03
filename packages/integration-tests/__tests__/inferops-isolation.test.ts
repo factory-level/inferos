@@ -22,11 +22,11 @@ import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, Overseer } from "@gadgets/workshop-shared/api";
 import type {
-  InferOpsProjectSession,
+  InferOpsDispatchSession, InferOpsProjectSession,
 } from "../../../custom-gatekeepers/gatekeeper-inferops/src/types.js";
 import { startHarness, type Harness } from "../src/harness.js";
 import {
-  INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, SEEDED_ISSUES, WORKSPACES, boardUrl,
+  INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, REPOS, SEEDED_ISSUES, WORKSPACES, boardUrl,
   secretDescription, type FakePerson, type WorkspaceSlug,
 } from "../src/inferops-fake.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
@@ -75,6 +75,9 @@ beforeAll(async () => {
           INFERLAB_AUTH_ORIGIN: INFERLAB_ORIGIN,
           INFEROPS_BASE_URL: INFEROPS_ORIGIN,
           BASE_URL,
+          // Coding dispatch on, with web-app the only allowlisted repository.
+          CODING_WORKBENCH_ENABLED: "true",
+          CODING_WORKBENCH_REPOS: REPOS.webApp.id,
         };
       },
     }],
@@ -539,8 +542,8 @@ describe("account and scope changes", () => {
   });
 });
 
-/** Reload the gatekeeper with `INFEROPS_ENABLED` set, keeping its storage and the fake's data. */
-async function setEnabled(enabled: boolean): Promise<void> {
+/** Reload the gatekeeper with a deployment var set, keeping its storage and the fake's data. */
+async function setVar(name: "INFEROPS_ENABLED" | "CODING_WORKBENCH_ENABLED", enabled: boolean): Promise<void> {
   earlierLogs.push(...harness.server.getLogs());
   await harness.server.update(options => ({
     ...options,
@@ -548,11 +551,141 @@ async function setEnabled(enabled: boolean): Promise<void> {
       if (!("config" in worker)) throw new Error("Expected inline harness config");
       if (worker.config.name !== GATEKEEPER_WORKER) return worker;
       return { ...worker, config: { ...worker.config,
-        vars: { ...worker.config.vars, INFEROPS_ENABLED: String(enabled) } } };
+        vars: { ...worker.config.vars, [name]: String(enabled) } } };
     }),
   }));
   harness.url = (await harness.server.listen()).url;
 }
+
+const setEnabled = (enabled: boolean) => setVar("INFEROPS_ENABLED", enabled);
+
+const ENG_DISPATCH = `inferops://acme.operations/project/dispatch/ENG`;
+
+describe("coding dispatch", () => {
+  /** An ENG issue earlier tests left open and never dispatched. */
+  const openIssue = () => {
+    const found = fake.issuesOf("ENG").find(i => i.stateId !== DONE.id && fake.runsOf(i.identifier).length === 0);
+    if (!found) throw new Error("No open ENG issue left");
+    return found;
+  };
+
+  /** A dispatch binding of the user's, and a session on it. */
+  async function bindDispatch(user: User, url = ENG_DISPATCH) {
+    const ws = await user.api.newGadget();
+    const connection = await ws.newGatekeeper(user.account.id, url);
+    if (!connection) throw new Error(`No connection for ${url}`);
+    const session = await connection.openSession() as RpcStub<InferOpsDispatchSession>;
+    return { ws, connection, session };
+  }
+
+  it("dispatches with the person's own delegate permission, once, only on approval", async () => {
+    const dana = await newUser("dispatcha", ["operations"]);
+    fake.grantDelegate(dana.person);
+    const { ws, session } = await bindDispatch(dana);
+    const repos = await session.listRepos();
+    expect(repos.map(r => [r.slug, r.allowed])).toEqual([["web-app", true], ["infra", false]]);
+    const issue = openIssue();
+
+    const writesBefore = fake.writeRequests().length;
+    const action = await proposed(ws, () =>
+      session.dispatch(issue.identifier, { repoId: REPOS.webApp.id }, issue.revision));
+    expect(fake.writeRequests().length).toBe(writesBefore);
+    expect((await session.listRuns()).map(r => r.pending)).toEqual(["dispatch"]);
+
+    await ws.approveAction(action.id);
+    const [run] = fake.runsOf(issue.identifier);
+    expect(run).toMatchObject({ status: "queued", repoId: REPOS.webApp.id, requestedBy: dana.person.userId });
+    const posts = fake.writeRequests().slice(writesBefore);
+    expect(posts.map(r => r.path)).toEqual([`/project/issues/${issue.id}/dispatch`]);
+    expect(posts[0]!.idempotencyKey).toMatch(/^[0-9a-f-]{36}:\d+$/);
+    expect(fake.accessTokensOf(dana.person)).toContain(posts[0]!.token);
+    expect(await failure(ws.approveAction(action.id))).toContain("not pending");
+    expect(fake.runsOf(issue.identifier)).toHaveLength(1);
+    expect((await session.listRuns()).map(r => [r.id, r.status])).toEqual([[run!.id, "queued"]]);
+
+    // A second dispatch of the issue is refused while the run is active, without a write.
+    expect(await failure(session.dispatch(issue.identifier, { repoId: REPOS.webApp.id }, fake.issue(issue.identifier).revision)))
+      .toContain("RUN_ACTIVE");
+    // Cancelling it is an approved action too.
+    const cancel = await proposed(ws, () => session.cancel(run!.id));
+    await ws.approveAction(cancel.id);
+    expect(fake.runsOf(issue.identifier)[0]!.status).toBe("cancelled");
+  });
+
+  it("attack: a person without dispatch permission is refused by InferOps at apply, and nothing runs", async () => {
+    const erin = await newUser("nodelega", ["operations"]);
+    const { ws, session } = await bindDispatch(erin);
+    const issue = openIssue();
+    const action = await proposed(ws, () =>
+      session.dispatch(issue.identifier, { repoId: REPOS.webApp.id }, issue.revision));
+
+    expect(await failure(ws.approveAction(action.id)))
+      .toContain("needs dispatch permission (issue:delegate)");
+    expect(fake.runsOf(issue.identifier)).toEqual([]);
+  });
+
+  it("attack: a board-only binding cannot dispatch, and a repository off the allowlist is refused before any request", async () => {
+    const fay = await newUser("boardonly", ["operations"]);
+    fake.grantDelegate(fay.person);
+    const { session: board } = await bind(fay, ENG_BOARD);
+    const asDispatch = board as unknown as RpcStub<InferOpsDispatchSession>;
+    expect(await failure(asDispatch.dispatch(openIssue().identifier, { repoId: REPOS.webApp.id }, "1"))).not.toBe("");
+
+    const { session } = await bindDispatch(fay);
+    const before = fake.requests.length;
+    const issue = openIssue();
+    expect(await failure(session.dispatch(issue.identifier, { repoId: REPOS.infra.id }, issue.revision)))
+      .toContain("FORBIDDEN: Repository");
+    expect(fake.requests.slice(before)).toEqual([]);
+    // Another workspace's project, and a workspace the person does not hold, are refused like a missing one.
+    expect(await bindRefusal(fay, "inferops://acme.knowledge/project/dispatch/OPS"))
+      .toContain(unavailable("OPS", "acme.knowledge"));
+    expect(await bindRefusal(fay, "inferops://acme.operations/project/dispatch/OPS"))
+      .toContain(unavailable("OPS", "acme.operations"));
+  });
+
+  it("failure: a dispatch made stale before approval surfaces the revision and queues nothing", async () => {
+    const gus = await newUser("stalegus", ["operations"]);
+    fake.grantDelegate(gus.person);
+    const { ws, session } = await bindDispatch(gus);
+    const issue = openIssue();
+    const action = await proposed(ws, () =>
+      session.dispatch(issue.identifier, { repoId: REPOS.webApp.id }, issue.revision));
+    fake.touch(issue.identifier);
+
+    expect(await failure(ws.approveAction(action.id))).toContain("the issue changed in InferOps");
+    expect(fake.runsOf(issue.identifier)).toEqual([]);
+  });
+
+  it("failure: with CODING_WORKBENCH_ENABLED off, dispatch sessions and queued dispatches are refused without a request", async () => {
+    const hal = await newUser("codeoff", ["operations"]);
+    fake.grantDelegate(hal.person);
+    const { ws, connection, session } = await bindDispatch(hal);
+    const issue = openIssue();
+    const action = await proposed(ws, () =>
+      session.dispatch(issue.identifier, { repoId: REPOS.webApp.id }, issue.revision));
+    const { id: gadgetId } = await ws.getMetadata();
+    const connectionId = await connection.getId();
+
+    await setVar("CODING_WORKBENCH_ENABLED", false);
+    try {
+      const api = await logIn(connect(harness.url), hal.username);
+      const reopened = await api.openGadget(gadgetId);
+      const stale = await (await reopened.getGatekeeperById(connectionId)).openSession() as
+        RpcStub<InferOpsDispatchSession>;
+      const before = fake.requests.length;
+      expect(await failure(stale.listRuns())).toContain("DISABLED: Coding dispatch is turned off");
+      expect(await failure(reopened.approveAction(action.id))).toContain("coding dispatch is turned off");
+      expect(await failure(reopened.newGatekeeper(hal.account.id, ENG_DISPATCH)))
+        .toContain("Coding dispatch is turned off");
+      expect(fake.requests.slice(before)).toEqual([]);
+      // The board stays available: the switch covers coding dispatch only.
+      expect(await (await api.newGadget()).newGatekeeper(hal.account.id, ENG_BOARD)).toBeTruthy();
+    } finally {
+      await setVar("CODING_WORKBENCH_ENABLED", true);
+    }
+  });
+});
 
 describe("the deployment switch", () => {
   it("failure: with INFEROPS_ENABLED off, bindings, reads and queued applies are refused without a request; on again restores them", async () => {

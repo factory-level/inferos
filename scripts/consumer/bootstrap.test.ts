@@ -184,7 +184,7 @@ test("capability report states enabled, supported and unsupported against the in
   } finally { rmSync(upstream, { recursive: true, force: true }); }
 });
 
-test("INFEROPS_ENABLED is supported by this revision; a version 1 wrapper never requests it", () => {
+test("INFEROPS_ENABLED and CODING_WORKBENCH_ENABLED are supported by this revision; a version 1 wrapper never requests them", () => {
   const repository = join(import.meta.dirname, "../..");
   assert.equal(capabilitySources.INFEROPS_ENABLED, "custom-gatekeepers/gatekeeper-inferops/src/enablement.ts");
   assert.ok(existsSync(join(repository, capabilitySources.INFEROPS_ENABLED!)));
@@ -196,9 +196,12 @@ test("INFEROPS_ENABLED is supported by this revision; a version 1 wrapper never 
   assert.deepEqual(unsupportedCapabilities(on.config, repository), []);
   const off = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { INFEROPS_ENABLED: false } });
   assert.deepEqual(reportCapabilities(off, repository).INFEROPS_ENABLED, { state: "supported", requested: false, source: "override" });
-  // CODING_WORKBENCH_ENABLED has no code yet (#69): switching it on still fails.
+  // CODING_WORKBENCH_ENABLED is enforced by the gatekeeper's coding switch (#69, #70).
+  assert.equal(capabilitySources.CODING_WORKBENCH_ENABLED, "custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts");
+  assert.ok(existsSync(join(repository, capabilitySources.CODING_WORKBENCH_ENABLED!)));
   const coding = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { INFEROPS_ENABLED: true, CODING_WORKBENCH_ENABLED: true } });
-  assert.deepEqual(unsupportedCapabilities(coding.config, repository), ["CODING_WORKBENCH_ENABLED"]);
+  assert.deepEqual(unsupportedCapabilities(coding.config, repository), []);
+  assert.deepEqual(reportCapabilities(coding, repository).CODING_WORKBENCH_ENABLED, { state: "enabled", requested: true, source: "override" });
 });
 
 const runtime = (target: string, command: string) => spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), command], { encoding: "utf8" });
