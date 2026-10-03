@@ -1,6 +1,8 @@
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
+import { WorkspaceFlowStore } from "./flow-store";
+import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND } from '@gadgets/workshop-shared/api';
@@ -1179,6 +1181,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
     collections: {
       canvases: collection<CanvasDefinition>()({ primaryKey: "id" }),
+      // Authored flows: ordered lists of this workspace's canvases (see flow-store.ts).
+      flows: collection<OperateFlow>()({ primaryKey: "id" }),
       // READ-ONLY LEGACY: the pre-git-storage incremental code log, tightly-packed from version 1
       // (there's no entry for version 0, the starting empty state). Nothing writes it anymore --
       // mainline code lives in `gitObjects` as commits -- and it is read only by the git-storage
@@ -10796,6 +10800,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async deleteCanvas(id: string, expectedRevision: string): Promise<void> { this.#canvasStore().delete(id, expectedRevision); }
 
+  #flowStore(): WorkspaceFlowStore {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceFlowStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
+  }
+
+  async listFlows(): Promise<OperateFlow[]> { return this.#flowStore().list(); }
+  async createFlow(content: OperateFlowContent): Promise<OperateFlow> { return this.#flowStore().create(content); }
+  async replaceFlow(id: string, expectedRevision: string, content: OperateFlowContent): Promise<OperateFlow> {
+    return this.#flowStore().replace(id, expectedRevision, content);
+  }
+  async deleteFlow(id: string, expectedRevision: string): Promise<void> { this.#flowStore().delete(id, expectedRevision); }
+
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,
@@ -12406,6 +12422,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async listFlows(): Promise<OperateFlow[]> { this.#deny(); }
+  async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
+  async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
+  async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
 
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,

@@ -43,6 +43,10 @@
       "types": "./src/theme.ts",
       "import": "./src/theme.ts"
     },
+    "./operate-flow": {
+      "types": "./src/operate-flow.ts",
+      "import": "./src/operate-flow.ts"
+    },
     "./canvas": {
       "types": "./src/canvas.ts",
       "import": "./src/canvas.ts"

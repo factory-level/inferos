@@ -12,6 +12,12 @@ export const MAX_OPERATE_SUBJECT_LENGTH = 512;
 /** Most references a session's working set holds; opening one more drops the oldest. */
 export const MAX_OPERATE_WORKING_SET = 24;
 
+/** Most steps a flow run holds. */
+export const MAX_OPERATE_FLOW_STEPS = 32;
+
+/** Longest flow title a session holds. */
+export const MAX_OPERATE_FLOW_TITLE_LENGTH = 120;
+
 /**
  * Something opened in an operate session, by reference only. A reference identifies a target but
  * grants nothing: it is rendered through the viewer's own access, and shows as unavailable if the
@@ -23,6 +29,22 @@ export type OperateRef =
 
 /** How an open app workspace is presented: the app itself, or the chat beside it. */
 export type OperateAppPresentation = "app" | "chat";
+
+/**
+ * A flow being run: an ordered list of one workspace's screens, shown one at a time across the
+ * whole page. The steps are copied in when the flow starts, so the run is unaffected by later
+ * edits to the flow and the reducer needs nothing but the event.
+ */
+export type OperateFlowRun = {
+  workspaceId: string;
+  /** The flow this run was started from. */
+  flowId: string;
+  title: string;
+  /** The screen ids to show, in order. Never empty. */
+  steps: string[];
+  /** The step being shown: an index into `steps`. */
+  index: number;
+};
 
 /** The full page state of an operate session. */
 export type OperatePageState = {
@@ -36,6 +58,11 @@ export type OperatePageState = {
   chatOpen: boolean;
   /** How a focused app workspace is presented. */
   appPresentation: OperateAppPresentation;
+  /**
+   * The flow being run, or null. While set, the page shows only the flow's current step (the "full
+   * canvas" state); the working set and focus are kept, and return when the flow is exited.
+   */
+  flow: OperateFlowRun | null;
 };
 
 /** A change to an operate session's page state. Events change presentation only. */
@@ -51,7 +78,13 @@ export type OperateEvent =
   /** Open or close the operate chat panel. */
   | { type: "setChatOpen"; open: boolean }
   /** Present a focused app workspace as the app or as its chat. */
-  | { type: "setAppPresentation"; presentation: OperateAppPresentation };
+  | { type: "setAppPresentation"; presentation: OperateAppPresentation }
+  /** Start running a flow at its first step, replacing any flow already running. */
+  | { type: "startFlow"; workspaceId: string; flowId: string; title: string; steps: string[] }
+  /** Show another step of the running flow. */
+  | { type: "goToStep"; index: number }
+  /** Stop running the flow and return to the working set. */
+  | { type: "exitFlow" };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -78,6 +111,7 @@ export const INITIAL_OPERATE_PAGE: OperatePageState = {
   subject: null,
   chatOpen: true,
   appPresentation: "app",
+  flow: null,
 };
 
 /** Thrown by `applyOperateEvent` for an event that is invalid in the current state. */
@@ -92,7 +126,10 @@ export function sameOperateRef(a: OperateRef, b: OperateRef): boolean {
 }
 
 function checkRef(ref: OperateRef): void {
-  let ids = ref.type === "screen" ? [ref.workspaceId, ref.screenId] : [ref.workspaceId];
+  checkIds(ref.type === "screen" ? [ref.workspaceId, ref.screenId] : [ref.workspaceId]);
+}
+
+function checkIds(ids: string[]): void {
   for (let id of ids) {
     if (id.length === 0 || id.length > MAX_OPERATE_ID_LENGTH) {
       throw new OperateEventError(`Reference ids must be 1-${MAX_OPERATE_ID_LENGTH} characters.`);
@@ -141,6 +178,30 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
       return { ...state, chatOpen: event.open };
     case "setAppPresentation":
       return { ...state, appPresentation: event.presentation };
+    case "startFlow": {
+      let { workspaceId, flowId, title, steps } = event;
+      checkIds([workspaceId, flowId, ...steps]);
+      if (steps.length === 0 || steps.length > MAX_OPERATE_FLOW_STEPS) {
+        throw new OperateEventError(`A flow must have 1-${MAX_OPERATE_FLOW_STEPS} steps.`);
+      }
+      if (title.length === 0 || title.length > MAX_OPERATE_FLOW_TITLE_LENGTH) {
+        throw new OperateEventError(
+            `A flow title must be 1-${MAX_OPERATE_FLOW_TITLE_LENGTH} characters.`);
+      }
+      return { ...state, flow: { workspaceId, flowId, title, steps: [...steps], index: 0 } };
+    }
+    case "goToStep": {
+      if (!state.flow) throw new OperateEventError("No flow is running in this session.");
+      if (!Number.isInteger(event.index) || event.index < 0 ||
+          event.index >= state.flow.steps.length) {
+        throw new OperateEventError("That step is not part of the running flow.");
+      }
+      return { ...state, flow: { ...state.flow, index: event.index } };
+    }
+    case "exitFlow": {
+      if (!state.flow) throw new OperateEventError("No flow is running in this session.");
+      return { ...state, flow: null };
+    }
   }
 }
 

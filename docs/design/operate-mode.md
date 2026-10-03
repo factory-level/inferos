@@ -49,6 +49,10 @@ From a Build workspace, Publish to Operate creates or updates a blueprint for it
 
 A screen is today's canvas definition: sections of widget instances. A view arranges several screens with a layout from a fixed set (for example tabs, or a primary screen with a secondary one), stored as screen references plus layout. Views carry no free-form placement or styling, matching the canvas contract.
 
+### Flows
+
+A flow is an authored, ordered list of screens that pushes a person through them one at a time: intake, then triage, then orders. Starting a flow puts the session in a **full-canvas** state, where the current step fills the page in place of the working set's tabs and the navigation, with the step's position and Back and Next. The running flow and its step are part of the page state, so a flow resumes on reload, stays in step across the person's tabs and devices, and can later be advanced by the operate agent through the same events. Exiting a flow returns to the working set as it was. A flow stores references and order only, like a view.
+
 ### Page state machine
 
 The page state is one value:
