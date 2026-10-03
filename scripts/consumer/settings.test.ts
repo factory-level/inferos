@@ -36,6 +36,8 @@ test("the default wrapper needs nothing beyond its configuration", () => {
 test("required-when follows sign-in, the stopgap token, custom code and coding", () => {
   const signIn = validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_AUTH"]), {});
   assert.deepEqual(codes(signIn), ["INFERLAB_AUTH_ORIGIN:missing"]);
+  // Startup falls back to the local InferOps origin, so an unset origin warns rather than fails.
+  assert.equal(signIn.ok, true);
   assert.equal(validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_AUTH"]), { INFERLAB_AUTH_ORIGIN: "http://localhost:8080" }).ok, true);
 
   const token = validateSettings(v1(), { INFEROPS_API_TOKEN: SECRET });
@@ -159,9 +161,9 @@ test("doctor's settings check runs the pinned table and fails only on errors", a
     assert.equal(pass.check.status, "pass");
     assert.ok(pass.report?.settings.length);
 
-    const failing = await diagnoseSettings(root, REPO, v2(["INFEROPS_ENABLED", "INFEROPS_AUTH"]), { INFEROPS_API_KEY: SECRET });
+    const failing = await diagnoseSettings(root, REPO, v2(["INFEROPS_ENABLED", "INFEROPS_AUTH"]), { INFEROPS_API_KEY: SECRET, INFERLAB_AUTH_ORIGIN: "http://auth.example.com" });
     assert.equal(failing.check.status, "error");
-    assert.match(failing.check.message, /INFERLAB_AUTH_ORIGIN is required/);
+    assert.match(failing.check.message, /INFERLAB_AUTH_ORIGIN is not a bare/);
     assert.ok(!JSON.stringify(failing).includes(SECRET));
 
     // inferos.canvas.json leaving the gatekeeper out reaches the validation.

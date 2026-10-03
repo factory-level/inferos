@@ -60,6 +60,8 @@ export interface SettingEntry {
   readAt: string;
   /** Whether it is present. `null` when doctor cannot tell without running something else. */
   present: (input: SettingsInput) => boolean | null;
+  /** When startup has a working fallback, a missing value is only a warning naming that fallback. */
+  whenMissing?: { severity: "warning"; note: string };
   /** Why this installation cannot honour the setting yet. */
   unsupported?: string;
 }
@@ -127,11 +129,12 @@ export const SETTINGS: readonly SettingEntry[] = [
   },
   {
     name: "INFERLAB_AUTH_ORIGIN", group: "Identity", kind: "reference", owner: "deployer",
-    default: `\`${DEFAULT_INFERLAB_AUTH_ORIGIN}\` at startup, but doctor requires it set when sign-in is on`, source: "local",
+    default: `\`${DEFAULT_INFERLAB_AUTH_ORIGIN}\` (doctor warns when sign-in is on and it is unset)`, source: "local",
     description: "The InferLab central-auth origin: a bare HTTPS origin, or HTTP on loopback, with no credentials, path, query or fragment.",
     requiredWhen: whenSignIn,
     readAt: "Shell, passed to `gatekeeper-inferops` by `scripts/run-dev-server.ts` (`getInferLabLoginVars`)",
     present: ({ env }) => has(env, "INFERLAB_AUTH_ORIGIN"),
+    whenMissing: { severity: "warning", note: `startup uses \`${DEFAULT_INFERLAB_AUTH_ORIGIN}\`, the local InferOps` },
   },
   {
     name: "AUTH_GATEKEEPERS", group: "Identity", kind: "value", owner: "deployer",
@@ -322,7 +325,9 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
 
   for (const entry of SETTINGS) {
     if (entry.requiredWhen.test(input) && entry.present(input) === false) {
-      add(entry.name, "error", "missing", `${entry.name} is required when ${lowerFirst(entry.requiredWhen.text)}`);
+      const message = `${entry.name} is required when ${lowerFirst(entry.requiredWhen.text)}`;
+      add(entry.name, entry.whenMissing?.severity ?? "error", "missing",
+        entry.whenMissing ? `${message}; unset, ${entry.whenMissing.note}` : message);
     }
   }
 
