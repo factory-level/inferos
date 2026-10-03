@@ -365,6 +365,9 @@ InferOps refused by InferOps (`FORBIDDEN`) and, after a reconnect, by the gateke
 request, for old and new bindings alike; a disconnect signing the session out and failing the
 account's bindings without a request; and no access token, refresh token, `Bearer` header or
 issue description in any Workers runtime log (`TestHarness.getLogs()`) or failure message of the
-run. Remaining gaps: it is fake-backed, so neither a live local InferOps run (#23's walkthrough)
-nor a cloud smoke has been recorded; the stopgap connection, `use`-role viewers and the
-`INFEROPS_ENABLED` switch (#103, not merged) are not exercised by it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.
+run. With `INFEROPS_ENABLED` turned off by a harness reload, a read through an existing binding
+fails `DISABLED`, a queued move is not applied and stays pending, and a new binding is refused,
+all without a request; turned back on, the read works and the queued move applies. Remaining
+gaps: it is fake-backed, so neither a live local InferOps run (#23's walkthrough) nor a cloud
+smoke has been recorded, and the stopgap connection and `use`-role viewers are not exercised by
+it. See [source ledger](../wiki/research-sources.md) for sibling repository revisions.

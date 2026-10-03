@@ -14,7 +14,7 @@
 //   B-type: member of `acme.knowledge` only (project OPS).
 //   C-type: member of both.
 //
-// Tests run in order and share one harness. The last one inspects everything the Workers printed
+// Tests run in order and share one harness. The last one inspects everything the Workers logged
 // during the file, so it has to stay last.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -56,6 +56,8 @@ const fake = new InferOpsFake();
 const network = new NetworkInterceptor({ handlers: [fake.handler] });
 let harness: Harness;
 
+// Runtime logs of earlier server sessions: a harness configuration update starts a new one.
+const earlierLogs: unknown[] = [];
 // Every failure message a test observed through the RPC API, for the same test.
 const failures: string[] = [];
 
@@ -537,11 +539,70 @@ describe("account and scope changes", () => {
   });
 });
 
+/** Reload the gatekeeper with `INFEROPS_ENABLED` set, keeping its storage and the fake's data. */
+async function setEnabled(enabled: boolean): Promise<void> {
+  earlierLogs.push(...harness.server.getLogs());
+  await harness.server.update(options => ({
+    ...options,
+    workers: options.workers.map(worker => {
+      if (!("config" in worker)) throw new Error("Expected inline harness config");
+      if (worker.config.name !== GATEKEEPER_WORKER) return worker;
+      return { ...worker, config: { ...worker.config,
+        vars: { ...worker.config.vars, INFEROPS_ENABLED: String(enabled) } } };
+    }),
+  }));
+  harness.url = (await harness.server.listen()).url;
+}
+
+describe("the deployment switch", () => {
+  it("failure: with INFEROPS_ENABLED off, bindings, reads and queued applies are refused without a request; on again restores them", async () => {
+    const alice = await newUser("switcha", ["operations"]);
+    const { ws, connection, session } = await bind(alice, ENG_BOARD);
+    const issue = await (await session.openIssue(fake.issue("ENG-2").id)).read();
+    const action = await proposed(ws, async () =>
+      (await session.openIssue(issue.id)).transition(DONE.id, issue.revision));
+    const { id: gadgetId } = await ws.getMetadata();
+    const connectionId = await connection.getId();
+
+    /** Alice's workspace and a session on the binding, over a connection to the reloaded server. */
+    const reopen = async () => {
+      const api = await logIn(connect(harness.url), alice.username);
+      const reopened = await api.openGadget(gadgetId);
+      const binding = await reopened.getGatekeeperById(connectionId);
+      return {
+        api, ws: reopened,
+        session: await binding.openSession() as RpcStub<InferOpsProjectSession>,
+      };
+    };
+
+    await setEnabled(false);
+    try {
+      const off = await reopen();
+      const before = fake.requests.length;
+      expect(await failure(off.session.readBoard()))
+        .toContain("DISABLED: InferOps is turned off for this deployment.");
+      expect(await failure(off.ws.approveAction(action.id)))
+        .toContain("was not applied: InferOps is turned off for this deployment");
+      expect(await failure(off.ws.newGatekeeper(alice.account.id, ENG_BOARD)))
+        .toContain("InferOps is turned off for this deployment.");
+      expect(fake.requests.slice(before)).toEqual([]);
+      expect((await pending(off.ws)).map(a => a.id)).toEqual([action.id]);
+    } finally {
+      await setEnabled(true);
+    }
+
+    const on = await reopen();
+    expect((await on.session.readBoard()).project.identifier).toBe("ENG");
+    await on.ws.approveAction(action.id);
+    expect(fake.issue("ENG-2").stateId).toBe(DONE.id);
+  });
+});
+
 describe("leakage", () => {
   // Must stay last: it inspects what every earlier test logged and failed with.
   it("no log line or error message carries a token, a refresh token or an issue description", async () => {
     // Every Workers runtime log since the harness started, the Workshop's and the gatekeeper's.
-    const printed = JSON.stringify(harness.server.getLogs());
+    const printed = JSON.stringify([...earlierLogs, ...harness.server.getLogs()]);
     // The capture is live: the gatekeeper's own structured logs from the failures above are in it.
     expect(printed).toContain("gatekeeper.inferops");
     expect(printed).toContain("http.request.failed");
