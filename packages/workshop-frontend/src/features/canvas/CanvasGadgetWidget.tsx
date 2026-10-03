@@ -40,7 +40,7 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer }: {
 
   const stub = client && client.id === gadgetId ? client.stub : null
   const title = gadget?.title ?? 'Unavailable gadget'
-  return <article ref={ref} aria-label={title} className="flex min-w-0 flex-col overflow-hidden rounded-lg border border-kumo-line bg-kumo-base">
+  return <article ref={ref} aria-label={title} className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base">
     <h3 className="truncate border-b border-kumo-line px-3 py-2 text-sm font-medium text-kumo-default">{title}</h3>
     {gadget === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is no longer in the workspace. Remove it from the layout or choose another gadget.</p>
       : gadgetId === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is still a draft in a conversation. Accept the conversation's changes to show it here.</p>
