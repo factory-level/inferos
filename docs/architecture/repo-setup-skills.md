@@ -13,7 +13,7 @@ updated: 2026-10-03
 
 ## Overview
 
-InferOS supplies a bootstrap skill and deterministic consumer scripts. They create a pinned wrapper, validate its configuration and synthetic board, and run native local development. The remaining maintenance and cloud workflows are tracked in the [design](../design/repo-setup-skills.md).
+InferOS supplies a bootstrap skill and deterministic consumer scripts. They create a pinned wrapper, validate its configuration and synthetic board, run native local development, and verify, upgrade and recover the wrapper locally. Cloud workflows are tracked in the [design](../design/repo-setup-skills.md).
 
 ## Components
 
@@ -23,8 +23,9 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | `scripts/generate-worker-configs.ts` | Generated config synchronization. `--consumer-root <wrapper>` also covers the wrapper's own gatekeepers, and `syncWorkerConfigs` generates or checks any given set of Worker directories ([wrapper topology](local-development.md#wrapper-topology)). |
 | `scripts/release/manifest-lib.ts` | Deployable discovery and inputs. |
 | `.agents/skills/bootstrap-inferos` | Consumer setup, configuration (including applying a reviewed intake) and evidence guidance. |
+| `.agents/skills/verify-inferos`, `upgrade-inferos`, `recover-inferos` | Procedures for `pnpm inferos verify`, `upgrade <sha> [--plan\|--apply]` and `recover <ports\|config\|fixtures\|state> [--apply]` ([details](consumer-configuration.md#wrapper-maintenance-verify-upgrade-recover)). |
 | `.agents/skills/skill-upload` | Installing, authoring (with skill-creator) and publishing wrapper skills. |
-| `scripts/consumer` | Atomic scaffolding, profile resolution, preflight, fixture/view/extension/skill-pack validation and intake application ([customer onboarding](customer-onboarding.md)). |
+| `scripts/consumer` | Atomic scaffolding, profile resolution, preflight, fixture/view/extension/skill-pack validation, intake application ([customer onboarding](customer-onboarding.md)), and the `.inferos/files.json` record with verify, upgrade and recover (`wrapper-files.ts`, `maintenance.ts`, `upgrade.ts`). |
 | `scripts/consumer/settings.ts` | The executable settings table for the selected private customer, validated by wrapper `doctor` and generating the [configuration reference](../wiki/configuration-reference.md#selected-customer-settings) section; `settings.test.ts` fails on drift ([details](consumer-configuration.md#data-and-control-flow)). |
 | `scripts/consumer/skill-packs` | Starter `operate`, `build` and `shared` runtime skills that bootstrap copies to `skills/`. `build/coding-dispatch` drives coding dispatch through the InferOps gatekeeper and reports only the runner's patch and test evidence. |
 | `.agents/skills/local-coding` | Setup, operation and recovery of the local coding runner; see [local coding workflows](local-coding-workflows.md). |
@@ -33,7 +34,7 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 
 ## Data and Control Flow
 
-Bootstrap generates an exact submodule gitlink, copied command helpers and skill, explicit profile settings, synthetic data, starter views and editable extension directories. Generated commands delegate to the pinned native implementation. Checks report configuration provenance, dirty upstream state and pending runtime adapters; setup uses frozen dependencies. See [consumer configuration](consumer-configuration.md) for current implementation details. The external cloudflare-os-starter remains a research reference, not a dependency of this scaffolder. The [starter inventory](../wiki/starter-inventory.md) maps each step of its operator flow to an InferOS command, says what was adapted and what was not adopted, and records its licence review.
+Bootstrap generates an exact submodule gitlink, copied command helpers and skills, a record of every file it wrote and its owner, explicit profile settings, synthetic data, starter views and editable extension directories. Generated commands delegate to the pinned native implementation. Checks report configuration provenance, dirty upstream state and pending runtime adapters; setup uses frozen dependencies. See [consumer configuration](consumer-configuration.md) for current implementation details. The external cloudflare-os-starter remains a research reference, not a dependency of this scaffolder. The [starter inventory](../wiki/starter-inventory.md) maps each step of its operator flow to an InferOS command, says what was adapted and what was not adopted, and records its licence review.
 
 ### Skill packs
 
@@ -57,7 +58,7 @@ Use the repo-pinned pnpm and lockfile. Do not edit generated wrangler.jsonc. Ins
 
 ## Divergences from Design
 
-Bootstrap, local startup, profile/style initialization, fixture validation and guarded canvas layouts have local evidence. General lifecycle/health verification, reviewed upgrade/recovery automation, authorized InferOps data loading and consumer cloud deployment remain backlog work. Native fixture/schema checks must not be described as a completed board read/approve/refresh flow. Settings validation covers only the selected private local customer (#19's MVP scope), not the design's full identity, admin, model, gatekeeper, storage, router and observability schema. Skill upload reaches only the local Workshop. Packs are not uploaded automatically when `pnpm dev` starts.
+Bootstrap, local startup, profile/style initialization, fixture validation and guarded canvas layouts have local evidence. Local verify, upgrade and recovery are implemented as #20's bounded slice. Upgrade flags an edited template `needs-review` instead of merging it, and reviewed multi-customer upgrades, automated reconciliation and cloud smoke checks are post-release (#75). Authorized InferOps data loading and consumer cloud deployment remain backlog work. Native fixture/schema checks must not be described as a completed board read/approve/refresh flow. Settings validation covers only the selected private local customer (#19's MVP scope), not the design's full identity, admin, model, gatekeeper, storage, router and observability schema. Skill upload reaches only the local Workshop. Packs are not uploaded automatically when `pnpm dev` starts.
 
 ## Open Questions
 

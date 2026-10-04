@@ -77,8 +77,8 @@ The fields the intake manages are recorded, so a rerun updates only values the i
 | 6. Configure | `pnpm inferos intake apply <file>`; `pnpm inferos config migrate` for a version 1 wrapper; `pnpm canvas` and `pnpm profile:init` | Exists |
 | 7. Create issues for gaps | `pnpm inferos intake apply <file> --file-issues <owner/repo>` | Exists |
 | 8. Customize locally | Edit `workers/`, `gatekeepers/`, `blueprints/`, `skills/` and `views/`. Validate with `pnpm extensions:check`, `pnpm blueprints:check`, `pnpm skills:check` and `pnpm views:check`. Run with `pnpm dev` or `pnpm local start` | Exists |
-| 9. Verify | `pnpm inferos:check`, `pnpm run doctor` and `pnpm local verify`. Live acceptance is recorded per issue against a running InferOps | Partly exists; a cloud-parity check does not ([#11](https://github.com/factory-level/inferos/issues/11)) |
-| Upgrade | `pnpm inferos upgrade` | Does not exist yet |
+| 9. Verify | `pnpm inferos verify` (check, doctor, `pnpm local status` and, while the stack runs, `pnpm local verify` in one JSON report). Live acceptance is recorded per issue against a running InferOps | Local verify exists; a cloud-parity check does not ([#11](https://github.com/factory-level/inferos/issues/11)) |
+| Upgrade | `pnpm inferos upgrade <sha>` (plan), then `--apply`; `pnpm inferos recover ports\|config\|fixtures\|state` for local repairs | Exists for one local wrapper ([#20](https://github.com/factory-level/inferos/issues/20)); multi-customer upgrade PRs and three-way template merges do not ([#75](https://github.com/factory-level/inferos/issues/75)) |
 | 10. Deploy explicitly | `pnpm inferos deploy` | Does not exist yet ([#11](https://github.com/factory-level/inferos/issues/11)) |
 
 Independent tracks may proceed in parallel once their contracts are settled. The first build target is the [local coding workflow](local-coding-workflows.md) proof, which does not wait for the full onboarding sequence.

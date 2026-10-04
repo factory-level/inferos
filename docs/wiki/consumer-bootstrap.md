@@ -104,13 +104,40 @@ On a pin containing `scripts/local/lifecycle.ts`, `pnpm local status|start|stop|
 
 State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as with `pnpm dev`. `status` lists the Workers the pinned checkout would bind, not the wrapper's custom Workers. An older pin fails with "does not support the local lifecycle"; use `pnpm dev` there.
 
+## Verify, upgrade and recover
+
+Run these from the wrapper root. Each prints one JSON object and exits 0 when the result is healthy, 1 when it is not and 2 on a usage error.
+
+```bash
+pnpm inferos verify [--live]                 # check + doctor + local status (+ local verify while the stack runs)
+pnpm inferos upgrade <full-sha>              # plan only (same as --plan): writes nothing
+pnpm inferos upgrade <full-sha> --apply      # clean tree required; stages the result, never commits
+pnpm inferos recover ports|config|fixtures|state [--apply]   # dry run unless --apply
+```
+
+- **verify** reports `checks[]` named `check`, `doctor`, `local-status` and `local-verify`, each with a `status` (`pass`, `fail` or `skipped`) and `reasons`. The live checks are `skipped` while the stack is stopped. `--live` makes a stopped stack a failure.
+- **upgrade** fetches the commit into `inferos/` if needed and runs that revision's planner from a temporary worktree.
+  - The plan lists blockers, the submodule move, whether `pnpm inferos config migrate` would succeed on the target (the upgrade never migrates), each changed file's action and the state rollback limit.
+  - `--apply` moves the submodule and gitlink, rewrites `upstream.revision`, `.inferos/bootstrap.json` and `.inferos/files.json`, and refreshes InferOS files you have not edited. An edited file stays as it is and is reported `needs-review`, with the new text under `.inferos/state/upgrade/<sha>/`. Customer-owned files (configuration, blueprints, skill packs, fixtures, views, workers) are never rewritten. A starter whose upstream changed is reported `upstream-changed`.
+  - A wrapper bootstrapped before `.inferos/files.json` existed has no baseline, so every copied file that differs from the target is `needs-review`. If its `.inferos/runtime.ts` has no `upgrade` command, run `node scripts/consumer/upgrade.ts <wrapper> <sha> [--apply]` from an InferOS checkout at the target SHA.
+  - After apply: `git diff --cached`, `pnpm run setup`, `pnpm inferos verify`, then commit. Before the commit, `git reset --hard && git submodule update --init inferos` undoes it.
+- **recover** never deletes a customer-owned file.
+  - `ports` stops this wrapper's own dev server, or moves `local.port` to a free port. It never stops another process.
+  - `config` realigns the submodule checkout with the gitlink, rewrites `bootstrap.json`, re-merges the managed `package.json` scripts and restores missing InferOS files. A gitlink that disagrees with `upstream.revision` is left for you to decide.
+  - `fixtures` keeps an invalid fixture as `<fixture>.invalid-<time>` and restores the pinned starter.
+  - `state` deletes `inferos/.wrangler/state` through `pnpm local reset --yes`.
+
+**Rollback limit for stateful migrations:** local state is reset only, never migrated back. Durable Object and storage migrations that a newer pin applied on start cannot be undone. Going back to an older pin therefore means reverting the upgrade and running `pnpm inferos recover state --apply`, which loses every local account, workspace, seeded board and approval. Nothing here touches cloud resources.
+
 ## Generated contract
 
 | File | Meaning |
 | --- | --- |
 | `inferos.config.json` | Versioned nonsecret inputs, exact upstream revision, profile, feature flags, style and local port |
 | `inferos/` | Pinned Git submodule |
-| `.inferos/runtime.ts` and `config.ts` | Standalone operator and validation helpers copied from this version |
+| `.inferos/runtime.ts`, `config.ts` and `maintenance.ts` | Standalone operator, validation and maintenance (verify/recover/upgrade) helpers copied from this version |
+| `.inferos/files.json` | Every file bootstrap wrote, with its class (`generated`, `copied-template`, `customer-owned`) and sha256; upgrade and recover read it to keep customer edits |
+| `.agents/skills/{verify,upgrade,recover}-inferos/SKILL.md` | Agent procedures for the maintenance commands below |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
 | `.agents/skills/skill-upload/SKILL.md` | Agent guidance for installing, authoring and publishing runtime skills (`/skill-upload`) |
 | `.agents/skills/local-coding/SKILL.md` | Agent SOP for setting up, operating and recovering the local coding runner |
@@ -121,7 +148,7 @@ State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as wit
 | `fixtures/project-board.json` | Synthetic projects/states/issues using the InferOps board wire fields |
 | `blueprints/` | Editable copies of the pinned standard formats; the complete local format set |
 | `gatekeepers/`, `profiles/` | Wrapper-owned customization locations; runtime adapters remain pending |
-| `package.json` | Pinned package manager and inferos (`intake apply`, `config migrate`)/check/setup/doctor/blueprints:check/profile:init/local/skills:check/skills:install/skills:upload/dev entrypoints |
+| `package.json` | Pinned package manager and inferos (`intake apply`, `config migrate`, `verify`, `recover`, `upgrade`)/check/setup/doctor/blueprints:check/profile:init/local/skills:check/skills:install/skills:upload/dev entrypoints |
 
 ## What check proves
 
