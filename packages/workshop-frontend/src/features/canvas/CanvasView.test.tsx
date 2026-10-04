@@ -110,3 +110,19 @@ it('defers loading a gadget until it scrolls near the screen', async () => {
   await act(async () => observed?.([{ isIntersecting: true }]))
   expect(container.querySelector('[data-testid="gadget-ui"]')?.textContent).toBe('visible')
 })
+
+// A finding of #28, recorded rather than fixed: unlike a gadget, a board card is not deferred until
+// it scrolls into view. Its read is bounded only by sharing (one per target) and the adapter's
+// concurrency cap, so an offscreen board still costs a full board read.
+it('reads an offscreen board card at once, sharing the read with every other card of it', async () => {
+  lookup.mockResolvedValue(connection)
+  vi.stubGlobal('IntersectionObserver', class {
+    observe() {}
+    disconnect() {}
+  })
+  await render(definition([boardWidget('b'), boardWidget('all', true), gadgetWidget('g', 'gadget:3')]),
+    summaries({ id: 3, type: 'gadget', title: 'Report' }))
+  expect(container.querySelector('[data-testid="gadget-ui"]')?.textContent).toBe('deferred')
+  expect(readBoard).toHaveBeenCalledTimes(1)
+  expect(container.querySelectorAll('[data-issue-id]').length).toBeGreaterThan(0)
+})
