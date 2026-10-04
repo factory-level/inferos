@@ -7,6 +7,7 @@ import {
 } from '@gadgets/workshop-shared/api'
 import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
+import { invalidateWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 
 /** How long a conflicting dispatch waits for the newer snapshot before giving up. */
 const CONFLICT_WAIT_MS = 2000
@@ -32,7 +33,9 @@ type OperateSessionValue = {
   error: string | null
   /**
    * Appends an event at the latest known sequence number. On a conflict (another tab or the agent
-   * moved first) it waits for the newer snapshot and retries once against it.
+   * moved first) it waits for the newer snapshot and retries once against it. A `consoleChanged`
+   * refusal means this tab's copy of a console is out of date, so the saved consoles are re-read
+   * before it rejects.
    */
   dispatch: (event: OperateEvent) => Promise<void>
   /** The session capability, for the session workspace (its operate chat). */
@@ -112,7 +115,9 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
         }
         return
       } catch (caught) {
-        if (attempt > 0 || getOperateSessionErrorCode(caught) !== OPERATE_SESSION_ERROR_CODES.conflict) {
+        const code = getOperateSessionErrorCode(caught)
+        if (code === OPERATE_SESSION_ERROR_CODES.consoleChanged) invalidateWorkspaceScreens()
+        if (attempt > 0 || code !== OPERATE_SESSION_ERROR_CODES.conflict) {
           throw caught
         }
         await waitForNewerThan(seq)

@@ -106,7 +106,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
       {board && (columns.length === 0
         ? <p className="text-sm text-kumo-subtle">No {widget.params.workflow} states to show. {widget.params.showCompleted ? '' : 'Completed and cancelled states are hidden on this card.'}</p>
         : <KanbanBoard board={board} columns={columns} pending={'pending' in state ? state.pending : []} changes={'changes' in state ? state.changes : []}
-          awaiting={awaitingByIssue(boardActivity)} layout={full ? 'full' : 'embedded'}
+          awaiting={awaitingByIssue(boardActivity)} decided={boardActivity.decided} layout={full ? 'full' : 'embedded'}
           onMove={(issue, toState) => move(issue.id, toState.id, issue.revision)}
           onCreate={create}
           onUpdate={(issue, changes) => update(issue.id, changes, issue.revision)}

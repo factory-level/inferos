@@ -2,12 +2,12 @@ import { useState } from 'react'
 import { Button, useKumoToastManager } from '@cloudflare/kumo'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { PlusIcon, SlidersHorizontalIcon } from '@phosphor-icons/react'
-import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from '@gadgets/workshop-shared/api'
 import type { OperateEvent, OperateRef } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { canBuild, useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useOperateSession } from './OperateSessionContext'
+import { refusalMessage } from './sessionRefusal'
 import { AgentActivityNote } from './AgentActivityNote'
 import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
 import { ConsoleMosaic } from './ConsoleMosaic'
@@ -44,12 +44,7 @@ export const OperateSessionPage = () => {
   const consoleId = operate?.snapshot?.state.console?.consoleId
   const notifyRefused = (caught: unknown) => {
     console.error('Operate session change failed:', caught)
-    const code = getOperateSessionErrorCode(caught)
-    toasts.add({ title: code === OPERATE_SESSION_ERROR_CODES.consoleChanged
-      ? 'This console has changed or is no longer available. Reload to see it as it is now.'
-      : code === OPERATE_SESSION_ERROR_CODES.boardUnavailable
-      ? 'That board is not connected for you or is no longer available. Choose another board or connect it.'
-      : 'That change could not be applied to your session.', variant: 'error' })
+    toasts.add({ title: refusalMessage(caught), variant: 'error' })
   }
   const send = (event: OperateEvent) => { operate?.dispatch(event).catch(notifyRefused) }
   useBoardHistory(operate?.snapshot?.state.board ?? null, search,
@@ -93,7 +88,7 @@ export const OperateSessionPage = () => {
         await operate.dispatch({ type: 'showScreen', screenId: target.screenId })
       }
       setWidgetTarget(target)
-    } catch { toasts.add({ title: 'Could not open this widget. Try again.', variant: 'error' }) }
+    } catch (caught) { toasts.add({ title: refusalMessage(caught), variant: 'error' }) }
   }
   const visibleWidget = widgetTarget?.consoleId === consoleId ? widgetTarget : null
   const settingsEntry = settings ? consoleEntries(workspaces).find(item => item.workspace.id === search.workspace && item.console.id === settings) : undefined
@@ -103,7 +98,7 @@ export const OperateSessionPage = () => {
       if (state.presentation === 'chat') await operate.dispatch({ type: 'setPresentation', presentation: 'canvas' })
       await operate.dispatch({ type: 'openView', viewId })
       await operate.dispatch({ type: 'setChatOpen', open: true })
-    } catch { toasts.add({ title: 'Could not open this page. Try again.', variant: 'error' }) }
+    } catch (caught) { toasts.add({ title: refusalMessage(caught), variant: 'error' }) }
   }
   const edit = (item: ConsoleEntry) => void navigate({ to: '/inferops-canvas', search: { setup: item.console.id, workspace: item.workspace.id } })
 

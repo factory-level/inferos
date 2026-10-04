@@ -24,8 +24,10 @@ export type BoardActivityItem = {
   title: string
   /** When it was asked (`awaiting`) or last changed (read, applied, rejected). */
   at: Date
-  /** The identifier of the issue an action moves, when the gatekeeper named it. */
+  /** The identifier of the issue an action moves or edits, when the gatekeeper named it. */
   issue?: string
+  /** The title of the issue an action creates, when the gatekeeper named it (and it names no existing issue). */
+  creates?: string
   /** The action's kind tag (`ActionKind.tag`), when the gatekeeper gave one, e.g. "inferops.code-dispatch". */
   tag?: string
 }
@@ -35,9 +37,14 @@ export type BoardActivity = {
   active: readonly BoardActivityItem[]
   /** Reads and decided actions within the window, newest first, at most `RECENT_ACTIVITY_LIMIT`. */
   recent: readonly BoardActivityItem[]
+  /**
+   * Every decided (applied or rejected) action the log holds for the board, however old, oldest
+   * first: what a board reads its proposals' outcomes from (see `advanceDecisions`).
+   */
+  decided: readonly BoardActivityItem[]
 }
 
-export const NO_ACTIVITY: BoardActivity = { active: [], recent: [] }
+export const NO_ACTIVITY: BoardActivity = { active: [], recent: [], decided: [] }
 
 /**
  * Display labels for `ActionLogEntry.requestedBy`. A person is not necessarily the viewer: the
@@ -47,13 +54,17 @@ export const ACTOR_LABELS: Record<ActionRequester, string> = {
   agent: 'Agent', person: 'Person', gadget: 'Gadget', hook: 'Automation',
 }
 
-// The gatekeeper names the moved issue in an inline "Issue" field of the description it renders
-// for the approver. Only a whole value is trusted; a truncated one is not an identifier.
-const issueOf = (record: ActionLogEntry): string | undefined => {
+// The gatekeeper names the moved or edited issue in an inline "Issue" field of the description it
+// renders for the approver, and an issue it creates by an inline "Title" with no "Issue". Only a
+// whole value is trusted; a truncated one is not an identifier.
+const inlineField = (record: ActionLogEntry, label: string): string | undefined => {
   if (record.type !== 'action') return undefined
-  const field = record.description.fields?.find(f => f.label === 'Issue')
+  const field = record.description.fields?.find(f => f.label === label)
   return field?.kind === 'inline' && !field.truncated ? field.value : undefined
 }
+const issueOf = (record: ActionLogEntry): string | undefined => inlineField(record, 'Issue')
+const createsOf = (record: ActionLogEntry): string | undefined =>
+  issueOf(record) === undefined ? inlineField(record, 'Title') : undefined
 
 const kindOf = (record: ActionLogEntry): BoardActivityKind | null => {
   if (record.type === 'observation') return 'read'
@@ -80,6 +91,7 @@ export const foldBoardActivity = (
   }
   const active: BoardActivityItem[] = []
   const recent: BoardActivityItem[] = []
+  const decided: BoardActivityItem[] = []
   for (const record of latest.values()) {
     const kind = kindOf(record)
     if (!kind) continue
@@ -90,15 +102,21 @@ export const foldBoardActivity = (
       title: record.description.title,
       at: kind === 'awaiting' ? record.createdAt : actionChangeTime(record),
       issue: issueOf(record),
+      ...createsOf(record) !== undefined ? { creates: createsOf(record) } : {},
       ...record.type === 'action' && record.description.actionKind ? { tag: record.description.actionKind.tag } : {},
     }
+    if (kind === 'applied' || kind === 'rejected') decided.push(item)
     if (kind === 'awaiting') {
       if (connected) active.push(item)
     } else if (now - item.at.getTime() < RECENT_ACTIVITY_MS) {
       recent.push(item)
     }
   }
-  return { active: active.toSorted(newestFirst), recent: recent.toSorted(newestFirst).slice(0, RECENT_ACTIVITY_LIMIT) }
+  return {
+    active: active.toSorted(newestFirst),
+    recent: recent.toSorted(newestFirst).slice(0, RECENT_ACTIVITY_LIMIT),
+    decided: decided.toSorted((a, b) => a.id - b.id),
+  }
 }
 
 /**
@@ -139,11 +157,12 @@ export const describeActivity = (item: BoardActivityItem, now: number): string =
 export const combineActivity = (a: BoardActivity, b: BoardActivity): BoardActivity => ({
   active: [...a.active, ...b.active].toSorted(newestFirst),
   recent: [...a.recent, ...b.recent].toSorted(newestFirst).slice(0, RECENT_ACTIVITY_LIMIT),
+  decided: [...a.decided, ...b.decided].toSorted((x, y) => x.id - y.id),
 })
 
 /** Only the actions: reads left out, for a resource that is re-read automatically and would fill the line with them. */
 export const actionsOnly = (activity: BoardActivity): BoardActivity => activity.recent.some(item => item.kind === 'read')
-  ? { active: activity.active, recent: activity.recent.filter(item => item.kind !== 'read') }
+  ? { ...activity, recent: activity.recent.filter(item => item.kind !== 'read') }
   : activity
 
 /** Awaiting actions by the identifier of the issue they move, for the issue's card. */

@@ -57,6 +57,15 @@ export const useDecidedActionInvalidation = (overseer: RpcStub<Overseer>): void 
 }
 
 /**
+ * Re-read the board at `targetRef` in every open scope, each through its own capability: after an
+ * approval whose apply failed, say, which leaves its action pending (so no log entry re-reads the
+ * board) while the board may have changed underneath it.
+ */
+export const invalidateBoardInEveryScope = (targetRef: string): void => {
+  for (const { data } of adapters.values()) data.invalidate(targetRef)
+}
+
+/**
  * Re-read, in every open scope, any board an action of this workspace touched once it leaves
  * `pending`. For a workspace that shows no boards itself but proposes moves on them, such as an
  * operate session's: a decided move there changes the board a screen shows through its own
@@ -65,7 +74,7 @@ export const useDecidedActionInvalidation = (overseer: RpcStub<Overseer>): void 
 export const useDecidedActionInvalidationInEveryScope = (overseer: RpcStub<Overseer> | null): void => {
   useActionEntries(overseer, record => {
     if (record.type !== 'action' || record.state === 'pending' || !record.resourceUrl) return
-    for (const { data } of adapters.values()) data.invalidate(record.resourceUrl)
+    invalidateBoardInEveryScope(record.resourceUrl)
   })
 }
 

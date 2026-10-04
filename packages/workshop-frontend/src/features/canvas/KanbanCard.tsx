@@ -7,7 +7,7 @@ import type { PendingChange, PendingMove, ProposalResult } from './boardData'
 import { CodingRunBadge } from './CodingRunStatus'
 import type { CodingControl } from './KanbanCodingForm'
 import { KanbanIssueDialog, type IssueDialogControl } from './KanbanIssueDialog'
-import { PRIORITY_LABELS, formatTargetDate, isOverdue, type ChangeDecision, type MoveDecision } from './kanbanBoard'
+import { PRIORITY_LABELS, formatTargetDate, isOverdue, type ChangeDecision } from './kanbanBoard'
 
 const PRIORITY_VARIANT = { urgent: 'error', high: 'warning', medium: 'info', low: 'neutral', none: 'neutral' } as const
 
@@ -22,7 +22,7 @@ export type KanbanCardProps = {
   /** A move of the issue awaiting approval that this board did not propose, from the action log. */
   proposed?: BoardActivityItem
   /** How the issue's last move was decided, until it moves again or changes. */
-  decision?: { outcome: MoveDecision['outcome']; toState: State | undefined }
+  decision?: { outcome: ChangeDecision['outcome']; toState: State | undefined }
   /** An edit of the issue this board proposed that the board does not show as pending yet. */
   edit?: Extract<PendingChange, { kind: 'update' }>
   /** How the issue's last edit was decided, until it changes again. */
