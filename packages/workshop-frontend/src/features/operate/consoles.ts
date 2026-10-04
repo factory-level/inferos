@@ -32,12 +32,12 @@ export const openConsoleEvent = ({ workspace, console: saved }: ConsoleEntry): O
 export const viewScreens = (view: ConsoleView): string[] => view.type === 'rollup' ? view.screens : [view.screen]
 
 /** One widget placed on a screen, named for the per-view inventory. */
-export type InventoryItem = { id: string; kind: 'board' | 'gadget'; label: string }
+export type InventoryItem = { id: string; kind: 'board' | 'wiki' | 'gadget'; label: string }
 
 /**
- * What a screen shows, by name: its InferOps boards (by the board key their reference names) and
- * its gadgets (by title, from the workspace's gadgets). It reads only the screen's definition, so
- * it can't drift from what the screen renders.
+ * What a screen shows, by name: its InferOps boards (by the board key their reference names), its
+ * Wiki widgets, and its gadgets (by title, from the workspace's gadgets). It reads only the screen's
+ * definition, so it can't drift from what the screen renders.
  */
 export const screenInventory = (screen: CanvasDefinition,
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>): InventoryItem[] =>
@@ -46,6 +46,7 @@ export const screenInventory = (screen: CanvasDefinition,
       const gadget = gadgets.get(gadgetIdOf(widget.targetRef))
       return { id: widget.id, kind: 'gadget', label: gadget?.title || 'Untitled gadget' }
     }
+    if (widget.kind === 'inferops.wiki') return { id: widget.id, kind: 'wiki', label: 'InferMind Wiki' }
     const key = widget.targetRef.split('/').at(-1) ?? widget.targetRef
     return { id: widget.id, kind: 'board', label: `Board ${key}` }
   }))

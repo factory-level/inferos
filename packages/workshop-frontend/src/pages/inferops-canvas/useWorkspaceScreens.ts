@@ -8,9 +8,14 @@ import type { OperateFlow } from '@gadgets/workshop-shared/operate-flow'
 /** At most this many recently active workspaces are opened to list their screens. */
 export const MAX_SCREEN_WORKSPACES = 24
 
+/** At most this many workspaces shared with the use role are opened to find their consoles. */
+export const MAX_USE_CONSOLE_WORKSPACES = 24
+
 /**
- * A workspace the user can build in, with its saved screens (null when they could not be read) and
- * the flows and consoles authored over them.
+ * A listed workspace, with its saved screens (null when they could not be read) and the flows and
+ * consoles authored over them. A workspace the user can build in lists all three; one shared with
+ * them for use only is listed only when it holds consoles, read-only and with `screens: null`,
+ * since the use role can list consoles but not screens or flows (see `canBuild`).
  */
 export type WorkspaceScreens = {
   workspace: GadgetMetadataWithTimestamps
@@ -50,10 +55,23 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
   const pending = byMode.get(key)
   if (pending) return pending
   const load = api.listGadgets().then(async all => {
-    const workspaces = all.filter(workspace => workspace.role !== 'use')
-      .toSorted((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
-      .slice(0, MAX_SCREEN_WORKSPACES)
-    return Promise.all(workspaces.map(async (workspace): Promise<WorkspaceScreens> => {
+    const recent = all.toSorted((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
+    const builds = recent.filter(workspace => workspace.role !== 'use').slice(0, MAX_SCREEN_WORKSPACES)
+    // An operator without Build reaches their console through a workspace shared for use, which is
+    // not among the recent build workspaces; it is listed only when it holds a console.
+    const uses = durableViews ? recent.filter(workspace => workspace.role === 'use').slice(0, MAX_USE_CONSOLE_WORKSPACES) : []
+    const operated = Promise.all(uses.map(async (workspace): Promise<WorkspaceScreens | null> => {
+      const overseer = api.openGadget(workspace.id)
+      try {
+        const consoles = await overseer.listConsoles()
+        return consoles.length === 0 ? null : { workspace, screens: null, flows: [], consoles }
+      } catch {
+        return null
+      } finally {
+        overseer[Symbol.dispose]()
+      }
+    }))
+    const built = Promise.all(builds.map(async (workspace): Promise<WorkspaceScreens> => {
       if (!durableViews) return { workspace, screens: [], flows: [], consoles: [] }
       // No observer callback: a workspace that first needs observer setup is skipped here and
       // set up when the user opens it.
@@ -69,13 +87,19 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
         overseer[Symbol.dispose]()
       }
     }))
+    const [listed, consoled] = await Promise.all([built, operated])
+    return [...listed, ...consoled.filter(entry => entry !== null)]
   }).finally(() => byMode.delete(key))
   byMode.set(key, load)
   return load
 }
 
+/** Whether the user can author in a listed workspace: everything but a workspace shared for use. */
+export const canBuild = (entry: WorkspaceScreens): boolean => entry.workspace.role !== 'use'
+
 /**
- * The saved screens across the user's most recently active build workspaces. Screens live in each
+ * The saved screens across the user's most recently active build workspaces, followed by the
+ * workspaces shared with them for use that hold consoles. Screens live in each
  * workspace, so every listed workspace is opened (one pipelined call each) and its stub disposed
  * as soon as its screens are read. Callers mounted at the same time share one load.
  */

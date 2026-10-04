@@ -30,6 +30,7 @@ vi.mock('@cloudflare/kumo', async importOriginal => ({
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true } }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
+  canBuild: (entry: { workspace: { role?: string } }) => entry.workspace.role !== 'use',
   useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
     { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], consoles: [
       { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',

@@ -1,0 +1,59 @@
+// @vitest-environment jsdom
+/* eslint-disable react/react-in-jsx-scope */
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type { RpcStub } from 'capnweb'
+import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
+import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
+import { canBuild, useWorkspaceScreens, type WorkspaceScreensState } from './useWorkspaceScreens'
+
+const CONSOLE: OperateConsole = { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'off',
+  views: [{ id: 'board', title: 'Board', type: 'screen', screen: 's1' }] }
+const workspace = (id: string, role: 'build' | 'use' | undefined, lastActive: string) =>
+  ({ id, title: id, role, lastActive: new Date(lastActive) }) as unknown as GadgetMetadataWithTimestamps
+const denied = () => Promise.reject(new Error('Unauthorized'))
+
+// Each workspace as its role sees it: the use role can list consoles but not screens or flows.
+const fakeApi = (consolesOf: Record<string, OperateConsole[]>, list: GadgetMetadataWithTimestamps[]) => {
+  const opened: string[] = []
+  const api = {
+    listGadgets: async () => list,
+    openGadget: (id: string) => {
+      opened.push(id)
+      const use = list.find(item => item.id === id)?.role === 'use'
+      return {
+        listCanvases: use ? denied : async () => [],
+        listFlows: use ? denied : async () => [],
+        listConsoles: async () => consolesOf[id] ?? [],
+        [Symbol.dispose]: () => {},
+      }
+    },
+  }
+  return { api: api as unknown as RpcStub<AuthenticatedApi>, opened }
+}
+
+let root: Root
+let container: HTMLDivElement
+let state: WorkspaceScreensState = { status: 'loading' }
+const Probe = ({ api }: { api: RpcStub<AuthenticatedApi> }) => { state = useWorkspaceScreens(api, true); return null }
+beforeEach(() => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container)
+})
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
+
+it('lists use-role workspaces that hold consoles, read-only, after the build workspaces', async () => {
+  const { api } = fakeApi({ shared: [CONSOLE] }, [
+    workspace('shared', 'use', '2026-01-01'),
+    workspace('empty', 'use', '2026-06-01'),
+    workspace('mine', undefined, '2026-03-01'),
+  ])
+  await act(async () => root.render(<Probe api={api} />))
+  if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
+  expect(state.workspaces.map(entry => entry.workspace.id)).toEqual(['mine', 'shared'])
+  const shared = state.workspaces[1]!
+  expect(shared).toMatchObject({ screens: null, flows: [], consoles: [CONSOLE] })
+  expect(canBuild(shared)).toBe(false)
+  expect(canBuild(state.workspaces[0]!)).toBe(true)
+})

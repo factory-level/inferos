@@ -12,7 +12,15 @@ vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticate
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({ overseer: { stub: {} }, error: null }) }))
 vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ workpieces: new Map() }) }))
 vi.mock('../canvas/CanvasView', () => ({
-  CanvasView: ({ definition }: { definition: CanvasDefinition }) => <div data-testid="canvas">{definition.title}</div>,
+  CanvasView: ({ definition, onOpenWidget }: { definition: CanvasDefinition; onOpenWidget?: (widgetId: string) => void }) =>
+    <div data-testid="canvas">{definition.title}
+      {definition.sections.flatMap(section => section.widgets).map(widget =>
+        <button key={widget.id} type="button" disabled={!onOpenWidget} onClick={() => onOpenWidget?.(widget.id)}>Open {widget.id}</button>)}
+    </div>,
+}))
+vi.mock('../canvas/CanvasBoardFullView', () => ({
+  CanvasBoardFullView: ({ widget, viewTitle, onBack }: { widget: { id: string }; viewTitle: string; onBack: () => void }) =>
+    <div data-testid="full">{widget.id}<button type="button" onClick={onBack}>Back to {viewTitle}</button></div>,
 }))
 vi.mock('./ConsoleRollup', () => ({ ConsoleRollup: () => <div data-testid="rollup" /> }))
 vi.mock('./OperateChatPanel', () => ({
@@ -71,4 +79,36 @@ it('says when the console or the view is gone', () => {
   expect(container.textContent).toContain('This console is unavailable.')
   render({ run: run({ viewId: 'removed' }) })
   expect(container.textContent).toContain('This view is no longer part of the console.')
+})
+
+const boardScreen = { schemaVersion: 1, id: 's1', revision: '0', title: 'Board screen', sections: [{
+  id: 'main', title: 'Main', columns: 2, widgets: [{
+    id: 'kanban', kind: 'inferops.project-board', targetRef: 'inferops://demo.local/project/board/DEMO', size: 'wide', params: {},
+  }],
+}] } as unknown as CanvasDefinition
+const button = (label: string) => [...container.querySelectorAll('button')].find(b => b.textContent === label)
+
+it('opens a board card in its full view in place, and back to the screen', () => {
+  const withBoard = { ...entry, screens: [boardScreen] }
+  render({ run: run({ viewId: 'board' }), entry: withBoard })
+  act(() => button('Open kanban')!.click())
+  expect(container.querySelector('[data-testid="full"]')?.textContent).toContain('kanban')
+  expect(container.querySelector('[data-testid="canvas"]')).toBeNull()
+  act(() => button('Back to Board screen')!.click())
+  expect(container.querySelector('[data-testid="canvas"]')).not.toBeNull()
+})
+
+it('closes the full view when the screen changes', () => {
+  const withBoard = { ...entry, screens: [boardScreen, screen('s2', 'Other')] }
+  render({ run: run({ screenId: 's1' }), entry: withBoard })
+  act(() => button('Open kanban')!.click())
+  expect(container.querySelector('[data-testid="full"]')).not.toBeNull()
+  render({ run: run({ screenId: null }), entry: withBoard })
+  render({ run: run({ screenId: 's1' }), entry: withBoard })
+  expect(container.querySelector('[data-testid="full"]')).toBeNull()
+})
+
+it('says a use-role console cannot show its screens yet', () => {
+  render({ entry: { ...entry, workspace: { id: 'w1', role: 'use' } as never, screens: [] } })
+  expect(container.textContent).toContain("can't be shown without build access")
 })

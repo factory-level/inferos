@@ -1,4 +1,4 @@
-import { AppWindowIcon, ArrowRightIcon, KanbanIcon } from '@phosphor-icons/react'
+import { AppWindowIcon, ArrowRightIcon, BookOpenIcon, KanbanIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { screenInventory } from './consoles'
@@ -35,12 +35,12 @@ export const ConsoleRollup = ({ screenIds, screens, gadgets, onShowScreen }: {
               ? <span className="text-sm text-kumo-subtle">Nothing on this screen yet.</span>
               : <span className="flex flex-col gap-1.5" aria-label={`On ${screen.title}`}>
                   {inventory.map(item => {
-                    const Icon = item.kind === 'board' ? KanbanIcon : AppWindowIcon
+                    const Icon = item.kind === 'board' ? KanbanIcon : item.kind === 'wiki' ? BookOpenIcon : AppWindowIcon
                     return (
                       <span key={item.id} className="flex items-center gap-2 rounded-xl bg-kumo-tint px-2.5 py-1.5 text-sm text-kumo-default">
                         <Icon size={14} aria-hidden className="shrink-0 text-kumo-subtle" />
                         <span className="truncate">{item.label}</span>
-                        <span className="ml-auto shrink-0 text-xs text-kumo-subtle">{item.kind === 'board' ? 'Widget' : 'Gadget'}</span>
+                        <span className="ml-auto shrink-0 text-xs text-kumo-subtle">{item.kind === 'gadget' ? 'Gadget' : 'Widget'}</span>
                       </span>
                     )
                   })}

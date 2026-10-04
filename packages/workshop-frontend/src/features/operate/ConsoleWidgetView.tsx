@@ -8,6 +8,7 @@ import { useWorkspaceOpen } from '../../useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { CanvasBoardWidget } from '../canvas/CanvasBoardWidget'
 import { CanvasGadgetWidget } from '../canvas/CanvasGadgetWidget'
+import { CanvasWikiWidget } from '../canvas/CanvasWikiWidget'
 import { useDecidedActionInvalidationInEveryScope } from '../canvas/useBoardData'
 import { gadgetIdOf } from '../canvas/canvasLayout'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
@@ -42,6 +43,8 @@ export const ConsoleWidgetView = ({ workspaceId, target, onClose }: {
     : !overseer || !screen || !widget || !ready ? <p role="status" className="p-5 text-sm text-kumo-subtle">Opening widget…</p>
     : widget.kind === 'inferos.gadget'
       ? <CanvasGadgetWidget widget={{ ...widget, size: 'full' }} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer.stub} />
+      // Wiki is operated read-only, as on session screens (no `editable`).
+      : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget widget={widget} overseer={overseer.stub} />
       : <CanvasBoardWidget widget={widget} overseer={overseer.stub} presentation="full" />
   if (target.presentation === 'modal') return <Dialog.Root open onOpenChange={open => { if (!open) onClose() }}>
     <Dialog size="lg" className="flex max-h-[90dvh] !w-[min(1000px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl bg-kumo-base p-0">

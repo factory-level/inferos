@@ -53,3 +53,13 @@ it('opens and edits independently, and lands on the saved console’s page', () 
   act(() => button('Open Console 9').click())
   expect(onOpen).toHaveBeenCalledOnce()
 })
+
+it('opens a console shared for use but offers no edit', () => {
+  const shared = screens(1)
+  if (shared.status !== 'ready') throw new Error('unreachable')
+  const workspaces = [{ ...shared.workspaces[0]!, screens: null, workspace: { id: 'workspace', title: 'Operations', role: 'use' } as ConsoleEntry['workspace'] }]
+  act(() => root.render(<ConsoleMosaic screens={{ status: 'ready', workspaces }} onOpen={onOpen} onEdit={onEdit} />))
+  expect(button('Edit Console 1')).toBeUndefined()
+  act(() => button('Open Console 1').click())
+  expect(onOpen).toHaveBeenCalledOnce()
+})

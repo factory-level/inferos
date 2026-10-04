@@ -6,7 +6,7 @@ import { consoleEntries, type ConsoleEntry } from './consoles'
 
 const PAGE_SIZE = 8
 
-/** The console launcher: eight real consoles per page, with separate open and edit actions. */
+/** The console launcher: eight real consoles per page, with separate open and edit actions (edit only where the viewer can build). */
 export const ConsoleMosaic = ({ screens, onOpen, onEdit, highlighted }: {
   screens: WorkspaceScreensState
   onOpen: (entry: ConsoleEntry) => void
@@ -43,9 +43,9 @@ export const ConsoleMosaic = ({ screens, onOpen, onEdit, highlighted }: {
                   <ArrowRightIcon size={14} aria-hidden className="ml-auto shrink-0" />
                 </span>
               </button>
-              <Button variant="ghost" size="sm" aria-label={`Edit ${saved.title}`} onClick={() => onEdit(entry)} className="!absolute right-2 top-2">
+              {entry.workspace.role !== 'use' && <Button variant="ghost" size="sm" aria-label={`Edit ${saved.title}`} onClick={() => onEdit(entry)} className="!absolute right-2 top-2">
                 <PencilSimpleIcon size={14} aria-hidden />
-              </Button>
+              </Button>}
             </li>
           })}
         </ul>}

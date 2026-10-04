@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { Button, useKumoToastManager } from '@cloudflare/kumo'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { PlusIcon, SlidersHorizontalIcon } from '@phosphor-icons/react'
+import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from '@gadgets/workshop-shared/api'
 import type { OperateEvent, OperateRef } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
-import { useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
+import { canBuild, useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useOperateSession } from './OperateSessionContext'
 import { AgentActivityNote } from './AgentActivityNote'
@@ -59,7 +60,9 @@ export const OperateSessionPage = () => {
   const send = (event: OperateEvent) => {
     operate.dispatch(event).catch(caught => {
       console.error('Operate session change failed:', caught)
-      toasts.add({ title: 'That change could not be applied to your session.', variant: 'error' })
+      toasts.add({ title: getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.consoleChanged
+        ? 'This console has changed or is no longer available. Reload to see it as it is now.'
+        : 'That change could not be applied to your session.', variant: 'error' })
     })
   }
   const showHome = async () => {
@@ -127,7 +130,7 @@ export const OperateSessionPage = () => {
             ? <p role={screens.status === 'error' ? 'alert' : 'status'} className="p-6 text-sm text-kumo-subtle">{screens.status === 'error' ? 'Could not load console setup. Reload to try again.' : 'Loading console setup…'}</p>
             : setup !== 'new' && !editing
               ? <p role="alert" className="p-6 text-sm text-kumo-danger">This console is unavailable. Return to All consoles to choose another.</p>
-              : <ConsoleBuilder key={`${search.workspace ?? ''}/${setup}`} workspaces={workspaces} initial={editing}
+              : <ConsoleBuilder key={`${search.workspace ?? ''}/${setup}`} workspaces={workspaces.filter(canBuild)} initial={editing}
                   onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
           : tools ? <InferOpsCanvasHome />
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} />
