@@ -34,7 +34,12 @@ export type KanbanBoardProps = {
   onUpdate: (issue: Issue, changes: IssueChanges) => Promise<ProposalResult>
   /** Coding dispatch for the board's project; absent, no card offers it. */
   coding?: CodingControl
+  /** Which issue's edit form is open, held by the caller; absent, each card holds its own. */
+  openIssue?: OpenIssueControl
 }
+
+/** The issue whose form is open (an issue id), held outside the board, and how to change it. */
+export type OpenIssueControl = { issueId: string | null; onChange: (issueId: string | null) => void }
 
 type Announcement = { text: string; tone: 'info' | 'error' }
 
@@ -65,7 +70,7 @@ const changeAnnouncement = (decision: ChangeDecision): string => decision.kind =
  *
  * With `coding`, each card shows its issue's latest coding run, and a run that finishes is announced.
  */
-export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout, onMove, onCreate, onUpdate, coding }: KanbanBoardProps) => {
+export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout, onMove, onCreate, onUpdate, coding, openIssue }: KanbanBoardProps) => {
   const instructionsId = useId()
   const root = useRef<HTMLDivElement>(null)
   // The issue whose card has focus; restored when its card re-mounts in another column.
@@ -220,6 +225,10 @@ export const KanbanBoard = ({ board, columns, pending, changes, awaiting, layout
               edit={edit}
               editDecision={editDecision && editDecision.revision === issue.revision ? editDecision.outcome : undefined}
               onUpdate={locked ? undefined : update(issue)}
+              editControl={openIssue && {
+                open: openIssue.issueId === issue.id,
+                onOpenChange: open => openIssue.onChange(open ? issue.id : null),
+              }}
               coding={coding && { control: coding, run: latestRunOf(runs, issue.id) }}
               pending={pendingMove && { move: pendingMove, toState: stateOf(board, pendingMove.toStateId) }}
               proposed={proposed}

@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Badge, Button, Loader } from '@cloudflare/kumo'
 import { ArrowClockwise, ArrowsOutSimple } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
@@ -7,7 +8,7 @@ import { actionsOnly, awaitingByIssue, combineActivity } from './boardActivity'
 import { visibleColumns } from './boardData'
 import { BoardActivityLine } from './BoardActivityLine'
 import { dispatchRefOf } from './codingRuns'
-import { KanbanBoard } from './KanbanBoard'
+import { KanbanBoard, type OpenIssueControl } from './KanbanBoard'
 import { useBoardActivity } from './useBoardActivity'
 import { useBoardData } from './useBoardData'
 import { useCodingDispatch } from './useCodingDispatch'
@@ -21,6 +22,10 @@ export type CanvasBoardWidgetProps = {
    * not edited from Operate. Without it the dispatch reference is never even looked up.
    */
   codingDispatch?: boolean
+  /** What to offer when the board is not connected in this scope (see `CanvasResourceScope`); `retry` reads it again. */
+  unboundAction?: (retry: () => void) => ReactNode
+  /** The issue shown over the board, held by the operate session (see `OpenIssueControl`). */
+  openIssue?: OpenIssueControl
 } & (
   /** A card in a view: the board fits its cell and columns scroll sideways. `onOpen` offers the full view. */
   | { presentation: 'card'; onOpen?: () => void }
@@ -43,7 +48,7 @@ const proposalCount = (moves: number, changes: number) => {
  * and the activity line includes the dispatch and cancel actions.
  */
 export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
-  const { widget, overseer, presentation } = props
+  const { widget, overseer, presentation, openIssue } = props
   const { state, refresh, move, create, update } = useBoardData(overseer, widget)
   const dispatchRef = props.codingDispatch ? dispatchRefOf(widget.targetRef) : null
   const coding = useCodingDispatch(overseer, dispatchRef)
@@ -56,6 +61,10 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
     coding.state.status === 'ready')
   const activity = combineActivity(boardActivity, actionsOnly(codingActivity))
   const columns = board ? visibleColumns(board, widget.params) : []
+  // An issue the session names that the board no longer has (deleted, moved to another project, or
+  // no longer readable) is said so, with the way back, rather than silently showing the board.
+  const missingIssue = board && openIssue?.issueId
+    && !board.columns.some(column => column.issues.some(issue => issue.id === openIssue.issueId))
   const full = presentation === 'full'
   // What this scope proposed and the board does not show decided yet. Creates and edits leave this
   // count once the board shows them, each then marked on its own card.
@@ -79,9 +88,9 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
     <BoardActivityLine activity={activity} now={now} compact={!full} />
     <div className={`min-h-0 flex-1 p-3 ${full ? 'flex flex-col' : ''}`}>
       {state.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the board…</p>}
-      {state.status === 'unbound' && <p className="text-sm text-kumo-subtle">
+      {state.status === 'unbound' && (props.unboundAction ? props.unboundAction(refresh) : <p className="text-sm text-kumo-subtle">
         Not connected. This workspace has no connection to this board. Connect it, for example by asking in the chat, to see it live.
-      </p>}
+      </p>)}
       {state.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
         {state.message} The connection to this board is kept; it shows the board again once InferOps is turned back on.
       </p>}
@@ -90,6 +99,10 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
         <Button size="sm" onClick={refresh}>Try again</Button>
       </div>}
       {state.status === 'stale' && state.error && <p role="alert" className="mb-2 text-xs text-kumo-danger">Showing the last board read; refresh failed: {state.error}</p>}
+      {missingIssue && <div role="alert" className="mb-2 flex flex-wrap items-center gap-2 text-sm text-kumo-subtle">
+        <span>The issue you had open is no longer on this board. It may have been deleted or moved.</span>
+        <Button size="sm" onClick={() => openIssue.onChange(null)}>Back to the board</Button>
+      </div>}
       {board && (columns.length === 0
         ? <p className="text-sm text-kumo-subtle">No {widget.params.workflow} states to show. {widget.params.showCompleted ? '' : 'Completed and cancelled states are hidden on this card.'}</p>
         : <KanbanBoard board={board} columns={columns} pending={'pending' in state ? state.pending : []} changes={'changes' in state ? state.changes : []}
@@ -97,6 +110,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
           onMove={(issue, toState) => move(issue.id, toState.id, issue.revision)}
           onCreate={create}
           onUpdate={(issue, changes) => update(issue.id, changes, issue.revision)}
+          openIssue={openIssue}
           coding={coding.state.status === 'unavailable' ? undefined : {
             state: coding.state, activity: codingActivity,
             onDispatch: (issue, repoId) => coding.dispatch(issue.identifier, { repoId }, issue.revision),

@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
@@ -7,10 +8,21 @@ import { CanvasWikiWidget } from './CanvasWikiWidget'
 import { gadgetIdOf, sectionGridClass, widgetSpanClass } from './canvasLayout'
 import { useDecidedActionInvalidation } from './useBoardData'
 
-export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, codingDispatch, wikiEditable }: {
+/**
+ * Where a view's board and Wiki references resolve when it is not the view's own workspace: a
+ * use-role operator's own session workspace, whose connections are made from their own account.
+ * `unboundAction` is what a board offers when it is not connected there.
+ */
+export type CanvasResourceScope = {
+  overseer: RpcStub<Overseer>
+  unboundAction: (targetRef: string, retry: () => void) => ReactNode
+}
+
+export const CanvasView = ({ definition, gadgets, overseer, resourceScope, onOpenWidget, codingDispatch, wikiEditable }: {
   definition: CanvasDefinition
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
   overseer: RpcStub<Overseer>
+  resourceScope?: CanvasResourceScope
   /** Opens a board widget's full view. Without it, cards offer no full view. */
   onOpenWidget?: (widgetId: string) => void
   /** See `CanvasBoardWidgetProps.codingDispatch`. */
@@ -18,7 +30,8 @@ export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, coding
   /** Offer Wiki section edits; see `CanvasWikiWidget`'s `editable`. */
   wikiEditable?: boolean
 }) => {
-  useDecidedActionInvalidation(overseer)
+  const resources = resourceScope?.overseer ?? overseer
+  useDecidedActionInvalidation(resources)
   return <div className="space-y-6">
     {definition.sections.length === 0 && <p className="text-sm text-kumo-subtle">This view is empty. Edit the layout to add a section.</p>}
     {definition.sections.map(section => <section key={section.id} aria-labelledby={`canvas-section-${section.id}`} className="@container space-y-3">
@@ -28,8 +41,9 @@ export const CanvasView = ({ definition, gadgets, overseer, onOpenWidget, coding
           {section.widgets.map(widget => <div key={widget.id} className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}>
             {widget.kind === 'inferos.gadget'
               ? <CanvasGadgetWidget widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} />
-              : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget widget={widget} overseer={overseer} editable={wikiEditable} />
-              : <CanvasBoardWidget widget={widget} overseer={overseer} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch} />}
+              : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget widget={widget} overseer={resources} editable={wikiEditable} />
+              : <CanvasBoardWidget widget={widget} overseer={resources} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch}
+                  unboundAction={resourceScope && (retry => resourceScope.unboundAction(widget.targetRef, retry))} />}
           </div>)}
         </div>}
     </section>)}

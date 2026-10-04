@@ -6,7 +6,7 @@ import type { BoardActivityItem } from './boardActivity'
 import type { PendingChange, PendingMove, ProposalResult } from './boardData'
 import { CodingRunBadge } from './CodingRunStatus'
 import type { CodingControl } from './KanbanCodingForm'
-import { KanbanIssueDialog } from './KanbanIssueDialog'
+import { KanbanIssueDialog, type IssueDialogControl } from './KanbanIssueDialog'
 import { PRIORITY_LABELS, formatTargetDate, isOverdue, type ChangeDecision, type MoveDecision } from './kanbanBoard'
 
 const PRIORITY_VARIANT = { urgent: 'error', high: 'warning', medium: 'info', low: 'neutral', none: 'neutral' } as const
@@ -29,6 +29,8 @@ export type KanbanCardProps = {
   editDecision?: ChangeDecision['outcome']
   /** Proposes an edit at the issue's revision; absent while the issue cannot be edited (anything pending). */
   onUpdate?: (changes: IssueChanges) => Promise<ProposalResult>
+  /** Holds the edit dialog's open state outside the card (see `IssueDialogControl`). */
+  editControl?: IssueDialogControl
   /**
    * Coding dispatch for the issue's project, with the issue's latest run. Absent when the board's
    * workspace holds no coding-dispatch connection for the project, or the surface offers none.
@@ -64,7 +66,7 @@ const pendingBadge = ({ issue, pending, edit, proposed }: Pick<KanbanCardProps, 
  * With coding dispatch offered, it shows the issue's latest coding run, and a software issue's
  * Coding button opens its coding task, which a pending move or edit does not withhold.
  */
-export const KanbanCard = ({ issue, state, targets, pending, proposed, decision, edit, editDecision, coding, today, instructionsId, onMove, onUpdate, onDragStart, onDragEnd }: KanbanCardProps) => {
+export const KanbanCard = ({ issue, state, targets, pending, proposed, decision, edit, editDecision, coding, today, instructionsId, onMove, onUpdate, editControl, onDragStart, onDragEnd }: KanbanCardProps) => {
   const [choice, setChoice] = useState<State | null>(null)
   const movable = targets.length > 0 && !pending
   const chosen = choice && targets.find(target => target.id === choice.id) ? choice : null
@@ -107,7 +109,7 @@ export const KanbanCard = ({ issue, state, targets, pending, proposed, decision,
       {issue.priority !== 'none' && <Badge variant={PRIORITY_VARIANT[issue.priority]}>{PRIORITY_LABELS[issue.priority]}</Badge>}
       {codable && <KanbanIssueDialog kind="code" issue={issue} run={coding.run} coding={coding.control}
         trigger={<Button size="xs" shape="square" variant="ghost" className="ml-auto" aria-label={`Coding task for ${issue.identifier}`} icon={Code} />} />}
-      {onUpdate && <KanbanIssueDialog kind="edit" issue={issue} onUpdate={onUpdate}
+      {onUpdate && <KanbanIssueDialog kind="edit" issue={issue} onUpdate={onUpdate} control={editControl}
         trigger={<Button size="xs" shape="square" variant="ghost" className={codable ? '' : 'ml-auto'} aria-label={`Edit ${issue.identifier}`} icon={PencilSimple} />} />}
       {movable && <DropdownMenu>
         <DropdownMenu.Trigger render={<Button size="xs" shape="square" variant="ghost" className={onUpdate || codable ? '' : 'ml-auto'} aria-label={`Move ${issue.identifier} to…`} icon={DotsThree} />} />

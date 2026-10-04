@@ -10,6 +10,7 @@ import type { Board, Issue, IssueChanges, NewIssue } from '@inferos/gatekeeper-i
 import { CanvasBoardWidget } from './CanvasBoardWidget'
 import { CanvasBoardFullView } from './CanvasBoardFullView'
 import { dialogField, setFieldValue } from './kumoPopupDoubles'
+import { SessionBoard } from '../operate/SessionBoard'
 
 vi.mock('@cloudflare/kumo', async importOriginal =>
   (await import('./kumoPopupDoubles')).withKumoPopupDoubles(await importOriginal<typeof import('@cloudflare/kumo')>()))
@@ -200,4 +201,61 @@ it('creates in the column\'s state and edits at the revision read; an edit waits
   expect(card('1').textContent).toContain('Edit applied')
   expect(article().querySelector('[aria-label="Edit DEMO-1"]')).not.toBeNull()
   expect([...article().querySelectorAll('[role="status"]')].map(s => s.textContent)).toContain('Edit of DEMO-1 applied.')
+})
+
+it('opens and closes the edit form from the issue its owner holds, and says when that issue is gone', async () => {
+  const onChange = vi.fn<(issueId: string | null) => void>()
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} openIssue={{ issueId: null, onChange }} />)
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Edit DEMO-1"]')!.click() })
+  expect(onChange).toHaveBeenLastCalledWith('1')
+  expect(container.querySelector('[role="dialog"]')).toBeNull()
+
+  // The held issue opens its form, as after a reload; Cancel hands Back to the owner.
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} openIssue={{ issueId: '1', onChange }} />)
+  expect(dialogField<HTMLInputElement>(container, 'Title').value).toBe('Issue 1')
+  await act(async () => { dialogButton('Cancel').click() })
+  expect(onChange).toHaveBeenLastCalledWith(null)
+
+  // An issue the board no longer has is explicit, with the way back, never another issue.
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} openIssue={{ issueId: 'deleted', onChange }} />)
+  expect(article().querySelector('[role="alert"]')?.textContent).toContain('no longer on this board')
+  expect(container.querySelector('[role="dialog"]')).toBeNull()
+  await act(async () => { [...article().querySelectorAll('button')].find(b => b.textContent === 'Back to the board')!.click() })
+  expect(onChange).toHaveBeenLastCalledWith(null)
+})
+
+it('proposes a new issue once however often it is submitted while the proposal is in flight', async () => {
+  let release!: () => void
+  createIssue.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} />)
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="New issue in Doing"]')!.click() })
+  await act(async () => setFieldValue(dialogField(container, 'Title'), 'Only once'))
+  const form = dialogButton('Propose issue').closest('form')!
+  await act(async () => { form.requestSubmit(); form.requestSubmit(); form.requestSubmit() })
+  await act(async () => { release(); await settle() })
+  expect(createIssue).toHaveBeenCalledTimes(1)
+})
+
+it('offers what its scope supplies when the board is not connected there', async () => {
+  lookup.mockResolvedValue(null)
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card"
+    unboundAction={retry => <button type="button" onClick={retry}>Connect yours</button>} />)
+  expect(container.textContent).not.toContain('This workspace has no connection')
+  lookup.mockResolvedValue(connection)
+  await act(async () => { [...container.querySelectorAll('button')].find(b => b.textContent === 'Connect yours')!.click(); await settle() })
+  expect(card('1')).toBeDefined()
+})
+
+it('never paints a board read that lands after the session switched to another board', async () => {
+  const OTHER = 'inferops://demo.local/project/board/OTHER'
+  const other: Board = { ...demo, project: { id: 'q', identifier: 'OTHER', name: 'Other' }, columns: demo.columns.map(c => ({ ...c, issues: [] })) }
+  let resolveFirst!: (board: Board) => void
+  readBoard.mockReturnValueOnce(new Promise(r => { resolveFirst = r })).mockResolvedValueOnce(other)
+  const onEvent = vi.fn<(event: unknown) => void>()
+  await render(<SessionBoard board={{ workspaceId: 'ws', boardRef: BOARD, issueId: null }} overseer={overseer} backLabel="Ops" onEvent={onEvent} />)
+  await render(<SessionBoard board={{ workspaceId: 'ws', boardRef: OTHER, issueId: null }} overseer={overseer} backLabel="Ops" onEvent={onEvent} />)
+  expect(container.querySelector('h4')?.textContent).toBe('Other (OTHER)')
+  await act(async () => { resolveFirst(demo); await settle() })
+  expect(container.querySelector('h4')?.textContent).toBe('Other (OTHER)')
+  expect(card('1')).toBeUndefined()
 })
