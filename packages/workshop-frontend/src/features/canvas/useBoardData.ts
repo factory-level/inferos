@@ -80,8 +80,13 @@ export const useDecidedActionInvalidationInEveryScope = (overseer: RpcStub<Overs
 
 const NOT_LOADED: ProposalResult = { ok: false, code: 'NOT_LOADED', message: 'The board is not loaded.' }
 
-/** The live state of one board card's request in the given scope, with its actions. */
-export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest): {
+/**
+ * The live state of one board card's request in the given scope, with its actions. While `active`
+ * is false (a card not yet near the screen) the request is not subscribed, so nothing is read, and
+ * the state stays `loading`; it is subscribed, and read or served from a card already showing the
+ * board, once `active` turns true.
+ */
+export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest, active = true): {
   state: BoardState
   refresh: () => void
   move: (issueId: string, toStateId: string, expectedRevision: Revision) => Promise<ProposalResult>
@@ -93,15 +98,16 @@ export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest)
   // dispose and recreate the scope's adapter between the two.
   useEffect(() => { acquire(overseer); return () => release(overseer) }, [overseer])
   const subscribe = useCallback((onChange: () => void) => {
+    if (!active) return () => {}
     const data = acquire(overseer)
     const unsubscribe = data.subscribe(request, onChange)
     return () => { unsubscribe(); release(overseer) }
   // The request is identified by its key; a new object with the same key is the same request.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overseer, key])
-  const getSnapshot = useCallback(() => adapters.get(overseer)?.data.get(request) ?? LOADING_BOARD,
+  }, [overseer, key, active])
+  const getSnapshot = useCallback(() => active ? adapters.get(overseer)?.data.get(request) ?? LOADING_BOARD : LOADING_BOARD,
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [overseer, key])
+  [overseer, key, active])
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const data = () => adapters.get(overseer)?.data
   return {

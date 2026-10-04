@@ -23,6 +23,12 @@
 // listed by sibling order, then title, and sections in page order. `setInferMindEnabled(false)`
 // turns the demo workspace into one without InferMind, so every Wiki call fails FORBIDDEN as
 // InferOps' product gate does.
+//
+// Large boards (#28, development only): `MOCK_INFEROPS_SYNTHETIC_ISSUES=<n>` (the dev server passes
+// it through from the shell or `.dev.vars`) adds a synthetic project `PERF` with n issues over six
+// states when an account's data is first seeded, for measuring the Kanban against a board of a
+// realistic size. Unset, or not a whole number from 1 to MAX_SYNTHETIC_ISSUES, it adds nothing; an
+// account seeded before it was set keeps its data (`pnpm local reset --yes` starts over).
 
 import { DurableObject } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
@@ -73,9 +79,71 @@ function notFound(): InferOpsError {
   return new InferOpsError("NOT_FOUND", "No such issue in this project.");
 }
 
-/** The seed fixture. JSON imports widen literal unions to string, so the shape is asserted here. */
-function seedData(): MockData {
-  return structuredClone(SEED) as unknown as MockData;
+/** The most issues `MOCK_INFEROPS_SYNTHETIC_ISSUES` may ask for: about 0.7 MB, well inside one stored value. */
+export const MAX_SYNTHETIC_ISSUES = 2000;
+
+/** The synthetic project's key; its board is `inferops://demo.local/project/board/PERF`. */
+export const SYNTHETIC_PROJECT_KEY = "PERF";
+
+const SYNTHETIC_STATES = [
+  ["Backlog", "backlog"], ["Ready", "unstarted"], ["Working", "started"], ["Review", "started"],
+  ["Done", "completed"], ["Cancelled", "cancelled"],
+] as const;
+const SYNTHETIC_PRIORITIES: Issue["priority"][] = ["urgent", "high", "medium", "low", "none"];
+const SYNTHETIC_WORDS = ["Verify", "the", "shift", "handover", "checklist", "for", "line", "three", "and", "record",
+  "sensor", "drift"];
+
+const syntheticId = (kind: number, n: number) =>
+  `${kind.toString(16).padStart(8, "0")}-0000-4000-9000-${n.toString(16).padStart(12, "0")}`;
+
+/**
+ * A deterministic project of `count` issues spread round-robin over six software states, with the
+ * same mix of titles, assignees, target dates and blockers as the frontend's synthetic boards
+ * (`syntheticBoard.ts`). Its ids differ from the fixture's in the fourth group, so they never collide.
+ */
+export function syntheticProject(count: number): ProjectSnapshot {
+  const states = SYNTHETIC_STATES.map(([name, group], i): ProjectSnapshot["states"][number] =>
+    ({ id: syntheticId(0x20000000, i + 1), name, group, position: i, workflow: "software" }));
+  const issues = Array.from({ length: count }, (_, i): Issue => {
+    const n = i + 1;
+    return {
+      id: syntheticId(0x30000000, n),
+      identifier: `${SYNTHETIC_PROJECT_KEY}-${n}`,
+      title: Array.from({ length: 4 + (n % 8) }, (_word, w) => SYNTHETIC_WORDS[(n + w) % SYNTHETIC_WORDS.length]).join(" "),
+      priority: SYNTHETIC_PRIORITIES[n % SYNTHETIC_PRIORITIES.length]!,
+      stateId: states[i % states.length]!.id,
+      targetDate: n % 3 === 0 ? `2026-${String((n % 12) + 1).padStart(2, "0")}-${String((n % 28) + 1).padStart(2, "0")}` : null,
+      workflow: "software",
+      revision: String(1 + (n % 40)),
+      assigneeId: n % 2 === 0 ? syntheticId(0x40000000, n % 25) : null,
+      blockedReason: n % 11 === 0 ? "Waiting for the vendor to confirm the replacement part." : null,
+    };
+  });
+  return {
+    project: { id: syntheticId(0x10000000, 1), identifier: SYNTHETIC_PROJECT_KEY, name: "Synthetic large board" },
+    states, issues,
+  };
+}
+
+/** The issue count `MOCK_INFEROPS_SYNTHETIC_ISSUES` asks for, or null when it asks for none. */
+export function syntheticIssueCount(value: string | undefined): number | null {
+  if (value === undefined || !/^\d+$/.test(value)) return null;
+  const count = Number(value);
+  return count >= 1 && count <= MAX_SYNTHETIC_ISSUES ? count : null;
+}
+
+/**
+ * The seed fixture, plus the synthetic project when `MOCK_INFEROPS_SYNTHETIC_ISSUES` asks for one.
+ * JSON imports widen literal unions to string, so the fixture's shape is asserted here.
+ */
+function seedData(env: Pick<Cloudflare.Env, "MOCK_INFEROPS_SYNTHETIC_ISSUES">): MockData {
+  const data = structuredClone(SEED) as unknown as MockData;
+  const count = syntheticIssueCount(env.MOCK_INFEROPS_SYNTHETIC_ISSUES);
+  if (count !== null) data.projects.push(syntheticProject(count));
+  else if (env.MOCK_INFEROPS_SYNTHETIC_ISSUES !== undefined) {
+    logger.warn("synthetic project not seeded", { event: "mock.synthetic.invalid" });
+  }
+  return data;
 }
 
 /** Per-account mock InferOps store. Reached only through `openInferOpsClient`. */
@@ -92,7 +160,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     this.#assertLive();
     let data = this.ctx.storage.kv.get<MockData>(DATA_KEY);
     if (!data) {
-      data = seedData();
+      data = seedData(this.env);
       this.ctx.storage.kv.put(DATA_KEY, data);
     }
     return data;

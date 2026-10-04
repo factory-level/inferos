@@ -1,23 +1,9 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { GadgetClient, GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasGadgetWidget as Widget } from '@gadgets/workshop-shared/canvas'
 import GadgetUI from '../../GadgetUI'
-
-// Latches once the element has been on screen, so a gadget far down a long canvas doesn't fetch
-// and boot its bundle until someone scrolls to it. Without IntersectionObserver, load eagerly.
-const useHasBeenOnScreen = (ref: RefObject<HTMLElement | null>) => {
-  const [seen, setSeen] = useState(() => typeof IntersectionObserver === 'undefined')
-  useEffect(() => {
-    if (seen || !ref.current) return
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setSeen(true)
-    }, { rootMargin: '200px' })
-    observer.observe(ref.current)
-    return () => observer.disconnect()
-  }, [ref, seen])
-  return seen
-}
+import { useHasBeenOnScreen } from './useHasBeenOnScreen'
 
 export const CanvasGadgetWidget = ({ widget, gadget, overseer }: {
   widget: Widget
