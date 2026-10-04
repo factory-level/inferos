@@ -1189,6 +1189,12 @@
             "UserDirectoryDurableObject"
           ],
           "tag": "v3"
+        },
+        {
+          "new_sqlite_classes": [
+            "SubjectPresenceDurableObject"
+          ],
+          "tag": "v4"
         }
       ],
       "modules": [

@@ -1,6 +1,7 @@
-// Operate subjects (#64), end to end: the session's subject is the board it shows, a handover shares
-// that subject and a note into another person's session without granting anything, and the
-// per-subject audit is readable only through the reader's own access to the subject.
+// Operate subjects (#64), end to end: the session's subject is the board it shows, people who can
+// read a subject see each other on it, a handover shares that subject and a note into another
+// person's session without granting anything, and the per-subject audit is readable only through
+// the reader's own access to the subject.
 //
 // The real Workshop and InferOps gatekeeper Worker against the fake InferLab and InferOps
 // (src/inferops-fake.ts), with per-person accounts from the real connect flow.
@@ -10,7 +11,7 @@ import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
 import {
   getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES, type AuthenticatedApi, type OperateSession,
-  type OperateSessionErrorCode, type Overseer,
+  type OperateSessionErrorCode, type OperateSubjectParticipant, type Overseer, type PresenceSubscriber,
 } from "@gadgets/workshop-shared/api";
 import type { InferOpsProjectSession } from "../../../custom-gatekeepers/gatekeeper-inferops/src/types.js";
 import { startHarness, type Harness } from "../src/harness.js";
@@ -19,7 +20,8 @@ import {
 } from "../src/inferops-fake.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  connect, listConnectedAccounts, nextUsernames, signUp, waitFor, type ConnectedAccount,
+  connect, listConnectedAccounts, nextUsernames, RpcTarget, signUp, stubFor, waitFor,
+  type ConnectedAccount,
 } from "../src/rpc-client.js";
 
 const INFEROPS_GATEKEEPER_DIR =
@@ -28,6 +30,7 @@ const GATEKEEPER_WORKER = "gatekeeper-inferops";
 const VENDOR = "inferops";
 const ENG_BOARD = boardUrl("operations", "ENG");
 const WEB_BOARD = boardUrl("operations", "WEB");
+const OPS_BOARD = boardUrl("knowledge", "OPS");
 
 const fake = new InferOpsFake();
 const network = new NetworkInterceptor({ handlers: [fake.handler] });
@@ -103,6 +106,33 @@ const refusedWith = (code: OperateSessionErrorCode) => (caught: unknown) => {
   expect(getOperateSessionErrorCode(caught)).toBe(code);
   return true;
 };
+
+class Roster extends RpcTarget implements PresenceSubscriber<OperateSubjectParticipant> {
+  readonly participants = new Map<string, OperateSubjectParticipant>();
+  init(participants: OperateSubjectParticipant[]) {
+    this.participants.clear();
+    for (const participant of participants) this.participants.set(participant.key, participant);
+  }
+  add(participant: OperateSubjectParticipant) {
+    this.participants.set(participant.key, participant);
+  }
+  remove(key: string) {
+    this.participants.delete(key);
+  }
+  /** Who is present, as `[user id, open issue]`, sorted by id. */
+  people() {
+    return [...this.participants.values()].map(p => [p.user.id, p.issueId]).toSorted();
+  }
+}
+
+/** Waits until `roster` shows exactly `expected` (sorted `[user id, issue]` pairs). */
+const rosterShows = (roster: Roster, expected: (string | null)[][]) =>
+  waitFor(`the roster ${JSON.stringify(expected)}`, async () =>
+    JSON.stringify(roster.people()) === JSON.stringify(expected.toSorted()) ? true : null);
+
+/** Shows `boardRef` in the operator's session, read through their own session workspace. */
+const open = (who: Operator, boardRef: string, seq = 0) =>
+  who.session.dispatch({ type: "openBoard", board: { workspaceId: who.workspaceId, boardRef } }, seq);
 
 const seqOf = async (operator: Operator) => (await operator.session.listEvents(0, 200)).length;
 
@@ -212,4 +242,56 @@ it("the audit of one subject holds its events and actions, and nothing of anothe
   const bobAudit = await bob.session.listSubjectAudit(bobEng);
   expect(bobAudit.events).toEqual([expect.objectContaining({ event: { type: "handoverReceived", handover } })]);
   expect(bobAudit.actions).toEqual([]);
+});
+
+it("people who can read a subject see each other on it; no one else sees them or appears", async () => {
+  const alice = await newOperator("presencealice", ["operations"]);
+  const bob = await newOperator("presencebob", ["operations"]);
+  const carol = await newOperator("presencecarol", ["knowledge"]);
+  const eng = await connectBoard(alice, ENG_BOARD);
+  await connectBoard(bob, ENG_BOARD);
+  await connectBoard(carol, OPS_BOARD);
+  const [eng1] = (await eng.readBoard()).columns.flatMap(column => column.issues);
+
+  // Nothing to be present on until a board is shown.
+  await expect(alice.session.subscribeToSubjectPresence(stubFor(new Roster())))
+    .rejects.toSatisfy(refusedWith(OPERATE_SESSION_ERROR_CODES.invalidEvent));
+
+  await open(alice, ENG_BOARD);
+  const aliceRoster = new Roster();
+  using aliceStub = stubFor(aliceRoster);
+  const alicePresence = await alice.session.subscribeToSubjectPresence(aliceStub);
+  await rosterShows(aliceRoster, [[alice.username, null]]);
+
+  // Bob, on the same record through his own connection, sees Alice, and she sees him.
+  let bobPage = await open(bob, ENG_BOARD);
+  bobPage = await bob.session.dispatch({ type: "openIssue", issueId: eng1!.id }, bobPage.seq);
+  const bobRoster = new Roster();
+  using bobStub = stubFor(bobRoster);
+  let bobPresence = await bob.session.subscribeToSubjectPresence(bobStub);
+  await rosterShows(bobRoster, [[alice.username, null], [bob.username, eng1!.id]]);
+  await rosterShows(aliceRoster, [[alice.username, null], [bob.username, eng1!.id]]);
+
+  // Carol can't reach ENG: she can't open it, so she is never on its roster, and her own board's
+  // roster holds only her.
+  await expect(open(carol, ENG_BOARD))
+    .rejects.toSatisfy(refusedWith(OPERATE_SESSION_ERROR_CODES.boardUnavailable));
+  await open(carol, OPS_BOARD);
+  const carolRoster = new Roster();
+  using carolStub = stubFor(carolRoster);
+  using _carolPresence = await carol.session.subscribeToSubjectPresence(carolStub);
+  await rosterShows(carolRoster, [[carol.username, null]]);
+  await rosterShows(aliceRoster, [[alice.username, null], [bob.username, eng1!.id]]);
+
+  // Switching subject leaves the old roster: Bob moves to WEB, and Alice no longer sees him.
+  bobPresence[Symbol.dispose]();
+  await connectBoard(bob, WEB_BOARD);
+  await open(bob, WEB_BOARD, bobPage.seq);
+  const bobWeb = new Roster();
+  using bobWebStub = stubFor(bobWeb);
+  bobPresence = await bob.session.subscribeToSubjectPresence(bobWebStub);
+  await rosterShows(bobWeb, [[bob.username, null]]);
+  await rosterShows(aliceRoster, [[alice.username, null]]);
+  alicePresence[Symbol.dispose]();
+  bobPresence[Symbol.dispose]();
 });

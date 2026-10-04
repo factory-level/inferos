@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch } from '@gadgets/workshop-shared/operate-console';
 import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -26,6 +26,7 @@ import { BlueprintKvRecord, blueprintVersionMetadata, buildBlueprintArchiveStrea
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
 import { UserDirectoryDurableObject } from "./user-directory.js";
+import { SubjectPresenceDurableObject } from "./subject-presence.js";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
@@ -64,7 +65,7 @@ export { LanguageModelGatekeeper };
 export { AdminSettings };
 
 // Re-export the deployment-wide user directory Durable Object.
-export { UserDirectoryDurableObject };
+export { UserDirectoryDurableObject, SubjectPresenceDurableObject };
 
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
@@ -674,7 +675,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
           this.overseers.newUniqueId().toString());
       return this.#openGadgetInternal(id, undefined, undefined, true);
     }, id => this.#openGadgetInternal(id),
-    userId => wrapDoStubForTelemetry(this.users.get(this.users.idFromName(userId))));
+    userId => wrapDoStubForTelemetry(this.users.get(this.users.idFromName(userId))),
+    boardRef => this.ctx.exports.SubjectPresenceDurableObject.getByName(boardRef));
   }
 }
 
@@ -685,7 +687,8 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
   constructor(private user: () => DurableObjectStub<UserDurableObject>,
       private openWorkspace: () => Promise<NativeRpcStub<Overseer>>,
       private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>,
-      private otherUser: (userId: string) => DurableObjectStub<UserDurableObject>) {
+      private otherUser: (userId: string) => DurableObjectStub<UserDurableObject>,
+      private subjectPresence: (boardRef: string) => DurableObjectStub<SubjectPresenceDurableObject>) {
     super();
   }
 
@@ -772,6 +775,15 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     await recipient.dispatchOperateEvent({ type: "handoverReceived", handover }, null, "person");
     await user.dispatchOperateEvent({ type: "handoverSent", handover }, null, "person");
     return handover;
+  }
+
+  async subscribeToSubjectPresence(
+      subscriber: RpcStub<PresenceSubscriber<OperateSubjectParticipant>>): Promise<RpcStub<{}>> {
+    let user = this.user();
+    let { board } = (await user.getOperatePage()).state;
+    if (!board) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    (await this.#reachBoard(board))[Symbol.dispose]();
+    return this.subjectPresence(board.boardRef).join(await user.whoami(), board.issueId, subscriber);
   }
 
   async listSubjectAudit(subject: OperateBoardRef, cursor?: OperateSubjectAuditCursor)
