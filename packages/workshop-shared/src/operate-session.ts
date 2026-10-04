@@ -100,6 +100,12 @@ export type OperateBoardRef = {
   boardRef: string;
 };
 
+/** The board a session shows, and the issue opened from it (an InferOps issue id), if any. */
+export type OperateBoardView = OperateBoardRef & {
+  /** The issue shown over the board, or null. Like the board, a reference only. */
+  issueId: string | null;
+};
+
 /** The full page state of an operate session. */
 export type OperatePageState = {
   /** What the session has open, in the order it was opened. */
@@ -135,7 +141,7 @@ export type OperatePageState = {
    * The board shown over the page, or null. Opening a console, another view or screen, or going
    * home closes it, so a board never outlives the context it was opened in.
    */
-  board: OperateBoardRef | null;
+  board: OperateBoardView | null;
 };
 
 /** A change to an operate session's page state. Events change presentation only. */
@@ -193,7 +199,11 @@ export type OperateEvent =
    */
   | { type: "openBoard"; board: OperateBoardRef }
   /** Stop showing the board. */
-  | { type: "closeBoard" };
+  | { type: "closeBoard" }
+  /** Show one issue of the shown board, replacing any issue already shown. */
+  | { type: "openIssue"; issueId: string }
+  /** Stop showing the issue and return to its board. */
+  | { type: "closeIssue" };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -402,11 +412,20 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
         throw new OperateEventError(
             `A board reference must be 1-${MAX_OPERATE_SUBJECT_LENGTH} characters.`);
       }
-      return { ...state, board: { workspaceId, boardRef } };
+      return { ...state, board: { workspaceId, boardRef, issueId: null } };
     }
     case "closeBoard": {
       if (!state.board) throw new OperateEventError("No board is shown in this session.");
       return { ...state, board: null };
+    }
+    case "openIssue": {
+      if (!state.board) throw new OperateEventError("No board is shown in this session.");
+      checkIds([event.issueId]);
+      return { ...state, board: { ...state.board, issueId: event.issueId } };
+    }
+    case "closeIssue": {
+      if (!state.board?.issueId) throw new OperateEventError("No issue is shown in this session.");
+      return { ...state, board: { ...state.board, issueId: null } };
     }
   }
 }

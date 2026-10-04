@@ -20,7 +20,7 @@ import {
 } from "../src/inferops-fake.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  connect, listConnectedAccounts, nextUsernames, signUp, waitFor, type ConnectedAccount,
+  connect, listConnectedAccounts, logIn, nextUsernames, signUp, waitFor, type ConnectedAccount,
 } from "../src/rpc-client.js";
 
 const INFEROPS_GATEKEEPER_DIR =
@@ -118,7 +118,7 @@ it("finds boards from a description among the person's own projects, and opens o
   // ENG is connected here, so it opens; WEB was found but is not connected, so it is refused and
   // the page keeps showing ENG rather than switching to anything else.
   let page = await session.dispatch({ type: "openBoard", board: { workspaceId, boardRef: ENG_BOARD } }, 0);
-  expect(page.state.board).toEqual({ workspaceId, boardRef: ENG_BOARD });
+  expect(page.state.board).toEqual({ workspaceId, boardRef: ENG_BOARD, issueId: null });
   await expect(session.dispatch({ type: "openBoard", board: { workspaceId, boardRef: WEB_BOARD } }, page.seq))
     .rejects.toSatisfy(boardUnavailable);
 
@@ -167,4 +167,25 @@ it("fails discovery explicitly once the person's access is revoked, naming nothi
   fake.setWorkspaces(user.person, ["operations"]);
   fake.revokeSessions(user.person);
   await expect(board.findBoards("website")).rejects.toThrow(/UNAUTHORIZED/);
+});
+
+it("keeps the board and its issue through a reconnect, and Back returns to that board, not another", async () => {
+  const user = await newUser("continuity", ["operations"]);
+  const { session, workspaceId, board } = await operate(user);
+  const [eng1] = (await board.readBoard()).columns.flatMap(column => column.issues);
+  let page = await session.dispatch({ type: "openBoard", board: { workspaceId, boardRef: ENG_BOARD } }, 0);
+  page = await session.dispatch({ type: "openIssue", issueId: eng1!.id }, page.seq);
+
+  // A new connection (a reload or another tab) sees the same board and issue.
+  using api = await logIn(connect(harness.url), user.username);
+  using again = await api.getOperateSession();
+  const events = await again.listEvents(0, 10);
+  expect(events.map(record => record.event.type)).toEqual(["openBoard", "openIssue"]);
+  page = await again.dispatch({ type: "closeIssue" }, page.seq);
+  expect(page.state.board).toEqual({ workspaceId, boardRef: ENG_BOARD, issueId: null });
+  // A stale tab's change at an old sequence number is refused rather than applied over this one.
+  await expect(session.dispatch({ type: "closeBoard" }, page.seq - 1)).rejects.toSatisfy(caught => {
+    expect(getOperateSessionErrorCode(caught)).toBe(OPERATE_SESSION_ERROR_CODES.conflict);
+    return true;
+  });
 });
