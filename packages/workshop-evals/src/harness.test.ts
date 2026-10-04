@@ -34,6 +34,7 @@ const fakes = vi.hoisted(() => {
     approveActionsAndWait: async () => result,
     listActions: async () => ({ entries: [] }),
     connectedAccount: () => { throw new Error("connectedAccount is not used by this test"); },
+    workspace: () => { throw new Error("workspace is not used by this test"); },
     openGadget: async () => { throw new Error("openGadget is not used by this test"); },
     acceptChanges: vi.fn(async () => {
       await new Promise(resolve => setTimeout(resolve, phaseDelayMs));

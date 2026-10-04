@@ -46,6 +46,8 @@ export const KNOWLEDGE_WIKI_RESOURCE: SupportedResource = {
   title: "InferMind Wiki",
   description:
     "Read the pages of one InferMind workspace's Wiki and propose edits to their sections.",
+  // The Wiki is not chat context in an operate session (#61); its own surfaces are separate.
+  excludeFromOperateChat: true,
 };
 
 /** The project-scoped resource kinds, by the path segment that names them. */

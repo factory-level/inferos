@@ -12,7 +12,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -5628,6 +5628,10 @@ class OverseerImpl implements AgentHooks {
       }
 
       case "gatekeeper":
+        if (caller.from === "agent" && this.storage.operateSession.get()) {
+          return this.#assertUsableInOperateChat(target.id).then(() =>
+              this.openGatekeeperSession(target.id, this.getGatekeeperFacet(target.id), caller));
+        }
         return this.openGatekeeperSession(target.id, this.getGatekeeperFacet(target.id), caller);
 
       case "worktree": {
@@ -7070,6 +7074,7 @@ class OverseerImpl implements AgentHooks {
     if (!gatekeeper) {
       throw new Error(`The resource behind ${envName} no longer exists.`);
     }
+    if (this.storage.operateSession.get()) await this.#assertUsableInOperateChat(id, envName);
     return this.describeGatekeeper(envName, gatekeeper);
   }
 
@@ -8765,6 +8770,7 @@ class OverseerImpl implements AgentHooks {
                         onOutputText?: (delta: string) => void,
                         worktreeTurn?: WorktreeTurnAccess)
       : Promise<string> {
+    if (this.storage.operateSession.get()) bindings = await this.#operateChatBindings(bindings);
     let bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     let executionId: string = bytes.toBase64();
@@ -8930,6 +8936,41 @@ class OverseerImpl implements AgentHooks {
     return this.storage.operateSession.get();
   }
 
+  // Whether the operate chat must not use connection `id`: its resource is of a type its vendor
+  // marks `excludeFromOperateChat` (see SupportedResource). A connection with no recorded vendor or
+  // URL predates both being recorded and matches no type.
+  async #excludedFromOperateChat(id: WorkpieceId): Promise<boolean> {
+    let record = this.storage.gatekeepers.get(id);
+    let vendorId = gatekeeperVendorId(record);
+    let url = record?.resourceUrl;
+    if (!vendorId || !url) return false;
+    let vendor = (await this.#listGatekeeperVendorsCached()).find(v => v.id.toLowerCase() === vendorId);
+    return vendor?.supportedResources.some(resource =>
+        resource.excludeFromOperateChat && matchesResourceUrlPattern(resource.urlPattern, url)) ?? false;
+  }
+
+  async #assertUsableInOperateChat(id: WorkpieceId, envName?: string): Promise<void> {
+    if (await this.#excludedFromOperateChat(id)) {
+      throw new Error(`${envName ?? "This resource"} is not available in an operate chat.`);
+    }
+  }
+
+  // The operate chat's bindings without the connections it must not use, so they never reach its
+  // executeCode env. Their sessions are refused as well (startGatekeeperSession), for a stub that
+  // reaches the agent any other way.
+  async #operateChatBindings(bindings: Record<string, ChatBindingEntry>)
+      : Promise<Record<string, ChatBindingEntry>> {
+    let kept: Record<string, ChatBindingEntry> = {};
+    for (let [name, entry] of Object.entries(bindings)) {
+      if (entry.type === "workpiece" && this.storage.gatekeepers.get(entry.id) &&
+          await this.#excludedFromOperateChat(entry.id)) {
+        continue;
+      }
+      kept[name] = entry;
+    }
+    return kept;
+  }
+
   // The owner's user DO holds the session (one per person, and only the owner opens this
   // workspace), so the agent's event joins the same serialized log as the person's tabs.
   //
@@ -8988,12 +9029,16 @@ class OverseerImpl implements AgentHooks {
       return `Unknown vendor "${vendorId}". Available vendors: ` +
           `${vendors.map(v => v.id).join(", ") || "(none)"}.`;
     }
-    if (vendor.supportedResources.length === 0) {
+    // An operate chat is never offered a type it may not use (see SupportedResource).
+    let resources = this.storage.operateSession.get()
+        ? vendor.supportedResources.filter(r => !r.excludeFromOperateChat)
+        : vendor.supportedResources;
+    if (resources.length === 0) {
       return `Vendor "${vendorId}" (${vendor.description.displayName}) offers no connectable ` +
           `resources.`;
     }
     let lines = [`Resource types offered by "${vendorId}" (${vendor.description.displayName}):`];
-    for (let r of vendor.supportedResources) {
+    for (let r of resources) {
       lines.push(`* ${r.title} — urlPattern: ${r.urlPattern}\n  ${r.description}`);
     }
     lines.push(
@@ -9032,6 +9077,11 @@ class OverseerImpl implements AgentHooks {
     if (!resolved.ok) {
       return { requested: false, message:
           `Cannot request a connection for "${vendor.description.displayName}": ${resolved.reason}` };
+    }
+    if (this.storage.operateSession.get() && resolved.resource.excludeFromOperateChat) {
+      return { requested: false, message:
+          `Cannot request a connection for "${vendor.description.displayName}": ` +
+          `${resolved.resource.title} is not available in an operate chat.` };
     }
 
     let requestId = `${chatId}:${crypto.randomUUID()}`;

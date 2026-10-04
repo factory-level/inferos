@@ -257,6 +257,15 @@ export type SupportedResource = {
    * If omitted/false, the resource type is not separately grantable.
    */
   grantable?: boolean;
+
+  /**
+   * If true, operate chats (see `OperateSession`) never use resources of this type: the operate
+   * agent is not offered the type, cannot request a connection to it, and a connection to one is
+   * left out of its `executeCode` env and refused to its `describeBinding` and binding sessions,
+   * even when the person pasted it into the chat. The person's own use of the connection outside the
+   * chat, and Build chats, are unaffected. It only narrows where a resource is used, never widens.
+   */
+  excludeFromOperateChat?: boolean;
 }
 
 /** Removes every trailing slash from a string in linear time. */
