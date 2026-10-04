@@ -22,7 +22,7 @@ import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
-import { BlueprintKvRecord, blueprintVersionMetadata, buildBlueprintArchiveStream, sanitizeBlueprintOutput, sanitizeWorkspaceKind, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
+import { BlueprintKvRecord, blueprintVersionMetadata, buildBlueprintArchiveStream, sanitizeBlueprintOutput, sanitizeWorkspaceKind, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings } from "./blueprint-archive.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
 import { UserDirectoryDurableObject } from "./user-directory.js";
@@ -508,6 +508,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     if (options?.kind !== undefined && options.kind !== content.kind) {
       throw new Error(`Blueprint version ${version} is a ${content.kind}, not a ${options.kind}.`);
     }
+    // The assignments must name that version's bindings: the ones stored with it, or the current
+    // ones for a version stored without them. A map (not a raw object) until names are validated.
+    let blueprintBindings = new Map(Object.entries(
+        await readBlueprintVersionBindings(this.env, blueprintId, version)
+            ?? kvRecord.metadata.bindings));
+    let unknown = Object.keys(bindings).find(name => !blueprintBindings.has(name));
+    if (unknown !== undefined) {
+      throw new Error(`Unknown binding name: ${unknown} (blueprint version ${version}).`);
+    }
 
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
@@ -525,9 +534,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let metadata = await overseerResult.getMetadata();
     using gadget = await overseerResult.getGadget(metadata.defaultGadgetId!);
 
-    // Defensively put blueprint bindings into a map (not a raw object) until we've had a chance to
-    // validate the names.
-    let blueprintBindings = new Map(Object.entries(kvRecord.metadata.bindings));
     let gadgetId = metadata.defaultGadgetId!;
 
     // Create gatekeepers in two phases: first every non-spawner binding (binding the

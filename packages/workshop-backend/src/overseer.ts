@@ -45,7 +45,7 @@ import WORKTREE_BINDING_TYPES from "./worktree-binding.txt";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import { chatChangeStatuses, foldProposedChanges, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
-import { blueprintSnapshotFiles, blueprintVersionMetadata, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
+import { blueprintSnapshotFiles, blueprintVersionKeys, blueprintVersionMetadata, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings, sanitizeBlueprintOutput, writeBlueprintVersionBindings } from "./blueprint-archive";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from "./agent-spawner-binding";
@@ -8380,6 +8380,11 @@ class OverseerImpl implements AgentHooks {
     record.dirty = true;
     this.storage.blueprints.put(record);
 
+    // The current version's bindings, which updateBlueprint({updateBindings}) can change without a
+    // new version. Written before the content, so a version that exists has its own list.
+    await writeBlueprintVersionBindings(
+        this.env, record.id, record.metadata.version, record.metadata.bindings);
+
     // Upload code snapshot to R2 (only when code is being created/updated).
     if (codeSnapshot) {
       await this.env.BLUEPRINT_CONTENT.put(
@@ -8438,7 +8443,7 @@ class OverseerImpl implements AgentHooks {
 
     // Delete all historical versions from R2.
     for (let v = 1; v <= record.metadata.version; v++) {
-      await this.env.BLUEPRINT_CONTENT.delete(`${record.id}/${v}`);
+      await this.env.BLUEPRINT_CONTENT.delete(blueprintVersionKeys(record.id, v));
     }
     await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${record.id}`);
 
@@ -11114,9 +11119,25 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let files = blueprintSnapshotFiles(content.code);
     if (files.size === 0) throw new Error("This blueprint's code archive is empty.");
 
+    // Refuse a version that needs a binding the install lacks, rather than moving to code that
+    // fails at it. A version stored without its bindings is checked against the current ones.
+    let gadgetId = this.impl.resolveGadgetId(undefined);
+    let needed = await readBlueprintVersionBindings(this.impl.env, installed.blueprintId, version)
+        ?? (await readBlueprintKvRecord(this.impl.env, installed.blueprintId))?.metadata.bindings
+        ?? {};
+    let bound = new Set(this.impl.visibleBindings(this.impl.getGadgetRecord(gadgetId))
+        .map(([name]) => name));
+    let missing = Object.entries(needed)
+        .filter(([name, binding]) => !binding.spawnerOnly && !bound.has(name))
+        .map(([name]) => `"${name}"`);
+    if (missing.length > 0) {
+      let [noun, pronoun] = missing.length === 1 ? ["binding", "it"] : ["bindings", "them"];
+      throw new Error(`Blueprint version ${version} needs the ${noun} ${missing.join(", ")}, ` +
+          `which this install does not have. Bind ${pronoun}, then upgrade.`);
+    }
+
     // The new version lands as an ordinary commit on the default gadget's head, so the code it
     // replaces stays in history and bindings, storage and chats are untouched.
-    let gadgetId = this.impl.resolveGadgetId(undefined);
     let head = this.impl.getGadgetRecord(gadgetId).commitId;
     let commitId = await this.impl.gitStore.writeFilesAsCommit(files, {
       parents: head !== undefined ? [head] : [],
