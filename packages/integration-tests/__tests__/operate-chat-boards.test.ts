@@ -179,9 +179,13 @@ it("returns every plausible board for an ambiguous request, and opens none of th
 it("answers a request nothing matches with no candidates, and opens nothing", async () => {
   const { session, eng } = await operator("emptysearch", ["operations"]);
   await using _ = session;
+  const first = model.requests.length;
   expect((await session.runTurn("[0] the payroll calendar", { capsules: [eng] })).outcome)
     .toEqual({ status: "completed" });
   expect(candidates("empty")).toEqual([]);
+  // The system prompt tells the agent to say so and open nothing.
+  const { messages } = model.requests[first] as { messages: { role: string; content: string }[] };
+  expect(messages[0]!.content).toMatch(/If no candidate fits, say plainly .*; do not open any board/);
   expect(await pageEvents(session.username)).toEqual([]);
 });
 

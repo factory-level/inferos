@@ -115,6 +115,8 @@ export interface WorkshopAgentSession extends AsyncDisposable {
       ids: readonly [number, ...number[]], options?: AgentTurnOptions): Promise<AgentTurnResult>;
   listActions(options?: ActionListOptions): Promise<ActionHistoryPage>;
   connectedAccount(vendorId: string): ConnectedAccount;
+  /** The workspace the chat runs in, as a stub the caller disposes. */
+  workspace(): RpcStub<Overseer>;
   openGadget(id: WorkpieceId): Promise<ProvisionalGadget>;
   acceptChanges(): Promise<void>;
   /** Rewind the chat's proposed changes from the given "changes" message on (see Overseer). */
@@ -677,6 +679,11 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
   async listActions(options?: ActionListOptions): Promise<ActionHistoryPage> {
     await this.#ready();
     return this.#workspace.listActions(options);
+  }
+
+  workspace(): RpcStub<Overseer> {
+    this.#assertOpen();
+    return this.#workspace.dup();
   }
 
   connectedAccount(vendorId: string): ConnectedAccount {
