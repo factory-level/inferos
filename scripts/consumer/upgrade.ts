@@ -29,7 +29,7 @@ import { findBase, isText, mergePolicy, mergeThreeWay, readBytes } from "./recon
 import { checkConsumer, inferOpsGatekeeperSelected, unsupportedCapabilities } from "./runtime.ts";
 import { localSecretValues, renderReview, reviewUpgrade, scanPortable, type ReconcileLine } from "./upgrade-review.ts";
 import {
-  FILES_MANIFEST, FILES_SCHEMA_VERSION, managedFiles, readFilesManifest, renderFilesManifest, renderPackageJson, sha256,
+  FILES_MANIFEST, FILES_SCHEMA_VERSION, managedFiles, readFilesManifest, renderFilesManifest, renderPackageJson, sha256, WRAPPER_LOCKFILE,
   type FileEntry, type FilesManifest,
 } from "./wrapper-files.ts";
 
@@ -182,6 +182,20 @@ function planFiles(root: string, record: FilesManifest | null, from: string | nu
 export const STATE_ROLLBACK =
   "Local Wrangler state (inferos/.wrangler/state) is kept across the upgrade. Durable Object and storage migrations a newer pin applies on its next start are not reversible: to return to an older pin, revert the upgrade commit and reset local state with pnpm inferos recover state --apply. Cloud state is not touched.";
 
+/**
+ * The blocker for a dirty wrapper, naming what is dirty. An untracked `pnpm-lock.yaml` gets its own
+ * hint: pnpm writes it before running any script in a wrapper bootstrapped without one, and it is
+ * meant to be committed, not ignored. Nothing is ignored on the caller's behalf either way.
+ */
+export function dirtyTreeBlocker(porcelain: string): string {
+  const paths = porcelain.split("\n").filter(Boolean).map(line => line.slice(3));
+  const shown = paths.length > 10 ? [...paths.slice(0, 10), `and ${paths.length - 10} more`] : paths;
+  const lockfile = porcelain.split("\n").includes(`?? ${WRAPPER_LOCKFILE}`)
+    ? `; ${WRAPPER_LOCKFILE} is the wrapper's lockfile, which pnpm writes before running a script: commit it (git add ${WRAPPER_LOCKFILE} && git commit)`
+    : "";
+  return `The wrapper has uncommitted changes (${shown.join(", ")}); commit or discard them before --apply${lockfile}`;
+}
+
 /** Read-only plan for moving the wrapper at `root` to `revision`. */
 export function planUpgrade(root: string, revision: string) {
   const blockers: string[] = [];
@@ -198,8 +212,9 @@ export function planUpgrade(root: string, revision: string) {
   } catch (error) {
     blockers.push(`The wrapper does not check at its current pin (${(error as Error).message}); run pnpm inferos recover config first`);
   }
-  const dirty = git(root, "status", "--porcelain");
-  if (dirty) blockers.push("The wrapper has uncommitted changes (git status is not clean); commit or discard them before --apply");
+  // Untrimmed: a porcelain line's first column is significant even when it is a space.
+  const dirty = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (dirty) blockers.push(dirtyTreeBlocker(dirty));
   const config = reviewConfig(root);
   if (!config.parses) blockers.push(`The target cannot read inferos.config.json: ${config.error}`);
   if (config.unsupported.length) blockers.push(`The target does not support enabled capabilities: ${config.unsupported.join(", ")}`);

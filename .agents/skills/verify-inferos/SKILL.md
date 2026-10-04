@@ -11,7 +11,7 @@ Run from the wrapper root (it has `inferos.config.json` and `.inferos/runtime.ts
 2. Read `checks[]`. Each has `name` (`check`, `doctor`, `local-status`, `local-verify`), `status` (`pass`, `fail`, `skipped`) and `reasons`. `failures` lists the failed names.
    - `check`: the pin, gitlink and configuration agree, and the pin supports the schema version and every enabled capability.
    - `doctor`: local prerequisites (Node, pnpm, dependencies, port, fixture, settings). A `dependencies` failure means `pnpm run setup` has not run.
-   - `local-status` and `local-verify` run only while the stack is up (`pnpm local start`, then `pnpm local seed`). They are `skipped` otherwise. Add `--live` when the task requires live evidence, so a stopped stack fails instead.
+   - `local-status` and `local-verify` run only while the stack is up (`pnpm local start`, then `pnpm local seed`). They are `skipped` otherwise, including when the port answers but the listener is not this wrapper's stack (the reason starts with `port-in-use-by-other`; another server holds `local.port`, and `local verify` is never run against it). Do not report that as a running stack: stop the other process or run `pnpm inferos recover ports`. Add `--live` when the task requires live evidence, so a stopped stack fails instead.
 3. Fix what a failing check names and rerun. Port, configuration, fixture and stale-state failures have bounded repairs in the `recover-inferos` skill.
 4. Report the JSON (or its `failures` and `reasons`) as evidence. Never paste secret values; the report carries only names and presence.
 
