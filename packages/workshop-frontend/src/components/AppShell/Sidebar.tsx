@@ -23,7 +23,6 @@ import {
 import SidebarUtilityStrip from './SidebarUtilityStrip'
 import SidebarGatekeeperApps from './SidebarGatekeeperApps'
 import { ModeToggle } from '../../features/operate/ModeToggle'
-import { OperateSidebar } from '../../features/operate/OperateSidebar'
 import { useAppMode, useOperateModeAvailable } from '../../features/operate/useAppMode'
 
 /**
@@ -39,7 +38,7 @@ import { useAppMode, useOperateModeAvailable } from '../../features/operate/useA
  *   • Favorites / Recent workspaces        SCROLLS
  *   • utility strip (plug, avatar)         pinned
  *
- * In Operate mode (the InferOps Canvas routes) the whole rail is replaced by the Operate sidebar.
+ * Console workspaces own their navigation; this rail belongs to the configuration application.
  */
 export default function Sidebar({
   collapsed,
@@ -58,8 +57,6 @@ export default function Sidebar({
   const urlMode = useAppMode()
   const mode = operateAvailable ? urlMode : 'build'
 
-  // Operate has its own, single sidebar: one way back to Build, then the open console's views.
-  if (mode === 'operate') return <OperateSidebar collapsed={collapsed} onToggleCollapsed={onToggleCollapsed} />
 
   return (
     <aside

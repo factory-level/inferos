@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 
 const CHAT_WIDTH_STORAGE_KEY = 'gadgets:workshop:chatWidth'
 const MIN_CHAT_WIDTH = 280
@@ -89,6 +89,15 @@ export const useResizableSplit = (enabled: boolean, side: SplitSide = 'left') =>
     width,
     isResizing,
     handleProps: {
+      tabIndex: 0,
+      onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+        if (!enabled || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
+        event.preventDefault()
+        const delta = (event.key === 'ArrowRight' ? 20 : -20) * (side === 'right' ? -1 : 1)
+        const next = clampChatWidth(widthRef.current + delta, event.currentTarget.parentElement?.clientWidth)
+        setWidth(next)
+        persistChatWidth(next)
+      },
       onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => {
         if (!enabled) return
         e.preventDefault()

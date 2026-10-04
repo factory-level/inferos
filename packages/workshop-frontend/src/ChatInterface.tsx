@@ -10,6 +10,7 @@ import {
 } from "react";
 import { reportIssue } from './errorReporting'
 import {
+  Button,
   Dialog,
   DropdownMenu,
   Tooltip,
@@ -930,6 +931,10 @@ interface ChatInterfaceProps {
   // An operate session's chat: its workspace capability denies every authoring method, so
   // controls that could only fail there (enabling or disabling a bound hook) are not offered.
   operateOnly?: boolean;
+  /** Welcome shown above the composer when an Operate conversation has no messages yet. */
+  operateWelcome?: string;
+  operateCenteredStart?: boolean;
+  operateSuggestions?: { pages: { id: string; title: string }[]; onOpen: (viewId: string) => void };
 }
 
 // Whether a chat proposes changes the client can act on: the server delivers the touched
@@ -1052,6 +1057,9 @@ function ChatInterface({
   onOpenGadget,
   outputOfWorkpiece,
   operateOnly = false,
+  operateWelcome,
+  operateCenteredStart,
+  operateSuggestions,
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
@@ -1384,14 +1392,14 @@ function ChatInterface({
   // In sidebar mode, auto-select the most recent chat when none is selected.
   useEffect(() => {
     if (
-      sidebarMode &&
+      (sidebarMode || operateOnly) &&
       selectedChatId === null &&
       chatListReady &&
       chatList.length > 0
     ) {
       onNavigateToChatRef.current(chatList[0].id, { replace: true });
     }
-  }, [sidebarMode, selectedChatId, chatListReady, chatList]);
+  }, [sidebarMode, operateOnly, selectedChatId, chatListReady, chatList]);
 
   // Get messages for selected chat (filter out any undefined slots in sparse array)
   // Memoized to prevent creating new array on every render
@@ -3776,7 +3784,24 @@ function ChatInterface({
 
       {/* ── Non-sidebar mode: show list OR chat ────────────────────────────── */}
       {!sidebarMode && selectedChatId === null ? (
-        chatListPanel
+        operateOnly ? (
+          <div className={`flex min-h-0 flex-1 flex-col ${operateCenteredStart ? 'justify-center' : 'justify-end'}`}>
+            {operateWelcome && <div className={`${operateCenteredStart ? '' : 'my-auto'} px-6 py-6 text-center`}>
+              <h1 className="text-2xl font-semibold text-kumo-default">{operateWelcome}</h1>
+            </div>}
+            <ChatComposer
+              createCapsuleGatekeeper={(accountId, url) => overseer.newGatekeeper(accountId, url)}
+              getOverseer={getOverseer} onSend={handleSend} isAgentActive={false}
+              models={availableModels} selectedModel={selectedModel === null ? null : { id: selectedModel }}
+              onModelChange={handleModelChange} minRows={1}
+              blockedReason={!chatListReady || chatList.length > 0 ? "Opening your conversation…" : undefined}
+              draftStorageKey={currentUser ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`) : undefined}
+            />
+            {operateSuggestions && <nav aria-label="Suggested pages" className="flex flex-wrap justify-center gap-2 px-6 pb-6 pt-3">
+              {operateSuggestions.pages.map(page => <Button key={page.id} variant="outline" size="sm" onClick={() => operateSuggestions.onOpen(page.id)}>{page.title}</Button>)}
+            </nav>}
+          </div>
+        ) : chatListPanel
       ) : selectedChatId !== null ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Tab bar — in sidebar mode, show Chat / Connections tabs */}
@@ -3818,7 +3843,7 @@ function ChatInterface({
           {(!sidebarMode || sidebarActiveTab === "chat") && (
             <>
               {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
-              {!sidebarMode && (
+              {!sidebarMode && !operateOnly && (
                 <div className="flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
                   <WorkshopIconButton
                     onClick={() => onNavigateToChat(null)}
@@ -4702,6 +4727,7 @@ function ChatInterface({
                   <ChatComposer
                     key={`${workspaceId}:${selectedChatId}`}
                     chatKey={selectedChatId}
+                    minRows={operateOnly ? 1 : 2}
                     createCapsuleGatekeeper={(accountId, url) =>
                       overseer.newGatekeeper(accountId, url)
                     }

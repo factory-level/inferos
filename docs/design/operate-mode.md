@@ -1,7 +1,7 @@
 ---
 title: Operate mode
 status: draft
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Operate mode
@@ -46,6 +46,16 @@ Only people with a build role see Build and the toggle. Everyone else lands in O
 ### Build outputs
 
 What Build offers to create is a fixed catalog of outputs: **Apps**, **Widgets** and **Agent workflows** (the three workspace kinds), plus the document formats **Sheets**, **Docs** and **Slides**. A Kanban board is not an output. Boards are InferOps records: a console references one through the `inferops.project-board` widget kind and changes it only through the InferOps gatekeeper's approved transitions. Building a board as an InferOS output would copy authoritative data that InferOps owns.
+
+### Console workspace experience
+
+Each console is a minimal workspace containing an assistant and reusable pages. The Operate home is a two-row, four-column mosaic of real consoles with pagination, plus the shared chat composer. Console creation is guided: choose a workspace, reuse or create screens, arrange the navigation, choose the start, then review.
+
+A console may start on its centered assistant (greeting, composer, page suggestions) or on a page with the assistant docked right. Both presentations keep the same conversation and draft. Widgets have subtle drop shadows and can open from the right-hand chat controls as a full-page widget or modal.
+
+Console navigation is separate from the Cloudflare OS configuration sidebar. It presents the console, its pages and their widgets as a hierarchy, with Settings per console. The longer-term hierarchy may attach behavior objects and state machines; this UI uses existing screens, widgets and flow state rather than inventing a second execution model.
+
+Pages remain reusable references, not definitions copied into each console. Settings records independent opt-in policies for personal shareable screens, custom widgets, application tools and skills. Personal additions should leave shared pages unchanged. The current implementation stores and validates those flags; personal artifact ownership/sharing and extension installation still require their own capability-backed flows. Operators do not receive configuration access merely by opening a console or enabling a flag.
 
 ### Publishing
 

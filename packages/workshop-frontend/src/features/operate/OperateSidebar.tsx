@@ -2,26 +2,22 @@ import type { ReactNode } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
-  ChatsCircleIcon, HammerIcon, LayoutIcon, SidebarSimpleIcon, SquaresFourIcon, StackIcon,
+  ChatsCircleIcon, GearIcon, LayoutIcon, SidebarSimpleIcon, SquaresFourIcon, StackIcon,
 } from '@phosphor-icons/react'
 import type { OperateEvent } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { useServerConfig } from '../../ServerConfigContext'
-import SidebarUtilityStrip from '../../components/AppShell/SidebarUtilityStrip'
 import { findConsole } from './consoles'
-import { buildReturnHref } from './operateMode'
+import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 import { useOperateSession } from './OperateSessionContext'
 
-/**
- * Operate's one sidebar. It holds a single button back to Build, the open console with its view
- * menu, and the full chat switch when the console offers it. With no console open it only offers
- * the console mosaic. Collapsed, it is an icon rail whose buttons keep their names as accessible
- * labels and tooltips.
- */
-export const OperateSidebar = ({ collapsed, onToggleCollapsed }: {
+/** A console's own page hierarchy, independent of the configuration application's sidebar. */
+export const OperateSidebar = ({ collapsed, onToggleCollapsed, onOpenWidget, onNavigate }: {
   collapsed: boolean
   onToggleCollapsed: () => void
+  onOpenWidget?: (target: ConsoleWidgetTarget) => void
+  onNavigate?: () => void
 }) => {
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
@@ -36,6 +32,8 @@ export const OperateSidebar = ({ collapsed, onToggleCollapsed }: {
   // Events apply in order: each waits for the one before, so a pair never races on the sequence.
   const send = (...events: OperateEvent[]) => {
     if (!operate) return
+    onNavigate?.()
+    void navigate({ to: '/inferops-canvas', search: {} })
     events.reduce((previous, event) => previous.then(() => operate.dispatch(event)), Promise.resolve()).catch(caught => {
       console.error('Operate session change failed:', caught)
       toasts.add({ title: 'That change could not be applied to your session.', variant: 'error' })
@@ -45,12 +43,10 @@ export const OperateSidebar = ({ collapsed, onToggleCollapsed }: {
   const inChat = state?.presentation === 'chat'
 
   return (
-    <aside aria-label="Operate"
+    <aside aria-label="Console workspace"
       className={`flex h-full shrink-0 flex-col bg-kumo-elevated transition-[width] duration-200 ease-out ${collapsed ? 'w-[56px]' : 'w-[min(320px,100vw)] md:w-[240px]'}`}>
       <div className={`flex h-14 shrink-0 items-center gap-1 ${collapsed ? 'flex-col justify-center px-1.5' : 'px-2'}`}>
-        <RailButton label="Back to Build" collapsed icon={<HammerIcon size={15} aria-hidden />}
-          onClick={() => void navigate({ to: '.', href: buildReturnHref() })} />
-        {!collapsed && <span className="min-w-0 flex-1 truncate px-1 text-[13px] font-semibold text-kumo-default">Operate</span>}
+        {!collapsed && <span className="min-w-0 flex-1 truncate px-1 text-[13px] font-semibold text-kumo-default" title={run?.title}>{run?.title ?? 'Operate'}</span>}
         {!collapsed && <RailButton label="Collapse sidebar" collapsed icon={<SidebarSimpleIcon size={15} aria-hidden />} onClick={onToggleCollapsed} />}
       </div>
       {collapsed && (
@@ -61,27 +57,42 @@ export const OperateSidebar = ({ collapsed, onToggleCollapsed }: {
 
       <nav aria-label="Console" className="sidebar-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pt-2">
         <MenuButton label="All consoles" icon={<SquaresFourIcon size={14} aria-hidden />} collapsed={collapsed}
-          current={!run} onClick={() => run && send({ type: 'closeConsole' })} />
+          current={!run && !state?.focus && !state?.flow} onClick={() => { void navigate({ to: '/inferops-canvas', search: {} }); send({ type: 'showHome' }) }} />
         {run && <>
-          {!collapsed && <p className="truncate px-2.5 pb-1 pt-4 text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">{run.title}</p>}
-          {collapsed && <div className="my-2 h-px bg-kumo-line" />}
-          {entry?.console.views.map(view => (
+          <div className="my-3 h-px bg-kumo-line" />
+          {fullChat !== 'off' && (
+            <MenuButton label="Assistant" icon={<ChatsCircleIcon size={14} aria-hidden />} collapsed={collapsed}
+              current={inChat}
+              onClick={() => { onNavigate?.(); void navigate({ to: '/inferops-canvas', search: {} }); if (!inChat && fullChat !== 'only') send({ type: 'setPresentation', presentation: 'chat' }) }} />
+          )}
+          {fullChat !== 'only' && !collapsed && <p className="px-2.5 pb-1 pt-4 text-xs text-kumo-subtle">Pages</p>}
+          {fullChat !== 'only' && entry?.console.views.map(view => (
+            <div key={view.id}>
             <MenuButton key={view.id} label={view.title} collapsed={collapsed}
               icon={view.type === 'rollup' ? <StackIcon size={14} aria-hidden /> : <LayoutIcon size={14} aria-hidden />}
               current={!inChat && run.viewId === view.id}
-              onClick={() => inChat && fullChat !== 'only'
-                ? send({ type: 'setPresentation', presentation: 'canvas' }, { type: 'openView', viewId: view.id })
+              onClick={() => inChat
+                ? send({ type: 'setPresentation', presentation: 'canvas' }, { type: 'openView', viewId: view.id }, { type: 'setChatOpen', open: true })
                 : send({ type: 'openView', viewId: view.id })} />
+            {!collapsed && run.viewId === view.id && !inChat && onOpenWidget && (view.type === 'screen' ? [view.screen] : view.screens).map(id => {
+              const page = entry.screens.find(screen => screen.id === id)
+              return page && <div key={id} className="ml-5 border-l border-kumo-line pl-2">
+                {view.type === 'rollup' && <MenuButton label={page.title} collapsed={false} current={run.screenId === id} icon={<LayoutIcon size={13} aria-hidden />} onClick={() => send({ type: 'showScreen', screenId: id })} />}
+                {page.sections.flatMap(section => section.widgets.map((widget, index) => <MenuButton key={widget.id}
+                  label={`${section.title || 'Page'} ${widget.kind === 'inferops.project-board' ? 'board' : `widget ${index + 1}`}`}
+                  collapsed={false} current={false} icon={<SquaresFourIcon size={12} aria-hidden />}
+                  onClick={() => { onOpenWidget({ consoleId: run.consoleId, screenId: id, widgetId: widget.id, presentation: 'page' }); onNavigate?.() }} />))}
+              </div>
+            })}
+            </div>
           ))}
-          {fullChat !== 'off' && (
-            <MenuButton label="Full chat" icon={<ChatsCircleIcon size={14} aria-hidden />} collapsed={collapsed}
-              current={inChat}
-              onClick={() => fullChat !== 'only' && send({ type: 'setPresentation', presentation: inChat ? 'canvas' : 'chat' })} />
-          )}
         </>}
       </nav>
 
-      <SidebarUtilityStrip collapsed={collapsed} />
+      {run && <div className="border-t border-kumo-line p-2">
+        <MenuButton label="Settings" icon={<GearIcon size={15} aria-hidden />} collapsed={collapsed} current={false}
+          onClick={() => { void navigate({ to: '/inferops-canvas', search: { settings: run.consoleId, workspace: run.workspaceId } }); onNavigate?.() }} />
+      </div>}
     </aside>
   )
 }
@@ -106,9 +117,9 @@ const MenuButton = ({ label, icon, collapsed, current, onClick }: {
       className={[
         'group flex h-11 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] leading-5 transition-colors md:h-8 md:text-[13px] md:leading-[18px]',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring',
-        current ? 'bg-kumo-info-tint font-medium text-kumo-brand' : 'text-kumo-default hover:bg-kumo-tint',
+        current ? 'bg-kumo-control font-medium text-kumo-default' : 'text-kumo-default hover:bg-kumo-tint',
       ].join(' ')}>
-      <span className={`flex h-5 w-5 shrink-0 items-center justify-center ${current ? 'text-kumo-brand' : 'text-kumo-subtle group-hover:text-kumo-default'}`}>{icon}</span>
+      <span className={`flex h-5 w-5 shrink-0 items-center justify-center ${current ? 'text-kumo-default' : 'text-kumo-subtle group-hover:text-kumo-default'}`}>{icon}</span>
       {!collapsed && <span className="min-w-0 flex-1 truncate">{label}</span>}
     </button>
   )

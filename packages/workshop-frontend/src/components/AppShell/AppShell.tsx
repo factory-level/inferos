@@ -5,6 +5,7 @@ import TopBarNotice from '../../TopBarNotice'
 import ReconnectingChip from '../ReconnectingChip'
 import { useConnectionLost } from '../../RpcContext'
 import Sidebar from './Sidebar'
+import { useAppMode, useOperateModeAvailable } from '../../features/operate/useAppMode'
 import CommandPalette from './CommandPalette'
 import { OPEN_COMMAND_PALETTE_EVENT } from './commandPaletteBus'
 
@@ -35,6 +36,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const drawerRef = useRef<HTMLDivElement>(null)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const connectionLost = useConnectionLost()
+  const mode = useAppMode()
+  const operateAvailable = useOperateModeAvailable()
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -84,6 +87,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   // without prop-drilling a close callback through the whole rail. No-op on desktop, where the
   // drawer is never open.
   const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const consoleWorkspace = operateAvailable && mode === 'operate' && pathname === '/inferops-canvas'
   useEffect(() => {
     setMobileOpen(false)
   }, [pathname])
@@ -91,6 +95,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   // Global ⌘K / Ctrl+K opens the command palette; the rail's search button opens it via a custom
   // event so it doesn't have to prop-drill into the palette.
   useEffect(() => {
+    if (consoleWorkspace) return
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault()
@@ -104,7 +109,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       document.removeEventListener('keydown', onKey)
       window.removeEventListener(OPEN_COMMAND_PALETTE_EVENT, onOpen)
     }
-  }, [])
+  }, [consoleWorkspace])
+
+  if (consoleWorkspace) return <div className="flex h-full min-h-0 flex-col bg-kumo-base">
+    <TopBarNotice />
+    {connectionLost && <ReconnectingChip />}
+    {children}
+  </div>
 
   return (
     <div className="flex h-full min-h-0 w-full overflow-hidden bg-kumo-base">

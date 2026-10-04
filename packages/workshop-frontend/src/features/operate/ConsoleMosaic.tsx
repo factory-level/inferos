@@ -1,59 +1,58 @@
-import { SquaresFourIcon } from '@phosphor-icons/react'
+import { useState } from 'react'
+import { Button } from '@cloudflare/kumo'
+import { ArrowRightIcon, ChatsCircleIcon, LayoutIcon, PencilSimpleIcon } from '@phosphor-icons/react'
 import type { WorkspaceScreensState } from '../../pages/inferops-canvas/useWorkspaceScreens'
-import { consoleEntries, viewScreens, type ConsoleEntry } from './consoles'
+import { consoleEntries, type ConsoleEntry } from './consoles'
 
-/**
- * Operate's home: one tile per console the person can open, each naming its views and how many
- * widgets they show, so they can pick the console for the work in front of them.
- */
-export const ConsoleMosaic = ({ screens, onOpen }: {
+const PAGE_SIZE = 8
+
+/** The console launcher: eight real consoles per page, with separate open and edit actions. */
+export const ConsoleMosaic = ({ screens, onOpen, onEdit, highlighted }: {
   screens: WorkspaceScreensState
   onOpen: (entry: ConsoleEntry) => void
+  onEdit: (entry: ConsoleEntry) => void
+  highlighted?: string
 }) => {
-  if (screens.status === 'loading') return <p role="status" className="p-6 text-sm text-kumo-subtle">Loading consoles…</p>
-  if (screens.status === 'error') return <p role="alert" className="p-6 text-sm text-kumo-danger">Consoles could not be loaded.</p>
+  const [requestedPage, setPage] = useState<number | null>(null)
+  if (screens.status === 'loading') return <p role="status" className="py-10 text-sm text-kumo-subtle">Loading consoles…</p>
+  if (screens.status === 'error') return <p role="alert" className="py-10 text-sm text-kumo-danger">Consoles could not be loaded. Reload to try again.</p>
   const entries = consoleEntries(screens.workspaces)
-  return (
-    <div className="min-h-full bg-kumo-tint p-6">
-      <div className="mx-auto max-w-6xl space-y-4">
-        <div>
-          <h1 className="text-lg font-semibold text-kumo-default">Consoles</h1>
-          <p className="text-sm text-kumo-subtle">Pick the console for your role.</p>
+  const pages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE))
+  const savedPage = Math.floor(Math.max(0, entries.findIndex(entry => entry.console.id === highlighted)) / PAGE_SIZE)
+  const page = Math.min(requestedPage ?? savedPage, pages - 1)
+  return <section aria-label="Consoles" className="space-y-4">
+    {entries.length === 0
+      ? <div className="rounded-xl border border-dashed border-kumo-line px-6 py-12 text-center">
+          <h2 className="font-medium text-kumo-default">Your consoles live here</h2>
+          <p className="mt-2 text-sm text-kumo-subtle">Create a console to bring your assistant and screens together.</p>
         </div>
-        {entries.length === 0
-          ? <p className="rounded-2xl border border-kumo-line bg-kumo-base p-6 text-sm text-kumo-subtle">
-              No consoles yet. A lead creates them in Build.
-            </p>
-          : <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {entries.map(entry => {
-                const { console: saved, workspace, screens: available } = entry
-                const widgets = [...new Set(saved.views.flatMap(viewScreens))]
-                  .flatMap(id => available.find(screen => screen.id === id)?.sections ?? [])
-                  .reduce((count, section) => count + section.widgets.length, 0)
-                return (
-                  <li key={`${workspace.id}/${saved.id}`}>
-                    <button type="button" onClick={() => onOpen(entry)}
-                      className="flex h-full w-full flex-col gap-3 rounded-2xl border border-kumo-line bg-kumo-base p-4 text-left transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">
-                      <span className="flex items-center gap-2">
-                        <span className="grid h-8 w-8 place-items-center rounded-xl bg-kumo-tint text-kumo-brand"><SquaresFourIcon size={16} aria-hidden /></span>
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium text-kumo-default">{saved.title}</span>
-                          <span className="block truncate text-xs text-kumo-subtle">{workspace.title || 'Untitled workspace'}</span>
-                        </span>
-                      </span>
-                      <span className="flex flex-wrap gap-1">
-                        {saved.views.map(view => <span key={view.id} className="rounded-full bg-kumo-tint px-2 py-0.5 text-xs text-kumo-default">{view.title}</span>)}
-                      </span>
-                      <span className="text-xs text-kumo-subtle">
-                        {saved.views.length} {saved.views.length === 1 ? 'view' : 'views'} · {widgets} {widgets === 1 ? 'widget' : 'widgets'}
-                        {saved.fullChat !== 'off' && ' · full chat'}
-                      </span>
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>}
-      </div>
-    </div>
-  )
+      : <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {entries.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(entry => {
+            const saved = entry.console
+            const first = saved.fullChat === 'default' || saved.fullChat === 'only'
+            const Icon = first ? ChatsCircleIcon : LayoutIcon
+            return <li key={`${entry.workspace.id}/${saved.id}`}
+              className={`group relative rounded-xl border bg-kumo-base transition-colors hover:border-kumo-ring ${saved.id === highlighted ? 'border-kumo-ring' : 'border-kumo-line'}`}>
+              <button type="button" onClick={() => onOpen(entry)} aria-label={`Open ${saved.title}`}
+                className="flex min-h-40 w-full flex-col p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring rounded-xl">
+                <Icon size={22} aria-hidden className="mb-5 text-kumo-subtle" />
+                <span className="line-clamp-2 pr-4 text-sm font-medium text-kumo-default">{saved.title}</span>
+                <span className="mt-1 block w-full truncate text-xs text-kumo-subtle">{entry.workspace.title || 'Untitled workspace'}</span>
+                <span className="mt-3 flex w-full items-center gap-2 text-xs text-kumo-subtle">
+                  <span className="truncate">{saved.fullChat === 'only' ? 'Assistant' : `${saved.views.length} ${saved.views.length === 1 ? 'view' : 'views'}${first ? ' · Assistant first' : ''}`}</span>
+                  <ArrowRightIcon size={14} aria-hidden className="ml-auto shrink-0" />
+                </span>
+              </button>
+              <Button variant="ghost" size="sm" aria-label={`Edit ${saved.title}`} onClick={() => onEdit(entry)} className="!absolute right-2 top-2">
+                <PencilSimpleIcon size={14} aria-hidden />
+              </Button>
+            </li>
+          })}
+        </ul>}
+    {pages > 1 && <nav aria-label="Console pages" className="flex items-center justify-end gap-3">
+      <Button size="sm" disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</Button>
+      <span aria-live="polite" className="text-xs text-kumo-subtle">{page + 1} / {pages}</span>
+      <Button size="sm" disabled={page === pages - 1} onClick={() => setPage(page + 1)}>Next</Button>
+    </nav>}
+  </section>
 }

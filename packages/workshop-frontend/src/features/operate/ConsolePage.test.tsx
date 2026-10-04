@@ -44,22 +44,18 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
 const render = (props: Partial<Parameters<typeof ConsolePage>[0]> = {}) => act(() => root.render(
-  <ConsolePage run={run()} entry={entry} loading={false} presentation="canvas" chatOpen sessionWorkspace={null}
-    approvals={null} onEvent={onEvent} {...props} />))
-const crumbs = () => [...container.querySelectorAll('nav[aria-label="Breadcrumb"] li')].map(li => li.textContent).filter(Boolean)
-const back = () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Back')
+  <ConsolePage run={run()} entry={entry} loading={false} onEvent={onEvent} {...props} />))
+const back = () => [...container.querySelectorAll('button')].find(b => b.textContent?.startsWith('Back to'))
 
-it('shows a rollup view with the chat beside it, and no Back at the view itself', () => {
+it('shows a rollup view with no Back at the view itself', () => {
   render()
-  expect(crumbs()).toEqual(['Operations lead', 'Overview'])
   expect(container.querySelector('[data-testid="rollup"]')).not.toBeNull()
-  expect(container.querySelector('[data-testid="chat"]')?.textContent).toBe('side')
   expect(back()).toBeUndefined()
 })
 
 it('draws a screen opened from the rollup, and goes back to the view', () => {
   render({ run: run({ screenId: 's1' }) })
-  expect(crumbs()).toEqual(['Operations lead', 'Overview', 'Board screen'])
+  expect(back()?.textContent).toBe('Back to Overview')
   expect(container.querySelector('[data-testid="canvas"]')?.textContent).toBe('Board screen')
   act(() => back()!.click())
   expect(onEvent).toHaveBeenCalledWith({ type: 'showScreen', screenId: null })
@@ -68,14 +64,6 @@ it('draws a screen opened from the rollup, and goes back to the view', () => {
 it('draws a screen view directly', () => {
   render({ run: run({ viewId: 'board' }) })
   expect(container.querySelector('[data-testid="canvas"]')?.textContent).toBe('Board screen')
-})
-
-it('gives the page to the conversation in full chat', () => {
-  render({ presentation: 'chat' })
-  expect(container.querySelector('[data-testid="chat"]')?.textContent).toBe('full')
-  expect(crumbs()).toEqual(['Operations lead', 'Full chat'])
-  expect(container.querySelector('[data-testid="rollup"]')).toBeNull()
-  expect([...container.querySelectorAll('button')].some(b => b.textContent === 'Operate chat')).toBe(false)
 })
 
 it('says when the console or the view is gone', () => {

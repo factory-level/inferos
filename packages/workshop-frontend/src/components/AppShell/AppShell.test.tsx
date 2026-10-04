@@ -5,7 +5,9 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@tanstack/react-router', () => ({ useRouterState: () => '/' }))
+const state = vi.hoisted(() => ({ operate: false }))
+vi.mock('@tanstack/react-router', () => ({ useRouterState: () => state.operate ? '/inferops-canvas' : '/' }))
+vi.mock('../../features/operate/useAppMode', () => ({ useAppMode: () => state.operate ? 'operate' : 'build', useOperateModeAvailable: () => state.operate }))
 
 vi.mock('../../RpcContext', () => ({ useConnectionLost: () => false }))
 vi.mock('../../TopBarNotice', () => ({ default: () => null }))
@@ -25,6 +27,16 @@ describe('AppShell', () => {
   afterEach(() => {
     act(() => root?.unmount())
     container?.remove()
+    state.operate = false
+  })
+
+  it('leaves operator navigation to the console shell without configuration chrome', () => {
+    state.operate = true
+    container = document.createElement('div')
+    root = createRoot(container)
+    act(() => root!.render(<AppShell><div data-testid="console" /></AppShell>))
+    expect(container.querySelector('[data-testid="sidebar"]')).toBeNull()
+    expect(container.querySelector('[data-testid="console"]')).not.toBeNull()
   })
 
   it('gives the percentage-height desktop sidebar a definite-height container', () => {

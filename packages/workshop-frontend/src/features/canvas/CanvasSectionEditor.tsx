@@ -17,7 +17,7 @@ type Props = {
   viewTitle: string
   onMoveUp: () => void
   onEdit: (operations: CanvasOperation[]) => Promise<boolean>
-  onAskAgent: (request: string) => Promise<void>
+  onAskAgent?: (request: string) => Promise<void>
 }
 
 export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGadgets, catalog, viewTitle, onMoveUp, onEdit, onAskAgent }: Props) => (
@@ -49,8 +49,8 @@ export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGad
     </div>
     {catalog.widgetKinds.includes('inferos.gadget') && <>
       <CanvasAddGadgetForm section={section} gadgets={acceptedGadgets} busy={busy} onEdit={onEdit} />
-      <CanvasBlueprintWidgets blueprints={catalog.blueprints} viewTitle={viewTitle} sectionTitle={section.title}
-        busy={busy} onAskAgent={onAskAgent} />
+      {onAskAgent && <CanvasBlueprintWidgets blueprints={catalog.blueprints} viewTitle={viewTitle} sectionTitle={section.title}
+        busy={busy} onAskAgent={onAskAgent} />}
     </>}
     {catalog.widgetKinds.includes('inferops.project-board') && <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
       event.preventDefault()

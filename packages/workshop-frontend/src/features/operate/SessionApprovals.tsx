@@ -152,7 +152,7 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
     <section aria-labelledby={`${baseId}-heading`} className="flex-shrink-0 border-b border-kumo-line px-4 py-2.5">
       <div className="flex items-center gap-2">
         <h2 id={`${baseId}-heading`} className="m-0 text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
-          Needs your approval
+          {pending.length > 0 || failedToLoad ? 'Needs your approval' : 'Recent activity'}
         </h2>
         <CountBadge count={pending.length} />
       </div>
