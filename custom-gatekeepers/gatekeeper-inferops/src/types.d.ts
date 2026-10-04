@@ -133,15 +133,17 @@ export interface InferOpsProjectSession {
   openIssue(issueId: string): Promise<InferOpsIssueSession>;
   /**
    * Create an issue in this project. readBoard() shows it at once, marked pending "create", until
-   * it exists. An empty or overlong field fails with INVALID_REQUEST; a state outside this project
-   * fails with INVALID_STATE.
+   * it exists. Proposing the same issue again while that create is still pending (from another
+   * tab, or a retry) joins it and queues nothing new. An empty or overlong field fails with
+   * INVALID_REQUEST; a state outside this project fails with INVALID_STATE.
    */
   createIssue(issue: NewIssue): Promise<void>;
   /**
-   * Find boards in this connection's InferOps workspace that match what the person described: its
-   * work or purpose, not necessarily its title or key (1-200 characters). Only projects the
-   * person's own account lists right now are considered, so a project they cannot read is never
-   * named or counted. Returns at most 8 candidates, best first, each with why it matched; an empty
+   * Find boards that match what the person described: its work or purpose, not necessarily its
+   * title, key or workspace (1-200 characters). Searches this connection's InferOps workspace and,
+   * when the connection is the person's own InferLab sign-in, every other InferOps workspace they
+   * belong to. Only projects the person's own account lists right now are considered, so a project
+   * they cannot read is never named or counted. Returns at most 8 candidates, best first, each with why it matched; an empty
    * list means nothing matched. Several candidates mean the person must choose: never pick one for
    * them. A candidate names a board but grants nothing; open it only through a connection made for
    * its boardRef. Recorded as an observation, and refused in a workspace shared with others.
@@ -153,7 +155,7 @@ export interface InferOpsProjectSession {
 export interface BoardCandidate {
   /** The tenant label of the connection's workspace. */
   tenant: string;
-  /** The InferOps workspace slug. */
+  /** The InferOps workspace slug of the board, which may differ from the connection's. */
   workspace: string;
   /** The project key, such as ENG. */
   projectKey: string;

@@ -5,7 +5,7 @@
 // See docs/blueprints.md for the full format description.
 
 import * as Y from "yjs";
-import { BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, DEFAULT_WORKSPACE_KIND, isOutputIcon, WORKSPACE_KINDS, WorkspaceKind } from '@gadgets/workshop-shared/api';
+import { BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, DEFAULT_WORKSPACE_KIND, isOutputIcon, WORKSPACE_KINDS, WorkspaceKind } from '@gadgets/workshop-shared/api';
 
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
 
@@ -134,6 +134,48 @@ export function sanitizeWorkspaceKind(kind: unknown): WorkspaceKind | undefined 
  */
 export function blueprintVersionMetadata(kind: WorkspaceKind | undefined): Record<string, string> {
   return {kind: kind ?? DEFAULT_WORKSPACE_KIND};
+}
+
+/**
+ * The R2 key of a blueprint version's binding list, beside its content at `<id>/<version>`. It is
+ * an object of its own rather than custom metadata like `kind`, because R2 caps custom metadata at
+ * 2 KiB and binding titles and descriptions can exceed that.
+ */
+function blueprintVersionBindingsKey(blueprintId: string, version: number): string {
+  return `${blueprintId}/${version}.bindings`;
+}
+
+/** Every R2 key holding one blueprint version: its content and its binding list. */
+export function blueprintVersionKeys(blueprintId: string, version: number): string[] {
+  return [`${blueprintId}/${version}`, blueprintVersionBindingsKey(blueprintId, version)];
+}
+
+/**
+ * Store the bindings blueprint version `version` requires, so an install pinned to it, or an
+ * upgrade to it, checks that version's bindings rather than the blueprint's current ones.
+ */
+export async function writeBlueprintVersionBindings(
+  env: Pick<Cloudflare.Env, 'BLUEPRINT_CONTENT'>,
+  blueprintId: string,
+  version: number,
+  bindings: Record<string, BlueprintBinding>,
+): Promise<void> {
+  await env.BLUEPRINT_CONTENT.put(blueprintVersionBindingsKey(blueprintId, version),
+      JSON.stringify(bindings), {httpMetadata: {contentType: "application/json"}});
+}
+
+/**
+ * The bindings stored with blueprint version `version`, or null when none were: a version
+ * published before they were stored, or uploaded or bundled content, whose only binding list is
+ * the blueprint's current metadata. Callers fall back to that.
+ */
+export async function readBlueprintVersionBindings(
+  env: Pick<Cloudflare.Env, 'BLUEPRINT_CONTENT'>,
+  blueprintId: string,
+  version: number,
+): Promise<Record<string, BlueprintBinding> | null> {
+  let r2Object = await env.BLUEPRINT_CONTENT.get(blueprintVersionBindingsKey(blueprintId, version));
+  return r2Object ? await r2Object.json<Record<string, BlueprintBinding>>() : null;
 }
 
 /**

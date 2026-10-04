@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES,
   type AuthenticatedApi, type BlueprintBindingAssignment, type BlueprintInstallOptions,
+  type GadgetClient,
   type OperateSession, type OperateSessionUpdate, type Overseer, type PublicApi, type WorkpieceId,
   type WorkspaceKind,
 } from "@gadgets/workshop-shared/api";
@@ -10,12 +11,13 @@ import type { OperateRef, OperateSessionSnapshot } from "@gadgets/workshop-share
 import { diffFiles, type CodeContent } from "@gadgets/workshop-shared/code-change";
 import { checkWorkspaceKind, workspaceKindStarter } from "@gadgets/workshop-shared/workspace-kind";
 import {
-  startHarness, TEST_GATEKEEPER_BINDING, TEST_GATEKEEPER_DIR, TEST_VENDOR_ID, type Harness,
+  startHarness, TEST_GATEKEEPER_BINDING, TEST_GATEKEEPER_DIR, TEST_VENDOR_ID, testControl,
+  type Harness,
 } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  callbackStubFor, connect, listConnectedAccounts, nextUsernames, signUp, stubFor, waitFor,
-  WorkpieceRecorder,
+  accountLabel, callbackStubFor, connect, listConnectedAccounts, MAX_OBSERVER_PROMPTS, nextUsernames,
+  ObserverConfigRecorder, signUp, stubFor, waitFor, WorkpieceRecorder,
 } from "../src/rpc-client.js";
 
 // What Build produces for Operate, used from somewhere other than where it was built. Things cross
@@ -471,5 +473,170 @@ describe("an install's upgrade", () => {
     expect(await binding?.getCreationSpec()).toMatchObject({
       type: "gatekeeper", vendorId: TEST_VENDOR_ID, resourceUrl: "https://gadgets-test.example/things/mine",
     });
+  });
+});
+
+const thingUrl = (thing: string) => `https://gadgets-test.example/things/${thing}`;
+
+/** The person's test-gatekeeper account, minted with no auth flow. */
+async function testAccount(person: RpcStub<AuthenticatedApi>) {
+  await person.provisionAmbientAccount(TEST_VENDOR_ID);
+  return waitFor("the test account", async () =>
+    (await listConnectedAccounts(person)).find(account => account.vendorId === TEST_VENDOR_ID) ?? null);
+}
+
+/** Connects `thing` with `accountId` and binds it into `gadget` as `name`, annotated to publish. */
+async function bindThing(workspace: RpcStub<Overseer>, gadget: RpcStub<GadgetClient>, name: string,
+                         accountId: number, thing: string, annotate = true) {
+  using connection = await workspace.newGatekeeper(accountId, thingUrl(thing));
+  if (!connection) throw new Error(`Failed to connect ${thing}`);
+  await gadget.bind(name, await connection.getId());
+  if (annotate) await gadget.setBlueprintAnnotation(name, { title: name, description: "" });
+}
+
+describe("an install's bindings", () => {
+  it("are checked against the installed version's, and an upgrade needing one it lacks is refused",
+      async () => {
+    using author = await user("versionbindauthor");
+    const authorAccount = await testAccount(author);
+    const built = await build(author, "app", filesOf("app", "v1"));
+    await bindThing(built.workspace, built.gadget, "DATA", authorAccount.id, "growing-source");
+    const blueprintId = await publish(built.gadget, "Growing");
+    // Version 2 also needs EXTRA.
+    await bindThing(built.workspace, built.gadget, "EXTRA", authorAccount.id, "growing-extra");
+    await built.commit({ "version.txt": "v2" });
+    await republish(built, blueprintId, 2);
+    expect(Object.keys((await publicApi.getBlueprint(blueprintId))!.metadata.bindings).toSorted())
+      .toEqual(["DATA", "EXTRA"]);
+
+    using operator = await user("versionbindoperator");
+    const operatorAccount = await testAccount(operator);
+    const assign = (...names: string[]): Record<string, BlueprintBindingAssignment> =>
+      Object.fromEntries(names.map(name => [name, {
+        type: "gatekeeper", accountId: operatorAccount.id, resourceUrl: thingUrl(`${name}-mine`),
+      }]));
+
+    // Version 1 has no EXTRA, so an install pinned to it may not assign one, and creates nothing.
+    const before = (await operator.listGadgets()).length;
+    await expect(install(operator, blueprintId, { version: 1 }, assign("DATA", "EXTRA")))
+      .rejects.toThrow(/Unknown binding name: EXTRA/);
+    expect((await operator.listGadgets()).length).toBe(before);
+    const pinned = await install(operator, blueprintId, { version: 1 }, assign("DATA"));
+
+    // Version 2 needs EXTRA, which the install lacks: the upgrade says so and moves nothing.
+    await expect(pinned.workspace.upgradeInstall(2)).rejects.toThrow(/needs the binding "EXTRA"/);
+    expect(await committedText(pinned.workspace, pinned.gadgetId, "version.txt")).toBe("v1");
+    expect((await pinned.workspace.getMetadata()).installedFrom?.version).toBe(1);
+
+    // Once the installer binds a resource of their own as EXTRA, it upgrades.
+    using pinnedGadget = await pinned.workspace.getGadget(pinned.gadgetId);
+    await bindThing(pinned.workspace, pinnedGadget, "EXTRA", operatorAccount.id, "EXTRA-mine", false);
+    await pinned.workspace.upgradeInstall(2);
+    expect(await committedText(pinned.workspace, pinned.gadgetId, "version.txt")).toBe("v2");
+
+    // Version 1 needs only DATA, so an install of version 2 can go back to it.
+    const latest = await install(operator, blueprintId, undefined, assign("DATA", "EXTRA"));
+    await latest.workspace.upgradeInstall(1);
+    expect(await committedText(latest.workspace, latest.gadgetId, "version.txt")).toBe("v1");
+  });
+});
+
+type Reader = { read(): Promise<number> };
+
+const READER_SERVER = `import { DurableObject } from "cloudflare:workers";
+export class Gadget extends DurableObject {
+  async read() { return await this.env.DATA.readValue(); }
+}
+`;
+const READER_UI = `document.body.textContent = "Value: " + await gadget.read();\n`;
+
+type ObserverEvent = { resourceUrl: string; type: "add" | "remove"; id: string };
+
+describe("an install bound to a resource", () => {
+  it("fails closed for a viewer or an operator who cannot read that resource", async () => {
+    using author = await user("closedauthor");
+    const authorAccount = await testAccount(author);
+    const built = await build(author, "app", { "server.js": READER_SERVER, "client.js": READER_UI });
+    await bindThing(built.workspace, built.gadget, "DATA", authorAccount.id, "closed-source");
+    const blueprintId = await publish(built.gadget, "Reader");
+
+    // The installer binds their own resource, and can read it through the install.
+    using installer = await user("closedinstaller");
+    const installerAccount = await testAccount(installer);
+    const thing = `closed-${crypto.randomUUID().slice(0, 8)}`;
+    const resourceUrl = thingUrl(thing);
+    const installed = await install(installer, blueprintId, undefined,
+        { DATA: { type: "gatekeeper", accountId: installerAccount.id, resourceUrl } });
+    using installerReader = await connectTo<Reader>(installed.workspace, installed.gadgetId);
+    expect(await installerReader.read()).toBe(42);
+    const screen = await installed.workspace.createCanvas({
+      title: "Reading", sections: [{ id: "main", title: "Now", columns: 1, widgets: [{
+        id: "reader", version: 1, kind: "inferos.gadget", targetRef: `gadget:${installed.gadgetId}`,
+        params: {}, size: "normal",
+      }] }],
+    });
+
+    const shareForUse = async (prefix: string) => {
+      const name = nextUsernames(prefix)[0]!;
+      const person = await signUp(publicApi, name);
+      if (!await installed.workspace.addCollaborator(name, "use")) {
+        throw new Error(`Failed to share with ${name}`);
+      }
+      return person;
+    };
+    const opens = async (person: RpcStub<AuthenticatedApi>, recorder?: ObserverConfigRecorder) => {
+      using callback = recorder ? stubFor(recorder) : undefined;
+      return await person.openGadget(installed.metadata.id, undefined, callback);
+    };
+    const adds = async () => (await testControl<{ events: ObserverEvent[] }>(
+        harness, "observer-events", { resourceUrl })).events.filter(event => event.type === "add");
+    const DENIED = "You cannot read this thing.";
+
+    // A viewer with no account for the resource gets no workspace, with or without a prompt.
+    using unconnected = await shareForUse("closednoaccount");
+    await expect(opens(unconnected)).rejects.toThrow(/choose connected accounts/);
+    await expect(opens(unconnected, new ObserverConfigRecorder().respondWith(() => [])))
+      .rejects.toThrow(/connect an account for every service/);
+
+    // A viewer whose own account the gatekeeper refuses for the resource is refused by name, and
+    // is left registered nowhere.
+    using refused = await shareForUse("closedrefused");
+    const refusedAccount = await testAccount(refused);
+    await testControl(harness, "verify-outcome",
+        { label: accountLabel(refusedAccount), allow: false, reason: DENIED, resourceUrl });
+    const refusal = opens(refused,
+        new ObserverConfigRecorder().alwaysChoose(refusedAccount.id, MAX_OBSERVER_PROMPTS));
+    await expect(refusal).rejects.toThrow(/could not confirm/);
+    await expect(refusal).rejects.toThrow(`Test Thing ${thing}`);
+    await expect(refusal).rejects.toThrow(DENIED);
+    expect(await adds()).toEqual([]);
+
+    // As an operator, the same person's session can hold a reference to the install's screen, but
+    // showing it goes through their own access, which still refuses them.
+    using session = await refused.getOperateSession();
+    const ref: OperateRef = { type: "screen", workspaceId: installed.metadata.id, screenId: screen.id };
+    expect((await session.dispatch({ type: "open", ref }, 0)).state.focus).toEqual(ref);
+    await expect(opens(refused,
+        new ObserverConfigRecorder().alwaysChoose(refusedAccount.id, MAX_OBSERVER_PROMPTS)))
+      .rejects.toThrow(DENIED);
+    using sessionWorkspace = await session.getWorkspace();
+    expect((await sessionWorkspace.getMetadata()).id).not.toBe(installed.metadata.id);
+
+    // A viewer the gatekeeper admits reads through the install, until their access is revoked.
+    using admitted = await shareForUse("closedadmitted");
+    const admittedAccount = await testAccount(admitted);
+    {
+      using shared = await opens(admitted,
+          new ObserverConfigRecorder().alwaysChoose(admittedAccount.id, MAX_OBSERVER_PROMPTS));
+      expect(await shared.getMetadata()).toMatchObject({ role: "use", installedFrom: { blueprintId } });
+      using reader = await connectTo<Reader>(shared, installed.gadgetId);
+      expect(await reader.read()).toBe(42);
+    }
+    expect(await adds()).toHaveLength(1);
+    await testControl(harness, "verify-outcome",
+        { label: accountLabel(admittedAccount), allow: false, reason: DENIED, resourceUrl });
+    await expect(opens(admitted,
+        new ObserverConfigRecorder().alwaysChoose(admittedAccount.id, MAX_OBSERVER_PROMPTS)))
+      .rejects.toThrow(DENIED);
   });
 });

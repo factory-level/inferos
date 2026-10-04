@@ -13,7 +13,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-03
+updated: 2026-10-04
 ---
 
 # InferOps gatekeeper
@@ -199,7 +199,15 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   shows a provisional card at the end of that column: id `pending-<action id>`, identifier
   `<KEY>-new`, revision `"0"`, `pending: "create"`; `openIssue` does not accept it. The approval
   shows project, title, state, workflow, priority and description; its title is
-  `Create issue: <title>`.
+  `Create issue: <title>`. One intent is one create: the binding stages it with `stageOnce`, which
+  looks for a pending action with the same fingerprint (same normalized request in the same
+  project) in the same synchronous step that would write the new record, and joins it instead, so
+  a second tab or a retried submit proposing the same issue while it is pending queues nothing and
+  returns as the first did
+  ([#63](https://github.com/factory-level/inferos/issues/63)). Once it is applied or rejected the
+  same proposal is a new intent. Edits and moves need no such step: a pending change already
+  refuses another of the same issue (`CONFLICT`), and the same edit again sends nothing because the
+  overlaid issue already shows it.
 - **Applying.** `applyAction` reads the record (a record without `kind` is a transition and has no
   fingerprint to check), recomputes the fingerprint of the request it is about to send and refuses
   a mismatch without sending anything, then calls the data source with idempotency key
@@ -216,16 +224,25 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   instead of acting.
 - **Board discovery** ([#61](https://github.com/factory-level/inferos/issues/61)).
   `findBoards(query)` (1-200 characters, else `INVALID_REQUEST`) lists the projects of the
-  binding's InferOps workspace with the person's own token (`GET /project/projects`), keeps the
-  bindable keys, reads the open issues of the first 20 (`MAX_DISCOVERY_SCANNED_PROJECTS`; a board
-  that cannot be read is matched on key and name only), and ranks them with the pure
+  binding's InferOps workspace and, for a connected person, of every other InferOps workspace their
+  stored identity names with a slug (`#otherWorkspaces`: InferLab's list at connect time, InferMind
+  workspaces left out), each with the person's own token in that workspace
+  (`GET /project/projects`; the credentials object refuses any workspace that is not theirs). The
+  tenant label of the other workspaces is the binding's. The stopgap connection and the demo serve
+  one workspace and search only the binding's. A failure in the binding's own workspace fails the
+  call; another workspace InferOps now refuses (`FORBIDDEN` or `NOT_FOUND`: membership removed
+  since connect) is left out. It keeps the bindable keys, reads the open issues of the first 20
+  across all of them (`MAX_DISCOVERY_SCANNED_PROJECTS`; a board that cannot be read is matched on
+  key and name only), and ranks them with the pure
   `rankBoards` in `src/board-discovery.ts`: query words, lowercased, crudely stemmed and with
   common words dropped, are matched against the project key, its name and its open issue titles.
   It returns at most 8 candidates `{tenant, workspace, projectKey, boardRef, title, reasons}`, best
   first, and only those that matched something, so an empty list means no match and ties are kept
-  for the caller to disambiguate. Issue titles never leave the gatekeeper; reasons quote only the
-  query's own words and counts. The search is one observation (`Searched InferOps boards on
-  <host>`, with the project and candidate counts) whose `excludeObservers` names every observer of
+  for the caller to disambiguate; equal scores are ordered by key, then workspace. Each candidate
+  names its own workspace and `boardRef`. Issue titles never leave the gatekeeper; reasons quote
+  only the query's own words and counts. The search is one observation (`Searched InferOps boards
+  on <host>`, or `on <host> and <n> other workspaces`, with the workspaces searched and the project
+  and candidate counts) whose `excludeObservers` names every observer of
   the binding, since they were admitted for its one project only; the overseer therefore refuses
   the search in a workspace shared with others, and it works in a person's own operate session
   workspace. A refused or revoked listing (`FORBIDDEN`, `UNAUTHORIZED`) fails the call, naming
@@ -333,8 +350,9 @@ missing a button.
 
 ## Divergences from Design
 
-- `findBoards` is not in the design's API. It searches only the binding's own InferOps workspace,
-  so a person needs a board connection in a workspace before they can discover its other boards.
+- `findBoards` is not in the design's API. It runs on a board session, so a person needs one board
+  connection before they can discover the others; from it, a connected person's search covers every
+  InferOps workspace they held at connect time (a workspace joined since needs a reconnect).
 
 - Signing in and connecting are two InferLab sign-ins: the Workshop persists a sign-in account only
   for its Cloudflare vendor, so the person connects InferOps separately (InferLab's SSO cookie makes
@@ -400,8 +418,9 @@ replay, rejection clearing the simulation, revert, and observer admission; for c
 updates, approval queued and not applied, the provisional card and update overlay, field
 validation, change-of-nothing, conflict with a pending move or update, denial leaving nothing,
 duplicate apply writing once, stale apply, update revert and its refusals, creates not revertible,
-a legacy record without `kind` applied as a transition, and a tampered record refused by its
-fingerprint.
+a legacy record without `kind` applied as a transition, a tampered record refused by its
+fingerprint, and two sessions proposing the same create at once queueing one action (a different
+priority is its own, and an applied one no longer joins).
 `__tests__/conformance.test.ts` runs the shared connection conformance suite
 ([connection packages](connection-extensions.md)) on a `DEMO` board binding: scope, observation and
 sharing, approval and apply-once, stale revision at apply, retry after a 503 and after a lost

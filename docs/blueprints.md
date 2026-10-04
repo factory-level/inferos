@@ -58,7 +58,7 @@ Blueprint data is stored in three places, with one-way propagation: Gadget DO ->
 
 3. **Workers KV** (`BLUEPRINTS` namespace) -- the public-facing lookup store. Stores `BlueprintKvRecord` keyed by blueprint hex ID. This is what `PublicApi.getBlueprint()` reads from.
 
-Blueprint **code content** is stored separately in an **R2 bucket** (`BLUEPRINT_CONTENT`). The R2 key is `<blueprintId>/<version>`. Content is stored as a Yjs V2-encoded document (the full state, not incremental updates). When a blueprint is updated, old versions are retained to avoid race conditions. When a blueprint is deleted, all its R2 versions are cleaned up.
+Blueprint **code content** is stored separately in an **R2 bucket** (`BLUEPRINT_CONTENT`). The R2 key is `<blueprintId>/<version>`. Content is stored as a Yjs V2-encoded document (the full state, not incremental updates). Beside each published version's content, `<blueprintId>/<version>.bindings` holds that version's binding list as JSON (a separate object because R2 custom metadata is capped at 2 KiB), so an install or upgrade checks the bindings of the version it targets; a version without one (older, uploaded or bundled content) is checked against the blueprint's current bindings. When a blueprint is updated, old versions are retained to avoid race conditions. When a blueprint is deleted, all its R2 versions and their binding lists are cleaned up.
 
 The `dirty` flag handles propagation failures gracefully: it is set to `true` before propagation begins and cleared only after all writes succeed. If a failure leaves it set, the UI shows a warning with a "Retry" button.
 
@@ -160,7 +160,7 @@ When someone opens a blueprint link (`/blueprint/<id>`), they see the **Blueprin
    - Creates gatekeepers from the user's binding assignments (pipelined for performance).
    - Returns the new Overseer stub, and the UI redirects to the new gadget.
 
-The new gadget is independent from the blueprint source: it has its own storage, chat history, and bindings. It is an *install* pinned to one version: `newGadgetFromBlueprint` takes optional `{version, kind}` (default: the current version), the workspace takes the kind that version was published as (stored as R2 custom metadata on the version's content), and `GadgetMetadata.installedFrom` records `{blueprintId, version, kind}`. Updating the blueprint never changes an existing install. `Overseer.upgradeInstall(version)` is the explicit step that moves one: it commits that version's files onto the gadget's head, keeps its bindings, and refuses a missing version or a different kind.
+The new gadget is independent from the blueprint source: it has its own storage, chat history, and bindings. It is an *install* pinned to one version: `newGadgetFromBlueprint` takes optional `{version, kind}` (default: the current version), the workspace takes the kind that version was published as (stored as R2 custom metadata on the version's content), and `GadgetMetadata.installedFrom` records `{blueprintId, version, kind}`. Updating the blueprint never changes an existing install. `Overseer.upgradeInstall(version)` is the explicit step that moves one: it commits that version's files onto the gadget's head, keeps its bindings, and refuses a missing version, a different kind, or a version that needs a binding the install doesn't have (naming it). An install's binding assignments must name bindings of the version being installed.
 
 ### Instantiation by the agent
 
