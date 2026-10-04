@@ -306,10 +306,11 @@ export async function recoverWrapper(root: string, target: RecoverTarget, { appl
 }
 
 /**
- * `pnpm inferos upgrade <sha> [--plan|--apply]`: fetch the commit into the submodule if needed, check
- * it out as a temporary worktree, and run that revision's own `scripts/consumer/upgrade.ts`.
+ * `pnpm inferos upgrade <sha> [flags]`: fetch the commit into the submodule if needed, check it out as
+ * a temporary worktree, and run that revision's own `scripts/consumer/upgrade.ts` with the flags, so
+ * the target, not this copy, decides which flags (`--plan`, `--apply`, `--branch`, `--open-pr`) it takes.
  */
-export function runUpgrade(root: string, revision: string, mode: "--plan" | "--apply"): number {
+export function runUpgrade(root: string, revision: string, flags: string[]): number {
   const upstream = join(root, "inferos");
   if (!/^[0-9a-f]{40}$/.test(revision)) throw new UsageError("The target must be a full 40-character commit SHA");
   const present = () => spawnSync("git", ["-C", upstream, "cat-file", "-e", `${revision}^{commit}`], { stdio: "ignore" }).status === 0;
@@ -326,7 +327,7 @@ export function runUpgrade(root: string, revision: string, mode: "--plan" | "--a
     git(upstream, "worktree", "add", "--quiet", "--detach", worktree, revision);
     const script = join(worktree, "scripts/consumer/upgrade.ts");
     if (!existsSync(script)) throw new Error("The target revision does not support pnpm inferos upgrade");
-    const result = spawnSync(process.execPath, [script, root, revision, mode], { cwd: worktree, stdio: "inherit" });
+    const result = spawnSync(process.execPath, [script, root, revision, ...flags], { cwd: worktree, stdio: "inherit" });
     return result.status ?? EXIT_FAILED;
   } finally {
     spawnSync("git", ["-C", upstream, "worktree", "remove", "--force", worktree], { stdio: "ignore" });
@@ -337,7 +338,7 @@ export function runUpgrade(root: string, revision: string, mode: "--plan" | "--a
 
 const USAGE = `Usage: pnpm inferos verify [--live]
        pnpm inferos recover ports|config|fixtures|state [--apply]
-       pnpm inferos upgrade <full-sha> [--plan|--apply]`;
+       pnpm inferos upgrade <full-sha> [--plan|--apply [--branch <name> [--open-pr <owner/repo>]]]`;
 
 /** Run one maintenance command; returns the exit code. */
 export async function runMaintenance(root: string, command: string, args: string[]): Promise<number> {
@@ -356,9 +357,9 @@ export async function runMaintenance(root: string, command: string, args: string
       return report.ok ? EXIT_OK : EXIT_FAILED;
     }
     if (command === "upgrade") {
-      const [revision, mode = "--plan", extra] = args;
-      if (!revision || extra || (mode !== "--plan" && mode !== "--apply")) throw new UsageError(USAGE);
-      return runUpgrade(root, revision, mode);
+      const [revision, ...flags] = args;
+      if (!revision || revision.startsWith("--")) throw new UsageError(USAGE);
+      return runUpgrade(root, revision, flags);
     }
     throw new UsageError(USAGE);
   } catch (error) {

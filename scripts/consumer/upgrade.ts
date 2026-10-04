@@ -1,6 +1,6 @@
 // Plan or apply moving a wrapper's InferOS pin to a reviewed commit.
 //
-//   node scripts/consumer/upgrade.ts <wrapper> <full-sha> [--plan|--apply]
+//   node scripts/consumer/upgrade.ts <wrapper> <full-sha> [--plan|--apply [--branch <name> [--open-pr <owner/repo>]]]
 //
 // Runs from an InferOS checkout at the target revision, because the target renders its own templates
 // and judges its own configuration support. A wrapper's `pnpm inferos upgrade <sha>` creates that
@@ -8,18 +8,26 @@
 // helpers predate the command runs it from any InferOS checkout at the target revision.
 //
 // `--plan` (the default) writes nothing. `--apply` refuses a dirty tree, then moves the submodule
-// checkout and gitlink, regenerates `generated` files, refreshes unedited `copied-template` files,
-// leaves edited ones in place (`needs-review`, with the new upstream text under
-// `.inferos/state/upgrade/<sha>/`), never touches `customer-owned` files, updates
+// checkout and gitlink, regenerates `generated` files, refreshes unedited copies, merges edited ones
+// three-way where `reconcile.ts` allows (a conflicted merge, or an unmergeable edit, leaves the
+// wrapper's file in place with the merge or the target's text under `.inferos/state/upgrade/<sha>/`),
+// never touches customer-owned files that were not copied from upstream, updates
 // `upstream.revision`, `.inferos/bootstrap.json` and `.inferos/files.json`, and stages the result.
-// It never commits, deploys, migrates the configuration schema or contacts anything but Git.
+// It never deploys, migrates the configuration schema or contacts anything but Git.
+//
+// `--branch` makes it a reviewed upgrade: the same apply on a new branch, committed with a summary of
+// code, configuration, capability, connection, migration and action-kind changes and the
+// reconciliation (`upgrade-review.ts`), after a scan that refuses to commit anything non-portable.
+// `--open-pr` then pushes the branch to `origin` and opens a PR with `gh`. Nothing is ever merged.
 
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { migrateConsumerConfig, parseConsumerConfig } from "./config.ts";
+import { findBase, isText, mergePolicy, mergeThreeWay, readBytes } from "./reconcile.ts";
 import { checkConsumer, inferOpsGatekeeperSelected, unsupportedCapabilities } from "./runtime.ts";
+import { localSecretValues, renderReview, reviewUpgrade, scanPortable, type ReconcileLine } from "./upgrade-review.ts";
 import {
   FILES_MANIFEST, FILES_SCHEMA_VERSION, managedFiles, readFilesManifest, renderFilesManifest, renderPackageJson, sha256,
   type FileEntry, type FilesManifest,
@@ -38,11 +46,15 @@ export type FileAction =
   | "add"
   /** Already identical to the target. */
   | "unchanged"
-  /** Edited, deleted, or unknown baseline: kept as is; the target's text is staged for review. */
+  /** Edited, and the wrapper's edits and the target's changes merged cleanly: the merge is written. */
+  | "merge"
+  /** Edited, and the three-way merge conflicts: kept as is; the merge with conflict markers is staged for review. */
+  | "conflict"
+  /** Edited and not mergeable (review-only file, or no original), deleted, or unknown baseline: kept as is; the target's text is staged for review. */
   | "needs-review"
   /** The target no longer ships this template; the wrapper's copy is kept. */
   | "removed-upstream"
-  /** A customer-owned starter whose upstream source changed; never rewritten, reported for review. */
+  /** A customer-owned starter whose upstream source changed and that is not reconciled (the fixture, a deleted or unmergeable file); kept as is, the target's text staged. */
   | "upstream-changed";
 
 /** One file in the plan. */
@@ -56,8 +68,6 @@ export interface FilePlan {
 }
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-
-const read = (path: string) => existsSync(path) ? readFileSync(path, "utf8") : undefined;
 
 /** The configuration review: whether the target parses the wrapper's file, and what `config migrate` would do. */
 export interface ConfigReview {
@@ -89,48 +99,83 @@ function reviewConfig(root: string): ConfigReview {
   };
 }
 
-/** Compare the wrapper's files with what the target would write. */
-function planFiles(root: string, record: FilesManifest | null) {
+/** What the planner decided for each file: bytes to write, bytes to stage for review, the new record entry. */
+interface FileWork { writes: Map<string, Buffer>; stages: Map<string, Buffer>; baselines: Map<string, FileEntry> }
+
+/** Compare the wrapper's files with what the target would write, reconciling edited copies three-way. */
+function planFiles(root: string, record: FilesManifest | null, from: string | null, revision: string) {
   const managed = managedFiles(REPO);
   const plans: FilePlan[] = [];
-  const content = new Map<string, string>();
+  const work: FileWork = { writes: new Map(), stages: new Map(), baselines: new Map() };
+  const history = join(root, "inferos");
+  const revisions = [record?.revision, from].filter((value): value is string => typeof value === "string");
+  const labels = { current: "wrapper", base: "original", other: `inferos ${revision.slice(0, 12)}` };
+  const add = (plan: FilePlan, effect: { write?: Buffer; stage?: Buffer; baseline?: Buffer } = {}) => {
+    plans.push(plan);
+    if (effect.write) work.writes.set(plan.path, effect.write);
+    if (effect.stage) work.stages.set(plan.path, effect.stage);
+    if (effect.baseline) work.baselines.set(plan.path, { class: plan.class, sha256: sha256(effect.baseline), ...(plan.source ? { source: plan.source } : {}) });
+  };
+  /** An edited copy: merged from its original when policy and history allow, otherwise left for review. */
+  const reconcile = (path: string, fileClass: FileEntry["class"], current: Buffer, next: Buffer, entry: FileEntry | undefined, source: string | undefined) => {
+    const held: FileAction = fileClass === "customer-owned" ? "upstream-changed" : "needs-review";
+    const base = (plan: FilePlan) => ({ ...plan, ...(source ? { source } : {}) });
+    const policy = mergePolicy(path, current, next);
+    if (policy.kind === "review") return add(base({ path, class: fileClass, action: held, reason: `edited; ${policy.reason}` }), { stage: next });
+    const original = entry?.source && entry.sha256 ? findBase(history, entry.source, entry.sha256, revisions) : null;
+    if (!original || !isText(original)) {
+      return add(base({ path, class: fileClass, action: held, reason: "edited, and the original text is not in the submodule's history, so it cannot be merged" }), { stage: next });
+    }
+    const merged = mergeThreeWay(policy, current, original, next, labels);
+    if (merged.clean) return add(base({ path, class: fileClass, action: "merge", reason: "the wrapper's edits and the target's changes merged cleanly" }), { write: merged.content, baseline: next });
+    add(base({ path, class: fileClass, action: "conflict", reason: merged.reason }), { stage: merged.content });
+  };
+
   for (const [path, file] of managed) {
-    const current = read(join(root, path));
+    const current = readBytes(join(root, path));
     const recorded = record?.files[path];
     const source = file.source ? { source: file.source } : {};
     if (file.class === "generated") {
       // package.json: only the managed keys are rewritten; the customer's own keys and scripts stay.
-      const next = renderPackageJson(REPO, current);
-      content.set(path, next);
-      plans.push({ path, class: "generated", action: current === next ? "unchanged" : "regenerate", ...source });
+      const next = Buffer.from(renderPackageJson(REPO, current?.toString("utf8")));
+      const same = current?.equals(next) ?? false;
+      add({ path, class: "generated", action: same ? "unchanged" : "regenerate", ...source }, { ...(same ? {} : { write: next }), baseline: next });
       continue;
     }
-    content.set(path, file.content);
-    let action: FileAction;
-    let reason: string | undefined;
-    if (current === file.content) action = "unchanged";
+    const next = Buffer.from(file.content);
+    const plan = (action: FileAction, reason?: string): FilePlan => ({ path, class: "copied-template", action, ...(reason ? { reason } : {}), ...source });
+    if (current?.equals(next)) add(plan("unchanged"), { baseline: next });
     else if (current === undefined) {
-      if (recorded) { action = "needs-review"; reason = "deleted in the wrapper; not restored"; }
-      else action = "add";
-    } else if (!record) { action = "needs-review"; reason = `no ${FILES_MANIFEST} baseline, so a local edit cannot be ruled out`; }
-    else if (!recorded?.sha256) { action = "needs-review"; reason = "no recorded baseline for this file"; }
-    else if (sha256(current) === recorded.sha256) action = "update";
-    else { action = "needs-review"; reason = "edited since InferOS wrote it"; }
-    plans.push({ path, class: "copied-template", action, ...(reason ? { reason } : {}), ...source });
+      if (recorded) add(plan("needs-review", "deleted in the wrapper; not restored"), { stage: next });
+      else add(plan("add"), { write: next, baseline: next });
+    } else if (!record) add(plan("needs-review", `no ${FILES_MANIFEST} baseline, so a local edit cannot be ruled out`), { stage: next });
+    else if (!recorded?.sha256) add(plan("needs-review", "no recorded baseline for this file"), { stage: next });
+    else if (sha256(current) === recorded.sha256) add(plan("update"), { write: next, baseline: next });
+    else reconcile(path, "copied-template", current, next, recorded, file.source);
   }
   for (const [path, entry] of Object.entries(record?.files ?? {})) {
     if (entry.class === "copied-template" && !managed.has(path)) {
-      plans.push({ path, class: "copied-template", action: "removed-upstream", reason: "the target no longer ships this file; the wrapper's copy is kept" });
+      add({ path, class: "copied-template", action: "removed-upstream", reason: "the target no longer ships this file; the wrapper's copy is kept" });
     }
-    if (entry.class === "customer-owned" && entry.source) {
-      const upstream = read(join(REPO, entry.source));
-      if (upstream !== undefined && entry.sha256 && sha256(upstream) !== entry.sha256) {
-        plans.push({ path, class: "customer-owned", action: "upstream-changed", source: entry.source,
-          reason: "upstream changed the starter this file was copied from; the wrapper's file is never rewritten" });
-      }
+    if (entry.class !== "customer-owned" || !entry.source || !entry.sha256) continue;
+    // A starter copied from upstream: reconciled like a template, except that review-only files are
+    // reported `upstream-changed` and a starter the customer deleted stays deleted.
+    const upstream = readBytes(join(REPO, entry.source));
+    const plan = (action: FileAction, reason?: string): FilePlan => ({ path, class: "customer-owned", action, source: entry.source, ...(reason ? { reason } : {}) });
+    if (upstream === undefined) { add(plan("removed-upstream", "upstream no longer ships the starter this file was copied from; the wrapper's file is kept")); continue; }
+    if (sha256(upstream) === entry.sha256) continue;
+    const current = readBytes(join(root, path));
+    if (current === undefined) add(plan("upstream-changed", "deleted in the wrapper; the upstream change is not applied"), { stage: upstream });
+    else if (current.equals(upstream)) add(plan("update", "already matches the target"), { baseline: upstream });
+    else if (sha256(current) !== entry.sha256) reconcile(path, "customer-owned", current, upstream, entry, entry.source);
+    else {
+      const policy = mergePolicy(path, current, upstream);
+      // Unedited: take the target's version, unless the file is review-only (the fixture).
+      if (policy.kind === "review" && path.startsWith("fixtures/")) add(plan("upstream-changed", policy.reason), { stage: upstream });
+      else add(plan("update", "unedited starter; replaced with the target's version"), { write: upstream, baseline: upstream });
     }
   }
-  return { plans, content };
+  return { plans, work };
 }
 
 /** The rollback limit every upgrade carries, stated once. */
@@ -145,8 +190,11 @@ export function planUpgrade(root: string, revision: string) {
   if (here !== revision) throw new Error(`Run upgrade.ts from an InferOS checkout at ${revision} (this one is at ${here}); pnpm inferos upgrade does that for you`);
   const upstream = join(root, "inferos");
   let from: string | null = null;
+  let repository: string | undefined;
   try {
-    from = checkConsumer(root).config.upstream.revision;
+    const consumer = checkConsumer(root);
+    from = consumer.config.upstream.revision;
+    repository = consumer.config.upstream.repository;
   } catch (error) {
     blockers.push(`The wrapper does not check at its current pin (${(error as Error).message}); run pnpm inferos recover config first`);
   }
@@ -163,8 +211,9 @@ export function planUpgrade(root: string, revision: string) {
   let record: FilesManifest | null;
   try { record = readFilesManifest(root); }
   catch (error) { record = null; blockers.push((error as Error).message); }
-  const { plans, content } = planFiles(root, record);
+  const { plans, work } = planFiles(root, record, from, revision);
   const count = (action: FileAction) => plans.filter(plan => plan.action === action).length;
+  const review = from ? reviewUpgrade(upstream, from, revision, repository) : null;
   return {
     report: {
       ok: blockers.length === 0, operation: "upgrade", mode: "plan" as "plan" | "apply", from, to: revision, blockers,
@@ -173,18 +222,22 @@ export function planUpgrade(root: string, revision: string) {
       config: { ...config, revisionField: "upstream.revision is rewritten to the target" },
       baseline: record ? FILES_MANIFEST : `missing: this wrapper predates ${FILES_MANIFEST}, so every copied file that differs from the target is needs-review`,
       files: plans.filter(plan => plan.action !== "unchanged"),
-      summary: { regenerate: count("regenerate"), update: count("update"), add: count("add"), unchanged: count("unchanged"),
-        needsReview: count("needs-review"), removedUpstream: count("removed-upstream"), upstreamChanged: count("upstream-changed") },
+      summary: { regenerate: count("regenerate"), update: count("update"), add: count("add"), merge: count("merge"), conflict: count("conflict"),
+        unchanged: count("unchanged"), needsReview: count("needs-review"), removedUpstream: count("removed-upstream"), upstreamChanged: count("upstream-changed") },
+      review,
       state: STATE_ROLLBACK,
-      next: ["Review the plan", "pnpm inferos upgrade <sha> --apply", "git diff --cached", "pnpm run setup", "pnpm inferos verify", "commit"],
+      next: ["Review the plan", "pnpm inferos upgrade <sha> --apply [--branch <name> [--open-pr <owner/repo>]]", "git diff --cached", "pnpm run setup", "pnpm inferos verify", "commit"],
     },
-    plans, content, record, from,
+    plans, work, record, from,
   };
 }
 
+/** Where apply leaves files for review; `.inferos/state/` is ignored by the wrapper's Git. */
+export const reviewDirectory = (revision: string) => `.inferos/state/upgrade/${revision}`;
+
 /** Apply the plan. Throws, having written nothing, when the plan has blockers. */
 export function applyUpgrade(root: string, revision: string) {
-  const { report, plans, content, record, from } = planUpgrade(root, revision);
+  const { report, plans, work, record, from } = planUpgrade(root, revision);
   if (report.blockers.length || !from) throw new Error(`Upgrade refused; nothing was changed: ${report.blockers.join("; ")}`);
   const upstream = join(root, "inferos");
   git(upstream, "checkout", "--quiet", "--detach", revision);
@@ -192,23 +245,22 @@ export function applyUpgrade(root: string, revision: string) {
   const pending: string[] = [];
   const files: Record<string, FileEntry> = { ...record?.files };
   for (const plan of plans) {
-    const next = content.get(plan.path);
-    if (next === undefined) continue;
-    const target = join(root, plan.path);
-    if (plan.action === "regenerate" || plan.action === "update" || plan.action === "add") {
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, next);
+    const write = work.writes.get(plan.path);
+    if (write) {
+      mkdirSync(dirname(join(root, plan.path)), { recursive: true });
+      writeFileSync(join(root, plan.path), write);
       written.push(plan.path);
     }
-    if (plan.action === "needs-review") {
-      // The target's text, for the reviewer; .inferos/state is gitignored. The baseline stays as it was.
-      const staged = join(root, ".inferos/state/upgrade", revision, plan.path);
+    const stage = work.stages.get(plan.path);
+    if (stage) {
+      // The target's text, or the conflicted merge, for the reviewer. The baseline stays as it was.
+      const staged = join(root, reviewDirectory(revision), plan.path);
       mkdirSync(dirname(staged), { recursive: true });
-      writeFileSync(staged, next);
-      pending.push(`.inferos/state/upgrade/${revision}/${plan.path}`);
-      continue;
+      writeFileSync(staged, stage);
+      pending.push(`${reviewDirectory(revision)}/${plan.path}`);
     }
-    files[plan.path] = { class: plan.class, sha256: sha256(next), ...(plan.source ? { source: plan.source } : {}) };
+    const baseline = work.baselines.get(plan.path);
+    if (baseline) files[plan.path] = baseline;
   }
   // upstream.revision is the one InferOS-managed field of the customer's configuration.
   const configPath = join(root, "inferos.config.json");
@@ -231,16 +283,96 @@ export function applyUpgrade(root: string, revision: string) {
   };
 }
 
+/** Options for a reviewed upgrade: a branch to commit to and, optionally, a GitHub repository to open a PR on. */
+export interface ReviewedUpgradeOptions { branch: string; openPr?: string }
+
+const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/**
+ * `--apply --branch <name> [--open-pr <owner/repo>]`: create the branch from the current HEAD, apply,
+ * scan the staged result for anything non-portable, and commit it with the review summary as its
+ * message. The summary is also written to `.inferos/state/upgrade/<sha>/UPGRADE.md`, the PR body.
+ * With `openPr`, push the branch to `origin` and open the PR with `gh`. Never merges.
+ */
+export function reviewedUpgrade(root: string, revision: string, { branch, openPr }: ReviewedUpgradeOptions) {
+  if (spawnSync("git", ["check-ref-format", "--branch", branch], { stdio: "ignore" }).status !== 0) throw new Error(`Not a valid branch name: ${branch}`);
+  if (spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { stdio: "ignore" }).status === 0) throw new Error(`Branch ${branch} already exists`);
+  if (openPr !== undefined && !GITHUB_REPOSITORY.test(openPr)) throw new Error("--open-pr takes a GitHub repository as owner/repo");
+  const planned = planUpgrade(root, revision).report;
+  if (planned.blockers.length) throw new Error(`Upgrade refused; nothing was changed: ${planned.blockers.join("; ")}`);
+  const base = git(root, "rev-parse", "--abbrev-ref", "HEAD");
+  if (openPr !== undefined && base === "HEAD") throw new Error("--open-pr needs a branch checked out to open the PR against");
+  git(root, "checkout", "--quiet", "-b", branch);
+  const applied = applyUpgrade(root, revision);
+
+  const staged = git(root, "diff", "--cached", "--name-only").split("\n").filter(Boolean);
+  const diff = execFileSync("git", ["-C", root, "diff", "--cached", "--no-ext-diff", "--text"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  const secrets = localSecretValues(root);
+  const files: ReconcileLine[] = applied.files;
+  const render = (scan: string[]) => renderReview(applied.review!, {
+    relation: applied.submodule.relation, config: applied.config, check: applied.check, files, needsReview: applied.applied.needsReview, scan, rollback: STATE_ROLLBACK,
+  });
+  let findings = scanPortable(staged, diff, secrets);
+  let body = render(findings);
+  findings = [...findings, ...scanPortable([], body, secrets).map(finding => `${finding} in the summary`)];
+  if (findings.length) body = render(findings);
+  const title = `Upgrade InferOS to ${revision.slice(0, 12)}`;
+  const directory = join(root, reviewDirectory(revision));
+  mkdirSync(directory, { recursive: true });
+  const summary = `${reviewDirectory(revision)}/UPGRADE.md`;
+  writeFileSync(join(root, summary), `# ${title}\n\n${body}`);
+  const result = { ...applied, reviewed: { branch, base, summary, committed: false as boolean, findings, commit: null as string | null, pr: null as null | { repository: string; url?: string; error?: string } } };
+  if (findings.length) return { ...result, ok: false };
+
+  const message = join(directory, "COMMIT_MESSAGE");
+  writeFileSync(message, `${title}\n\n${body}`);
+  git(root, "commit", "--quiet", "-F", message);
+  result.reviewed.committed = true;
+  result.reviewed.commit = git(root, "rev-parse", "HEAD");
+  if (openPr !== undefined) {
+    const push = spawnSync("git", ["-C", root, "push", "--quiet", "-u", "origin", branch], { stdio: ["ignore", "ignore", "ignore"] });
+    if (push.status !== 0) {
+      result.reviewed.pr = { repository: openPr, error: "git push to origin failed; push the branch and open the PR by hand" };
+    } else {
+      const pr = spawnSync("gh", ["pr", "create", "-R", openPr, "--base", base, "--head", branch, "--title", title, "--body-file", join(root, summary)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      result.reviewed.pr = pr.status === 0 ? { repository: openPr, url: pr.stdout.trim().split("\n").at(-1) } : { repository: openPr, error: "gh pr create failed; the branch is pushed, open the PR by hand" };
+    }
+  }
+  return { ...result, ok: applied.ok && !result.reviewed.pr?.error };
+}
+
+const USAGE = "Usage: node scripts/consumer/upgrade.ts WRAPPER FULL_SHA [--plan|--apply [--branch NAME [--open-pr OWNER/REPO]]]";
+
+/** Parse the flags after WRAPPER and FULL_SHA, or null on a usage error. */
+export function parseUpgradeFlags(flags: string[]): { mode: "--plan" | "--apply"; branch?: string; openPr?: string } | null {
+  let mode: "--plan" | "--apply" | undefined;
+  let branch: string | undefined;
+  let openPr: string | undefined;
+  for (let index = 0; index < flags.length; index++) {
+    const flag = flags[index];
+    const value = () => { const next = flags[++index]; return next === undefined || next.startsWith("--") ? null : next; };
+    if ((flag === "--plan" || flag === "--apply") && mode === undefined) mode = flag;
+    else if (flag === "--branch" && branch === undefined) { const next = value(); if (next === null) return null; branch = next; }
+    else if (flag === "--open-pr" && openPr === undefined) { const next = value(); if (next === null) return null; openPr = next; }
+    else return null;
+  }
+  mode ??= "--plan";
+  if (branch !== undefined && mode !== "--apply") return null;
+  if (openPr !== undefined && branch === undefined) return null;
+  return { mode, ...(branch !== undefined ? { branch } : {}), ...(openPr !== undefined ? { openPr } : {}) };
+}
+
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const usage = "Usage: node scripts/consumer/upgrade.ts WRAPPER FULL_SHA [--plan|--apply]";
-  const [target, revision, mode, extra] = process.argv.slice(2);
-  if (!target || !revision || extra || (mode !== undefined && mode !== "--plan" && mode !== "--apply")) {
-    console.error(usage);
+  const [target, revision, ...rest] = process.argv.slice(2);
+  const flags = parseUpgradeFlags(rest);
+  if (!target || !revision || !flags) {
+    console.error(USAGE);
     process.exitCode = 2;
   } else {
     try {
       const root = resolve(target);
-      const report = mode === "--apply" ? applyUpgrade(root, revision) : planUpgrade(root, revision).report;
+      const report = flags.branch !== undefined ? reviewedUpgrade(root, revision, { branch: flags.branch, ...(flags.openPr ? { openPr: flags.openPr } : {}) })
+        : flags.mode === "--apply" ? applyUpgrade(root, revision) : planUpgrade(root, revision).report;
       console.log(JSON.stringify(report, null, 2));
       process.exitCode = report.ok ? 0 : 1;
     } catch (error) {

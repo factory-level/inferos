@@ -40,8 +40,11 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 | `scripts/consumer/runtime.ts` | Check actual submodule/index pin, report capability support, install locked dependencies, diagnose local prerequisites, launch native Workshop baseline, delegate `pnpm local` to the pinned lifecycle operator, migrate a version 1 file (`config migrate`) and delegate `intake apply` to the pinned intake command |
 | `scripts/consumer/wrapper-files.ts` | What bootstrap writes and who owns it: the templates (`.inferos` helpers, wrapper skills, README, `.gitignore`), the managed `package.json` keys, and the `.inferos/files.json` record with each file's class and sha256 ([maintenance](#wrapper-maintenance-verify-upgrade-recover)) |
 | `scripts/consumer/maintenance.ts` | Copied to `.inferos/maintenance.ts`: `verify`, `recover <ports\|config\|fixtures\|state>` and the `upgrade` driver that runs the target revision's planner |
-| `scripts/consumer/upgrade.ts` | Plan or apply a pin change from a checkout at the target revision |
-| `scripts/consumer/maintenance.test.ts` | Files record, upgrade with customizations kept, the missing-record path, verify report shape, recover dry run and apply |
+| `scripts/consumer/upgrade.ts` | Plan or apply a pin change from a checkout at the target revision; `--branch` commits it as a reviewed upgrade and `--open-pr` opens the PR |
+| `scripts/consumer/reconcile.ts` | Three-way reconciliation: per-file merge policy, the original rebuilt from the submodule's history, `git merge-file --diff3` ([reconciliation](#three-way-reconciliation-and-reviewed-upgrades)) |
+| `scripts/consumer/upgrade-review.ts` | The upgrade review (code, configuration, capabilities, connections, migrations, action kinds), its Markdown rendering, and the portability scan |
+| `scripts/consumer/wrapper-templates/` | The wrapper `README.md` and `.gitignore` templates, kept as files so their copies record an upstream `source` |
+| `scripts/consumer/maintenance.test.ts` | Files record, upgrade with customizations kept, two differently customized wrappers on one target, a reviewed branch with PR, summary and secret checks, the missing-record path, verify report shape, recover dry run and apply |
 | `scripts/consumer/settings.ts` | The selected private customer's settings table (#19): kind (secret, reference or value), owner, default, required-when predicate, local or cloud source and where each is read. `validateSettings` reports missing, invalid, credentialed, contradictory and unsupported settings without values; it also generates the table in [configuration reference](../wiki/configuration-reference.md#selected-customer-settings) |
 | `scripts/consumer/intake.ts` | Derive managed configuration, a starter view and screen template, and requirement dispositions from a reviewed intake; see [customer onboarding](customer-onboarding.md) |
 | `scripts/consumer/project-board.json` | Synthetic fixture matching inspected InferOps board wire fields |
@@ -74,9 +77,9 @@ The bootstrap copies the pinned standard blueprint directory into wrapper-owned 
 **File record.** `.inferos/files.json` (`schemaVersion: 1`) lists every file bootstrap wrote with its class, the sha256 of the bytes written and, for copies, the upstream `source` path. The submodule is listed under `shared`. The classes are:
 - `generated`: `.inferos/bootstrap.json`, and `package.json`, where only `packageManager`, `engines` and InferOS's own scripts are managed (`renderPackageJson` merges them and keeps the customer's other keys and scripts).
 - `copied-template`: the `.inferos` helpers, the six wrapper skills, `README.md` and `.gitignore`.
-- `customer-owned`: everything else, including the configuration, blueprints, skill packs, fixture, views, workers, `inferos.canvas.json` and the `.gitkeep` files.
+- `customer-owned`: everything else, including the configuration, blueprints, skill packs, fixture, views, workers, `inferos.canvas.json` and the `.gitkeep` files. The blueprints, skill packs and fixture record the upstream `source` they were copied from.
 
-The hashes are the merge base a later three-way merge (#75) needs.
+The `source` and hash identify the original text, which upgrade rebuilds from the submodule's history ([reconciliation](#three-way-reconciliation-and-reviewed-upgrades)).
 
 **verify** runs `checkConsumer` (plus schema and capability support), `diagnoseConsumer` and the pinned lifecycle's `status --json`. When the stack listens it also runs `verify --json` and ignores doctor's port error, which is then the stack's own listener. A stopped stack makes the live checks `skipped`; `--live` turns that into a failure. The report is `{ok, revision, live, failures, checks[{name, status, reasons, details}]}`.
 
@@ -84,10 +87,35 @@ The hashes are the merge base a later three-way merge (#75) needs.
 - blockers: a dirty wrapper tree, a wrapper that does not check, a configuration the target cannot parse, or enabled capabilities the target does not ship.
 - the submodule move (`forward`, `same` or `not-a-descendant`).
 - what `config migrate` would do against the target for a version 1 file. This is advisory only; the upgrade never migrates.
-- a per-file action. Generated files get `regenerate`. A copied template gets `update` when its hash matches the record, `add` when it is new, and `needs-review` when it was edited, deleted, has no baseline, or when `files.json` is missing. A template the target dropped gets `removed-upstream`. A customer-owned starter whose upstream source hash changed gets `upstream-changed`.
+- a per-file action. Generated files get `regenerate`. A copied template gets `update` when its hash matches the record, `add` when it is new, `merge` or `conflict` when it was edited and could be reconciled, and `needs-review` when it was edited but not mergeable, deleted, has no baseline, or when `files.json` is missing. A template the target dropped gets `removed-upstream`. A customer-owned starter whose upstream source changed gets `update` when unedited, `merge` or `conflict` when edited, and `upstream-changed` when it is the fixture, was deleted, or cannot be merged.
+- `review`, the change between the two revisions ([below](#three-way-reconciliation-and-reviewed-upgrades)).
 - the state rollback limit.
 
-`--apply` checks out the target in the submodule and stages the gitlink. It writes the `regenerate`/`update`/`add` files and puts the target's text for each `needs-review` file under the ignored `.inferos/state/upgrade/<sha>/`. It rewrites only `upstream.revision` in `inferos.config.json`, then `.inferos/bootstrap.json` and `.inferos/files.json`. A `needs-review` file keeps its old baseline, or none, so it stays flagged until it matches the target. Apply stages the result, reruns `checkConsumer` and never commits or deploys.
+`--apply` checks out the target in the submodule and stages the gitlink. It writes the `regenerate`/`update`/`add`/`merge` files and puts the conflicted merge, or the target's text, for each `conflict`, `needs-review` and `upstream-changed` file under the ignored `.inferos/state/upgrade/<sha>/`. It rewrites only `upstream.revision` in `inferos.config.json`, then `.inferos/bootstrap.json` and `.inferos/files.json`. A written file's record takes the target's hash, including a merged one, so the next upgrade merges from the target's text. A file left for review keeps its old baseline, or none, so it stays flagged until it is resolved. Apply stages the result, reruns `checkConsumer` and, without `--branch`, never commits or deploys.
+
+### Three-way reconciliation and reviewed upgrades
+
+**Originals come from Git, not from copies.** `reconcile.ts` rebuilds the original of an edited copy by reading its recorded `source` from the wrapper's submodule, first at the record's revision and the current pin, then through the last 200 commits that touched it, and keeps the blob whose sha256 matches the record. The wrapper stores no second copy of each file. A file without a `source` (a wrapper bootstrapped before the README and `.gitignore` moved to `scripts/consumer/wrapper-templates/`) or whose original is not in reach falls back to `needs-review`.
+
+**Merge policy, per file.**
+
+| Files | Edited copy |
+| --- | --- |
+| `.inferos/` helpers | `needs-review`: operator code, so an edit is a private core patch, which is never merged automatically |
+| `fixtures/` | `upstream-changed`, edited or not: the customer's board data |
+| Binary (a NUL byte or invalid UTF-8) | `needs-review`/`upstream-changed`; replaced only while unedited |
+| `*.json` (blueprint manifests) | Text merge; a result that does not parse is a `conflict` |
+| Other text (skills, SOPs, blueprint sources, README, `.gitignore`) | Text merge |
+
+The merge is `git merge-file --diff3` on temporary copies, labelled `wrapper`, `original` and `inferos <sha>`. A clean result is written; a conflicted one goes, markers included, only to `.inferos/state/upgrade/<sha>/<path>`, which is gitignored, never into the customer's file. Customer-owned files with no upstream `source` (configuration, views, workers, gatekeepers, intake) are never read for merging or written.
+
+**Review.** `upgrade-review.ts` reads the submodule's history between the pin and the target: the commit list (up to 50), shortstat and a GitHub compare link; configuration schema sources that changed; additions and removals in `CAPABILITY_NAMES`, `CAPABILITY_REQUIREMENTS` and `capabilitySources`; changed `connection.json` and gatekeeper `deploy-inputs.json` files with their diff; new and removed `migrations` entries in each changed `cloudflare.config.ts`; and action kinds, as literal `tag:` values in gatekeeper sources and record `kind:` values in `*actions.ts`, plus every gatekeeper whose source changed. It is a text reading: computed tags, OAuth scopes in code and new methods are not analysed, and the summary says so.
+
+**Reviewed branch.** `--apply --branch <name>` checks the plan, creates the branch from HEAD, applies, and scans before committing. The scan refuses staged paths under `.dev.vars*`, `.env*`, `.wrangler/`, `.inferos/state/` or `node_modules/`, any value of 12 or more characters from the wrapper's root `.dev.vars*`/`.env*` files, and known token shapes (private keys, GitHub, `sk-`, Slack, AWS, bearer) in the staged diff and in the summary. A finding is reported by name and leaves the branch uncommitted. Otherwise it commits with the summary as the message and writes the summary to `.inferos/state/upgrade/<sha>/UPGRADE.md`. `--open-pr <owner/repo>` then pushes to `origin` and runs `gh pr create --base <previous branch> --body-file UPGRADE.md`. Nothing is merged. `maintenance.ts` passes every flag through to the target's `upgrade.ts`, so the target decides what it accepts.
+
+**Authority.** The wrapper holds no grants, bindings, approvals, auto-approval rules or agent memory, so an upgrade cannot carry or widen them. Auto-approval rules are stored in the deployment per gatekeeper and action kind (`setAutoApprovedActionKind`), so a new kind starts with none, and each of its actions waits for a manual decision until someone enables one. The summary flags each new kind for review. `maintenance.test.ts` checks this for a target that adds a delete action kind: the branch diff holds only InferOS-managed and reconciled files, and fake tokens planted in `.dev.vars`, `.inferos/state/` and local Wrangler state appear in neither the diff nor the commit message.
+
+This answers two open questions in [connection extensions](../design/connection-extensions.md). Classification is recorded in `.inferos/files.json`, with the submodule listed as `shared`. The three-way mechanism is the original rebuilt from Git plus `git merge-file`, under the per-file policy above.
 
 **recover** is a dry run unless given `--apply`. Each action is `auto` or `manual`, and `ok` means none is left outstanding.
 - `ports`: stops the wrapper's own recorded dev server, or moves `local.port` to the next free port; it never stops another process.
@@ -115,7 +143,7 @@ The initial profile is inferops-operations, with composable and durable views en
 
 ## Divergences from Design
 
-The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Site name, profile instructions, fallback theme, listing density, local custom Workers and canvas layout persistence are implemented. Authorized InferOps data, agent composition tools, complete view-sharing and cloud extension deployment remain pending. The native development runner's state/topology and lifecycle limitations remain. Upgrade and recovery cover the local wrapper only (#20's MVP slice): edited templates are flagged `needs-review` rather than merged, multi-customer upgrade PRs and cloud smoke checks are post-release (#75), and nothing copies production domain storage.
+The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Site name, profile instructions, fallback theme, listing density, local custom Workers and canvas layout persistence are implemented. Authorized InferOps data, agent composition tools, complete view-sharing and cloud extension deployment remain pending. The native development runner's state/topology and lifecycle limitations remain. Upgrade and recovery cover the local wrapper only. Edited copies are reconciled three-way, and `--branch`/`--open-pr` produce a reviewed upgrade branch and PR (#75). Cloud smoke checks are not implemented, and nothing copies production domain storage. The [connection extensions](../design/connection-extensions.md) design asks for upgrades to show OAuth, data and approval changes. The review reads these from known files only (`connection.json`, `deploy-inputs.json`, `migrations` and literal action-kind tags). It does not analyse OAuth scopes requested in code or new gatekeeper methods, and pending-action compatibility across versions is not checked.
 
 Durable views ship as the bounded #34 slice (MVP scope in #1): the one private Kanban/Operate view persists through reload and local Worker restart, rejects stale expected revisions with a conflict, and is scoped to the workspace's build-access boundary. The design's export-with-binding-requirements and import-time rebind, independent view sharing, deployment-update recovery and supported schema migration are post-release. Import today validates content and mints a new definition without rebinding authority, and a view is shared only by sharing its workspace. Evidence is in [canvas architecture](inferops-canvas.md#resolving-a-board-reference).
 
@@ -125,7 +153,7 @@ Settings validation ([#19](https://github.com/factory-level/inferos/issues/19)) 
 
 ## Open Questions
 
-The generated wrapper copies its small operator helpers so it can pin a prior InferOS revision. `upgrade` refreshes them as copied templates; a wrapper whose helpers predate the command runs the target's `scripts/consumer/upgrade.ts` from an InferOS checkout at the target revision. Whether edited helpers should block an upgrade rather than be flagged `needs-review` is open. Complete runtime and cloud validation is still required before declaring the objective complete.
+The generated wrapper copies its small operator helpers so it can pin a prior InferOS revision. `upgrade` refreshes them as copied templates; a wrapper whose helpers predate the command runs the target's `scripts/consumer/upgrade.ts` from an InferOS checkout at the target revision. Edited helpers are never merged and stay `needs-review`; whether they should block an upgrade instead is open. Whether an unedited blueprint starter should be refreshed automatically (it is, and the change is visible in the reviewed diff) or only reported is a policy question for a human reviewer. Complete runtime and cloud validation is still required before declaring the objective complete.
 
 Capability configuration ([#67](https://github.com/factory-level/inferos/issues/67)) leaves these undecided. Each has a conservative interim choice in code, not a decision:
 
