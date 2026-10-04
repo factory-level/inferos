@@ -76,16 +76,14 @@ const allDenied = (calls: object) =>
   Object.fromEntries(Object.keys(calls).map(name => [name, DENIED]));
 
 // What renders the gadget UI, plus the inert action/console reads and the read-only console
-// listing (covered in workshop-consoles.test.ts). Everything else must be classified below, so a
-// new Overseer or GadgetClient method fails to compile until it is.
+// listing and console screens (covered in workshop-consoles.test.ts). Everything else must be
+// classified below, so a new Overseer or GadgetClient method fails to compile until it is.
 type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" |
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
-    "subscribeToConsoleLogs" | "listConsoles";
+    "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
-  listCanvases: ws => ws.listCanvases(),
-  getCanvas: ws => ws.getCanvas("view"),
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),

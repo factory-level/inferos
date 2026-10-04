@@ -95,6 +95,15 @@ it("lets a use-role operator read consoles, and checks console navigation agains
     await expect(useWorkspace.replaceConsole(created.id, "0", created)).rejects.toThrow(denied);
     await expect(useWorkspace.deleteConsole(created.id, "0")).rejects.toThrow(denied);
 
+    // It reads the screens a console shows, read-only, and no other.
+    expect((await useWorkspace.listCanvases()).map(screen => screen.id).toSorted())
+      .toEqual([board.id, activity.id].toSorted());
+    expect(await useWorkspace.getCanvas(board.id)).toEqual(board);
+    expect(await useWorkspace.getCanvas(elsewhere.id)).toBeNull();
+    await expect(useWorkspace.editCanvas(board.id, board.revision, [{ type: "rename", title: "Denied" }]))
+      .rejects.toThrow(denied);
+    await expect(useWorkspace.deleteCanvas(board.id, board.revision)).rejects.toThrow(denied);
+
     using session = await operatorApi.getOperateSession();
     const open = { type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
       fullChat: "available", viewId: "overview" } as const;
@@ -116,6 +125,9 @@ it("lets a use-role operator read consoles, and checks console navigation agains
     // The check reads the definition as it is now, not as the session copied it in.
     await workspace.replaceConsole(created.id, "0", { ...created, views: [created.views[1]!] });
     await expect(session.dispatch({ type: "openView", viewId: "overview" }, page.seq)).rejects.toSatisfy(consoleChanged);
+    // A screen the console stopped showing is no longer readable to the operator.
+    expect(await useWorkspace.getCanvas(activity.id)).toBeNull();
+    expect((await useWorkspace.listCanvases()).map(screen => screen.id)).toEqual([board.id]);
 
     // Someone without access to the console's workspace cannot open it.
     using strangerApi = await signUp(api, "consolesstranger");

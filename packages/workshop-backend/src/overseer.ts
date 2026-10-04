@@ -4,7 +4,7 @@ import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { WorkspaceConsoleStore } from "./console-store";
 import { WorkspaceFlowStore } from "./flow-store";
-import type { OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -12524,8 +12524,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // interface but permits only the handful of methods needed to render and interact with the
 // gadgets' deployed UIs: getMetadata() (restricted to id/title/kind/owner), a restricted
 // subscribeToMetadata(), subscribeToPresence(), subscribeToWorkpieces(), and getGadget()
-// (returning a restricted, mainline-only UseGadgetClientInterface), plus a read-only
-// listConsoles() so an operator reaches their role console without Build. Presence includes active
+// (returning a restricted, mainline-only UseGadgetClientInterface), plus read-only listConsoles()
+// and the screens those consoles show (listCanvases(), getCanvas()), so an operator reaches and
+// renders their role console without Build. Presence includes active
 // viewers' names, profile IDs, and roles. Every other
 // method throws "Unauthorized", with a few exceptions: subscribeToConsoleLogs() and
 // subscribeToActions() return inert subscriptions (they never deliver data), and
@@ -12539,8 +12540,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // whether "use" callers may invoke it.
 @validateRpc()
 class UseOverseerInterface extends RpcTarget implements Overseer {
-  async listCanvases(): Promise<CanvasDefinition[]> { this.#deny(); }
-  async getCanvas(_id: string): Promise<CanvasDefinition | null> { this.#deny(); }
+  // An operator granted "use" reads the screens this workspace's consoles show, read-only, so a
+  // console renders without Build. A screen is layout and references only: every board on it
+  // resolves through the viewer's own connection, never this workspace's. A screen no console
+  // lists reads as missing.
+  async listCanvases(): Promise<CanvasDefinition[]> {
+    let shown = this.#consoleScreenIds();
+    return this.#canvasStore().list().filter(canvas => shown.has(canvas.id));
+  }
+  async getCanvas(id: string): Promise<CanvasDefinition | null> {
+    return this.#consoleScreenIds().has(id) ? this.#canvasStore().get(id) : null;
+  }
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
@@ -12550,13 +12560,24 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   // An operator granted "use" reaches the consoles of the workspace without Build, read-only: a
   // console is references and presentation, and grants nothing. Writes stay build-only.
-  async listConsoles(): Promise<OperateConsole[]> {
-    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
-    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env).list();
-  }
+  async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+
+  #canvasStore(): WorkspaceCanvasStore {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceCanvasStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
+  }
+
+  #consoleStore(): WorkspaceConsoleStore {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
+  }
+
+  #consoleScreenIds(): Set<string> {
+    return new Set(this.#consoleStore().list().flatMap(consoleScreens));
+  }
 
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
