@@ -19,6 +19,9 @@ covers:
   - .agents/skills/bootstrap-inferos
   - .agents/skills/skill-upload
   - .agents/skills/local-coding
+  - .agents/skills/verify-inferos
+  - .agents/skills/upgrade-inferos
+  - .agents/skills/recover-inferos
 updated: 2026-10-03
 ---
 
@@ -35,6 +38,10 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 | `scripts/consumer/config.ts` | Version 1 and 2 contract, exact keys/types, pin and URL checks, flag and capability dependency validation, version 1 to 2 migration |
 | `scripts/consumer/bootstrap.ts` | Atomic creation in a sibling temporary directory, pinned submodule, wrapper files, copied standard blueprint sources, optional profile/capability choice with InferOps gatekeeper selection, and rerun protection. The wrapper's `.gitignore` covers `node_modules/`, `.wrangler/`, `.env*`, `.dev.vars*`, `.inferos/state/` and the generated, machine-specific `wrangler.consumer.jsonc` and `wrangler.dev.jsonc` files (the dev server writes the latter beside each wrapper gatekeeper, with absolute paths and the local port) |
 | `scripts/consumer/runtime.ts` | Check actual submodule/index pin, report capability support, install locked dependencies, diagnose local prerequisites, launch native Workshop baseline, delegate `pnpm local` to the pinned lifecycle operator, migrate a version 1 file (`config migrate`) and delegate `intake apply` to the pinned intake command |
+| `scripts/consumer/wrapper-files.ts` | What bootstrap writes and who owns it: the templates (`.inferos` helpers, wrapper skills, README, `.gitignore`), the managed `package.json` keys, and the `.inferos/files.json` record with each file's class and sha256 ([maintenance](#wrapper-maintenance-verify-upgrade-recover)) |
+| `scripts/consumer/maintenance.ts` | Copied to `.inferos/maintenance.ts`: `verify`, `recover <ports\|config\|fixtures\|state>` and the `upgrade` driver that runs the target revision's planner |
+| `scripts/consumer/upgrade.ts` | Plan or apply a pin change from a checkout at the target revision |
+| `scripts/consumer/maintenance.test.ts` | Files record, upgrade with customizations kept, the missing-record path, verify report shape, recover dry run and apply |
 | `scripts/consumer/settings.ts` | The selected private customer's settings table (#19): kind (secret, reference or value), owner, default, required-when predicate, local or cloud source and where each is read. `validateSettings` reports missing, invalid, credentialed, contradictory and unsupported settings without values; it also generates the table in [configuration reference](../wiki/configuration-reference.md#selected-customer-settings) |
 | `scripts/consumer/intake.ts` | Derive managed configuration, a starter view and screen template, and requirement dispositions from a reviewed intake; see [customer onboarding](customer-onboarding.md) |
 | `scripts/consumer/project-board.json` | Synthetic fixture matching inspected InferOps board wire fields |
@@ -42,10 +49,11 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 | `.agents/skills/bootstrap-inferos` | Coding-agent setup guidance with honest readiness reporting |
 | `.agents/skills/skill-upload` | Coding-agent guidance for installing, authoring and publishing wrapper skill packs, copied into wrappers |
 | `.agents/skills/local-coding` | Coding-agent SOP for the local coding runner (setup, `pnpm local runner`/`coding doctor`, recovery, applying a patch), copied into wrappers |
+| `.agents/skills/verify-inferos`, `upgrade-inferos`, `recover-inferos` | Coding-agent procedures for the three maintenance commands, copied into wrappers |
 
 ## Data and Control Flow
 
-The bootstrap accepts destination, repository and full commit SHA, plus optional `--profile` and repeatable `--capability` flags (`InitialConsumerOptions` in `config.ts`). It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser helpers (reached through the `inferos` script, `node .inferos/runtime.ts`, as well as the named scripts), the `bootstrap-inferos`, `skill-upload` and `local-coding` skills and the starter skill packs (`skills/`, with a default `inferos.skills.json`; see [repo setup skills](repo-setup-skills.md#skill-packs)) into the wrapper, emits explicit configuration and a synthetic board, verifies the pin and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
+The bootstrap accepts destination, repository and full commit SHA, plus optional `--profile` and repeatable `--capability` flags (`InitialConsumerOptions` in `config.ts`). It validates inputs, initializes Git in a staging directory, adds the submodule, checks out the requested commit and stages its gitlink. It copies runtime/parser/maintenance helpers (reached through the `inferos` script, `node .inferos/runtime.ts`, as well as the named scripts), the `bootstrap-inferos`, `skill-upload`, `local-coding`, `verify-inferos`, `upgrade-inferos` and `recover-inferos` skills and the starter skill packs (`skills/`, with a default `inferos.skills.json`; see [repo setup skills](repo-setup-skills.md#skill-packs)) into the wrapper, emits explicit configuration and a synthetic board, verifies the pin, records every file it wrote in `.inferos/files.json` and atomically renames the directory. A failed operation removes only its own staging directory. Existing unknown directories are rejected; an existing managed wrapper is checked without rewriting its files.
 
 ### Customer shell options
 
@@ -58,6 +66,34 @@ The copied wrapper runtime loads configuration and compares the actual submodule
 `doctor` aggregates nonmutating configuration/pin, Node, native-script, pnpm-version, local-tool and port checks. Missing dependencies point to `pnpm run setup`; requested unavailable features are errors. It exits nonzero on errors and reports dirty upstream code and pending runtime adapters as warnings. Its `runtimeReady: false` is separate from the preflight `ok` field. Its `settings` check (`diagnoseSettings`) imports the *pinned* `scripts/consumer/settings.ts` and runs `validateSettings` over the resolved configuration, the shell and whether `inferos.canvas.json` selects the InferOps gatekeeper. Only error findings fail doctor; warnings (shell values a version 2 wrapper overrides, the unchecked Codex login) and unsupported rows (the Wiki binding, a cloud deployment target) are reported. The report's `settings` field lists each row's state (`set`, `unset`, `unchecked`, `unsupported`) and the findings; a secret is reported only as present or absent, and no message carries a value. A pin without the table yields a warning. It does not claim running-service health or cloud parity and never stops a listener. The native launcher now uses a frozen-lockfile install as well as the wrapper setup command.
 
 The bootstrap copies the pinned standard blueprint directory into wrapper-owned `blueprints/`. Local startup selects that complete set through the existing `BUNDLED_BLUEPRINTS_DIR` override; no kernel or installer API changes are needed. Empty legacy directories retain upstream defaults. A symlinked blueprint root is rejected. `blueprints:check` uses the pinned native compiler with a throwaway output and cleans it on success or failure, leaving the backend module untouched. Wrapper edits are read afresh on validation/startup; they are not yet watched automatically. The native revision and installed-gadget ownership rules remain unchanged.
+
+## Wrapper maintenance: verify, upgrade, recover
+
+`runtime.ts` hands `verify`, `recover` and `upgrade` to `.inferos/maintenance.ts` before its own configuration check, so they answer with a JSON report even when the wrapper does not check. Each prints one JSON object and exits 0 (healthy), 1 (not) or 2 (usage), like the lifecycle operator.
+
+**File record.** `.inferos/files.json` (`schemaVersion: 1`) lists every file bootstrap wrote with its class, the sha256 of the bytes written and, for copies, the upstream `source` path. The submodule is listed under `shared`. The classes are:
+- `generated`: `.inferos/bootstrap.json`, and `package.json`, where only `packageManager`, `engines` and InferOS's own scripts are managed (`renderPackageJson` merges them and keeps the customer's other keys and scripts).
+- `copied-template`: the `.inferos` helpers, the six wrapper skills, `README.md` and `.gitignore`.
+- `customer-owned`: everything else, including the configuration, blueprints, skill packs, fixture, views, workers, `inferos.canvas.json` and the `.gitkeep` files.
+
+The hashes are the merge base a later three-way merge (#75) needs.
+
+**verify** runs `checkConsumer` (plus schema and capability support), `diagnoseConsumer` and the pinned lifecycle's `status --json`. When the stack listens it also runs `verify --json` and ignores doctor's port error, which is then the stack's own listener. A stopped stack makes the live checks `skipped`; `--live` turns that into a failure. The report is `{ok, revision, live, failures, checks[{name, status, reasons, details}]}`.
+
+**upgrade `<sha>` [`--plan`|`--apply`]** fetches the commit into the submodule when it is missing (the only network access), adds a temporary detached worktree of the submodule at the target, and runs *that* revision's `scripts/consumer/upgrade.ts`, so the target renders its own templates and judges its own configuration support. The planner refuses to run from a checkout at any other revision. The plan reports:
+- blockers: a dirty wrapper tree, a wrapper that does not check, a configuration the target cannot parse, or enabled capabilities the target does not ship.
+- the submodule move (`forward`, `same` or `not-a-descendant`).
+- what `config migrate` would do against the target for a version 1 file. This is advisory only; the upgrade never migrates.
+- a per-file action. Generated files get `regenerate`. A copied template gets `update` when its hash matches the record, `add` when it is new, and `needs-review` when it was edited, deleted, has no baseline, or when `files.json` is missing. A template the target dropped gets `removed-upstream`. A customer-owned starter whose upstream source hash changed gets `upstream-changed`.
+- the state rollback limit.
+
+`--apply` checks out the target in the submodule and stages the gitlink. It writes the `regenerate`/`update`/`add` files and puts the target's text for each `needs-review` file under the ignored `.inferos/state/upgrade/<sha>/`. It rewrites only `upstream.revision` in `inferos.config.json`, then `.inferos/bootstrap.json` and `.inferos/files.json`. A `needs-review` file keeps its old baseline, or none, so it stays flagged until it matches the target. Apply stages the result, reruns `checkConsumer` and never commits or deploys.
+
+**recover** is a dry run unless given `--apply`. Each action is `auto` or `manual`, and `ok` means none is left outstanding.
+- `ports`: stops the wrapper's own recorded dev server, or moves `local.port` to the next free port; it never stops another process.
+- `config`: runs `git submodule update --init inferos` when the gitlink and `upstream.revision` agree but the checkout differs (refused while the submodule has local changes). A gitlink that disagrees with `upstream.revision` is reported as manual. It also rewrites `bootstrap.json`, re-merges the managed `package.json` keys and restores missing templates from the pin's own `wrapper-files.ts`. Edited templates and an invalid configuration are only reported.
+- `fixtures`: renames an invalid fixture to `<fixture>.invalid-<time>` and restores the pinned starter, only when the starter validates against `inferops.targetRef`.
+- `state`: states the rollback limit (local state is reset only, never migrated back) and with `--apply` runs the pinned `reset --yes`.
 
 ## One-time profile initialization
 
@@ -79,7 +115,7 @@ The initial profile is inferops-operations, with composable and durable views en
 
 ## Divergences from Design
 
-The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Site name, profile instructions, fallback theme, listing density, local custom Workers and canvas layout persistence are implemented. Authorized InferOps data, agent composition tools, complete view-sharing and cloud extension deployment remain pending. The native development runner's state/topology and lifecycle limitations remain. Bootstrap is not yet an upgrade/recovery service and does not copy production domain storage.
+The [design](../design/consumer-configuration.md) requires live InferOps projection, runtime flag enforcement, composable/durable views, complete profile/style settings and custom Worker manifests. Site name, profile instructions, fallback theme, listing density, local custom Workers and canvas layout persistence are implemented. Authorized InferOps data, agent composition tools, complete view-sharing and cloud extension deployment remain pending. The native development runner's state/topology and lifecycle limitations remain. Upgrade and recovery cover the local wrapper only (#20's MVP slice): edited templates are flagged `needs-review` rather than merged, multi-customer upgrade PRs and cloud smoke checks are post-release (#75), and nothing copies production domain storage.
 
 Durable views ship as the bounded #34 slice (MVP scope in #1): the one private Kanban/Operate view persists through reload and local Worker restart, rejects stale expected revisions with a conflict, and is scoped to the workspace's build-access boundary. The design's export-with-binding-requirements and import-time rebind, independent view sharing, deployment-update recovery and supported schema migration are post-release. Import today validates content and mints a new definition without rebinding authority, and a view is shared only by sharing its workspace. Evidence is in [canvas architecture](inferops-canvas.md#resolving-a-board-reference).
 
@@ -89,7 +125,7 @@ Settings validation ([#19](https://github.com/factory-level/inferos/issues/19)) 
 
 ## Open Questions
 
-The generated wrapper copies its small operator helpers so it can pin a prior InferOS revision. A reviewed upgrade command must define helper-version compatibility and update policy. Complete runtime and cloud validation is still required before declaring the objective complete.
+The generated wrapper copies its small operator helpers so it can pin a prior InferOS revision. `upgrade` refreshes them as copied templates; a wrapper whose helpers predate the command runs the target's `scripts/consumer/upgrade.ts` from an InferOS checkout at the target revision. Whether edited helpers should block an upgrade rather than be flagged `needs-review` is open. Complete runtime and cloud validation is still required before declaring the objective complete.
 
 Capability configuration ([#67](https://github.com/factory-level/inferos/issues/67)) leaves these undecided. Each has a conservative interim choice in code, not a decision:
 

@@ -319,7 +319,13 @@ export async function diagnoseSettings(root: string, upstream: string, config: C
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "skills", "skills-upload", "skills-install", "setup", "dev", "intake", "config"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|skills|skills-upload|skills-install|setup|dev|intake|config");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "skills", "skills-upload", "skills-install", "setup", "dev", "intake", "config", "verify", "recover", "upgrade"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|skills|skills-upload|skills-install|setup|dev|intake|config|verify|recover|upgrade");
+  if (command === "verify" || command === "recover" || command === "upgrade") {
+    // Before the configuration check: these commands must answer for a broken wrapper too.
+    const { runMaintenance } = await import("./maintenance.ts");
+    process.exitCode = await runMaintenance(root, command, process.argv.slice(3));
+    return;
+  }
   if (command === "doctor") {
     const report = await diagnoseConsumer(root);
     console.log(JSON.stringify(report, null, 2));

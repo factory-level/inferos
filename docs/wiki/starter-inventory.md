@@ -38,7 +38,7 @@ The starter's README gives four steps, and its operator skill expands them into 
 | Branding in `/admin` | Site name, logo and accent colour without a redeploy | `pnpm profile:init` applies `styling` (site name and theme) to the local deployment. `/admin` stays available | Adapted |
 | Verify the live deployment | Sign-in, admin, Context, custom gatekeeper observation, Scheduler, logs | `pnpm local seed` and `pnpm local verify` (sign in, read the demo board through the gatekeeper, reach the approval queue) on the local stack. Evidence lives in [local verification evidence](local-verification-evidence.md) | Adapted for local only |
 | Close out, rollback | Sanitised operation record, Workers rollback | None. Cloud rollback is not applicable without a cloud deploy | Not adopted |
-| Pinned submodule upgrade | Record the gitlink, update it, review base configs, re-sync the `catalog:` entries, lint, check, deploy | `bootstrap.ts` refuses to change an existing wrapper's pin ("bootstrap does not perform upgrades"). Reviewed upgrade and recovery automation is #20 | Not adopted yet (backlog) |
+| Pinned submodule upgrade | Record the gitlink, update it, review base configs, re-sync the `catalog:` entries, lint, check, deploy | `pnpm inferos upgrade <sha>` plans, and with `--apply` moves, the gitlink. It runs the target's own planner, refreshes unedited InferOS files and flags edited ones `needs-review`; `pnpm inferos verify` follows it. Bootstrap still refuses to change a pin. There is no catalog re-sync or deploy | Adapted (local only; #20) |
 
 ## Why the differences
 
