@@ -160,7 +160,7 @@ When someone opens a blueprint link (`/blueprint/<id>`), they see the **Blueprin
    - Creates gatekeepers from the user's binding assignments (pipelined for performance).
    - Returns the new Overseer stub, and the UI redirects to the new gadget.
 
-The new gadget is independent from the blueprint source: it has its own storage, chat history, and bindings. There is currently no mechanism for automatic updates from the blueprint to existing instances (though the Yjs-based storage format could support this in the future).
+The new gadget is independent from the blueprint source: it has its own storage, chat history, and bindings. It is an *install* pinned to one version: `newGadgetFromBlueprint` takes optional `{version, kind}` (default: the current version), the workspace takes the kind that version was published as (stored as R2 custom metadata on the version's content), and `GadgetMetadata.installedFrom` records `{blueprintId, version, kind}`. Updating the blueprint never changes an existing install. `Overseer.upgradeInstall(version)` is the explicit step that moves one: it commits that version's files onto the gadget's head, keeps its bindings, and refuses a missing version or a different kind.
 
 ### Instantiation by the agent
 

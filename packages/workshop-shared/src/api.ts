@@ -879,10 +879,16 @@ export interface AuthenticatedApi extends RpcTarget {
    * keyed by binding name. Throws if any are missing or if accountId/modelId are invalid.
    *
    * The returned Overseer can be used immediately (pipelining-friendly).
+   *
+   * The new workspace is an install: it takes the kind the installed version was published as and
+   * records where it came from (`GadgetMetadata.installedFrom`). `options` pins a version (default:
+   * the current one) and states the kind the caller expects; either one not matching throws before
+   * anything is created. Later republishes never change the install (see `Overseer.upgradeInstall`).
    */
   newGadgetFromBlueprint(
     blueprintId: string,
-    bindings: Record<string, BlueprintBindingAssignment>
+    bindings: Record<string, BlueprintBindingAssignment>,
+    options?: BlueprintInstallOptions
   ): Promise<RpcStub<Overseer>>;
 
   /**
@@ -1733,6 +1739,9 @@ export type GadgetMetadata = {
    */
   kind?: WorkspaceKind;
 
+  /** Set when the workspace was installed from a blueprint: what it runs, at which version. */
+  installedFrom?: BlueprintInstall;
+
   // TODO:
   // - created / modified / activity times
   // - icon? thumbnail?
@@ -1751,6 +1760,28 @@ export const WORKSPACE_KINDS: readonly WorkspaceKind[] = ["app", "widget", "work
 
 /** The kind a workspace has when none was ever set. */
 export const DEFAULT_WORKSPACE_KIND: WorkspaceKind = "app";
+
+/**
+ * Where a blueprint install came from: the blueprint, the version it is pinned to, and the kind
+ * that version was published as. Recorded by `newGadgetFromBlueprint` and changed only by
+ * `Overseer.upgradeInstall`.
+ */
+export type BlueprintInstall = {
+  /** The installed blueprint's id. */
+  blueprintId: string;
+  /** The pinned `BlueprintMetadata.version`. */
+  version: number;
+  /** The kind the pinned version was published as. An upgrade must keep it. */
+  kind: WorkspaceKind;
+};
+
+/** Options for `AuthenticatedApi.newGadgetFromBlueprint`. */
+export type BlueprintInstallOptions = {
+  /** The version to install. Absent means the blueprint's current version. */
+  version?: number;
+  /** The kind the caller is installing for. A version of another kind is refused. */
+  kind?: WorkspaceKind;
+};
 
 /**
  * GadgetMetadata extended with timestamps. These are available when listing gadgets from the
@@ -2183,6 +2214,15 @@ export interface Overseer extends RpcTarget {
 
   /** Change the workspace kind (see `WorkspaceKind`). Build role only. */
   setKind(kind: WorkspaceKind): Promise<void>;
+
+  /**
+   * Re-pin this blueprint install (see `GadgetMetadata.installedFrom`) to `version` of the same
+   * blueprint, replacing its default gadget's code with that version's as a new commit. The
+   * explicit upgrade: nothing else moves an install. Bindings are kept as they are, and nothing is
+   * copied from the source. Throws if the workspace is not an install, the version doesn't exist,
+   * or that version's kind differs from the install's. Build role only.
+   */
+  upgradeInstall(version: number): Promise<void>;
 
   /** Pin or unpin this workspace in the user's list. */
   setPinned(pinned: boolean): Promise<void>;
@@ -4609,6 +4649,12 @@ export type BlueprintMetadata = {
    * created from this blueprint, and preserved when such a gadget is republished as a blueprint.
    */
   output?: BlueprintOutput;
+
+  /**
+   * The source workspace's kind when the current version was published. Absent means "app".
+   * Each version's kind is also stored with its content, which is what an install reads.
+   */
+  kind?: WorkspaceKind;
 
   /** Key = binding name. */
   bindings: Record<string, BlueprintBinding>;

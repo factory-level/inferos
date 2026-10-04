@@ -98,6 +98,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   deleteConsole: ws => ws.deleteConsole("console", "0"),
   setTitle: ws => ws.setTitle("Title"),
   setKind: ws => ws.setKind("workflow"),
+  upgradeInstall: ws => ws.upgradeInstall(2),
   setPinned: ws => ws.setPinned(true),
   deleteSelf: ws => ws.deleteSelf(),
   createGadget: ws => ws.createGadget("App"),

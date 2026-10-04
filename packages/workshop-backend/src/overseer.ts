@@ -8,7 +8,7 @@ import type { OperateConsole, OperateConsoleContent } from "@gadgets/workshop-sh
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -45,7 +45,7 @@ import WORKTREE_BINDING_TYPES from "./worktree-binding.txt";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import { chatChangeStatuses, foldProposedChanges, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
-import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
+import { blueprintSnapshotFiles, blueprintVersionMetadata, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from "./agent-spawner-binding";
@@ -1134,6 +1134,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // The workspace kind (see WorkspaceKind). Workspaces stored before kinds existed read the
       // default.
       kind: <WorkspaceKind>DEFAULT_WORKSPACE_KIND,
+
+      // Set if this workspace is a blueprint install (see GadgetMetadata.installedFrom).
+      installedFrom: <BlueprintInstall | undefined>undefined,
 
       // Whether this is its owner's operate session workspace (see OperateSession.getWorkspace()).
       // Set, never cleared, when the session first opens it; from then on every open is the
@@ -8381,7 +8384,8 @@ class OverseerImpl implements AgentHooks {
     if (codeSnapshot) {
       await this.env.BLUEPRINT_CONTENT.put(
         `${record.id}/${record.metadata.version}`,
-        codeSnapshot
+        codeSnapshot,
+        { customMetadata: blueprintVersionMetadata(record.metadata.kind) },
       );
     }
 
@@ -9176,7 +9180,7 @@ class OverseerImpl implements AgentHooks {
       throw new Error(`No such blueprint: ${blueprintId}. Use listBlueprints to see available ` +
           `blueprints.`);
     }
-    let code = await readBlueprintContent(this.env, blueprintId, kvRecord.metadata.version);
+    let code = (await readBlueprintContent(this.env, blueprintId, kvRecord.metadata.version))?.code;
     if (!code) {
       throw new Error(`The content of blueprint ${blueprintId} is missing; it cannot be ` +
           `instantiated.`);
@@ -10304,8 +10308,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * Initialize this workspace's default gadget from a blueprint's code snapshot. Called by
    * AuthenticatedApi.newGadgetFromBlueprint() after creating (and opening) the DO.
    */
-  async initializeFromBlueprint(code: Uint8Array, title: string, output?: BlueprintOutput)
-      : Promise<void> {
+  async initializeFromBlueprint(code: Uint8Array, title: string, install: BlueprintInstall,
+      output?: BlueprintOutput): Promise<void> {
     // Set the title. The default gadget (created below) inherits it.
     this.impl.storage.title.put(title);
 
@@ -10318,12 +10322,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // committed tree. An empty archive is refused rather than instantiated as a code-less
     // gadget: blueprints of such gadgets cannot be created (see createBlueprint), so one can
     // only arrive corrupted or hand-crafted.
-    let archiveDoc = new Y.Doc();
-    Y.applyUpdateV2(archiveDoc, code);
-    let files = new Map<string, string>();
-    for (let [file, content] of archiveDoc.getMap<Y.Text>()) {
-      files.set(file, content.toString());
-    }
+    let files = blueprintSnapshotFiles(code);
     if (files.size === 0) {
       throw new Error("This blueprint's code archive is empty.");
     }
@@ -10359,6 +10358,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       let record = this.impl.getGadgetRecord(this.impl.resolveGadgetId(undefined));
       record.output = output;
       this.impl.storage.gadgets.put(record);
+    }
+
+    // The install runs as the kind its version was published as, and remembers what it runs.
+    this.impl.storage.kind.put(install.kind);
+    this.impl.storage.installedFrom.put(install);
+    if (install.kind !== DEFAULT_WORKSPACE_KIND) {
+      await owner().updateKind(this.ctx.id.toString(), install.kind);
     }
 
     // Mark gadget as non-provisional (it has code, so it should appear in the gadget list).
@@ -10967,6 +10973,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       kind: this.impl.storage.kind.get(),
+      installedFrom: this.impl.storage.installedFrom.get(),
       totalCost: this.impl.storage.totalCost.get(),
       containsRestrictedData: this.impl.storage.containsRestrictedData.get(),
       ownerInvitesOnly: this.impl.storage.ownerInvitesOnly.get(),
@@ -10993,6 +11000,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       kind: this.impl.storage.kind.get(),
+      installedFrom: this.impl.storage.installedFrom.get(),
       totalCost: this.impl.storage.totalCost.get(),
       containsRestrictedData: this.impl.storage.containsRestrictedData.get(),
       ownerInvitesOnly: this.impl.storage.ownerInvitesOnly.get(),
@@ -11010,6 +11018,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let kindSubscriber = {
       update(value: WorkspaceKind) {
         metadata.kind = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+    let installedFromSubscriber = {
+      update(value: BlueprintInstall | undefined) {
+        metadata.installedFrom = value;
         callback(metadata).catch(unsubscribe);
       }
     };
@@ -11035,6 +11049,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.kind.unsubscribe(kindSubscriber);
+      this.impl.storage.installedFrom.unsubscribe(installedFromSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
       this.impl.storage.containsRestrictedData.unsubscribe(restrictedDataSubscriber);
       this.impl.storage.ownerInvitesOnly.unsubscribe(ownerInvitesOnlySubscriber);
@@ -11043,6 +11058,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.kind.subscribe(kindSubscriber);
+    this.impl.storage.installedFrom.subscribe(installedFromSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
     this.impl.storage.containsRestrictedData.subscribe(restrictedDataSubscriber);
     this.impl.storage.ownerInvitesOnly.subscribe(ownerInvitesOnlySubscriber);
@@ -11070,6 +11086,40 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async setKind(kind: WorkspaceKind): Promise<void> {
     this.impl.storage.kind.put(kind);
     await this.#owner.updateKind(this.impl.ctx.id.toString(), kind);
+  }
+
+  async upgradeInstall(version: number): Promise<void> {
+    let installed = this.impl.storage.installedFrom.get();
+    if (!installed) throw new Error("This workspace is not a blueprint install.");
+    let content = await readBlueprintContent(this.impl.env, installed.blueprintId, version);
+    if (!content) throw new Error(`Blueprint version ${version} not found.`);
+    if (content.kind !== installed.kind) {
+      throw new Error(`Blueprint version ${version} is a ${content.kind}, not a ` +
+          `${installed.kind}; an upgrade cannot change the install's kind.`);
+    }
+    let files = blueprintSnapshotFiles(content.code);
+    if (files.size === 0) throw new Error("This blueprint's code archive is empty.");
+
+    // The new version lands as an ordinary commit on the default gadget's head, so the code it
+    // replaces stays in history and bindings, storage and chats are untouched.
+    let gadgetId = this.impl.resolveGadgetId(undefined);
+    let head = this.impl.getGadgetRecord(gadgetId).commitId;
+    let commitId = await this.impl.gitStore.writeFilesAsCommit(files, {
+      parents: head !== undefined ? [head] : [],
+      author: commitIdentityForAuthor(await this.#getClientProfile()),
+      message: `Upgrade blueprint install to version ${version}`,
+      timestamp: new Date(),
+    });
+    // Re-read after the awaits: a concurrent upgrade or merge must not be overwritten.
+    let record = this.impl.getGadgetRecord(gadgetId);
+    if (record.commitId !== head ||
+        this.impl.storage.installedFrom.get()?.version !== installed.version) {
+      throw new Error("The workspace changed during the upgrade; please retry.");
+    }
+    record.commitId = commitId;
+    this.impl.storage.gadgets.put(record);
+    this.impl.storage.installedFrom.put({...installed, version});
+    this.impl.bumpVersion([gadgetId]);
   }
 
   async setPinned(pinned: boolean): Promise<void> {
@@ -12289,6 +12339,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         record.commitId = commitId;
         delete record.codeVersion;
         record.metadata.version++;
+        record.metadata.kind = this.impl.storage.kind.get();
         codeSnapshot = await this.impl.snapshotCode(commitId);
       }
     }
@@ -12573,6 +12624,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       kind: this.impl.storage.kind.get(),
+      installedFrom: this.impl.storage.installedFrom.get(),
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
@@ -12591,6 +12643,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       kind: this.impl.storage.kind.get(),
+      installedFrom: this.impl.storage.installedFrom.get(),
       owner,
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
@@ -12655,6 +12708,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
   async setKind(_kind: WorkspaceKind): Promise<void> { this.#deny(); }
+  async upgradeInstall(_version: number): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
@@ -12933,6 +12987,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
   async setKind(_kind: WorkspaceKind): Promise<void> { this.#deny(); }
+  async upgradeInstall(_version: number): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
@@ -13235,6 +13290,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     if (gadget.output) {
       metadata.output = gadget.output;
     }
+    metadata.kind = this.impl.storage.kind.get();
 
     let record: BlueprintGadgetRecord = {
       id,
