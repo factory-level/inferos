@@ -20,6 +20,7 @@ import { ConsoleWidgetView } from './ConsoleWidgetView'
 import { viewScreens } from './consoles'
 import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from './consoles'
 import { FlowPage } from './FlowPage'
+import { HandoverInbox } from './HandoverInbox'
 import { OperateChatPanel } from './OperateChatPanel'
 import { SessionApprovals } from './SessionApprovals'
 import { SessionBoard } from './SessionBoard'
@@ -123,6 +124,7 @@ export const OperateSessionPage = () => {
     {!configuring && <SessionApprovals session={sessionWorkspace}
       screenWorkspaceId={state.flow?.workspaceId ?? run?.workspaceId ?? (state.focus?.type === 'screen' ? state.focus.workspaceId : null)}
       reviewing={state.reviewing} lastOutcome={state.lastApprovalOutcome} onEvent={operate.dispatch} />}
+    {!configuring && <HandoverInbox handovers={state.handovers} workspace={sessionWorkspace} onEvent={operate.dispatch} />}
     <div className={`flex min-h-0 flex-1 ${home ? 'flex-col overflow-y-auto' : 'overflow-hidden'}`}>
       <div hidden={centered} className={centered ? 'hidden' : home
         ? 'mx-auto w-full max-w-6xl shrink-0 px-5 pb-4 pt-6 sm:px-8'
