@@ -1,7 +1,8 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, WorkspaceKind, DEFAULT_WORKSPACE_KIND } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError } from '@gadgets/workshop-shared/api';
+import { consoleEventMismatch } from '@gadgets/workshop-shared/operate-console';
 import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -663,7 +664,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       let id = await this.#user.claimOperateSessionWorkspace(
           this.overseers.newUniqueId().toString());
       return this.#openGadgetInternal(id, undefined, undefined, true);
-    });
+    }, id => this.#openGadgetInternal(id));
   }
 }
 
@@ -672,8 +673,31 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 @validateRpc()
 class OperateSessionImpl extends RpcTarget implements OperateSession {
   constructor(private user: () => DurableObjectStub<UserDurableObject>,
-      private openWorkspace: () => Promise<NativeRpcStub<Overseer>>) {
+      private openWorkspace: () => Promise<NativeRpcStub<Overseer>>,
+      private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>) {
     super();
+  }
+
+  // The reducer is pure, so it can't know whether a view or screen still belongs to the console a
+  // session copied in. Console navigation is checked here against the console's current definition,
+  // read through the caller's own role in its workspace (build or use), so a stale or forged event
+  // can't point the page outside the console. The operate agent can't send these events.
+  async #checkConsoleEvent(event: OperateEvent): Promise<void> {
+    if (event.type !== "openConsole" && event.type !== "openView" &&
+        !(event.type === "showScreen" && event.screenId !== null)) return;
+    let run = event.type === "openConsole" ? null : (await this.user().getOperatePage()).state.console;
+    let target = event.type === "openConsole" ? event : run;
+    if (!target) return;  // No console is open: the reducer refuses the event.
+    let saved;
+    try {
+      using workspace = await this.openConsoleWorkspace(target.workspaceId);
+      saved = (await workspace.listConsoles()).find(candidate => candidate.id === target.consoleId);
+    } catch {
+      saved = undefined;
+    }
+    if (!saved || consoleEventMismatch(saved, run, event) !== null) {
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.consoleChanged);
+    }
   }
 
   async subscribe(subscriber: RpcStub<(update: OperateSessionUpdate) => void>)
@@ -682,6 +706,7 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
   }
 
   async dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot> {
+    await this.#checkConsoleEvent(event);
     return this.user().dispatchOperateEvent(event, expectedSeq, "person");
   }
 

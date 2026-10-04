@@ -2,7 +2,9 @@ import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/
 import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
+import { WorkspaceConsoleStore } from "./console-store";
 import { WorkspaceFlowStore } from "./flow-store";
+import type { OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -1197,6 +1199,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       canvases: collection<CanvasDefinition>()({ primaryKey: "id" }),
       // Authored flows: ordered lists of this workspace's canvases (see flow-store.ts).
       flows: collection<OperateFlow>()({ primaryKey: "id" }),
+      // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
+      consoles: collection<OperateConsole>()({ primaryKey: "id" }),
       // READ-ONLY LEGACY: the pre-git-storage incremental code log, tightly-packed from version 1
       // (there's no entry for version 0, the starting empty state). Nothing writes it anymore --
       // mainline code lives in `gitObjects` as commits -- and it is read only by the git-storage
@@ -10856,6 +10860,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async deleteFlow(id: string, expectedRevision: string): Promise<void> { this.#flowStore().delete(id, expectedRevision); }
 
+  #consoleStore(): WorkspaceConsoleStore {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
+  }
+
+  async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
+  async createConsole(content: OperateConsoleContent): Promise<OperateConsole> { return this.#consoleStore().create(content); }
+  async replaceConsole(id: string, expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole> {
+    return this.#consoleStore().replace(id, expectedRevision, content);
+  }
+  async deleteConsole(id: string, expectedRevision: string): Promise<void> { this.#consoleStore().delete(id, expectedRevision); }
+
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,
@@ -12457,7 +12473,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // interface but permits only the handful of methods needed to render and interact with the
 // gadgets' deployed UIs: getMetadata() (restricted to id/title/kind/owner), a restricted
 // subscribeToMetadata(), subscribeToPresence(), subscribeToWorkpieces(), and getGadget()
-// (returning a restricted, mainline-only UseGadgetClientInterface). Presence includes active
+// (returning a restricted, mainline-only UseGadgetClientInterface), plus a read-only
+// listConsoles() so an operator reaches their role console without Build. Presence includes active
 // viewers' names, profile IDs, and roles. Every other
 // method throws "Unauthorized", with a few exceptions: subscribeToConsoleLogs() and
 // subscribeToActions() return inert subscriptions (they never deliver data), and
@@ -12480,6 +12497,15 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // An operator granted "use" reaches the consoles of the workspace without Build, read-only: a
+  // console is references and presentation, and grants nothing. Writes stay build-only.
+  async listConsoles(): Promise<OperateConsole[]> {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env).list();
+  }
+  async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
+  async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
+  async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
 
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
@@ -12814,6 +12840,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async listCanvases(): Promise<CanvasDefinition[]> { return this.owner.listCanvases(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.owner.getCanvas(id); }
   async listFlows(): Promise<OperateFlow[]> { return this.owner.listFlows(); }
+  async listConsoles(): Promise<OperateConsole[]> { return this.owner.listConsoles(); }
 
   // --- Allowed: the chat ---
 
@@ -12916,6 +12943,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent)
       : Promise<OperateFlow> { this.#deny(); }
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
+  async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
+      : Promise<OperateConsole> { this.#deny(); }
+  async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
