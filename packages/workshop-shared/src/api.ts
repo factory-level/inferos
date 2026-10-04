@@ -469,6 +469,20 @@ export interface OperateSession extends RpcTarget {
       : Promise<OperateSubjectAuditPage>;
 
   /**
+   * Presence on the session's subject: joins the caller to everyone who has the same board
+   * reference open, with the issue they have open over it, and delivers that roster (including the
+   * caller) to `subscriber`, then each change. The caller stays present until the returned stub is
+   * disposed or the connection drops; a client re-subscribes when its board or issue changes.
+   *
+   * Only people whose own access reaches the subject see or appear in its roster: like `openBoard`,
+   * the shown board's workspace, opened as the caller, must hold a connection to exactly that
+   * reference, or this rejects with `boardUnavailable`. It rejects with `invalidEvent` when no
+   * board is shown. Access is checked when subscribing, not again while it lasts.
+   */
+  subscribeToSubjectPresence(subscriber: RpcStub<PresenceSubscriber<OperateSubjectParticipant>>)
+      : Promise<RpcStub<{}>>;
+
+  /**
    * The owner-only workspace behind the session, where its operate chat runs. It is created on first
    * call and is never listed by `listGadgets()`.
    *
@@ -5016,13 +5030,24 @@ export type PresenceParticipant = {
 
 /**
  * `init` delivers the full roster once on subscribe.
- * `add`/`remove` (keyed by `key`) report changes thereafter.
+ * `add`/`remove` (keyed by `key`) report changes thereafter; an `add` for a key already present
+ * replaces that participant. `P` is the roster's participant: a workspace's `PresenceParticipant`,
+ * or an operate subject's `OperateSubjectParticipant`.
  */
-export interface PresenceSubscriber {
-  init(participants: PresenceParticipant[]): void;
-  add(participant: PresenceParticipant): void;
+export interface PresenceSubscriber<P extends { key: string } = PresenceParticipant> {
+  init(participants: P[]): void;
+  add(participant: P): void;
   remove(key: string): void;
 }
+
+/** One person who has an operate subject open (`OperateSession.subscribeToSubjectPresence`). */
+export type OperateSubjectParticipant = {
+  /** Opaque key matching this participant across add/remove events. */
+  key: string;
+  user: AiChatAuthorInfo;
+  /** The issue they have open over the board, or null for the board itself. */
+  issueId: string | null;
+};
 
 /** Describes how one user came to have collaborator access. */
 export type PermissionEdge = {

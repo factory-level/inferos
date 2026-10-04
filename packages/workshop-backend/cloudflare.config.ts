@@ -37,7 +37,8 @@ export default defineGadgetsWorker({
     // local development. Add `remote: true` to use a remote browser running on Cloudflare instead.
     BROWSER: bindings.browser(),
 
-    // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, ...)
+    // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin,
+    // UserDirectoryDurableObject, SubjectPresenceDurableObject)
     // are reached via ctx.exports and need no explicit durable_objects binding.
     BLUEPRINTS: bindings.kv(),
     AVATARS: bindings.kv(),
@@ -74,4 +75,6 @@ export const migrations: DurableObjectMigration[] = [
   // login back to the waiting browser.
   { tag: "v2", new_sqlite_classes: ["PendingLogin"] },
   { tag: "v3", new_sqlite_classes: ["UserDirectoryDurableObject"] },
+  // Live presence on operate subjects: one in-memory roster per subject reference.
+  { tag: "v4", new_sqlite_classes: ["SubjectPresenceDurableObject"] },
 ];
