@@ -17,6 +17,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // Sibling of this package, whether that's `packages/` in this repo or `public/packages/` when a repo
 // vendors this one as a submodule.
 const WORKSHOP_DIR = resolve(HERE, "../../workshop-backend");
+const ROUTER_DIR = resolve(HERE, "../../router");
+
+/** A minimal frontend build the router serves as its `ASSETS` (see the router option below). */
+export const ROUTER_ASSETS_DIR = resolve(HERE, "../fixtures/router-assets");
 
 // wrangler treats an inline config as living at `<root>/wrangler.jsonc`, so it loads that directory's
 // .dev.vars (or .env) -- and lets those values override the config's own vars of the same name. A
@@ -45,6 +49,7 @@ const WORKER_CONFIG = z.looseObject({
   name: z.string(),
   main: z.string(),
   account_id: z.string().optional(),
+  assets: z.looseObject({ directory: z.string().optional() }).optional(),
   ai: z.looseObject({
     binding: z.string(),
     remote: z.boolean().optional(),
@@ -122,6 +127,22 @@ function workshopConfig(
   return config;
 }
 
+// The production router in front of the Workshop and the gatekeepers, as a deployment runs it: the
+// checked-in config's assets stanza (SPA fallback and worker-first paths) over a fixture build, its
+// `WORKSHOP_BACKEND` binding, and one `GATEKEEPER_<binding>` per gatekeeper -- the bindings the
+// deploy service adds from the release manifest. A gatekeeper's router binding targets its default
+// (HTTP) export, unlike the backend's `GatekeeperVendor` entrypoint.
+function routerConfig(gatekeepers: { binding: string; name: string }[], assetsDirectory: string)
+    : WorkerConfig {
+  const config = readWorkerConfig(ROUTER_DIR);
+  config.assets = { ...config.assets, directory: assetsDirectory };
+  config.services = [
+    ...(config.services ?? []),
+    ...gatekeepers.map(gk => ({ binding: `GATEKEEPER_${gk.binding}`, service: gk.name })),
+  ];
+  return config;
+}
+
 export type Harness = {
   server: TestHarness;
   /** Base URL of the running server, e.g. http://127.0.0.1:1234. */
@@ -143,6 +164,12 @@ export async function startHarness(opts: {
   gatekeepers: GatekeeperSpec[];
   patchWorkshop?: (config: WorkerConfig) => void;
   enableGadgetExecution?: boolean;
+  /**
+   * Boot the production router as the primary Worker, so `url` -- and every request a test sends to
+   * it, WebSocket included -- enters through the router exactly as a deployment's public origin
+   * does. `assetsDirectory` stands in for the frontend build (default: {@link ROUTER_ASSETS_DIR}).
+   */
+  router?: { assetsDirectory?: string };
 }): Promise<Harness> {
   // Each gatekeeper's config is read (and patched) exactly once; the service binding below points at
   // the name the booted worker will actually carry, patches included.
@@ -155,8 +182,12 @@ export async function startHarness(opts: {
   mkdirSync(HARNESS_ROOT, { recursive: true });
   const server = createTestHarness({
     root: HARNESS_ROOT,
-    // workshop-backend is primary, so unrouted requests (e.g. /api) go to it.
+    // The first Worker is primary, so unrouted requests (e.g. /api) go to it: the router when one
+    // was asked for, the Workshop otherwise.
     workers: [
+      ...(opts.router
+        ? [{ config: routerConfig(gatekeepers, opts.router.assetsDirectory ?? ROUTER_ASSETS_DIR) }]
+        : []),
       { config: workshopConfig(gatekeepers, opts.enableGadgetExecution ?? false,
           opts.patchWorkshop) },
       ...gatekeepers.map(({ config }) => ({ config })),

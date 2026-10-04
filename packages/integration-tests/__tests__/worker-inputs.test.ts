@@ -26,6 +26,8 @@ it.each([
   "packages/integration-tests/fixtures/gatekeeper-test/src/test-gatekeeper.ts",
   "custom-gatekeepers/gatekeeper-inferops/wrangler.jsonc",
   "custom-gatekeepers/gatekeeper-inferops/src/inferops.ts",
+  "packages/router/src/index.ts",
+  "packages/router/wrangler.jsonc",
   "pnpm-lock.yaml",
 ])("treats %s as a Worker input", path => {
   expect(isWorkerInput(inWorkspace(path))).toBe(true);
@@ -71,6 +73,7 @@ it("watches a root covering every entry in the table", () => {
     "packages/integration-tests/fixtures/gatekeeper-test",
     "custom-gatekeepers/gatekeeper-inferops",
     "custom-gatekeepers/gatekeeper-inferops/src",
+    "packages/router",
     "tsconfig.json",
     "pnpm-lock.yaml",
   ].map(inWorkspace);

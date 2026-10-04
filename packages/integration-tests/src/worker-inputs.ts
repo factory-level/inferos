@@ -87,6 +87,8 @@ const WORKER_INPUTS: WorkerInput[] = [
   // `src/generated` is build output (the configurator UI), and `.wrangler` the validated tree.
   { kind: "dir", path: "custom-gatekeepers/gatekeeper-inferops", excludeDirs: [...BUILT, "src", ".wrangler"] },
   { kind: "dir", path: "custom-gatekeepers/gatekeeper-inferops/src", excludeDirs: ["generated"] },
+  // The production router the router-parity suite boots in front of the Workshop.
+  { kind: "dir", path: "packages/router", excludeDirs: [...BUILT, ".wrangler"] },
   // Extended by every package above, so it controls their emit and their type checking.
   { kind: "file", path: "tsconfig.json" },
   { kind: "file", path: "pnpm-lock.yaml" },

@@ -1,6 +1,6 @@
 ---
 title: Local development and Cloudflare parity
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Local development and Cloudflare parity
@@ -49,21 +49,84 @@ Use synthetic settings and fixture accounts. A general upgrade, migration rollba
 
 ## Parity matrix
 
-| Capability | Local evidence available | Cloud-only or unresolved evidence |
-| --- | --- | --- |
-| Workers JavaScript runtime | Wrangler uses workerd through local tooling | Deployed limits, placement and release configuration |
-| Durable Objects | Local state and alarms can be exercised | Distributed production behavior, operational recovery and deployment migrations |
-| KV/R2 | Local simulated storage and seeded objects | Production consistency, permissions and service behavior |
-| Service bindings / RPC | Multi-worker calls with real contracts | Correct deployed names, entrypoints and account wiring |
-| Router and frontend | Supported pinned run-local derives asset ownership, ASSETS binding and route precedence from the production router; clean-pin browser proofs exist | Older pins lack the fix; deployed origin/auth/bindings still require cloud proof |
-| External InferOps | The InferOps gatekeeper's mock board is read over the real RPC and gatekeeper path (`pnpm local verify`, and the harness suite with external traffic intercepted); a live instance via `INFEROPS_BASE_URL` | Live auth, domain version and network failures |
-| OAuth/handoff | State, nonce, single-use and staged reconnect tests | Provider redirect registration, real domains and token grants |
-| Cloudflare Access | Controlled auth fixtures | Real issuer/audience and Access policy |
-| Workers AI | Explicit remote binding mode | No fully local model execution through the Workers AI binding |
-| ChatGPT plan inference | Feasibility research only; no supported subscription inference flow proven | Personal Workers hosting eligibility remains unverified |
-| Logs/traces | Local event assertions and redaction checks | Deployed trace lifecycle, dashboard ingestion and retention |
+Each capability is placed in the column that describes how local development provides it. **Emulated** means the real code runs under the local runtime (workerd through Wrangler and Miniflare) with simulated platform services; **mocked** means a fake stands in for an external system; **remote** means local development reaches a real Cloudflare or provider resource; **cloud-only** is what only a deployment can establish. A mocked provider succeeding never shows that a real provider, plan or subscription supports the flow.
+
+| Capability | Emulated | Mocked | Remote | Cloud-only |
+| --- | --- | --- | --- | --- |
+| Workers runtime | workerd runs every Worker's real bundle | — | — | Deployed limits, placement, release bundling |
+| Router and frontend assets | Production router config: `ASSETS`, SPA fallback, worker-first paths | A fixture build stands in for `workshop-frontend/dist` in tests | — | Real hostname, TLS, the release's asset upload |
+| `/api` Cap'n Web over WebSocket | Upgrade through the router to the Workshop | — | — | Edge WebSocket behaviour behind Access |
+| Service bindings and RPC | Router → backend → gatekeeper bindings, `GatekeeperVendor` entrypoints | — | — | Deployed Worker names, preview ids, account wiring |
+| Durable Objects | Local SQLite-backed state, alarms, restart persistence | — | — | Distributed placement, migrations on a live namespace, recovery |
+| KV / R2 | Local simulated storage | — | — | Production consistency and permissions |
+| InferOps / InferLab | — | `src/inferops-fake.ts` (tests); the gatekeeper's built-in demo data (`pnpm local`) | A live InferOps through `INFEROPS_BASE_URL` (`inferops-live.test.ts`, opt-in) | Live auth domains and network failures |
+| OAuth and connect handoff | State, nonce, single-use ticket, staged reconnect, `redirect_uri` from `BASE_URL` | Provider `/authorize` and token endpoints | — | Provider redirect registration, real domains and grants |
+| Cloudflare Access | — | `verifyCfAccessJwt` with a stub verifier (unit tests); the harness runs without Access | — | Real issuer, audience, policy and service tokens |
+| Workers AI | — | The scripted model (`pnpm dev:mock-model`) | `--use-workers-ai-binding` adds the `WORKERS_AI` binding, which reaches the account | No fully local Workers AI execution |
+| ChatGPT plan inference | — | — | Feasibility only | Personal Workers hosting eligibility remains unverified |
+| Logs and traces | Captured runtime logs and redaction assertions | — | — | Trace lifecycle, dashboard ingestion, retention |
+| Wrapper gatekeepers | Discovered and routed for local development | — | — | Release packaging (not implemented) |
+
+### Local evidence
+
+Every local row above is evidenced by a test that runs without a network: the harness fails on any external request that no fake answers.
+
+| Evidence | What it establishes |
+| --- | --- |
+| `packages/integration-tests/__tests__/router-parity.test.ts` | The production router as the primary Worker in front of the Workshop and the InferOps gatekeeper, over real HTTP: the app shell, a static asset and the SPA fallback (including `/connect/handoff`); `/api` worker-first; a `/gatekeeper/inferops/*` path reaching the gatekeeper while an unbound one falls through to the shell; the Cap'n Web WebSocket through the router; the InferLab connect flow through the router, with `redirect_uri` on the public origin; a board read recorded as an observation; one approval applied once and a second refused; a restart of all three Workers with the account, credentials, observation and a held proposal kept, the held proposal then applied once; and a reconnect after the restart. |
+| `packages/integration-tests/__tests__/inferops-isolation.test.ts` | Stale revision, denied approval (permission refused at apply), revoked session and reconnect, a disconnected account's bindings failing, lost write responses replayed rather than reapplied, and the deployment switches across a gatekeeper reload. |
+| `packages/integration-tests/__tests__/workshop-canvas.test.ts` | Durable views kept across a Workshop restart. |
+| `packages/integration-tests/__tests__/connect-handoff.test.ts` | The connect handoff's ticket, nonce and single use. |
+| `packages/integration-tests/__tests__/local-lifecycle-verify.test.ts` | The `pnpm local seed`/`verify` operators against the real Workers, offline. |
+| `packages/router/__tests__/router.test.ts` | Routing rules and config integrity with stub bindings. |
+| `scripts/consumer/gatekeepers.test.ts` | Wrapper gatekeeper discovery and router wiring with recording stubs. |
+
+A wrapper's own gatekeeper is not booted by the harness: it needs a generated wrapper checkout and its build, which the repository has no fixture for. It is bound and routed by the same `GATEKEEPER_<NAME>` rule `router-parity.test.ts` exercises.
+
+### Runtime and configuration versions
+
+Recorded for the evidence above on 2026-10-03, at the lockfile of this repository:
+
+| Component | Version |
+| --- | --- |
+| Wrangler | 4.138.0 |
+| workerd | 1.20260921.1 |
+| Miniflare | 5.20260921.1-alpha |
+| `compatibility_date` (every Worker, from `scripts/worker-config.ts`) | 2026-09-04 |
+| Node.js | 24.14.0 |
+| pnpm | 11.17.0 |
+| Vitest | 4.1.11 |
+
+Re-record these when the lockfile or `COMPATIBILITY_DATE` changes and the evidence is rerun.
 
 Cloudflare’s [development binding table](https://developers.cloudflare.com/workers/local-development/bindings-per-env/) distinguishes simulated local bindings from remote support; remote Durable Objects are not simply a direct substitute for local ones. Remote modes can reach actual account resources. [Local data guidance](https://developers.cloudflare.com/workers/local-development/local-data/) describes persistence and seeding; seed Durable Objects through their application API. [Service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/) also retain invocation lifecycle constraints, so await calls rather than treating them as detached work.
+
+## Cloud smoke recipe
+
+`scripts/preview/smoke.ts` checks an already deployed instance from outside. It is a recipe, not part of CI, and it has **not been run against Cloudflare**; nothing in this repository runs it. It never deploys, creates, changes or deletes anything: every request is a GET or a WebSocket handshake closed at once, and it calls neither the Cloudflare API nor Wrangler.
+
+1. Deploy a disposable instance, for example a preview with `node scripts/preview/preview.ts deploy` (see that script's header for the required account and Access settings), and note its router URL.
+2. If the instance sits behind Cloudflare Access, create an Access service token allowed by its policy and export `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
+3. Optionally, start a connect flow in the Workshop for each OAuth gatekeeper to check, and copy the popup's URL before signing in.
+4. Run:
+
+   ```bash
+   node scripts/preview/smoke.ts https://<preview>-router.<subdomain>.workers.dev \
+     [--gatekeeper inferops]... [--connect-url <popup URL>]... [--timeout 15000]
+   ```
+
+5. Tear the instance down with `node scripts/preview/preview.ts delete`.
+
+It prints one JSON report (`ok`, `baseUrl`, `accessServiceToken`, `checks[]`) and exits 0 when every check passed, 1 when one failed and 2 on a usage error:
+
+| Check | Passes when |
+| --- | --- |
+| `app-shell` | `/` is the HTML app shell and a client route returns the same shell (the SPA fallback). |
+| `api` | A WebSocket handshake to `/api`, sent with the instance's own `Origin`, is upgraded, or is refused by an auth challenge (the Workshop's Access refusal, an Access login redirect, a 401 or a 403); a 404 or a 5xx fails. Only an upgrade or the Workshop's own refusal proves the backend was reached. |
+| `gatekeeper:<name>` | `/gatekeeper/<name>/` answers from the gatekeeper: not the app shell (an unbound route falls through to it) and not a 502–504. Defaults to every gatekeeper package this checkout deploys. |
+| `oauth:<name>` | For each `--connect-url`, the provider redirect's `redirect_uri` is on the base URL's origin under `/gatekeeper/<name>/`. Skipped without a connect URL. Fetching it starts one sign-in attempt, which expires unused; the report never prints the URL, since a connect URL is a bearer capability. |
+
+Without a service token, every path but `/api` is expected to be challenged by Access, and those checks fail saying so. `scripts/preview/smoke.test.ts` covers the checks against a local fake deployment.
 
 ## Generated consuming layout
 
@@ -86,4 +149,6 @@ These paths are generated by `scripts/consumer/bootstrap.ts`. Reruns preserve wr
 
 ## Verification contract
 
-Fixture verification should prove: clean clone → config generation → startup → authenticated RPC → board read → proposed transition → approval → authoritative refresh → restart persistence → shutdown. `pnpm local start|seed|verify|stop` covers startup through the proposed transition (one pending move) and shutdown for the in-repo stack, and the harness suite `local-lifecycle-verify.test.ts` fails on an unexpected external request. Approval, authoritative refresh, restart persistence under test, a second wrapper, stale revision, denied approval and revoked capability are still manual or untested. Record runtime versions, elapsed startup, request counts and failure evidence. Cloud smoke tests use explicitly provisioned disposable resources and report separately from local results.
+Fixture verification should prove: clean clone → config generation → startup → authenticated RPC → board read → proposed transition → approval → authoritative refresh → restart persistence → shutdown. `pnpm local start|seed|verify|stop` covers startup through the proposed transition (one pending move) and shutdown for the in-repo stack, and `local-lifecycle-verify.test.ts` runs its operators offline.
+
+Automated in the harness, through the production router (`router-parity.test.ts`) or directly (`inferops-isolation.test.ts`): authenticated RPC, the board read as an observation, approval applied once with a second approval refused, the authoritative refresh (InferOps' issue state and revision after apply), restart persistence of the Workshop's and the gatekeeper's Durable Objects with a held approval applied after the restart, reconnect, stale revision, denied approval, a revoked session and a disconnected account (the revoked capability). A second wrapper side by side is covered for discovery and routing by `scripts/consumer/gatekeepers.test.ts`, not by booting two stacks. Still manual: a clean clone through `pnpm local start` timed end to end, and anything in the cloud-only column. Cloud smoke runs use explicitly provisioned disposable resources and report separately from local results.

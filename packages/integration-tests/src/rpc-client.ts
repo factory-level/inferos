@@ -139,6 +139,53 @@ export async function listConnectedAccounts(
   return accounts;
 }
 
+const pause = (ms: number) => new Promise(done => setTimeout(done, ms));
+
+/**
+ * Wait until a reloaded server answers steadily. Right after `server.update` the runtime can still
+ * be restarting, so a WebSocket opened at once is sometimes dropped mid-test ("WebSocket connection
+ * failed"). Two fresh connections in a row must each answer pings spread over about a second; any
+ * failure starts the count again.
+ */
+export async function settled(url: URL): Promise<void> {
+  let last: unknown;
+  let steady = 0;
+  for (let attempt = 0; attempt < 40 && steady < 2; attempt++) {
+    const api = connect(url);
+    try {
+      for (let ping = 0; ping < 4; ping++) {
+        await api.ping();
+        await pause(250);
+      }
+      steady++;
+    } catch (error) {
+      last = error;
+      steady = 0;
+      await pause(500);
+    } finally {
+      api[Symbol.dispose]();
+    }
+  }
+  if (steady < 2) throw new Error(`The reloaded server never settled: ${String(last)}`);
+}
+
+/**
+ * Run `phase` over fresh connections until one survives. Even a settled server can drop a socket
+ * opened just after a reload, which surfaces as "WebSocket connection failed." (thrown, or as a
+ * caught failure's message). Only side-effect-free phases may be repeated; any other failure is the
+ * test's real result. `url` is read again before each retry, since a reload can move the server.
+ */
+export async function overFreshConnection<T>(url: () => URL, phase: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await phase();
+    } catch (error) {
+      if (attempt >= 3 || !String(error).includes("WebSocket connection failed")) throw error;
+      await settled(url());
+    }
+  }
+}
+
 /** Wait until chat `chatId` exists with no agent running. */
 export function waitForIdleChat(ws: RpcStub<Overseer>, chatId: number): Promise<true> {
   return waitFor(`chat ${chatId} to go idle`, async () => {
