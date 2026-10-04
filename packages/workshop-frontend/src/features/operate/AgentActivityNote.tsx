@@ -26,6 +26,10 @@ export const describeAgentEvent = (event: OperateEvent, titleOf: (ref: OperateRe
     case 'closeBoard': return 'closed the board'
     case 'openIssue': return 'opened an issue'
     case 'closeIssue': return 'went back to the board'
+    // The kernel records handovers and the person dismisses them; the agent sends neither.
+    case 'handoverReceived': return `received a handover from ${event.handover.from.name}`
+    case 'handoverSent': return `handed the board to ${event.handover.to.name}`
+    case 'dismissHandover': return 'dismissed a handover'
   }
 }
 

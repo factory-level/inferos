@@ -3,7 +3,7 @@ import { openAiCommand } from './openai-plugin.js';
 import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
 import { localApiModels } from './local-api-models.js';
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind } from '@gadgets/workshop-shared/api';
-import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
+import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -1033,10 +1033,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   // The stored page, with any field added to OperatePageState since it was stored filled in from
-  // the initial page, so a session that predates a field reads as if it always had it.
+  // the initial page, so a session that predates a field reads as if it always had it. A subject
+  // stored before it was derived from the board is re-derived the same way.
   #operatePage(): OperateSessionSnapshot {
     let { seq, state } = this.storage.operatePage.get();
-    return { seq, state: { ...INITIAL_OPERATE_PAGE, ...state } };
+    let filled = { ...INITIAL_OPERATE_PAGE, ...state };
+    return { seq, state: { ...filled, subject: filled.board?.boardRef ?? null } };
   }
 
   /** The session's current page. */
@@ -1065,6 +1067,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw err;
     }
     let record: OperateEventRecord = { seq: current.seq + 1, event, actor, at: new Date() };
+    let subject = operateEventSubject(event, current.state, state);
+    if (subject !== null) record.subject = subject;
     this.storage.operateEvents.put(record);
     this.storage.operatePage.put({ seq: record.seq, state, record });
     return { seq: record.seq, state };
@@ -1107,6 +1111,27 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       startAfter: operateEventKey(Math.max(0, Math.floor(afterSeq))),
       limit: count,
     })];
+  }
+
+  /**
+   * One page of the per-subject audit's session half (see OperateSession.listSubjectAudit): the
+   * events recorded about `subject` among the up to 200 entries before `beforeSeq` (or the newest
+   * when null), newest first, and the seq to continue below, or null at the start of the log. A
+   * page may hold no matches while older entries remain.
+   */
+  async listOperateSubjectEvents(subject: string, beforeSeq: number | null)
+      : Promise<{ events: OperateEventRecord[]; nextBeforeSeq: number | null }> {
+    let scanned = [...this.storage.operateEvents.list({
+      end: beforeSeq === null ? undefined : operateEventKey(Math.max(0, Math.floor(beforeSeq))),
+      reverse: true,
+      limit: MAX_OPERATE_EVENTS_PAGE + 1,
+    })];
+    let more = scanned.length > MAX_OPERATE_EVENTS_PAGE;
+    if (more) scanned.pop();
+    return {
+      events: scanned.filter(record => record.subject === subject),
+      nextBeforeSeq: more ? scanned.at(-1)!.seq : null,
+    };
   }
 
   async updateTitle(gadgetId: string, title: string) {

@@ -246,7 +246,7 @@ Still open:
 - Whether InferOS adopts declarative chat widgets (template widgets like InferOps `widget-kit` or ChatKit) alongside gadget widgets, or renders only gadget and InferOps widgets in the conversation. If it does, decide whether one template format serves both InferOps and InferOS.
 - The state machine definition format: a small native statechart JSON, or an existing format such as XState's, validated like canvases.
 
-- Which subject types come first, and where their authoritative data lives (InferOps, or another system behind a gatekeeper).
+- Which subject types come first, and where their authoritative data lives (InferOps, or another system behind a gatekeeper). The first is the InferOps board (#64), read through the InferOps gatekeeper.
 - How roles map from the subject's system into Operate (per space, per subject, or both), and how that mapping selects consoles.
 - Which model providers a deployment may use with regulated data, and how a space declares that it holds it.
 

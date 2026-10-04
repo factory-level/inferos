@@ -29,7 +29,9 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
-import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from "./operate-session.js";
+import type {
+  OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
+} from "./operate-session.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
@@ -427,13 +429,44 @@ export interface OperateSession extends RpcTarget {
    * `consoleChanged` when a console event (`openConsole`, `openView`, `showScreen`) names a view or
    * screen outside the console's current definition, read through the caller's own access to the
    * console's workspace, and with `boardUnavailable` when an `openBoard` names a board the named
-   * workspace, opened with the caller's own access, holds no connection to. Either way nothing
+   * workspace, opened with the caller's own access, holds no connection to. The kernel-only
+   * `handoverReceived` and `handoverSent` are refused with `invalidEvent`. Either way nothing
    * changes.
    */
   dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
+
+  /**
+   * Hands the session's subject (the shown board, and its open issue) with `note` to the person
+   * whose user id is `recipientId`: appends `handoverReceived` to their session, then
+   * `handoverSent` to this one, and returns the handover. It shares a reference and a note only.
+   * The recipient opens the board through their own access, so a recipient who can't reach it is
+   * refused at `openBoard` as usual.
+   *
+   * Rejects, appending nothing, with `invalidEvent` when no board is shown or the note is too long
+   * (see `MAX_OPERATE_HANDOVER_NOTE_LENGTH`), with `boardUnavailable` when the caller can no
+   * longer reach the shown board, and with `recipientUnavailable` when `recipientId` names no other
+   * user of this deployment. If recording the sender's copy fails after delivery, the call rejects
+   * and the recipient keeps the handover.
+   */
+  handOver(recipientId: string, note: string): Promise<OperateHandover>;
+
+  /**
+   * One page of the audit for one subject, newest first: this session's events about it (opening
+   * and closing it, issues opened over it, events while it was shown, handovers sent and received;
+   * see `OperateEventRecord.subject`) and the entries of `subject.workspaceId`'s action log whose
+   * `resourceUrl` is exactly `subject.boardRef` (reads, proposed and decided writes, by anyone who
+   * acts there). Pass the returned `next` for the next-older page; a page may be empty while
+   * `next` is still set.
+   *
+   * Readable only through the caller's own access: like `openBoard`, the named workspace, opened
+   * as the caller, must hold a connection to exactly that reference, or the call rejects with
+   * `boardUnavailable`. It reads the existing logs and keeps no copy of either.
+   */
+  listSubjectAudit(subject: OperateBoardRef, cursor?: OperateSubjectAuditCursor)
+      : Promise<OperateSubjectAuditPage>;
 
   /**
    * The owner-only workspace behind the session, where its operate chat runs. It is created on first
@@ -449,13 +482,34 @@ export interface OperateSession extends RpcTarget {
   getWorkspace(): Promise<RpcStub<Overseer>>;
 }
 
+/**
+ * Where `OperateSession.listSubjectAudit()` continues: below these positions in each log, or
+ * nothing more from a log whose position is null.
+ */
+export type OperateSubjectAuditCursor = {
+  /** Continue with the session's events before this sequence number. */
+  beforeSeq: number | null;
+  /** Continue with the workspace's action log entries before this id. */
+  beforeActionId: number | null;
+};
+
+/** One page of `OperateSession.listSubjectAudit()`. */
+export type OperateSubjectAuditPage = {
+  /** The session's events about the subject in this page's range, newest first. */
+  events: OperateEventRecord[];
+  /** The action log's entries for the subject in this page's range, newest first. */
+  actions: ActionLogEntry[];
+  /** Where the next-older page starts; absent once both logs are exhausted. */
+  next?: OperateSubjectAuditCursor;
+};
+
 /** What `OperateSession.subscribe()` delivers: a snapshot, plus the event that produced it. */
 export type OperateSessionUpdate = OperateSessionSnapshot & {
   /** The appended entry that produced this snapshot; absent on the first, current-state call. */
   record?: OperateEventRecord;
 };
 
-/** Machine-readable codes for expected `OperateSession.dispatch()` failures. */
+/** Machine-readable codes for expected `OperateSession` failures. */
 export const OPERATE_SESSION_ERROR_CODES = {
   /** Another tab or the agent appended an event first; resubscribe or retry at the new seq. */
   conflict: "OPERATE_SESSION_CONFLICT",
@@ -471,6 +525,8 @@ export const OPERATE_SESSION_ERROR_CODES = {
    * (never connected, removed, or the workspace is out of reach); connect it or choose again.
    */
   boardUnavailable: "OPERATE_SESSION_BOARD_UNAVAILABLE",
+  /** A handover names no other user of this deployment. */
+  recipientUnavailable: "OPERATE_SESSION_RECIPIENT_UNAVAILABLE",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -488,6 +544,8 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
   [OPERATE_SESSION_ERROR_CODES.boardUnavailable]:
       "That board is not connected for you here, or is no longer available to you. Connect it or " +
       "choose another board.",
+  [OPERATE_SESSION_ERROR_CODES.recipientUnavailable]:
+      "There is no other person with that id here to hand this over to.",
 });
 
 /** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */

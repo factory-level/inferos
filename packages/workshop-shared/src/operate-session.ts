@@ -14,6 +14,12 @@ export const MAX_OPERATE_SUBJECT_LENGTH = 512;
 /** Most references a session's working set holds; opening one more drops the oldest. */
 export const MAX_OPERATE_WORKING_SET = 24;
 
+/** Longest note a handover carries. */
+export const MAX_OPERATE_HANDOVER_NOTE_LENGTH = 2000;
+
+/** Most received handovers a session keeps; receiving one more drops the oldest. */
+export const MAX_OPERATE_HANDOVERS = 20;
+
 /** Most steps a flow run holds. */
 export const MAX_OPERATE_FLOW_STEPS = 32;
 
@@ -106,13 +112,39 @@ export type OperateBoardView = OperateBoardRef & {
   issueId: string | null;
 };
 
+/** A person named by a handover: their user id, and their display name when it was sent. */
+export type OperatePerson = { id: string; name: string };
+
+/**
+ * A subject one person handed into another person's session (`OperateSession.handOver`): the board
+ * and issue the sender had open, and a note. It names a target only. The recipient opens it with
+ * `openBoard` through their own access, exactly as if they had found the board themselves, so a
+ * handover never grants anything.
+ */
+export type OperateHandover = {
+  /** Unique id, the same in the sender's and the recipient's log. */
+  id: string;
+  from: OperatePerson;
+  to: OperatePerson;
+  /** The board's canonical reference (an `inferops://` URI). */
+  boardRef: string;
+  /** The issue the sender had open over the board, or null. */
+  issueId: string | null;
+  /** Up to `MAX_OPERATE_HANDOVER_NOTE_LENGTH` characters; may be empty. */
+  note: string;
+};
+
 /** The full page state of an operate session. */
 export type OperatePageState = {
   /** What the session has open, in the order it was opened. */
   workingSet: OperateRef[];
   /** The reference shown in the main region, or null. Always a member of `workingSet`. */
   focus: OperateRef | null;
-  /** The subject the page and the operate chat work on (for example a board), or null. */
+  /**
+   * The subject the page and the operate chat work on: the shown board's reference, or null.
+   * Derived from `board` by `applyOperateEvent` after every event, so it is never set on its own
+   * and can't disagree with what the page shows.
+   */
   subject: string | null;
   /** Whether the operate chat panel is open. */
   chatOpen: boolean;
@@ -139,9 +171,12 @@ export type OperatePageState = {
   presentation: OperatePresentation;
   /**
    * The board shown over the page, or null. Opening a console, another view or screen, or going
-   * home closes it, so a board never outlives the context it was opened in.
+   * home closes it, so a board never outlives the context it was opened in. The board is the
+   * session's subject (see `subject`).
    */
   board: OperateBoardView | null;
+  /** Handovers received and not yet dismissed, oldest first. */
+  handovers: OperateHandover[];
 };
 
 /** A change to an operate session's page state. Events change presentation only. */
@@ -154,7 +189,10 @@ export type OperateEvent =
   | { type: "close"; ref: OperateRef }
   /** Focus a reference already in the working set. */
   | { type: "focus"; ref: OperateRef }
-  /** Set or clear the subject. */
+  /**
+   * Superseded: the subject is now the shown board, opened with `openBoard` and closed with
+   * `closeBoard`. Kept so logs recorded before still read; the reducer refuses it.
+   */
   | { type: "setSubject"; subject: string | null }
   /** Open or close the operate chat panel. */
   | { type: "setChatOpen"; open: boolean }
@@ -203,7 +241,19 @@ export type OperateEvent =
   /** Show one issue of the shown board, replacing any issue already shown. */
   | { type: "openIssue"; issueId: string }
   /** Stop showing the issue and return to its board. */
-  | { type: "closeIssue" };
+  | { type: "closeIssue" }
+  /**
+   * A handover from another person, appended by the kernel only (`OperateSession.handOver`); a
+   * dispatch that sends it is refused. Adds it to `handovers`, dropping the oldest past
+   * `MAX_OPERATE_HANDOVERS`. Recorded with the actor `person`; `handover.from` names the sender.
+   */
+  | { type: "handoverReceived"; handover: OperateHandover }
+  /**
+   * The sender's record of a handover, appended by the kernel only. It changes nothing on the page.
+   */
+  | { type: "handoverSent"; handover: OperateHandover }
+  /** Remove a received handover from `handovers`. Opening its board is a separate `openBoard`. */
+  | { type: "dismissHandover"; id: string };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -215,6 +265,11 @@ export type OperateEventRecord = {
   event: OperateEvent;
   actor: OperateEventActor;
   at: Date;
+  /**
+   * The subject the event concerned (see `operateEventSubject`), which the per-subject audit
+   * filters on. Absent for an event on no subject, and on records stored before subjects.
+   */
+  subject?: string;
 };
 
 /** A session's page state as of an event sequence number (0 before any event). */
@@ -236,6 +291,7 @@ export const INITIAL_OPERATE_PAGE: OperatePageState = {
   console: null,
   presentation: "canvas",
   board: null,
+  handovers: [],
 };
 
 /** Thrown by `applyOperateEvent` for an event that is invalid in the current state. */
@@ -268,6 +324,28 @@ function checkApproval(approval: OperateApprovalRef): void {
   }
 }
 
+function checkHandover(handover: OperateHandover): void {
+  let { id, from, to, boardRef, issueId, note } = handover;
+  checkIds([id, from.id, to.id, ...(issueId === null ? [] : [issueId])]);
+  checkBoardRef(boardRef);
+  for (let name of [from.name, to.name]) {
+    if (name.length > MAX_OPERATE_SUBJECT_LENGTH) {
+      throw new OperateEventError(`A name must be at most ${MAX_OPERATE_SUBJECT_LENGTH} characters.`);
+    }
+  }
+  if (note.length > MAX_OPERATE_HANDOVER_NOTE_LENGTH) {
+    throw new OperateEventError(
+        `A handover note must be at most ${MAX_OPERATE_HANDOVER_NOTE_LENGTH} characters.`);
+  }
+}
+
+function checkBoardRef(boardRef: string): void {
+  if (boardRef.length === 0 || boardRef.length > MAX_OPERATE_SUBJECT_LENGTH) {
+    throw new OperateEventError(
+        `A board reference must be 1-${MAX_OPERATE_SUBJECT_LENGTH} characters.`);
+  }
+}
+
 function checkTitle(title: string): void {
   if (title.length === 0 || title.length > MAX_OPERATE_FLOW_TITLE_LENGTH) {
     throw new OperateEventError(`A title must be 1-${MAX_OPERATE_FLOW_TITLE_LENGTH} characters.`);
@@ -287,9 +365,28 @@ function sameApproval(a: OperateApprovalRef, b: OperateApprovalRef): boolean {
 
 /**
  * Applies one event to a page state and returns the new state, leaving the input unchanged. Throws
- * `OperateEventError`, changing nothing, for an event that is invalid in `state`.
+ * `OperateEventError`, changing nothing, for an event that is invalid in `state`. The result's
+ * `subject` is always its board's reference.
  */
 export function applyOperateEvent(state: OperatePageState, event: OperateEvent): OperatePageState {
+  let next = applyEvent(state, event);
+  return { ...next, subject: next.board?.boardRef ?? null };
+}
+
+/**
+ * The subject an event concerned, for the per-subject audit: a handover's board, else the board
+ * shown after the event, else the one shown before it (so the event that closed a board counts
+ * toward it). Null when no board was involved.
+ */
+export function operateEventSubject(event: OperateEvent, before: OperatePageState,
+                                    after: OperatePageState): string | null {
+  if (event.type === "handoverReceived" || event.type === "handoverSent") {
+    return event.handover.boardRef;
+  }
+  return after.board?.boardRef ?? before.board?.boardRef ?? null;
+}
+
+function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageState {
   switch (event.type) {
     case "showHome":
       return { ...state, console: null, focus: null, flow: null, presentation: "canvas", board: null };
@@ -316,14 +413,8 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
       }
       return { ...state, focus: event.ref };
     }
-    case "setSubject": {
-      if (event.subject !== null &&
-          (event.subject.length === 0 || event.subject.length > MAX_OPERATE_SUBJECT_LENGTH)) {
-        throw new OperateEventError(
-            `A subject must be 1-${MAX_OPERATE_SUBJECT_LENGTH} characters, or null.`);
-      }
-      return { ...state, subject: event.subject };
-    }
+    case "setSubject":
+      throw new OperateEventError("The subject is the shown board: use openBoard or closeBoard.");
     case "setChatOpen":
       return { ...state, chatOpen: event.open };
     case "setAppPresentation":
@@ -408,10 +499,7 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
     case "openBoard": {
       let { workspaceId, boardRef } = event.board;
       checkIds([workspaceId]);
-      if (boardRef.length === 0 || boardRef.length > MAX_OPERATE_SUBJECT_LENGTH) {
-        throw new OperateEventError(
-            `A board reference must be 1-${MAX_OPERATE_SUBJECT_LENGTH} characters.`);
-      }
+      checkBoardRef(boardRef);
       return { ...state, board: { workspaceId, boardRef, issueId: null } };
     }
     case "closeBoard": {
@@ -426,6 +514,21 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
     case "closeIssue": {
       if (!state.board?.issueId) throw new OperateEventError("No issue is shown in this session.");
       return { ...state, board: { ...state.board, issueId: null } };
+    }
+    case "handoverReceived": {
+      checkHandover(event.handover);
+      let others = state.handovers.filter(handover => handover.id !== event.handover.id);
+      return { ...state, handovers: [...others, event.handover].slice(-MAX_OPERATE_HANDOVERS) };
+    }
+    case "handoverSent":
+      checkHandover(event.handover);
+      return state;
+    case "dismissHandover": {
+      let handovers = state.handovers.filter(handover => handover.id !== event.id);
+      if (handovers.length === state.handovers.length) {
+        throw new OperateEventError("No such handover is waiting in this session.");
+      }
+      return { ...state, handovers };
     }
   }
 }
