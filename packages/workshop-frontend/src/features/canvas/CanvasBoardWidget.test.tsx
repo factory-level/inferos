@@ -259,3 +259,95 @@ it('never paints a board read that lands after the session switched to another b
   expect(container.querySelector('h4')?.textContent).toBe('Other (OTHER)')
   expect(card('1')).toBeUndefined()
 })
+
+const createAction = (id: number, state: ActionLogEntry['state'], title: string): ActionLogEntry => ({
+  id, type: 'action', state, resourceUrl: BOARD, resourceTitle: 'InferOps board DEMO', createdAt: new Date(), requestedBy: 'person',
+  description: { title: `Create issue: ${title}`, description: '', fields: [{ label: 'Title', kind: 'inline', value: title }] },
+} as ActionLogEntry)
+const statuses = () => [...article().querySelectorAll('[role="status"]')].map(s => s.textContent).join(' ')
+const withProvisional = (title: string): Board => ({
+  ...demo, columns: demo.columns.map(c => c.state.id === 'doing'
+    ? { ...c, issues: [{ ...issue('pending-4', 'doing', '0'), identifier: 'DEMO-new', title, pending: 'create' as const }] } : c),
+})
+const withCreated = (title: string): Board => ({
+  ...demo, columns: demo.columns.map(c => c.state.id === 'doing' ? { ...c, issues: [{ ...issue('9', 'doing', '1'), title }] } : c),
+})
+
+it('creates through approval: a provisional card while pending, then the outcome the action log records, announced once', async () => {
+  createIssue.mockImplementation(async ({ title }) => { current = withProvisional(title) })
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} />)
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="New issue in Doing"]')!.click() })
+  await act(async () => setFieldValue(dialogField(container, 'Title'), 'Write docs'))
+  await act(async () => { dialogButton('Propose issue').click(); await settle() })
+  expect(createIssue).toHaveBeenCalledWith({ title: 'Write docs', priority: 'none', stateId: 'doing' })
+
+  // Queued: a provisional card that cannot be edited, and no outcome yet.
+  await act(async () => { actions?.entry(createAction(5, 'pending', 'Write docs')); await settle() })
+  expect(card('pending-4').textContent).toContain('Write docs')
+  expect(article().querySelector('[aria-label="Edit DEMO-new"]')).toBeNull()
+  expect(statuses()).not.toMatch(/created|rejected/)
+
+  // Approved: InferOps creates it, and the board announces it from the log entry.
+  current = withCreated('Write docs')
+  await act(async () => { actions?.entry(createAction(5, 'approved', 'Write docs')); await settle() })
+  expect(card('9').textContent).toContain('Write docs')
+  expect(card('pending-4')).toBeUndefined()
+  expect(statuses()).toContain('New issue "Write docs" created.')
+
+  // A second proposal denied: the provisional card goes and the board says it was rejected.
+  current = { ...withProvisional('Nope'), columns: withProvisional('Nope').columns.map(c => c.state.id === 'doing' ? { ...c, issues: [...withCreated('Write docs').columns[1]!.issues, ...c.issues] } : c) }
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
+  current = withCreated('Write docs')
+  await act(async () => { actions?.entry(createAction(6, 'rejected', 'Nope')); await settle() })
+  expect(card('pending-4')).toBeUndefined()
+  expect(statuses()).toContain('New issue "Nope" was rejected.')
+  expect(statuses()).not.toContain('"Write docs" created')
+  createIssue.mockReset()
+})
+
+it('closes the open issue with explicit recovery when it is deleted in InferOps while open', async () => {
+  const onChange = vi.fn<(issueId: string | null) => void>()
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} openIssue={{ issueId: '1', onChange }} />)
+  expect(dialogField<HTMLInputElement>(container, 'Title').value).toBe('Issue 1')
+
+  // Deleted in InferOps: the next read no longer has it.
+  current = { ...demo, columns: demo.columns.map(c => ({ ...c, issues: [] })) }
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
+  expect(container.querySelector('[role="dialog"]')).toBeNull()
+  expect(article().querySelector('[role="alert"]')?.textContent).toContain('no longer on this board')
+  expect(card('1')).toBeUndefined()
+  await act(async () => { [...article().querySelectorAll('button')].find(b => b.textContent === 'Back to the board')!.click() })
+  expect(onChange).toHaveBeenLastCalledWith(null)
+})
+
+it('after a reconnect, shows the edit still pending with no outcome, then the outcome the log records', async () => {
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={overseer} onBack={() => {}} />)
+  await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Edit DEMO-1"]')!.click() })
+  await act(async () => setFieldValue(dialogField(container, 'Title'), 'Renamed'))
+  await act(async () => { dialogButton('Propose changes').click(); await settle() })
+  expect(card('1').textContent).toContain('Edit waiting for approval')
+  const pendingEdit = { ...agentMove(7, 'pending'), requestedBy: 'person', description: { title: 'Update DEMO-1: title', description: '', fields: [{ label: 'Issue', kind: 'inline', value: 'DEMO-1' }] } } as ActionLogEntry
+  await act(async () => { actions?.entry(pendingEdit); await settle() })
+
+  // The WebSocket drops and comes back: every stub is new, and the log replays from the start.
+  const reconnected = {
+    getGatekeeperByResourceUrl: lookup,
+    subscribeToActions: async (subscriber: ActionsSubscriber) => { actions = subscriber; return { [Symbol.dispose]: () => {} } },
+    listActions: async () => ({ entries: [pendingEdit] }),
+  } as unknown as RpcStub<Overseer>
+  readBoard.mockClear(); update.mockClear()
+  await render(<CanvasBoardFullView widget={widget()} viewTitle="Ops" overseer={reconnected} onBack={() => {}} />)
+  await act(async () => { actions?.entry(pendingEdit); await settle() })
+  expect(readBoard).toHaveBeenCalled()
+  expect(update).not.toHaveBeenCalled()
+  expect(card('1').textContent).toContain('Renamed')
+  expect(card('1').textContent).toContain('Awaiting approval (Person): Update DEMO-1: title')
+  expect(statuses()).not.toMatch(/applied|rejected/)
+
+  // Denied after the reconnect: the board drops the overlay, and says rejected, not applied.
+  current = demo
+  await act(async () => { actions?.entry({ ...pendingEdit, state: 'rejected' }); await settle() })
+  expect(card('1').textContent).toContain('Issue 1')
+  expect(statuses()).toContain('Edit of DEMO-1 was rejected')
+  expect(statuses()).not.toContain('applied')
+})
