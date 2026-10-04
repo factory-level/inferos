@@ -23,7 +23,6 @@ import {
 import SidebarUtilityStrip from './SidebarUtilityStrip'
 import SidebarGatekeeperApps from './SidebarGatekeeperApps'
 import { ModeToggle } from '../../features/operate/ModeToggle'
-import { OperateSidebarNav } from '../../features/operate/OperateSidebarNav'
 import { useAppMode, useOperateModeAvailable } from '../../features/operate/useAppMode'
 
 /**
@@ -39,8 +38,7 @@ import { useAppMode, useOperateModeAvailable } from '../../features/operate/useA
  *   • Favorites / Recent workspaces        SCROLLS
  *   • utility strip (plug, avatar)         pinned
  *
- * In Operate mode (the InferOps Canvas routes) the nav, workspace tools and lists are replaced by
- * the saved screens and gatekeeper apps.
+ * Console workspaces own their navigation; this rail belongs to the configuration application.
  */
 export default function Sidebar({
   collapsed,
@@ -58,6 +56,7 @@ export default function Sidebar({
   const operateAvailable = useOperateModeAvailable()
   const urlMode = useAppMode()
   const mode = operateAvailable ? urlMode : 'build'
+
 
   return (
     <aside
@@ -126,70 +125,64 @@ export default function Sidebar({
 
       {operateAvailable && <ModeToggle mode={mode} collapsed={collapsed} />}
 
-      {mode === 'operate' ? (
-        <div className="sidebar-scroll min-h-0 flex-1 overflow-y-auto">
-          <OperateSidebarNav collapsed={collapsed} gatekeeperApps={gatekeeperApps} />
+      <SidebarWorkspacesProvider>
+        {/* Pinned top stack. shrink-0 keeps it from squishing when the lists below grow. */}
+        <div className="flex shrink-0 flex-col gap-3 pt-3">
+          {/* Primary nav */}
+          <nav className="flex flex-col gap-0.5 px-2">
+            <SidebarItem
+              to="/"
+              label="Home"
+              icon={<House size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+            <SidebarItem
+              to="/workspaces"
+              label="Workspaces"
+              icon={<SquaresFour size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+            <SidebarItem
+              to="/blueprints"
+              label="Blueprints"
+              icon={<Blueprint size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+            <SidebarItem
+              to="/outputs"
+              label="Outputs"
+              icon={<Stack size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+            {/* With Operate mode on, the mode toggle is the way into the InferOps Canvas. */}
+            {composableViews && !operateAvailable && (
+              <SidebarItem
+                to="/inferops-canvas"
+                label="InferOps Canvas"
+                icon={<Kanban size={14} weight="regular" />}
+                collapsed={collapsed}
+              />
+            )}
+            {/* Gatekeeper management apps (e.g. the Context Library), listed dynamically. */}
+            <SidebarGatekeeperApps apps={gatekeeperApps} collapsed={collapsed} />
+            <SidebarItem
+              to="/explore"
+              label="Explore"
+              icon={<Compass size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+          </nav>
+
+          {/* Workspace tools: search. Pinned so it's always reachable. */}
+          <SidebarWorkspacesTools collapsed={collapsed} />
         </div>
-      ) : (
-        <SidebarWorkspacesProvider>
-          {/* Pinned top stack. shrink-0 keeps it from squishing when the lists below grow. */}
-          <div className="flex shrink-0 flex-col gap-3 pt-3">
-            {/* Primary nav */}
-            <nav className="flex flex-col gap-0.5 px-2">
-              <SidebarItem
-                to="/"
-                label="Home"
-                icon={<House size={14} weight="regular" />}
-                collapsed={collapsed}
-              />
-              <SidebarItem
-                to="/workspaces"
-                label="Workspaces"
-                icon={<SquaresFour size={14} weight="regular" />}
-                collapsed={collapsed}
-              />
-              <SidebarItem
-                to="/blueprints"
-                label="Blueprints"
-                icon={<Blueprint size={14} weight="regular" />}
-                collapsed={collapsed}
-              />
-              <SidebarItem
-                to="/outputs"
-                label="Outputs"
-                icon={<Stack size={14} weight="regular" />}
-                collapsed={collapsed}
-              />
-              {/* With Operate mode on, the mode toggle is the way into the InferOps Canvas. */}
-              {composableViews && !operateAvailable && (
-                <SidebarItem
-                  to="/inferops-canvas"
-                  label="InferOps Canvas"
-                  icon={<Kanban size={14} weight="regular" />}
-                  collapsed={collapsed}
-                />
-              )}
-              {/* Gatekeeper management apps (e.g. the Context Library), listed dynamically. */}
-              <SidebarGatekeeperApps apps={gatekeeperApps} collapsed={collapsed} />
-              <SidebarItem
-                to="/explore"
-                label="Explore"
-                icon={<Compass size={14} weight="regular" />}
-                collapsed={collapsed}
-              />
-            </nav>
 
-            {/* Workspace tools: search. Pinned so it's always reachable. */}
-            <SidebarWorkspacesTools collapsed={collapsed} />
-          </div>
-
-          {/* Scrolling middle: only the Favorites / Recent workspaces / Recent blueprints lists.
-              min-h-0 lets flex children compute scroll height correctly. */}
-          <div className="sidebar-scroll mt-1 min-h-0 flex-1 overflow-y-auto">
-            <SidebarWorkspacesLists collapsed={collapsed} />
-          </div>
-        </SidebarWorkspacesProvider>
-      )}
+        {/* Scrolling middle: only the Favorites / Recent workspaces / Recent blueprints lists.
+            min-h-0 lets flex children compute scroll height correctly. */}
+        <div className="sidebar-scroll mt-1 min-h-0 flex-1 overflow-y-auto">
+          <SidebarWorkspacesLists collapsed={collapsed} />
+        </div>
+      </SidebarWorkspacesProvider>
 
       <SidebarUtilityStrip collapsed={collapsed} />
     </aside>

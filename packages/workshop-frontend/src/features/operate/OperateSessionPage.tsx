@@ -1,102 +1,163 @@
-import { useKumoToastManager } from '@cloudflare/kumo'
-import { ChatCircleIcon, LayoutIcon, XIcon, AppWindowIcon } from '@phosphor-icons/react'
-import { sameOperateRef, type OperateEvent, type OperateRef } from '@gadgets/workshop-shared/operate-session'
+import { useState } from 'react'
+import { Button, useKumoToastManager } from '@cloudflare/kumo'
+import { useNavigate, useSearch } from '@tanstack/react-router'
+import { PlusIcon, SlidersHorizontalIcon } from '@phosphor-icons/react'
+import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from '@gadgets/workshop-shared/api'
+import type { OperateEvent, OperateRef } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
-import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
-import { useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
+import { canBuild, useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useOperateSession } from './OperateSessionContext'
 import { AgentActivityNote } from './AgentActivityNote'
+import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
+import { ConsoleMosaic } from './ConsoleMosaic'
+import { ConsolePage } from './ConsolePage'
+import { ConsoleBuilder } from './ConsoleBuilder'
+import { ConsoleSettings } from './ConsoleSettings'
+import { ConsoleWorkspaceShell } from './ConsoleWorkspaceShell'
+import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
+import { ConsoleWidgetView } from './ConsoleWidgetView'
+import { viewScreens } from './consoles'
+import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from './consoles'
 import { FlowPage } from './FlowPage'
 import { OperateChatPanel } from './OperateChatPanel'
 import { SessionApprovals } from './SessionApprovals'
 import { SessionScreen } from './SessionScreen'
 import { useSessionWorkspace } from './useSessionWorkspace'
 
-const refKey = (ref: OperateRef) => ref.type === 'screen' ? `${ref.workspaceId}/${ref.screenId}` : ref.workspaceId
-
-/**
- * Operate: the person's one operate session. Its tabs are the working set, the main region shows the
- * focused reference, and the operate chat sits beside it. While a flow runs, the flow's current
- * step takes the whole page instead. Every change goes through the session, so
- * every tab and device of theirs shows the same page. Pending approvals of the session workspace
- * and the focused screen's workspace are decided above the main region.
- */
+/** Operate's launcher and workspaces share one mounted conversation, including during setup. */
 export const OperateSessionPage = () => {
   const operate = useOperateSession()
   const toasts = useKumoToastManager()
+  const navigate = useNavigate()
+  const search = useSearch({ from: '/inferops-canvas' })
   const { authenticatedApi } = useAuthenticatedApi()
   const durableViews = useServerConfig()?.canvasFeatures?.durableViews === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
   const sessionWorkspace = useSessionWorkspace(operate?.session ?? null)
+  const [savedEntry, setSavedEntry] = useState<ConsoleEntry | null>(null)
+
+  const [widgetTarget, setWidgetTarget] = useState<ConsoleWidgetTarget | null>(null)
+  const consoleId = operate?.snapshot?.state.console?.consoleId
+
 
   if (!operate) return null
   if (operate.error) return <p role="alert" className="p-6 text-sm text-kumo-danger">{operate.error}</p>
   if (!operate.snapshot) return <p role="status" className="p-6 text-sm text-kumo-subtle">Opening your operate session…</p>
 
   const { state } = operate.snapshot
+  const run = state.console
+  const workspaces = screens.status === 'ready' ? screens.workspaces : []
+  const entry = run ? findConsole(workspaces, run) : undefined
+  const viewTitle = run?.screenId ? entry?.screens.find(screen => screen.id === run.screenId)?.title : entry?.console.views.find(view => view.id === run?.viewId)?.title
+  const setup = search.setup
+  const settings = search.settings
+  const configuring = !!setup || !!settings
+  const tools = search.tools === true
+  const home = !state.flow && !run && !state.focus && !tools && !configuring
+  const centered = !state.flow && !tools && !configuring && run !== null && state.presentation === 'chat'
+  const hideChat = configuring || tools || (!home && !centered && !state.chatOpen)
   const send = (event: OperateEvent) => {
     operate.dispatch(event).catch(caught => {
       console.error('Operate session change failed:', caught)
-      toasts.add({ title: 'That change could not be applied to your session.', variant: 'error' })
+      toasts.add({ title: getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.consoleChanged
+        ? 'This console has changed or is no longer available. Reload to see it as it is now.'
+        : 'That change could not be applied to your session.', variant: 'error' })
     })
   }
-  if (state.flow) return <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} sessionWorkspace={sessionWorkspace} />
-
-  const titleOf = (ref: OperateRef) => {
-    if (ref.type === 'workspace') return 'Workspace'
-    if (screens.status !== 'ready') return 'Screen'
-    const entry = screens.workspaces.find(({ workspace: w }) => w.id === ref.workspaceId)
-    return entry?.screens?.find(screen => screen.id === ref.screenId)?.title ?? 'Screen'
+  const showHome = async () => {
+    try {
+      await operate.dispatch({ type: 'showHome' })
+      await navigate({ to: '/inferops-canvas', search: {} })
+    } catch { toasts.add({ title: 'Could not return to consoles. Try again.', variant: 'error' }) }
   }
+  const titleOf = (ref: OperateRef) => ref.type === 'workspace' ? 'Workspace'
+    : workspaces.find(item => item.workspace.id === ref.workspaceId)?.screens?.find(screen => screen.id === ref.screenId)?.title ?? 'Screen'
+  const editing = setup && setup !== 'new'
+    ? consoleEntries(workspaces).find(item => item.workspace.id === search.workspace && item.console.id === setup) : undefined
+  const openWidget = async (target: ConsoleWidgetTarget) => {
+    if (!entry || target.consoleId !== entry.console.id) return
+    try {
+      if (target.presentation === 'page') {
+        const view = entry.console.views.find(candidate => viewScreens(candidate).includes(target.screenId))
+        if (!view) return
+        if (state.presentation === 'chat') await operate.dispatch({ type: 'setPresentation', presentation: 'canvas' })
+        await operate.dispatch({ type: 'openView', viewId: view.id })
+        await operate.dispatch({ type: 'showScreen', screenId: target.screenId })
+      }
+      setWidgetTarget(target)
+    } catch { toasts.add({ title: 'Could not open this widget. Try again.', variant: 'error' }) }
+  }
+  const visibleWidget = widgetTarget?.consoleId === consoleId ? widgetTarget : null
+  const settingsEntry = settings ? consoleEntries(workspaces).find(item => item.workspace.id === search.workspace && item.console.id === settings) : undefined
+  const openView = async (viewId: string) => {
+    setWidgetTarget(null)
+    try {
+      if (state.presentation === 'chat') await operate.dispatch({ type: 'setPresentation', presentation: 'canvas' })
+      await operate.dispatch({ type: 'openView', viewId })
+      await operate.dispatch({ type: 'setChatOpen', open: true })
+    } catch { toasts.add({ title: 'Could not open this page. Try again.', variant: 'error' }) }
+  }
+  const edit = (item: ConsoleEntry) => void navigate({ to: '/inferops-canvas', search: { setup: item.console.id, workspace: item.workspace.id } })
 
-  return (
-    <div className="flex h-full flex-col overflow-hidden bg-kumo-base">
-      <header className="flex h-14 flex-shrink-0 items-center gap-2 px-4">
-        <div role="tablist" aria-label="Open in this session" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-          {state.workingSet.map(ref => {
-            const selected = state.focus !== null && sameOperateRef(state.focus, ref)
-            const Icon = ref.type === 'screen' ? LayoutIcon : AppWindowIcon
-            return (
-              <div key={refKey(ref)} className={`flex shrink-0 items-center rounded-lg ${selected ? 'bg-kumo-control' : ''}`}>
-                <button type="button" role="tab" aria-selected={selected}
-                  onClick={() => send({ type: 'focus', ref })}
-                  className={`flex h-8 items-center gap-1.5 rounded-lg pl-2.5 pr-1 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${selected ? 'text-kumo-default' : 'text-kumo-subtle hover:text-kumo-default'}`}>
-                  <Icon size={13} aria-hidden />{titleOf(ref)}
-                </button>
-                <button type="button" aria-label={`Close ${titleOf(ref)}`} onClick={() => send({ type: 'close', ref })}
-                  className="mr-1 grid h-6 w-6 place-items-center rounded-md text-kumo-inactive hover:bg-kumo-fill-hover hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">
-                  <XIcon size={11} aria-hidden />
-                </button>
-              </div>
-            )
-          })}
-          {state.workingSet.length === 0 && <span className="px-1 text-[13px] text-kumo-inactive">Nothing open yet</span>}
-        </div>
-        <div className="max-w-[40%] min-w-0"><AgentActivityNote records={operate.recentEvents} titleOf={titleOf} /></div>
-        <span className="text-[11px] text-kumo-inactive" title="Session sequence number">#{operate.snapshot.seq}</span>
-        <button type="button" aria-pressed={state.chatOpen} onClick={() => send({ type: 'setChatOpen', open: !state.chatOpen })}
-          className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring ${state.chatOpen ? 'bg-kumo-control text-kumo-default' : 'text-kumo-subtle hover:text-kumo-default'}`}>
-          <ChatCircleIcon size={14} aria-hidden />Operate chat
-        </button>
-      </header>
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        {state.chatOpen && <OperateChatPanel workspace={sessionWorkspace} />}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <SessionApprovals session={sessionWorkspace}
-            screenWorkspaceId={state.focus?.type === 'screen' ? state.focus.workspaceId : null}
-            reviewing={state.reviewing} lastOutcome={state.lastApprovalOutcome} onEvent={operate.dispatch} />
-          <main className="min-h-0 min-w-0 flex-1 overflow-auto">
-            {state.focus?.type === 'screen'
-              ? <SessionScreen key={refKey(state.focus)} workspaceId={state.focus.workspaceId} screenId={state.focus.screenId}
-                  onShowScreen={screenId => send({ type: 'open', ref: { type: 'screen', workspaceId: (state.focus as OperateRef).workspaceId, screenId } })}
-                  onClose={() => state.focus && send({ type: 'close', ref: state.focus })} />
-              : state.focus?.type === 'workspace'
-                ? <p className="p-6 text-sm text-kumo-subtle">Workspaces open in a session come next.</p>
-                : <InferOpsCanvasHome />}
-          </main>
-        </div>
+  return <ConsoleWorkspaceShell onOpenWidget={target => void openWidget(target)} onNavigate={() => setWidgetTarget(null)}>
+    <div className="flex h-full min-h-0 flex-col bg-kumo-base">
+    {!configuring && <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-3 px-5 py-3">
+      <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-kumo-default">{state.flow ? state.flow.title : tools ? 'Screens and flows' : (run ? centered ? 'Assistant' : viewTitle ?? 'Console' : state.focus ? titleOf(state.focus) : 'Consoles')}</h1>
+      <div className="hidden max-w-[30%] md:block"><AgentActivityNote records={operate.recentEvents} titleOf={titleOf} /></div>
+      {home && <>
+        <Button variant="ghost" size="sm" onClick={() => void navigate({ to: '/inferops-canvas', search: { tools: true } })}>Screens and flows</Button>
+        <Button variant="primary" size="sm" disabled={!durableViews} onClick={() => void navigate({ to: '/inferops-canvas', search: { setup: 'new' } })}><PlusIcon size={14} aria-hidden />New console</Button>
+      </>}
+      {tools && <Button size="sm" onClick={() => void showHome()}>All consoles</Button>}
+      {entry && !state.flow && <Button size="sm" variant="ghost" aria-label="Console settings" title="Console settings" onClick={() => void navigate({ to: '/inferops-canvas', search: { settings: entry.console.id, workspace: entry.workspace.id } })}><SlidersHorizontalIcon size={16} aria-hidden /></Button>}
+      {!home && !tools && !centered && <Button size="sm" aria-pressed={state.chatOpen}
+        onClick={() => send({ type: 'setChatOpen', open: !state.chatOpen })}>{state.chatOpen ? 'Hide assistant' : 'Show assistant'}</Button>}
+    </header>}
+    {!configuring && <SessionApprovals session={sessionWorkspace}
+      screenWorkspaceId={state.flow?.workspaceId ?? run?.workspaceId ?? (state.focus?.type === 'screen' ? state.focus.workspaceId : null)}
+      reviewing={state.reviewing} lastOutcome={state.lastApprovalOutcome} onEvent={operate.dispatch} />}
+    <div className={`flex min-h-0 flex-1 ${home ? 'flex-col overflow-y-auto' : 'overflow-hidden'}`}>
+      <div hidden={centered} className={centered ? 'hidden' : home
+        ? 'mx-auto w-full max-w-6xl shrink-0 px-5 pb-4 pt-6 sm:px-8'
+        : `min-h-0 min-w-0 flex-1 overflow-auto ${!hideChat ? 'max-md:hidden' : ''}`}>
+        {settings
+          ? settingsEntry ? <ConsoleSettings key={`${settingsEntry.console.id}/${settingsEntry.console.revision}`} entry={settingsEntry}
+              onClose={() => void navigate({ to: '/inferops-canvas', search: {} })} onEdit={() => edit(settingsEntry)} />
+            : <p role="status" className="p-6 text-sm text-kumo-subtle">{screens.status === 'loading' ? 'Loading settings…' : 'This console is unavailable.'}</p>
+          : setup
+          ? screens.status !== 'ready'
+            ? <p role={screens.status === 'error' ? 'alert' : 'status'} className="p-6 text-sm text-kumo-subtle">{screens.status === 'error' ? 'Could not load console setup. Reload to try again.' : 'Loading console setup…'}</p>
+            : setup !== 'new' && !editing
+              ? <p role="alert" className="p-6 text-sm text-kumo-danger">This console is unavailable. Return to All consoles to choose another.</p>
+              : <ConsoleBuilder key={`${search.workspace ?? ''}/${setup}`} workspaces={workspaces.filter(canBuild)} initial={editing}
+                  onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
+          : tools ? <InferOpsCanvasHome />
+          : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} />
+          : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
+          : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} onEvent={send} />
+          : state.focus?.type === 'screen'
+            ? <SessionScreen key={`${state.focus.workspaceId}/${state.focus.screenId}`} workspaceId={state.focus.workspaceId} screenId={state.focus.screenId}
+                onShowScreen={screenId => send({ type: 'open', ref: { type: 'screen', workspaceId: state.focus!.workspaceId, screenId } })}
+                onClose={() => state.focus && send({ type: 'close', ref: state.focus })} />
+            : state.focus ? <p className="p-6 text-sm text-kumo-subtle">Workspaces open in a session come next.</p>
+            : <>
+                {savedEntry && <div role="status" className="mb-4 flex items-center gap-3 text-sm text-kumo-subtle">
+                  <span>{savedEntry.console.title} saved.</span><Button size="sm" onClick={() => send(openConsoleEvent(savedEntry))}>Open console</Button>
+                </div>}
+                <ConsoleMosaic key={savedEntry?.console.id} screens={screens} highlighted={savedEntry?.console.id}
+                  onOpen={item => send(openConsoleEvent(item))} onEdit={edit} />
+                {state.workingSet.length > 0 && <nav aria-label="Open in this session" className="mt-4 flex flex-wrap gap-2">
+                  {state.workingSet.map(ref => <Button key={ref.type === 'screen' ? `${ref.workspaceId}/${ref.screenId}` : ref.workspaceId}
+                    size="sm" onClick={() => send({ type: 'focus', ref })}>{titleOf(ref)}</Button>)}
+                </nav>}
+              </>}
       </div>
+      <OperateChatPanel workspace={sessionWorkspace} layout={hideChat ? 'hidden' : home ? 'home' : centered ? 'full' : 'side'}
+        onClose={() => send({ type: 'setChatOpen', open: false })}
+        consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target) } : undefined} />
     </div>
-  )
+    {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
+  </div>
+  </ConsoleWorkspaceShell>
 }

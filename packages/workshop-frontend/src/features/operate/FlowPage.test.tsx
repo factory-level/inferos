@@ -35,7 +35,7 @@ afterEach(() => {
 })
 
 const render = (index: number, chatOpen = false) => act(() => root.render(
-  <FlowPage flow={{ ...FLOW, index }} chatOpen={chatOpen} onEvent={onEvent} sessionWorkspace={null} />,
+  <FlowPage flow={{ ...FLOW, index }} chatOpen={chatOpen} onEvent={onEvent} />,
 ))
 const button = (name: string) => {
   const found = [...container.querySelectorAll('button')]
@@ -75,7 +75,6 @@ describe('FlowPage', () => {
 
   it('keeps the operate chat available beside the step', () => {
     render(0, true)
-    expect(container.querySelector('[data-testid="chat"]')).not.toBeNull()
     act(() => button('Operate chat').click())
     expect(onEvent).toHaveBeenCalledWith({ type: 'setChatOpen', open: false })
   })

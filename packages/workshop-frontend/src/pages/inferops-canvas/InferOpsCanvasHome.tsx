@@ -7,7 +7,7 @@ import { WorkshopButton, WorkshopInput } from '../../components/WorkshopControls
 import { useServerConfig } from '../../ServerConfigContext'
 import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import { useDocumentTitle } from '../../useDocumentTitle'
-import { MAX_SCREEN_WORKSPACES, invalidateWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
+import { MAX_SCREEN_WORKSPACES, canBuild, invalidateWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
 import { useOperateSession } from '../../features/operate/OperateSessionContext'
 import { WorkspaceFlows } from '../../features/operate/WorkspaceFlows'
 
@@ -94,7 +94,8 @@ export const InferOpsCanvasHome = () => {
     <PageHeading subtitle="Composable views are not enabled for this deployment." />
   </div>
 
-  const workspaces = screens.status === 'ready' ? screens.workspaces : []
+  // Screens and flows are authored here, so workspaces shared for use only are left out.
+  const workspaces = screens.status === 'ready' ? screens.workspaces.filter(canBuild) : []
   const create = async (title: string) => {
     const screen = catalog.screens.find(item => item.id === template)
     const content: CanvasContent = screen ? { ...structuredClone(screen.content), title }

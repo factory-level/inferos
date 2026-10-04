@@ -3,20 +3,16 @@ import { ArrowLeftIcon, ArrowRightIcon, ChatCircleIcon, CheckIcon, XIcon } from 
 import type { OperateEvent, OperateFlowRun } from '@gadgets/workshop-shared/operate-session'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import { FlowScreen } from './FlowScreen'
-import { OperateChatPanel } from './OperateChatPanel'
-import type { SessionWorkspace } from './useSessionWorkspace'
 
 /**
  * The full-canvas state: a running flow's current step fills the page, in place of the session's
  * tabs and the app's navigation. Back and Next move the step through the session, so every tab
  * and device of the person's shows the same step.
  */
-export const FlowPage = ({ flow, chatOpen, onEvent, sessionWorkspace }: {
+export const FlowPage = ({ flow, chatOpen, onEvent }: {
   flow: OperateFlowRun
   chatOpen: boolean
   onEvent: (event: OperateEvent) => void
-  /** The session workspace, where the operate chat runs; null while it opens. */
-  sessionWorkspace: SessionWorkspace | null
 }) => {
   const [stepTitle, setStepTitle] = useState<string | null>(null)
   const last = flow.index === flow.steps.length - 1
@@ -57,8 +53,7 @@ export const FlowPage = ({ flow, chatOpen, onEvent, sessionWorkspace }: {
         </button>
       </header>
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {chatOpen && <OperateChatPanel workspace={sessionWorkspace} />}
-        <main className="min-h-0 min-w-0 flex-1 overflow-auto">
+        <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-kumo-tint">
           <FlowScreen key={`${flow.index}/${flow.steps[flow.index]}`} workspaceId={flow.workspaceId}
             screenId={flow.steps[flow.index]!} onTitle={setStepTitle} />
         </main>

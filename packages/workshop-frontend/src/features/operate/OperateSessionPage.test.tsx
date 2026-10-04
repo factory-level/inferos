@@ -15,7 +15,13 @@ const testState = vi.hoisted(() => ({
   state: null as unknown,
   dispatch: null as unknown,
   recentEvents: [] as OperateEventRecord[],
+  search: {} as { setup?: string; tools?: boolean },
+  navigate: vi.fn<(options: unknown) => void>(),
 }))
+
+vi.mock('@tanstack/react-router', () => ({ useNavigate: () => testState.navigate, useSearch: () => testState.search }))
+vi.mock('./ConsoleWorkspaceShell', () => ({ ConsoleWorkspaceShell: ({ children }: { children: import('react').ReactNode }) => children }))
+vi.mock('./ConsoleBuilder', () => ({ ConsoleBuilder: () => <div data-testid="builder" /> }))
 
 vi.mock('@cloudflare/kumo', async importOriginal => ({
   ...await importOriginal<typeof import('@cloudflare/kumo')>(),
@@ -24,12 +30,21 @@ vi.mock('@cloudflare/kumo', async importOriginal => ({
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true } }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
+  canBuild: (entry: { workspace: { role?: string } }) => entry.workspace.role !== 'use',
   useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
-    { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [] },
+    { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], consoles: [
+      { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',
+        views: [{ id: 'overview', title: 'Overview', type: 'rollup', screens: ['board'] }] },
+    ] },
   ] }),
 }))
 vi.mock('../../pages/inferops-canvas/InferOpsCanvasHome', () => ({ InferOpsCanvasHome: () => <div data-testid="home" /> }))
-vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: () => <div data-testid="chat" /> }))
+vi.mock('./ConsoleMosaic', () => ({ ConsoleMosaic: () => <div data-testid="mosaic" /> }))
+vi.mock('./ConsolePage', () => ({
+  ConsolePage: ({ entry, presentation }: { entry?: { console: { title: string } }; presentation: string }) =>
+    <div data-testid="console">{entry?.console.title}/{presentation}</div>,
+}))
+vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: ({ layout }: { layout: string }) => <div data-testid="chat" data-layout={layout}><input aria-label="Chat draft" /></div> }))
 vi.mock('./SessionApprovals', () => ({
   SessionApprovals: ({ screenWorkspaceId }: { screenWorkspaceId: string | null }) =>
     <div data-testid="approvals">{screenWorkspaceId}</div>,
@@ -59,6 +74,7 @@ beforeEach(() => {
   dispatch.mockClear()
   testState.dispatch = dispatch
   testState.recentEvents = []
+  testState.search = {}
 })
 
 afterEach(() => {
@@ -73,9 +89,8 @@ const render = (state: OperatePageState) => {
 }
 
 describe('OperateSessionPage', () => {
-  it('shows the working set as tabs and the focused screen', () => {
+  it('shows the focused screen', () => {
     render(OPEN)
-    expect([...container.querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(['Shift board'])
     expect(container.querySelector('[data-testid="screen"]')?.textContent).toBe('board')
   })
 
@@ -100,15 +115,54 @@ describe('OperateSessionPage', () => {
     expect(container.textContent).not.toContain('Agent ')
   })
 
+  it('opens on the console mosaic when nothing is open', () => {
+    render({ ...INITIAL_OPERATE_PAGE })
+    expect(container.querySelector('[data-testid="mosaic"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="home"]')).toBeNull()
+    expect(container.querySelector('[data-testid="chat"]')?.getAttribute('data-layout')).toBe('home')
+    expect(container.querySelector('[data-testid="console"]')).toBeNull()
+  })
+
+  it('gives the page to the open console, found among the saved ones', () => {
+    render({ ...OPEN, presentation: 'chat', console: {
+      workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', fullChat: 'available', viewId: 'overview', screenId: null,
+    } })
+    expect(container.querySelector('[data-testid="chat"]')?.getAttribute('data-layout')).toBe('full')
+    expect(container.querySelector('[role="tablist"]')).toBeNull()
+  })
+
   it('gives the whole page to a running flow, keeping the working set for afterwards', () => {
     render({ ...OPEN, flow: { workspaceId: 'ws1', flowId: 'f', title: 'Admission', steps: ['intake', 'triage'], index: 1 } })
     expect(container.querySelector('[role="tablist"]')).toBeNull()
     expect(container.querySelector('[data-testid="screen"]')).toBeNull()
     expect(container.querySelector('[data-testid="step"]')?.textContent).toBe('triage')
-    expect(container.querySelector('h1')?.textContent).toBe('Step 2 of 2')
+    expect(container.textContent).toContain('Step 2 of 2')
 
     const finish = [...container.querySelectorAll('button')].find(b => b.textContent?.trim() === 'Finish')!
     act(() => finish.click())
     expect(dispatch).toHaveBeenCalledWith({ type: 'exitFlow' })
   })
+})
+
+it('keeps one conversation mounted as home changes to a console, a screen, and setup', () => {
+  render(INITIAL_OPERATE_PAGE)
+  const chat = container.querySelector('[data-testid="chat"]')
+  const draft = container.querySelector<HTMLInputElement>('input')!
+  draft.value = 'Keep this draft'
+  const consoleState: OperatePageState = { ...INITIAL_OPERATE_PAGE, presentation: 'chat', console: {
+    workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', fullChat: 'default', viewId: 'overview', screenId: null,
+  } }
+  render(consoleState)
+  expect(container.querySelector('[data-testid="chat"]')).toBe(chat)
+  expect(chat?.getAttribute('data-layout')).toBe('full')
+  render({ ...consoleState, presentation: 'canvas' })
+  expect(chat?.getAttribute('data-layout')).toBe('side')
+  testState.search = { setup: 'new' }
+  render(consoleState)
+  expect(chat?.getAttribute('data-layout')).toBe('hidden')
+  expect(container.querySelector('[data-testid="builder"]')).not.toBeNull()
+  testState.search = {}
+  render(INITIAL_OPERATE_PAGE)
+  expect(container.querySelector('input')).toBe(draft)
+  expect(draft.value).toBe('Keep this draft')
 })

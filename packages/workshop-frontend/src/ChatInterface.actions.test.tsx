@@ -84,7 +84,7 @@ function withChatApi(
 
 function renderChat(
   overseer: RpcStub<Overseer>,
-  props: { restricted?: boolean, selectedChatId?: number, operateOnly?: boolean } = {},
+  props: { restricted?: boolean, selectedChatId?: number, operateOnly?: boolean, onNavigate?: (id: number | null) => void, suggestions?: { pages: { id: string; title: string }[]; onOpen: (id: string) => void } } = {},
 ) {
   return testRoot.render(
     <ChatInterface
@@ -92,7 +92,7 @@ function renderChat(
       overseer={overseer}
       restricted={props.restricted}
       selectedChatId={props.selectedChatId ?? null}
-      onNavigateToChat={() => {}}
+      onNavigateToChat={props.onNavigate ?? (() => {})}
       pendingConsoleLogCount={0}
       consoleLogPreview=""
       consoleLogSeverity="info"
@@ -101,6 +101,9 @@ function renderChat(
       onOpenGadget={() => {}}
       outputOfWorkpiece={() => undefined}
       operateOnly={props.operateOnly}
+      operateSuggestions={props.suggestions}
+      operateWelcome={props.operateOnly ? "How can I help?" : undefined}
+      operateCenteredStart={props.operateOnly}
     />,
   )
 }
@@ -320,4 +323,25 @@ describe('operate-only chat', () => {
     await renderHookCard(false)
     expect(hookToggle()).not.toBeNull()
   })
+})
+
+
+it('restores an existing operate conversation instead of starting a separate console chat', async () => {
+  const server = makeOverseer()
+  withChatApi(server, undefined, [{ id: 4, title: 'Shared conversation', started: new Date(), lastActive: new Date() }])
+  const navigate = vi.fn<(id: number | null) => void>()
+  await renderChat(server.overseer, { operateOnly: true, onNavigate: navigate })
+  expect(navigate).toHaveBeenCalledWith(4, { replace: true })
+})
+
+it('offers page suggestions next to the assistant start composer', async () => {
+  const server = makeOverseer()
+  withChatApi(server)
+  const open = vi.fn<(id: string) => void>()
+  await renderChat(server.overseer, { operateOnly: true, suggestions: { pages: [{ id: 'board', title: 'Shift board' }], onOpen: open } })
+  const suggestion = document.querySelector<HTMLButtonElement>('[aria-label="Suggested pages"] button')!
+  expect(document.body.textContent).toContain('How can I help?')
+  act(() => suggestion.click())
+  expect(open).toHaveBeenCalledWith('board')
+  expect(document.querySelector('[role="combobox"]')).not.toBeNull()
 })
