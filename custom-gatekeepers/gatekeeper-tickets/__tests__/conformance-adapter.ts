@@ -19,7 +19,11 @@ type Fixture = {
   session: ReturnType<DurableObjectStub<TestHooks>["startSession"]>;
 };
 
-/** The message an RPC call failed with, or null when it succeeded. */
+/**
+ * The message an RPC call failed with, or null when it succeeded. Use this rather than handing an
+ * RPC promise to `expect(...).rejects`: inspecting it reads properties, each a pipelined call that
+ * rejects with the same error and is never handled, which vitest reports as unhandled errors.
+ */
 async function refusal(call: PromiseLike<unknown>): Promise<string | null> {
   try {
     await call;
