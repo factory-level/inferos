@@ -1,6 +1,7 @@
-// Semantic board discovery (#61): ranks the projects a person can read against what they said,
-// without them having to remember a board's title, key or URI. Pure, so the session can feed it
-// whatever the person's own token listed, and the ranking is tested on its own.
+// Semantic board discovery (#61): ranks the projects a person can read, in every InferOps
+// workspace they hold, against what they said, without them having to remember a board's title,
+// key, workspace or URI. Pure, so the session can feed it whatever the person's own token listed,
+// and the ranking is tested on its own.
 //
 // "Semantic" here is deliberately local and explainable: query words (lowercased, lightly stemmed,
 // common words dropped) are matched against a project's key, its name and the titles of its open
@@ -14,7 +15,10 @@ export const MAX_DISCOVERY_QUERY_LENGTH = 200;
 /** Most candidates `findBoards` returns. */
 export const MAX_DISCOVERY_CANDIDATES = 8;
 
-/** Most projects whose issue titles are read for one query; the rest are matched on key and name. */
+/**
+ * Most projects whose issue titles are read for one query, across every workspace searched; the
+ * rest are matched on key and name.
+ */
 export const MAX_DISCOVERY_SCANNED_PROJECTS = 20;
 
 const STOPWORDS = new Set([
@@ -45,22 +49,27 @@ export type DiscoveryProject = {
   openIssueTitles: string[] | null;
 };
 
-/** Where the board candidates live: the binding's workspace and how to name a board in it. */
+/** Where the board candidates live: one workspace and how to name a board in it. */
 export type DiscoveryScope = {
   tenant: string;
   workspace: string;
   boardRef: (projectKey: string) => string;
 };
 
+/** The projects the person can read in one workspace. */
+export type DiscoveryWorkspace = { scope: DiscoveryScope; projects: DiscoveryProject[] };
+
 /**
- * The projects that match `query`, best first, at most `MAX_DISCOVERY_CANDIDATES`. A project that
- * matches nothing is never returned, so an empty result means no match, and ties are kept: callers
- * must disambiguate rather than take the first.
+ * The projects across `workspaces` that match `query`, best first, at most
+ * `MAX_DISCOVERY_CANDIDATES`. A project that matches nothing is never returned, so an empty result
+ * means no match, and ties are kept: callers must disambiguate rather than take the first. Equal
+ * scores are ordered by project key, then workspace, so the result does not depend on the order the
+ * workspaces were listed in.
  */
-export function rankBoards(query: string, projects: DiscoveryProject[], scope: DiscoveryScope): BoardCandidate[] {
+export function rankBoards(query: string, workspaces: DiscoveryWorkspace[]): BoardCandidate[] {
   const terms = discoveryTerms(query);
   const rawKeys = new Set((query.match(/[A-Za-z][A-Za-z0-9]*/g) ?? []).map(word => word.toUpperCase()));
-  const scored = projects.flatMap(project => {
+  const scored = workspaces.flatMap(({ scope, projects }) => projects.flatMap(project => {
     const reasons: string[] = [];
     let score = 0;
     if (rawKeys.has(project.identifier)) {
@@ -88,9 +97,11 @@ export function rankBoards(query: string, projects: DiscoveryProject[], scope: D
       boardRef: scope.boardRef(project.identifier), title: project.name, reasons,
     };
     return [{ candidate, score }];
-  });
+  }));
   return scored
-    .toSorted((a, b) => b.score - a.score || a.candidate.projectKey.localeCompare(b.candidate.projectKey))
+    .toSorted((a, b) => b.score - a.score
+      || a.candidate.projectKey.localeCompare(b.candidate.projectKey)
+      || a.candidate.workspace.localeCompare(b.candidate.workspace))
     .slice(0, MAX_DISCOVERY_CANDIDATES)
     .map(entry => entry.candidate);
 }

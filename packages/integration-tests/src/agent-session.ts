@@ -1,7 +1,8 @@
 import type { RpcPromise, RpcStub } from "capnweb";
 import type {
   ActionHistoryFilter, ActionHistoryPage, AiChatAuthorInfo, AiChatHistoryPage, AiChatMessage,
-  AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiModelConfig, AuthenticatedApi, GadgetClient,
+  AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiModelConfig, AuthenticatedApi, CapsuleSpecifier,
+  GadgetClient,
   WorkspaceKind,
   Overseer, PublicApi, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber,
 } from "@gadgets/workshop-shared/api";
@@ -24,6 +25,8 @@ type UserModel = {
 export type AgentTurnOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Resources the person pastes into the prompt, as the composer would send them. */
+  capsules?: CapsuleSpecifier[];
 };
 
 /** Configuration for one fresh local Workshop account and workspace. */
@@ -38,6 +41,11 @@ export type AgentSessionOptions = {
    */
   operateSession?: boolean;
   ambientVendorIds?: readonly string[];
+  /**
+   * Runs once the account exists, before its workspace is opened: connect accounts the way the
+   * person would, for example.
+   */
+  prepare?: (api: RpcStub<AuthenticatedApi>, username: string) => Promise<void>;
   usernamePrefix?: string;
   turnTimeoutMs?: number;
   costAccountingTimeoutMs?: number;
@@ -594,9 +602,10 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
         chatId, options.timeoutMs ?? this.#turnTimeoutMs, options.signal, prompt, false,
         dispatchedAfter);
     const operation = chatId === undefined
-      ? () => this.#startChat(prompt, observer)
+      ? () => this.#startChat(prompt, observer, options.capsules)
       : () => this.#awaitRpc(
-          this.#workspace.sendChatMessage(chatId, prompt, this.#modelId), chatId, observer);
+          this.#workspace.sendChatMessage(chatId, prompt, this.#modelId, options.capsules),
+          chatId, observer);
     return this.#observeOperation(observer, operation);
   }
 
@@ -708,8 +717,8 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
     return this.close();
   }
 
-  async #startChat(prompt: string, observer: TurnObserver): Promise<void> {
-    const creating = this.#workspace.newChat(prompt, this.#modelId);
+  async #startChat(prompt: string, observer: TurnObserver, capsules?: CapsuleSpecifier[]): Promise<void> {
+    const creating = this.#workspace.newChat(prompt, this.#modelId, capsules);
     this.#pendingRpcs.add(creating);
     creating.then(chatId => {
       const status = observer.outcome?.status;
@@ -1040,6 +1049,8 @@ export async function openAgentSession(
           ?? null);
       accounts.set(vendorId, account);
     }
+
+    await options.prepare?.(authenticated, username);
 
     if (options.operateSession) {
       using operate = await authenticated.getOperateSession();

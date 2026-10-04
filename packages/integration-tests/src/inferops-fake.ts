@@ -35,7 +35,8 @@
 //
 // Failure switches: `failNextRequests` (503 for the next N InferOps calls), `failNextWrites` (503 for
 // the next N writes, before anything is committed), and `loseNextWriteResponse` (commit the next
-// write, store its response under its key, then drop the connection). `revokeSessions` ends a
+// write, store its response under its key, then drop the connection). `deleteIssue` removes an
+// issue as a deletion in InferOps would. `revokeSessions` ends a
 // person's sessions at InferLab, so their access tokens get 401 and their refresh tokens too.
 //
 // Everything a request carried is recorded in `requests`, and every committed write in `commits`,
@@ -448,6 +449,14 @@ export class InferOpsFake {
   touch(identifier: string): void {
     const issue = this.issue(identifier);
     issue.revision = String(Number(issue.revision) + 1);
+  }
+
+  /**
+   * Someone deletes the issue in InferOps: it leaves its board, and reads and writes of it answer
+   * 404 NOT_FOUND from then on.
+   */
+  deleteIssue(identifier: string): void {
+    this.#issues.delete(this.issue(identifier).id);
   }
 
   /** The InferOps writes (anything but a GET) that reached the API. */
