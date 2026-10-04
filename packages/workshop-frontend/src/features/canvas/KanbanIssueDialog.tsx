@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react'
+import { useRef, useState, type ReactElement } from 'react'
 import { Button, Dialog, Input, InputArea, Select } from '@cloudflare/kumo'
 import type { Issue, IssueChanges, NewIssue, Priority, Run, State } from '@inferos/gatekeeper-inferops/src/types'
 import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
@@ -19,9 +19,16 @@ type FormMode =
 /** `code`: the issue's coding run and a dispatch to the coding runner, through the project's coding-dispatch connection. */
 type Mode = FormMode | { kind: 'code'; issue: Issue; run: Run | undefined; coding: CodingControl }
 
+/**
+ * Whether the dialog is open, held by its owner (the operate session's shown issue) rather than the
+ * dialog, so it survives reload and Back closes it. Absent, the dialog keeps its own open state.
+ */
+export type IssueDialogControl = { open: boolean; onOpenChange: (open: boolean) => void }
+
 export type KanbanIssueDialogProps = {
   /** The control that opens the dialog. Focus returns to it when the dialog closes. */
   trigger: ReactElement
+  control?: IssueDialogControl
 } & Mode
 
 /**
@@ -33,9 +40,11 @@ export type KanbanIssueDialogProps = {
  * In `code` mode it is the issue's coding task instead: it stays open after a dispatch or cancel is
  * proposed, since it also follows the run (see `KanbanCodingForm`).
  */
-export const KanbanIssueDialog = ({ trigger, ...mode }: KanbanIssueDialogProps) => {
-  const [open, setOpen] = useState(false)
-  return <Dialog.Root open={open} onOpenChange={setOpen}>
+export const KanbanIssueDialog = ({ trigger, control, ...mode }: KanbanIssueDialogProps) => {
+  const [ownOpen, setOwnOpen] = useState(false)
+  const open = control ? control.open : ownOpen
+  const setOpen = control ? control.onOpenChange : setOwnOpen
+  return <Dialog.Root open={open} onOpenChange={next => setOpen(next)}>
     <Dialog.Trigger render={trigger} />
     <Dialog className="responsive-dialog space-y-4 p-6" size="lg">
       {/* Mounted only while open, so every opening starts from the issue as the board shows it. */}
@@ -52,19 +61,23 @@ const IssueForm = ({ mode, onDone }: { mode: FormMode; onDone: () => void }) => 
     ? { title: mode.issue.title, description: '', priority: mode.issue.priority }
     : { title: '', description: '', priority: 'none' })
   const [busy, setBusy] = useState(false)
+  // Set synchronously on submit, so a second click or Enter before the busy state renders cannot
+  // propose the same change twice.
+  const proposing = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const changes = mode.kind === 'edit' ? changedFields(mode.issue, fields) : null
   const title = fields.title.trim()
   const unchanged = changes !== null && Object.keys(changes).length === 0
 
   const submit = async () => {
-    if (title === '' || unchanged || busy) return
+    if (title === '' || unchanged || proposing.current) return
+    proposing.current = true
     setBusy(true)
     setError(null)
-    const result = mode.kind === 'create'
-      ? await mode.onCreate({ title, priority: fields.priority, stateId: mode.state.id,
+    const result = await (mode.kind === 'create'
+      ? mode.onCreate({ title, priority: fields.priority, stateId: mode.state.id,
         ...fields.description.trim() !== '' ? { description: fields.description } : {} })
-      : await mode.onUpdate(changes!)
+      : mode.onUpdate(changes!)).finally(() => { proposing.current = false })
     setBusy(false)
     if (result.ok) onDone()
     else setError(proposalErrorText(result))

@@ -241,7 +241,7 @@ describe("boards", () => {
 
   it("shows one board at a time, by reference, and closes it", () => {
     let state = replayOperateEvents([{ type: "openBoard", board: ENG }, { type: "openBoard", board: WEB }]);
-    expect(state.board).toEqual(WEB);
+    expect(state.board).toEqual({ ...WEB, issueId: null });
     state = applyOperateEvent(state, { type: "closeBoard" });
     expect(state.board).toBeNull();
     expect(() => applyOperateEvent(state, { type: "closeBoard" })).toThrow(OperateEventError);
@@ -257,8 +257,8 @@ describe("boards", () => {
       expect(applyOperateEvent(shown, event).board).toBeNull();
     }
     // Presentation and chat changes keep it.
-    expect(applyOperateEvent(shown, { type: "setPresentation", presentation: "chat" }).board).toEqual(ENG);
-    expect(applyOperateEvent(shown, { type: "setChatOpen", open: false }).board).toEqual(ENG);
+    expect(applyOperateEvent(shown, { type: "setPresentation", presentation: "chat" }).board).toMatchObject(ENG);
+    expect(applyOperateEvent(shown, { type: "setChatOpen", open: false }).board).toMatchObject(ENG);
   });
 
   it("rejects a malformed board reference", () => {
@@ -274,7 +274,26 @@ describe("boards", () => {
     let { board: _b, ...old } = replayOperateEvents([openConsole]);
     let stored: OperatePageState = { ...INITIAL_OPERATE_PAGE, ...old };
     expect(stored.board).toBeNull();
-    expect(applyOperateEvent(stored, { type: "openBoard", board: ENG }).board).toEqual(ENG);
+    expect(applyOperateEvent(stored, { type: "openBoard", board: ENG }).board).toMatchObject(ENG);
+  });
+
+  it("goes board, issue, back to the same board; another board starts with no issue", () => {
+    let state = replayOperateEvents([{ type: "openBoard", board: ENG }, { type: "openIssue", issueId: "issue-1" }]);
+    expect(state.board).toEqual({ ...ENG, issueId: "issue-1" });
+    state = applyOperateEvent(state, { type: "openIssue", issueId: "issue-2" });
+    expect(state.board?.issueId).toBe("issue-2");
+    state = applyOperateEvent(state, { type: "closeIssue" });
+    expect(state.board).toEqual({ ...ENG, issueId: null });
+    expect(() => applyOperateEvent(state, { type: "closeIssue" })).toThrow(OperateEventError);
+    state = replayOperateEvents([{ type: "openBoard", board: ENG }, { type: "openIssue", issueId: "issue-1" }, { type: "openBoard", board: WEB }]);
+    expect(state.board).toEqual({ ...WEB, issueId: null });
+  });
+
+  it("refuses an issue with no board shown, or with a malformed id", () => {
+    expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "openIssue", issueId: "issue-1" })).toThrow(OperateEventError);
+    let shown = applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "openBoard", board: ENG });
+    expect(() => applyOperateEvent(shown, { type: "openIssue", issueId: "" })).toThrow(OperateEventError);
+    expect(() => applyOperateEvent(shown, { type: "openIssue", issueId: "x".repeat(129) })).toThrow(OperateEventError);
   });
 });
 

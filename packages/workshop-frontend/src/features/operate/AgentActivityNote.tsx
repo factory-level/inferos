@@ -24,6 +24,8 @@ export const describeAgentEvent = (event: OperateEvent, titleOf: (ref: OperateRe
     case 'setPresentation': return event.presentation === 'chat' ? 'switched to full chat' : 'switched to the canvas'
     case 'openBoard': return `opened board ${event.board.boardRef.split('/').at(-1) ?? ''}`
     case 'closeBoard': return 'closed the board'
+    case 'openIssue': return 'opened an issue'
+    case 'closeIssue': return 'went back to the board'
   }
 }
 

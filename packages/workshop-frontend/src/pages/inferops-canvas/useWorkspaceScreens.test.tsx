@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
+import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import { canBuild, useWorkspaceScreens, type WorkspaceScreensState } from './useWorkspaceScreens'
 
@@ -14,8 +15,9 @@ const workspace = (id: string, role: 'build' | 'use' | undefined, lastActive: st
   ({ id, title: id, role, lastActive: new Date(lastActive) }) as unknown as GadgetMetadataWithTimestamps
 const denied = () => Promise.reject(new Error('Unauthorized'))
 
-// Each workspace as its role sees it: the use role can list consoles but not screens or flows.
-const fakeApi = (consolesOf: Record<string, OperateConsole[]>, list: GadgetMetadataWithTimestamps[]) => {
+// Each workspace as its role sees it: the use role lists consoles and the screens they show, not flows.
+const fakeApi = (consolesOf: Record<string, OperateConsole[]>, list: GadgetMetadataWithTimestamps[],
+    consoleScreensOf: Record<string, CanvasDefinition[]> = {}) => {
   const opened: string[] = []
   const api = {
     listGadgets: async () => list,
@@ -23,7 +25,7 @@ const fakeApi = (consolesOf: Record<string, OperateConsole[]>, list: GadgetMetad
       opened.push(id)
       const use = list.find(item => item.id === id)?.role === 'use'
       return {
-        listCanvases: use ? denied : async () => [],
+        listCanvases: async () => use ? consoleScreensOf[id] ?? [] : [],
         listFlows: use ? denied : async () => [],
         listConsoles: async () => consolesOf[id] ?? [],
         [Symbol.dispose]: () => {},
@@ -44,16 +46,17 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
 it('lists use-role workspaces that hold consoles, read-only, after the build workspaces', async () => {
+  const screen: CanvasDefinition = { schemaVersion: 1, id: 's1', revision: '0', title: 'Board', sections: [] }
   const { api } = fakeApi({ shared: [CONSOLE] }, [
     workspace('shared', 'use', '2026-01-01'),
     workspace('empty', 'use', '2026-06-01'),
     workspace('mine', undefined, '2026-03-01'),
-  ])
+  ], { shared: [screen] })
   await act(async () => root.render(<Probe api={api} />))
   if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
   expect(state.workspaces.map(entry => entry.workspace.id)).toEqual(['mine', 'shared'])
   const shared = state.workspaces[1]!
-  expect(shared).toMatchObject({ screens: null, flows: [], consoles: [CONSOLE] })
+  expect(shared).toMatchObject({ screens: [screen], flows: [], consoles: [CONSOLE] })
   expect(canBuild(shared)).toBe(false)
   expect(canBuild(state.workspaces[0]!)).toBe(true)
 })

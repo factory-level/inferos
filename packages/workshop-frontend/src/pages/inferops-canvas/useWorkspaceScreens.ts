@@ -14,8 +14,8 @@ export const MAX_USE_CONSOLE_WORKSPACES = 24
 /**
  * A listed workspace, with its saved screens (null when they could not be read) and the flows and
  * consoles authored over them. A workspace the user can build in lists all three; one shared with
- * them for use only is listed only when it holds consoles, read-only and with `screens: null`,
- * since the use role can list consoles but not screens or flows (see `canBuild`).
+ * them for use only is listed only when it holds consoles, read-only, with just the screens those
+ * consoles show and no flows, which is all the use role can read (see `canBuild`).
  */
 export type WorkspaceScreens = {
   workspace: GadgetMetadataWithTimestamps
@@ -63,8 +63,8 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
     const operated = Promise.all(uses.map(async (workspace): Promise<WorkspaceScreens | null> => {
       const overseer = api.openGadget(workspace.id)
       try {
-        const consoles = await overseer.listConsoles()
-        return consoles.length === 0 ? null : { workspace, screens: null, flows: [], consoles }
+        const [consoles, screens] = await Promise.all([overseer.listConsoles(), overseer.listCanvases()])
+        return consoles.length === 0 ? null : { workspace, screens: screens.map(parseCanvasDefinition), flows: [], consoles }
       } catch {
         return null
       } finally {

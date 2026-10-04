@@ -22,7 +22,9 @@ import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from
 import { FlowPage } from './FlowPage'
 import { OperateChatPanel } from './OperateChatPanel'
 import { SessionApprovals } from './SessionApprovals'
+import { SessionBoard } from './SessionBoard'
 import { SessionScreen } from './SessionScreen'
+import { useBoardHistory, type BoardSearch } from './useBoardHistory'
 import { useSessionWorkspace } from './useSessionWorkspace'
 
 /** Operate's launcher and workspaces share one mounted conversation, including during setup. */
@@ -39,7 +41,19 @@ export const OperateSessionPage = () => {
 
   const [widgetTarget, setWidgetTarget] = useState<ConsoleWidgetTarget | null>(null)
   const consoleId = operate?.snapshot?.state.console?.consoleId
-
+  const notifyRefused = (caught: unknown) => {
+    console.error('Operate session change failed:', caught)
+    const code = getOperateSessionErrorCode(caught)
+    toasts.add({ title: code === OPERATE_SESSION_ERROR_CODES.consoleChanged
+      ? 'This console has changed or is no longer available. Reload to see it as it is now.'
+      : code === OPERATE_SESSION_ERROR_CODES.boardUnavailable
+      ? 'That board is not connected for you or is no longer available. Choose another board or connect it.'
+      : 'That change could not be applied to your session.', variant: 'error' })
+  }
+  const send = (event: OperateEvent) => { operate?.dispatch(event).catch(notifyRefused) }
+  useBoardHistory(operate?.snapshot?.state.board ?? null, search,
+    (boardSearch: BoardSearch, replace) => void navigate({ to: '/inferops-canvas', search: previous => ({ ...previous, ...boardSearch }), replace }),
+    event => (operate ? operate.dispatch(event) : Promise.reject(new Error('No operate session'))).catch(caught => { notifyRefused(caught); throw caught }))
 
   if (!operate) return null
   if (operate.error) return <p role="alert" className="p-6 text-sm text-kumo-danger">{operate.error}</p>
@@ -54,17 +68,9 @@ export const OperateSessionPage = () => {
   const settings = search.settings
   const configuring = !!setup || !!settings
   const tools = search.tools === true
-  const home = !state.flow && !run && !state.focus && !tools && !configuring
+  const home = !state.flow && !run && !state.board && !state.focus && !tools && !configuring
   const centered = !state.flow && !tools && !configuring && run !== null && state.presentation === 'chat'
   const hideChat = configuring || tools || (!home && !centered && !state.chatOpen)
-  const send = (event: OperateEvent) => {
-    operate.dispatch(event).catch(caught => {
-      console.error('Operate session change failed:', caught)
-      toasts.add({ title: getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.consoleChanged
-        ? 'This console has changed or is no longer available. Reload to see it as it is now.'
-        : 'That change could not be applied to your session.', variant: 'error' })
-    })
-  }
   const showHome = async () => {
     try {
       await operate.dispatch({ type: 'showHome' })
@@ -135,7 +141,15 @@ export const OperateSessionPage = () => {
           : tools ? <InferOpsCanvasHome />
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} />
           : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
-          : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} onEvent={send} />
+          : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} board={state.board}
+              sessionWorkspace={sessionWorkspace} onEvent={send} />
+          : state.board
+            ? sessionWorkspace?.id === state.board.workspaceId
+              ? <div className="h-full p-5"><SessionBoard board={state.board} overseer={sessionWorkspace.stub} backLabel="consoles" onEvent={send} /></div>
+              : sessionWorkspace
+                ? <div role="alert" className="space-y-3 p-6 text-sm text-kumo-subtle"><p>This board was opened through a workspace you no longer reach.</p>
+                    <Button size="sm" onClick={() => send({ type: 'closeBoard' })}>Back to consoles</Button></div>
+                : <p role="status" className="p-6 text-sm text-kumo-subtle">Opening the board…</p>
           : state.focus?.type === 'screen'
             ? <SessionScreen key={`${state.focus.workspaceId}/${state.focus.screenId}`} workspaceId={state.focus.workspaceId} screenId={state.focus.screenId}
                 onShowScreen={screenId => send({ type: 'open', ref: { type: 'screen', workspaceId: state.focus!.workspaceId, screenId } })}
