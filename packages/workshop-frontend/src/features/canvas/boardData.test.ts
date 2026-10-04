@@ -373,6 +373,66 @@ const metered = (ws: ReturnType<typeof workspace>, options: { maxConcurrent?: nu
 }
 
 describe('BoardData read metrics', () => {
+  // A card deferred while offscreen subscribes late (#28): it must not cost a second read of a board
+  // another card already shows current, and must see what that board has pending.
+  it('serves a card subscribing after the board landed from the card showing it, with its pending move, without a read', async () => {
+    const ws = workspace()
+    const { data, metrics } = metered(ws)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo', '7'), issue('2', 'done')]))
+    await flush()
+    const moved = data.move(request(), '1', 'done', '7')
+    await flush()
+    ws.transitions[0]!.settle.resolve()
+    await moved
+    await flush()
+    ws.reads[1]!.resolve(board([issue('1', 'done', '7'), issue('2', 'done')]))
+    await flush()
+    expect(data.get(request())).toMatchObject({ status: 'ready', pending: [{ issueId: '1', phase: 'awaiting' }] })
+
+    const late = request(DEMO, { workflow: 'software', showCompleted: true })
+    const card = listen(data, late)
+    await flush()
+    expect(ws.reads).toHaveLength(2)
+    expect(data.get(late)).toMatchObject({ status: 'ready', pending: [{ issueId: '1', phase: 'awaiting' }] })
+    expect(columns(data.get(late))).toEqual([[], ['1', '2'], []])
+    expect(metrics.snapshot()).toMatchObject({ readsStarted: 2, sharedDemands: 1 })
+    // It is a card of the board like any other: the next decision re-reads once and reaches it.
+    data.invalidate(DEMO)
+    await flush()
+    expect(ws.reads).toHaveLength(3)
+    ws.reads[2]!.resolve(board([issue('1', 'done', '8'), issue('2', 'done')]))
+    await flush()
+    expect(data.get(late)).toMatchObject({ status: 'ready', pending: [] })
+    expect(card.changes).toEqual(['stale', 'ready'])
+  })
+
+  it('has a card subscribing while the board is being re-read join that read, and one after a failed read read again', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+    data.refresh(request())
+    await flush()
+    const late = request(DEMO, { workflow: 'software', showCompleted: true })
+    listen(data, late)
+    await flush()
+    expect(ws.reads).toHaveLength(2)
+    expect(data.get(late).status).toBe('loading')
+    ws.reads[1]!.reject(new Error('UNAVAILABLE: down'))
+    await flush()
+    expect(data.get(request())).toMatchObject({ status: 'stale', error: 'down' })
+    expect(data.get(late)).toMatchObject({ status: 'error', message: 'down' })
+    // The board on screen is not current, so a third card does not take it: it reads.
+    const third = request(DEMO, { workflow: 'content', showCompleted: false })
+    listen(data, third)
+    await flush()
+    expect(ws.reads).toHaveLength(3)
+  })
+
   it('counts duplicate widgets of one target as one read and the rest as shared', async () => {
     const ws = workspace()
     const { data, metrics, tick } = metered(ws)

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
 import { Badge, Button, Loader } from '@cloudflare/kumo'
 import { ArrowClockwise, ArrowsOutSimple } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
@@ -12,6 +12,7 @@ import { KanbanBoard, type OpenIssueControl } from './KanbanBoard'
 import { useBoardActivity } from './useBoardActivity'
 import { useBoardData } from './useBoardData'
 import { useCodingDispatch } from './useCodingDispatch'
+import { useHasBeenOnScreen } from './useHasBeenOnScreen'
 
 export type CanvasBoardWidgetProps = {
   widget: CanvasProjectBoardWidget
@@ -49,8 +50,12 @@ const proposalCount = (moves: number, changes: number) => {
  */
 export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   const { widget, overseer, presentation, openIssue } = props
-  const { state, refresh, move, create, update } = useBoardData(overseer, widget)
-  const dispatchRef = props.codingDispatch ? dispatchRefOf(widget.targetRef) : null
+  const ref = useRef<HTMLElement>(null)
+  // A card reads nothing (the board, its coding runs) until it first comes near the screen, and
+  // stays subscribed after (see the Kanban performance notes); the full view is always on screen.
+  const nearScreen = useHasBeenOnScreen(ref, presentation === 'full')
+  const { state, refresh, move, create, update } = useBoardData(overseer, widget, nearScreen)
+  const dispatchRef = props.codingDispatch && nearScreen ? dispatchRefOf(widget.targetRef) : null
   const coding = useCodingDispatch(overseer, dispatchRef)
   const board = 'board' in state ? state.board : undefined
   // Awaiting actions show only while a board is held: once the connection is revoked or the board
@@ -69,7 +74,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   // What this scope proposed and the board does not show decided yet. Creates and edits leave this
   // count once the board shows them, each then marked on its own card.
   const proposals = 'pending' in state ? proposalCount(state.pending.length, state.changes.length) : { count: 0, noun: '' }
-  return <article aria-label={`Project board ${widget.targetRef}`} data-presentation={presentation}
+  return <article ref={ref} aria-label={`Project board ${widget.targetRef}`} data-presentation={presentation}
     className={`flex min-w-0 flex-col rounded-xl border border-kumo-line bg-kumo-base shadow-md ${full ? 'h-full min-h-0' : ''}`}>
     <header className="flex flex-wrap items-center gap-2 border-b border-kumo-line px-3 py-2">
       <div className="min-w-0 flex-1">
@@ -86,7 +91,9 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
       {presentation === 'card' && props.onOpen && <Button size="sm" variant="ghost" icon={ArrowsOutSimple} onClick={props.onOpen}>Open</Button>}
     </header>
     <BoardActivityLine activity={activity} now={now} compact={!full} />
-    <div className={`min-h-0 flex-1 p-3 ${full ? 'flex flex-col' : ''}`}>
+    {/* Until its board is loaded, a card holds the height an embedded board takes (KanbanBoard's
+        32rem cap): as short loaders, every card would fit near the screen at once and read. */}
+    <div className={`min-h-0 flex-1 p-3 ${full ? 'flex flex-col' : ''} ${!full && state.status === 'loading' ? 'min-h-[32rem]' : ''}`}>
       {state.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the board…</p>}
       {state.status === 'unbound' && (props.unboundAction ? props.unboundAction(refresh) : <p className="text-sm text-kumo-subtle">
         Not connected. This workspace has no connection to this board. Connect it, for example by asking in the chat, to see it live.

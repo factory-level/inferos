@@ -117,14 +117,26 @@ export class BoardData {
     this.#metrics = options.metrics
   }
 
-  /** Start serving a request; the first subscriber triggers the load. Unsubscribing the last one cancels any unused load. */
+  /**
+   * Start serving a request; the first subscriber triggers the load, unless another card of the
+   * board already shows it current, whose board it then shares without a read (a card scrolled into
+   * view after the others loaded). Unsubscribing the last one cancels any unused load.
+   */
   subscribe(request: BoardRequest, listener: () => void): () => void {
     const key = boardRequestKey(request)
     let entry = this.#entries.get(key)
     if (!entry) {
-      entry = { target: canonicalBoardRef(request.targetRef), request, listeners: new Set(), state: LOADING_BOARD }
+      const target = canonicalBoardRef(request.targetRef)
+      // `ready` means the last read landed and nothing newer was asked for since (that would be `stale`).
+      const current = this.#entriesOf(target).find(other => other.state.status === 'ready')?.state
+      entry = { target, request, listeners: new Set(), state: LOADING_BOARD }
       this.#entries.set(key, entry)
-      this.#demand(entry)
+      if (current?.status === 'ready') {
+        entry.state = { status: 'ready', board: current.board, pending: current.pending, changes: current.changes }
+        this.#metrics?.shared()
+      } else {
+        this.#demand(entry)
+      }
     } else {
       this.#metrics?.shared()
     }

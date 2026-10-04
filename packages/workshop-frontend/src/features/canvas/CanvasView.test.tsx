@@ -111,18 +111,58 @@ it('defers loading a gadget until it scrolls near the screen', async () => {
   expect(container.querySelector('[data-testid="gadget-ui"]')?.textContent).toBe('visible')
 })
 
-// A finding of #28, recorded rather than fixed: unlike a gadget, a board card is not deferred until
-// it scrolls into view. Its read is bounded only by sharing (one per target) and the adapter's
-// concurrency cap, so an offscreen board still costs a full board read.
-it('reads an offscreen board card at once, sharing the read with every other card of it', async () => {
-  lookup.mockResolvedValue(connection)
+// One IntersectionObserver per card, as the browser gives each card its own; `show` reports the
+// named cards near the screen, `hide` reports them gone again.
+const observeCards = () => {
+  const observers: { callback: (entries: { isIntersecting: boolean }[]) => void; elements: Element[] }[] = []
   vi.stubGlobal('IntersectionObserver', class {
-    observe() {}
-    disconnect() {}
+    readonly entry: (typeof observers)[number]
+    constructor(callback: (typeof observers)[number]['callback']) { this.entry = { callback, elements: [] }; observers.push(this.entry) }
+    observe(element: Element) { this.entry.elements.push(element) }
+    disconnect() { observers.splice(observers.indexOf(this.entry), 1) }
   })
-  await render(definition([boardWidget('b'), boardWidget('all', true), gadgetWidget('g', 'gadget:3')]),
+  const report = async (isIntersecting: boolean, cards: Element[]) => {
+    await act(async () => {
+      for (const observer of observers) if (observer.elements.some(element => cards.includes(element))) observer.callback([{ isIntersecting }])
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+  }
+  return { show: (cards: Element[]) => report(true, cards), hide: (cards: Element[]) => report(false, cards) }
+}
+const boardCards = () => [...container.querySelectorAll(`[aria-label="Project board ${BOARD}"]`)]
+const issueCount = (card: Element | undefined) => card?.querySelectorAll('[data-issue-id]').length
+
+// #28: a board card reads nothing until it first comes near the screen, as a gadget card loads
+// nothing; duplicates still share one read, and a card arriving after the board landed takes it.
+it('reads an offscreen board card only once it comes near the screen, sharing one read among its cards', async () => {
+  lookup.mockResolvedValue(connection)
+  const cards = observeCards()
+  await render(definition([boardWidget('b1'), boardWidget('b2'), boardWidget('all', true), gadgetWidget('g', 'gadget:3')]),
     summaries({ id: 3, type: 'gadget', title: 'Report' }))
-  expect(container.querySelector('[data-testid="gadget-ui"]')?.textContent).toBe('deferred')
+  expect(lookup).not.toHaveBeenCalled()
+  expect(readBoard).not.toHaveBeenCalled()
+  expect(boardCards().map(card => card.querySelector('[aria-busy="true"]') !== null)).toEqual([true, true, true])
+
+  const [b1, b2, all] = boardCards()
+  await cards.show([b1!, b2!])
   expect(readBoard).toHaveBeenCalledTimes(1)
-  expect(container.querySelectorAll('[data-issue-id]').length).toBeGreaterThan(0)
+  expect(boardCards().map(issueCount)).toEqual([2, 2, 0])
+
+  await cards.show([all!])
+  expect(readBoard).toHaveBeenCalledTimes(1)
+  expect(boardCards().map(issueCount)).toEqual([2, 2, 3])
+  expect(container.querySelector('[data-testid="gadget-ui"]')?.textContent).toBe('deferred')
+})
+
+it('keeps a board card that scrolled away subscribed, so a decided action still re-reads the board once', async () => {
+  lookup.mockResolvedValue(connection)
+  const cards = observeCards()
+  await render(definition([boardWidget('b'), boardWidget('all', true)]), summaries())
+  await cards.show(boardCards())
+  await cards.hide(boardCards())
+  expect(readBoard).toHaveBeenCalledTimes(1)
+  expect(boardCards().map(issueCount)).toEqual([2, 3])
+  await act(async () => { actions?.entry(action(BOARD, 'approved')); await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(readBoard).toHaveBeenCalledTimes(2)
+  expect(boardCards().map(issueCount)).toEqual([2, 3])
 })

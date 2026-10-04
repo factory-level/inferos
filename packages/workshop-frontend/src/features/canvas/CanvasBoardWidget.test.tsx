@@ -259,3 +259,26 @@ it('never paints a board read that lands after the session switched to another b
   expect(container.querySelector('h4')?.textContent).toBe('Other (OTHER)')
   expect(card('1')).toBeUndefined()
 })
+
+// #28: a card defers its reads until it first comes near the screen; the full view never waits.
+it('reads a card, and looks up its coding dispatch, only once it comes near the screen; the full view reads at once', async () => {
+  let reportNear: ((entries: { isIntersecting: boolean }[]) => void) | undefined
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(callback: typeof reportNear) { reportNear = callback }
+    observe() {}
+    disconnect() {}
+  })
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" codingDispatch />)
+  expect(lookup).not.toHaveBeenCalled()
+  expect(article().querySelector('[aria-busy="true"]')).not.toBeNull()
+  await act(async () => { reportNear?.([{ isIntersecting: true }]); await settle() })
+  expect(lookup.mock.calls.map(([url]) => url).toSorted()).toEqual([BOARD, 'inferops://demo.local/project/dispatch/DEMO'])
+  expect(readBoard).toHaveBeenCalledTimes(1)
+
+  await act(async () => root.unmount())
+  root = createRoot(container); readBoard.mockClear(); reportNear = undefined
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="full" />)
+  expect(reportNear).toBeUndefined()
+  expect(readBoard).toHaveBeenCalledTimes(1)
+  expect(article().querySelector('h4')?.textContent).toBe('Demo (DEMO)')
+})
