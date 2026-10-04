@@ -1092,6 +1092,7 @@ function operateEventFromToolInput(input: {
       if (input.step === undefined) throw new Error("The goToStep action needs a step.");
       return {type: "goToStep", index: input.step};
     case "exitFlow": return {type: "exitFlow"};
+    case "showHome": return {type: "showHome"};
     case "setSubject": return {type: "setSubject", subject: input.subject ?? null};
     default: throw new Error(`Unknown action: ${input.action}`);
   }
@@ -3889,7 +3890,7 @@ async function runAgentPass(
       description: OPERATE_PAGE_TOOL_DESCRIPTION,
       parameters: Type.Object({
         action: Type.Optional(Type.String({
-          enum: ["open", "focus", "close", "goToStep", "exitFlow", "setSubject"],
+          enum: ["open", "focus", "close", "goToStep", "exitFlow", "setSubject", "showHome"],
           description: "The change to make. Omit to only read the page.",
         })),
         workspaceId: Type.Optional(Type.String({

@@ -1,4 +1,4 @@
-import { MAX_OPERATE_ID_LENGTH } from "./operate-session.js";
+import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
 
 // An authored console: everything one operator role works in, as a menu of views over one
 // workspace's screens (canvas ids), stored in that workspace beside its screens and flows. Opening
@@ -35,6 +35,23 @@ export type ConsoleView =
   | { id: string; title: string; type: "rollup"; screens: string[] }
   | { id: string; title: string; type: "screen"; screen: string };
 
+/** Opt-in customization policy; these flags never grant workspace or resource capabilities. */
+export type ConsoleCustomization = {
+  /** Whether users may create personal, shareable screens for this console. */
+  screens: boolean;
+  /** Whether users may add custom widgets to their console experience. */
+  widgets: boolean;
+  /** Whether users may add application tools to their console experience. */
+  tools: boolean;
+  /** Whether users may add custom skills to their console experience. */
+  skills: boolean;
+};
+
+/** Existing consoles permit no personal customization unless explicitly configured. */
+export const DEFAULT_CONSOLE_CUSTOMIZATION: Readonly<ConsoleCustomization> = {
+  screens: false, widgets: false, tools: false, skills: false,
+};
+
 /** The authored part of a console. */
 export type OperateConsoleContent = {
   /** The console's name, shown on its tile and in the Operate sidebar. 1 to `MAX_CONSOLE_TITLE_LENGTH` characters. */
@@ -43,6 +60,8 @@ export type OperateConsoleContent = {
   views: ConsoleView[];
   /** Whether the console offers full chat. */
   fullChat: ConsoleFullChat;
+  /** Optional for older consoles; omitted flags default to disabled. */
+  customization?: ConsoleCustomization;
 };
 
 /** A stored console. */
@@ -102,5 +121,47 @@ export function parseOperateConsoleContent(content: OperateConsoleContent): Oper
     }
     return { id: view.id, title: viewTitle, type: "rollup", screens: view.screens.map(screenId) };
   });
-  return { title: title(content.title, "console"), views: parsed, fullChat: content.fullChat };
+  let customization = content.customization;
+  if (customization !== undefined) {
+    let flags = customization;
+    if (typeof flags !== "object" || flags === null ||
+        CONSOLE_CUSTOMIZATION_KEYS.some(key => typeof flags[key] !== "boolean")) {
+      throw new TypeError("Console customization settings must be booleans.");
+    }
+    customization = { screens: flags.screens, widgets: flags.widgets, tools: flags.tools, skills: flags.skills };
+  }
+  return { title: title(content.title, "console"), views: parsed, fullChat: content.fullChat,
+    ...(customization === undefined ? {} : { customization }) };
+}
+
+const CONSOLE_CUSTOMIZATION_KEYS = Object.keys(DEFAULT_CONSOLE_CUSTOMIZATION) as (keyof ConsoleCustomization)[];
+
+/**
+ * Checks a console navigation event against the console's current definition, since a session
+ * copies a console in when it opens and the definition may change after. `openConsole` must name
+ * one of `saved`'s views and its current full chat setting; `openView` one of its views; and
+ * `showScreen` a screen of the view `run` shows (a rollup's screens, or a screen view's one), or
+ * null. Returns why the event no longer fits, or null when it does or is not a console navigation
+ * event. `saved` is the console the event addresses: the one being opened, else `run`'s.
+ */
+export function consoleEventMismatch(saved: OperateConsole, run: OperateConsoleRun | null,
+    event: OperateEvent): string | null {
+  let view = (id: string) => saved.views.find(candidate => candidate.id === id);
+  switch (event.type) {
+    case "openConsole":
+      if (!view(event.viewId)) return `View ${event.viewId} is not part of console ${saved.id}.`;
+      if (event.fullChat !== saved.fullChat) return `Console ${saved.id}'s full chat setting has changed.`;
+      return null;
+    case "openView":
+      return view(event.viewId) ? null : `View ${event.viewId} is not part of console ${saved.id}.`;
+    case "showScreen": {
+      if (event.screenId === null || !run) return null;
+      let shown = view(run.viewId);
+      if (!shown) return `View ${run.viewId} is no longer part of console ${saved.id}.`;
+      let screens = shown.type === "rollup" ? shown.screens : [shown.screen];
+      return screens.includes(event.screenId) ? null : `Screen ${event.screenId} is not part of view ${shown.id}.`;
+    }
+    default:
+      return null;
+  }
 }

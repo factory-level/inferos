@@ -232,3 +232,17 @@ describe("operate page state machine", () => {
     });
   });
 });
+
+it("returns home without losing the working set or approval context, including from a flow", () => {
+  const events: OperateEvent[] = [
+    { type: "open", ref: screen("a") },
+    { type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations", fullChat: "default", viewId: "a" },
+    { type: "reviewApproval", approval: approval(7) },
+    { type: "startFlow", workspaceId: "ws1", flowId: "f1", title: "Intake", steps: ["a"] },
+    { type: "showHome" },
+  ];
+  const state = replayOperateEvents(events);
+  expect(state).toMatchObject({ console: null, focus: null, flow: null, presentation: "canvas", workingSet: [screen("a")], reviewing: approval(7) });
+  expect(applyOperateEvent(state, { type: "showHome" })).toEqual(state);
+  expect(applyOperateEvent(state, { type: "focus", ref: screen("a") }).focus).toEqual(screen("a"));
+});

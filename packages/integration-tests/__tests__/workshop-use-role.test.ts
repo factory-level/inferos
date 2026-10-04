@@ -75,11 +75,12 @@ async function outcomes<T>(calls: Calls<T>, target: T) {
 const allDenied = (calls: object) =>
   Object.fromEntries(Object.keys(calls).map(name => [name, DENIED]));
 
-// What renders the gadget UI, plus the inert action/console reads. Everything else must be
-// classified below, so a new Overseer or GadgetClient method fails to compile until it is.
+// What renders the gadget UI, plus the inert action/console reads and the read-only console
+// listing (covered in workshop-consoles.test.ts). Everything else must be classified below, so a
+// new Overseer or GadgetClient method fails to compile until it is.
 type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" |
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
-    "subscribeToConsoleLogs";
+    "subscribeToConsoleLogs" | "listConsoles";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
@@ -92,7 +93,6 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   createFlow: ws => ws.createFlow({ title: "Flow", steps: ["view"] }),
   replaceFlow: ws => ws.replaceFlow("flow", "0", { title: "Flow", steps: ["view"] }),
   deleteFlow: ws => ws.deleteFlow("flow", "0"),
-  listConsoles: ws => ws.listConsoles(),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),

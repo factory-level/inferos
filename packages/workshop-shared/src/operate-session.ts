@@ -122,6 +122,8 @@ export type OperatePageState = {
 
 /** A change to an operate session's page state. Events change presentation only. */
 export type OperateEvent =
+  /** Return to the console home, keeping the working set and conversation available. */
+  | { type: "showHome" }
   /** Add a reference to the working set (if absent) and focus it. */
   | { type: "open"; ref: OperateRef }
   /** Remove a reference; focus moves to the most recently opened remaining one. */
@@ -253,6 +255,8 @@ function sameApproval(a: OperateApprovalRef, b: OperateApprovalRef): boolean {
  */
 export function applyOperateEvent(state: OperatePageState, event: OperateEvent): OperatePageState {
   switch (event.type) {
+    case "showHome":
+      return { ...state, console: null, focus: null, flow: null, presentation: "canvas" };
     case "open": {
       checkRef(event.ref);
       let workingSet = state.workingSet.some(ref => sameOperateRef(ref, event.ref))

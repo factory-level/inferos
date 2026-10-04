@@ -423,8 +423,10 @@ export interface OperateSession extends RpcTarget {
   /**
    * Appends `event` if `expectedSeq` is the session's current sequence number, and returns the new
    * snapshot. Rejects with `OPERATE_SESSION_ERROR_CODES.conflict` when another change landed first,
-   * and with `invalidEvent` when the event doesn't apply to the current page. Either way nothing
-   * changes.
+   * with `invalidEvent` when the event doesn't apply to the current page, and with
+   * `consoleChanged` when a console event (`openConsole`, `openView`, `showScreen`) names a view or
+   * screen outside the console's current definition, read through the caller's own access to the
+   * console's workspace. Either way nothing changes.
    */
   dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot>;
 
@@ -457,6 +459,11 @@ export const OPERATE_SESSION_ERROR_CODES = {
   conflict: "OPERATE_SESSION_CONFLICT",
   /** The event is invalid in the session's current page state (see `applyOperateEvent`). */
   invalidEvent: "OPERATE_SESSION_INVALID_EVENT",
+  /**
+   * A console navigation event no longer fits the console's current definition (see
+   * `consoleEventMismatch`), or the console can no longer be read; reload the console.
+   */
+  consoleChanged: "OPERATE_SESSION_CONSOLE_CHANGED",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -468,6 +475,9 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
       "The operate session changed since you last saw it. Retry from the latest state.",
   [OPERATE_SESSION_ERROR_CODES.invalidEvent]:
       "That change is not valid for the operate session's current page.",
+  [OPERATE_SESSION_ERROR_CODES.consoleChanged]:
+      "That view or screen is not part of the console as it is now saved, or the console is no " +
+      "longer available to you. Reload the console.",
 });
 
 /** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */
@@ -2135,8 +2145,9 @@ export interface Overseer extends RpcTarget {
 
   /**
    * List this workspace's consoles: one operator role's menu of views over this workspace's
-   * screens, opened in an operate session. Console methods require build access and both view
-   * flags, like canvases and flows.
+   * screens, opened in an operate session. Needs both view flags, like canvases and flows. Unlike
+   * them it is also allowed to the use role and the operate session (read-only), so an operator
+   * reaches their console without Build; creating, replacing and deleting need build access.
    */
   listConsoles(): Promise<OperateConsole[]>;
   /** Create a console under a server-minted ID and revision zero. Its views must reference canvases of this workspace; limit 16 per workspace. */

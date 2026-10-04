@@ -12473,7 +12473,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // interface but permits only the handful of methods needed to render and interact with the
 // gadgets' deployed UIs: getMetadata() (restricted to id/title/kind/owner), a restricted
 // subscribeToMetadata(), subscribeToPresence(), subscribeToWorkpieces(), and getGadget()
-// (returning a restricted, mainline-only UseGadgetClientInterface). Presence includes active
+// (returning a restricted, mainline-only UseGadgetClientInterface), plus a read-only
+// listConsoles() so an operator reaches their role console without Build. Presence includes active
 // viewers' names, profile IDs, and roles. Every other
 // method throws "Unauthorized", with a few exceptions: subscribeToConsoleLogs() and
 // subscribeToActions() return inert subscriptions (they never deliver data), and
@@ -12496,7 +12497,12 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
-  async listConsoles(): Promise<OperateConsole[]> { this.#deny(); }
+  // An operator granted "use" reaches the consoles of the workspace without Build, read-only: a
+  // console is references and presentation, and grants nothing. Writes stay build-only.
+  async listConsoles(): Promise<OperateConsole[]> {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env).list();
+  }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
