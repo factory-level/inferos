@@ -67,8 +67,9 @@ it("stores workspace-scoped compositions with atomic revisions, reconnect recove
     expect(await workspace.getCanvas(first.id)).toEqual(updated);
     const useLink = await workspace.createShareLink('use', 'UI only');
     using useSession = await viewer.openGadget(workspaceId, useLink.key);
-    await expect(useSession.listCanvases()).rejects.toThrow(/Unauthorized/);
-    await expect(useSession.getCanvas(first.id)).rejects.toThrow(/Unauthorized/);
+    // No console shows the view, so the use role reads none (workshop-consoles.test.ts covers one that does).
+    expect(await useSession.listCanvases()).toEqual([]);
+    expect(await useSession.getCanvas(first.id)).toBeNull();
     await expect(useSession.editCanvas(first.id, '2', [{ type: 'rename', title: 'Denied' }])).rejects.toThrow(/Unauthorized/);
     using reconnectedApi = connect(harness.url);
     using reconnectedOwner = await logIn(reconnectedApi, "canvasowner");
@@ -201,12 +202,13 @@ it("keeps a private Kanban view with a live board reference through stale edits,
       await expect(otherWorkspace.editCanvas(created.id, view.revision, [{ type: "rename", title: "Taken" }]))
         .rejects.toThrow(/not found/);
 
-      // A collaborator added for use can open the workspace but not read or edit its views.
+      // A collaborator added for use can open the workspace but neither read a view no console
+      // shows nor edit any.
       await workspace.addCollaborator(useName!, "use");
       using shared = await useCollaborator.openGadget(workspaceId);
       expect(await shared.getMetadata()).toMatchObject({ role: "use" });
-      await expect(shared.listCanvases()).rejects.toThrow(/Unauthorized/);
-      await expect(shared.getCanvas(created.id)).rejects.toThrow(/Unauthorized/);
+      expect(await shared.listCanvases()).toEqual([]);
+      expect(await shared.getCanvas(created.id)).toBeNull();
       await expect(shared.editCanvas(created.id, view.revision, [{ type: "rename", title: "Denied" }]))
         .rejects.toThrow(/Unauthorized/);
       await expect(shared.deleteCanvas(created.id, view.revision)).rejects.toThrow(/Unauthorized/);
@@ -243,7 +245,9 @@ it("keeps a private Kanban view with a live board reference through stale edits,
     // The restart neither loosened the use-role denial nor let a stale revision through.
     using useOwner = await logIn(api, useName!);
     using shared = await useOwner.openGadget(saved.workspaceId);
-    await expect(shared.getCanvas(saved.view.id)).rejects.toThrow(/Unauthorized/);
+    expect(await shared.getCanvas(saved.view.id)).toBeNull();
+    await expect(shared.editCanvas(saved.view.id, saved.view.revision, [{ type: "rename", title: "Denied" }]))
+      .rejects.toThrow(/Unauthorized/);
     await expect(workspace.editCanvas(saved.view.id, "1", [{ type: "rename", title: "Stale" }]))
       .rejects.toThrow(/Canvas changed/);
     const next = await workspace.editCanvas(saved.view.id, saved.view.revision, [{ type: "rename", title: "Shift board" }]);

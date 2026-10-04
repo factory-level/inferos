@@ -2120,9 +2120,16 @@ export type AgentSpawnerConfig = {
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
-  /** List stored composition definitions in this workspace. Requires build access and both view flags. */
+  /**
+   * List stored composition definitions in this workspace. Requires both view flags. Build access
+   * lists every one; the use role lists only the screens this workspace's consoles show (see
+   * `listConsoles()`), read-only, so an operator renders their console without Build.
+   */
   listCanvases(): Promise<CanvasDefinition[]>;
-  /** Read a composition with build access and both view flags; never resolves or grants domain resources. */
+  /**
+   * Read a composition with both view flags; never resolves or grants domain resources. For the use
+   * role, a screen no console of this workspace shows reads as null, like a missing one.
+   */
   getCanvas(id: string): Promise<CanvasDefinition | null>;
   /** Create content under a server-minted ID and revision zero. Requires build access and both flags; limit 64 per workspace. */
   createCanvas(content: CanvasContent): Promise<CanvasDefinition>;
@@ -2344,6 +2351,11 @@ export interface Overseer extends RpcTarget {
    * capability was minted from the creator's connected account through the admin-policy
    * chokepoint, and a collaborator was verified against it with their own account at open(). A
    * null result is the cue to offer newGatekeeper(), never to connect on the caller's behalf.
+   *
+   * Denied to the use role, so an operator never reads through the workspace owner's connection.
+   * An operator resolves a resource a console shows in their own operate session's workspace
+   * (`OperateSession.getWorkspace()`) instead, where a connection exists only if they created it
+   * from their own connected account.
    */
   getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null>;
 
