@@ -1,0 +1,169 @@
+{
+  "$schema": "../../scripts/connection-package.schema.json",
+  "schemaVersion": 1,
+  "id": "inferops",
+  "package": "@inferos/gatekeeper-inferops",
+  "status": "reference",
+  "summary": "InferOps project boards, coding dispatch and the InferMind Wiki, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
+  "entrypoints": {
+    "main": "src/inferops.ts",
+    "vendor": "GatekeeperVendor",
+    "account": "InferOpsAccount",
+    "verifier": "InferOpsVerifier",
+    "durableObjects": [
+      "MockInferOps",
+      "InferOpsProjectGatekeeper",
+      "InferOpsDispatchGatekeeper",
+      "InferOpsWikiGatekeeper",
+      "InferLabLogin",
+      "InferOpsCredentials"
+    ]
+  },
+  "resources": [
+    {
+      "kind": "project/board",
+      "urlPattern": "inferops://*/project/board/*",
+      "gatekeeper": "InferOpsProjectGatekeeper",
+      "session": "InferOpsProjectSession",
+      "scope": "One project, by key, in one workspace the signed-in person holds. The workspace slug is resolved against their memberships when the Workshop mints the binding and fixed in its props; no session method takes a project, host, workspace or account. An issue of another project is refused exactly as an unknown one (NOT_FOUND).",
+      "enabledBy": ["INFEROPS_ENABLED"],
+      "observers": "admission",
+      "reads": [
+        { "method": "readBoard", "notes": "The bound project's board, pending actions overlaid." },
+        { "method": "openIssue", "notes": "Narrows to one issue of the bound project; its read() is an observation." }
+      ],
+      "writes": [
+        { "method": "createIssue", "concurrency": "none", "idempotency": "provider-key", "revert": "never", "notes": "InferOps has no issue delete." },
+        { "method": "transition", "concurrency": "expected-revision", "idempotency": "provider-key", "revert": "conditional", "notes": "Reverted only while the issue is still in the state it moved to." },
+        { "method": "update", "concurrency": "expected-revision", "idempotency": "provider-key", "revert": "conditional", "notes": "Title and priority revert while the issue is still at the revision the update produced; a description change never reverts." }
+      ]
+    },
+    {
+      "kind": "project/dispatch",
+      "urlPattern": "inferops://*/project/dispatch/*",
+      "gatekeeper": "InferOpsDispatchGatekeeper",
+      "session": "InferOpsDispatchSession",
+      "scope": "One project's software issues, bound by the same rules as a board, and only repositories on the wrapper's CODING_WORKBENCH_REPOS allowlist, checked at proposal and again at apply. A separate grant: a board binding never dispatches. InferOps additionally requires the person's issue:delegate.",
+      "enabledBy": ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED"],
+      "observers": "admission",
+      "reads": [
+        { "method": "listRepos" },
+        { "method": "getRun" },
+        { "method": "listRuns" }
+      ],
+      "writes": [
+        { "method": "dispatch", "concurrency": "expected-revision", "idempotency": "provider-key", "revert": "never", "notes": "Cancel the run instead." },
+        { "method": "cancel", "concurrency": "none", "idempotency": "provider-key", "revert": "never", "notes": "A CONFLICT for a run that has already stopped counts as applied." }
+      ]
+    },
+    {
+      "kind": "knowledge/wiki",
+      "urlPattern": "inferops://*/knowledge/wiki",
+      "gatekeeper": "InferOpsWikiGatekeeper",
+      "session": "InferOpsWikiSession",
+      "scope": "One InferMind workspace's Wiki the person holds; one of their InferOps workspaces is refused as having no Wiki. inferops://…/knowledge/document/<slug> references inside pages are returned, never resolved or bound.",
+      "enabledBy": ["INFEROPS_ENABLED"],
+      "observers": "admission",
+      "reads": [
+        { "method": "listDocuments" },
+        { "method": "readDocument" },
+        { "method": "readDocumentText" }
+      ],
+      "writes": [
+        { "method": "updateSection", "concurrency": "expected-version", "idempotency": "read-before-write", "revert": "conditional", "notes": "InferOps' section PATCH takes no expected version and does not replay a key, so apply re-reads the section: at the proposed version it writes; already showing this body it counts as applied; otherwise it refuses as STALE_REVISION. Reverted while the section still shows the applied body at the applied version." }
+      ]
+    }
+  ],
+  "approval": {
+    "autoApprovable": [],
+    "fingerprint": true,
+    "rejection": "Deletes the pending record, which ends its simulation; a later apply of that id is refused as unknown.",
+    "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op."
+  },
+  "providerErrors": [
+    { "code": "NOT_FOUND", "meaning": "The project, issue, run or section does not exist or is outside the binding's scope; the two are indistinguishable.", "retryable": false },
+    { "code": "STALE_REVISION", "meaning": "The target changed after the write was proposed (an expected revision or section version no longer matches).", "retryable": false },
+    { "code": "WORKFLOW_MISMATCH", "meaning": "The target state belongs to the other workflow.", "retryable": false },
+    { "code": "INVALID_STATE", "meaning": "The target state is not part of the bound project.", "retryable": false },
+    { "code": "IDEMPOTENCY_CONFLICT", "meaning": "A key was reused for a different change, or the stored request no longer matches its fingerprint.", "retryable": false },
+    { "code": "INVALID_REQUEST", "meaning": "The request itself was malformed (for instance a non-decimal revision or an empty title).", "retryable": false },
+    { "code": "CONFLICT", "meaning": "Refused in the target's current condition, such as a second pending change of one issue.", "retryable": false },
+    { "code": "RUN_ACTIVE", "meaning": "The issue already has a queued or running coding run, or a dispatch waiting for approval.", "retryable": false },
+    { "code": "UNAUTHORIZED", "meaning": "The person's session ended, was revoked, or the account was disconnected.", "retryable": false },
+    { "code": "FORBIDDEN", "meaning": "The person lacks the InferOps permission, or the workspace lacks the product.", "retryable": false },
+    { "code": "UNAVAILABLE", "meaning": "InferOps could not be reached, answered unusably, or the connection changed mid-request. The action stays pending, and a retry sends the same idempotency key.", "retryable": true },
+    { "code": "DISABLED", "meaning": "The deployment has the integration (or coding dispatch) turned off; the action stays pending until it is turned back on.", "retryable": true }
+  ],
+  "simulation": {
+    "summary": "Pending actions are stored beside the binding and overlaid on every read until applied or rejected: a move shows the issue in its target state, an update its new title and priority, a create a provisional card, a dispatch a pending run, a cancel a run marked pending, a section edit its new body.",
+    "limits": [
+      "A pending change keeps the revision InferOps reported: InferOps revisions are positions in a shared ledger, so the revision a change will produce cannot be computed. An issue therefore carries at most one live pending change, and a second is refused with CONFLICT.",
+      "A pending create is a provisional card (id pending-<action id>, identifier <KEY>-new, revision \"0\") that openIssue does not accept.",
+      "An issue's description is never read, so a pending description change is not shown and cannot be reverted.",
+      "A section edit is applied as a read then a write; an edit made in InferMind between the two is overwritten (see the design's Open Questions)."
+    ]
+  },
+  "credentials": [
+    { "name": "INFERLAB_AUTH_ORIGIN", "kind": "var", "purpose": "InferLab central-auth origin. Set, every account is a person's own InferLab session (PKCE sign-in, held in InferOpsCredentials); unset, accounts are auto-provisioned demo accounts.", "default": "Unset: demo accounts, no sign-in." },
+    { "name": "BASE_URL", "kind": "var", "purpose": "This gatekeeper's public URL, for the sign-in redirect." },
+    { "name": "INFEROPS_BASE_URL", "kind": "var", "purpose": "The InferOps API a connected person calls with their own token." },
+    { "name": "INFEROPS_API_TOKEN", "kind": "secret", "purpose": "Local-development stopgap connection shared by accounts with no identity. Never backs a connected person." },
+    { "name": "INFEROPS_WORKSPACE_ID", "kind": "var", "purpose": "The stopgap connection's workspace id." },
+    { "name": "INFEROPS_WORKSPACE_SLUG", "kind": "var", "purpose": "The workspace slug a URL must name to use the stopgap connection." },
+    { "name": "INFEROPS_ENABLED", "kind": "var", "purpose": "Capability switch for the whole integration, checked on every call.", "default": "Unset counts as on." },
+    { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
+    { "name": "CODING_WORKBENCH_REPOS", "kind": "var", "purpose": "Comma-separated InferOps repository ids a dispatch may target.", "default": "Unset allows no repository." }
+  ],
+  "compatibility": {
+    "provider": {
+      "name": "InferOps",
+      "repository": "https://github.com/factory-level/inferops",
+      "revision": "29b01a024c377b9c37b8754e7001b290e15d1509",
+      "apiVersion": null,
+      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract."
+    },
+    "contracts": [
+      { "path": "scripts/consumer/project-board.schema.json", "source": "domains/project/shared/board.dto.ts#BoardResponseSchema" }
+    ]
+  },
+  "conformance": {
+    "suite": "@gadgets/gatekeeper-kit/conformance",
+    "tests": ["__tests__/conformance.test.ts"],
+    "covered": {
+      "project/board": [
+        "resource-scope", "observation", "sharing", "approval", "apply-once", "stale-revision",
+        "server-error-retry", "lost-response-retry", "revocation"
+      ]
+    },
+    "perConnector": [
+      {
+        "kind": "project/board",
+        "cases": ["revocation"],
+        "reason": "The shared suite revokes a demo account over MockInferOps. A connected person's revocation (InferLab sign-out, UNAUTHORIZED on the next read) goes through the HTTP client and InferLab, which the suite's adapter does not fake.",
+        "coveredBy": ["__tests__/account.test.ts"]
+      },
+      {
+        "kind": "project/dispatch",
+        "cases": ["resource-scope", "observation", "approval", "apply-once", "stale-revision", "lost-response-retry"],
+        "reason": "No shared-suite adapter yet: dispatch needs the coding-workbench switch and repository allowlist set per test. Its own suite covers these cases.",
+        "coveredBy": ["__tests__/dispatch.test.ts"]
+      },
+      {
+        "kind": "knowledge/wiki",
+        "cases": ["resource-scope", "observation", "sharing", "approval", "apply-once", "stale-revision", "lost-response-retry"],
+        "reason": "No shared-suite adapter yet. Its write is guarded by a read before the write rather than a provider idempotency key, so a retry after a lost response is answered by that re-read. Its own suite covers these cases.",
+        "coveredBy": ["__tests__/wiki.test.ts"]
+      },
+      {
+        "kind": "project/dispatch",
+        "cases": ["revocation", "server-error-retry"],
+        "reason": "Not tested for this kind. It reads through the same data source and account credentials as project/board, whose revocation and UNAVAILABLE handling the shared suite covers."
+      },
+      {
+        "kind": "knowledge/wiki",
+        "cases": ["revocation", "server-error-retry"],
+        "reason": "Not tested for this kind. It reads through the same data source and account credentials as project/board, whose revocation and UNAVAILABLE handling the shared suite covers."
+      }
+    ]
+  }
+}

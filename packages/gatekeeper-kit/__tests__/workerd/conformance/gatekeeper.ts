@@ -70,6 +70,7 @@ export function resetProvider(): void {
   provider.controls.rejectCredentials = false;
   provider.controls.grantDead = false;
   provider.controls.timeoutAfterCreate = false;
+  provider.controls.unavailableOnce = false;
   provider.principal = "user-a";
   provider.listCalls = 0;
   provider.revoked.clear();
@@ -526,6 +527,34 @@ export class ConformanceResource extends DurableObject {
             { kind: "collections", ids: [...new Set(projects.map(project => project.spaceId))] }));
       },
     });
+  }
+
+  /**
+   * Narrows this resource to one space, as a binding's props fix its scope when it is minted.
+   * Only `openProject` honours it: the rest of this fixture reads the whole account.
+   * @param spaceId The one space `openProject` may open projects of.
+   */
+  scopeTo(spaceId: string): void {
+    this.ctx.storage.kv.put("scope", spaceId);
+  }
+
+  /**
+   * Opens one project of the bound space. A project of another space is refused exactly as an
+   * unknown id is, so the refusal is no existence oracle.
+   * @param id Provider project id.
+   * @returns The project.
+   */
+  async openProject(id: string): Promise<Project> {
+    const scope = this.ctx.storage.kv.get<string>("scope");
+    const project = await this.#creds.run(async creds => provider.searchProjects(creds, "")
+      .matches.find(candidate => candidate.id === id));
+    if (project === undefined || project.spaceId !== scope) {
+      throw new Error("No such project in this resource.");
+    }
+    await this.#requireGate().authorize(
+      { title: "Project", description: `Opened project ${project.name}.` },
+      { kind: "collections", ids: [project.spaceId] });
+    return project;
   }
 
   /**

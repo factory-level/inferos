@@ -1,6 +1,11 @@
 /**
  * Conformance suite for the kit's assembly.
  *
+ * The connection-level cases every gatekeeper must pass (scope, observation and sharing, approval,
+ * retry, revocation) are the shared suite in `src/conformance.ts`, registered at the end of this
+ * file through `conformance/adapter.ts`. The cases here are the kit's own: they reach into the
+ * assembly (stages, fences, cursors, journals) further than an adapter can.
+ *
  * The other workerd suites test one leaf each. This one drives a gatekeeper built from all of them
  * at once, because the contracts that matter to a new consumer are the ones that only appear when
  * the pieces are wired together: a fence captured in one module and checked in another, a cursor
@@ -9,6 +14,8 @@
 
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { defineConformanceSuite } from "../../src/conformance";
+import { syntheticAdapter } from "./conformance/adapter";
 import { RpcStub } from "cloudflare:workers";
 import type { ConformanceAccount, ConformanceResource } from "./conformance/gatekeeper";
 import {
@@ -610,3 +617,5 @@ describe("assembly", () => {
     expect(names).toEqual(["left-project", "right-project"]);
   });
 });
+
+defineConformanceSuite(syntheticAdapter, { describe, it, beforeEach });

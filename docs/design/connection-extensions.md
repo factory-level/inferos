@@ -1,7 +1,7 @@
 ---
 title: Connection packages and reviewed fork updates
 status: draft
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 
 # Connection packages and reviewed fork updates
@@ -77,7 +77,9 @@ The InferOps Gatekeeper is the reference implementation. A second small syntheti
 
 ## Open Questions
 
-- The manifest schema and its compatibility versioning.
+- The manifest schema and its compatibility versioning. Partly answered for the package contract:
+  `connection.json`, `schemaVersion: 1`, pinned to a provider revision (see the
+  [architecture](../architecture/connection-extensions.md)); how a deployment loads it is open.
 - How file classification is recorded so that an upgrade can tell shared from copied-template files.
 - The three-way reconciliation mechanism for copied skills, SOPs and blueprints.
 - How a connection package relates to this fork's `custom-gatekeepers/` root and to a wrapper's `gatekeepers/` and `workers/` directories.

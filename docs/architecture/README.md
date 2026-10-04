@@ -20,6 +20,7 @@ Create documents from [`_template.md`](_template.md).
 | [Consumer configuration](consumer-configuration.md) | `scripts/consumer`, bootstrap skill, admin configuration/API, Workshop theme | Bootstrap, wrapper blueprints, profile initialization and theme fallback; remaining adapters tracked |
 | [Customer OS onboarding](customer-onboarding.md) | `scripts/consumer/intake.ts`, `scripts/consumer/intake.schema.json`, `scripts/consumer/fixtures/intake` | Reviewed intake to wrapper configuration, requirement dispositions and drafted gap issues; no upgrade or deploy command |
 | [Customer feature capabilities](feature-capabilities.md) | `scripts/consumer/config.ts`, `scripts/consumer/runtime.ts`, `custom-gatekeepers/gatekeeper-inferops/src/enablement.ts`, `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | Schema version 2 vocabulary; `INFEROPS_ENABLED`, `INFEROPS_AUTH` and `CODING_WORKBENCH_ENABLED` supported, five capabilities unsupported |
+| [Connection packages and reviewed fork updates](connection-extensions.md) | `packages/gatekeeper-kit/src/conformance.ts`, `custom-gatekeepers/gatekeeper-inferops/connection.json`, `scripts/connection-package.schema.json`, `scripts/connection-package.test.ts` | Shared gatekeeper conformance suite and the `connection.json` package contract; the InferOps gatekeeper is the reference package. No scaffolder, manifest loading or upgrade code. |
 | [Local coding workflows and agent dispatch](local-coding-workflows.md) | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts`, `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx`, `scripts/consumer/config.ts`, `scripts/dev-server-config.ts` | Governed coding dispatch through the InferOps gatekeeper behind `CODING_WORKBENCH_ENABLED`; the runner itself is InferOps' |
 
 ## Designs with no implementation yet
@@ -28,6 +29,5 @@ These draft designs from the 2026-10-02 baseline have no architecture page becau
 
 | Design | Current state |
 | --- | --- |
-| [Connection packages and reviewed fork updates](../design/connection-extensions.md) | No connection-package, scaffolder or upgrade code. Its precursors are the fork's `custom-gatekeepers/` root ([local development](local-development.md)) and the wrapper Worker manifest ([consumer configuration](consumer-configuration.md#consumer-workers)). Tracked by [#51](https://github.com/factory-level/inferos/issues/51). |
 | [External-agent platform integrations](../design/agent-platform-integrations.md) | No code. `HARNESS_HG_ENABLED` is accepted by the configuration schema and reported unsupported. Tracked by [#52](https://github.com/factory-level/inferos/issues/52). |
 | [Native agent deployments](../design/agent-deployments.md) | No code. `AGENT_DEPLOYMENTS` is accepted by the configuration schema and reported unsupported. Tracked by [#53](https://github.com/factory-level/inferos/issues/53). |
