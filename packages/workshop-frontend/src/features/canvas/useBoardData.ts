@@ -2,18 +2,31 @@ import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { useActionEntries } from '../../useActions'
+import { BoardMetrics, type BoardMetricsSnapshot } from './boardMetrics'
 import { BoardData, LOADING_BOARD, boardRequestKey, type BoardRequest, type BoardState, type ProposalResult } from './boardData'
 import type { IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
 
 // One adapter per scope, the Overseer stub being the user's capability on the workspace. A new
 // stub (another workspace, a reopened session) gets an empty adapter; the old one is disposed with
 // its last card, so no scope's data outlives it.
-const adapters = new Map<RpcStub<Overseer>, { data: BoardData; refs: number }>()
+const adapters = new Map<RpcStub<Overseer>, { data: BoardData; refs: number; metrics?: BoardMetrics }>()
+
+declare global {
+  interface Window {
+    /** Development builds only: read metrics of every open board scope (#28). Counts and timings, no board content. */
+    __inferosBoardMetrics?: () => BoardMetricsSnapshot[]
+  }
+}
+
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  window.__inferosBoardMetrics = () => [...adapters.values()].flatMap(held => held.metrics ? [held.metrics.snapshot()] : [])
+}
 
 const acquire = (overseer: RpcStub<Overseer>): BoardData => {
   let held = adapters.get(overseer)
   if (!held) {
-    held = { data: new BoardData(overseer), refs: 0 }
+    const metrics = import.meta.env.DEV ? new BoardMetrics() : undefined
+    held = { data: new BoardData(overseer, { metrics }), refs: 0, metrics }
     adapters.set(overseer, held)
   }
   held.refs++

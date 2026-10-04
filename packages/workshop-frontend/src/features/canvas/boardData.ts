@@ -12,6 +12,7 @@ import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
 import type { Board, InferOpsProjectSession, IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
+import type { BoardMetrics } from './boardMetrics'
 
 /** What one board card asks for: registered kind and version, canonical target, normalized params. */
 export type BoardRequest = Pick<CanvasProjectBoardWidget, 'kind' | 'version' | 'targetRef' | 'params'>
@@ -102,15 +103,18 @@ type Read = { target: string; clock: number; entries: Set<Entry>; running: boole
 export class BoardData {
   readonly #overseer: RpcStub<Overseer>
   readonly #maxConcurrent: number
+  readonly #metrics: BoardMetrics | undefined
   readonly #entries = new Map<string, Entry>()
   readonly #targets = new Map<string, TargetData>()
   readonly #reads: Read[] = []
   #clock = 0
   #disposed = false
 
-  constructor(overseer: RpcStub<Overseer>, options: { maxConcurrent?: number } = {}) {
+  /** `metrics` records read counts and timings (development only; see `boardMetrics.ts`). */
+  constructor(overseer: RpcStub<Overseer>, options: { maxConcurrent?: number; metrics?: BoardMetrics } = {}) {
     this.#overseer = overseer
     this.#maxConcurrent = options.maxConcurrent ?? 4
+    this.#metrics = options.metrics
   }
 
   /** Start serving a request; the first subscriber triggers the load. Unsubscribing the last one cancels any unused load. */
@@ -121,6 +125,8 @@ export class BoardData {
       entry = { target: canonicalBoardRef(request.targetRef), request, listeners: new Set(), state: LOADING_BOARD }
       this.#entries.set(key, entry)
       this.#demand(entry)
+    } else {
+      this.#metrics?.shared()
     }
     entry.listeners.add(listener)
     return () => {
@@ -287,6 +293,8 @@ export class BoardData {
     if (!read) {
       read = { target: entry.target, clock: 0, entries: new Set(), running: false }
       this.#reads.push(read)
+    } else {
+      this.#metrics?.shared()
     }
     if (read.clock < wanted) read.clock = ++this.#clock
     read.entries.add(entry)
@@ -308,17 +316,25 @@ export class BoardData {
   async #run(read: Read): Promise<void> {
     read.running = true
     if (read.clock === 0) read.clock = ++this.#clock
+    const finished = this.#metrics?.readStarted()
     try {
       const session = await this.#session(read.target)
       const board = session ? await session.readBoard() : null
       const target = this.#targets.get(read.target)
-      if (!target || read.clock < target.wanted || read.clock <= target.applied) return
+      if (!target || read.clock < target.wanted || read.clock <= target.applied) {
+        finished?.('superseded', board)
+        return
+      }
+      const entries = this.#entriesOf(read.target)
+      // A result with no card left to show it is counted as superseded: it reached nobody.
+      finished?.(entries.length === 0 ? 'superseded' : board ? 'applied' : 'unbound', board)
       target.applied = read.clock
       if (board) this.#reconcile(read.target, board)
-      for (const entry of this.#entriesOf(read.target)) {
+      for (const entry of entries) {
         this.#set(entry, board ? { status: 'ready', board, pending: target.pending, changes: target.changes } : UNBOUND)
       }
     } catch (error) {
+      finished?.('failed')
       // Re-resolve the connection on the next read rather than reuse a session that just failed.
       this.#forgetSession(read.target)
       const target = this.#targets.get(read.target)

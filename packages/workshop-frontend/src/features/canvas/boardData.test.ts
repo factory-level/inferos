@@ -3,6 +3,7 @@ import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { Board, Issue, IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
 import { BoardData, boardRequestKey, canonicalBoardRef, visibleColumns, type BoardRequest } from './boardData'
+import { BoardMetrics, percentile } from './boardMetrics'
 
 const DEMO = 'inferops://demo.local/project/board/DEMO'
 const request = (targetRef = DEMO, params: BoardRequest['params'] = { workflow: 'software', showCompleted: false }): BoardRequest =>
@@ -360,5 +361,125 @@ describe('BoardData', () => {
     expect(visibleColumns(full, { workflow: 'software', showCompleted: false }).map(c => c.state.id)).toEqual(['todo'])
     expect(visibleColumns(full, { workflow: 'software', showCompleted: true }).map(c => c.state.id)).toEqual(['todo', 'done'])
     expect(visibleColumns(full, { workflow: 'content', showCompleted: true }).map(c => c.state.id)).toEqual(['draft'])
+  })
+})
+
+// #28: the read guarantees the performance work rests on, counted by the development-only metrics.
+/** An adapter with metrics on a clock the test advances. */
+const metered = (ws: ReturnType<typeof workspace>, options: { maxConcurrent?: number } = {}) => {
+  let now = 0
+  const metrics = new BoardMetrics({ now: () => now })
+  return { data: new BoardData(ws.overseer, { ...options, metrics }), metrics, tick: (ms: number) => { now += ms } }
+}
+
+describe('BoardData read metrics', () => {
+  it('counts duplicate widgets of one target as one read and the rest as shared', async () => {
+    const ws = workspace()
+    const { data, metrics, tick } = metered(ws)
+    listen(data, request())
+    listen(data, request())
+    listen(data, request(DEMO, { workflow: 'content', showCompleted: true }))
+    await flush()
+    tick(40)
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+    const snapshot = metrics.snapshot()
+    expect(ws.reads).toHaveLength(1)
+    expect(snapshot).toMatchObject({ readsStarted: 1, sharedDemands: 2, outcomes: { applied: 1 }, latencyMs: { p50: 40, p95: 40 } })
+    expect(snapshot.payloadBytes.last).toBe(new TextEncoder().encode(JSON.stringify(board([issue('1', 'todo')]))).byteLength)
+    // Counts and sizes only: nothing of the board is retained.
+    expect(JSON.stringify(snapshot)).not.toContain('DEMO')
+  })
+
+  it('reads nothing for a card that left: a queued read is dropped, and invalidation skips it', async () => {
+    const targets = ['A', 'B'].map(key => `inferops://demo.local/project/board/${key}`)
+    const ws = workspace(Object.fromEntries(targets.map(t => [t, true])))
+    const { data, metrics } = metered(ws, { maxConcurrent: 1 })
+    const a = listen(data, request(targets[0]))
+    const b = listen(data, request(targets[1]))
+    b.unsubscribe()
+    await flush()
+    ws.reads[0]!.resolve(board([], 'A'))
+    await flush()
+    expect(ws.lookups).toEqual([targets[0]])
+    // The in-flight read of a card that leaves still finishes, but lands nowhere.
+    data.invalidate(targets[0]!)
+    await flush()
+    a.unsubscribe()
+    ws.reads[1]!.resolve(board([], 'A'))
+    await flush()
+    data.invalidate(targets[0]!)
+    data.invalidate(targets[1]!)
+    await flush()
+    expect(ws.reads).toHaveLength(2)
+    expect(metrics.snapshot()).toMatchObject({ readsStarted: 2, outcomes: { applied: 1, superseded: 1 } })
+  })
+
+  it('records a response that arrives after a newer one as superseded', async () => {
+    const ws = workspace()
+    const { data, metrics } = metered(ws)
+    listen(data, request())
+    await flush()
+    data.refresh(request())
+    await flush()
+    ws.reads[1]!.resolve(board([issue('1', 'done')]))
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+    expect(columns(data.get(request()))).toEqual([[], ['1'], []])
+    expect(metrics.snapshot()).toMatchObject({ readsStarted: 2, outcomes: { applied: 1, superseded: 1 } })
+  })
+
+  it('re-reads each invalidated target exactly once, whatever its number of cards', async () => {
+    const targets = ['A', 'B'].map(key => `inferops://demo.local/project/board/${key}`)
+    const ws = workspace(Object.fromEntries(targets.map(t => [t, true])))
+    const { data, metrics } = metered(ws)
+    listen(data, request(targets[0]))
+    listen(data, request(targets[0]))
+    listen(data, request(targets[0], { workflow: 'content', showCompleted: true }))
+    listen(data, request(targets[1]))
+    listen(data, request(targets[1], { workflow: 'software', showCompleted: true }))
+    await flush()
+    expect(ws.reads).toHaveLength(2)
+    for (const read of ws.reads) read.resolve(board([]))
+    await flush()
+    data.invalidate(targets[0]!)
+    data.invalidate(targets[1]!)
+    await flush()
+    expect(ws.reads).toHaveLength(4)
+    // The sessions are reused: an invalidation costs a read, not a connection lookup.
+    expect(ws.lookups).toEqual(targets)
+    for (const read of ws.reads.slice(2)) read.resolve(board([]))
+    await flush()
+    expect(metrics.snapshot()).toMatchObject({ readsStarted: 4, outcomes: { applied: 4 } })
+  })
+
+  it('coalesces repeated invalidations into one queued read while reads are saturated', async () => {
+    const targets = ['A', 'B'].map(key => `inferops://demo.local/project/board/${key}`)
+    const ws = workspace(Object.fromEntries(targets.map(t => [t, true])))
+    const { data } = metered(ws, { maxConcurrent: 1 })
+    listen(data, request(targets[0]))
+    listen(data, request(targets[1]))
+    await flush()
+    for (let i = 0; i < 5; i++) data.invalidate(targets[1]!)
+    ws.reads[0]!.resolve(board([], 'A'))
+    await flush()
+    ws.reads[1]!.resolve(board([], 'B'))
+    await flush()
+    expect(ws.reads).toHaveLength(2)
+    expect(data.get(request(targets[1]))).toMatchObject({ status: 'ready' })
+  })
+
+  it('takes nearest-rank percentiles and records failures without a payload', async () => {
+    expect(percentile([], 50)).toBeNull()
+    expect(percentile([5, 1, 4, 2, 3], 50)).toBe(3)
+    expect(percentile(Array.from({ length: 20 }, (_, i) => i + 1), 95)).toBe(19)
+    const ws = workspace()
+    const { data, metrics } = metered(ws)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.reject(new Error('UNAVAILABLE: down'))
+    await flush()
+    expect(metrics.snapshot()).toMatchObject({ outcomes: { failed: 1 }, payloadBytes: { last: null }, recent: [{ bytes: null, outcome: 'failed' }] })
   })
 })
