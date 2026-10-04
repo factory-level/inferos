@@ -88,6 +88,10 @@ it("lets a use-role operator read consoles, and checks console navigation agains
     // A use-role operator lists the consoles read-only, without Build.
     using operatorApi = await signUp(api, "consolesoperator");
     if (!await workspace.addCollaborator("consolesoperator", "use")) throw new Error("Failed to share");
+    // Listed for them as soon as it is shared, before they ever open it: their Operate home finds
+    // its consoles only through this listing.
+    expect((await operatorApi.listGadgets()).find(listed => listed.id === workspaceId))
+      .toMatchObject({ role: "use", owner: expect.objectContaining({ name: expect.any(String) }) });
     using useWorkspace = await operatorApi.openGadget(workspaceId);
     expect(await useWorkspace.listConsoles()).toEqual([created]);
     const denied = /Unauthorized: this collaborator only has permission/;

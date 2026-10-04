@@ -12421,12 +12421,27 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return null;
     }
 
-    return (await this.impl.getSharingManager()).addCollaborator({
+    let added = (await this.impl.getSharingManager()).addCollaborator({
       caller: this.#sharingCaller(),
       profile,
       role,
       note,
     });
+
+    // List the workspace for them now rather than on their first open: a use-role operator finds
+    // the workspace's consoles only through that listing. Presentation only, like the open-time
+    // record (it grants nothing; open() still authorizes), so a failure here is just logged.
+    let gadgetId = this.impl.ctx.id.toString();
+    try {
+      let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
+      await userDo.recordSharedGadgetOpen(
+          gadgetId, this.impl.storage.title.get(), await owner.whoami(), added.role);
+    } catch (err) {
+      this.impl.logger.warn("failed to list a shared workspace for its new collaborator", {
+        event: "shared.gadget.add.record.failed", gadgetId, error: err,
+      });
+    }
+    return added;
   }
 
   async previewRemoveCollaborator(profileId: string): Promise<AffectedCollaborator[]> {
