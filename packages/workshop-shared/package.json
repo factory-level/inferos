@@ -66,6 +66,10 @@
     "./agent-artifact": {
       "types": "./src/agent-artifact.ts",
       "import": "./src/agent-artifact.ts"
+    },
+    "./agent-deployment": {
+      "types": "./src/agent-deployment.ts",
+      "import": "./src/agent-deployment.ts"
     }
   },
   "scripts": {

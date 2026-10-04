@@ -22,6 +22,7 @@ Create documents from [`_template.md`](_template.md).
 | [Customer feature capabilities](feature-capabilities.md) | `scripts/consumer/config.ts`, `scripts/consumer/runtime.ts`, `custom-gatekeepers/gatekeeper-inferops/src/enablement.ts`, `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | Schema version 2 vocabulary; `INFEROPS_ENABLED`, `INFEROPS_AUTH` and `CODING_WORKBENCH_ENABLED` supported, five capabilities unsupported |
 | [Connection packages and reviewed fork updates](connection-extensions.md) | `packages/gatekeeper-kit/src/conformance.ts`, `custom-gatekeepers/gatekeeper-inferops/connection.json`, `scripts/connection-package.schema.json`, `scripts/connection-package.test.ts` | Shared gatekeeper conformance suite and the `connection.json` package contract; the InferOps gatekeeper is the reference package. Scaffolding, manifest-gated discovery and reviewed three-way wrapper upgrades are implemented by #137/#138. |
 | [Local coding workflows and agent dispatch](local-coding-workflows.md) | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts`, `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx`, `scripts/consumer/config.ts`, `scripts/dev-server-config.ts` | Governed coding dispatch through the InferOps gatekeeper behind `CODING_WORKBENCH_ENABLED`; the runner itself is InferOps' |
+| [Native agent deployments](agent-deployments.md) | `packages/workshop-shared/src/agent-deployment.ts` | Proposed contract only (types, lifecycle table, grant carry-forward); `AGENT_DEPLOYMENTS` still reported unsupported |
 
 ## Designs with no implementation yet
 
@@ -30,4 +31,3 @@ These draft designs from the 2026-10-02 baseline have no architecture page becau
 | Design | Current state |
 | --- | --- |
 | [External-agent platform integrations](../design/agent-platform-integrations.md) | Provider-neutral design/fixtures only (#79/#80); all HG/#81 work is deferred. No bridge code. `HARNESS_HG_ENABLED` is accepted by the configuration schema and reported unsupported. Tracked by [#52](https://github.com/factory-level/inferos/issues/52). |
-| [Native agent deployments](../design/agent-deployments.md) | No code. `AGENT_DEPLOYMENTS` is accepted by the configuration schema and reported unsupported. Tracked by [#53](https://github.com/factory-level/inferos/issues/53). |
