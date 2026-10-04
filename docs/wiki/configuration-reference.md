@@ -59,7 +59,8 @@ as its `settings` check. Doctor reports a secret by presence only and never prin
 
 | Setting | Kind | Owner | Default | Required when | Source | Read from | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `features.customCloudflareCode` | value | deployer | off | Optional. | local | `inferos.config.json`; `scripts/consumer/extensions.ts` and `gatekeepers.ts` | Loads the wrapper's own Workers (`workers/`, listed in `inferos.extensions.json`) and gatekeepers (`gatekeepers/gatekeeper-<name>/`). |
+| `features.customCloudflareCode` | value | deployer | off | Optional. | local | `inferos.config.json`; `scripts/consumer/extensions.ts` and `gatekeepers.ts` | Master switch for the wrapper's own Workers (`workers/`, listed in `inferos.extensions.json`) and gatekeepers (`gatekeepers/gatekeeper-<name>/`, listed in `gatekeepers`). |
+| `gatekeepers` | value | deployer | none (no wrapper gatekeeper loads) | Optional. | local | `inferos.config.json`; `readConsumerGatekeepers` in `scripts/consumer/gatekeepers.ts` | `[{ slug, enabled }]`, at most 32: which wrapper gatekeepers may load. Each also needs a valid `connection.json` declaring a gatekeeper API level the pin implements; anything else is reported by `gatekeepers:check` and doctor, never bound. Grants no resource. |
 | `inferos.extensions.json` | reference | developer | none | `features.customCloudflareCode` is on. | local | Wrapper root; `readConsumerWorkers` in `scripts/consumer/extensions.ts` | The custom component paths, each contained in the wrapper. `pnpm extensions:check` and `gatekeepers:check` validate them. |
 
 ### Coding adapter

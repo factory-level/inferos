@@ -297,7 +297,7 @@ function customerShellSource(root: string, { gatekeeperCode = true } = {}) {
   execFileSync("git", ["init", "--quiet", source]);
   write("package.json", JSON.stringify({ type: "module", packageManager: "pnpm@11.17.0" }));
   write("packages/bundled-blueprints/blueprints/example/files/client.js", "// upstream blueprint\n");
-  for (const path of ["scripts/consumer/config.ts", "scripts/consumer/runtime.ts", "scripts/consumer/canvas.ts", "scripts/worker-dirs.ts",
+  for (const path of ["scripts/consumer/config.ts", "scripts/consumer/runtime.ts", "scripts/consumer/canvas.ts", "scripts/worker-dirs.ts", "scripts/connection-status.ts",
     "packages/workshop-shared/src/canvas.ts", "scripts/relay-termination.ts", "scripts/kill-process-tree.ts"]) copy(path);
   write("custom-gatekeepers/gatekeeper-inferops/wrangler.jsonc", "{}\n");
   write("packages/workshop-backend/src/canvas-store.ts", "export {};\n"); // durableViews' source

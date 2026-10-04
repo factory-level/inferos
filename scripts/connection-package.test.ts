@@ -8,6 +8,7 @@ import { join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { GATEKEEPER_API_LEVEL, RELEASED_STATUSES, type ConnectionStatus } from "./connection-package.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const schema = JSON.parse(readFileSync(join(root, "scripts/connection-package.schema.json"), "utf8"));
@@ -16,13 +17,18 @@ const validator = z.fromJSONSchema(schema);
 type Contract = {
   id: string;
   package: string;
+  status: ConnectionStatus;
   entrypoints: { main: string; vendor: string; account: string; verifier?: string; durableObjects: string[] };
   resources: Array<{
     kind: string; urlPattern: string; gatekeeper: string; session: string; enabledBy?: string[];
     reads: Array<{ method: string }>; writes: Array<{ method: string }>;
   }>;
   credentials: Array<{ name: string }>;
-  compatibility: { provider: { revision: string }; contracts: Array<{ path: string }> };
+  compatibility: {
+    provider: { revision: string | null };
+    inferos?: { gatekeeperApi: number[] };
+    contracts: Array<{ path: string }>;
+  };
   conformance: { tests: string[]; covered: Record<string, string[]>; perConnector: Array<{ kind: string }> };
 };
 
@@ -80,7 +86,7 @@ describe("connection packages", () => {
         for (const resource of contract.resources) {
           assert.ok(source.includes(`"${resource.urlPattern}"`),
             `${resource.kind}: no source declares urlPattern ${resource.urlPattern}`);
-          const named = resource.urlPattern.replace(/^[a-z]+:\/\/\*\//, "").replace(/\/\*$/, "");
+          const named = resource.urlPattern.replace(/^[a-z][a-z0-9+.-]*:\/\/\*\//, "").replace(/\/\*$/, "");
           assert.equal(named, resource.kind, `${resource.kind}: its urlPattern names ${named}`);
         }
         const kinds = contract.resources.map(resource => resource.kind);
@@ -126,6 +132,21 @@ describe("connection packages", () => {
         }
       });
 
+      it("claims no more than its status allows", () => {
+        // Past scaffold, the shared suite must actually cover something.
+        if (contract.status !== "scaffold") {
+          assert.ok(Object.values(contract.conformance.covered).some(cases => cases.length > 0),
+            `status ${contract.status} needs at least one kind covered by the shared suite`);
+        }
+        // Reviewed against a real provider means a provider revision is pinned.
+        if (RELEASED_STATUSES.has(contract.status)) {
+          assert.notEqual(contract.compatibility.provider.revision, null,
+            `status ${contract.status} needs compatibility.provider.revision`);
+        }
+        const levels = contract.compatibility.inferos?.gatekeeperApi;
+        if (levels) assert.ok(levels.includes(GATEKEEPER_API_LEVEL), `built for gatekeeper API ${levels}, not ${GATEKEEPER_API_LEVEL}`);
+      });
+
       it("registers the shared conformance suite for the kinds it claims", () => {
         for (const test of contract.conformance.tests) {
           const text = readFileSync(join(dir, test), "utf8");
@@ -150,6 +171,18 @@ describe("connection package schema", () => {
     const leaked = structuredClone(valid) as unknown as { credentials: Array<Record<string, unknown>> };
     leaked.credentials[0]!.value = "secret";
     assert.equal(validator.safeParse(leaked).success, false);
+  });
+
+  it("orders statuses scaffold, conformant, reference, production and refuses others", () => {
+    const statuses = (schema.properties.status as { enum: string[] }).enum;
+    assert.deepEqual(statuses, ["scaffold", "conformant", "reference", "production"]);
+    assert.equal(validator.safeParse({ ...valid, status: "ready" }).success, false);
+  });
+
+  it("finds the second connector, built through the scaffolder", () => {
+    const tickets = contracts.find(path => path.endsWith("custom-gatekeepers/gatekeeper-tickets/connection.json"));
+    assert.ok(tickets, "custom-gatekeepers/gatekeeper-tickets/connection.json is missing");
+    assert.equal((JSON.parse(readFileSync(tickets, "utf8")) as Contract).status, "conformant");
   });
 
   it("refuses an unknown format version and an unknown conformance case", () => {

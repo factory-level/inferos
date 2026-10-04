@@ -77,12 +77,13 @@ The InferOps Gatekeeper is the reference implementation. A second small syntheti
 
 ## Open Questions
 
-- The manifest schema and its compatibility versioning. Partly answered for the package contract:
-  `connection.json`, `schemaVersion: 1`, pinned to a provider revision (see the
-  [architecture](../architecture/connection-extensions.md)); how a deployment loads it is open.
+- The manifest schema and its compatibility versioning. Answered in the
+  [architecture](../architecture/connection-extensions.md): `connection.json`, `schemaVersion: 1`,
+  pinned to a provider revision and to a gatekeeper API level; a wrapper loads its own gatekeepers
+  only when listed, enabled, valid and compatible. Cloud packaging of wrapper gatekeepers is open.
 - How file classification is recorded so that an upgrade can tell shared from copied-template files.
 - The three-way reconciliation mechanism for copied skills, SOPs and blueprints.
-- How a connection package relates to this fork's `custom-gatekeepers/` root and to a wrapper's `gatekeepers/` and `workers/` directories.
+- How a connection package relates to this fork's `custom-gatekeepers/` root and to a wrapper's `gatekeepers/` and `workers/` directories. Answered in the [architecture](../architecture/connection-extensions.md#where-packages-live): fork packages live in `custom-gatekeepers/`, a customer's private ones in the wrapper's `gatekeepers/`, and `workers/` holds only custom Workers, never a connection package.
 
 ## Related
 

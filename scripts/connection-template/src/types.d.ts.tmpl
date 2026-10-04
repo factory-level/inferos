@@ -1,0 +1,38 @@
+/** An item's version as a nonnegative decimal string. A write names the one it was proposed against. */
+export type Revision = string;
+
+/** One item of the bound collection. */
+export interface Item {
+  /** Stable item id. */
+  id: string;
+  /** Display title. */
+  title: string;
+  /** The item's current revision. */
+  revision: Revision;
+}
+
+/** The fields a proposed change may set. */
+export interface ItemChanges {
+  /** The new title: 1 to 200 characters after trimming. */
+  title?: string;
+}
+
+/**
+ * One __title__ collection. Every read is shown to the person as an observation; every change is a
+ * proposal they approve before anything happens.
+ */
+export interface __Name__CollectionSession {
+  /** List every item in the bound collection. */
+  listItems(): Promise<Item[]>;
+  /**
+   * Read one item of the bound collection. An item of another collection fails exactly as an
+   * unknown id does, with NOT_FOUND.
+   */
+  readItem(itemId: string): Promise<Item>;
+  /**
+   * Propose a change to one item, pinned to the revision you read. Nothing changes until it is
+   * approved, and you wait for the decision. If the item changed in the meantime the change fails
+   * with STALE_REVISION; read it again and propose anew.
+   */
+  updateItem(itemId: string, changes: ItemChanges, expectedRevision: Revision): Promise<void>;
+}

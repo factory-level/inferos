@@ -21,7 +21,7 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | --- | --- |
 | `scripts/run-dev-server.ts` | Existing local startup orchestration. |
 | `scripts/generate-worker-configs.ts` | Generated config synchronization. `--consumer-root <wrapper>` also covers the wrapper's own gatekeepers, and `syncWorkerConfigs` generates or checks any given set of Worker directories ([wrapper topology](local-development.md#wrapper-topology)). |
-| `scripts/release/manifest-lib.ts` | Deployable discovery and inputs. |
+| `scripts/release/manifest-lib.ts` | Deployable discovery and inputs. A connection package whose `connection.json` status is not `reference` or `production` is not deployable (`isUnreleasedConnection`, `scripts/connection-status.ts`), so it never reaches a release, preview or the deploy wizard. |
 | `.agents/skills/bootstrap-inferos` | Consumer setup, configuration (including applying a reviewed intake) and evidence guidance. |
 | `.agents/skills/verify-inferos`, `upgrade-inferos`, `recover-inferos` | Procedures for `pnpm inferos verify`, `upgrade <sha> [--plan\|--apply [--branch <name> [--open-pr <owner/repo>]]]` and `recover <ports\|config\|fixtures\|state> [--apply]` ([details](consumer-configuration.md#wrapper-maintenance-verify-upgrade-recover), [reconciliation](consumer-configuration.md#three-way-reconciliation-and-reviewed-upgrades)). |
 | `.agents/skills/skill-upload` | Installing, authoring (with skill-creator) and publishing wrapper skills. |

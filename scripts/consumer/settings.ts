@@ -238,10 +238,17 @@ export const SETTINGS: readonly SettingEntry[] = [
   },
   {
     name: "features.customCloudflareCode", group: "Custom components", kind: "value", owner: "deployer", default: "off", source: "local",
-    description: "Loads the wrapper's own Workers (`workers/`, listed in `inferos.extensions.json`) and gatekeepers (`gatekeepers/gatekeeper-<name>/`).",
+    description: "Master switch for the wrapper's own Workers (`workers/`, listed in `inferos.extensions.json`) and gatekeepers (`gatekeepers/gatekeeper-<name>/`, listed in `gatekeepers`).",
     requiredWhen: never,
     readAt: "`inferos.config.json`; `scripts/consumer/extensions.ts` and `gatekeepers.ts`",
     present: ({ config }) => config.features.customCloudflareCode,
+  },
+  {
+    name: "gatekeepers", group: "Custom components", kind: "value", owner: "deployer", default: "none (no wrapper gatekeeper loads)", source: "local",
+    description: "`[{ slug, enabled }]`, at most 32: which wrapper gatekeepers may load. Each also needs a valid `connection.json` declaring a gatekeeper API level the pin implements; anything else is reported by `gatekeepers:check` and doctor, never bound. Grants no resource.",
+    requiredWhen: never,
+    readAt: "`inferos.config.json`; `readConsumerGatekeepers` in `scripts/consumer/gatekeepers.ts`",
+    present: ({ config }) => (config.gatekeepers?.length ?? 0) > 0,
   },
   {
     name: "inferos.extensions.json", group: "Custom components", kind: "reference", owner: "developer", default: null, source: "local",

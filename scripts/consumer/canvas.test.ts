@@ -9,6 +9,7 @@ const inventory: CanvasInventory = {
   kinds: ["inferops.project-board", "inferos.gadget"],
   blueprints: [{ blueprintId: "inferops.kanban", title: "InferOps Kanban", description: "Project board." }],
   customGatekeepers: ["gatekeeper-inferops"],
+  unreleasedGatekeepers: [],
 };
 const base = { schemaVersion: 1, widgets: { kinds: ["inferos.gadget"], blueprints: [] }, screens: [], customGatekeepers: "all" };
 
@@ -56,6 +57,24 @@ test("screen templates are validated by the Workshop's own parser", () => {
 test("custom gatekeepers default to all built ones and can be narrowed", () => {
   assert.deepEqual(selectedCustomGatekeepers(undefined, inventory), ["gatekeeper-inferops"]);
   assert.deepEqual(selectedCustomGatekeepers({ ...base, customGatekeepers: [] } as never, inventory), []);
+});
+
+test("an unreleased connection package is never part of \"all\" but can be enabled by name", t => {
+  const { upstream, root, run } = fixture(t);
+  const tickets = join(upstream, "custom-gatekeepers/gatekeeper-tickets");
+  mkdirSync(tickets, { recursive: true });
+  writeFileSync(join(tickets, "wrangler.jsonc"), "{}");
+  writeFileSync(join(tickets, "connection.json"), JSON.stringify({ status: "conformant" }));
+  writeFileSync(join(upstream, "custom-gatekeepers/gatekeeper-inferops/connection.json"), JSON.stringify({ status: "reference" }));
+  assert.deepEqual(run("list").enabled.customGatekeepers, ["gatekeeper-inferops"]);
+  run("gatekeeper", "enable", "gatekeeper-tickets");
+  assert.deepEqual(JSON.parse(readFileSync(join(root, CANVAS_CONFIG_FILE), "utf8")).customGatekeepers,
+    ["gatekeeper-inferops", "gatekeeper-tickets"]);
+  run("gatekeeper", "all");
+  assert.deepEqual(run("list").enabled.customGatekeepers, ["gatekeeper-inferops"]);
+  // A contract with no readable status counts as unreviewed.
+  writeFileSync(join(upstream, "custom-gatekeepers/gatekeeper-inferops/connection.json"), "{");
+  assert.deepEqual(run("list").enabled.customGatekeepers, []);
 });
 
 test("the CLI edits the config file and only ever writes valid configurations", t => {

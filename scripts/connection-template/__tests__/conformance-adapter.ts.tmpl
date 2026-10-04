@@ -1,0 +1,123 @@
+// The shared connection conformance suite (`@gadgets/gatekeeper-kit/conformance`) mapped onto the
+// collection gatekeeper: an `inbox` binding of a fresh account over the fake provider, driven
+// through `TestHooks` as the overseer drives it. `connection.json` states which cases this covers.
+
+import { env } from "cloudflare:workers";
+import type { ConformanceAdapter } from "@gadgets/gatekeeper-kit/conformance";
+import type { BindingProps, TestHooks, TestProvider } from "./worker";
+
+const COLLECTION = "inbox";
+const ITEM = "item-1";
+// An item of another collection the same account holds, which an inbox binding must not reach.
+const OTHER_COLLECTION_ITEM = "item-9";
+
+type Fixture = {
+  props: BindingProps;
+  hooks: DurableObjectStub<TestHooks>;
+  provider: DurableObjectStub<TestProvider>;
+  session: ReturnType<DurableObjectStub<TestHooks>["startSession"]>;
+  /** The title the last stale-revision proposal set. */
+  staleTitle?: string;
+};
+
+/** The message an RPC call failed with, or null when it succeeded. */
+async function refusal(call: PromiseLike<unknown>): Promise<string | null> {
+  try {
+    await call;
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+/** A refusal with its RPC prefix dropped, so two refusals compare by what the agent is told. */
+function told(message: string | null): string | null {
+  return message?.replace(/^.*?(?=NOT_FOUND)/, "") ?? null;
+}
+
+/** The newest action the approval queue was given. */
+async function lastActionId(hooks: Fixture["hooks"]): Promise<number> {
+  const last = (await hooks.log()).actions.at(-1);
+  if (!last) throw new Error("nothing was submitted to the approval queue");
+  return last.id;
+}
+
+/** Proposes retitling ITEM at the revision it has now. */
+async function proposeTitle({ session, hooks }: Fixture, title: string): Promise<number> {
+  const item = await session.readItem(ITEM);
+  await session.updateItem(ITEM, { title }, item.revision);
+  return lastActionId(hooks);
+}
+
+/** The collection gatekeeper over the fake provider. */
+export const collectionAdapter: ConformanceAdapter<Fixture> = {
+  name: "gatekeeper-__slug__ collection",
+
+  async setup() {
+    const props: BindingProps = { accountId: crypto.randomUUID(), workspace: "demo", collectionId: COLLECTION };
+    const hooks = env.TEST_HOOKS.getByName(props.accountId);
+    const provider = env.FAKE_PROVIDER.getByName(props.accountId);
+    return { props, hooks, provider, session: hooks.startSession(props) };
+  },
+
+  async read({ session }) {
+    await session.listItems();
+  },
+
+  async observations({ hooks }) {
+    return (await hooks.log()).excluded.map(excludeObservers => ({ excludeObservers }));
+  },
+
+  async share({ props, hooks }, canSee) {
+    // Strategy B: the binding is one collection, so a collaborator is admitted or refused whole.
+    return { id: "observer-1", admitted: await hooks.addObserver(props, canSee) === null };
+  },
+
+  proposeWrite(fixture) {
+    return proposeTitle(fixture, `Conformance ${crypto.randomUUID()}`);
+  },
+
+  async submittedActions({ hooks }) {
+    return (await hooks.log()).actions.map(action => action.id);
+  },
+
+  apply({ props, hooks }, actionId) {
+    return hooks.apply(props, actionId);
+  },
+
+  effects({ provider }) {
+    // Each case's account is fresh, so every applied write is the case's own.
+    return provider.appliedWrites();
+  },
+
+  async revoke({ props, hooks }) {
+    await hooks.revokeAccount({ accountId: props.accountId });
+  },
+
+  scope: {
+    readOutOfScope: async ({ session }) => told(await refusal(session.readItem(OTHER_COLLECTION_ITEM))),
+    readUnknown: async ({ session }) => told(await refusal(session.readItem(crypto.randomUUID()))),
+  },
+
+  staleRevision: {
+    async propose(fixture) {
+      fixture.staleTitle = `Stale ${crypto.randomUUID()}`;
+      return proposeTitle(fixture, fixture.staleTitle);
+    },
+    async advanceBehind({ provider }) {
+      await provider.advance(COLLECTION, ITEM);
+    },
+    async landed({ provider, staleTitle }) {
+      return (await provider.peek(COLLECTION, ITEM))?.title === staleTitle;
+    },
+  },
+
+  faults: {
+    async failNextWrite({ provider }) {
+      await provider.failNextWrite("unavailable");
+    },
+    async loseNextResponse({ provider }) {
+      await provider.failNextWrite("lost");
+    },
+  },
+};

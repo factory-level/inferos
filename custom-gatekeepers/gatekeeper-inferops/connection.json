@@ -122,6 +122,7 @@
       "apiVersion": null,
       "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract."
     },
+    "inferos": { "gatekeeperApi": [1] },
     "contracts": [
       { "path": "scripts/consumer/project-board.schema.json", "source": "domains/project/shared/board.dto.ts#BoardResponseSchema" }
     ]

@@ -16,7 +16,26 @@ interface ConsumerSettings {
   local: { port: number };
   inferops: { mode: "fixture"; fixture: "fixtures/project-board.json"; targetRef: string }
     | { mode: "remote"; baseUrl: string; targetRef: string };
+  /**
+   * The wrapper's own gatekeepers (`gatekeepers/gatekeeper-<slug>/`) it allows to load, each
+   * switched on or off. Omitted means none: a directory that is not listed and enabled here is never
+   * bound, whatever it contains. `features.customCloudflareCode` stays the master switch.
+   */
+  gatekeepers?: WrapperGatekeeperEntry[];
 }
+
+/** One wrapper gatekeeper the configuration names. Listing it grants nothing by itself. */
+export interface WrapperGatekeeperEntry {
+  /** The directory `gatekeepers/gatekeeper-<slug>`'s slug. */
+  slug: string;
+  /** Whether it may load. A listed, disabled gatekeeper is reported and never bound. */
+  enabled: boolean;
+}
+
+/** The longest list of wrapper gatekeepers a configuration may name. */
+export const MAX_WRAPPER_GATEKEEPERS = 32;
+
+const GATEKEEPER_SLUG = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
 /**
  * One local repository the wrapper allows coding against: the InferOps repository id a dispatch
@@ -106,6 +125,25 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GIT_REF = /^(?![-/])(?!.*\/\/)(?!.*\.\.)(?!.*@\{)[^\s~^:?*[\\]+(?<![/.])$/;
 const MAX_CODING_REPOS = 50;
 const MAX_TEST_COMMANDS = 20;
+
+/** Validate `gatekeepers` without echoing rejected values. Slugs are unique. */
+function parseWrapperGatekeepers(value: unknown): WrapperGatekeeperEntry[] {
+  if (!Array.isArray(value) || value.length > MAX_WRAPPER_GATEKEEPERS) {
+    throw new Error(`gatekeepers: expected an array of at most ${MAX_WRAPPER_GATEKEEPERS}`);
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const at = `gatekeepers[${index}]`;
+    const record = object(entry, ["slug", "enabled"], at);
+    if (typeof record.slug !== "string" || record.slug.length > 40 || !GATEKEEPER_SLUG.test(record.slug)) {
+      throw new Error(`${at}.slug: expected a lowercase slug (the part after gatekeeper-)`);
+    }
+    if (seen.has(record.slug)) throw new Error(`${at}.slug: listed twice`);
+    seen.add(record.slug);
+    if (typeof record.enabled !== "boolean") throw new Error(`${at}.enabled: expected boolean`);
+    return { slug: record.slug, enabled: record.enabled };
+  });
+}
 
 /** Validate `codingWorkbench` without echoing rejected values. Paths must be absolute; ids unique. */
 function parseCodingWorkbench(value: unknown): CodingWorkbenchConfig {
@@ -205,7 +243,7 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
   if (version === 1 && Object.hasOwn(input as object, "capabilities")) throw new Error("capabilities: requires schemaVersion 2");
   if (version === 1 && Object.hasOwn(input as object, "codingWorkbench")) throw new Error("codingWorkbench: requires schemaVersion 2");
   const root = object(input, ["schemaVersion", "upstream", "profile", "features", "styling", "local", "inferops",
-    ...(version === 2 ? ["capabilities"] : [])], "config", false, version === 2 ? ["codingWorkbench"] : []);
+    ...(version === 2 ? ["capabilities"] : [])], "config", false, version === 2 ? ["codingWorkbench", "gatekeepers"] : ["gatekeepers"]);
   const upstream = object(root.upstream, ["repository", "revision"], "upstream");
   const repository = validateRepository(upstream.repository);
   if (typeof upstream.revision !== "string" || !/^[a-f0-9]{40}$/.test(upstream.revision)) {
@@ -261,6 +299,7 @@ export function resolveConsumerConfig(input: unknown): { config: ConsumerConfig;
     inferops: remote
       ? { mode: "remote", baseUrl: validateHttpsUrl(data.baseUrl, "inferops.baseUrl"), targetRef }
       : { mode: choice(data.mode, ["fixture"], "inferops.mode"), fixture: choice(data.fixture, ["fixtures/project-board.json"], "inferops.fixture"), targetRef },
+    ...(Object.hasOwn(root, "gatekeepers") ? { gatekeepers: parseWrapperGatekeepers(root.gatekeepers) } : {}),
   };
   const provenance: ConsumerProvenance = { features: resolvedFeatures.provenance, styling: resolvedStyle.provenance };
   if (!resolvedCapabilities) return { config: { schemaVersion: 1, ...settings }, provenance };
