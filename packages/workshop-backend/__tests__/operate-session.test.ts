@@ -233,6 +233,51 @@ describe("operate page state machine", () => {
   });
 });
 
+describe("boards", () => {
+  const ENG = { workspaceId: "session", boardRef: "inferops://acme.operations/project/board/ENG" };
+  const WEB = { workspaceId: "session", boardRef: "inferops://acme.operations/project/board/WEB" };
+  const openConsole: OperateEvent =
+    { type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations", fullChat: "available", viewId: "board" };
+
+  it("shows one board at a time, by reference, and closes it", () => {
+    let state = replayOperateEvents([{ type: "openBoard", board: ENG }, { type: "openBoard", board: WEB }]);
+    expect(state.board).toEqual(WEB);
+    state = applyOperateEvent(state, { type: "closeBoard" });
+    expect(state.board).toBeNull();
+    expect(() => applyOperateEvent(state, { type: "closeBoard" })).toThrow(OperateEventError);
+  });
+
+  it("closes the board whenever the console context changes, so it never outlives it", () => {
+    let shown = replayOperateEvents([openConsole, { type: "openBoard", board: ENG }]);
+    expect(shown.console?.consoleId).toBe("c1");
+    for (let event of [
+      openConsole, { type: "openView", viewId: "other" }, { type: "showScreen", screenId: "s" },
+      { type: "showScreen", screenId: null }, { type: "closeConsole" }, { type: "showHome" },
+    ] as OperateEvent[]) {
+      expect(applyOperateEvent(shown, event).board).toBeNull();
+    }
+    // Presentation and chat changes keep it.
+    expect(applyOperateEvent(shown, { type: "setPresentation", presentation: "chat" }).board).toEqual(ENG);
+    expect(applyOperateEvent(shown, { type: "setChatOpen", open: false }).board).toEqual(ENG);
+  });
+
+  it("rejects a malformed board reference", () => {
+    expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
+        { type: "openBoard", board: { ...ENG, boardRef: "" } })).toThrow(OperateEventError);
+    expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
+        { type: "openBoard", board: { ...ENG, boardRef: "x".repeat(513) } })).toThrow(OperateEventError);
+    expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
+        { type: "openBoard", board: { ...ENG, workspaceId: "" } })).toThrow(OperateEventError);
+  });
+
+  it("applies to a page stored before boards existed once it is filled from the initial page", () => {
+    let { board: _b, ...old } = replayOperateEvents([openConsole]);
+    let stored: OperatePageState = { ...INITIAL_OPERATE_PAGE, ...old };
+    expect(stored.board).toBeNull();
+    expect(applyOperateEvent(stored, { type: "openBoard", board: ENG }).board).toEqual(ENG);
+  });
+});
+
 it("returns home without losing the working set or approval context, including from a flow", () => {
   const events: OperateEvent[] = [
     { type: "open", ref: screen("a") },

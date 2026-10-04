@@ -23,8 +23,8 @@ updated: 2026-10-03
 `custom-gatekeepers/gatekeeper-inferops` (package `@inferos/gatekeeper-inferops`, vendor id
 `inferops`) implements the reviewed agent-facing API from the
 [design](../design/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
-`inferops-gatekeeper-api.d.ts` verbatim: `InferOpsProjectSession` (`readBoard`, `openIssue`,
-`createIssue`) and `InferOpsIssueSession` (`read`, `transition`, `update`), with `Issue.pending`
+`inferops-gatekeeper-api.d.ts` verbatim, plus `findBoards` (below): `InferOpsProjectSession` (`readBoard`, `openIssue`,
+`createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`), with `Issue.pending`
 marking simulated changes. The gatekeeper code is written against a data-source
 contract (`src/inferops-client.ts`) with two implementations: `src/mock-inferops.ts` (**demo data**,
 the default, and what the tests and the demo use) and `src/http-inferops.ts` (the InferOps HTTP
@@ -214,9 +214,28 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   the issue is still at the revision the update produced and still shows its values. Creates and
   description updates are submitted with `implementsRevert: false`, and `revertAction` explains
   instead of acting.
+- **Board discovery** ([#61](https://github.com/factory-level/inferos/issues/61)).
+  `findBoards(query)` (1-200 characters, else `INVALID_REQUEST`) lists the projects of the
+  binding's InferOps workspace with the person's own token (`GET /project/projects`), keeps the
+  bindable keys, reads the open issues of the first 20 (`MAX_DISCOVERY_SCANNED_PROJECTS`; a board
+  that cannot be read is matched on key and name only), and ranks them with the pure
+  `rankBoards` in `src/board-discovery.ts`: query words, lowercased, crudely stemmed and with
+  common words dropped, are matched against the project key, its name and its open issue titles.
+  It returns at most 8 candidates `{tenant, workspace, projectKey, boardRef, title, reasons}`, best
+  first, and only those that matched something, so an empty list means no match and ties are kept
+  for the caller to disambiguate. Issue titles never leave the gatekeeper; reasons quote only the
+  query's own words and counts. The search is one observation (`Searched InferOps boards on
+  <host>`, with the project and candidate counts) whose `excludeObservers` names every observer of
+  the binding, since they were admitted for its one project only; the overseer therefore refuses
+  the search in a workspace shared with others, and it works in a person's own operate session
+  workspace. A refused or revoked listing (`FORBIDDEN`, `UNAUTHORIZED`) fails the call, naming
+  nothing. A candidate grants nothing: it is opened only through a connection made for its
+  `boardRef` from the person's own account (see [operate mode](operate-mode.md)). Discovery is
+  local and explainable; there is no index or embedding.
 - **Observers.** Strategy B: `addObserver` asks the collaborator's own `InferOpsVerifier` whether
-  their account can open the bound project in the binding's workspace, with their own token;
-  `removeObserver` is a no-op. `NOT_FOUND`, `UNAUTHORIZED`, `FORBIDDEN` and no membership of that
+  their account can open the bound project in the binding's workspace, with their own token. A
+  board binding remembers each admitted observer id (`observer:<id>`) only for `findBoards`'
+  exclusions, and `removeObserver` forgets it; a dispatch binding tracks nothing. `NOT_FOUND`, `UNAUTHORIZED`, `FORBIDDEN` and no membership of that
   workspace mean no access; any other failure fails the open.
 - **Coding dispatch.** A dispatch binding's facet, `InferOpsDispatchGatekeeper`, reuses the board's
   binding state (instance id, action records, fingerprints, idempotency keys) and observer strategy
@@ -313,6 +332,9 @@ report `providesAuth` fails every request with a clear message rather than a log
 missing a button.
 
 ## Divergences from Design
+
+- `findBoards` is not in the design's API. It searches only the binding's own InferOps workspace,
+  so a person needs a board connection in a workspace before they can discover its other boards.
 
 - Signing in and connecting are two InferLab sign-ins: the Workshop persists a sign-in account only
   for its Cloudflare vendor, so the person connects InferOps separately (InferLab's SSO cookie makes

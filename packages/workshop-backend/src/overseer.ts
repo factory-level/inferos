@@ -8923,9 +8923,23 @@ class OverseerImpl implements AgentHooks {
 
   // The owner's user DO holds the session (one per person, and only the owner opens this
   // workspace), so the agent's event joins the same serialized log as the person's tabs.
+  //
+  // A board the agent opens is always read through this workspace's own connections, so the event
+  // names this workspace, and it is applied only while one of them is for exactly that reference:
+  // a reference the person never connected (or whose connection was removed) is refused, never
+  // swapped for another board.
   async operatePage(event?: OperateEvent): Promise<OperateSessionSnapshot> {
     if (!this.storage.operateSession.get() || !this.ownerId) {
       throw new Error("This chat is not part of an operate session.");
+    }
+    if (event?.type === "openBoard") {
+      let {boardRef} = event.board;
+      if (!Array.from(this.storage.gatekeepers.list()).some(record => record.resourceUrl === boardRef)) {
+        throw new Error(
+            `No connection here is for ${boardRef}. Ask the user to connect it, or search again; ` +
+            `do not open a different board instead.`);
+      }
+      event = {type: "openBoard", board: {workspaceId: this.ctx.id.toString(), boardRef}};
     }
     let owner = wrapDoStubForTelemetry(
         this.users.get(this.users.idFromString(this.ownerId)), this.logger);

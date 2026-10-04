@@ -37,6 +37,14 @@ const model = scriptedChatCompletions([
   { text: "Opened." },
   // A Build chat.
   { text: "Ready to build." },
+  // The operate chat tries to open a board the person never connected.
+  {
+    toolCall: {
+      id: "operate-board", name: "operatePage",
+      arguments: { action: "openBoard", boardRef: "inferops://acme.operations/project/board/ENG" },
+    },
+  },
+  { text: "That board isn't connected for you." },
 ]);
 const network = new NetworkInterceptor({ handlers: [model.handler] });
 let harness: Harness;
@@ -150,4 +158,16 @@ it("still offers a Build chat its authoring tools", async () => {
   const offered = offeredTools(first);
   expect(offered).toEqual(expect.arrayContaining(AUTHORING_TOOLS));
   expect(offered).not.toContain("operatePage");
+});
+
+it("refuses the operate agent a board no connection of the session holds, and opens nothing else", async () => {
+  await using session = await open(true);
+  const result = await session.runTurn("Open the engineering board.");
+  expect(result.outcome).toEqual({ status: "completed" });
+  expect(toolResult("operate-board")).toMatch(/No connection here is for inferops:\/\/acme\.operations\/project\/board\/ENG/);
+
+  using publicApi = connect(harness.url);
+  using person = await logIn(publicApi, session.username);
+  using operate = await person.getOperateSession();
+  expect(await operate.listEvents(0, 10)).toEqual([]);
 });

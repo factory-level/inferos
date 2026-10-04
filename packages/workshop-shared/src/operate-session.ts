@@ -87,6 +87,19 @@ export type OperateConsoleRun = {
   screenId: string | null;
 };
 
+/**
+ * A board opened in a session, by its canonical reference and the workspace whose connection reads
+ * it: the session's own workspace (a board the operate agent or a use-role operator opened through
+ * their own connection), or a console's workspace (a builder's). It names a target only: the board
+ * is read through the viewer's own access to that workspace's connection, and shows as unavailable
+ * when that no longer reaches it.
+ */
+export type OperateBoardRef = {
+  workspaceId: string;
+  /** The board's canonical reference, as its gatekeeper reports it (an `inferops://` URI). */
+  boardRef: string;
+};
+
 /** The full page state of an operate session. */
 export type OperatePageState = {
   /** What the session has open, in the order it was opened. */
@@ -118,6 +131,11 @@ export type OperatePageState = {
   console: OperateConsoleRun | null;
   /** How the open console is presented. Always `canvas` when no console is open. */
   presentation: OperatePresentation;
+  /**
+   * The board shown over the page, or null. Opening a console, another view or screen, or going
+   * home closes it, so a board never outlives the context it was opened in.
+   */
+  board: OperateBoardRef | null;
 };
 
 /** A change to an operate session's page state. Events change presentation only. */
@@ -168,7 +186,14 @@ export type OperateEvent =
   /** Close the console and return to the console mosaic. */
   | { type: "closeConsole" }
   /** Present the open console as its canvas or as full chat, as its full chat setting allows. */
-  | { type: "setPresentation"; presentation: OperatePresentation };
+  | { type: "setPresentation"; presentation: OperatePresentation }
+  /**
+   * Show a board, replacing any board already shown. The kernel accepts it only when the named
+   * workspace, opened with the sender's own access, holds a connection to exactly that reference.
+   */
+  | { type: "openBoard"; board: OperateBoardRef }
+  /** Stop showing the board. */
+  | { type: "closeBoard" };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -200,6 +225,7 @@ export const INITIAL_OPERATE_PAGE: OperatePageState = {
   lastApprovalOutcome: null,
   console: null,
   presentation: "canvas",
+  board: null,
 };
 
 /** Thrown by `applyOperateEvent` for an event that is invalid in the current state. */
@@ -256,7 +282,7 @@ function sameApproval(a: OperateApprovalRef, b: OperateApprovalRef): boolean {
 export function applyOperateEvent(state: OperatePageState, event: OperateEvent): OperatePageState {
   switch (event.type) {
     case "showHome":
-      return { ...state, console: null, focus: null, flow: null, presentation: "canvas" };
+      return { ...state, console: null, focus: null, flow: null, presentation: "canvas", board: null };
     case "open": {
       checkRef(event.ref);
       let workingSet = state.workingSet.some(ref => sameOperateRef(ref, event.ref))
@@ -341,23 +367,23 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
       let presentation: OperatePresentation =
           fullChat === "default" || fullChat === "only" ? "chat" : "canvas";
       return {
-        ...state, presentation,
+        ...state, presentation, board: null,
         console: { workspaceId, consoleId, title, fullChat, viewId, screenId: null },
       };
     }
     case "openView": {
       let open = requireConsole(state);
       checkIds([event.viewId]);
-      return { ...state, console: { ...open, viewId: event.viewId, screenId: null } };
+      return { ...state, board: null, console: { ...open, viewId: event.viewId, screenId: null } };
     }
     case "showScreen": {
       let open = requireConsole(state);
       if (event.screenId !== null) checkIds([event.screenId]);
-      return { ...state, console: { ...open, screenId: event.screenId } };
+      return { ...state, board: null, console: { ...open, screenId: event.screenId } };
     }
     case "closeConsole": {
       requireConsole(state);
-      return { ...state, console: null, presentation: "canvas" };
+      return { ...state, console: null, presentation: "canvas", board: null };
     }
     case "setPresentation": {
       let open = requireConsole(state);
@@ -368,6 +394,19 @@ export function applyOperateEvent(state: OperatePageState, event: OperateEvent):
         throw new OperateEventError("This console is chat-only.");
       }
       return { ...state, presentation: event.presentation };
+    }
+    case "openBoard": {
+      let { workspaceId, boardRef } = event.board;
+      checkIds([workspaceId]);
+      if (boardRef.length === 0 || boardRef.length > MAX_OPERATE_SUBJECT_LENGTH) {
+        throw new OperateEventError(
+            `A board reference must be 1-${MAX_OPERATE_SUBJECT_LENGTH} characters.`);
+      }
+      return { ...state, board: { workspaceId, boardRef } };
+    }
+    case "closeBoard": {
+      if (!state.board) throw new OperateEventError("No board is shown in this session.");
+      return { ...state, board: null };
     }
   }
 }

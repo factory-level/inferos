@@ -705,8 +705,26 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     return this.user().subscribeOperateSession(subscriber);
   }
 
+  // A board is shown only through a connection the sender can reach: the named workspace, opened
+  // with their own access (the session's own workspace, or a console workspace they build in),
+  // must hold one for exactly that reference. A use-role operator cannot look up a console
+  // workspace's connections, so their boards name their own session workspace.
+  async #checkBoardEvent(event: OperateEvent): Promise<void> {
+    if (event.type !== "openBoard") return;
+    let connected = false;
+    try {
+      using workspace = await this.openConsoleWorkspace(event.board.workspaceId);
+      using connection = await workspace.getGatekeeperByResourceUrl(event.board.boardRef);
+      connected = connection !== null;
+    } catch {
+      connected = false;
+    }
+    if (!connected) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.boardUnavailable);
+  }
+
   async dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot> {
     await this.#checkConsoleEvent(event);
+    await this.#checkBoardEvent(event);
     return this.user().dispatchOperateEvent(event, expectedSeq, "person");
   }
 
