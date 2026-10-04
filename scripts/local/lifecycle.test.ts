@@ -11,7 +11,8 @@ import {
 } from "./lifecycle.ts";
 import {
   configuredWorkers, inferOpsConfiguration, latestWranglerLog, localEnv, probeWorkers,
-  readDevServerRecord, recordDevServer, resetLocalState, resolveLocalStack,
+  readDevServerRecord, recordDevServer, resetLocalState, resolveLocalStack, stackOwnership,
+  type DevServerRecord,
 } from "./stack.ts";
 
 const REPO = join(import.meta.dirname, "..", "..");
@@ -23,6 +24,7 @@ function offlineDeps(overrides: Partial<LifecycleDeps> = {}): LifecycleDeps & { 
     ...defaultDeps,
     env: {},
     isPortListening: async () => false,
+    devServerRecord: () => null,
     fetchImpl: async () => { throw new Error("offline"); },
     runOperator: (script, args) => {
       operatorCalls.push([script, ...args]);
@@ -36,6 +38,9 @@ function offlineDeps(overrides: Partial<LifecycleDeps> = {}): LifecycleDeps & { 
     ...overrides,
   };
 }
+
+/** A live record of this checkout's dev server on `port`: what makes a listener ours. */
+const ours = (port = 8787): DevServerRecord => ({ pid: process.pid, port, mode: "run-local", startedAt: "2026-10-03T00:00:00.000Z" });
 
 function tempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "inferos-local-"));
@@ -100,7 +105,7 @@ test("status is ok only when every configured Worker answers through the router"
     const status = answers.get(path) ?? 503;
     return new Response(null, { status });
   };
-  const deps = offlineDeps({ isPortListening: async () => true, fetchImpl });
+  const deps = offlineDeps({ isPortListening: async () => true, devServerRecord: () => ours(), fetchImpl });
   const degraded = await runLifecycle(["status", "--json"], deps);
   assert.equal(degraded.exitCode, EXIT_FAILED);
   assert.match(degraded.headline, /^degraded:/);
@@ -116,6 +121,51 @@ test("status is ok only when every configured Worker answers through the router"
   assert.equal(up.exitCode, EXIT_OK);
   assert.equal(up.report.ok, true);
   assert.match(up.headline, /^up: \d+ workers answering .* \(InferOps mock\)$/);
+});
+
+test("status reports a listener this checkout did not start as port-in-use-by-other and never probes it", async () => {
+  const root = tempRoot();
+  const { port, close } = await listen();
+  let probed = false;
+  const fetchImpl: typeof fetch = async () => { probed = true; return new Response(null, { status: 200 }); };
+  try {
+    // Real port, real record file: nothing recorded, then a record for another port, then ours.
+    for (const record of [null, () => recordDevServer(root, { port: port + 1, mode: "run-local" })]) {
+      record?.();
+      const result = await runLifecycle(["status", "--json", "--port", String(port)], offlineDeps({ root, fetchImpl, isPortListening: defaultDeps.isPortListening, devServerRecord: readDevServerRecord }));
+      assert.equal(result.exitCode, EXIT_FAILED);
+      assert.equal(result.report.ok, false);
+      assert.equal(result.report.listening, true);
+      assert.equal(result.report.stack, "port-in-use-by-other");
+      assert.match(String(result.report.error), new RegExp(`Port ${port} is in use by a process this checkout did not start`));
+      assert.match(result.headline, /^port-in-use-by-other:/);
+      assert.ok((result.report.workers as { state: string }[]).every(worker => worker.state === "down"));
+    }
+    assert.equal(probed, false);
+    recordDevServer(root, { port, mode: "run-local" });
+    const mine = await runLifecycle(["status", "--json", "--port", String(port)], offlineDeps({ root, fetchImpl, isPortListening: defaultDeps.isPortListening, devServerRecord: readDevServerRecord }));
+    assert.equal(mine.report.stack, "running");
+    assert.equal((mine.report.devServer as { port: number }).port, port);
+    assert.equal(probed, true);
+  } finally {
+    await close();
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal(stackOwnership(false, ours(), 8787), "not-running");
+  assert.equal(stackOwnership(true, null, 8787), "port-in-use-by-other");
+  assert.equal(stackOwnership(true, ours(9000), 8787), "port-in-use-by-other");
+  assert.equal(stackOwnership(true, ours(), 8787), "running");
+});
+
+test("seed and verify refuse a listener that is not this checkout's stack", async () => {
+  const deps = offlineDeps({ isPortListening: async () => true });
+  for (const command of ["seed", "verify"]) {
+    const result = await runLifecycle([command, "--json"], deps);
+    assert.equal(result.exitCode, EXIT_FAILED);
+    assert.equal(result.report.stack, "port-in-use-by-other");
+    assert.match(String(result.report.error), /Port 8787 is in use by a process this checkout did not start/);
+  }
+  assert.deepEqual(deps.operatorCalls, []);
 });
 
 test("probing reports a Worker as down when the origin does not answer", async () => {
@@ -174,7 +224,7 @@ test("repeated seed runs the same idempotent operator steps and keeps the sessio
     agentView: { inferops: { connected: true }, board: { project: "DEMO", issues: 9, states: 10 }, approvalQueue: { reachable: true, pending: 1 } } };
   const runOperator = (script: string): OperatorResult =>
     ({ exitCode: 0, report: script === "dev-setup.ts" ? { ...setupReport } : { ...verifyReport }, stderr: "" });
-  const deps = offlineDeps({ isPortListening: async () => true, runOperator: (script, args, env) => {
+  const deps = offlineDeps({ isPortListening: async () => true, devServerRecord: () => ours(), runOperator: (script, args, env) => {
     deps.operatorCalls.push([script, ...args]);
     return runOperator(script);
   } });
@@ -199,7 +249,7 @@ test("repeated seed runs the same idempotent operator steps and keeps the sessio
 });
 
 test("seed reports which operator step failed", async () => {
-  const deps = offlineDeps({ isPortListening: async () => true, runOperator: script => script === "dev-setup.ts"
+  const deps = offlineDeps({ isPortListening: async () => true, devServerRecord: () => ours(), runOperator: script => script === "dev-setup.ts"
     ? { exitCode: 0, report: { ok: true }, stderr: "" }
     : { exitCode: 1, report: { ok: false, step: "board", error: "The InferOps account cannot open the board" }, stderr: "" } });
   const result = await runLifecycle(["seed", "--json"], deps);
@@ -207,7 +257,7 @@ test("seed reports which operator step failed", async () => {
   assert.equal((result.report.verify as { step: string }).step, "board");
   assert.match(result.headline, /^seed failed at verify: The InferOps account cannot open/);
 
-  const broken = await runLifecycle(["seed", "--json"], offlineDeps({ isPortListening: async () => true,
+  const broken = await runLifecycle(["seed", "--json"], offlineDeps({ isPortListening: async () => true, devServerRecord: () => ours(),
     runOperator: () => ({ exitCode: 1, report: null, stderr: "Saved canvases are off" }) }));
   assert.equal(broken.exitCode, EXIT_FAILED);
   assert.deepEqual(broken.report, { ok: false, command: "seed", url: "http://localhost:8787", step: "setup", error: "Saved canvases are off" });
@@ -216,7 +266,7 @@ test("seed reports which operator step failed", async () => {
 test("verify passes the operator's report through with its exit code", async () => {
   const ready = { ok: true, agentView: { board: { project: "DEMO", issues: 2, states: 3 }, approvalQueue: { pending: 0 } } };
   const calls: string[][] = [];
-  const deps = offlineDeps({ isPortListening: async () => true, runOperator: (script, args) => {
+  const deps = offlineDeps({ isPortListening: async () => true, devServerRecord: () => ours(), runOperator: (script, args) => {
     calls.push([script, ...args]);
     return { exitCode: 0, report: ready, stderr: "" };
   } });
@@ -226,12 +276,12 @@ test("verify passes the operator's report through with its exit code", async () 
   assert.deepEqual(result.report.agentView, ready.agentView);
   assert.deepEqual(calls, [["dev-verify.ts", "--url", "http://localhost:8787", "--board", "inferops://ops.example/project/board/OPS"]]);
 
-  const notReady = await runLifecycle(["verify", "--json"], offlineDeps({ isPortListening: async () => true,
+  const notReady = await runLifecycle(["verify", "--json"], offlineDeps({ isPortListening: async () => true, devServerRecord: () => ours(),
     runOperator: () => ({ exitCode: 1, report: { ok: false, step: "signIn", error: "No local account" }, stderr: "" }) }));
   assert.equal(notReady.exitCode, EXIT_FAILED);
   assert.equal(notReady.headline, "not ready (signIn): No local account");
 
-  const crashed = await runLifecycle(["verify", "--json"], offlineDeps({ isPortListening: async () => true,
+  const crashed = await runLifecycle(["verify", "--json"], offlineDeps({ isPortListening: async () => true, devServerRecord: () => ours(),
     runOperator: () => ({ exitCode: 1, report: null, stderr: "boom" }) }));
   assert.equal(crashed.exitCode, EXIT_FAILED);
   assert.deepEqual(crashed.report, { ok: false, step: "connect", error: "boom", command: "verify" });

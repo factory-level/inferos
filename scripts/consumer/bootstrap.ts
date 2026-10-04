@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { initialConsumerConfig, type InitialConsumerOptions } from "./config.ts";
 import { checkConsumer } from "./runtime.ts";
 import { defaultConsumerSkillsManifest, SKILLS_MANIFEST } from "./skills.ts";
-import { describeWrapperFiles, FILES_MANIFEST, managedFiles, renderFilesManifest } from "./wrapper-files.ts";
+import { describeWrapperFiles, FILES_MANIFEST, managedFiles, renderFilesManifest, renderWrapperLockfile, WRAPPER_LOCKFILE } from "./wrapper-files.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const json = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
@@ -78,6 +78,8 @@ export function bootstrapConsumer(target: string, repository: string, revision: 
     cpSync(join(here, "skill-packs"), join(staging, "skills"), { recursive: true });
     writeFileSync(join(staging, SKILLS_MANIFEST), json(defaultConsumerSkillsManifest()));
     writeFileSync(join(staging, "inferos.config.json"), json(config));
+    // Committed with the rest, so pnpm's dependency check before each script finds nothing to write.
+    writeFileSync(join(staging, WRAPPER_LOCKFILE), renderWrapperLockfile(join(staging, "inferos")));
     writeFileSync(join(staging, ".inferos/bootstrap.json"), json({ version: 1, repository, revision }));
     writeFileSync(join(staging, "views/operations.json"), json({
       schemaVersion: 1, id: "operations", revision: "0", title: "Operations",

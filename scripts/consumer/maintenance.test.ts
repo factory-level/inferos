@@ -9,7 +9,8 @@ import { bootstrapConsumer } from "./bootstrap.ts";
 import { mergePolicy } from "./reconcile.ts";
 import { checkConsumer } from "./runtime.ts";
 import { exportBlock, localSecretValues, scanPortable } from "./upgrade-review.ts";
-import { FILES_MANIFEST, sha256, WRAPPER_SKILLS } from "./wrapper-files.ts";
+import { dirtyTreeBlocker } from "./upgrade.ts";
+import { FILES_MANIFEST, sha256, WRAPPER_LOCKFILE, WRAPPER_SKILLS } from "./wrapper-files.ts";
 
 const REPO = join(import.meta.dirname, "../..");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
@@ -70,9 +71,12 @@ export const checkConsumerFixture = (root: string) => validateBoardFixture(JSON.
 `);
   write(join(source, "scripts/consumer/project-board.json"), read(join(REPO, "scripts/consumer/project-board.json")));
   // A stopped stack; reset deletes the state directory under the checkout it runs from, like the real one.
-  write(join(source, "scripts/local/lifecycle.ts"), `import { rmSync } from "node:fs";
+  // FAKE_STATUS replaces status's report; verify leaves a marker so a test can tell it ran.
+  write(join(source, "scripts/local/lifecycle.ts"), `import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 const command = process.argv[2];
 if (command === "reset") { rmSync(".wrangler/state", { recursive: true, force: true }); console.log(JSON.stringify({ ok: true, command })); }
+else if (command === "status" && process.env.FAKE_STATUS) { console.log(process.env.FAKE_STATUS); process.exitCode = JSON.parse(process.env.FAKE_STATUS).ok ? 0 : 1; }
+else if (command === "verify") { mkdirSync(".wrangler", { recursive: true }); writeFileSync(".wrangler/verified", ""); console.log(JSON.stringify({ ok: true, command })); }
 else { console.log(JSON.stringify({ ok: false, command, listening: false, error: "Nothing listens" })); process.exitCode = 1; }
 `);
   const gatekeeper = "custom-gatekeepers/gatekeeper-inferops";
@@ -137,6 +141,57 @@ test("bootstrap records every file it writes with its class and hash", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+/** pnpm on PATH, or null: the lockfile test runs the real one when it can. */
+const pnpm = (() => {
+  const probe = spawnSync("pnpm", ["--version"], { encoding: "utf8" });
+  return probe.status === 0 ? "pnpm" : null;
+})();
+
+test("a bootstrapped wrapper carries the lockfile pnpm would write, so pnpm leaves its tree clean", { skip: pnpm ? false : "pnpm is not on PATH" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-lockfile-"));
+  try {
+    const { source, a } = inferosSource(root);
+    const target = committedWrapper(root, source, a);
+    const record = JSON.parse(read(join(target, FILES_MANIFEST)));
+    // The customer's from here on: an upgrade never rewrites it.
+    assert.deepEqual(Object.keys(record.files[WRAPPER_LOCKFILE]).toSorted(), ["class", "sha256"]);
+    assert.equal(record.files[WRAPPER_LOCKFILE].class, "customer-owned");
+    // pnpm verifies (installs) the wrapper's dependencies before every script. Outside the
+    // surrounding pnpm run's environment, so it behaves as in a customer's shell.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(npm|pnpm)_/i.test(key)));
+    const before = read(join(target, WRAPPER_LOCKFILE));
+    const run = spawnSync(pnpm!, ["run", "inferos:check"], { cwd: target, encoding: "utf8", env });
+    assert.ok(existsSync(join(target, "node_modules")), run.stderr);
+    assert.equal(read(join(target, WRAPPER_LOCKFILE)), before);
+    assert.equal(git(target, "status", "--porcelain"), "");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("upgrade names what makes the tree dirty, and says to commit an untracked lockfile", () => {
+  assert.equal(dirtyTreeBlocker(" M inferos.config.json\n?? notes.txt\n"),
+    "The wrapper has uncommitted changes (inferos.config.json, notes.txt); commit or discard them before --apply");
+  const many = Array.from({ length: 12 }, (_, index) => `?? file-${index}`).join("\n");
+  assert.match(dirtyTreeBlocker(many), /file-9, and 2 more\)/);
+  const root = mkdtempSync(join(tmpdir(), "inferos-dirty-lockfile-"));
+  try {
+    // A wrapper bootstrapped before the lockfile was: pnpm has since written one, untracked.
+    const { source, a, b } = inferosSource(root);
+    git(source, "reset", "-q", "--hard", a);
+    const target = committedWrapper(root, source, a);
+    git(source, "reset", "-q", "--hard", b);
+    const lockfile = read(join(target, WRAPPER_LOCKFILE));
+    rmSync(join(target, WRAPPER_LOCKFILE));
+    commit(target, "an older wrapper");
+    writeFileSync(join(target, WRAPPER_LOCKFILE), lockfile);
+    const plan = wrapper(target, "upgrade", b);
+    assert.equal(plan.report!.ok, false);
+    assert.deepEqual(plan.report!.blockers, [`The wrapper has uncommitted changes (${WRAPPER_LOCKFILE}); commit or discard them before --apply; ` +
+      `${WRAPPER_LOCKFILE} is the wrapper's lockfile, which pnpm writes before running a script: commit it (git add ${WRAPPER_LOCKFILE} && git commit)`]);
+    commit(target, "commit the lockfile");
+    assert.deepEqual(wrapper(target, "upgrade", b).report!.blockers, []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("upgrade plans, refuses a dirty tree, then moves the pin keeping every customization", () => {
   const root = mkdtempSync(join(tmpdir(), "inferos-upgrade-"));
   try {
@@ -183,7 +238,7 @@ test("upgrade plans, refuses a dirty tree, then moves the pin keeping every cust
     writeFileSync(join(target, "scratch.txt"), "uncommitted");
     const dirty = wrapper(target, "upgrade", b, "--apply");
     assert.equal(dirty.status, 1);
-    assert.match(dirty.stderr, /uncommitted changes/);
+    assert.match(dirty.stderr, /uncommitted changes \(scratch\.txt\)/);
     assert.equal(git(join(target, "inferos"), "rev-parse", "HEAD"), a);
     rmSync(join(target, "scratch.txt"));
 
@@ -478,6 +533,41 @@ test("verify prints one JSON report with a status and reasons per check", () => 
     assert.equal(broken.status, 1);
     assert.equal(broken.report!.checks[0].status, "fail");
     assert.match(broken.report!.checks[0].reasons[0], /HEAD differs/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("verify never runs live checks against a process this wrapper did not start", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-verify-foreign-"));
+  try {
+    const { source, a } = inferosSource(root);
+    const target = committedWrapper(root, source, a);
+    const port = JSON.parse(read(join(target, "inferos.config.json"))).local.port;
+    const verified = join(target, "inferos/.wrangler/verified");
+    const checksOf = (report: Record<string, any>) => Object.fromEntries(report.checks.map((check: { name: string; status: string; reasons: string[] }) => [check.name, check]));
+    // The pin's operator says the listener is someone else's.
+    const foreign = JSON.stringify({ ok: false, command: "status", listening: true, stack: "port-in-use-by-other", error: `Port ${port} is in use by a process this checkout did not start` });
+    for (const live of [false, true]) {
+      const result = wrapperWith({ FAKE_STATUS: foreign }, target, "verify", ...(live ? ["--live"] : []));
+      const checks = checksOf(result.report!);
+      assert.equal(result.report!.live, false);
+      assert.equal(checks["local-status"].status, live ? "fail" : "skipped");
+      assert.match(checks["local-status"].reasons[0], /^port-in-use-by-other: Port \d+ is in use/);
+      assert.equal(checks["local-verify"].status, live ? "fail" : "skipped");
+      assert.match(checks["local-verify"].reasons[0], /did not start/);
+      assert.equal(result.report!.checks.length, 4);
+    }
+    // An older pin reports only `listening`: without this wrapper's dev-server record it is not ours either.
+    const legacy = JSON.stringify({ ok: true, command: "status", listening: true });
+    const unrecorded = checksOf(wrapperWith({ FAKE_STATUS: legacy }, target, "verify").report!);
+    assert.equal(unrecorded["local-status"].status, "skipped");
+    assert.match(unrecorded["local-status"].reasons[0], /^port-in-use-by-other/);
+    assert.equal(existsSync(verified), false);
+    // With a live record for the wrapper's port, the same report is the wrapper's stack and verify runs.
+    write(join(target, "inferos/.wrangler/local/dev-server.json"), JSON.stringify({ pid: process.pid, port, mode: "run-local", startedAt: new Date().toISOString() }));
+    const recorded = wrapperWith({ FAKE_STATUS: legacy }, target, "verify");
+    assert.equal(recorded.report!.live, true);
+    assert.equal(checksOf(recorded.report!)["local-verify"].status, "pass");
+    assert.equal(existsSync(verified), true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

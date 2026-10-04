@@ -48,8 +48,21 @@ function readPort(root: string): number | null {
 }
 
 /**
- * check + doctor + local status, and local verify while the stack runs. A stack that is not running
- * skips the live checks unless `live` requires them.
+ * Whether the stack `local status` saw is this wrapper's own. A pin whose operator reports `stack`
+ * decides it; an older pin reports only `listening`, which any server on the port satisfies, so the
+ * wrapper checks the submodule's dev-server record for that port itself.
+ */
+function stackOwnership(root: string, report: Record<string, any> | null): "running" | "not-running" | "port-in-use-by-other" {
+  if (report?.stack === "running" || report?.stack === "not-running" || report?.stack === "port-in-use-by-other") return report.stack;
+  if (report?.listening !== true) return "not-running";
+  const port = readPort(root);
+  return port !== null && recordedDevServer(root)?.port === port ? "running" : "port-in-use-by-other";
+}
+
+/**
+ * check + doctor + local status, and local verify while the stack runs. A stack that is not running,
+ * or a port held by a process this wrapper did not start (`port-in-use-by-other`), skips the live
+ * checks unless `live` requires them; local verify never runs against such a process.
  */
 export async function verifyWrapper(root: string, { live = false } = {}) {
   const checks: VerifyCheck[] = [];
@@ -67,7 +80,9 @@ export async function verifyWrapper(root: string, { live = false } = {}) {
   const upstream = join(root, "inferos");
   const hasLifecycle = existsSync(lifecycleScript(upstream));
   const status = hasLifecycle ? lifecycle(root, ["status"]) : null;
-  const listening = status?.report?.listening === true;
+  const ownership = status ? stackOwnership(root, status.report) : "not-running";
+  // Only this wrapper's own stack counts as live: a stranger on the port is never verified.
+  const listening = ownership === "running";
   const doctor = await diagnoseConsumer(root);
   // A running stack holds its own port; doctor's port preflight is about starting a new one.
   const errors = doctor.checks.filter(check => check.status === "error" && !(listening && check.name === "port"));
@@ -75,6 +90,10 @@ export async function verifyWrapper(root: string, { live = false } = {}) {
     details: { checks: doctor.checks } });
   if (!status) {
     checks.push({ name: "local-status", status: live ? "fail" : "skipped", reasons: ["The pinned revision has no local lifecycle operator (scripts/local/lifecycle.ts)"] });
+  } else if (ownership === "port-in-use-by-other") {
+    const reason = `port-in-use-by-other: ${status.report?.error ?? `port ${readPort(root)} answers, but not with this wrapper's dev server`}`;
+    checks.push({ name: "local-status", status: live ? "fail" : "skipped", reasons: [reason], details: status.report ?? undefined });
+    checks.push({ name: "local-verify", status: live ? "fail" : "skipped", reasons: [`Not run against a process this wrapper did not start (${reason})`] });
   } else if (!listening) {
     checks.push({ name: "local-status", status: live ? "fail" : "skipped", reasons: [status.report?.error ?? "The local stack is not running (pnpm local start)"], details: status.report ?? undefined });
   } else {
@@ -85,7 +104,7 @@ export async function verifyWrapper(root: string, { live = false } = {}) {
     const verified = lifecycle(root, ["verify"]);
     checks.push({ name: "local-verify", status: verified.exitCode === 0 ? "pass" : "fail",
       reasons: verified.exitCode === 0 ? [] : [`${verified.report?.step ?? "verify"}: ${verified.report?.error ?? verified.stderr ?? "failed"}`], details: verified.report ?? undefined });
-  } else {
+  } else if (ownership !== "port-in-use-by-other") {
     checks.push({ name: "local-verify", status: live ? "fail" : "skipped", reasons: ["Runs only while the local stack is running"] });
   }
   const failures = checks.filter(check => check.status === "fail").map(check => check.name);

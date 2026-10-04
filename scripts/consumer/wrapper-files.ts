@@ -11,7 +11,7 @@
 //   coding-agent skills, `README.md`, `.gitignore`). Refreshed while unedited, reconciled three-way
 //   once edited (`reconcile.ts`).
 // - `customer-owned`: starters the customer is expected to edit (configuration, blueprints, skill
-//   packs, fixtures, views, workers). `source` names the upstream file a starter was copied from;
+//   packs, fixtures, views, workers, and the wrapper's `pnpm-lock.yaml`). `source` names the upstream file a starter was copied from;
 //   only those are reconciled by an upgrade, and files without a source are never rewritten.
 //
 // Every copy records its `source`, and the recorded hash identifies which upstream revision of that
@@ -116,6 +116,27 @@ export function managedFiles(pin: string): Map<string, ManagedFile> {
   copy(".gitignore", `${TEMPLATES}/gitignore`);
   files.set("package.json", { class: "generated", content: renderPackageJson(pin) });
   return files;
+}
+
+/** The wrapper's own pnpm lockfile, at its root beside package.json. */
+export const WRAPPER_LOCKFILE = "pnpm-lock.yaml";
+
+/** What pnpm 9 and later write for a project with no dependencies, below the version line. */
+const EMPTY_LOCKFILE_BODY = "settings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n";
+
+/**
+ * The lockfile bootstrap commits for a wrapper with no dependencies of its own. pnpm 11 verifies a
+ * project's dependencies before every `pnpm run` (`verifyDepsBeforeRun`), and for the wrapper that
+ * means installing its empty root and writing this file. Writing the same bytes up front keeps the
+ * first `pnpm inferos …` from leaving an untracked lockfile behind (which `upgrade --apply` would
+ * then refuse as uncommitted changes). The lockfile format version is the pin's own, since the
+ * wrapper runs the pin's pnpm (`packageManager`). Once written the file is the customer's: it
+ * changes when the customer adds a dependency, and an upgrade never rewrites it.
+ */
+export function renderWrapperLockfile(pin: string): string {
+  const path = join(pin, "pnpm-lock.yaml");
+  const version = existsSync(path) ? /^lockfileVersion: .*$/m.exec(readFileSync(path, "utf8"))?.[0] : undefined;
+  return `${version ?? "lockfileVersion: '9.0'"}\n\n${EMPTY_LOCKFILE_BODY}`;
 }
 
 /** Customer-owned starters bootstrap copies from an InferOS checkout: wrapper prefix → upstream prefix. */

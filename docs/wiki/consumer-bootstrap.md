@@ -24,7 +24,7 @@ pnpm dev
 
 The example pins the consumer implementation, not a moving branch. Select a reviewed commit from your own fork when appropriate. For local development/testing, supply an absolute local Git repository path instead of the HTTPS URL. The destination must be new or an existing wrapper created by this command. The command does not overwrite an arbitrary existing repo.
 
-Review and commit the wrapper files and staged gitlink before publishing it. Another developer can then use `git clone --recurse-submodules` on the wrapper. Use the wrapper's pinned pnpm version. `.dev.vars` and local state remain uncommitted.
+Review and commit the wrapper files and staged gitlink before publishing it. That includes `pnpm-lock.yaml`: the wrapper's own lockfile, which bootstrap writes for its empty dependency list. pnpm checks (and installs) a project's dependencies before every `pnpm run`, so a wrapper without a committed lockfile gets an untracked one from its first `pnpm inferos …`, and `upgrade --apply` then refuses the dirty tree. If you add dependencies to the wrapper, commit the updated lockfile too. Another developer can then use `git clone --recurse-submodules` on the wrapper. Use the wrapper's pinned pnpm version. `.dev.vars` and local state remain uncommitted.
 
 ## Kanban customer shell
 
@@ -102,7 +102,7 @@ On a pin containing `scripts/local/lifecycle.ts`, `pnpm local status|start|stop|
 - `seed` without `--screen` passes the first screen template in the wrapper's `inferos.canvas.json`.
 - `runner start|status|stop` and `coding doctor` get `--consumer-root <wrapper>`, so the local coding runner reads the wrapper's `codingWorkbench.repos` and `.dev.vars` and keeps its state in the wrapper's git-ignored `.inferos/state/runner/` (see [Run the local coding runner](local-coding-runner.md)).
 
-State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as with `pnpm dev`. `status` lists the Workers the pinned checkout would bind, not the wrapper's custom Workers. An older pin fails with "does not support the local lifecycle"; use `pnpm dev` there.
+State, the dev-server record and `reset` stay under `inferos/.wrangler/`, as with `pnpm dev`. That record is how `status` knows the listener is this wrapper's: a server on `local.port` that this wrapper did not start is reported as `stack: "port-in-use-by-other"`, and `seed` and `verify` refuse to act on it (`pnpm inferos recover ports` moves the wrapper instead). `status` lists the Workers the pinned checkout would bind, not the wrapper's custom Workers. An older pin fails with "does not support the local lifecycle"; use `pnpm dev` there.
 
 ## Verify, upgrade and recover
 
@@ -116,8 +116,8 @@ pnpm inferos upgrade <full-sha> --apply --branch <name> [--open-pr <owner/repo>]
 pnpm inferos recover ports|config|fixtures|state [--apply]   # dry run unless --apply
 ```
 
-- **verify** reports `checks[]` named `check`, `doctor`, `local-status` and `local-verify`, each with a `status` (`pass`, `fail` or `skipped`) and `reasons`. The live checks are `skipped` while the stack is stopped. `--live` makes a stopped stack a failure.
-- **upgrade** fetches the commit into `inferos/` if needed and runs that revision's planner from a temporary worktree.
+- **verify** reports `checks[]` named `check`, `doctor`, `local-status` and `local-verify`, each with a `status` (`pass`, `fail` or `skipped`) and `reasons`. The live checks are `skipped` while the stack is stopped, and also when the port is held by a process this wrapper did not start (the reason starts with `port-in-use-by-other`; `local verify` never runs against it, and doctor's port check fails). `--live` makes either a failure.
+- **upgrade** fetches the commit into `inferos/` if needed and runs that revision's planner from a temporary worktree. `--apply` needs a clean tree; the blocker names the dirty paths. A wrapper bootstrapped before the lockfile was written shows an untracked `pnpm-lock.yaml` there: commit it (`git add pnpm-lock.yaml && git commit`), do not ignore it.
   - The plan lists blockers, the submodule move, whether `pnpm inferos config migrate` would succeed on the target (the upgrade never migrates), each changed file's action and the state rollback limit.
   - `--apply` moves the submodule and gitlink, rewrites `upstream.revision`, `.inferos/bootstrap.json` and `.inferos/files.json`, and refreshes InferOS files and upstream starters (blueprints, skill packs) you have not edited.
   - An edited skill, SOP, README or blueprint is merged three-way. The original is rebuilt from the submodule's history, so the wrapper keeps no extra copy. A clean merge is written (`merge`). A conflicting one leaves your file untouched (`conflict`), with a diff3 merge and its conflict markers under `.inferos/state/upgrade/<sha>/`.

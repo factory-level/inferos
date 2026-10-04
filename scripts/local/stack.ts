@@ -218,6 +218,20 @@ export function readDevServerRecord(recordPath: string): DevServerRecord | null 
 }
 
 /**
+ * Who holds the stack's port. `running`: this checkout's recorded dev server, alive and recorded on
+ * that port. `port-in-use-by-other`: something answers there, but this checkout did not start it (no
+ * live record, or a record for another port), so nothing about it says it is this stack. A probe
+ * alone cannot tell the two apart: any server on 8787 accepts the connection.
+ */
+export type StackOwnership = "running" | "not-running" | "port-in-use-by-other";
+
+/** Classify the listener on `port` from the probe and this checkout's dev-server record. */
+export function stackOwnership(listening: boolean, record: DevServerRecord | null, port: number): StackOwnership {
+  if (!listening) return "not-running";
+  return record?.port === port ? "running" : "port-in-use-by-other";
+}
+
+/**
  * Remove this checkout's local state. Refuses without `confirm` (the caller's `--yes`) and while
  * a recorded dev server runs, since Wrangler would keep writing into the directory being removed.
  * Only `stateDir` and the dev-server record go; Wrangler's build scratch and logs stay.

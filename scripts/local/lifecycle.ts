@@ -2,7 +2,7 @@
 
 // Lifecycle of this checkout's local stack, for people and agents alike:
 //
-//   pnpm local status [--json]                   Is the stack up, which Workers answer, mock or live InferOps
+//   pnpm local status [--json]                   Is this checkout's stack up, which Workers answer, mock or live InferOps
 //   pnpm local start [-- <run-local flags>]      Start the public origin (scripts/run-local.ts) after a port check
 //   pnpm local stop [--json]                     Signal the recorded dev server and wait for it to exit
 //   pnpm local seed [--json] [--screen ID] [--no-approval]
@@ -20,8 +20,10 @@
 // stdout is one JSON object; without it a headline precedes the same object, pretty-printed.
 //
 // `start` and `stop` are thin: the stack itself is `scripts/run-local.ts` and
-// `scripts/run-dev-server.ts`, which records its pid so `stop` and `status` can find it. `seed`
-// and `verify` drive the Workshop through the operator scripts under
+// `scripts/run-dev-server.ts`, which records its pid so `stop` and `status` can find it. That
+// record is also how a listener is known to be this checkout's: `status`, `seed` and `verify` treat
+// a port that answers without a live record for it as `port-in-use-by-other`, never as the stack.
+// `seed` and `verify` drive the Workshop through the operator scripts under
 // `packages/workshop-backend/scripts/` (dev-setup.ts and dev-verify.ts), which hold the RPC code.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -35,8 +37,8 @@ import { relayTermination } from "../relay-termination.ts";
 import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
-  probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack,
-  wranglerLogDir, type LocalStack,
+  probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack, stackOwnership,
+  wranglerLogDir, type DevServerRecord, type LocalStack, type StackOwnership,
 } from "./stack.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -83,6 +85,8 @@ export interface LifecycleDeps extends CodingDeps {
   root: string;
   env: NodeJS.ProcessEnv;
   isPortListening: (port: number) => Promise<boolean>;
+  /** This checkout's live dev-server record (see `readDevServerRecord`), or null. */
+  devServerRecord: (recordPath: string) => DevServerRecord | null;
   fetchImpl: typeof fetch;
   /** Run an operator script from packages/workshop-backend/scripts and parse its JSON. */
   runOperator: (script: string, args: string[], env: NodeJS.ProcessEnv) => OperatorResult;
@@ -146,6 +150,7 @@ export const defaultDeps: LifecycleDeps = {
   root: ROOT,
   env: process.env,
   isPortListening: port => isPortListening(port),
+  devServerRecord: readDevServerRecord,
   fetchImpl: fetch,
   runOperator: runOperatorScript,
   startStack: startStackForeground,
@@ -240,34 +245,59 @@ export function seedScreenTemplate(root: string, explicit?: string): string | nu
   }
 }
 
-/** Fail early when the command needs a Workshop and nothing listens. */
-async function requireListening(stack: LocalStack, deps: LifecycleDeps, command: Command): Promise<LifecycleResult | null> {
-  if (await deps.isPortListening(stack.port)) return null;
+/** Probe the port and classify its listener against this checkout's record. */
+async function inspectStack(stack: LocalStack, deps: LifecycleDeps): Promise<{ listening: boolean; devServer: DevServerRecord | null; ownership: StackOwnership }> {
+  const listening = await deps.isPortListening(stack.port);
+  const devServer = deps.devServerRecord(stack.recordPath);
+  return { listening, devServer, ownership: stackOwnership(listening, devServer, stack.port) };
+}
+
+/** Why a listener that is not this checkout's is refused; shared by status, seed and verify. */
+const foreignListener = (stack: LocalStack) =>
+  `Port ${stack.port} is in use by a process this checkout did not start (no running dev server is recorded for it on that port); ` +
+  `stop that process or move this stack to another port (in a wrapper: pnpm inferos recover ports)`;
+
+/**
+ * Fail early when the command needs this checkout's Workshop and it is not what answers: nothing
+ * listens, or the listener is someone else's (seeding or verifying it would act on a stranger).
+ */
+async function requireOwnStack(stack: LocalStack, deps: LifecycleDeps, command: Command): Promise<LifecycleResult | null> {
+  const { ownership } = await inspectStack(stack, deps);
+  if (ownership === "running") return null;
+  if (ownership === "port-in-use-by-other") {
+    return {
+      exitCode: EXIT_FAILED,
+      report: { ok: false, command, url: stack.url, stack: ownership, error: foreignListener(stack) },
+      headline: `${command}: ${stack.backendHost} is in use by another process, not this checkout's stack`,
+    };
+  }
   return {
     exitCode: EXIT_FAILED,
-    report: { ok: false, command, url: stack.url, error: `Nothing listens on ${stack.backendHost}; start the stack first (pnpm local start)` },
+    report: { ok: false, command, url: stack.url, stack: ownership, error: `Nothing listens on ${stack.backendHost}; start the stack first (pnpm local start)` },
     headline: `${command}: nothing listens on ${stack.backendHost}`,
   };
 }
 
 async function status(stack: LocalStack, deps: LifecycleDeps): Promise<LifecycleResult> {
-  const listening = await deps.isPortListening(stack.port);
+  const { listening, devServer, ownership } = await inspectStack(stack, deps);
   const workers = configuredWorkers(deps.root);
-  const probes = listening
+  // A foreign listener is not probed: its answers would describe some other server as this stack.
+  const probes = ownership === "running"
     ? await probeWorkers(stack.url, workers, deps.fetchImpl)
     : workers.map(worker => ({ ...worker, state: "down" as const }));
   const inferops = inferOpsConfiguration(localEnv(deps.root, deps.env));
-  const devServer = readDevServerRecord(stack.recordPath);
   const down = probes.filter(probe => probe.state !== "up").map(probe => probe.name);
-  const ok = listening && down.length === 0 && inferops.missing.length === 0;
+  const ok = ownership === "running" && down.length === 0 && inferops.missing.length === 0;
   const report = {
-    ok, command: "status", url: stack.url, port: stack.port, listening,
-    devServer: devServer ? { pid: devServer.pid, mode: devServer.mode, startedAt: devServer.startedAt } : null,
+    ok, command: "status", url: stack.url, port: stack.port, listening, stack: ownership,
+    ...(ownership === "port-in-use-by-other" ? { error: foreignListener(stack) } : {}),
+    devServer: devServer ? { pid: devServer.pid, port: devServer.port, mode: devServer.mode, startedAt: devServer.startedAt } : null,
     workers: probes, inferops,
     state: { directory: stack.stateDir, present: existsSync(stack.stateDir) },
     logs: deps.wranglerLogDir(),
   };
   const headline = !listening ? `down: nothing listens on ${stack.backendHost}`
+    : ownership === "port-in-use-by-other" ? `port-in-use-by-other: ${stack.backendHost} answers, but not with this checkout's dev server`
     : down.length ? `degraded: ${down.join(", ")} not answering on ${stack.url}`
     : inferops.missing.length ? `misconfigured: INFEROPS_BASE_URL is set but ${inferops.missing.join(", ")} is not`
     : `up: ${probes.length} workers answering on ${stack.url} (InferOps ${inferops.mode})`;
@@ -320,7 +350,7 @@ async function stop(stack: LocalStack, deps: LifecycleDeps): Promise<LifecycleRe
 }
 
 async function seed(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Promise<LifecycleResult> {
-  const notListening = await requireListening(stack, deps, "seed");
+  const notListening = await requireOwnStack(stack, deps, "seed");
   if (notListening) return notListening;
   const screen = seedScreenTemplate(deps.root, parsed.screen);
   const setupArgs = [...credentialArgs(parsed, stack), "--mock-model", "--inferops"];
@@ -360,7 +390,7 @@ function summarizeVerify(report: Record<string, unknown> | null): string {
 }
 
 async function verify(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Promise<LifecycleResult> {
-  const notListening = await requireListening(stack, deps, "verify");
+  const notListening = await requireOwnStack(stack, deps, "verify");
   if (notListening) return notListening;
   const args = credentialArgs(parsed, stack);
   if (parsed.board) args.push("--board", parsed.board);

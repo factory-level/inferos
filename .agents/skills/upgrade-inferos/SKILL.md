@@ -7,7 +7,7 @@ description: Move an InferOS wrapper repository to a reviewed InferOS commit - p
 
 Get the reviewed full 40-character target SHA from the task. Never pick a moving branch yourself.
 
-1. Commit or set aside every local change: `--apply` refuses a dirty tree. Plan first, always:
+1. Commit or set aside every local change: `--apply` refuses a dirty tree and names the dirty paths. An untracked `pnpm-lock.yaml` (pnpm writes it in a wrapper bootstrapped before bootstrap wrote one) belongs in the wrapper: commit it, do not ignore it. Plan first, always:
    `pnpm inferos upgrade <sha>` (same as `--plan`; writes nothing). It fetches the commit into `inferos/` if needed and runs that revision's own planner from a temporary worktree.
 2. Review the plan JSON:
    - `blockers`: must be empty before applying (dirty tree, a configuration the target cannot read, capabilities it does not ship, a wrapper that does not check now).
