@@ -4,7 +4,8 @@
 // content byte length), followed by UTF-8 JSON metadata and the gzip-compressed Yjs snapshot.
 // See docs/blueprints.md for the full format description.
 
-import { BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, isOutputIcon } from '@gadgets/workshop-shared/api';
+import * as Y from "yjs";
+import { BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, DEFAULT_WORKSPACE_KIND, isOutputIcon, WORKSPACE_KINDS, WorkspaceKind } from '@gadgets/workshop-shared/api';
 
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
 
@@ -122,22 +123,53 @@ export async function listFeaturedBlueprintsFromKv(
   return parseFeaturedBlueprints(raw);
 }
 
+/** A blueprint kind from untrusted metadata (an uploaded archive), or undefined if it is none. */
+export function sanitizeWorkspaceKind(kind: unknown): WorkspaceKind | undefined {
+  return WORKSPACE_KINDS.find(known => known === kind);
+}
+
 /**
- * Read a blueprint's code snapshot (an uncompressed Yjs V2 state update of a doc whose unnamed
- * root map is filename -> Y.Text) from R2, or null if the content object doesn't exist.
+ * The R2 custom metadata stored with each blueprint version's content: the kind that version was
+ * published as, so an install pinned to it takes that kind even after the blueprint moves on.
+ */
+export function blueprintVersionMetadata(kind: WorkspaceKind | undefined): Record<string, string> {
+  return {kind: kind ?? DEFAULT_WORKSPACE_KIND};
+}
+
+/**
+ * Read a blueprint version's code snapshot (an uncompressed Yjs V2 state update of a doc whose
+ * unnamed root map is filename -> Y.Text) and kind from R2, or null if that version doesn't exist.
+ * Content stored without a kind (from before kinds, or bundled) is an app; an unknown kind throws.
  */
 export async function readBlueprintContent(
   env: Pick<Cloudflare.Env, 'BLUEPRINT_CONTENT'>,
   blueprintId: string,
   version: number,
-): Promise<Uint8Array | null> {
+): Promise<{code: Uint8Array, kind: WorkspaceKind} | null> {
   let r2Object = await env.BLUEPRINT_CONTENT.get(`${blueprintId}/${version}`);
   if (!r2Object) {
     return null;
   }
+  let storedKind = r2Object.customMetadata?.kind;
+  let kind = storedKind === undefined ? DEFAULT_WORKSPACE_KIND : sanitizeWorkspaceKind(storedKind);
+  if (kind === undefined) {
+    await r2Object.body.cancel();
+    throw new Error(`Blueprint version ${version} has an unknown kind.`);
+  }
 
   let decompressed = r2Object.body.pipeThrough(new DecompressionStream("gzip"));
-  return new Uint8Array(await new Response(decompressed).arrayBuffer());
+  return {code: new Uint8Array(await new Response(decompressed).arrayBuffer()), kind};
+}
+
+/** The files in a blueprint code snapshot, by name. Archives always use the doc's unnamed root. */
+export function blueprintSnapshotFiles(code: Uint8Array): Map<string, string> {
+  let archiveDoc = new Y.Doc();
+  Y.applyUpdateV2(archiveDoc, code);
+  let files = new Map<string, string>();
+  for (let [file, content] of archiveDoc.getMap<Y.Text>()) {
+    files.set(file, content.toString());
+  }
+  return files;
 }
 
 export function randomBlueprintId(): string {

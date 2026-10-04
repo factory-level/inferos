@@ -12,6 +12,8 @@ covers:
   - packages/workshop-backend/scripts/dev-setup.ts
   - packages/workshop-backend/src/overseer.ts
   - packages/workshop-backend/src/agent.ts
+  - packages/workshop-backend/src/blueprint-archive.ts
+  - packages/integration-tests/__tests__/operate-published.test.ts
 updated: 2026-10-03
 ---
 
@@ -36,6 +38,8 @@ The operate session is implemented in the kernel: one per person, holding a page
 | `packages/workshop-backend/src/server.ts` | `OperateSessionImpl` (`@validateRpc`), which forwards to the user DO with a fresh stub per call, opens the session workspace as an operate session, and checks console navigation events against the console's current definition before dispatching them. |
 | `packages/workshop-backend/src/overseer.ts` | The `operateSession` mark in the workspace's storage, set by `open()` when the session opens it; `OperateOverseerInterface`, the operate-only capability every open of a marked workspace returns; and the agent hooks `isOperateSession` and `operatePage`. |
 | `packages/workshop-backend/src/agent.ts` | `OPERATE_AGENT_TOOLS`, the operate chat's tool allowlist; the `operatePage` tool; and the operate note leading the chat's system prompt. |
+| `packages/workshop-backend/src/blueprint-archive.ts` | Each blueprint version's kind, stored as R2 custom metadata on its content (`blueprintVersionMetadata`) and read back with the code (`readBlueprintContent`); `sanitizeWorkspaceKind` for uploaded archives. |
+| `packages/integration-tests/__tests__/operate-published.test.ts` | Apps, widgets and workflows used outside their source workspace: installs at a pinned version, explicit upgrades, kind checks, and `use` shares. |
 
 ## Data and Control Flow
 
@@ -71,6 +75,14 @@ A stored snapshot may predate a page-state field. The user DO fills missing fiel
 
 References in the page state (`screen`, `workspace`, and a flow's workspace and steps) identify targets only. The session never opens them and grants no access.
 
+### Pinned installs and upgrades
+
+Publishing stamps the source workspace's kind on the blueprint (`BlueprintMetadata.kind`, in `createBlueprint` and in `updateBlueprint` when it republishes code) and stores it with that version's R2 content (`<blueprintId>/<version>`, custom metadata `kind`). An uploaded archive keeps a known kind and drops any other. Content stored without a kind (older versions, bundled blueprints) reads as `app`; an unknown stored kind is refused.
+
+`AuthenticatedApi.newGadgetFromBlueprint(blueprintId, bindings, options)` installs `options.version` (default: the current version) and refuses, before creating anything, a version that doesn't exist or whose kind differs from `options.kind`. `initializeFromBlueprint` gives the new workspace that version's kind (also in the owner's list) and records `installedFrom: {blueprintId, version, kind}` in the workspace's storage. `getMetadata()` and `subscribeToMetadata()` report it, for both build and use roles. Republishing writes a new version and touches no install.
+
+`Overseer.upgradeInstall(version)` is the only thing that moves an install. It needs build access: `UseOverseerInterface` and `OperateOverseerInterface` deny it. It reads that version of the recorded blueprint, refuses a missing version or one whose kind differs from `installedFrom.kind`, and writes the version's files as a new commit on the default gadget's head. It then re-checks that neither the head nor the pin moved during the awaits, fast-forwards the head, re-pins `installedFrom.version`, and restarts the gadget. Bindings, storage, chats, grants and credentials are untouched, and nothing is read from the source workspace. A downgrade is the same call with an older version.
+
 ## Configuration
 
 None. Limits are constants in `operate-session.ts`: references and screen ids up to 128 characters, a subject up to 512, at most 24 references in the working set (opening one more drops the oldest), and 1 to 32 steps in a flow run with a title up to 120 characters. The page holds at most one approval under review and one last outcome. One `listEvents()` page returns at most 200 entries.
@@ -89,7 +101,9 @@ Against [the design](../design/operate-mode.md):
 - The event log is kept in full, with no compaction or retention policy.
 - Role consoles are partial: there is a console definition and the `openConsole` / `openView` / `showScreen` / `closeConsole` / `showHome` events, but no general console state machine (`consoleEvent`, `navigateBack`) and no board or issue continuity in the page state.
 - Build is not gated by role. Any signed-in user can author, and the Build | Operate toggle depends only on the `operate-mode` flag and composable views.
-- Kind controls stop at authoring. Today the kernel enforces only the explicit `setKind()` (denied to `use`), the builder contract and starter files, and the workflow `client.js` refusal in the agent's file tools. That refusal is skipped in worktrees. A blueprint does not record the kind, so an install reads as `app` (`integration-tests/__tests__/operate-published.test.ts` records this as a known gap). `checkWorkspaceKind` runs only in tests, not at publish. Placing an `inferos.gadget` does not require a widget-kind gadget, and there is no per-console operate catalog.
+- Kind controls stop at install. The kernel enforces the explicit `setKind()` (denied to `use`), the builder contract and starter files, the workflow `client.js` refusal in the agent's file tools (skipped in worktrees), the kind recorded with each published version, and the kind checks at install and upgrade. `checkWorkspaceKind` runs only in tests, not at publish. Placing an `inferos.gadget` does not require a widget-kind gadget, and there is no per-console operate catalog.
+- There is no operate space as a container and no Publish to Operate action: an install is an ordinary workspace made by `newGadgetFromBlueprint`, owned by the installer, and its owner and `build` collaborators can still edit it and call `setKind`. An upgrade replaces the default gadget's files with the version's, so local edits made on an install are superseded (they stay in its commit history).
+- An install at an older version validates binding assignments against the blueprint's current binding list, since only the current version's metadata is stored. A newer version that needs a binding the install lacks is upgraded anyway, and the gadget fails at the missing binding until someone binds it.
 - There is no derived console inventory and no admin or observability view of which apps and widgets each console uses.
 - Build still offers the bundled `inferops.kanban` blueprint as a creatable output, and it does not yet offer Widgets or Agent workflows as outputs.
 

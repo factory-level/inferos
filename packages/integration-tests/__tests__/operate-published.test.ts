@@ -2,19 +2,26 @@ import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES,
-  type AuthenticatedApi, type OperateSession, type OperateSessionUpdate, type Overseer, type PublicApi,
-  type WorkpieceId, type WorkspaceKind,
+  type AuthenticatedApi, type BlueprintBindingAssignment, type BlueprintInstallOptions,
+  type OperateSession, type OperateSessionUpdate, type Overseer, type PublicApi, type WorkpieceId,
+  type WorkspaceKind,
 } from "@gadgets/workshop-shared/api";
 import type { OperateRef, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { diffFiles, type CodeContent } from "@gadgets/workshop-shared/code-change";
 import { checkWorkspaceKind, workspaceKindStarter } from "@gadgets/workshop-shared/workspace-kind";
-import { startHarness, type Harness } from "../src/harness.js";
+import {
+  startHarness, TEST_GATEKEEPER_BINDING, TEST_GATEKEEPER_DIR, TEST_VENDOR_ID, type Harness,
+} from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { callbackStubFor, connect, nextUsernames, signUp, stubFor, waitFor, WorkpieceRecorder } from "../src/rpc-client.js";
+import {
+  callbackStubFor, connect, listConnectedAccounts, nextUsernames, signUp, stubFor, waitFor,
+  WorkpieceRecorder,
+} from "../src/rpc-client.js";
 
 // What Build produces for Operate, used from somewhere other than where it was built. Things cross
 // workspaces in two ways today, and each case below uses both where they apply: an install from a
-// published blueprint (the operator's own independent copy), and a "use" share of the original.
+// published blueprint (the operator's own independent copy, pinned to one version), and a "use"
+// share of the original.
 
 type Counter = { add(n: number): Promise<number>; total(): Promise<number> };
 type Widget = { summary(): Promise<{ title: string; value: string }> };
@@ -39,7 +46,7 @@ const network = new NetworkInterceptor();
 beforeAll(async () => {
   network.install();
   harness = await startHarness({
-    gatekeepers: [],
+    gatekeepers: [{ binding: TEST_GATEKEEPER_BINDING, dir: TEST_GATEKEEPER_DIR }],
     enableGadgetExecution: true,
     patchWorkshop(config) {
       config.vars = { ...config.vars, COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true" };
@@ -64,8 +71,8 @@ const user = async (prefix: string) => signUp(publicApi, nextUsernames(prefix)[0
 async function build(author: RpcStub<AuthenticatedApi>, kind: WorkspaceKind, files: Record<string, string>) {
   const workspace = await author.newGadget(kind);
   const workpieces = new WorkpieceRecorder();
-  using workpiecesStub = stubFor(workpieces);
-  using _subscription = await workspace.subscribeToWorkpieces(workpiecesStub);
+  // Held for the workspace's life (the harness's), so later commits can watch the head move.
+  await workspace.subscribeToWorkpieces(stubFor(workpieces));
   await workpieces.loaded;
   const gadget = workspace.createGadget("Built", undefined, "BUILT");
   const gadgetId = await gadget.getId();
@@ -73,17 +80,24 @@ async function build(author: RpcStub<AuthenticatedApi>, kind: WorkspaceKind, fil
     const summary = workpieces.summaries.get(gadgetId);
     return summary?.type === "gadget" && summary.commitId !== undefined ? summary.commitId : null;
   });
-  const empty = await head();
-  const chatId = await workspace.newChat("Build", null);
-  const content = (entries: [string, string][]): CodeContent => new Map([[gadgetId, new Map(entries)]]);
-  await workspace.submitCodeChange(chatId, {
-    generation: 0, revision: 0, clientId: "build", seq: 1,
-    pins: [{ gadgetId, baseCommit: empty }],
-    change: diffFiles(content([]), content(Object.entries(files))),
-  });
-  expect(await workspace.mergeChanges(chatId)).toEqual({ outcome: "merged" });
-  await waitFor("the merged head", async () => (await head()) !== empty || null);
-  return { workspace, gadget, gadgetId, id: (await workspace.getMetadata()).id };
+  const content = (entries: Record<string, string>): CodeContent =>
+      new Map([[gadgetId, new Map(Object.entries(entries))]]);
+  let current: Record<string, string> = {};
+  /** Merges `next` over the gadget's files to mainline, as the builder would. */
+  const commit = async (next: Record<string, string>) => {
+    const base = await head();
+    const chatId = await workspace.newChat("Build", null);
+    await workspace.submitCodeChange(chatId, {
+      generation: 0, revision: 0, clientId: "build", seq: 1,
+      pins: [{ gadgetId, baseCommit: base }],
+      change: diffFiles(content(current), content({ ...current, ...next })),
+    });
+    expect(await workspace.mergeChanges(chatId)).toEqual({ outcome: "merged" });
+    await waitFor("the merged head", async () => (await head()) !== base || null);
+    current = { ...current, ...next };
+  };
+  await commit(files);
+  return { workspace, gadget, gadgetId, commit, id: (await workspace.getMetadata()).id };
 }
 
 /** Publishes a built gadget as a blueprint and waits until it can be installed. */
@@ -93,12 +107,33 @@ async function publish(gadget: Awaited<ReturnType<typeof build>>["gadget"], titl
   return blueprint.id;
 }
 
+/** Republishes a built gadget's current code as the blueprint's next version. */
+async function republish(built: Awaited<ReturnType<typeof build>>, blueprintId: string, version: number) {
+  await built.workspace.updateBlueprint(blueprintId, { updateCode: true });
+  await waitFor(`version ${version} of the blueprint`, async () =>
+    (await publicApi.getBlueprint(blueprintId))?.metadata.version === version || null);
+}
+
 /** Installs a blueprint as the operator's own workspace. */
-async function install(operator: RpcStub<AuthenticatedApi>, blueprintId: string) {
-  const workspace = await operator.newGadgetFromBlueprint(blueprintId, {});
+async function install(operator: RpcStub<AuthenticatedApi>, blueprintId: string,
+                       options?: BlueprintInstallOptions,
+                       bindings: Record<string, BlueprintBindingAssignment> = {}) {
+  const workspace = await operator.newGadgetFromBlueprint(blueprintId, bindings, options);
   const metadata = await workspace.getMetadata();
   if (metadata.defaultGadgetId === undefined) throw new Error("The install has no gadget");
   return { workspace, metadata, gadgetId: metadata.defaultGadgetId as WorkpieceId };
+}
+
+/** The text of `path` at the head of `gadgetId` in `workspace`. */
+async function committedText(workspace: RpcStub<Overseer>, gadgetId: WorkpieceId, path: string) {
+  const workpieces = new WorkpieceRecorder();
+  using stub = stubFor(workpieces);
+  using _subscription = await workspace.subscribeToWorkpieces(stub);
+  await workpieces.loaded;
+  const summary = workpieces.summaries.get(gadgetId);
+  if (summary?.type !== "gadget" || summary.commitId === undefined) throw new Error("No head");
+  const [file] = await workspace.readFilesAtCommit(summary.commitId, [path]);
+  return file?.[1]?.kind === "text" ? file[1].text : undefined;
 }
 
 const connectTo = async <T>(workspace: RpcStub<Overseer>, gadgetId: WorkpieceId) => {
@@ -321,12 +356,120 @@ describe("a workflow", () => {
   });
 });
 
-// A known gap, recorded so a fix shows up as a failing test: a blueprint does not carry its
-// workspace's kind, so an installed widget or workflow is an app until its kind is switched.
-it("an install does not yet carry the kind it was built as", async () => {
-  using author = await user("kindauthor");
-  using operator = await user("kindoperator");
-  const built = await build(author, "widget", workspaceKindStarter("widget")!);
-  const { metadata } = await install(operator, await publish(built.gadget, "Kindless"));
-  expect(metadata.kind ?? "app").toBe("app");
+/** A version marker beside each kind's files, so a test can tell which version an install runs. */
+const filesOf = (kind: WorkspaceKind, version: string): Record<string, string> => ({
+  ...(workspaceKindStarter(kind) ?? { "server.js": COUNTER_SERVER, "client.js": COUNTER_UI }),
+  "version.txt": version,
+});
+
+describe.each<WorkspaceKind>(["app", "widget", "workflow"])("a published %s", kind => {
+  it("installs at a pinned version, which only an explicit upgrade moves", async () => {
+    using author = await user(`pin${kind}author`);
+    const operatorName = nextUsernames(`pin${kind}operator`)[0]!;
+    using operator = await signUp(publicApi, operatorName);
+    const built = await build(author, kind, filesOf(kind, "v1"));
+    const blueprintId = await publish(built.gadget, `Pinned ${kind}`);
+    expect((await publicApi.getBlueprint(blueprintId))?.metadata.kind).toBe(kind);
+
+    // The install carries the kind it was built as, and records what it runs.
+    const live = await install(operator, blueprintId);
+    expect(live.metadata).toMatchObject({ kind, installedFrom: { blueprintId, version: 1, kind } });
+    expect((await operator.listGadgets()).find(listed => listed.id === live.metadata.id)?.kind ?? "app")
+      .toBe(kind);
+    await expect(operator.openGadget(built.id)).rejects.toThrow();
+
+    // Editing and republishing the source changes no existing install.
+    await built.commit({ "version.txt": "v2" });
+    await republish(built, blueprintId, 2);
+    expect(await committedText(live.workspace, live.gadgetId, "version.txt")).toBe("v1");
+    expect((await live.workspace.getMetadata()).installedFrom?.version).toBe(1);
+
+    // A new install can still pin the old version, and a pin that doesn't exist or doesn't fit
+    // creates nothing.
+    const pinned = await install(operator, blueprintId, { version: 1, kind });
+    expect(await committedText(pinned.workspace, pinned.gadgetId, "version.txt")).toBe("v1");
+    const latest = await install(operator, blueprintId);
+    expect(await committedText(latest.workspace, latest.gadgetId, "version.txt")).toBe("v2");
+    const before = (await operator.listGadgets()).length;
+    await expect(install(operator, blueprintId, { version: 3 })).rejects.toThrow(/not found/);
+    const otherKind = kind === "app" ? "widget" : "app";
+    await expect(install(operator, blueprintId, { kind: otherKind })).rejects.toThrow(/not a/);
+    expect((await operator.listGadgets()).length).toBe(before);
+
+    // Someone the install is shared with for use can use it but not upgrade it.
+    const viewerName = nextUsernames(`pin${kind}viewer`)[0]!;
+    using viewer = await signUp(publicApi, viewerName);
+    await live.workspace.addCollaborator(viewerName, "use");
+    using shared = await viewer.openGadget(live.metadata.id);
+    expect(await shared.getMetadata()).toMatchObject({ role: "use", installedFrom: { version: 1 } });
+    await expect(shared.upgradeInstall(2)).rejects.toThrow(/Unauthorized/);
+
+    // The upgrade is its own action, and it moves the install to exactly the version asked for.
+    await expect(live.workspace.upgradeInstall(3)).rejects.toThrow(/not found/);
+    await live.workspace.upgradeInstall(2);
+    expect(await committedText(live.workspace, live.gadgetId, "version.txt")).toBe("v2");
+    expect(await live.workspace.getMetadata())
+      .toMatchObject({ kind, installedFrom: { blueprintId, version: 2, kind } });
+    expect(await committedText(pinned.workspace, pinned.gadgetId, "version.txt")).toBe("v1");
+    await live.workspace.upgradeInstall(1);
+    expect(await committedText(live.workspace, live.gadgetId, "version.txt")).toBe("v1");
+  });
+});
+
+describe("an install's upgrade", () => {
+  it("refuses a version published as another kind", async () => {
+    using author = await user("kindchangeauthor");
+    using operator = await user("kindchangeoperator");
+    const built = await build(author, "widget", filesOf("widget", "v1"));
+    const blueprintId = await publish(built.gadget, "Changing");
+    const installed = await install(operator, blueprintId, { kind: "widget" });
+
+    await built.workspace.setKind("app");
+    await built.commit({ "version.txt": "v2" });
+    await republish(built, blueprintId, 2);
+    expect((await publicApi.getBlueprint(blueprintId))?.metadata.kind).toBe("app");
+
+    await expect(installed.workspace.upgradeInstall(2)).rejects.toThrow(/cannot change/);
+    expect(await installed.workspace.getMetadata())
+      .toMatchObject({ kind: "widget", installedFrom: { version: 1, kind: "widget" } });
+    // Version 1 stays installable as the widget it was published as.
+    expect((await install(operator, blueprintId, { version: 1 })).metadata.kind).toBe("widget");
+    await expect(install(operator, blueprintId, { kind: "widget" })).rejects.toThrow(/not a widget/);
+  });
+
+  it("keeps the installer's own bindings, and an installer without the resource is refused", async () => {
+    using author = await user("boundauthor");
+    await author.provisionAmbientAccount(TEST_VENDOR_ID);
+    const authorAccount = (await listConnectedAccounts(author))
+      .find(account => account.vendorId === TEST_VENDOR_ID);
+    if (!authorAccount) throw new Error("The author's test account was not provisioned");
+    const built = await build(author, "app", filesOf("app", "v1"));
+    using data = await built.workspace.newGatekeeper(
+        authorAccount.id, "https://gadgets-test.example/things/source");
+    if (!data) throw new Error("Failed to create the author's connection");
+    await built.gadget.bind("DATA", await data.getId());
+    await built.gadget.setBlueprintAnnotation("DATA", { title: "Data", description: "" });
+    const blueprintId = await publish(built.gadget, "Bound");
+
+    // The operator holds no account for the resource, so naming one creates no binding to it.
+    using operator = await user("boundoperator");
+    const assign = (accountId: number, thing: string): Record<string, BlueprintBindingAssignment> =>
+      ({ DATA: { type: "gatekeeper", accountId, resourceUrl: `https://gadgets-test.example/things/${thing}` } });
+    await expect(install(operator, blueprintId, { version: 1 }, assign(authorAccount.id, "source")))
+      .rejects.toThrow();
+
+    await operator.provisionAmbientAccount(TEST_VENDOR_ID);
+    const operatorAccount = (await listConnectedAccounts(operator))
+      .find(account => account.vendorId === TEST_VENDOR_ID);
+    if (!operatorAccount) throw new Error("The operator's test account was not provisioned");
+    const installed = await install(operator, blueprintId, { version: 1 }, assign(operatorAccount.id, "mine"));
+    await built.commit({ "version.txt": "v2" });
+    await republish(built, blueprintId, 2);
+    await installed.workspace.upgradeInstall(2);
+    using gadget = await installed.workspace.getGadget(installed.gadgetId);
+    using binding = await gadget.getBinding("DATA");
+    expect(await binding?.getCreationSpec()).toMatchObject({
+      type: "gatekeeper", vendorId: TEST_VENDOR_ID, resourceUrl: "https://gadgets-test.example/things/mine",
+    });
+  });
 });
