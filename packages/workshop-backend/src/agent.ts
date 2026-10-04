@@ -1069,17 +1069,15 @@ To find a Kanban board the user describes, call \`findBoards(query)\` on a conne
 
 const OPERATE_PAGE_TOOL_DESCRIPTION =
     "Read or change the user's operate page: what it has open (its working set), what it shows " +
-    "(its focus), its subject, the board it shows, and any flow being run. Returns the page " +
-    "after the change, as " +
-    "JSON. Changes are presentation only and grant no access: a reference the user cannot open " +
+    "(its focus), the board it shows (its subject), any flow being run, and handovers other " +
+    "people sent the user. Returns the page after the change, as JSON. Changes are presentation only and grant no access: a reference the user cannot open " +
     "shows as unavailable. The change is recorded as yours in the session's history.";
 
 // Builds the operate event an operatePage call asks for, or undefined to only read the page. The
 // tool's flat parameters keep its schema simple for every provider; the reducer (applyOperateEvent)
 // then validates the event against the page like any other.
 function operateEventFromToolInput(input: {
-  action?: string, workspaceId?: string, screenId?: string, step?: number, subject?: string,
-  boardRef?: string,
+  action?: string, workspaceId?: string, screenId?: string, step?: number, boardRef?: string,
 }): OperateEvent | undefined {
   let ref = (): OperateRef => {
     if (input.workspaceId === undefined) {
@@ -1099,7 +1097,6 @@ function operateEventFromToolInput(input: {
       return {type: "goToStep", index: input.step};
     case "exitFlow": return {type: "exitFlow"};
     case "showHome": return {type: "showHome"};
-    case "setSubject": return {type: "setSubject", subject: input.subject ?? null};
     case "openBoard":
       if (input.boardRef === undefined) throw new Error("The openBoard action needs a boardRef.");
       // The workspace is the session's own, filled in by AgentHooks.operatePage.
@@ -3901,8 +3898,8 @@ async function runAgentPass(
       description: OPERATE_PAGE_TOOL_DESCRIPTION,
       parameters: Type.Object({
         action: Type.Optional(Type.String({
-          enum: ["open", "focus", "close", "goToStep", "exitFlow", "setSubject", "showHome",
-            "openBoard", "closeBoard"],
+          enum: ["open", "focus", "close", "goToStep", "exitFlow", "showHome", "openBoard",
+            "closeBoard"],
           description: "The change to make. Omit to only read the page.",
         })),
         workspaceId: Type.Optional(Type.String({
@@ -3915,10 +3912,6 @@ async function runAgentPass(
         step: Type.Optional(Type.Integer({
           minimum: 0,
           description: "For goToStep: the index into the running flow's steps, 0-based.",
-        })),
-        subject: Type.Optional(Type.String({
-          description: "For setSubject: what the page works on, such as an inferops:// board " +
-              "reference. Omit to clear it.",
         })),
         boardRef: Type.Optional(Type.String({
           description: "For openBoard: the exact boardRef of the findBoards candidate the user " +

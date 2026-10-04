@@ -1,9 +1,9 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch } from '@gadgets/workshop-shared/operate-console';
-import type { OperateEvent, OperateEventRecord, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
+import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import {
@@ -673,7 +673,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       let id = await this.#user.claimOperateSessionWorkspace(
           this.overseers.newUniqueId().toString());
       return this.#openGadgetInternal(id, undefined, undefined, true);
-    }, id => this.#openGadgetInternal(id));
+    }, id => this.#openGadgetInternal(id),
+    userId => wrapDoStubForTelemetry(this.users.get(this.users.idFromName(userId))));
   }
 }
 
@@ -683,7 +684,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 class OperateSessionImpl extends RpcTarget implements OperateSession {
   constructor(private user: () => DurableObjectStub<UserDurableObject>,
       private openWorkspace: () => Promise<NativeRpcStub<Overseer>>,
-      private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>) {
+      private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>,
+      private otherUser: (userId: string) => DurableObjectStub<UserDurableObject>) {
     super();
   }
 
@@ -714,31 +716,82 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     return this.user().subscribeOperateSession(subscriber);
   }
 
-  // A board is shown only through a connection the sender can reach: the named workspace, opened
+  // A board is reached only through a connection the caller can reach: the named workspace, opened
   // with their own access (the session's own workspace, or a console workspace they build in),
   // must hold one for exactly that reference. A use-role operator cannot look up a console
-  // workspace's connections, so their boards name their own session workspace.
-  async #checkBoardEvent(event: OperateEvent): Promise<void> {
-    if (event.type !== "openBoard") return;
-    let connected = false;
+  // workspace's connections, so their boards name their own session workspace. Returns the opened
+  // workspace, which the caller disposes; throws `boardUnavailable` otherwise.
+  async #reachBoard(board: OperateBoardRef): Promise<NativeRpcStub<Overseer>> {
+    let workspace;
     try {
-      using workspace = await this.openConsoleWorkspace(event.board.workspaceId);
-      using connection = await workspace.getGatekeeperByResourceUrl(event.board.boardRef);
-      connected = connection !== null;
+      workspace = await this.openConsoleWorkspace(board.workspaceId);
+      using connection = await workspace.getGatekeeperByResourceUrl(board.boardRef);
+      if (connection !== null) return workspace;
     } catch {
-      connected = false;
+      // Unreachable, like a workspace with no such connection.
     }
-    if (!connected) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.boardUnavailable);
+    workspace?.[Symbol.dispose]();
+    throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.boardUnavailable);
   }
 
   async dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot> {
+    // Only the kernel records handovers (handOver), so a session's log can't claim one that
+    // never happened.
+    if (event.type === "handoverReceived" || event.type === "handoverSent") {
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    }
     await this.#checkConsoleEvent(event);
-    await this.#checkBoardEvent(event);
+    if (event.type === "openBoard") (await this.#reachBoard(event.board))[Symbol.dispose]();
     return this.user().dispatchOperateEvent(event, expectedSeq, "person");
   }
 
   async listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]> {
     return this.user().listOperateEvents(afterSeq, limit);
+  }
+
+  // The recipient's copy is appended first: it is the one that matters, and if it is refused
+  // (an invalid note) nothing has been recorded anywhere. The two DOs can't be written atomically,
+  // so a failure recording the sender's copy leaves the delivered handover in place.
+  async handOver(recipientId: string, note: string): Promise<OperateHandover> {
+    let user = this.user();
+    let { board } = (await user.getOperatePage()).state;
+    if (!board) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    (await this.#reachBoard(board))[Symbol.dispose]();
+    let sender = await user.whoami();
+    let recipient = this.otherUser(recipientId);
+    let profile = recipientId === sender.id ? null : await recipient.whoamiIfExists();
+    if (!profile) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
+    let handover: OperateHandover = {
+      id: crypto.randomUUID(),
+      from: { id: sender.id, name: sender.name },
+      to: { id: profile.id, name: profile.name },
+      boardRef: board.boardRef,
+      issueId: board.issueId,
+      note,
+    };
+    await recipient.dispatchOperateEvent({ type: "handoverReceived", handover }, null, "person");
+    await user.dispatchOperateEvent({ type: "handoverSent", handover }, null, "person");
+    return handover;
+  }
+
+  async listSubjectAudit(subject: OperateBoardRef, cursor?: OperateSubjectAuditCursor)
+      : Promise<OperateSubjectAuditPage> {
+    using workspace = await this.#reachBoard(subject);
+    let { beforeSeq = null, beforeActionId = null } = cursor ?? {};
+    let fromStart = cursor === undefined;
+    let events = fromStart || beforeSeq !== null
+        ? await this.user().listOperateSubjectEvents(subject.boardRef, beforeSeq)
+        : { events: [], nextBeforeSeq: null };
+    let actions = fromStart || beforeActionId !== null
+        ? await workspace.listActions(
+            { beforeId: beforeActionId ?? undefined, filter: "all" })
+        : { entries: [], nextBeforeId: undefined };
+    let next = { beforeSeq: events.nextBeforeSeq, beforeActionId: actions.nextBeforeId ?? null };
+    return {
+      events: events.events,
+      actions: actions.entries.filter(entry => entry.resourceUrl === subject.boardRef),
+      next: next.beforeSeq === null && next.beforeActionId === null ? undefined : next,
+    };
   }
 
   async getWorkspace(): Promise<RpcStub<Overseer>> {

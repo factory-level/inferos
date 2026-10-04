@@ -14,6 +14,7 @@ covers:
   - packages/workshop-backend/src/agent.ts
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/integration-tests/__tests__/operate-published.test.ts
+  - packages/integration-tests/__tests__/operate-subjects.test.ts
 updated: 2026-10-03
 ---
 
@@ -40,6 +41,7 @@ The operate session is implemented in the kernel: one per person, holding a page
 | `packages/workshop-backend/src/agent.ts` | `OPERATE_AGENT_TOOLS`, the operate chat's tool allowlist; the `operatePage` tool; and the operate note leading the chat's system prompt. |
 | `packages/workshop-backend/src/blueprint-archive.ts` | Each blueprint version's kind, stored as R2 custom metadata on its content (`blueprintVersionMetadata`) and read back with the code (`readBlueprintContent`); `sanitizeWorkspaceKind` for uploaded archives. |
 | `packages/integration-tests/__tests__/operate-published.test.ts` | Apps, widgets and workflows used outside their source workspace: installs at a pinned version, explicit upgrades, kind checks, and `use` shares. |
+| `packages/integration-tests/__tests__/operate-subjects.test.ts` | Subjects (#64): handovers recorded in both sessions that grant nothing, and the per-subject audit, readable only through the reader's own connection. |
 
 ## Data and Control Flow
 
@@ -57,7 +59,7 @@ Before a person's `openConsole`, `openView` or `showScreen` (with a screen) reac
 
 The agent loop reads the same mark (`AgentHooks.isOperateSession()`), never anything the client sends, so every chat in the workspace is an operate chat however its turn started. Its tools are the `OPERATE_AGENT_TOOLS` allowlist: `readFile`, `grep`, `webFetch`, `observeUserChanges`, `describeBinding`, `executeCode`, `listCanvases`, `listConnectableResources`, `requestConnection` and `operatePage`. `writeFile`, `editFile`, `createGadget`, `createWorktree`, `setGadgetBinding`, `editCanvas` and `listBlueprints` are not offered, so a call to one fails as an unknown tool. `executeCode` still reaches connected resources through their gatekeepers, so a domain write queues for approval exactly as in Build. A short operate note leads the project-specific half of the system prompt. Other workspaces' chats never get `operatePage`.
 
-`operatePage` reads the page or applies one event to it: `open`, `focus` or `close` a screen or workspace reference, `goToStep` or `exitFlow` in the running flow, `setSubject`, `showHome`, or `openBoard` / `closeBoard` (not the issue events, which only the board surface sends). It returns the resulting page state as JSON. The Overseer forwards it to the owner's user DO (`dispatchOperateEvent(event, null, "agent")` or `getOperatePage()`), so the event goes through the same reducer and serialized log as a person's and is recorded with the actor `agent`. A null `expectedSeq` applies it to whatever page is current, since the agent acts on the latest page rather than one it watched.
+`operatePage` reads the page or applies one event to it: `open`, `focus` or `close` a screen or workspace reference, `goToStep` or `exitFlow` in the running flow, `showHome`, or `openBoard` / `closeBoard` (not the issue events, which only the board surface sends). It returns the resulting page state as JSON. The Overseer forwards it to the owner's user DO (`dispatchOperateEvent(event, null, "agent")` or `getOperatePage()`), so the event goes through the same reducer and serialized log as a person's and is recorded with the actor `agent`. A null `expectedSeq` applies it to whatever page is current, since the agent acts on the latest page rather than one it watched.
 
 A session can run a **flow**: `startFlow` copies an ordered list of one workspace's screen ids into the page state (`flow`), `goToStep` moves the index within it, and `exitFlow` clears it. While `flow` is set the page is meant to show only that step (the full-canvas state); the working set and focus are untouched, so they return on exit. Because the steps are copied in, the reducer validates a step from the event alone and a run is unaffected by later edits to the flow it started from.
 
@@ -79,7 +81,19 @@ A session can show a **board** (#61): `openBoard` names `{workspaceId, boardRef}
 
 The operate prompt tells the agent to discover boards with the InferOps board session's `findBoards(query)` through `executeCode`, to show the candidates and ask when more than one fits, and to open only the candidate the person chose by its exact `boardRef`. `findBoards` itself is the gatekeeper's (see [InferOps gatekeeper](inferops-gatekeeper.md)). `integration-tests/__tests__/operate-board-discovery.test.ts` covers paraphrased and empty searches over the person's own projects, opening a connected board, refusing a found but unconnected one and then opening it once connected, refusing a console owner's connection to a use-role operator and to a stranger, and a revoked or signed-out person's search failing; `operate-chat.test.ts` covers the agent's refused `openBoard`.
 
-References in the page state (`screen`, `workspace`, a board, and a flow's workspace and steps) identify targets only. The session never opens them and grants no access.
+### Subjects, handovers and the per-subject audit
+
+A session's **subject** (#64) is the board it shows. `OperatePageState.subject` is derived: `applyOperateEvent` sets it to `board?.boardRef ?? null` after every event, and the user DO re-derives it when it reads a stored snapshot, so it can't disagree with the board. `openBoard` is the design's `openSubject` for the first subject type, and it is already validated against a connection the sender can reach (above). Switching subject is another `openBoard`, which replaces the board and starts with no issue, so nothing of the previous subject stays on the page; the board surface keys its subject-bound state by the reference. The older free-string `setSubject` event is kept in the `OperateEvent` union so logs recorded before still read, but the reducer refuses it and the agent's `operatePage` no longer offers it.
+
+Each log entry records the subject it concerned (`OperateEventRecord.subject`, from `operateEventSubject`): a handover's board, else the board shown after the event, else the one shown before it, so the event that closed or switched away from a board counts toward it. Entries stored before this field have none.
+
+A **handover** (`OperateSession.handOver(recipientId, note)`) shares the session's subject (its board reference and open issue, never the sender's workspace id) and a note of up to 2,000 characters into another person's session. `OperateSessionImpl` reads the board from the sender's own page, re-checks that the sender still reaches it (`boardUnavailable`), and looks the recipient up as `addCollaborator` does (`idFromName` and `whoamiIfExists`), refusing an unknown id or the sender with `recipientUnavailable`. It appends `handoverReceived` to the recipient's log first, then `handoverSent` to the sender's, both with the actor `person` and the same handover id; the two Durable Objects can't be written atomically, so if the second append fails the call rejects and the recipient keeps the handover. A person's `dispatch` of either event is refused with `invalidEvent`, so a log can't claim a handover that never happened. `handoverReceived` adds the handover to `handovers` (at most 20, oldest dropped) and `dismissHandover` removes it; `handoverSent` changes nothing on the page. A handover grants nothing: the recipient opens the board with their own `openBoard`, validated against their own connections, so a recipient without access is refused exactly as if they had found the reference themselves. Handover notes appear in the page JSON the operate agent reads.
+
+The **per-subject audit** (`OperateSession.listSubjectAudit({workspaceId, boardRef}, cursor?)`) is read from the existing logs, with no copy kept. It first opens the named workspace with the caller's own access and requires a connection to exactly that reference, the same check as `openBoard`, so a person who can't reach the subject is refused with `boardUnavailable`, and a use-role operator can't read a console workspace's log through it. One page returns this session's events whose `subject` is the reference (scanning up to 200 entries, via the user DO's `listOperateSubjectEvents`) and the workspace's action log entries whose `resourceUrl` equals the reference (one `listActions` page of 50), both newest first, plus a cursor (`beforeSeq`, `beforeActionId`, null once a log is exhausted). A page can be empty while the cursor continues. The events are the reader's own; the action log is the workspace's, so in a shared console workspace it holds every collaborator's reads and writes there, and in a session workspace only its owner's.
+
+Retention and compaction: the audit has no storage of its own, so it is retained exactly as long as the two logs are. Today both are kept in full: the operate event log has no pruning and the action log is never pruned. If the event log is ever compacted, the rule is that entries carrying a `subject` (and every handover) are kept, and only subject-less page navigation may be folded into the stored snapshot, so the audit of a subject never shrinks under compaction. Action log entries are the gatekeepers' record and are not compacted by Operate.
+
+References in the page state (`screen`, `workspace`, a board, a handover, and a flow's workspace and steps) identify targets only. The session never opens them and grants no access.
 
 ### Pinned installs and upgrades
 
@@ -91,7 +105,7 @@ Publishing stamps the source workspace's kind on the blueprint (`BlueprintMetada
 
 ## Configuration
 
-None. Limits are constants in `operate-session.ts`: references and screen ids up to 128 characters, a subject up to 512, at most 24 references in the working set (opening one more drops the oldest), and 1 to 32 steps in a flow run with a title up to 120 characters. The page holds at most one approval under review and one last outcome. One `listEvents()` page returns at most 200 entries.
+None. Limits are constants in `operate-session.ts`: references and screen ids up to 128 characters, a subject (board reference) up to 512, a handover note up to 2,000 and at most 20 waiting handovers, at most 24 references in the working set (opening one more drops the oldest), and 1 to 32 steps in a flow run with a title up to 120 characters. The page holds at most one approval under review and one last outcome. One `listEvents()` page returns at most 200 entries, and one `listSubjectAudit()` page scans at most 200 events and 50 actions.
 
 ## Divergences from Design
 
@@ -100,11 +114,12 @@ Against [the design](../design/operate-mode.md):
 - A console is stored in, and references screens of, one workspace; there is no operate space yet. It has no state machine (`consoleEvent`, `navigateBack`), no app or widget assignments, no role assignment, and no derived inventory. Operators with only the use role read a workspace's consoles and the screens they show, but not its flows, and they never reach its connections; their boards resolve only through a connection in their own session workspace (above). The operate agent's `operatePage` offers `showHome` but not the other console events.
 - Full chat is a page presentation only: the conversation does not yet render widgets inline.
 - A flow is a single ordered list of one workspace's screens. Views that lay out several screens at once, steps from other workspaces, and steps that must be completed before moving on are not implemented.
-- Views, subject-bound views and handover events are not implemented. The page state covers the working set, focus, subject, chat panel, app presentation, a running flow, the approval under review and the last reported approval outcome.
+- Views and subject types other than the InferOps board are not implemented, and there is no separate `openSubject` event: `openBoard` opens the subject. A view does not declare a subject type, and the subject is not passed to screens and widgets as an input. The page state covers the working set, focus, subject, chat panel, app presentation, a running flow, the approval under review, the last reported approval outcome, the shown board and waiting handovers.
+- The per-subject audit is per reader, not one cross-person trail: it covers the reader's own session events and the action log of the workspace they name. Another person's opens, and reads and writes made through another person's own session workspace, are not in it; a handover is in both people's.
 - The session page dispatches `reviewApproval` and `approvalResolved` (see the approvals on the [operate session page](inferops-canvas.md#operate-session-page)) and reports only the outcome it read back from the workspace's action log, but the kernel does not check a reported outcome against the log. The page covers the session workspace and the focused screen's workspace only. Workflow runs started by a schedule, their approval waits and a generic workflow-run view are not shown in the session (post-release).
-- The URL mirror and presence are not implemented. The agent can open, focus and close references, step or exit a running flow and set the subject, but cannot start a flow, and it learns the page only by calling `operatePage` rather than from its prompt.
+- The URL mirror and presence are not implemented. The agent can open, focus and close references, step or exit a running flow and open or close a board, but cannot start a flow or hand over, and it learns the page only by calling `operatePage` rather than from its prompt.
 - A session workspace claimed before the `operateSession` mark existed is marked on its next `getWorkspace()`. Until then an `openGadget()` by id returns the full owner capability.
-- The event log is kept in full, with no compaction or retention policy.
+- The event log is kept in full. Compaction is defined (above) but not implemented.
 - Role consoles are partial: there is a console definition and the `openConsole` / `openView` / `showScreen` / `closeConsole` / `showHome` events and a shown board and issue (`openBoard` / `closeBoard` / `openIssue` / `closeIssue`), but no general console state machine (`consoleEvent`, `navigateBack`).
 - The kernel does not re-read the provider when a board is opened: it checks that a connection the sender can reach holds exactly that reference, and the board's first read is what reveals a deleted project or revoked access. The chat surface for Wiki exclusion (#61) is not changed here.
 - Build is not gated by role. Any signed-in user can author, and the Build | Operate toggle depends only on the `operate-mode` flag and composable views.
@@ -116,4 +131,5 @@ Against [the design](../design/operate-mode.md):
 
 ## Open Questions
 
-- Retention of the event log for audit versus storage growth.
+- When the event log should start compacting (by size or age), given that subject entries are kept.
+- Whether a cross-person subject trail is wanted, which would need a per-subject log rather than reads over each person's logs.

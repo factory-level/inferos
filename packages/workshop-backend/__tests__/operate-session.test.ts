@@ -3,10 +3,14 @@ import {
   applyOperateEvent,
   INITIAL_OPERATE_PAGE,
   MAX_OPERATE_FLOW_STEPS,
+  MAX_OPERATE_HANDOVER_NOTE_LENGTH,
+  MAX_OPERATE_HANDOVERS,
   MAX_OPERATE_WORKING_SET,
   OperateEventError,
+  operateEventSubject,
   replayOperateEvents,
   type OperateEvent,
+  type OperateHandover,
   type OperatePageState,
   type OperateRef,
 } from "@gadgets/workshop-shared/operate-session";
@@ -55,8 +59,7 @@ describe("operate page state machine", () => {
       { type: "focus", ref: screen("missing") },
       { type: "close", ref: screen("missing") },
       { type: "open", ref: screen("") },
-      { type: "setSubject", subject: "" },
-      { type: "setSubject", subject: "x".repeat(513) },
+      { type: "dismissHandover", id: "missing" },
     ] satisfies OperateEvent[]) {
       expect(() => applyOperateEvent(state, event)).toThrow(OperateEventError);
     }
@@ -66,7 +69,7 @@ describe("operate page state machine", () => {
   it("is deterministic: replaying the same log yields the same page", () => {
     let log: OperateEvent[] = [
       { type: "open", ref: screen("a") },
-      { type: "setSubject", subject: "inferops://demo.local/project/board/DEMO" },
+      { type: "openBoard", board: { workspaceId: "ws1", boardRef: "inferops://demo.local/project/board/DEMO" } },
       { type: "setChatOpen", open: false },
       { type: "setAppPresentation", presentation: "chat" },
     ];
@@ -294,6 +297,91 @@ describe("boards", () => {
     let shown = applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "openBoard", board: ENG });
     expect(() => applyOperateEvent(shown, { type: "openIssue", issueId: "" })).toThrow(OperateEventError);
     expect(() => applyOperateEvent(shown, { type: "openIssue", issueId: "x".repeat(129) })).toThrow(OperateEventError);
+  });
+});
+
+describe("subjects", () => {
+  const ENG = { workspaceId: "session", boardRef: "inferops://acme.operations/project/board/ENG" };
+  const WEB = { workspaceId: "session", boardRef: "inferops://acme.operations/project/board/WEB" };
+
+  it("the subject is the shown board, and follows it through every change", () => {
+    let state = applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "openBoard", board: ENG });
+    expect(state.subject).toBe(ENG.boardRef);
+    state = applyOperateEvent(state, { type: "openIssue", issueId: "issue-1" });
+    expect(state.subject).toBe(ENG.boardRef);
+    state = applyOperateEvent(state, { type: "openBoard", board: WEB });
+    expect(state).toMatchObject({ subject: WEB.boardRef, board: { ...WEB, issueId: null } });
+    expect(applyOperateEvent(state, { type: "closeBoard" }).subject).toBeNull();
+    expect(applyOperateEvent(state, { type: "showHome" }).subject).toBeNull();
+  });
+
+  it("switching subject carries nothing of the previous one over", () => {
+    let state = replayOperateEvents([
+      { type: "openBoard", board: ENG }, { type: "openIssue", issueId: "eng-1" }, { type: "openBoard", board: WEB },
+    ]);
+    expect(JSON.stringify(state)).not.toContain(ENG.boardRef);
+    expect(JSON.stringify(state)).not.toContain("eng-1");
+  });
+
+  it("refuses the superseded setSubject, so the subject is never set apart from the board", () => {
+    let shown = applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "openBoard", board: ENG });
+    for (let subject of [null, ENG.boardRef, WEB.boardRef]) {
+      expect(() => applyOperateEvent(shown, { type: "setSubject", subject })).toThrow(OperateEventError);
+    }
+  });
+
+  it("attributes each event to the subject it concerned", () => {
+    let shown = applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "openBoard", board: ENG });
+    let closed = applyOperateEvent(shown, { type: "closeBoard" });
+    expect(operateEventSubject({ type: "openBoard", board: ENG }, INITIAL_OPERATE_PAGE, shown)).toBe(ENG.boardRef);
+    expect(operateEventSubject({ type: "closeBoard" }, shown, closed)).toBe(ENG.boardRef);
+    expect(operateEventSubject({ type: "setChatOpen", open: false }, closed, closed)).toBeNull();
+    let handover = { id: "h", from: { id: "a", name: "A" }, to: { id: "b", name: "B" }, boardRef: WEB.boardRef, issueId: null, note: "" };
+    expect(operateEventSubject({ type: "handoverSent", handover }, shown, shown)).toBe(WEB.boardRef);
+  });
+});
+
+describe("handovers", () => {
+  const handover = (id: string, overrides: Partial<OperateHandover> = {}): OperateHandover => ({
+    id, from: { id: "alice", name: "Alice" }, to: { id: "bob", name: "Bob" },
+    boardRef: "inferops://acme.operations/project/board/ENG", issueId: "issue-1", note: "Over to you", ...overrides,
+  });
+
+  it("a received handover waits until dismissed, and opening nothing", () => {
+    let state = applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "handoverReceived", handover: handover("h1") });
+    expect(state.handovers).toEqual([handover("h1")]);
+    // It names a board but shows none: opening it is the recipient's own openBoard.
+    expect(state.board).toBeNull();
+    expect(state.subject).toBeNull();
+    state = applyOperateEvent(state, { type: "dismissHandover", id: "h1" });
+    expect(state.handovers).toEqual([]);
+    expect(() => applyOperateEvent(state, { type: "dismissHandover", id: "h1" })).toThrow(OperateEventError);
+  });
+
+  it("the sender's record changes nothing on the page", () => {
+    expect(applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "handoverSent", handover: handover("h1") }))
+      .toEqual(INITIAL_OPERATE_PAGE);
+  });
+
+  it("keeps the newest handovers, once each", () => {
+    let events: OperateEvent[] = [];
+    for (let i = 0; i <= MAX_OPERATE_HANDOVERS; i++) events.push({ type: "handoverReceived", handover: handover(`h${i}`) });
+    events.push({ type: "handoverReceived", handover: handover("h5") });
+    let state = replayOperateEvents(events);
+    expect(state.handovers).toHaveLength(MAX_OPERATE_HANDOVERS);
+    expect(state.handovers[0]?.id).toBe("h1");
+    expect(state.handovers.at(-1)?.id).toBe("h5");
+  });
+
+  it("rejects a malformed handover", () => {
+    for (let bad of [
+      handover(""), handover("h", { boardRef: "" }), handover("h", { issueId: "" }),
+      handover("h", { note: "x".repeat(MAX_OPERATE_HANDOVER_NOTE_LENGTH + 1) }),
+      handover("h", { to: { id: "", name: "Bob" } }),
+    ]) {
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "handoverReceived", handover: bad })).toThrow(OperateEventError);
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "handoverSent", handover: bad })).toThrow(OperateEventError);
+    }
   });
 });
 
