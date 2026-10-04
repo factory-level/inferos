@@ -1,7 +1,6 @@
 import { useRef, useState, type ReactElement } from 'react'
 import { Button, Dialog, Input, InputArea, Select } from '@cloudflare/kumo'
 import type { Issue, IssueChanges, NewIssue, Priority, Run, State } from '@inferos/gatekeeper-inferops/src/types'
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import type { ProposalResult } from './boardData'
 import { KanbanCodingForm, type CodingControl } from './KanbanCodingForm'
 import { PRIORITY_LABELS, changedFields, proposalErrorText, type IssueFields } from './kanbanBoard'
@@ -56,7 +55,6 @@ export const KanbanIssueDialog = ({ trigger, control, ...mode }: KanbanIssueDial
 }
 
 const IssueForm = ({ mode, onDone }: { mode: FormMode; onDone: () => void }) => {
-  const selectPortalContainer = useDialogSelectPortalContainer()
   const [fields, setFields] = useState<IssueFields>(mode.kind === 'edit'
     ? { title: mode.issue.title, description: '', priority: mode.issue.priority }
     : { title: '', description: '', priority: 'none' })
@@ -94,7 +92,7 @@ const IssueForm = ({ mode, onDone }: { mode: FormMode; onDone: () => void }) => 
     <InputArea label="Description" rows={4} maxLength={DESCRIPTION_MAX} value={fields.description} disabled={busy}
       description={mode.kind === 'edit' ? 'Leave empty to keep the current description.' : undefined}
       onValueChange={description => set({ description })} />
-    <Select container={selectPortalContainer} label="Priority" value={fields.priority} disabled={busy}
+    <Select label="Priority" value={fields.priority} disabled={busy}
       renderValue={value => PRIORITY_LABELS[value as Priority]}
       onValueChange={value => { if (value) set({ priority: value as Priority }) }}>
       {PRIORITIES.map(priority => <Select.Option key={priority} value={priority}>{PRIORITY_LABELS[priority]}</Select.Option>)}

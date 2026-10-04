@@ -68,6 +68,10 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   const shownStub = !board ? undefined
     : board.workspaceId === sessionWorkspace?.id ? sessionWorkspace.stub
     : !useRole && board.workspaceId === run.workspaceId ? overseer?.stub : undefined
+  // Until the workspace that could read it has (re)opened, as after a reconnect, the board is
+  // still opening: whether it can be shown here is not known yet, so nothing claims it can't.
+  const boardOpening = !!board && !shownStub
+    && (!sessionWorkspace || (!useRole && board.workspaceId === run.workspaceId && !overseer))
   const viewTitle = screen && run.screenId !== null ? screen.title : view?.title ?? 'view'
 
   // Opening or leaving a board moves focus to the page, so a keyboard user is not left on an
@@ -87,7 +91,8 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   else if (!entry) body = <Notice>This console is unavailable. It may have been removed.</Notice>
   else if (!view) body = <Notice>This view is no longer part of the console.</Notice>
   else if (board) {
-    body = shownStub
+    body = boardOpening ? <p role="status" className="text-sm text-kumo-subtle">Opening the board…</p>
+      : shownStub
       ? <SessionBoard board={board} overseer={shownStub} backLabel={viewTitle} onEvent={onEvent}
           widget={boardWidgets.find(widget => canonicalBoardRef(widget.targetRef) === board.boardRef)} />
       : <div className="space-y-3">

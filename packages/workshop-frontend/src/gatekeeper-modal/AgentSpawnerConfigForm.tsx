@@ -1,4 +1,4 @@
-import { Checkbox, Select, type PortalContainer } from '@cloudflare/kumo'
+import { Checkbox, Select } from '@cloudflare/kumo'
 import { AiChatAuthorInfo, WorkpieceId, validateBindingName } from '@gadgets/workshop-shared/api'
 import { WorkshopInput } from '../components/WorkshopControls'
 import { ConnectionConfigField } from './ConnectionConfigField'
@@ -62,7 +62,6 @@ export interface AgentSpawnerConfigFormProps {
   onDisplayNameChange: (value: string) => void
   onModelIdChange: (id: string | null) => void
   onEnvChange: (env: SpawnerEnvRow[]) => void
-  selectContainer?: PortalContainer
 }
 
 export function AgentSpawnerConfigForm({
@@ -74,7 +73,6 @@ export function AgentSpawnerConfigForm({
   onDisplayNameChange,
   onModelIdChange,
   onEnvChange,
-  selectContainer,
 }: AgentSpawnerConfigFormProps) {
   const updateRow = (index: number, updates: Partial<SpawnerEnvRow>) => {
     onEnvChange(env.map((row, i) => (i === index ? { ...row, ...updates } : row)))
@@ -102,7 +100,6 @@ export function AgentSpawnerConfigForm({
         <Select
           aria-label="Agent model"
           className="w-full text-sm [&_button]:!h-9"
-          container={selectContainer}
           placeholder="Select a model"
           value={modelId}
           onValueChange={(v) => onModelIdChange(v as string | null)}

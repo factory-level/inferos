@@ -3,7 +3,6 @@ import { Button, Input, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasCatalog, CanvasContent, CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import DeleteConfirmationDialog from '../../components/DeleteConfirmationDialog'
 import { CanvasBoardFullView } from './CanvasBoardFullView'
 import { CanvasMoveWidgetForm } from './CanvasMoveWidgetForm'
@@ -44,7 +43,6 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   wikiEditable?: boolean
 }) => {
   const canvas = useCanvasWorkspace(storage, viewId)
-  const selectPortalContainer = useDialogSelectPortalContainer()
   const [template, setTemplate] = useState(BLANK_TEMPLATE)
   const [editing, setEditing] = useState(false)
   const activeId = canvas.active?.id ?? null
@@ -72,7 +70,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
       void canvas.create(content).then(success => { if (success) setEditing(!screen) })
     }}>
       <Input label="New view title" name="title" required maxLength={120} defaultValue="Operations" disabled={canvas.busy} />
-      {catalog.screens.length > 0 && <Select container={selectPortalContainer} label="Start from" value={template}
+      {catalog.screens.length > 0 && <Select label="Start from" value={template}
         disabled={canvas.busy} onValueChange={value => setTemplate(String(value ?? BLANK_TEMPLATE))}
         renderValue={value => catalog.screens.find(item => item.id === value)?.content.title ?? 'Blank view'}>
         <Select.Option value={BLANK_TEMPLATE}>Blank view</Select.Option>

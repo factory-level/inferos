@@ -493,8 +493,14 @@ html {
    stacking context is.
 
    Matched on the popup Kumo puts inside, not on `[role="presentation"]` alone, which dialogs also
-   use for their backdrop and viewport — raising those would bury a dialog under its own backdrop. */
-[data-base-ui-portal] > [role="presentation"]:has(> .kumo-popover-popup) {
+   use for their backdrop and viewport — raising those would bury a dialog under its own backdrop.
+
+   A Select's listbox gets the same raise rather than a portal host of its own above the dialog
+   layers. Opened from a dialog, Base UI portals it inside the dialog's portal, which is the only
+   place a modal dialog leaves visible to assistive tech: anything else beside it in `<body>` is
+   marked `aria-hidden` and inert while the dialog is open. */
+[data-base-ui-portal] > [role="presentation"]:has(> .kumo-popover-popup),
+[data-base-ui-portal] > [role="presentation"]:has(> [role="presentation"] > [role="listbox"]) {
   z-index: 1100;
 }
 

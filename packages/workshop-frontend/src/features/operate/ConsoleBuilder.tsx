@@ -8,7 +8,6 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import { invalidateWorkspaceScreens, type WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { ConsoleScreenEditor } from './ConsoleScreenEditor'
 import { ConsoleViewEditor } from './ConsoleViewEditor'
@@ -38,7 +37,6 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmCancel, setConfirmCancel] = useState(false)
-  const container = useDialogSelectPortalContainer()
   const entry = workspaces.find(item => item.workspace.id === workspaceId)
   const { overseer, metadata, error: openError, observerConfig } = useWorkspaceOpen({
     id: workspaceId || undefined, authenticatedApi, onMetadata: ignore, onShareKeyConsumed: ignore, onInvalidShareKey: ignore,
@@ -91,7 +89,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
     </ol>
     {step === 0 && <div className="space-y-5">
       <Input label="Console name" placeholder="e.g. Operations" value={title} required maxLength={120} onChange={event => setTitle(event.target.value)} />
-      <Select label="Workspace" container={container} value={workspaceId} disabled={!!initial} placeholder="Choose a workspace"
+      <Select label="Workspace" value={workspaceId} disabled={!!initial} placeholder="Choose a workspace"
         renderValue={value => workspaces.find(item => item.workspace.id === value)?.workspace.title ?? 'Choose a workspace'}
         onValueChange={value => { setWorkspaceId(String(value)); setViews([]); setAddedScreens([]); setError(null) }}>
         {workspaces.map(item => <Select.Option key={item.workspace.id} value={item.workspace.id}>{item.workspace.title || 'Untitled workspace'}</Select.Option>)}
@@ -116,14 +114,14 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
     </div>}
     {step === 2 && <div className="space-y-5">
       <h2 className="font-medium text-kumo-default">What opens first?</h2>
-      <Select label="Starting experience" container={container} value={fullChat} renderValue={value => START_LABELS[value as ConsoleFullChat]} onValueChange={value => setFullChat(value as ConsoleFullChat)}>
+      <Select label="Starting experience" value={fullChat} renderValue={value => START_LABELS[value as ConsoleFullChat]} onValueChange={value => setFullChat(value as ConsoleFullChat)}>
         <Select.Option value="default">Assistant first</Select.Option>
         <Select.Option value="available">A view first, with Assistant</Select.Option>
         <Select.Option value="off">A view first, with side chat only</Select.Option>
         {initial?.console.fullChat === 'only' && <Select.Option value="only">Assistant only</Select.Option>}
       </Select>
       <p className="text-sm text-kumo-subtle">Assistant opens a centered conversation. Choosing a screen docks the same conversation beside your work.</p>
-      {fullChat !== 'only' && <Select label="Default view" container={container} value={views[0]?.id ?? ''} renderValue={value => views.find(view => view.id === value)?.title ?? 'Choose a view'}
+      {fullChat !== 'only' && <Select label="Default view" value={views[0]?.id ?? ''} renderValue={value => views.find(view => view.id === value)?.title ?? 'Choose a view'}
         onValueChange={value => { const selected = views.find(view => view.id === value); if (selected) setViews([selected, ...views.filter(view => view.id !== value)]) }}>
         {views.map(view => <Select.Option key={view.id} value={view.id}>{view.title}</Select.Option>)}
       </Select>}
