@@ -44,5 +44,10 @@ declare namespace Cloudflare {
      * Ids only, never local paths. Unset allows no repository.
      */
     CODING_WORKBENCH_REPOS?: string;
+    /**
+     * Development only (#28): a whole number from 1 to 2000 adds a synthetic `PERF` project of that
+     * many issues to each mock account's data when it is first seeded (see mock-inferops.ts).
+     */
+    MOCK_INFEROPS_SYNTHETIC_ISSUES?: string;
   }
 }

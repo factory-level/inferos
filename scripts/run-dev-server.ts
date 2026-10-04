@@ -579,8 +579,10 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
   // The InferOps API. The base URL is what connected people call with their own InferLab session;
   // the token, workspace id and workspace slug are a local-development stopgap for accounts with no
   // identity (the slug is the `<workspace>` a board URL names to use it).
+  // MOCK_INFEROPS_SYNTHETIC_ISSUES adds a large synthetic board to the mock's seed (#28).
   "gatekeeper-inferops": [
     "INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG",
+    "MOCK_INFEROPS_SYNTHETIC_ISSUES",
   ],
 };
 // Vars resolved here rather than read raw from the shell.
