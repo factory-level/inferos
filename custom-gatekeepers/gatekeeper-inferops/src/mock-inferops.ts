@@ -7,6 +7,9 @@
 //
 // One `MockInferOps` Durable Object per (host, account) holds a private copy of the seed fixture,
 // so each auto-provisioned account starts from the same demo board and its moves stay its own.
+// Revoking the account (`forget`) deletes that copy and leaves a tombstone: every later call is
+// refused UNAUTHORIZED, as a real InferOps refuses a signed-out session, rather than re-seeding
+// fresh demo data under a binding the Workshop no longer honours.
 //
 // Coding dispatch: two seeded repositories (one enabled, one disabled) and a run ledger with
 // InferOps' dispatch guards (software workflow, an open state, no active run, an enabled repository,
@@ -41,6 +44,7 @@ const RUNS_KEY = "runs:v1";
 const IDEMPOTENCY_PREFIX = "idem:";
 const WIKI_KEY = "wiki:v1";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
+const REVOKED_KEY = "revoked";
 
 /** The demo Wiki: its pages and their sections. */
 type MockWiki = { documents: WikiDocumentRecord[]; sections: WikiSectionRecord[] };
@@ -77,7 +81,15 @@ function seedData(): MockData {
 /** Per-account mock InferOps store. Reached only through `openInferOpsClient`. */
 @validateRpc()
 export class MockInferOps extends DurableObject<Cloudflare.Env> {
+  /** Refuses every call once the account was revoked; its data is gone and must not re-seed. */
+  #assertLive(): void {
+    if (this.ctx.storage.kv.get<boolean>(REVOKED_KEY)) {
+      throw new InferOpsError("UNAUTHORIZED", "This InferOps account was disconnected.");
+    }
+  }
+
   #data(): MockData {
+    this.#assertLive();
     let data = this.ctx.storage.kv.get<MockData>(DATA_KEY);
     if (!data) {
       data = seedData();
@@ -214,6 +226,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
   }
 
   #runs(): RunRecord[] {
+    this.#assertLive();
     return this.ctx.storage.kv.get<RunRecord[]>(RUNS_KEY) ?? [];
   }
 
@@ -231,6 +244,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
   }
 
   async listRepos(): Promise<RepoRecord[]> {
+    this.#assertLive();
     return MOCK_REPOS.map(repo => ({ ...repo }));
   }
 
@@ -322,6 +336,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
   }
 
   #wiki(): MockWiki {
+    this.#assertLive();
     if (this.ctx.storage.kv.get<boolean>(NO_INFERMIND_KEY)) {
       throw new InferOpsError("FORBIDDEN",
         "This demo workspace has no InferMind Wiki (InferMind is turned off for it).");
@@ -377,6 +392,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
 
   /** The result a key already produced for this operation; throws if it produced another's. */
   #replayed<T>(idempotencyKey: string, operation: string): T | undefined {
+    this.#assertLive();
     const previous = this.ctx.storage.kv.get<IdempotencyRecord<T>>(IDEMPOTENCY_PREFIX + idempotencyKey);
     if (!previous) return undefined;
     if (previous.operation !== operation) {
@@ -401,8 +417,10 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return issue;
   }
 
+  /** Deletes the account's data and refuses every later call (see the header). */
   async forget(): Promise<void> {
-    this.ctx.storage.deleteAll();
+    await this.ctx.storage.deleteAll();
+    this.ctx.storage.kv.put(REVOKED_KEY, true);
   }
 }
 

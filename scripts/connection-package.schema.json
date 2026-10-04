@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/factory-level/inferos/scripts/connection-package.schema.json",
+  "title": "Connection package contract",
+  "description": "A connection package's reviewed contract (connection.json, schema version 1): what the gatekeeper exposes, which calls read and which write, how writes are approved, what provider errors mean, what simulation cannot show, the credential names it needs (never values), the provider contract it is compatible with, and which shared conformance cases it passes. Validated by scripts/connection-package.test.ts. See docs/architecture/connection-extensions.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "id", "package", "status", "summary", "entrypoints", "resources", "approval",
+    "providerErrors", "simulation", "credentials", "compatibility", "conformance"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": {
+      "description": "This file's format version. A breaking change to the format raises it; readers refuse a version they do not know.",
+      "const": 1
+    },
+    "id": {
+      "description": "The gatekeeper's vendor id, as its VendorDescription and /gatekeeper/<id> route name it.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "package": { "description": "The package.json name.", "type": "string", "minLength": 1 },
+    "status": {
+      "description": "scaffold: generated, not reviewed; reference: reviewed and passing the shared suite, the pattern others copy; production: additionally accepted live. Scaffolding never implies production.",
+      "enum": ["scaffold", "reference", "production"]
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "entrypoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["main", "vendor", "account", "durableObjects"],
+      "properties": {
+        "main": { "description": "The Worker's main module, relative to the package.", "type": "string" },
+        "vendor": { "description": "The GatekeeperVendor entrypoint class.", "type": "string" },
+        "account": { "description": "The GatekeeperUser (account) entrypoint class.", "type": "string" },
+        "verifier": { "description": "The GatekeeperUserVerifier entrypoint class, if any.", "type": "string" },
+        "durableObjects": {
+          "description": "Every Durable Object class the Worker declares, resource gatekeepers included.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "resources": {
+      "description": "One entry per resource kind the account offers. Each is a separate grant.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "urlPattern", "gatekeeper", "session", "scope", "observers", "reads", "writes"],
+        "properties": {
+          "kind": {
+            "description": "The resource kind, as the URL path names it (e.g. project/board).",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)*$"
+          },
+          "urlPattern": { "description": "The SupportedResource.urlPattern, exactly as the source declares it.", "type": "string" },
+          "gatekeeper": { "description": "The resource gatekeeper (Durable Object) class.", "type": "string" },
+          "session": { "description": "The agent-facing session type the gatekeeper hands out.", "type": "string" },
+          "scope": { "description": "What one binding of this kind can reach, and where that scope comes from.", "type": "string" },
+          "enabledBy": {
+            "description": "Deployment switches that must be on for this kind to be offered and served.",
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "observers": {
+            "description": "How a collaborator is withheld data: admission (refused at addObserver), exclusion (excluded per observation), or none.",
+            "enum": ["admission", "exclusion", "none"]
+          },
+          "reads": {
+            "description": "Session calls that only read. Each is authorized as an observation before it returns.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["method"],
+              "properties": {
+                "method": { "type": "string" },
+                "notes": { "type": "string" }
+              }
+            }
+          },
+          "writes": {
+            "description": "Session calls that propose a provider change. Each is submitted as an action.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["method", "concurrency", "idempotency", "revert"],
+              "properties": {
+                "method": { "type": "string" },
+                "concurrency": {
+                  "description": "How a change made behind the action is detected at apply.",
+                  "enum": ["expected-revision", "expected-version", "none"]
+                },
+                "idempotency": {
+                  "description": "What stops a repeated or retried apply writing twice: the provider replaying a key, a read before the write, or nothing.",
+                  "enum": ["provider-key", "read-before-write", "none"]
+                },
+                "revert": { "enum": ["always", "conditional", "never"] },
+                "notes": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["autoApprovable", "fingerprint", "rejection", "notes"],
+      "properties": {
+        "autoApprovable": {
+          "description": "Action kinds a user may auto-approve. Empty means every write waits for review.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "fingerprint": { "description": "Whether apply refuses a stored request that no longer matches the one approved.", "type": "boolean" },
+        "rejection": { "description": "What rejecting an action does.", "type": "string" },
+        "notes": { "type": "string" }
+      }
+    },
+    "providerErrors": {
+      "description": "Every error code the data source reports, with what it means and whether a retry can succeed.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "meaning", "retryable"],
+        "properties": {
+          "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "meaning": { "type": "string" },
+          "retryable": { "type": "boolean" }
+        }
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "limits"],
+      "properties": {
+        "summary": { "type": "string" },
+        "limits": {
+          "description": "What a read overlaid with pending actions cannot show truthfully.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "credentials": {
+      "description": "Configuration names the package reads. Names and purposes only: a value never belongs here.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "purpose"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "kind": { "enum": ["secret", "var"] },
+          "purpose": { "type": "string" },
+          "default": { "description": "What unset means.", "type": "string" }
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "contracts"],
+      "properties": {
+        "provider": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "repository", "revision", "apiVersion"],
+          "properties": {
+            "name": { "type": "string" },
+            "repository": { "type": "string" },
+            "revision": {
+              "description": "The provider commit its pinned contracts were generated from.",
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "apiVersion": {
+              "description": "The provider API version, or null when its API is unversioned.",
+              "type": ["string", "null"]
+            },
+            "notes": { "type": "string" }
+          }
+        },
+        "contracts": {
+          "description": "Generated contract files pinned to provider.revision, relative to the repository root.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "source"],
+            "properties": {
+              "path": { "type": "string" },
+              "source": { "description": "The provider file and export it was generated from.", "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "conformance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite", "tests", "covered", "perConnector"],
+      "properties": {
+        "suite": { "const": "@gadgets/gatekeeper-kit/conformance" },
+        "tests": {
+          "description": "Test files, relative to the package, that register the shared suite.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "covered": {
+          "description": "The shared cases the suite runs, by the resource kind its adapter binds.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/case" },
+            "uniqueItems": true
+          }
+        },
+        "perConnector": {
+          "description": "Cases a resource kind does not run through the shared suite, why, and what covers them instead.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "cases", "reason"],
+            "properties": {
+              "kind": { "type": "string" },
+              "cases": { "type": "array", "items": { "$ref": "#/$defs/case" }, "minItems": 1 },
+              "reason": { "type": "string" },
+              "coveredBy": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "case": {
+      "enum": [
+        "resource-scope", "observation", "sharing", "approval", "apply-once", "stale-revision",
+        "server-error-retry", "lost-response-retry", "revocation"
+      ]
+    }
+  }
+}

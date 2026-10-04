@@ -9,6 +9,9 @@ export class ProviderAuthError extends Error {}
 /** Thrown when the provider was reached but the outcome is unknowable -- a timeout. */
 export class ProviderTimeoutError extends Error {}
 
+/** Thrown for a server error the provider raised before committing anything -- a 503. */
+export class ProviderUnavailableError extends Error {}
+
 /** The stored grant. `refreshToken` rotates, so a lost merge breaks the *next* refresh. */
 export type Grant = {
   accessToken: string;
@@ -30,6 +33,8 @@ export type ProviderControls = {
   grantDead?: boolean;
   /** Creates the project, then times out before returning -- the ambiguous outcome. */
   timeoutAfterCreate?: boolean;
+  /** Refuses the next create with a server error, committing nothing; clears itself. */
+  unavailableOnce?: boolean;
 };
 
 /**
@@ -146,6 +151,10 @@ export class FakeProvider {
    */
   createProject(grant: PublicGrant, name: string, spaceId: string): string {
     this.#check(grant);
+    if (this.controls.unavailableOnce) {
+      this.controls.unavailableOnce = false;
+      throw new ProviderUnavailableError("503 service unavailable");
+    }
     this.#created += 1;
     const id = `project-${this.#created}`;
     this.projects.set(id, { id, name, spaceId });

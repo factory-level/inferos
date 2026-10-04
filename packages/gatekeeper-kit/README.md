@@ -89,6 +89,7 @@ import {
 | `./endpoint` | User-supplied provider endpoint normalization. | A user enters a self-hosted provider URL. |
 | `./http-errors` | HTTP access-error classification and ACL probes. | A verifier distinguishes no access from provider failure. |
 | `./response-body` | Strict byte-capped response decoding. | A gatekeeper reads any provider response body. |
+| `./conformance` | The shared connection conformance suite, registered through a small per-gatekeeper adapter (test-only). | A gatekeeper's tests prove scope, observation and sharing, approval, stale revision, retry and revocation. See [connection packages](../../docs/architecture/connection-extensions.md). |
 
 ## Internal modules
 

@@ -10,7 +10,10 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper, InferOpsWikiGatekeeper,
+  MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
+import { InferOpsError, type IssueChanges, type NewIssueRequest } from "../src/inferops-client.js";
+import type { Issue, Revision } from "../src/types.js";
 import type {
   InferOpsDispatchSession, InferOpsProjectSession, InferOpsWikiSession,
 } from "../src/types.js";
@@ -21,8 +24,50 @@ export * from "../src/inferops.js";
 // ctx.exports are named explicitly.
 export {
   GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsDispatchGatekeeper,
-  InferOpsProjectGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper, MockInferOps,
+  InferOpsProjectGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
 } from "../src/inferops.js";
+
+/** A fault the next issue write meets: refused before commit, or committed with its reply lost. */
+export type WriteFault = "unavailable" | "lost";
+
+const FAULT_KEY = "test:fault";
+
+/**
+ * The production mock plus one-shot provider faults on issue writes. Exported under the production
+ * name, so `ctx.exports.MockInferOps` -- what every binding's client opens -- is this class.
+ */
+export class MockInferOps extends BaseMockInferOps {
+  /** Arms `fault` for the next transition, create or update. */
+  async failNextWrite(fault: WriteFault): Promise<void> {
+    this.ctx.storage.kv.put(FAULT_KEY, fault);
+  }
+
+  async #faulted<T>(write: () => Promise<T>): Promise<T> {
+    const fault = this.ctx.storage.kv.get<WriteFault>(FAULT_KEY);
+    this.ctx.storage.kv.delete(FAULT_KEY);
+    if (fault === "unavailable") throw new InferOpsError("UNAVAILABLE", "InferOps answered 503.");
+    const result = await write();
+    if (fault === "lost") throw new InferOpsError("UNAVAILABLE", "The InferOps response was lost.");
+    return result;
+  }
+
+  override transition(projectKey: string, issueId: string, toStateId: string,
+                      expectedRevision: Revision, idempotencyKey: string): Promise<Issue> {
+    return this.#faulted(() =>
+      super.transition(projectKey, issueId, toStateId, expectedRevision, idempotencyKey));
+  }
+
+  override createIssue(projectKey: string, request: NewIssueRequest, idempotencyKey: string):
+      Promise<Issue> {
+    return this.#faulted(() => super.createIssue(projectKey, request, idempotencyKey));
+  }
+
+  override updateIssue(projectKey: string, issueId: string, changes: IssueChanges,
+                       expectedRevision: Revision, idempotencyKey: string): Promise<Issue> {
+    return this.#faulted(() =>
+      super.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey));
+  }
+}
 
 /**
  * The production gatekeeper plus one test-only method, so a test can write a stored action record
@@ -71,6 +116,8 @@ export type BindingProps = {
 /** What the recording approval queue was told, in order. */
 export type QueueLog = {
   observations: string[];
+  /** Each observation's collaborator exclusions, parallel to `observations`. */
+  excluded: string[][];
   actions: Array<{
     id: number; title: string; description: string; implementsRevert: boolean;
     /** Each field's label and shown value. */
@@ -87,6 +134,7 @@ class TestApprovalQueue extends RpcTarget {
 
   async authorizeObservation(description: ObservationDescription): Promise<void> {
     this.log.observations.push(description.title);
+    this.log.excluded.push([...(description.excludeObservers ?? [])]);
   }
 
   async submitAction(id: number, description: ActionDescription): Promise<void> {
@@ -198,7 +246,7 @@ function messageOf(error: unknown): string {
 }
 
 export class TestHooks extends DurableObject<Cloudflare.Env> {
-  #log: QueueLog = { observations: [], actions: [] };
+  #log: QueueLog = { observations: [], excluded: [], actions: [] };
   // Classes the accounts minted, by binding name: a facet is re-initialized from its class on
   // every `facets.get`.
   #minted = new Map<string, DurableObjectClass<InferOpsProjectGatekeeper>>();
