@@ -106,9 +106,12 @@ import {
   type SectionUpdateAction, type StagedAction, type UpdateAction,
 } from "./actions";
 import { documentText, embeddedReferences, wikilinksOf } from "./wiki";
+import {
+  MAX_DISCOVERY_QUERY_LENGTH, MAX_DISCOVERY_SCANNED_PROJECTS, rankBoards, type DiscoveryProject,
+} from "./board-discovery";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
-  Board, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession,
+  Board, BoardCandidate, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession,
   InferOpsWikiSession, Issue, IssueChanges, NewIssue, Repo, Revision, Run, WikiDocument,
   WikiDocumentNode, WikiSection,
 } from "./types";
@@ -670,6 +673,8 @@ class InferOpsProjectConfiguratorUI extends RpcTarget implements InferOpsProject
 // Project gatekeeper (a facet of the Overseer, one per binding)
 
 const ACTION_PREFIX = "action:";
+/** Observers admitted to a board binding, so its search results can be kept from them. */
+const OBSERVER_PREFIX = "observer:";
 const NEXT_ACTION_KEY = "nextActionId";
 const INSTANCE_KEY = "instanceId";
 
@@ -819,13 +824,19 @@ export class InferOpsProjectGatekeeper
     return new ProjectSessionImpl(this.#binding(), approvalQueue.dup());
   }
 
-  /** Strategy B: the binding is one project, so admit an observer who can open that project. */
-  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+  /**
+   * Strategy B: the binding is one project, so admit an observer who can open that project. The
+   * observer is remembered only so `findBoards` can exclude them: its results name other projects,
+   * which admitting them for this one does not cover.
+   */
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
     await admitProjectObserver(this.ctx.props, user);
+    this.ctx.storage.kv.put(OBSERVER_PREFIX + id, true);
   }
 
-  /** Nothing is tracked per observer under strategy B. */
-  async removeObserver(_id: string): Promise<void> {}
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(OBSERVER_PREFIX + id);
+  }
 
   /**
    * Send the recorded request under the action's idempotency key, so a repeated apply (or one
@@ -941,6 +952,21 @@ export class InferOpsProjectGatekeeper
         binding.projectKey, record.issueId, record.previous, current.revision, revertKey);
     }
     binding.putAction({ ...record, status: "reverted" });
+  }
+}
+
+/**
+ * The titles of a project's open issues, for matching only; null when the board cannot be read
+ * now, so the project is still matched on its key and name.
+ */
+async function openIssueTitles(client: InferOpsClient, projectKey: string): Promise<string[] | null> {
+  try {
+    const { states, issues } = await client.readProject(projectKey);
+    const closed = new Set(states.filter(s => s.group === "completed" || s.group === "cancelled").map(s => s.id));
+    return issues.filter(issue => !closed.has(issue.stateId)).map(issue => issue.title);
+  } catch (error) {
+    if (inferOpsErrorCode(error) === null) throw error;
+    return null;
   }
 }
 
@@ -1150,6 +1176,49 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
         `${board.columns.length} states.`,
     });
     return board;
+  }
+
+  /**
+   * Ranks the projects the person's own token lists in this binding's workspace (see
+   * `rankBoards`). Only bindable keys are candidates, and the issue titles read for matching never
+   * leave the gatekeeper. The observation excludes every observer of the binding, since they were
+   * admitted for its one project only, so a shared workspace refuses the search.
+   */
+  async findBoards(query: string): Promise<BoardCandidate[]> {
+    const text = query.trim();
+    if (text.length === 0 || text.length > MAX_DISCOVERY_QUERY_LENGTH) {
+      fail("INVALID_REQUEST", `A board search must be 1-${MAX_DISCOVERY_QUERY_LENGTH} characters.`);
+    }
+    const binding = this.#binding;
+    const { host } = binding.ctx.props;
+    const labels = host === DEMO_HOST ? { tenant: "demo", workspace: "local" } : parseHost(host);
+    if (!labels) fail("INVALID_REQUEST", "This connection's workspace cannot be searched.");
+    const boardRef = (projectKey: string) => projectBoardUrl({ host, projectKey });
+    const bindable = (await binding.client.listProjects()).filter(project => {
+      try {
+        parseProjectBoardUrl(boardRef(project.identifier));
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    const projects = await Promise.all(bindable.map(async (project, index): Promise<DiscoveryProject> => ({
+      identifier: project.identifier,
+      name: project.name,
+      openIssueTitles: index < MAX_DISCOVERY_SCANNED_PROJECTS
+        ? await openIssueTitles(binding.client, project.identifier) : null,
+    })));
+    const candidates = rankBoards(text, projects, { ...labels, boardRef });
+    const observers = Array.from(binding.kv.list({ prefix: OBSERVER_PREFIX }),
+      ([key]) => key.slice(OBSERVER_PREFIX.length));
+    await this.#queue.authorizeObservation({
+      title: `Searched InferOps boards on ${host}`,
+      description:
+        `Matched a search against the ${projects.length} projects listed on ${host}: ` +
+        `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}.`,
+      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
+    });
+    return candidates;
   }
 
   /**

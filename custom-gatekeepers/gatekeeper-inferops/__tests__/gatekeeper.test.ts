@@ -517,3 +517,57 @@ describe("observers", () => {
     expect(await hooks.addObserver(props, false)).toContain("cannot open InferOps project DEMO");
   });
 });
+
+describe("board discovery", () => {
+  it("finds a board by what its work is about, not only its title or key, and says why", async () => {
+    const { hooks, session } = setup();
+
+    // ENG's open work includes "Scope service tokens to one project"; its name is "Platform engineering".
+    const byWork = await session.findBoards("where are we tracking service tokens?");
+    expect(byWork.map(c => c.projectKey)).toContain("ENG");
+    const eng = byWork.find(c => c.projectKey === "ENG")!;
+    expect(eng).toMatchObject({
+      tenant: "demo", workspace: "local", boardRef: "inferops://demo.local/project/board/ENG",
+      title: "Platform engineering",
+    });
+    expect(eng.reasons.some(reason => /open issues? mentions?/.test(reason))).toBe(true);
+
+    const byName = await session.findBoards("the platform team's kanban");
+    expect(byName[0]).toMatchObject({ projectKey: "ENG" });
+    expect(byName[0]!.reasons).toContain('Name "Platform engineering" matches "platform"');
+    expect((await session.findBoards("eng"))[0]).toMatchObject({ projectKey: "ENG" });
+
+    expect((await hooks.log()).observations).toEqual([
+      "Searched InferOps boards on demo.local", "Searched InferOps boards on demo.local",
+      "Searched InferOps boards on demo.local",
+    ]);
+  });
+
+  it("returns every plausible board rather than picking one, and nothing for no match", async () => {
+    const { session } = setup();
+    // Both demo projects have open work about transitions.
+    const plausible = await session.findBoards("transitions");
+    expect(plausible.map(c => c.projectKey).toSorted()).toEqual(["DEMO", "ENG"]);
+    expect(await session.findBoards("quarterly marketing budget")).toEqual([]);
+    expect(await failure(session.findBoards("   "))).toMatch(/INVALID_REQUEST/);
+    expect(await failure(session.findBoards("x".repeat(201)))).toMatch(/INVALID_REQUEST/);
+  });
+
+  it("fails, naming nothing, once the person's access is revoked", async () => {
+    const { hooks, mock, session } = setup();
+    expect((await session.findBoards("platform")).map(c => c.projectKey)).toEqual(["ENG"]);
+    await mock.forget();
+    expect(await failure(session.findBoards("platform"))).toMatch(/UNAUTHORIZED/);
+    expect((await hooks.log()).observations).toHaveLength(1);
+  });
+
+  it("keeps results from the binding's observers, who were admitted for its project only", async () => {
+    const { props, hooks, session } = setup();
+    expect(await hooks.addObserver(props, true)).toBeNull();
+    await session.findBoards("platform");
+    await hooks.removeObserver(props);
+    await session.findBoards("platform");
+    const log = await hooks.log();
+    expect(log.excluded).toEqual([["observer-1"], []]);
+  });
+});

@@ -554,8 +554,10 @@ export interface AgentHooks {
   /**
    * The owner's operate page (see OperateSession), after first applying `event`, if given, as the
    * agent's: it goes through the same reducer as a person's and is logged with actor "agent".
-   * Throws an agent-readable error for an event that doesn't apply to the current page. Only
-   * called from operate chats.
+   * Throws an agent-readable error for an event that doesn't apply to the current page. An
+   * `openBoard` is read through this workspace's own connections: its `workspaceId` is replaced
+   * with this workspace's, and it is refused unless one of them is for exactly its `boardRef`.
+   * Only called from operate chats.
    */
   operatePage(event?: OperateEvent): Promise<OperateSessionSnapshot>;
 
@@ -1061,11 +1063,14 @@ let OPERATE_SESSION_PROMPT = `
 # Operate session
 
 This chat runs in the user's operate session: they are using finished applications, not building them. You cannot create or edit Gadgets, their code, their bindings, or saved canvases here, and the tools for that are not available; if the user asks for that, tell them to switch to Build. Work through connected resources with \`executeCode\` (changes they make wait for the user's approval) and answer in chat. Use \`operatePage\` to see what the user's page shows, or to open, focus, or close a screen or step through the running flow for them.
+
+To find a Kanban board the user describes, call \`findBoards(query)\` on a connected InferOps board session in \`executeCode\`, passing what they said. Show them the candidates' titles, workspaces and reasons. If more than one fits, ask which one they mean; never choose for them, and never open a board no candidate named. Open their choice with \`operatePage\` (\`openBoard\` with the candidate's exact \`boardRef\`). If that is refused because the board is not connected, ask them to connect it (\`requestConnection\`) rather than opening another one.
 `.trim();
 
 const OPERATE_PAGE_TOOL_DESCRIPTION =
     "Read or change the user's operate page: what it has open (its working set), what it shows " +
-    "(its focus), its subject, and any flow being run. Returns the page after the change, as " +
+    "(its focus), its subject, the board it shows, and any flow being run. Returns the page " +
+    "after the change, as " +
     "JSON. Changes are presentation only and grant no access: a reference the user cannot open " +
     "shows as unavailable. The change is recorded as yours in the session's history.";
 
@@ -1074,6 +1079,7 @@ const OPERATE_PAGE_TOOL_DESCRIPTION =
 // then validates the event against the page like any other.
 function operateEventFromToolInput(input: {
   action?: string, workspaceId?: string, screenId?: string, step?: number, subject?: string,
+  boardRef?: string,
 }): OperateEvent | undefined {
   let ref = (): OperateRef => {
     if (input.workspaceId === undefined) {
@@ -1094,6 +1100,11 @@ function operateEventFromToolInput(input: {
     case "exitFlow": return {type: "exitFlow"};
     case "showHome": return {type: "showHome"};
     case "setSubject": return {type: "setSubject", subject: input.subject ?? null};
+    case "openBoard":
+      if (input.boardRef === undefined) throw new Error("The openBoard action needs a boardRef.");
+      // The workspace is the session's own, filled in by AgentHooks.operatePage.
+      return {type: "openBoard", board: {workspaceId: "", boardRef: input.boardRef}};
+    case "closeBoard": return {type: "closeBoard"};
     default: throw new Error(`Unknown action: ${input.action}`);
   }
 }
@@ -3890,7 +3901,8 @@ async function runAgentPass(
       description: OPERATE_PAGE_TOOL_DESCRIPTION,
       parameters: Type.Object({
         action: Type.Optional(Type.String({
-          enum: ["open", "focus", "close", "goToStep", "exitFlow", "setSubject", "showHome"],
+          enum: ["open", "focus", "close", "goToStep", "exitFlow", "setSubject", "showHome",
+            "openBoard", "closeBoard"],
           description: "The change to make. Omit to only read the page.",
         })),
         workspaceId: Type.Optional(Type.String({
@@ -3907,6 +3919,10 @@ async function runAgentPass(
         subject: Type.Optional(Type.String({
           description: "For setSubject: what the page works on, such as an inferops:// board " +
               "reference. Omit to clear it.",
+        })),
+        boardRef: Type.Optional(Type.String({
+          description: "For openBoard: the exact boardRef of the findBoards candidate the user " +
+              "chose. It must be connected in this session.",
         })),
       }),
       execute: async (toolCallId, input) => {

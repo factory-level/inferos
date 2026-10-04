@@ -542,6 +542,11 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return result?.message ?? null;
   }
 
+  /** Forget the observer `addObserver` admitted. */
+  async removeObserver(props: BindingProps): Promise<void> {
+    await this.#gatekeeper(props).removeObserver("observer-1");
+  }
+
   /** Admission of a collaborator whose own account does or does not reach the project. */
   async addObserver(props: BindingProps, hasAccess: boolean): Promise<string | null> {
     const verifier = new RpcStub(new TestVerifier(hasAccess)) as unknown as

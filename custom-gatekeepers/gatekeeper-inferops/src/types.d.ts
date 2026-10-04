@@ -137,6 +137,32 @@ export interface InferOpsProjectSession {
    * fails with INVALID_STATE.
    */
   createIssue(issue: NewIssue): Promise<void>;
+  /**
+   * Find boards in this connection's InferOps workspace that match what the person described: its
+   * work or purpose, not necessarily its title or key (1-200 characters). Only projects the
+   * person's own account lists right now are considered, so a project they cannot read is never
+   * named or counted. Returns at most 8 candidates, best first, each with why it matched; an empty
+   * list means nothing matched. Several candidates mean the person must choose: never pick one for
+   * them. A candidate names a board but grants nothing; open it only through a connection made for
+   * its boardRef. Recorded as an observation, and refused in a workspace shared with others.
+   */
+  findBoards(query: string): Promise<BoardCandidate[]>;
+}
+
+/** A board findBoards() matched, identified by validated ids rather than its display name. */
+export interface BoardCandidate {
+  /** The tenant label of the connection's workspace. */
+  tenant: string;
+  /** The InferOps workspace slug. */
+  workspace: string;
+  /** The project key, such as ENG. */
+  projectKey: string;
+  /** The board's canonical reference: inferops://<tenant>.<workspace>/project/board/<KEY>. */
+  boardRef: string;
+  /** The project's display name. */
+  title: string;
+  /** Why it matched, for the person choosing between candidates. */
+  reasons: string[];
 }
 
 /** Where a coding run stands. queued and running are active; the rest are final. */

@@ -426,7 +426,9 @@ export interface OperateSession extends RpcTarget {
    * with `invalidEvent` when the event doesn't apply to the current page, and with
    * `consoleChanged` when a console event (`openConsole`, `openView`, `showScreen`) names a view or
    * screen outside the console's current definition, read through the caller's own access to the
-   * console's workspace. Either way nothing changes.
+   * console's workspace, and with `boardUnavailable` when an `openBoard` names a board the named
+   * workspace, opened with the caller's own access, holds no connection to. Either way nothing
+   * changes.
    */
   dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot>;
 
@@ -464,6 +466,11 @@ export const OPERATE_SESSION_ERROR_CODES = {
    * `consoleEventMismatch`), or the console can no longer be read; reload the console.
    */
   consoleChanged: "OPERATE_SESSION_CONSOLE_CHANGED",
+  /**
+   * An `openBoard` names a board the caller cannot reach through that workspace's connections
+   * (never connected, removed, or the workspace is out of reach); connect it or choose again.
+   */
+  boardUnavailable: "OPERATE_SESSION_BOARD_UNAVAILABLE",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -478,6 +485,9 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
   [OPERATE_SESSION_ERROR_CODES.consoleChanged]:
       "That view or screen is not part of the console as it is now saved, or the console is no " +
       "longer available to you. Reload the console.",
+  [OPERATE_SESSION_ERROR_CODES.boardUnavailable]:
+      "That board is not connected for you here, or is no longer available to you. Connect it or " +
+      "choose another board.",
 });
 
 /** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */
