@@ -108,6 +108,7 @@ import {
 import { documentText, embeddedReferences, wikilinksOf } from "./wiki";
 import {
   MAX_DISCOVERY_QUERY_LENGTH, MAX_DISCOVERY_SCANNED_PROJECTS, rankBoards, type DiscoveryProject,
+  type DiscoveryWorkspace,
 } from "./board-discovery";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
@@ -725,11 +726,29 @@ class ActionBinding<P> {
    * submitted, so an immediate apply can find it.
    */
   async stage(staged: StagedAction): Promise<number> {
+    return (await this.stageOnce(staged, false)).actionId;
+  }
+
+  /**
+   * Like `stage`, but when `join` is set, a pending action whose request has the same fingerprint
+   * is returned instead (`joined`), and nothing new is staged. The lookup and the write happen in
+   * one synchronous step after the fingerprint is computed, so two concurrent proposals of one
+   * request (two tabs) cannot both stage it.
+   */
+  async stageOnce(staged: StagedAction, join = true): Promise<{ actionId: number; joined: boolean }> {
     const fingerprint = await fingerprintOf(this.scope, staged);
+    if (join) {
+      for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
+        const record = readAction(raw);
+        if (record?.status === "pending" && record.fingerprint === fingerprint) {
+          return { actionId: record.actionId, joined: true };
+        }
+      }
+    }
     const actionId = this.kv.get<number>(NEXT_ACTION_KEY) ?? 1;
     this.kv.put(NEXT_ACTION_KEY, actionId + 1);
     this.putAction({ ...staged, actionId, status: "pending", fingerprint } as ActionRecord);
-    return actionId;
+    return { actionId, joined: false };
   }
 
   /** Submit a staged action; if it was not submitted, forget it so it is no longer simulated. */
@@ -746,8 +765,16 @@ class ActionBinding<P> {
 }
 
 /** A project binding (board or coding dispatch): the bound project and its simulated board. */
+/** One InferOps workspace `findBoards` searches: its host and a data source in it. */
+type DiscoverySource = { host: string; client: InferOpsClient };
+
 class ProjectBinding extends ActionBinding<ProjectGatekeeperProps> {
-  constructor(ctx: DurableObjectState<ProjectGatekeeperProps>, client: InferOpsClient) {
+  /**
+   * `otherWorkspaces` lists the person's other InferOps workspaces for `findBoards`, each with a
+   * data source as the same person; omitted where there is no person to list them for.
+   */
+  constructor(ctx: DurableObjectState<ProjectGatekeeperProps>, client: InferOpsClient,
+              readonly otherWorkspaces: () => Promise<DiscoverySource[]> = async () => []) {
     super(ctx, client, ctx.props.projectKey);
   }
 
@@ -795,8 +822,36 @@ export class InferOpsProjectGatekeeper
     implements Gatekeeper<InferOpsProjectSession> {
   #binding(): ProjectBinding {
     const { accountId, connected, host, workspaceId } = this.ctx.props;
+    const account = { accountId, connected };
     return new ProjectBinding(
-      this.ctx, clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId));
+      this.ctx, clientFor(this.env, this.ctx.exports, account, host, workspaceId),
+      () => this.#otherWorkspaces());
+  }
+
+  /**
+   * A connected person's other InferOps workspaces, for `findBoards`: those InferLab reported at
+   * connect time with a slug, each read with the person's own token in that workspace (the
+   * credentials object refuses any workspace that is not theirs). The tenant label is the binding's,
+   * since a person's workspaces share one tenant. The stopgap connection and the demo serve one
+   * workspace, so they search only the binding's.
+   */
+  async #otherWorkspaces(): Promise<DiscoverySource[]> {
+    const { accountId, connected, host, workspaceId } = this.ctx.props;
+    const tenant = parseHost(host)?.tenant;
+    if (!connected || host === DEMO_HOST || !tenant) return [];
+    const identity = await credentialsOf(this.ctx.exports, accountId).identity();
+    return (identity?.workspaces ?? []).flatMap(workspace => {
+      if (workspace.product === "infermind" || !workspace.workspaceSlug ||
+          workspace.workspaceId === workspaceId) {
+        return [];
+      }
+      const other = `${tenant}.${workspace.workspaceSlug}`;
+      if (!parseHost(other)) return [];
+      return [{
+        host: other,
+        client: clientFor(this.env, this.ctx.exports, { accountId, connected }, other, workspace.workspaceId),
+      }];
+    });
   }
 
   async describe(): Promise<ResourceDescription> {
@@ -1179,10 +1234,13 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   }
 
   /**
-   * Ranks the projects the person's own token lists in this binding's workspace (see
-   * `rankBoards`). Only bindable keys are candidates, and the issue titles read for matching never
-   * leave the gatekeeper. The observation excludes every observer of the binding, since they were
-   * admitted for its one project only, so a shared workspace refuses the search.
+   * Ranks the projects the person's own token lists in this binding's workspace and, for a
+   * connected person, in each of their other InferOps workspaces (see `rankBoards`). Only bindable
+   * keys are candidates, and the issue titles read for matching never leave the gatekeeper. The
+   * binding's own workspace must be readable; another one InferOps now refuses (membership removed
+   * since connect) is left out rather than failing the search. The observation excludes every
+   * observer of the binding, since they were admitted for its one project only, so a shared
+   * workspace refuses the search.
    */
   async findBoards(query: string): Promise<BoardCandidate[]> {
     const text = query.trim();
@@ -1191,30 +1249,55 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     }
     const binding = this.#binding;
     const { host } = binding.ctx.props;
-    const labels = host === DEMO_HOST ? { tenant: "demo", workspace: "local" } : parseHost(host);
-    if (!labels) fail("INVALID_REQUEST", "This connection's workspace cannot be searched.");
-    const boardRef = (projectKey: string) => projectBoardUrl({ host, projectKey });
-    const bindable = (await binding.client.listProjects()).filter(project => {
+    if (host !== DEMO_HOST && !parseHost(host)) {
+      fail("INVALID_REQUEST", "This connection's workspace cannot be searched.");
+    }
+    const sources = [{ host, client: binding.client }, ...await binding.otherWorkspaces()];
+    const listed = await Promise.all(sources.map(async (source, index) => {
       try {
-        parseProjectBoardUrl(boardRef(project.identifier));
-        return true;
-      } catch {
-        return false;
+        return { source, projects: await source.client.listProjects() };
+      } catch (error) {
+        const code = inferOpsErrorCode(error);
+        if (index > 0 && (code === "FORBIDDEN" || code === "NOT_FOUND")) return null;
+        throw error;
       }
-    });
-    const projects = await Promise.all(bindable.map(async (project, index): Promise<DiscoveryProject> => ({
-      identifier: project.identifier,
-      name: project.name,
-      openIssueTitles: index < MAX_DISCOVERY_SCANNED_PROJECTS
-        ? await openIssueTitles(binding.client, project.identifier) : null,
-    })));
-    const candidates = rankBoards(text, projects, { ...labels, boardRef });
+    }));
+    let scanned = 0;
+    const workspaces = await Promise.all(listed.flatMap(entry => entry ? [entry] : [])
+      .map(async ({ source, projects }): Promise<DiscoveryWorkspace> => {
+        const labels = source.host === DEMO_HOST
+          ? { tenant: "demo", workspace: "local" } : parseHost(source.host)!;
+        const boardRef = (projectKey: string) => projectBoardUrl({ host: source.host, projectKey });
+        const bindable = projects.filter(project => {
+          try {
+            parseProjectBoardUrl(boardRef(project.identifier));
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        const read = bindable.map(() => scanned++ < MAX_DISCOVERY_SCANNED_PROJECTS);
+        return {
+          scope: { ...labels, boardRef },
+          projects: await Promise.all(bindable.map(async (project, index): Promise<DiscoveryProject> => ({
+            identifier: project.identifier,
+            name: project.name,
+            openIssueTitles: read[index] ? await openIssueTitles(source.client, project.identifier) : null,
+          }))),
+        };
+      }));
+    const candidates = rankBoards(text, workspaces);
+    const count = workspaces.reduce((sum, workspace) => sum + workspace.projects.length, 0);
+    const others = workspaces.length - 1;
+    const where = others > 0
+      ? `${host} and ${others} other workspace${others === 1 ? "" : "s"}` : host;
     const observers = Array.from(binding.kv.list({ prefix: OBSERVER_PREFIX }),
       ([key]) => key.slice(OBSERVER_PREFIX.length));
     await this.#queue.authorizeObservation({
-      title: `Searched InferOps boards on ${host}`,
+      title: `Searched InferOps boards on ${where}`,
       description:
-        `Matched a search against the ${projects.length} projects listed on ${host}: ` +
+        `Matched a search against the ${count} projects listed on ` +
+        `${workspaces.map(workspace => `${workspace.scope.tenant}.${workspace.scope.workspace}`).join(", ")}: ` +
         `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}.`,
       ...(observers.length > 0 ? { excludeObservers: observers } : {}),
     });
@@ -1257,7 +1340,11 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
       stateId: state.id,
       ...(state.workflow === "content" ? { workflow: "content" as const } : {}),
     };
-    const actionId = await binding.stage({ kind: "create", issue: request, stateName: state.name });
+    // One intent, one create: the same proposal again (another tab, a retried submit) while the
+    // first is pending joins it rather than queueing a second issue. Edits and moves need no
+    // such step, since a pending change to an issue already refuses another (`refuseIfPending`).
+    const { actionId, joined } = await binding.stageOnce({ kind: "create", issue: request, stateName: state.name });
+    if (joined) return;
     const description = buildDescription(
       `Create an issue in InferOps project ${binding.projectKey}.`)
       .inline("Project", binding.projectKey)

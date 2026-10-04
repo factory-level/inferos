@@ -310,6 +310,29 @@ describe("creating issues", () => {
     expect((await mock.readProject("DEMO")).issues.filter(i => i.title === "Once")).toHaveLength(1);
   });
 
+  it("queues one create for one intent: an identical proposal from another tab joins the pending one", async () => {
+    const { props, hooks, mock, session } = setup();
+    // Two tabs, two sessions on the one binding, both proposing the same new issue at once.
+    const other = hooks.startSession(props);
+    await Promise.all([
+      session.createIssue({ title: "Same issue", priority: "high" }),
+      other.createIssue({ title: " Same issue ", priority: "high" }),
+    ]);
+    // A different issue is its own proposal.
+    await other.createIssue({ title: "Same issue", priority: "low" });
+
+    const { actions } = await hooks.log();
+    expect(actions.map(a => a.title)).toEqual(["Create issue: Same issue", "Create issue: Same issue"]);
+    expect(cards(await session.readBoard()).filter(c => c.pending === "create").map(c => c.priority))
+      .toEqual(["high", "low"]);
+
+    expect(await hooks.apply(props, actions[0]!.id)).toBeNull();
+    // Once applied, the same proposal is a new intent again.
+    await session.createIssue({ title: "Same issue", priority: "high" });
+    expect((await hooks.log()).actions).toHaveLength(3);
+    expect((await mock.readProject("DEMO")).issues.filter(i => i.title === "Same issue")).toHaveLength(1);
+  });
+
   it("is not revertible", async () => {
     const { props, hooks, session } = setup();
     await session.createIssue({ title: "Permanent" });
