@@ -34,8 +34,8 @@ const onCreate = vi.fn<(issue: NewIssue) => Promise<ProposalResult>>(async () =>
 const onUpdate = vi.fn<(issue: Issue, changes: IssueChanges) => Promise<ProposalResult>>(async () => ({ ok: true }))
 
 const render = async (b: Board, pending: PendingMove[] = [], layout: KanbanLayout = 'embedded', columns = b.columns,
-  awaiting: ReadonlyMap<string, BoardActivityItem> = new Map(), changes: PendingChange[] = []) => {
-  await act(async () => root.render(<KanbanBoard board={b} columns={columns} pending={pending} changes={changes} awaiting={awaiting} layout={layout}
+  awaiting: ReadonlyMap<string, BoardActivityItem> = new Map(), changes: PendingChange[] = [], decided: BoardActivityItem[] = []) => {
+  await act(async () => root.render(<KanbanBoard board={b} columns={columns} pending={pending} changes={changes} awaiting={awaiting} decided={decided} layout={layout}
     onMove={onMove} onCreate={onCreate} onUpdate={onUpdate} />))
 }
 const card = (id: string) => [...container.querySelectorAll<HTMLElement>('[data-issue-id]')].find(item => item.dataset.issueId === id)!
@@ -48,6 +48,11 @@ const dialog = () => container.querySelector<HTMLElement>('[role="dialog"]')
 const field = <T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(label: string) => dialogField<T>(container, label)
 const enter = (element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string) => act(async () => setFieldValue(element, value))
 const submit = () => act(async () => { dialog()!.querySelector<HTMLButtonElement>('button[type="submit"]')!.click() })
+/** A decided action in the board's log, as `BoardActivity.decided` lists it. */
+const logged = (id: number, kind: 'applied' | 'rejected', target: { issue: string } | { creates: string }): BoardActivityItem =>
+  ({ id, kind, actor: 'Person', title: `Action ${id}`, at: new Date(), ...target })
+/** Re-render with the board as it is and the given decided actions, as when the log's entries arrive. */
+const withLog = (b: Board, decided: BoardActivityItem[], pending: PendingMove[] = []) => render(b, pending, 'embedded', b.columns, new Map(), [], decided)
 const dragEvent = (type: string, dataTransfer: object) => Object.assign(new Event(type, { bubbles: true, cancelable: true }), { dataTransfer })
 
 beforeEach(() => {
@@ -123,17 +128,24 @@ it('shows a pending move on its card with the target state and withholds move co
   expect(card('1').textContent).toContain('Awaiting approval: Doing')
 })
 
-it('reverts a rejected move visibly and announces it; an applied move is marked and announced', async () => {
+it('reverts a rejected move visibly and announces it; an applied move is marked and announced, as the action log decides', async () => {
   const awaiting: PendingMove = { issueId: '1', fromStateId: 'todo', toStateId: 'doing', expectedRevision: '1', phase: 'awaiting' }
   await render(board([TODO, []], [DOING, [issue('1', 'doing')]], [DONE, []]), [awaiting])
-  await render(board([TODO, [issue('1', 'todo')]], [DOING, []], [DONE, []]), [])
+  const back = board([TODO, [issue('1', 'todo')]], [DOING, []], [DONE, []])
+  await render(back, [])
+  // The board alone says nothing about how it ended.
+  expect(status()).toBe('')
+  await withLog(back, [logged(4, 'rejected', { issue: 'DEMO-1' })])
   expect(column('todo').contains(card('1'))).toBe(true)
   expect(card('1').textContent).toContain('Move to Doing rejected')
   expect(status()).toBe('Move of DEMO-1 to Doing was rejected; it stays where it was.')
   expect(menuItems('1')).toEqual(['Move to Doing', 'Move to Done'])
 
-  await render(board([TODO, []], [DOING, [issue('2', 'doing')]], [DONE, []]), [{ ...awaiting, issueId: '2' }])
-  await render(board([TODO, []], [DOING, [issue('2', 'doing', { revision: '2' })]], [DONE, []]), [])
+  const decided = [logged(4, 'rejected', { issue: 'DEMO-1' })]
+  await withLog(board([TODO, []], [DOING, [issue('2', 'doing')]], [DONE, []]), decided, [{ ...awaiting, issueId: '2' }])
+  // The log may decide first; the board's drop then announces it.
+  await withLog(board([TODO, []], [DOING, [issue('2', 'doing')]], [DONE, []]), [...decided, logged(5, 'applied', { issue: 'DEMO-2' })], [{ ...awaiting, issueId: '2' }])
+  await withLog(board([TODO, []], [DOING, [issue('2', 'doing', { revision: '2' })]], [DONE, []]), [...decided, logged(5, 'applied', { issue: 'DEMO-2' })])
   expect(card('2').textContent).toContain('Move to Doing applied')
   expect(status()).toBe('DEMO-2 moved to Doing.')
 })
@@ -279,17 +291,32 @@ it('marks a pending edit, proposing or waiting for approval, and withholds edits
   expect(menuItems('1')).toEqual([])
 })
 
-it('announces creates and edits once the board stops marking them pending: a new revision or issue is applied, else rejected', async () => {
+it('announces creates and edits once the board stops marking them pending, with the outcome the action log records', async () => {
   const provisional = issue('pending-9', 'todo', { identifier: 'DEMO-new', title: 'Write docs', revision: '0', pending: 'create' })
   await render(board([TODO, [issue('1', 'todo', { title: 'New title', pending: 'update' }), provisional]], [DOING, []]))
-  await render(board([TODO, [issue('1', 'todo', { title: 'New title', revision: '2' }), issue('4', 'todo', { title: 'Write docs', revision: '3' })]], [DOING, []]))
-  expect(status()).toBe('Edit of DEMO-1 applied. New issue DEMO-4 created: Write docs.')
+  const applied = board([TODO, [issue('1', 'todo', { title: 'New title', revision: '2' }), issue('4', 'todo', { title: 'Write docs', revision: '3' })]], [DOING, []])
+  const decided = [logged(1, 'applied', { issue: 'DEMO-1' }), logged(2, 'applied', { creates: 'Write docs' })]
+  await withLog(applied, decided)
+  expect(status()).toBe('Edit of DEMO-1 applied. New issue "Write docs" created.')
   expect(card('1').textContent).toContain('Edit applied')
   expect(button('Edit DEMO-1')).not.toBeNull()
 
   const another = issue('pending-10', 'todo', { identifier: 'DEMO-new', title: 'Nope', revision: '0', pending: 'create' })
-  await render(board([TODO, [issue('5', 'todo', { title: 'Overlaid', pending: 'update' }), another]], [DOING, []]))
-  await render(board([TODO, [issue('5', 'todo', { title: 'Old title' })]], [DOING, []]))
+  await withLog(board([TODO, [issue('5', 'todo', { title: 'Overlaid', pending: 'update' }), another]], [DOING, []]), decided)
+  await withLog(board([TODO, [issue('5', 'todo', { title: 'Old title' })]], [DOING, []]),
+    [...decided, logged(3, 'rejected', { issue: 'DEMO-5' }), logged(4, 'rejected', { creates: 'Nope' })])
   expect(status()).toBe('Edit of DEMO-5 was rejected; it keeps its previous values. New issue "Nope" was rejected.')
   expect(card('5').textContent).toContain('Edit rejected')
+})
+
+it('announces a denied edit as rejected though an outside edit moved the issue\'s revision', async () => {
+  await render(board([TODO, [issue('13', 'todo', { title: 'Proposed', priority: 'low', pending: 'update', revision: '530' })]], [DOING, []]))
+  // A concurrent edit in InferOps: the gatekeeper stops overlaying the stale edit, still pending.
+  const outside = board([TODO, [issue('13', 'todo', { title: 'Changed elsewhere', revision: '531' })]], [DOING, []])
+  await withLog(outside, [])
+  expect(status()).not.toContain('applied')
+  // Denied: the log records it rejected, and so is it announced.
+  await withLog(outside, [logged(16, 'rejected', { issue: 'DEMO-13' })])
+  expect(status()).toBe('Edit of DEMO-13 was rejected; it keeps its previous values.')
+  expect(card('13').textContent).toContain('Edit rejected')
 })

@@ -11,6 +11,7 @@ import { useServerConfig } from '../../ServerConfigContext'
 import { findConsole } from './consoles'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 import { useOperateSession } from './OperateSessionContext'
+import { refusalMessage } from './sessionRefusal'
 
 /** A console's own page hierarchy, independent of the configuration application's sidebar. */
 export const OperateSidebar = ({ collapsed, onToggleCollapsed, onOpenWidget, onNavigate }: {
@@ -36,7 +37,7 @@ export const OperateSidebar = ({ collapsed, onToggleCollapsed, onOpenWidget, onN
     void navigate({ to: '/inferops-canvas', search: {} })
     events.reduce((previous, event) => previous.then(() => operate.dispatch(event)), Promise.resolve()).catch(caught => {
       console.error('Operate session change failed:', caught)
-      toasts.add({ title: 'That change could not be applied to your session.', variant: 'error' })
+      toasts.add({ title: refusalMessage(caught), variant: 'error' })
     })
   }
   const fullChat = run?.fullChat ?? 'off'

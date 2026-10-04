@@ -4,7 +4,7 @@
 import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import type { OperateEvent, OperatePageState } from '@gadgets/workshop-shared/operate-session'
 
 const auth = vi.hoisted(() => {
@@ -14,6 +14,11 @@ const auth = vi.hoisted(() => {
   return holder
 })
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => auth.context }))
+const boards = vi.hoisted(() => ({ invalidated: [] as string[] }))
+vi.mock('../canvas/useBoardData', () => ({
+  useDecidedActionInvalidationInEveryScope: () => {},
+  invalidateBoardInEveryScope: (targetRef: string) => { boards.invalidated.push(targetRef) },
+}))
 
 import { entry, flushFrames, makeOverseer, makeTestRoot } from '../../action-test-harness'
 import { SessionApprovals } from './SessionApprovals'
@@ -23,10 +28,12 @@ const view = makeTestRoot()
 afterEach(() => {
   view.cleanup()
   vi.restoreAllMocks()
+  boards.invalidated = []
 })
 
 const MOVE = entry(4, {
   resourceTitle: 'DEMO board',
+  resourceUrl: 'inferops://demo.local/project/board/DEMO',
   requestedBy: 'agent',
   description: { title: 'Move DEMO-1 to Done', description: 'Moves DEMO-1 from Doing to Done.', implementsRevert: false },
 })
@@ -40,14 +47,15 @@ async function renderPending(page: Partial<Pick<OperatePageState, 'reviewing' | 
   const rejectAction = vi.fn<(id: number) => Promise<void>>(async () => {})
   Object.assign(server.overseer as object, { approveAction, rejectAction })
   const onEvent = vi.fn<(event: OperateEvent) => Promise<void>>(async () => {})
-  await view.render(
+  const show = (next: Partial<Pick<OperatePageState, 'reviewing' | 'lastApprovalOutcome'>>) => view.render(
     <SessionApprovals session={{ stub: server.overseer, id: 'ops', restricted: false }} screenWorkspaceId={null}
-      reviewing={page.reviewing ?? null} lastOutcome={page.lastApprovalOutcome ?? null} onEvent={onEvent} />,
+      reviewing={next.reviewing ?? null} lastOutcome={next.lastApprovalOutcome ?? null} onEvent={onEvent} />,
   )
+  await show(page)
   await server.resolveSubscription()
   await server.resolvePendingQuery({ entries: [MOVE] })
   flushFrames()
-  return { server, approveAction, rejectAction, onEvent }
+  return { server, approveAction, rejectAction, onEvent, show }
 }
 
 const button = (label: string) => {
@@ -112,6 +120,8 @@ describe('SessionApprovals', () => {
     ])
     expect(status()).toContain('STALE_REVISION: the board changed since this move was proposed')
     expect(status()).not.toContain('approved and applied')
+    // The action stays pending, so no decided entry re-reads its board: it is re-read here.
+    expect(boards.invalidated).toEqual(['inferops://demo.local/project/board/DEMO'])
   })
 
   it('reports a rejection', async () => {
@@ -134,9 +144,31 @@ describe('SessionApprovals', () => {
     expect(status()).toContain('was not resolved: Unauthorized')
   })
 
-  it('shows the last outcome the session recorded', async () => {
-    await renderPending({ lastApprovalOutcome: { workspaceId: 'ops', actionId: 2, outcome: 'rejected' } })
-    expect(status()).toBe('“Action 2” was rejected.')
+  it('shows the outcome restored on load with the action\'s title and age, without announcing it', async () => {
+    const { server } = await renderPending({ lastApprovalOutcome: { workspaceId: 'ops', actionId: 2, outcome: 'rejected' } })
+    await server.resolvePage({ entries: [entry(2, {
+      state: 'rejected', appliedAt: new Date(Date.now() - 30_000),
+      description: { title: 'Update DEMO-1: priority', description: '', implementsRevert: false },
+    })] })
+    expect(server.listCalls).toEqual([{ beforeId: 3 }])
+    expect(document.body.textContent).toContain('“Update DEMO-1: priority” was rejected. · just now')
+    expect(document.body.textContent).not.toContain('Action 2')
+    expect(status()).toBe('')
+  })
+
+  it('drops a restored outcome that is no longer recent', async () => {
+    const { server } = await renderPending({ lastApprovalOutcome: { workspaceId: 'ops', actionId: 2, outcome: 'applied' } })
+    await server.resolvePage({ entries: [entry(2, { state: 'approved', appliedAt: new Date(Date.now() - 10 * 60_000) })] })
+    expect(document.body.textContent).not.toContain('was approved and applied')
+    expect(status()).toBe('')
+  })
+
+  it('announces an outcome reported after load under the action\'s title', async () => {
+    const { server, show } = await renderPending()
+    await show({ lastApprovalOutcome: { workspaceId: 'ops', actionId: 4, outcome: 'applied' } })
+    expect(status()).toBe('')
+    await server.resolvePage({ entries: [{ ...MOVE, state: 'approved', appliedAt: new Date() } as ActionLogEntry] })
+    expect(status()).toBe('“Move DEMO-1 to Done” was approved and applied.')
   })
 
   it('renders nothing for a workspace the viewer may only use', async () => {

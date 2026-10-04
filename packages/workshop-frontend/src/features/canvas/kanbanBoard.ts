@@ -1,5 +1,6 @@
 // Pure Kanban rules over the gatekeeper's board DTO, shared by every presentation of a board.
 import type { Board, Issue, IssueChanges, State } from '@inferos/gatekeeper-inferops/src/types'
+import type { BoardActivityItem } from './boardActivity'
 import type { PendingMove, ProposalResult } from './boardData'
 
 export const PRIORITY_LABELS: Record<Issue['priority'], string> = {
@@ -31,66 +32,99 @@ export const stateOf = (board: Board, stateId: string): State | undefined =>
 export const pendingMoveOf = (issue: Issue, pending: readonly PendingMove[]): PendingMove | undefined =>
   pending.find(move => move.issueId === issue.id)
 
-/** How the authoritative board decided a move that was awaiting approval. */
-export type MoveDecision = {
-  issueId: string
-  toStateId: string
-  outcome: 'applied' | 'rejected'
-  /** The issue's revision when the decision was seen; a newer one supersedes the decision. */
-  revision: string
-}
+/**
+ * A change the board shows waiting for approval whose outcome is announced once decided: a move
+ * (this board's own awaiting move, or the gatekeeper's `transition` marker), an edit (`update`
+ * marker) or a new issue (a provisional card). An issue has at most one, as the gatekeeper refuses
+ * a second.
+ */
+export type TrackedChange =
+  | { kind: 'move'; issueId: string; identifier: string; toStateId: string }
+  | { kind: 'update'; issueId: string; identifier: string }
+  | { kind: 'create'; title: string }
+
+/** How a tracked change ended, as its action's record in the action log says. */
+export type ChangeDecision = { change: TrackedChange; outcome: 'applied' | 'rejected'; actionId: number }
 
 /**
- * The awaiting moves that `previous` listed and `current` no longer does, read against the
- * board that decided them: an issue back in a state other than the target at the revision the
- * move was proposed against was rejected, anything else (a new revision, or the issue gone from
- * the board) was applied. A move dropped while still `proposing` failed on submission, which its
- * caller reports, so it is not a decision.
+ * What `advanceDecisions` carries between board renders: the changes shown pending last time, the
+ * ones the board stopped showing whose action the log has not decided yet (`waiting`), log
+ * decisions that arrived before the board stopped showing their change (`early`), and every
+ * decided action id already accounted for (`seen`).
  */
-export const decidedMoves = (previous: readonly PendingMove[], current: readonly PendingMove[], board: Board): MoveDecision[] => {
-  const issues = new Map(board.columns.flatMap(column => column.issues.map(issue => [issue.id, issue] as const)))
-  const still = (move: PendingMove) => current.some(other => other.issueId === move.issueId && other.toStateId === move.toStateId && other.expectedRevision === move.expectedRevision)
-  return previous.filter(move => move.phase === 'awaiting' && !still(move)).map(move => {
-    const issue = issues.get(move.issueId)
-    const rejected = issue !== undefined && issue.revision === move.expectedRevision && issue.stateId !== move.toStateId
-    return { issueId: move.issueId, toStateId: move.toStateId, outcome: rejected ? 'rejected' : 'applied', revision: issue?.revision ?? move.expectedRevision }
+export type DecisionTracker = {
+  tracked: readonly TrackedChange[]
+  waiting: readonly TrackedChange[]
+  early: ReadonlyMap<string, readonly BoardActivityItem[]>
+  seen: ReadonlySet<number>
+}
+
+// Changes and log decisions meet on the issue identifier, or on the title of an issue to create.
+const changeKey = (change: TrackedChange) => change.kind === 'create' ? `create:${change.title}` : `issue:${change.identifier}`
+const decisionKey = (item: BoardActivityItem) =>
+  item.issue !== undefined ? `issue:${item.issue}` : item.creates !== undefined ? `create:${item.creates}` : null
+
+/** The changes `board` (with this board's own `pending` moves) shows waiting for approval. */
+export const trackedChanges = (board: Board, pending: readonly PendingMove[]): TrackedChange[] =>
+  board.columns.flatMap(column => column.issues.flatMap((issue): TrackedChange[] => {
+    if (issue.pending === 'create') return [{ kind: 'create', title: issue.title }]
+    const move = pending.find(candidate => candidate.issueId === issue.id && candidate.phase === 'awaiting')
+    if (move) return [{ kind: 'move', issueId: issue.id, identifier: issue.identifier, toStateId: move.toStateId }]
+    if (issue.pending === 'transition') return [{ kind: 'move', issueId: issue.id, identifier: issue.identifier, toStateId: issue.stateId }]
+    if (issue.pending === 'update') return [{ kind: 'update', issueId: issue.id, identifier: issue.identifier }]
+    return []
+  }))
+
+/** A tracker starting now: decisions the log already holds are history, never announced. */
+export const startDecisions = (board: Board, pending: readonly PendingMove[], decided: readonly BoardActivityItem[]): DecisionTracker =>
+  ({ tracked: trackedChanges(board, pending), waiting: [], early: new Map(), seen: new Set(decided.map(item => item.id)) })
+
+/**
+ * The outcomes of changes the board stopped showing pending, taken from the action log alone. A
+ * change the board drops is decided only once its action is decided in the log (`decided`, the
+ * board's applied and rejected actions, oldest first), and its outcome is that record's: approved
+ * is applied and rejected is rejected. The board itself never says how: a concurrent edit in
+ * InferOps also moves an issue's revision, and the gatekeeper stops overlaying a change made stale,
+ * while its action stays pending (an approval whose apply failed stays pending too). A drop with
+ * no decision yet waits for one; a decision that arrives first is held for the drop. Decisions for
+ * changes the board never showed pending are ignored, and each decision is used once.
+ */
+export const advanceDecisions = (
+  tracker: DecisionTracker, board: Board, pending: readonly PendingMove[], decided: readonly BoardActivityItem[],
+): { tracker: DecisionTracker; decisions: ChangeDecision[] } => {
+  const tracked = trackedChanges(board, pending)
+  const still = tracked.map(changeKey)
+  const dropped = tracker.tracked.filter(change => {
+    const index = still.indexOf(changeKey(change))
+    if (index < 0) return true
+    still.splice(index, 1)
+    return false
   })
-}
-
-/** How the authoritative board decided a pending create or edit, read from its `pending` markers. */
-export type ChangeDecision =
-  | { kind: 'update'; issueId: string; identifier: string; outcome: 'applied' | 'rejected'; revision: string }
-  | { kind: 'create'; title: string; outcome: 'applied' | 'rejected'; identifier?: string }
-
-/**
- * The creates and edits `previous` showed pending that `current` no longer does. An edit is
- * pending at the issue's unchanged revision, so the same revision without the marker means it was
- * rejected (the old values are back) and a new one that it was applied; an issue gone from the
- * board counts as neither. A provisional card that disappeared was created if an issue with its
- * title is now on the board that was not before, and rejected otherwise.
- *
- * The gatekeeper also stops overlaying a change made stale by an outside change; that reads as
- * applied here, as a stale move does.
- */
-export const decidedChanges = (previous: Board, current: Board): ChangeDecision[] => {
-  const before = new Map(previous.columns.flatMap(column => column.issues.map(issue => [issue.id, issue] as const)))
-  const after = new Map(current.columns.flatMap(column => column.issues.map(issue => [issue.id, issue] as const)))
-  const created = [...after.values()].filter(issue => !before.has(issue.id) && issue.pending !== 'create')
+  const waiting = [...tracker.waiting]
+  const early = new Map(tracker.early)
+  const seen = new Set(tracker.seen)
   const decisions: ChangeDecision[] = []
-  for (const issue of before.values()) {
-    const now = after.get(issue.id)
-    if (issue.pending === 'update' && now && now.pending !== 'update') {
-      decisions.push({ kind: 'update', issueId: issue.id, identifier: now.identifier,
-        outcome: now.revision === issue.revision ? 'rejected' : 'applied', revision: now.revision })
-    } else if (issue.pending === 'create' && !now) {
-      const index = created.findIndex(candidate => candidate.title === issue.title)
-      const [match] = index >= 0 ? created.splice(index, 1) : []
-      decisions.push(match
-        ? { kind: 'create', title: issue.title, outcome: 'applied', identifier: match.identifier }
-        : { kind: 'create', title: issue.title, outcome: 'rejected' })
-    }
+  const decide = (change: TrackedChange, item: BoardActivityItem) =>
+    decisions.push({ change, outcome: item.kind === 'applied' ? 'applied' : 'rejected', actionId: item.id })
+
+  for (const change of dropped) {
+    const key = changeKey(change)
+    const [first, ...rest] = early.get(key) ?? []
+    if (!first) { waiting.push(change); continue }
+    decide(change, first)
+    if (rest.length > 0) early.set(key, rest)
+    else early.delete(key)
   }
-  return decisions
+  for (const item of decided) {
+    if (seen.has(item.id) || (item.kind !== 'applied' && item.kind !== 'rejected')) continue
+    seen.add(item.id)
+    const key = decisionKey(item)
+    if (key === null) continue
+    const index = waiting.findIndex(change => changeKey(change) === key)
+    if (index >= 0) decide(waiting.splice(index, 1)[0]!, item)
+    else if (tracked.some(change => changeKey(change) === key)) early.set(key, [...early.get(key) ?? [], item])
+  }
+  return { tracker: { tracked, waiting, early, seen }, decisions }
 }
 
 /** What a create or edit form holds. The description is free text; empty means none given. */

@@ -17,7 +17,8 @@ export type ApprovalDecisionResult =
 const messageOf = (caught: unknown): string =>
   caught instanceof Error && caught.message ? caught.message : String(caught)
 
-const readAction = async (overseer: RpcStub<Overseer>, actionId: number): Promise<ActionLogEntry | undefined> => {
+/** One action's current record in the workspace's log, or undefined when the log holds no such action. */
+export const readAction = async (overseer: RpcStub<Overseer>, actionId: number): Promise<ActionLogEntry | undefined> => {
   // Pages run newest first and stop before `beforeId`, so the action leads the first page.
   const page = await overseer.listActions({ beforeId: actionId + 1 })
   return page.entries.find(entry => entry.id === actionId)
