@@ -20,6 +20,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parse } from "jsonc-parser";
 import type { AssetManifestEntry, CollectedAssets, CollectedModule } from "./hash-lib.ts";
+import { isUnreleasedConnection } from "../connection-status.ts";
 import { workerPackageDirs } from "../worker-dirs.ts";
 
 /** Manifest version the deploy-side renderer must agree with (see header comment). */
@@ -324,10 +325,13 @@ const GATEKEEPER_PREFIX = "gatekeeper-";
 
 /**
  * Read every deployable package under the worker package roots of `root` (see `worker-dirs.ts`)
- * and its Wrangler configuration, sorted by package name.
+ * and its Wrangler configuration, sorted by package name. A connection package that has not been
+ * reviewed past `conformant` (its `connection.json` status is not `reference` or `production`) is
+ * left out: it runs in local development only, and a release never ships it.
  */
 export function readDeployablePackages(root: string): DeployablePackage[] {
   return workerPackageDirs(root)
+      .filter((dir) => !isUnreleasedConnection(dir))
       .filter((dir) => {
     try {
       return statSync(join(dir, "wrangler.jsonc")).isFile();

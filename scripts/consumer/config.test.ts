@@ -249,3 +249,21 @@ test("codingWorkbench rejects malformed entries without echoing their values", (
   }
   assert.throws(() => parseConsumerConfig({ ...workbench([]), codingWorkbench: { repos: [], extra: 1 } }), /codingWorkbench: expected exactly repos/);
 });
+
+test("gatekeepers lists wrapper gatekeepers by slug in either version, omitted meaning none", () => {
+  assert.equal(parseConsumerConfig(candidate()).gatekeepers, undefined);
+  const listed = [{ slug: "tickets", enabled: true }, { slug: "acme-crm", enabled: false }];
+  assert.deepEqual(parseConsumerConfig({ ...candidate(), gatekeepers: listed }).gatekeepers, listed);
+  const migrated = migrateConsumerConfig({ ...candidate(), gatekeepers: listed });
+  assert.deepEqual(parseConsumerConfig(migrated).gatekeepers, listed, "migration keeps the listing");
+  for (const [gatekeepers, message] of [
+    [{}, /expected an array/],
+    [[{ slug: "Tickets", enabled: true }], /lowercase slug/],
+    [[{ slug: "gatekeeper-tickets", enabled: true }, { slug: "gatekeeper-tickets", enabled: true }], /listed twice/],
+    [[{ slug: "tickets", enabled: "yes" }], /enabled: expected boolean/],
+    [[{ slug: "tickets" }], /expected exactly slug, enabled/],
+    [Array.from({ length: 33 }, (_, n) => ({ slug: `g${n}`, enabled: true })), /at most 32/],
+  ] as const) {
+    assert.throws(() => parseConsumerConfig({ ...candidate(), gatekeepers }), message);
+  }
+});

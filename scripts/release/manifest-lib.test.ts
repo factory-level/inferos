@@ -317,3 +317,13 @@ test("a gatekeeper-prefixed library is not a deployable worker", () => {
   assert.ok(!deployable.includes("gatekeeper-kit"),
       "gatekeeper-kit is a library; adding a wrangler.jsonc would publish it as a connector");
 });
+
+// A connection package ships only once reviewed against a real provider (`reference` or
+// `production`). `gatekeeper-tickets` is a Worker with a wrangler.jsonc, but `conformant`: it would
+// otherwise reach the deploy wizard, which would also demand OAuth credentials it never takes.
+test("an unreleased connection package is not a deployable worker", () => {
+  const deployable = readDeployablePackages(ROOT).map((pkg) => pkg.name);
+  assert.ok(existsSync(join(ROOT, "custom-gatekeepers/gatekeeper-tickets/wrangler.jsonc")));
+  assert.ok(!deployable.includes("gatekeeper-tickets"), "a conformant connector was released");
+  assert.ok(deployable.includes("gatekeeper-inferops"), "the reference connector was dropped");
+});

@@ -67,7 +67,7 @@ export const WRAPPER_HELPERS = ["config.ts", "runtime.ts", "maintenance.ts"] as 
 export const WRAPPER_SCRIPTS: Record<string, string> = {
   inferos: "node .inferos/runtime.ts", "inferos:check": "node .inferos/runtime.ts check", "profile:init": "node .inferos/runtime.ts profile",
   local: "node .inferos/runtime.ts local", "extensions:check": "node .inferos/runtime.ts extensions", "gatekeepers:check": "node .inferos/runtime.ts gatekeepers",
-  "gatekeepers:generate": "node .inferos/runtime.ts gatekeepers --write", "views:check": "node .inferos/runtime.ts views", canvas: "node .inferos/runtime.ts canvas",
+  "gatekeepers:generate": "node .inferos/runtime.ts gatekeepers --write", "gatekeepers:scaffold": "node .inferos/runtime.ts scaffold", "views:check": "node .inferos/runtime.ts views", canvas: "node .inferos/runtime.ts canvas",
   "fixtures:check": "node .inferos/runtime.ts fixtures", "blueprints:check": "node .inferos/runtime.ts blueprints", "skills:check": "node .inferos/runtime.ts skills",
   "skills:install": "node .inferos/runtime.ts skills-install", "skills:upload": "node .inferos/runtime.ts skills-upload", doctor: "node .inferos/runtime.ts doctor",
   setup: "node .inferos/runtime.ts setup", dev: "node .inferos/runtime.ts dev",

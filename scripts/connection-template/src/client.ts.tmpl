@@ -1,0 +1,62 @@
+// SCAFFOLD: the typed __title__ client the gatekeeper calls. It is a stub over the synthetic
+// `__Name__FakeProvider`, not a trusted proxy.
+//
+// Replacing it with the real API is reviewed work, not generated work:
+// - keep one named method per provider call, each classified as a read or a write in
+//   connection.json (never a generic `request(path)` an agent's input could steer);
+// - every write takes the idempotency key the gatekeeper passes, and the revision it was proposed
+//   against when the provider has one;
+// - map every provider failure onto an `ErrorCode` here, and list each in connection.json's
+//   providerErrors with whether a retry can succeed;
+// - credentials come from the account, never from the binding or the agent.
+
+import type { Item, ItemChanges, Revision } from "./types";
+
+/** What a provider failure means, as the gatekeeper and connection.json classify it. */
+export type ErrorCode = "NOT_FOUND" | "STALE_REVISION" | "INVALID_REQUEST" | "UNAUTHORIZED" | "UNAVAILABLE";
+
+const CODES: ReadonlySet<string> = new Set<ErrorCode>(
+  ["NOT_FOUND", "STALE_REVISION", "INVALID_REQUEST", "UNAUTHORIZED", "UNAVAILABLE"]);
+
+/** A classified provider failure. Its message starts with the code, which survives RPC. */
+export class __Name__Error extends Error {
+  constructor(readonly code: ErrorCode, detail: string) {
+    super(`${code}: ${detail}`);
+    this.name = "__Name__Error";
+  }
+}
+
+/** The code a caught error carries, or null for any other failure. */
+export function errorCode(error: unknown): ErrorCode | null {
+  if (!(error instanceof Error)) return null;
+  const match = /\b([A-Z_]+): /.exec(error.message);
+  return match && CODES.has(match[1]!) ? match[1] as ErrorCode : null;
+}
+
+/** Every provider call the gatekeeper makes, for one account. */
+export interface __Name__Client {
+  /** Read: whether the account can see the collection. */
+  hasCollection(collectionId: string): Promise<boolean>;
+  /** Read: every item of one collection. */
+  listItems(collectionId: string): Promise<Item[]>;
+  /** Read: one item of one collection; NOT_FOUND for an item of any other collection. */
+  readItem(collectionId: string, itemId: string): Promise<Item>;
+  /** Write: change one item if it is still at `expectedRevision`, once per `idempotencyKey`. */
+  updateItem(collectionId: string, itemId: string, changes: ItemChanges, expectedRevision: Revision,
+             idempotencyKey: string): Promise<Item>;
+  /** Revocation: forget the account; every later call is refused UNAUTHORIZED. */
+  forget(): Promise<void>;
+}
+
+/** The client for one account. SCAFFOLD: always the fake provider. */
+export function openClient(exports: Cloudflare.Exports, accountId: string): __Name__Client {
+  const stub = exports.__Name__FakeProvider.getByName(accountId);
+  return {
+    hasCollection: collectionId => stub.hasCollection(collectionId),
+    listItems: collectionId => stub.listItems(collectionId),
+    readItem: (collectionId, itemId) => stub.readItem(collectionId, itemId),
+    updateItem: (collectionId, itemId, changes, expectedRevision, idempotencyKey) =>
+      stub.updateItem(collectionId, itemId, changes, expectedRevision, idempotencyKey),
+    forget: () => stub.forget(),
+  };
+}

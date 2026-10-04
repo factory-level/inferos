@@ -1,0 +1,93 @@
+// SCAFFOLD: a synthetic __title__ provider, one Durable Object per account. It stands in for the
+// real API so the gatekeeper and the shared conformance suite run with no network and no
+// credentials. It behaves like a careful provider should: revisions, idempotency keys and
+// revocation are all enforced here, so the gatekeeper is tested against them.
+
+import { DurableObject } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
+import { __Name__Error } from "./client";
+import type { Item, ItemChanges, Revision } from "./types";
+
+/** Storage key of the account's data; the test worker reads it directly. */
+export const FAKE_DATA_KEY = "data";
+const REVOKED_KEY = "revoked";
+const APPLIED_PREFIX = "applied:";
+
+/** The account's synthetic data. `writes` counts applied writes, never replays. */
+export type FakeData = { collections: { id: string; items: Item[] }[]; writes: number };
+
+const SEED: FakeData = {
+  collections: [
+    { id: "inbox", items: [
+      { id: "item-1", title: "First item", revision: "1" },
+      { id: "item-2", title: "Second item", revision: "1" },
+    ] },
+    { id: "archive", items: [
+      { id: "item-9", title: "Archived item", revision: "1" },
+    ] },
+  ],
+  writes: 0,
+};
+
+const notFound = () => new __Name__Error("NOT_FOUND", "No such item in this collection.");
+
+@validateRpc()
+export class __Name__FakeProvider extends DurableObject<Cloudflare.Env> {
+  /** Refuses every call once the account was revoked; its data is gone and must not re-seed. */
+  #assertLive(): void {
+    if (this.ctx.storage.kv.get<boolean>(REVOKED_KEY)) {
+      throw new __Name__Error("UNAUTHORIZED", "This account was disconnected.");
+    }
+  }
+
+  #data(): FakeData {
+    this.#assertLive();
+    let data = this.ctx.storage.kv.get<FakeData>(FAKE_DATA_KEY);
+    if (!data) this.ctx.storage.kv.put(FAKE_DATA_KEY, data = structuredClone(SEED));
+    return data;
+  }
+
+  #collection(data: FakeData, collectionId: string) {
+    const collection = data.collections.find(c => c.id === collectionId);
+    if (!collection) throw notFound();
+    return collection;
+  }
+
+  async hasCollection(collectionId: string): Promise<boolean> {
+    return this.#data().collections.some(c => c.id === collectionId);
+  }
+
+  async listItems(collectionId: string): Promise<Item[]> {
+    return this.#collection(this.#data(), collectionId).items;
+  }
+
+  async readItem(collectionId: string, itemId: string): Promise<Item> {
+    const item = this.#collection(this.#data(), collectionId).items.find(i => i.id === itemId);
+    if (!item) throw notFound();
+    return item;
+  }
+
+  async updateItem(collectionId: string, itemId: string, changes: ItemChanges,
+                   expectedRevision: Revision, idempotencyKey: string): Promise<Item> {
+    const data = this.#data();
+    const replay = this.ctx.storage.kv.get<Item>(APPLIED_PREFIX + idempotencyKey);
+    if (replay) return replay;
+    const item = this.#collection(data, collectionId).items.find(i => i.id === itemId);
+    if (!item) throw notFound();
+    if (item.revision !== expectedRevision) {
+      throw new __Name__Error("STALE_REVISION", "The item changed after this was proposed.");
+    }
+    if (changes.title !== undefined) item.title = changes.title;
+    item.revision = String(Number(item.revision) + 1);
+    data.writes += 1;
+    this.ctx.storage.kv.put(FAKE_DATA_KEY, data);
+    this.ctx.storage.kv.put(APPLIED_PREFIX + idempotencyKey, item);
+    return item;
+  }
+
+  /** Deletes the account's data and leaves a tombstone, so nothing re-seeds it. */
+  async forget(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+    this.ctx.storage.kv.put(REVOKED_KEY, true);
+  }
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -10,6 +10,7 @@ import { resolveLocalStack } from "../local/stack.ts";
 import type { WranglerConfig } from "../release/manifest-lib.ts";
 import { consumerGatekeeperDirs, workerPackageDirs } from "../worker-dirs.ts";
 import { initialConsumerConfig } from "./config.ts";
+import { readConsumerWorkers } from "./extensions.ts";
 import { checkConsumerGatekeepers, prepareConsumerGatekeepers } from "./gatekeepers.ts";
 import { devLaunchArgs } from "./runtime.ts";
 
@@ -23,6 +24,19 @@ const gatekeeperConfig = (name: string, extra = "") =>
   `import { defineGadgetsWorker } from ${JSON.stringify(factory)};\n` +
   `export default defineGadgetsWorker({ name: ${JSON.stringify(name)}, entrypoint: "src/index.ts"${extra} });\n`;
 
+/** A valid wrapper-gatekeeper contract for `slug`: the Tickets package's, renamed. */
+function contractFor(slug: string): Record<string, unknown> {
+  const contract = JSON.parse(readFileSync(join(UPSTREAM, "custom-gatekeepers/gatekeeper-tickets/connection.json"), "utf8"));
+  return { ...contract, id: slug, package: `gatekeeper-${slug}`, status: "scaffold" };
+}
+
+interface GatekeeperOptions {
+  /** List it in inferos.config.json (the default), and with what `enabled`. `false` leaves it unlisted. */
+  listed?: boolean | { enabled: boolean };
+  /** The connection.json to write, or null for none. Defaults to a valid one. */
+  contract?: Record<string, unknown> | null;
+}
+
 /** A wrapper with its own pinned-checkout directory, `local.port` and gatekeepers. */
 function wrapper(t: TestContext, { port = 8787, customCode = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), "inferos-gatekeepers-"));
@@ -34,27 +48,38 @@ function wrapper(t: TestContext, { port = 8787, customCode = true } = {}) {
   mkdirSync(join(root, "inferos"));
   mkdirSync(join(root, "gatekeepers"));
   writeFileSync(join(root, "gatekeepers/.gitkeep"), "");
-  const addGatekeeper = (name: string, source = gatekeeperConfig(name)) => {
+  const writeConfig = () => writeFileSync(join(root, "inferos.config.json"), JSON.stringify(config));
+  /** Lists `slug` in inferos.config.json, replacing any earlier entry for it. */
+  const list = (slug: string, enabled = true) => {
+    config.gatekeepers = [...(config.gatekeepers ?? []).filter(entry => entry.slug !== slug), { slug, enabled }];
+    writeConfig();
+  };
+  const addGatekeeper = (name: string, source = gatekeeperConfig(name), options: GatekeeperOptions = {}) => {
     const dir = join(root, "gatekeepers", name);
     mkdirSync(join(dir, "src"), { recursive: true });
     writeFileSync(join(dir, "src/index.ts"), "export default { fetch() { return new Response('ok'); } };\n");
     writeFileSync(join(dir, "cloudflare.config.ts"), source);
+    const slug = name.replace(/^gatekeeper-/, "");
+    const contract = options.contract === undefined ? contractFor(slug) : options.contract;
+    if (contract) writeFileSync(join(dir, "connection.json"), JSON.stringify(contract));
+    const listed = options.listed ?? true;
+    if (listed !== false) list(slug, listed === true ? true : listed.enabled);
     return dir;
   };
-  return { root, config, addGatekeeper };
+  return { root, config, addGatekeeper, list };
 }
 
 test("a wrapper without gatekeepers, or with only a library, adds nothing and needs no config", async t => {
   const w = wrapper(t);
   rmSync(join(w.root, "gatekeepers"), { recursive: true });
   assert.deepEqual(consumerGatekeeperDirs(w.root), []);
-  assert.deepEqual(await checkConsumerGatekeepers(w.root), { enabled: true, gatekeepers: [], stale: [] });
+  assert.deepEqual(await checkConsumerGatekeepers(w.root), { enabled: true, gatekeepers: [], stale: [], refused: [] });
 
   mkdirSync(join(w.root, "gatekeepers/acme-shared"), { recursive: true });
   writeFileSync(join(w.root, "gatekeepers/acme-shared/package.json"), "{}\n");
   // Listed as a package (so a name clash is still caught) but never a Worker: it has no wrangler.jsonc.
   assert.ok(workerPackageDirs(UPSTREAM, { consumerRoot: w.root }).includes(join(w.root, "gatekeepers/acme-shared")));
-  assert.deepEqual(await checkConsumerGatekeepers(w.root), { enabled: true, gatekeepers: [], stale: [] });
+  assert.deepEqual(await checkConsumerGatekeepers(w.root), { enabled: true, gatekeepers: [], stale: [], refused: [] });
 });
 
 test("pinned discovery is unchanged unless a consumer root is passed", t => {
@@ -73,6 +98,7 @@ test("a wrapper gatekeeper generates its config in the wrapper and is described 
   const [gatekeeper] = await prepareConsumerGatekeepers(w.root);
   assert.deepEqual({ ...gatekeeper, directory: relative(w.root, gatekeeper.directory) }, {
     name: "gatekeeper-acme", directory: "gatekeepers/gatekeeper-acme", binding: "GATEKEEPER_ACME", route: "/gatekeeper/acme",
+    status: "scaffold",
   });
   const generated = readFileSync(join(dir, "wrangler.jsonc"), "utf8");
   assert.match(generated, /^\/\/ Generated from cloudflare.config.ts/);
@@ -124,7 +150,8 @@ test("names that collide with the pinned checkout or cannot round-trip through a
   rmSync(join(w.root, "gatekeepers/router"), { recursive: true });
 
   for (const name of ["acme", "gatekeeper-Acme", "gatekeeper-acme_beta", "gatekeeper-acme--beta"]) {
-    const dir = w.addGatekeeper(name);
+    // Unlisted: a bad name is rejected structurally, before any listing is consulted.
+    const dir = w.addGatekeeper(name, gatekeeperConfig(name), { listed: false });
     await assert.rejects(checkConsumerGatekeepers(w.root), /must be named gatekeeper-<lowercase-slug>/, name);
     rmSync(dir, { recursive: true });
   }
@@ -163,7 +190,7 @@ test("with custom Cloudflare code off the gatekeepers directory is inert", async
   const w = wrapper(t, { customCode: false });
   w.addGatekeeper("gatekeeper-acme", "throw new Error('must not execute');\n");
   w.addGatekeeper("gatekeeper-github");
-  assert.deepEqual(await checkConsumerGatekeepers(w.root), { enabled: false, gatekeepers: [], stale: [] });
+  assert.deepEqual(await checkConsumerGatekeepers(w.root), { enabled: false, gatekeepers: [], stale: [], refused: [] });
   assert.deepEqual(await prepareConsumerGatekeepers(w.root), []);
 });
 
@@ -238,4 +265,93 @@ test("two wrappers keep separate ports, state, generated configs and gatekeepers
   const [aRouter, bRouter] = [routerFor(8801, aGatekeepers.map(gk => gk.name), []), routerFor(8802, bGatekeepers.map(gk => gk.name), [])];
   assert.equal(await route(aRouter.config, "/gatekeeper/beta/oauth", 8801), "ASSETS http://localhost:8801");
   assert.equal(await route(bRouter.config, "/gatekeeper/beta/oauth", 8802), "GATEKEEPER_BETA http://localhost:8802");
+});
+
+// Manifest loading: a directory is a candidate, never an authority. Each refusal leaves the
+// gatekeeper unbound and its code unexecuted (the configs below throw if imported).
+const throwing = "throw new Error('a refused gatekeeper was executed');\n";
+
+test("an unlisted or disabled gatekeeper is reported, not bound, and never executed", async t => {
+  const w = wrapper(t);
+  w.addGatekeeper("gatekeeper-acme", throwing, { listed: false });
+  w.addGatekeeper("gatekeeper-beta", throwing, { listed: { enabled: false } });
+  const report = await checkConsumerGatekeepers(w.root);
+  assert.deepEqual(report.gatekeepers, []);
+  assert.deepEqual(report.refused.map(({ name, severity }) => ({ name, severity })), [
+    { name: "gatekeeper-acme", severity: "notice" }, { name: "gatekeeper-beta", severity: "notice" },
+  ]);
+  assert.match(report.refused[0]!.reason, /not listed: add \{ "slug": "acme", "enabled": true \}/);
+  assert.match(report.refused[1]!.reason, /disabled in inferos.config.json/);
+  // Notices alone do not fail the check.
+  const check = cli(w.root);
+  assert.equal(check.status, 0, check.stderr);
+  assert.deepEqual(JSON.parse(check.stdout).gatekeepers, []);
+});
+
+test("a missing, invalid or mismatched connection.json fails closed with a reason", async t => {
+  const w = wrapper(t);
+  w.addGatekeeper("gatekeeper-acme", throwing, { contract: null });
+  w.addGatekeeper("gatekeeper-beta", throwing, { contract: { ...contractFor("beta"), status: "ready" } });
+  w.addGatekeeper("gatekeeper-gamma", throwing, { contract: { ...contractFor("gamma"), credentials: [{ name: "TOKEN", kind: "secret", purpose: "x", value: "s3cret" }] } });
+  w.addGatekeeper("gatekeeper-delta", throwing, { contract: contractFor("other") });
+  const report = await checkConsumerGatekeepers(w.root);
+  assert.deepEqual(report.gatekeepers, []);
+  const reasons = Object.fromEntries(report.refused.map(({ name, severity, reason }) => [name, `${severity}: ${reason}`]));
+  assert.match(reasons["gatekeeper-acme"]!, /^error: no connection.json/);
+  assert.match(reasons["gatekeeper-beta"]!, /^error: connection.json does not match the schema at status/);
+  assert.match(reasons["gatekeeper-gamma"]!, /^error: connection.json does not match the schema at credentials/);
+  // The rejected value never reaches the report.
+  assert.doesNotMatch(JSON.stringify(report.refused), /s3cret/);
+  assert.match(reasons["gatekeeper-delta"]!, /^error: connection.json id "other" must be the directory's slug "delta"/);
+  const check = cli(w.root);
+  assert.equal(check.status, 1);
+  assert.match(check.stderr, /gatekeeper-acme is not loaded: no connection.json/);
+});
+
+test("an incompatible gatekeeper, and a listed one with no directory, fail closed", async t => {
+  const w = wrapper(t);
+  const contract = contractFor("acme");
+  w.addGatekeeper("gatekeeper-acme", throwing, { contract: { ...contract, compatibility: { ...contract.compatibility as object, inferos: { gatekeeperApi: [99] } } } });
+  const { inferos: _, ...unpinned } = contract.compatibility as Record<string, unknown>;
+  w.addGatekeeper("gatekeeper-beta", throwing, { contract: { ...contractFor("beta"), compatibility: unpinned } });
+  w.list("ghost");
+  const reasons = Object.fromEntries((await checkConsumerGatekeepers(w.root)).refused.map(({ name, reason }) => [name, reason]));
+  assert.match(reasons["gatekeeper-acme"]!, /incompatible: built for gatekeeper API 99; this InferOS implements 1/);
+  assert.match(reasons["gatekeeper-beta"]!, /incompatible: connection.json declares no compatibility.inferos.gatekeeperApi/);
+  assert.match(reasons["gatekeeper-ghost"]!, /listed and enabled, but gatekeepers\/gatekeeper-ghost holds no Worker config/);
+});
+
+test("a listed, enabled, valid and compatible gatekeeper is bound beside refused ones", async t => {
+  const w = wrapper(t);
+  w.addGatekeeper("gatekeeper-acme");
+  w.addGatekeeper("gatekeeper-beta", throwing, { listed: { enabled: false } });
+  const bound = await prepareConsumerGatekeepers(w.root);
+  assert.deepEqual(bound.map(({ name, binding, status }) => ({ name, binding, status })),
+    [{ name: "gatekeeper-acme", binding: "GATEKEEPER_ACME", status: "scaffold" }]);
+  // Only the accepted one had its config generated.
+  assert.ok(existsSync(join(w.root, "gatekeepers/gatekeeper-acme/wrangler.jsonc")));
+  assert.ok(!existsSync(join(w.root, "gatekeepers/gatekeeper-beta/wrangler.jsonc")));
+});
+
+test("a workers/ extension is never discovered as a gatekeeper, whatever it holds or is named", async t => {
+  const w = wrapper(t);
+  // A gatekeeper-shaped Worker under workers/, with a valid contract, listed as a gatekeeper too.
+  const dir = join(w.root, "workers/gatekeeper-evil");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src/index.ts"), "export default { fetch() { return new Response('x'); } };\n");
+  writeFileSync(join(dir, "cloudflare.config.ts"), gatekeeperConfig("gatekeeper-evil"));
+  writeFileSync(join(dir, "connection.json"), JSON.stringify(contractFor("evil")));
+  w.list("evil");
+  const report = await checkConsumerGatekeepers(w.root);
+  assert.deepEqual(report.gatekeepers, []);
+  assert.deepEqual(report.refused.map(({ name }) => name), ["gatekeeper-evil"]);
+  assert.ok(!workerPackageDirs(UPSTREAM, { consumerRoot: w.root }).some(path => path.startsWith(join(w.root, "workers"))));
+  // Listed as an extension instead, it is refused outright: a connection package is a gatekeeper.
+  writeFileSync(join(w.root, "inferos.extensions.json"), JSON.stringify({ schemaVersion: 1, workers: [{ id: "gatekeeper-evil", directory: "workers/gatekeeper-evil" }] }));
+  assert.throws(() => readConsumerWorkers(w.root), /holds a connection.json/);
+  // Without one it is an ordinary custom Worker: router-only CONSUMER_ binding, never GATEKEEPER_.
+  rmSync(join(dir, "connection.json"));
+  const [worker] = readConsumerWorkers(w.root);
+  assert.equal(worker!.binding, "CONSUMER_GATEKEEPER_EVIL");
+  assert.equal(worker!.name, "consumer-gatekeeper-evil");
 });

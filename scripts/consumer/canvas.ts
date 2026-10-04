@@ -5,6 +5,7 @@ import {
   CANVAS_WIDGET_KINDS, parseCanvasCatalog,
   type CanvasCatalog, type CanvasSection, type CanvasWidgetKind,
 } from "../../packages/workshop-shared/src/canvas.ts";
+import { isUnreleasedConnection } from "../connection-status.ts";
 import { WORKER_PACKAGE_ROOTS } from "../worker-dirs.ts";
 import { consumerBlueprintDirectory } from "./runtime.ts";
 
@@ -38,6 +39,11 @@ export interface CanvasInventory {
   kinds: readonly CanvasWidgetKind[];
   blueprints: AvailableBlueprint[];
   customGatekeepers: string[];
+  /**
+   * The custom gatekeepers whose `connection.json` status is not `reference` or `production`
+   * (`scaffold` or `conformant`). They can be enabled by name but are never part of `"all"`.
+   */
+  unreleasedGatekeepers: string[];
 }
 
 /** The configuration a checkout without a canvas file behaves as: everything built, nothing extra. */
@@ -67,7 +73,8 @@ export function canvasInventory(root: string, upstream = UPSTREAM): CanvasInvent
       .filter(entry => entry.isDirectory() && entry.name.startsWith("gatekeeper-") && existsSync(join(customRoot, entry.name, "wrangler.jsonc")))
       .map(entry => entry.name).toSorted()
     : [];
-  return { kinds: CANVAS_WIDGET_KINDS, blueprints, customGatekeepers };
+  const unreleasedGatekeepers = customGatekeepers.filter(name => isUnreleasedConnection(join(customRoot, name)));
+  return { kinds: CANVAS_WIDGET_KINDS, blueprints, customGatekeepers, unreleasedGatekeepers };
 }
 
 const exactKeys = (value: unknown, keys: string[], path: string): Record<string, unknown> => {
@@ -136,9 +143,14 @@ export function readCanvasConfig(root: string, inventory = canvasInventory(root)
   return resolveCanvasConfig(JSON.parse(readFileSync(path, "utf8")), inventory);
 }
 
-/** The custom gatekeepers a config selects, from those the checkout builds. */
+/**
+ * The custom gatekeepers a config selects, from those the checkout builds. `"all"` (and no config)
+ * means every released one: an unreviewed connection package runs only when named.
+ */
 export function selectedCustomGatekeepers(config: CanvasConfig | undefined, inventory: CanvasInventory): string[] {
-  if (!config || config.customGatekeepers === "all") return inventory.customGatekeepers;
+  if (!config || config.customGatekeepers === "all") {
+    return inventory.customGatekeepers.filter(name => !inventory.unreleasedGatekeepers.includes(name));
+  }
   return config.customGatekeepers;
 }
 
@@ -157,7 +169,7 @@ const USAGE = `Usage: canvas.ts ROOT <command>
   add-screen <id> <title> [boardRef ...]   Add a screen template, optionally with InferOps board references
   remove-screen <id>                 Remove a screen template
   gatekeeper enable|disable <name>   Choose which custom-gatekeepers/ packages the dev server binds
-  gatekeeper all                     Bind every custom gatekeeper (the default)`;
+  gatekeeper all                     Bind every released custom gatekeeper (the default)`;
 
 /** Run one CLI command against the config at `root`; returns the JSON report it prints. */
 export function runCanvasCommand(root: string, args: string[], upstream = UPSTREAM): unknown {
@@ -228,7 +240,7 @@ export function runCanvasCommand(root: string, args: string[], upstream = UPSTRE
         config.customGatekeepers = "all";
       } else if ((action === "enable" || action === "disable") && rest.length === 2) {
         if (!inventory.customGatekeepers.includes(name)) throw new Error(`No custom gatekeeper "${name}"; run list`);
-        const current = config.customGatekeepers === "all" ? inventory.customGatekeepers : config.customGatekeepers;
+        const current = selectedCustomGatekeepers(config, inventory);
         config.customGatekeepers = action === "enable"
           ? [...new Set([...current, name])].toSorted() : current.filter(item => item !== name);
       } else {

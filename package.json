@@ -17,6 +17,7 @@
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
     "dev-server": "node scripts/run-dev-server.ts",
     "canvas": "node scripts/consumer/canvas.ts .",
+    "gatekeepers:scaffold": "node scripts/scaffold-gatekeeper.ts",
     "dev:setup": "node packages/workshop-backend/scripts/dev-setup.ts",
     "dev:verify": "node packages/workshop-backend/scripts/dev-verify.ts",
     "local": "node scripts/local/lifecycle.ts",

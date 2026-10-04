@@ -31,7 +31,7 @@ function intakeSource(root: string) {
   write("package.json", JSON.stringify({ type: "module", packageManager: "pnpm@11.17.0" }));
   write("packages/bundled-blueprints/blueprints/example/files/client.js", "// upstream blueprint\n");
   for (const path of ["scripts/consumer/config.ts", "scripts/consumer/runtime.ts", "scripts/consumer/canvas.ts", "scripts/consumer/intake.ts",
-    "scripts/worker-dirs.ts", "packages/workshop-shared/src/canvas.ts"]) write(path, readFileSync(join(repo, path)));
+    "scripts/worker-dirs.ts", "scripts/connection-status.ts", "packages/workshop-shared/src/canvas.ts"]) write(path, readFileSync(join(repo, path)));
   write("custom-gatekeepers/gatekeeper-inferops/wrangler.jsonc", "{}\n");
   write("packages/workshop-backend/src/canvas-store.ts", "export {};\n");
   for (const path of [capabilitySources.INFEROPS_ENABLED!, capabilitySources.INFEROPS_AUTH!]) write(path, "export {};\n");

@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
@@ -48,7 +48,12 @@ export function readConsumerWorkers(root: string): ConsumerWorker[] {
     if (!rel.startsWith(`workers${sep}`) || rel.split(sep).includes("..") || !statSync(directory).isDirectory()) {
       throw new Error("Worker directory must remain inside the wrapper's workers directory");
     }
-    for (const filename of ["cloudflare.config.ts"]) {
+    // A connection package is a gatekeeper and belongs in gatekeepers/, where its contract is
+    // checked; as an extension it would get a public route and no capability boundary at all.
+    if (existsSync(join(directory, "connection.json"))) {
+      throw new Error("A custom Worker holds a connection.json; connection packages belong in gatekeepers/, never workers/");
+    }
+        for (const filename of ["cloudflare.config.ts"]) {
       const source = realpathSync(join(directory, filename));
       if (!source.startsWith(directory + sep) || !statSync(source).isFile()) throw new Error("Worker config must remain inside its directory");
     }

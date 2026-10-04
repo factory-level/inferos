@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CAPABILITY_NAMES, migrateConsumerConfig, parseConsumerConfig, resolveConsumerConfig } from "./config.ts";
 import type { CapabilityName, ConsumerConfig, SettingSource } from "./config.ts";
@@ -274,6 +274,30 @@ export async function diagnoseConsumer(root: string) {
       const workers = readConsumerWorkers(root);
       add("extensions", "pass", `${workers.length} explicit custom Workers; run pnpm extensions:check to validate canonical configs`);
     } catch { add("extensions", "error", "Cannot validate custom Workers; check the manifest, contained paths and supported pin"); }
+    const gatekeeperScript = join(upstream, "scripts/consumer/gatekeepers.ts");
+    if (existsSync(gatekeeperScript)) {
+      try {
+        const module = await import(pathToFileURL(gatekeeperScript).href);
+        // A pin that predates manifest-gated wrapper gatekeepers binds by directory alone.
+        if (typeof module.readConsumerGatekeepers !== "function") {
+          add("gatekeepers", "warning", "Pinned revision binds wrapper gatekeepers by directory, without a listing or connection.json");
+        } else {
+          const { accepted, refused } = module.readConsumerGatekeepers(root, upstream) as {
+            accepted: { directory: string; status: string }[];
+            refused: { name: string; severity: "error" | "notice"; reason: string }[];
+          };
+          const loaded = accepted.map(({ directory, status }) => `${basename(directory)} (${status})`);
+          const errors = refused.filter(entry => entry.severity === "error");
+          const summary = [
+            `${accepted.length} wrapper gatekeepers load${loaded.length ? `: ${loaded.join(", ")}` : ""}`,
+            ...refused.map(({ name, reason }) => `${name} is not loaded: ${reason}`),
+          ].join("; ");
+          add("gatekeepers", errors.length ? "error" : refused.length ? "warning" : "pass", summary);
+        }
+      } catch (error) {
+        add("gatekeepers", "error", `Cannot validate wrapper gatekeepers: ${(error as Error).message}`);
+      }
+    }
   }
   const skillScript = join(upstream, "scripts/consumer/skills.ts");
   if (existsSync(join(root, "inferos.skills.json")) && existsSync(skillScript)) {
@@ -319,7 +343,7 @@ export async function diagnoseSettings(root: string, upstream: string, config: C
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "skills", "skills-upload", "skills-install", "setup", "dev", "intake", "config", "verify", "recover", "upgrade"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|skills|skills-upload|skills-install|setup|dev|intake|config|verify|recover|upgrade");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "scaffold", "skills", "skills-upload", "skills-install", "setup", "dev", "intake", "config", "verify", "recover", "upgrade"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|scaffold|skills|skills-upload|skills-install|setup|dev|intake|config|verify|recover|upgrade");
   if (command === "verify" || command === "recover" || command === "upgrade") {
     // Before the configuration check: these commands must answer for a broken wrapper too.
     const { runMaintenance } = await import("./maintenance.ts");
@@ -375,6 +399,12 @@ async function main() {
     const script = join(upstream, "scripts/consumer/gatekeepers.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support wrapper gatekeepers; use a reviewed newer pin");
     execFileSync(process.execPath, [script, root, ...process.argv.slice(3)], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
+  if (command === "scaffold") {
+    const script = join(upstream, "scripts/scaffold-gatekeeper.ts");
+    if (!existsSync(script)) throw new Error("Pinned revision has no connector scaffolder; use a reviewed newer pin");
+    execFileSync(process.execPath, [script, ...process.argv.slice(3), "--consumer-root", root], { cwd: upstream, stdio: "inherit" });
     return;
   }
   if (command === "profile") {

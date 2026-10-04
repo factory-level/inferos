@@ -1,0 +1,15 @@
+{
+  "extends": "__INFEROS__/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ESNext"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["./worker-configuration.d.ts"],
+    "paths": {
+      "@gadgets/workshop-shared/*": ["__INFEROS__/packages/workshop-shared/src/*"]
+    }
+  },
+  "include": ["src", "__tests__/**/*.ts"],
+  "exclude": ["dist", "node_modules", ".wrangler"]
+}
