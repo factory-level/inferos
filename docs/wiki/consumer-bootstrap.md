@@ -112,13 +112,18 @@ Run these from the wrapper root. Each prints one JSON object and exits 0 when th
 pnpm inferos verify [--live]                 # check + doctor + local status (+ local verify while the stack runs)
 pnpm inferos upgrade <full-sha>              # plan only (same as --plan): writes nothing
 pnpm inferos upgrade <full-sha> --apply      # clean tree required; stages the result, never commits
+pnpm inferos upgrade <full-sha> --apply --branch <name> [--open-pr <owner/repo>]   # reviewed upgrade: commit on a new branch, optionally open a PR
 pnpm inferos recover ports|config|fixtures|state [--apply]   # dry run unless --apply
 ```
 
 - **verify** reports `checks[]` named `check`, `doctor`, `local-status` and `local-verify`, each with a `status` (`pass`, `fail` or `skipped`) and `reasons`. The live checks are `skipped` while the stack is stopped. `--live` makes a stopped stack a failure.
 - **upgrade** fetches the commit into `inferos/` if needed and runs that revision's planner from a temporary worktree.
   - The plan lists blockers, the submodule move, whether `pnpm inferos config migrate` would succeed on the target (the upgrade never migrates), each changed file's action and the state rollback limit.
-  - `--apply` moves the submodule and gitlink, rewrites `upstream.revision`, `.inferos/bootstrap.json` and `.inferos/files.json`, and refreshes InferOS files you have not edited. An edited file stays as it is and is reported `needs-review`, with the new text under `.inferos/state/upgrade/<sha>/`. Customer-owned files (configuration, blueprints, skill packs, fixtures, views, workers) are never rewritten. A starter whose upstream changed is reported `upstream-changed`.
+  - `--apply` moves the submodule and gitlink, rewrites `upstream.revision`, `.inferos/bootstrap.json` and `.inferos/files.json`, and refreshes InferOS files and upstream starters (blueprints, skill packs) you have not edited.
+  - An edited skill, SOP, README or blueprint is merged three-way. The original is rebuilt from the submodule's history, so the wrapper keeps no extra copy. A clean merge is written (`merge`). A conflicting one leaves your file untouched (`conflict`), with a diff3 merge and its conflict markers under `.inferos/state/upgrade/<sha>/`.
+  - Edited `.inferos/` helpers and binary files are not merged (`needs-review`, with the new text in the same place). The fixture is only reported (`upstream-changed`). Configuration, views, workers and gatekeepers are never touched.
+  - `--branch <name>` creates the branch, applies, and refuses to commit if the staged diff or summary contains a staged `.dev.vars*`, `.env*`, `.wrangler/` or `.inferos/state/` path, a value from your `.dev.vars`, or a known token shape. Otherwise it commits with a review summary, also written to `.inferos/state/upgrade/<sha>/UPGRADE.md`. The summary covers code range, configuration, capabilities, connections and OAuth, Durable Object migrations, new action kinds and every file's reconciliation. `--open-pr <owner/repo>` pushes to `origin` and runs `gh pr create` with that body. Nothing is merged.
+  - New action kinds are flagged in the summary. The wrapper holds no grants or auto-approval rules, so a new kind waits for manual approval until someone enables a rule for it.
   - A wrapper bootstrapped before `.inferos/files.json` existed has no baseline, so every copied file that differs from the target is `needs-review`. If its `.inferos/runtime.ts` has no `upgrade` command, run `node scripts/consumer/upgrade.ts <wrapper> <sha> [--apply]` from an InferOS checkout at the target SHA.
   - After apply: `git diff --cached`, `pnpm run setup`, `pnpm inferos verify`, then commit. Before the commit, `git reset --hard && git submodule update --init inferos` undoes it.
 - **recover** never deletes a customer-owned file.
@@ -136,7 +141,7 @@ pnpm inferos recover ports|config|fixtures|state [--apply]   # dry run unless --
 | `inferos.config.json` | Versioned nonsecret inputs, exact upstream revision, profile, feature flags, style and local port |
 | `inferos/` | Pinned Git submodule |
 | `.inferos/runtime.ts`, `config.ts` and `maintenance.ts` | Standalone operator, validation and maintenance (verify/recover/upgrade) helpers copied from this version |
-| `.inferos/files.json` | Every file bootstrap wrote, with its class (`generated`, `copied-template`, `customer-owned`) and sha256; upgrade and recover read it to keep customer edits |
+| `.inferos/files.json` | Every file bootstrap wrote, with its class (`generated`, `copied-template`, `customer-owned`), sha256 and upstream source; upgrade reads it to rebuild originals for three-way merges, and recover to keep customer edits |
 | `.agents/skills/{verify,upgrade,recover}-inferos/SKILL.md` | Agent procedures for the maintenance commands below |
 | `.agents/skills/bootstrap-inferos/SKILL.md` | Agent setup guidance copied into the consuming repository |
 | `.agents/skills/skill-upload/SKILL.md` | Agent guidance for installing, authoring and publishing runtime skills (`/skill-upload`) |

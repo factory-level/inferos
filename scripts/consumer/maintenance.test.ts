@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { bootstrapConsumer } from "./bootstrap.ts";
+import { mergePolicy } from "./reconcile.ts";
 import { checkConsumer } from "./runtime.ts";
-import { FILES_MANIFEST, WRAPPER_SKILLS } from "./wrapper-files.ts";
+import { exportBlock, localSecretValues, scanPortable } from "./upgrade-review.ts";
+import { FILES_MANIFEST, sha256, WRAPPER_SKILLS } from "./wrapper-files.ts";
 
 const REPO = join(import.meta.dirname, "../..");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
@@ -21,8 +23,10 @@ const write = (path: string, text: string) => {
   writeFileSync(path, text);
 };
 const read = (path: string) => readFileSync(path, "utf8");
-const wrapper = (target: string, ...args: string[]) => {
-  const result = spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), ...args], { encoding: "utf8" });
+const IDENTITY = { GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.invalid" };
+const wrapper = (target: string, ...args: string[]) => wrapperWith({}, target, ...args);
+const wrapperWith = (env: Record<string, string>, target: string, ...args: string[]) => {
+  const result = spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), ...args], { encoding: "utf8", env: { ...process.env, ...env } });
   let report: Record<string, any> | null = null;
   try { report = JSON.parse(result.stdout); } catch { report = null; }
   return { status: result.status, report, stderr: result.stderr };
@@ -33,20 +37,30 @@ const editJson = (path: string, edit: (value: Record<string, any>) => void) => {
   writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
 };
 
+/** A starter blueprint manifest whose title and description sit far enough apart to merge separately. */
+const blueprintJson = (description: string) => JSON.stringify({
+  title: "Example", blueprintId: "example", output: { id: "example", noun: "Example", plural: "Examples" }, description,
+}, null, 2) + "\n";
+
 /**
  * An InferOS source with two commits. A carries this checkout's real consumer helpers, wrapper skills
- * and a stand-in fixture validator and lifecycle operator. B changes upstream text the way a release
- * does: a skill the customer will edit, one they will not, the runtime helper, the pnpm version, a
- * starter blueprint, and one new wrapper skill.
+ * and a stand-in fixture validator, lifecycle operator and gatekeeper. B changes upstream text the way
+ * a release does: skills customers edit and ones they do not, a runtime skill pack, the README
+ * template, the runtime helper and its capability table, the pnpm version, a starter blueprint's
+ * source and manifest, the starter fixture and one new wrapper skill; and, in the gatekeeper, a new
+ * write action kind, a Durable Object migration and changed deploy inputs and connection.
  */
 function inferosSource(root: string) {
   const source = join(root, "source");
   execFileSync("git", ["init", "--quiet", source]);
   write(join(source, "package.json"), JSON.stringify({ type: "module", packageManager: "pnpm@11.17.0" }));
+  write(join(source, ".gitignore"), ".wrangler/\n");
   write(join(source, "packages/bundled-blueprints/blueprints/example/files/client.js"), "// upstream blueprint\n");
-  for (const file of ["config.ts", "runtime.ts", "maintenance.ts", "upgrade.ts", "wrapper-files.ts"]) {
+  write(join(source, "packages/bundled-blueprints/blueprints/example/blueprint.json"), blueprintJson("An example."));
+  for (const file of ["config.ts", "runtime.ts", "maintenance.ts", "upgrade.ts", "wrapper-files.ts", "reconcile.ts", "upgrade-review.ts"]) {
     write(join(source, "scripts/consumer", file), read(join(REPO, "scripts/consumer", file)));
   }
+  cpSync(join(REPO, "scripts/consumer/wrapper-templates"), join(source, "scripts/consumer/wrapper-templates"), { recursive: true });
   for (const skill of WRAPPER_SKILLS) write(join(source, ".agents/skills", skill, "SKILL.md"), read(join(REPO, ".agents/skills", skill, "SKILL.md")));
   cpSync(join(REPO, "scripts/consumer/skill-packs"), join(source, "scripts/consumer/skill-packs"), { recursive: true });
   // The real validator needs installed dependencies; this one only asks for a projects list.
@@ -61,16 +75,31 @@ const command = process.argv[2];
 if (command === "reset") { rmSync(".wrangler/state", { recursive: true, force: true }); console.log(JSON.stringify({ ok: true, command })); }
 else { console.log(JSON.stringify({ ok: false, command, listening: false, error: "Nothing listens" })); process.exitCode = 1; }
 `);
+  const gatekeeper = "custom-gatekeepers/gatekeeper-inferops";
+  write(join(source, gatekeeper, "src/inferops.ts"), `export const move = { actionKind: { tag: "inferops.issue-transition", label: "Move an issue" } };\n`);
+  write(join(source, gatekeeper, "cloudflare.config.ts"), `export const migrations = [\n  { tag: "v0", new_sqlite_classes: ["Board"] },\n];\n`);
+  write(join(source, "packages/gatekeeper-github/deploy-inputs.json"), JSON.stringify({ inputs: [{ name: "CLIENT_ID" }] }, null, 2) + "\n");
   const a = commit(source, "A");
   const append = (path: string, text: string) => writeFileSync(join(source, path), read(join(source, path)) + text);
+  const replace = (path: string, from: string, to: string) => writeFileSync(join(source, path), read(join(source, path)).replace(from, to));
   append(".agents/skills/bootstrap-inferos/SKILL.md", "\nUpstream B guidance.\n");
   append(".agents/skills/verify-inferos/SKILL.md", "\nUpstream B verify step.\n");
+  append(".agents/skills/local-coding/SKILL.md", "\nUpstream B runner note.\n");
+  append("scripts/consumer/skill-packs/operate/board-triage/SKILL.md", "\nUpstream B triage step.\n");
+  append("scripts/consumer/wrapper-templates/README.md", "\nUpstream B README note.\n");
   append("scripts/consumer/runtime.ts", "// upstream B\n");
+  replace("scripts/consumer/runtime.ts", "HARNESS_HG_ENABLED: null,", `HARNESS_HG_ENABLED: "packages/harness/src/index.ts",`);
+  replace("scripts/consumer/project-board.json", `"Synthetic operations"`, `"Synthetic operations B"`);
   write(join(source, "package.json"), JSON.stringify({ type: "module", packageManager: "pnpm@11.18.0" }));
   write(join(source, "packages/bundled-blueprints/blueprints/example/files/client.js"), "// upstream blueprint B\n");
+  write(join(source, "packages/bundled-blueprints/blueprints/example/blueprint.json"), blueprintJson("An example, revised in B."));
   const files = join(source, "scripts/consumer/wrapper-files.ts");
   writeFileSync(files, read(files).replace(`"recover-inferos"] as const`, `"recover-inferos", "extra-inferos"] as const`));
   write(join(source, ".agents/skills/extra-inferos/SKILL.md"), "---\nname: extra-inferos\ndescription: New in B.\n---\n");
+  append(join(gatekeeper, "src/inferops.ts"), `export const remove = { actionKind: { tag: "inferops.issue-delete", label: "Delete an issue" } };\n`);
+  replace(join(gatekeeper, "cloudflare.config.ts"), "];", `  { tag: "v1", new_sqlite_classes: ["DeletedIssues"] },\n];`);
+  write(join(source, "packages/gatekeeper-github/deploy-inputs.json"), JSON.stringify({ inputs: [{ name: "CLIENT_ID" }, { name: "APP_SLUG" }] }, null, 2) + "\n");
+  write(join(source, gatekeeper, "connection.json"), JSON.stringify({ scopes: ["project:read", "project:write"] }, null, 2) + "\n");
   const b = commit(source, "B");
   return { source, a, b };
 }
@@ -98,6 +127,7 @@ test("bootstrap records every file it writes with its class and hash", () => {
       assert.equal(record.files[path].class, "copied-template", path);
     }
     assert.equal(record.files[".inferos/runtime.ts"].source, "scripts/consumer/runtime.ts");
+    assert.equal(record.files["README.md"].source, "scripts/consumer/wrapper-templates/README.md");
     for (const path of ["inferos.config.json", "views/operations.json", "workers/hello/src.ts", "fixtures/project-board.json"]) {
       assert.equal(record.files[path].class, "customer-owned", path);
     }
@@ -139,8 +169,11 @@ test("upgrade plans, refuses a dirty tree, then moves the pin keeping every cust
     assert.equal(action(".inferos/runtime.ts"), "update");
     assert.equal(action(".agents/skills/verify-inferos/SKILL.md"), "update");
     assert.equal(action(".agents/skills/extra-inferos/SKILL.md"), "add");
-    assert.equal(action(".agents/skills/bootstrap-inferos/SKILL.md"), "needs-review");
-    assert.equal(action("blueprints/example/files/client.js"), "upstream-changed");
+    // Both sides appended at the end of the file: a conflict, staged for review only.
+    assert.equal(action(".agents/skills/bootstrap-inferos/SKILL.md"), "conflict");
+    // Unedited starters take the target's version; the fixture is only reported.
+    assert.equal(action("blueprints/example/files/client.js"), "update");
+    assert.equal(action("fixtures/project-board.json"), "upstream-changed");
     assert.equal(action("workers/acme/src.ts"), undefined);
     assert.match(report.state, /not reversible/);
     // A plan writes nothing and leaves the pin alone.
@@ -163,11 +196,14 @@ test("upgrade plans, refuses a dirty tree, then moves the pin keeping every cust
     assert.equal(JSON.parse(read(join(target, ".inferos/bootstrap.json"))).revision, b);
     // Customizations kept.
     assert.equal(read(join(target, ".agents/skills/bootstrap-inferos/SKILL.md")), editedSkill);
-    assert.match(read(join(target, `.inferos/state/upgrade/${b}/.agents/skills/bootstrap-inferos/SKILL.md`)), /Upstream B guidance/);
+    const conflicted = read(join(target, `.inferos/state/upgrade/${b}/.agents/skills/bootstrap-inferos/SKILL.md`));
+    assert.match(conflicted, /Upstream B guidance/);
+    assert.match(conflicted, /^<<<<<<< wrapper$/m);
     assert.ok(existsSync(join(target, "workers/acme/src.ts")));
     assert.equal(JSON.parse(read(join(target, "inferos.extensions.json"))).workers.length, 2);
     assert.equal(checkConsumer(target).config.styling.siteName, "Acme Ops");
-    assert.equal(read(join(target, "blueprints/example/files/client.js")), "// upstream blueprint\n");
+    assert.equal(read(join(target, "blueprints/example/files/client.js")), "// upstream blueprint B\n");
+    assert.doesNotMatch(read(join(target, "fixtures/project-board.json")), /Synthetic operations B/);
     // InferOS files refreshed.
     const pkg = JSON.parse(read(join(target, "package.json")));
     assert.equal(pkg.packageManager, "pnpm@11.18.0");
@@ -187,7 +223,7 @@ test("upgrade plans, refuses a dirty tree, then moves the pin keeping every cust
     assert.equal(again.status, 0, again.stderr);
     assert.equal(again.report!.submodule.relation, "same");
     assert.deepEqual(again.report!.files.map((file: { path: string; action: string }) => [file.path, file.action]),
-      [[".agents/skills/bootstrap-inferos/SKILL.md", "needs-review"], ["blueprints/example/files/client.js", "upstream-changed"]]);
+      [[".agents/skills/bootstrap-inferos/SKILL.md", "conflict"], ["fixtures/project-board.json", "upstream-changed"]]);
 
     // The standalone planner refuses to run from a checkout at another revision.
     const elsewhere = spawnSync(process.execPath, [join(REPO, "scripts/consumer/upgrade.ts"), target, a], { encoding: "utf8" });
@@ -210,7 +246,7 @@ test("a wrapper without files.json upgrades conservatively: every differing copi
     assert.equal(plan.status, 0, plan.stderr);
     assert.match(plan.report!.baseline, /^missing/);
     const reviews = plan.report!.files.filter((file: { action: string }) => file.action === "needs-review").map((file: { path: string }) => file.path).toSorted();
-    assert.deepEqual(reviews, [".agents/skills/bootstrap-inferos/SKILL.md", ".agents/skills/verify-inferos/SKILL.md", ".inferos/runtime.ts"]);
+    assert.deepEqual(reviews, [".agents/skills/bootstrap-inferos/SKILL.md", ".agents/skills/local-coding/SKILL.md", ".agents/skills/verify-inferos/SKILL.md", ".inferos/runtime.ts", "README.md"]);
     assert.ok(plan.report!.files.every((file: { action: string; reason?: string }) => file.action !== "needs-review" || /no .inferos\/files.json baseline/.test(file.reason!)));
     // Without a record there is nothing to say about customer-owned starters.
     assert.equal(plan.report!.summary.upstreamChanged, 0);
@@ -225,6 +261,193 @@ test("a wrapper without files.json upgrades conservatively: every differing copi
     assert.equal(record.files[".inferos/runtime.ts"], undefined);
     assert.equal(record.files[".agents/skills/extra-inferos/SKILL.md"].class, "copied-template");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** Insert a line just after a Markdown file's first heading, far from where upstream appends. */
+const afterHeading = (path: string, line: string) => {
+  const text = read(path);
+  const heading = text.indexOf("\n# ");
+  const end = text.indexOf("\n", heading + 1);
+  writeFileSync(path, text.slice(0, end + 1) + "\n" + line + "\n" + text.slice(end + 1));
+};
+
+test("two differently customized wrappers take the same upgrade: clean merges applied, conflicts staged, customizations kept", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-reconcile-"));
+  try {
+    const { source, a, b } = inferosSource(root);
+    const acme = join(root, "acme");
+    const globex = join(root, "globex");
+    for (const target of [acme, globex]) { bootstrapConsumer(target, source, a); commit(target, "bootstrap"); }
+
+    // Acme edits the tops of two skills, its SOP and a blueprint manifest, and adds a Worker and a setting.
+    afterHeading(join(acme, ".agents/skills/bootstrap-inferos/SKILL.md"), "Acme: always bootstrap with the operations profile.");
+    afterHeading(join(acme, "skills/operate/board-triage/SKILL.md"), "Acme: list overdue work first.");
+    afterHeading(join(acme, ".agents/skills/local-coding/SKILL.md"), "Acme SOP: run the runner only on the build host.");
+    editJson(join(acme, "blueprints/example/blueprint.json"), value => { value.title = "Acme example"; });
+    write(join(acme, "workers/acme/src.ts"), "export default { fetch() { return new Response(\"acme\"); } };\n");
+    editJson(join(acme, "inferos.config.json"), value => { value.styling.siteName = "Acme Ops"; });
+    commit(acme, "acme customizations");
+    // Globex appends to the same skill upstream appends to, edits its blueprint code and README, and has its own Worker and density.
+    writeFileSync(join(globex, ".agents/skills/bootstrap-inferos/SKILL.md"), read(join(globex, ".agents/skills/bootstrap-inferos/SKILL.md")) + "\nGlobex: never enable custom Workers.\n");
+    afterHeading(join(globex, "skills/operate/board-triage/SKILL.md"), "Globex: group by assignee.");
+    writeFileSync(join(globex, "blueprints/example/files/client.js"), "// globex blueprint\n");
+    writeFileSync(join(globex, "README.md"), "Globex operations wrapper.\n\n" + read(join(globex, "README.md")));
+    write(join(globex, "workers/globex/src.ts"), "export default { fetch() { return new Response(\"globex\"); } };\n");
+    editJson(join(globex, "inferos.config.json"), value => { value.styling.density = "comfortable"; });
+    commit(globex, "globex customizations");
+    const before = { acmeRunbook: read(join(acme, ".agents/skills/local-coding/SKILL.md")), globexSkill: read(join(globex, ".agents/skills/bootstrap-inferos/SKILL.md")) };
+
+    const plans = Object.fromEntries([acme, globex].map(target => {
+      const plan = wrapper(target, "upgrade", b);
+      assert.equal(plan.status, 0, plan.stderr);
+      return [target, Object.fromEntries(plan.report!.files.map((file: { path: string; action: string }) => [file.path, file.action]))];
+    }));
+    assert.equal(plans[acme][".agents/skills/bootstrap-inferos/SKILL.md"], "merge");
+    assert.equal(plans[acme]["skills/operate/board-triage/SKILL.md"], "merge");
+    assert.equal(plans[acme][".agents/skills/local-coding/SKILL.md"], "merge");
+    assert.equal(plans[acme]["blueprints/example/blueprint.json"], "merge");
+    assert.equal(plans[acme]["blueprints/example/files/client.js"], "update");
+    assert.equal(plans[acme]["README.md"], "update");
+    assert.equal(plans[globex][".agents/skills/bootstrap-inferos/SKILL.md"], "conflict");
+    assert.equal(plans[globex]["skills/operate/board-triage/SKILL.md"], "merge");
+    assert.equal(plans[globex]["blueprints/example/files/client.js"], "conflict");
+    assert.equal(plans[globex]["blueprints/example/blueprint.json"], "update");
+    assert.equal(plans[globex]["README.md"], "merge");
+    assert.equal(plans[globex][".agents/skills/local-coding/SKILL.md"], "update");
+    for (const target of [acme, globex]) assert.equal(plans[target]["fixtures/project-board.json"], "upstream-changed");
+    // A plan merges in a scratch directory only.
+    assert.equal(git(acme, "status", "--porcelain"), "");
+
+    for (const target of [acme, globex]) {
+      const applied = wrapper(target, "upgrade", b, "--apply");
+      assert.equal(applied.status, 0, applied.stderr);
+      assert.equal(git(join(target, "inferos"), "rev-parse", "HEAD"), b);
+    }
+    // Acme: both sides' text in every merged file.
+    const acmeSkill = read(join(acme, ".agents/skills/bootstrap-inferos/SKILL.md"));
+    assert.match(acmeSkill, /Acme: always bootstrap/);
+    assert.match(acmeSkill, /Upstream B guidance/);
+    assert.match(read(join(acme, "skills/operate/board-triage/SKILL.md")), /Acme: list overdue work first\.[\s\S]*Upstream B triage step/);
+    const runbook = read(join(acme, ".agents/skills/local-coding/SKILL.md"));
+    assert.match(runbook, /Acme SOP/);
+    assert.match(runbook, /Upstream B runner note/);
+    assert.notEqual(runbook, before.acmeRunbook);
+    const manifest = JSON.parse(read(join(acme, "blueprints/example/blueprint.json")));
+    assert.deepEqual([manifest.title, manifest.description], ["Acme example", "An example, revised in B."]);
+    assert.equal(read(join(acme, "blueprints/example/files/client.js")), "// upstream blueprint B\n");
+    assert.ok(existsSync(join(acme, "workers/acme/src.ts")));
+    assert.equal(checkConsumer(acme).config.styling.siteName, "Acme Ops");
+    // Globex: conflicts leave the customer's file alone; markers only in the ignored state directory.
+    assert.equal(read(join(globex, ".agents/skills/bootstrap-inferos/SKILL.md")), before.globexSkill);
+    assert.equal(read(join(globex, "blueprints/example/files/client.js")), "// globex blueprint\n");
+    const marked = read(join(globex, `.inferos/state/upgrade/${b}/blueprints/example/files/client.js`));
+    assert.match(marked, /^<<<<<<< wrapper\n\/\/ globex blueprint\n\|\|\|\|\|\|\| original\n\/\/ upstream blueprint\n=======\n\/\/ upstream blueprint B\n>>>>>>> inferos /);
+    for (const path of git(globex, "ls-files").split("\n")) {
+      if (existsSync(join(globex, path)) && !path.startsWith("inferos")) assert.doesNotMatch(read(join(globex, path)), /^<<<<<<< /m, path);
+    }
+    assert.match(read(join(globex, "README.md")), /^Globex operations wrapper\.[\s\S]*Upstream B README note/);
+    assert.match(read(join(globex, "skills/operate/board-triage/SKILL.md")), /Globex: group by assignee\.[\s\S]*Upstream B triage step/);
+    assert.ok(existsSync(join(globex, "workers/globex/src.ts")));
+    assert.equal(checkConsumer(globex).config.styling.density, "comfortable");
+    // Merged files are recorded against the target's text, so the next upgrade merges from there.
+    const record = JSON.parse(read(join(acme, FILES_MANIFEST)));
+    assert.equal(record.files[".agents/skills/local-coding/SKILL.md"].sha256, sha256(read(join(source, ".agents/skills/local-coding/SKILL.md"))));
+    const globexRecord = JSON.parse(read(join(globex, FILES_MANIFEST)));
+    assert.equal(globexRecord.files["blueprints/example/files/client.js"].sha256, sha256("// upstream blueprint\n"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a reviewed upgrade commits a branch with the review summary, opens a PR, and carries no secrets, grants or state", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-reviewed-"));
+  try {
+    const { source, a, b } = inferosSource(root);
+    const target = committedWrapper(root, source, a);
+    const origin = join(root, "origin.git");
+    execFileSync("git", ["init", "--quiet", "--bare", origin]);
+    git(target, "remote", "add", "origin", origin);
+    git(target, "branch", "-M", "main");
+    afterHeading(join(target, ".agents/skills/local-coding/SKILL.md"), "Our SOP: tokens live in .dev.vars only.");
+    commit(target, "customize");
+    // Local secrets and state the upgrade must never carry: ignored files with fake tokens.
+    const devToken = "fake-dev-vars-token-7c1d9e2f4a";
+    const stateToken = "ghp_" + "f".repeat(36);
+    writeFileSync(join(target, ".dev.vars"), `INFEROPS_SERVICE_KEY="${devToken}"\nPORT=8787\n`);
+    write(join(target, ".inferos/state/runner/session.json"), JSON.stringify({ token: stateToken, grant: "project/dispatch" }));
+    write(join(target, "inferos/.wrangler/state/v3/do/grants.sqlite"), `grant ${stateToken}`);
+    assert.equal(git(target, "status", "--porcelain"), "");
+    const bin = join(root, "bin");
+    const ghArgs = join(root, "gh-args.txt");
+    write(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${ghArgs}"\necho https://github.com/globex/wrapper/pull/7\n`);
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    const env = { ...IDENTITY, PATH: `${bin}:${process.env.PATH}` };
+
+    assert.equal(wrapperWith(env, target, "upgrade", b, "--branch", "x").status, 2, "--branch needs --apply");
+    assert.equal(wrapperWith(env, target, "upgrade", b, "--apply", "--open-pr", "globex/wrapper").status, 2, "--open-pr needs --branch");
+    const result = wrapperWith(env, target, "upgrade", b, "--apply", "--branch", "inferos-upgrade-b", "--open-pr", "globex/wrapper");
+    assert.equal(result.status, 0, result.stderr + JSON.stringify(result.report?.reviewed));
+    const reviewed = result.report!.reviewed;
+    assert.deepEqual([reviewed.branch, reviewed.base, reviewed.committed, reviewed.findings], ["inferos-upgrade-b", "main", true, []]);
+    assert.equal(reviewed.pr.url, "https://github.com/globex/wrapper/pull/7");
+    const gh = read(ghArgs).split("\n");
+    assert.deepEqual(gh.slice(0, 9), ["pr", "create", "-R", "globex/wrapper", "--base", "main", "--head", "inferos-upgrade-b", "--title"]);
+    assert.equal(git(origin, "rev-parse", "inferos-upgrade-b"), reviewed.commit);
+    assert.equal(git(target, "rev-parse", "--abbrev-ref", "HEAD"), "inferos-upgrade-b");
+    assert.equal(git(target, "status", "--porcelain"), "");
+
+    const summary = read(join(target, reviewed.summary));
+    assert.equal(reviewed.summary, `.inferos/state/upgrade/${b}/UPGRADE.md`);
+    for (const section of ["Code", "Configuration", "Capabilities", "Connections and OAuth", "Data and Durable Object migrations", "Approvals and action kinds", "Reconciliation", "Portability"]) {
+      assert.match(summary, new RegExp(`^## ${section}$`, "m"), section);
+    }
+    assert.match(summary, /^1 commit; /m);
+    assert.match(summary, new RegExp(`${b.slice(0, 7)} B`));
+    assert.match(summary, /added `HARNESS_HG_ENABLED: "packages\/harness\/src\/index.ts"`/);
+    assert.match(summary, /`custom-gatekeepers\/gatekeeper-inferops\/connection.json`|A custom-gatekeepers\/gatekeeper-inferops\/connection.json/);
+    assert.match(summary, /packages\/gatekeeper-github\/deploy-inputs.json/);
+    assert.match(summary, /new: `\{ tag: "v1", new_sqlite_classes: \["DeletedIssues"\] \}`/);
+    // The new write operation is flagged for review, and no existing authority moves with it.
+    assert.match(summary, /\*\*new action kind `inferops.issue-delete`: review\*\*/);
+    assert.doesNotMatch(summary, /new action kind `inferops.issue-transition`/);
+    assert.match(summary, /stores no grants, bindings, approvals or auto-approval rules/);
+    assert.match(summary, /\| `.agents\/skills\/local-coding\/SKILL.md` \| copied-template \| merge \|/);
+    // The commit carries exactly the upgrade, with the summary as its message.
+    assert.equal(git(target, "log", "-1", "--format=%s"), `Upgrade InferOS to ${b.slice(0, 12)}`);
+    assert.match(git(target, "log", "-1", "--format=%b"), /## Approvals and action kinds/);
+    const changed = git(target, "diff", "--name-only", "main", "inferos-upgrade-b").split("\n");
+    assert.ok(changed.includes("inferos") && changed.includes(FILES_MANIFEST));
+    assert.ok(changed.every(path => !/^(\.dev\.vars|\.env|\.inferos\/state\/)|\.wrangler\//.test(path)), changed.join(","));
+    const diff = execFileSync("git", ["-C", target, "diff", "main", "inferos-upgrade-b"], { encoding: "utf8" });
+    for (const secret of [devToken, stateToken, "project/dispatch"]) {
+      assert.equal(diff.includes(secret), false);
+      assert.equal(git(target, "log", "-1", "--format=%B").includes(secret), false);
+    }
+    assert.deepEqual(scanPortable(changed, diff, localSecretValues(target)), []);
+    // Nothing in the wrapper records a grant or credential, before or after.
+    assert.doesNotMatch(read(join(target, "inferos.config.json")), /grant|token|secret/i);
+
+    // A second reviewed upgrade cannot reuse the branch.
+    const again = wrapperWith(env, target, "upgrade", b, "--apply", "--branch", "inferos-upgrade-b");
+    assert.equal(again.status, 1);
+    assert.match(again.stderr, /already exists/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("merge policy, review parsing and the portability scan", () => {
+  const text = Buffer.from("text\n");
+  assert.equal(mergePolicy("skills/a/SKILL.md", text).kind, "text");
+  assert.equal(mergePolicy("blueprints/a/blueprint.json", text).kind, "json");
+  assert.equal(mergePolicy(".inferos/runtime.ts", text).kind, "review");
+  assert.equal(mergePolicy("fixtures/project-board.json", text).kind, "review");
+  assert.equal(mergePolicy("blueprints/a/icon.png", Buffer.from([0x89, 0x50, 0, 1])).kind, "review");
+  assert.equal(exportBlock(`export const migrations: X[] = [\n  { tag: "v0" },\n];`, "migrations"), `[\n  { tag: "v0" },\n]`);
+  assert.equal(exportBlock("const other = 1;", "migrations"), null);
+  const secret = "s3cret-value-from-dev-vars";
+  assert.deepEqual(scanPortable(["README.md"], "plain text", [secret]), []);
+  assert.deepEqual(scanPortable([".dev.vars", "inferos/.wrangler/state/x", ".inferos/state/runner/a"], "", []).length, 3);
+  assert.deepEqual(scanPortable([], `+KEY=${secret}`, [secret]), ["a value from the wrapper's .dev.vars or .env files"]);
+  const findings = scanPortable([], "+ token ghp_" + "a".repeat(36) + " and sk-" + "b".repeat(24) + "\n-----BEGIN RSA PRIVATE KEY-----", []);
+  assert.deepEqual(findings, ["a private key", "a GitHub token", "an API secret key"].map(item => item.replace(/^an /, "a ")));
+  assert.equal(findings.some(finding => finding.includes("ghp_")), false);
 });
 
 test("verify prints one JSON report with a status and reasons per check", () => {
