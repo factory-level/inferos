@@ -33,7 +33,8 @@ import {
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
   connect, listConnectedAccounts, logIn, MAX_OBSERVER_PROMPTS, nextUsernames,
-  ObserverConfigRecorder, signUp, stubFor, waitFor, type ConnectedAccount,
+  ObserverConfigRecorder, overFreshConnection, settled, signUp, stubFor, waitFor,
+  type ConnectedAccount,
 } from "../src/rpc-client.js";
 
 const INFEROPS_GATEKEEPER_DIR =
@@ -559,52 +560,6 @@ async function setVar(name: "INFEROPS_ENABLED" | "CODING_WORKBENCH_ENABLED", ena
   await settled(harness.url);
 }
 
-/**
- * Wait until the reloaded server answers steadily. Right after `server.update` the runtime can
- * still be restarting, so a WebSocket opened at once is sometimes dropped mid-test ("WebSocket
- * connection failed"). Two fresh connections in a row must each answer pings spread over about a
- * second; any failure starts the count again.
- */
-async function settled(url: URL): Promise<void> {
-  const pause = (ms: number) => new Promise(done => setTimeout(done, ms));
-  let last: unknown;
-  let steady = 0;
-  for (let attempt = 0; attempt < 40 && steady < 2; attempt++) {
-    const api = connect(url);
-    try {
-      for (let ping = 0; ping < 4; ping++) {
-        await api.ping();
-        await pause(250);
-      }
-      steady++;
-    } catch (error) {
-      last = error;
-      steady = 0;
-      await pause(500);
-    } finally {
-      api[Symbol.dispose]();
-    }
-  }
-  if (steady < 2) throw new Error(`The reloaded server never settled: ${String(last)}`);
-}
-
-/**
- * Run `phase` over fresh connections until one survives. Even a settled server can drop a socket
- * opened just after a reload, which surfaces as "WebSocket connection failed." (thrown, or as the
- * message `failure` returns). Only side-effect-free phases may be repeated; any other failure is
- * the test's real result.
- */
-async function overFreshConnection<T>(phase: () => Promise<T>): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await phase();
-    } catch (error) {
-      if (attempt >= 3 || !String(error).includes("WebSocket connection failed")) throw error;
-      await settled(harness.url);
-    }
-  }
-}
-
 const setEnabled = (enabled: boolean) => setVar("INFEROPS_ENABLED", enabled);
 
 const ENG_DISPATCH = `inferops://acme.operations/project/dispatch/ENG`;
@@ -717,7 +672,7 @@ describe("coding dispatch", () => {
 
     await setVar("CODING_WORKBENCH_ENABLED", false);
     try {
-      await overFreshConnection(async () => {
+      await overFreshConnection(() => harness.url, async () => {
         const api = await logIn(connect(harness.url), hal.username);
         const reopened = await api.openGadget(gadgetId);
         const stale = await (await reopened.getGatekeeperById(connectionId)).openSession() as
@@ -761,7 +716,7 @@ describe("the deployment switch", () => {
 
     await setEnabled(false);
     try {
-      await overFreshConnection(async () => {
+      await overFreshConnection(() => harness.url, async () => {
         const off = await reopen();
         const before = fake.requests.length;
         expect(await failure(off.session.readBoard()))
@@ -777,7 +732,7 @@ describe("the deployment switch", () => {
       await setEnabled(true);
     }
 
-    const on = await overFreshConnection(async () => {
+    const on = await overFreshConnection(() => harness.url, async () => {
       const reopened = await reopen();
       expect((await reopened.session.readBoard()).project.identifier).toBe("ENG");
       return reopened;
@@ -787,7 +742,7 @@ describe("the deployment switch", () => {
       if (!String(error).includes("WebSocket connection failed")) throw error;
       await settled(harness.url);
       if (fake.issue("ENG-2").stateId !== DONE.id) {
-        await overFreshConnection(async () => (await reopen()).ws.approveAction(action.id));
+        await overFreshConnection(() => harness.url, async () => (await reopen()).ws.approveAction(action.id));
       }
     });
     expect(fake.issue("ENG-2").stateId).toBe(DONE.id);

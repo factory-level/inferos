@@ -17,6 +17,8 @@ covers:
   - custom-gatekeepers
   - packages/router
   - packages/integration-tests
+  - scripts/preview/smoke.ts
+  - scripts/preview/smoke.test.ts
 updated: 2026-10-03
 ---
 
@@ -24,7 +26,7 @@ updated: 2026-10-03
 
 ## Overview
 
-The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)); wrapper-aware cloud packaging and cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)) are not implemented. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
+The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)). For local-to-cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)), the production router's request path is exercised in workerd and an opt-in smoke recipe checks a deployed instance (see [router-path parity](#router-path-parity)); wrapper-aware cloud packaging is not implemented. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
 
 ## Components
 
@@ -42,7 +44,8 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `scripts/worker-dirs.ts` | Worker discovery roots: this checkout's `packages/` and `custom-gatekeepers/`, plus a wrapper's `gatekeepers/` when a consumer root is passed. |
 | `scripts/consumer/gatekeepers.ts` | Validates, generates and drift-checks a wrapper's own gatekeepers for local development. |
 | `packages/router` | Public routing and frontend assets/backend fallback. |
-| `packages/integration-tests` | Real Workers and RPC test harness with external network interception. |
+| `packages/integration-tests` | Real Workers and RPC test harness with external network interception; optionally boots the production router as the primary Worker. |
+| `scripts/preview/smoke.ts` | Opt-in, read-only smoke check of a deployed instance's public origin (app shell, `/api` handshake, gatekeeper routes, OAuth redirect origins). |
 
 ## Data and Control Flow
 
@@ -100,6 +103,14 @@ The connection is found through the native action log rather than a file: every 
 
 `packages/integration-tests/__tests__/local-lifecycle-verify.test.ts` runs both operator scripts as subprocesses against the real Workshop and the real InferOps gatekeeper (mock data) under `createTestHarness` with the `NetworkInterceptor` installed: verify fails closed before seeding (naming `signIn`, `inferops`, `workspace`), seeding twice finds the same connection and leaves one pending move, the token and password never reach the output, and the escape list is empty, which is what "an offline fixture run makes no external request" means here. The gatekeeper is validated into its own `.wrangler` by the `build:inferops-gatekeeper` task (after its configurator UI is built) before the suite starts, the same way the fixture gatekeeper is.
 
+## Router-path parity
+
+`startHarness({ router: {} })` (`packages/integration-tests/src/harness.ts`) boots `packages/router` from its checked-in `wrangler.jsonc` as the harness's primary Worker, ahead of the Workshop and the gatekeepers, so the harness URL is the deployment's public origin. The router keeps its production assets stanza (SPA fallback and worker-first paths) with `assets.directory` pointed at `fixtures/router-assets`, a two-file stand-in for the frontend build; it binds `WORKSHOP_BACKEND` and one `GATEKEEPER_<binding>` per gatekeeper to the gatekeeper's default export, the bindings the deploy service adds. Without the option the Workshop stays primary, so other suites are unchanged. The router is a Worker input of the suite (`src/worker-inputs.ts`), so watch mode reruns on a router change.
+
+`__tests__/router-parity.test.ts` sends every request to that origin over real HTTP: static assets and the SPA fallback, `/api` worker-first, the gatekeeper and unbound gatekeeper routes, the Cap'n Web WebSocket, the InferOps gatekeeper's InferLab sign-in legs (asserting the provider `redirect_uri` is on the public origin), a board read recorded as an observation, one approval applied once, a restart of all three Workers via `server.update` with Durable Object state kept, and a reconnect. Reloads wait with `settled()` and retry side-effect-free phases with `overFreshConnection()`, now exported from `src/rpc-client.ts` and shared with `inferops-isolation.test.ts`, because a WebSocket opened just after a reload can be dropped.
+
+`scripts/preview/smoke.ts` is the cloud half: given a deployed base URL and an optional Access service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`), it checks the app shell and SPA fallback, a `/api` WebSocket handshake (upgraded or auth-challenged, never 404 or 5xx), each gatekeeper route answering from a gatekeeper rather than the shell, and, for connect URLs passed with `--connect-url`, the provider `redirect_uri` origin. It only sends GETs and closes the handshake at once, prints a JSON report and exits 0, 1 or 2. Its checks are pure classifiers over a response, which `smoke.test.ts` drives against a local fake server under `node --test`. The [parity wiki](../wiki/local-cloud-parity.md) holds the matrix, the recorded runtime versions and the recipe.
+
 ## Configuration
 
 cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.jsonc. The default frontend and backend ports are 3000 and 8787. A root `.dev.vars`, then a root `.env`, fill variables the shell has not set. Remote Workers AI requires account access. See the [settings](../wiki/configuration-reference.md) and [parity](../wiki/local-cloud-parity.md) wiki pages.
@@ -116,6 +127,7 @@ The dev server resolves these before it writes the per-Worker dev configs:
 - Wrapper gatekeepers are discovered for local development only. The release manifest does not package them (cloud parity, [#11](https://github.com/factory-level/inferos/issues/11)), the gatekeeper UI pre-flight (`vp run build:configurator`/`build:app:dev`) covers only workspace packages, and a wrapper gatekeeper's dependencies must resolve from the wrapper, since it is not a package of the pinned workspace. A reviewed topology parity contract remains planned.
 - A generated wrapper exposes `pnpm local` by delegating to the pinned operator (see [consumer configuration](consumer-configuration.md#data-and-control-flow)), which runs from the submodule: `status` lists the Workers the pinned checkout would bind rather than the wrapper's custom Workers and gatekeepers, and `status` reads InferOps connection variables from the shell and the submodule's local env files, not the wrapper's.
 - `stop` relies on the dev server's record file; a stack started by other means (or before this change) is reported but never signalled. Startup-failure cleanup remains the dev server's own responsibility (its pre-flight and signal handlers), not a lifecycle command.
+- The cloud smoke recipe has not been run against a Cloudflare deployment, and no CI job runs it; Cloudflare Access, real OAuth provider registration and deployed bindings remain unproven. A wrapper's own gatekeeper is not booted by the router-parity suite (it needs a generated wrapper and its build); its routing rests on the same `GATEKEEPER_<NAME>` rule and on `scripts/consumer/gatekeepers.test.ts`.
 - Offline interception of external traffic is enforced in the integration harness, where Worker subrequests pass through Node. `pnpm local verify` against a running Wrangler cannot intercept the Workers' own traffic; it reports the configured mode instead.
 - `seed` creates the demo canvas screen only when `inferos.canvas.json` declares one; the synthetic board itself comes from the InferOps gatekeeper's mock data, which is the "mock business operations" the MVP note on #10 excludes from the final walkthrough.
 
@@ -123,7 +135,7 @@ The dev server resolves these before it writes the per-Worker dev configs:
 
 - Choose the wrapper configuration schema after comparing the upstream starter contract with this fork.
 - Whether wrapper gatekeepers should stay behind `features.customCloudflareCode`, which the design describes only for the extension manifest, or get their own switch.
-- Cloud auth and real binding parity still need proof.
+- Cloud auth and real binding parity still need proof: whether the smoke recipe should become a gated CI job against disposable previews.
 
 ## Evidence
 
