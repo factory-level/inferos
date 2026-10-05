@@ -24,6 +24,7 @@
   // globals. Their separate tsconfig.operator.json is checked by the backend build without widening
   // every build script.
   "exclude": [
+    "../packages/workshop-backend/scripts/propose-recipe.ts",
     "../packages/workshop-backend/scripts/initialize-consumer-profile.ts",
     "../packages/workshop-backend/scripts/dev-setup.ts",
     "../packages/workshop-backend/scripts/dev-verify.ts",
