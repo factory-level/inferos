@@ -69,7 +69,7 @@ Durable views are released as a bounded slice (#34, MVP scope in #1): the one pr
 - `modeForPath` counts the workspace's own canvas (`/workspace/$id/inferops-canvas`) as Operate for the shell's Build | Operate toggle, yet it is the one surface that offers coding dispatch (its viewers hold the workspace's build role, and it is not the Operate session). Whether the coding control should move to a Build-only surface once role consoles land ([#106](https://github.com/factory-level/inferos/pull/106)) is open.
 - Choose ownership and persistence for shared canvas configuration; current InferOps pins are personal and cannot simply be widened.
 - Decide whether the canonical InferOps widget client package can be safely adapted to Kumo and capability RPC or needs a thin host-specific renderer.
-- Set measured payload, latency and memory budgets from representative device/network fixtures. Proposed starting budgets, not decisions, from the [baseline](#kanban-performance) (the local browser run compares against them, but they await owner agreement): a board payload to the browser of at most 256 KB (about 800 cards at the synthetic card size) before paging is required; at most one `readBoard()` per target per demand, whatever the number of cards (held by tests today); adapter-side work per landed read (decode, land, render prep) under 4 ms for 500 cards on a desktop-class CPU, so under 16 ms with a 4x CPU throttle; and, once a browser run exists, p95 board load under 1.5 s and p95 move-to-pending feedback under 100 ms on a mid-range laptop over a fast 4G profile. Long-task and memory budgets wait for that browser run.
+- Agree measured payload, latency, long-task and memory budgets from representative device/network fixtures. The [paired windowing measurements and proposed ceilings](#kanban-performance) are recorded below. Owner agreement and the decision on live-provider/shaped-WebSocket validation are deferred to [#158](https://github.com/factory-level/inferos/issues/158), Wave 5; no numeric budget is agreed.
 - The board DTO has no paging: `readBoard()` returns every column and card of the project, and every refresh re-reads it whole. A proposal for InferOps (an upstream contract change, so a cross-repo decision under `BoardResponseSchema`): (1) a column page, `GET` board with `?limit=<n>&cursor=<opaque>` per state returning `columns[].{state, issues, nextCursor, total}`, so a card shows the first page of each column and its count; (2) a delta read, `?since=<board revision>` returning the changed and removed issue ids since an opaque board-level revision (a new `boardRevision` on the response, monotonic per project), falling back to a full read when the revision is too old. The gatekeeper would expose both as optional `readBoard({ limit, cursor, since })` arguments with the same capability scope, and the adapter would keep per-target pages and apply deltas under its existing `wanted`/`applied` clocks. Whether InferOps can provide a board-level revision cheaply is open. The provider contract request is tracked in [factory-level/inferops#2335](https://github.com/factory-level/inferops/issues/2335); it is not implemented by card windowing.
 
 ## Evidence
@@ -182,7 +182,7 @@ A card shows one pending badge, most specific first: its own move (*Proposing mo
 
 ## Kanban performance
 
-Tracking issue [#28](https://github.com/factory-level/inferos/issues/28). Instrumentation, an adapter-side baseline and a local browser run against the mock gatekeeper exist; nothing has been measured against a live InferOps, and no budget is agreed (proposals are under [Open Questions](#open-questions), compared below).
+Implementation tracking issue [#28](https://github.com/factory-level/inferos/issues/28) is closed after windowing and re-measurement; the owner directed remaining human input into follow-up [#158](https://github.com/factory-level/inferos/issues/158). Instrumentation, an adapter-side baseline and a local browser run against the mock gatekeeper exist; nothing has been measured against a live InferOps, and no budget is agreed (proposals are under [Open Questions](#open-questions), compared below).
 
 **Read metrics.** `features/canvas/boardMetrics.ts` is an optional recorder `BoardData` takes as `metrics`. Per `readBoard()` it records the duration from read start (including the session lookup of a first read) to the result, the UTF-8 byte length of the result as JSON, and the outcome: `applied`, `unbound`, `superseded` (lost to a newer read, or no card left to show it) or `failed`. It also counts reads started and *shared demands* (a card served by an existing entry, or a demand joined to a queued or in-flight read). Snapshots give the counts, nearest-rank p50/p95 latency and last/max payload over the last 200 reads. Nothing about a board is kept: no target, content or identity. `useBoardData` creates one per scope only when `import.meta.env.DEV`, and exposes them as `window.__inferosBoardMetrics()` in development builds; production adapters have none and pay nothing. Sizing a payload serializes it, so metrics roughly double the adapter's per-read cost on large boards (below).
 
@@ -271,6 +271,27 @@ Ten keyboard moves on distinct issues per row, measured from the actual Enter ev
 | PERF x4 | 4× | after | 81 / 144 ms | 330 / 461 ms |
 
 Windowing reduces initial DOM elements by 83.5% for x1 and 85.1% for x4; heap drops from about 31/55MiB to 12/16MiB. The p95 local move badge falls from 107→29ms and 233→36ms unthrottled, and 570→83ms and 952→144ms at 4× CPU. Startup still includes a worst 1,148ms task under the throttled x4 profile (down from 2,075ms); reducing issue-card rendering does not eliminate the page’s initial load cost. Host contention and ten-sample tails remain noisy. The earlier proposed 100ms move limit holds for both unthrottled views and throttled x1, but throttled x4 needs an explicit budget decision. Numeric ceilings remain proposals until the owner’s agreement is recorded.
+
+
+**Budget decision — proposed 2026-10-04, not agreed; decision deferred to [#158](https://github.com/factory-level/inferos/issues/158).** On 2026-10-04 the owner directed completion of Wave 4 with human input deferred into issues. #28 closes on the implemented windowing, pane preloading, verification and re-measurement; the follow-up owns explicit agreement or revision of these ceilings and recording the eventual agreement date. This scope split does not approve the proposed numbers. These budgets cover the local 500-issue PERF x1/x4 **initial viewport** under the conditions above (x4 initially loads two widgets). They do not claim a live-provider, shaped-WebSocket, arbitrary-device or all-widgets-loaded guarantee.
+
+| Metric | Unthrottled ceiling | 4× CPU + Fast 4G ceiling | Highest observed, 1× / 4× |
+| --- | --- | --- | --- |
+| p95 viewport load | 1,500ms | 4,000ms | 777 / 3,672ms |
+| p95 local move-to-proposing | 100ms | 200ms | 36 / 144ms |
+| p95 queued/awaiting feedback | 500ms | 750ms | 319 / 461ms |
+| Median long-task total per load | 150ms | 1,000ms | 108 / 851ms |
+| Worst individual long task | 200ms | 1,250ms | 132 / 1,148ms |
+| Median long-task count per load | 2 | 8 | 1 / 6 |
+| Post-GC heap | 20MiB | 20MiB | 16.1 / 16.0MiB |
+| Initial DOM element count | 1,600 | 1,600 | 1,320 / 1,320 |
+| Board payload per read | 256KiB | 256KiB | 153.9 / 153.9KiB |
+| Reads per target per demand | 1 | 1 | 1 / 1 |
+| Adapter decode/land/render-prep CPU, 500 issues | 4ms | 16ms | Earlier adapter baseline about 0.5ms; 4× is a scaling allowance |
+
+All paired browser rows meet these proposed ceilings. The long-task ceiling explicitly includes startup work, which still has a 1.148s worst task at 4× CPU. The separate all-four-widgets scroll-through count is 2,766 DOM elements, outside the initial-viewport budget’s scope. Larger full-board payloads remain an upstream paging/delta follow-up ([inferops#2335](https://github.com/factory-level/inferops/issues/2335)); the 256KiB ceiling is a fixture budget and paging threshold, not a newly enforced runtime rejection.
+
+Additional browser checks passed for a keyboard move into destination position 85 with focus retained, and a 390px viewport with no document-level horizontal overflow.
 
 ## Action attribution
 
