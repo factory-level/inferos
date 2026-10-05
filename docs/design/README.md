@@ -24,3 +24,9 @@ Create documents from [`_template.md`](_template.md).
 | [Connection packages and reviewed fork updates](connection-extensions.md) | draft | Repeatable Gatekeeper connection packages and reviewed upgrades of customized customer repositories |
 | [External-agent platform integrations](agent-platform-integrations.md) | draft | Governed capability bridge for Harness HG and other external agent platforms |
 | [Native agent deployments](agent-deployments.md) | draft | Persistent native persona/skill agent deployments with scoped identity and lifecycle controls |
+
+## Wave 5 review artifacts
+
+- [Operate space and publication review](operate-publication.md) — #155; proposed container and review journey, no runtime additions.
+- [Approval roles and restricted-data policy](operate-policy.md) — #65; authority and inference policy review.
+- [Provider-neutral external-agent contract](external-agent-contract.md) — #79/#80; proposed vocabulary and fixtures, no adapter.

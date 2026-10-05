@@ -1,6 +1,6 @@
 ---
 title: Research source ledger
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 
 # Research source ledger
@@ -70,3 +70,26 @@ Reviewed 2026-10-01. Sources establish the facts described in the linked wiki to
 High confidence: inspected native boundaries, generated config ownership, existing board/pin shapes and the distinction between human presence and proposed agent activity. Provisional: wrapper schema reuse, external API auth/idempotency, reusable artifact compatibility and performance budgets. Unresolved: ChatGPT personal Workers eligibility, production medical/industrial requirements, actual providers for many secondary-vertical rows and live behavior of proposed adapters.
 
 No new provider login, cloud deployment, model inference, clinical workflow or industrial control was executed for this documentation release. No software performance results are claimed. The follow-up research issues require provider-specific and fixture/live evidence before production claims.
+
+## Wave 5 refresh — 2026-10-04
+
+Current InferOS code audit: [`21708d3449a482843e13cb2268d1ae79451c7dfb`](https://github.com/factory-level/inferos/tree/21708d3449a482843e13cb2268d1ae79451c7dfb). This supersedes the 2026-10-01 implementation inventory for wrapper intake/upgrade, gatekeeper packages, published installs, Operate and Kanban. Earlier repository rows remain provenance for their original research, not a claim they were freshly inspected. InferOps contract #2326 remains open; its current local checkout is `abeca60a`, not a newly verified external-agent provider.
+
+The following primary pages were reopened and read, not merely checked for HTTP success:
+
+| Source | Refreshed finding / evidence limit |
+| --- | --- |
+| [Microsoft Field Service](https://learn.microsoft.com/en-us/dynamics365/field-service/overview) | Work-order dispatch includes resource availability and mobile/offline concerns; a Kanban transition alone does not implement dispatch optimization |
+| [Jira Service Management REST](https://developer.atlassian.com/cloud/jira/service-desk/rest/intro/) | Source roles/permissions, authentication and pagination remain provider requirements |
+| [GitHub environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) | Provider deployment protections remain authoritative; a native approval is not a deployment bypass |
+| [OPC UA Part 2](https://reference.opcfoundation.org/specs/OPC-10000-2/full) | Application/site security is broader than protocol security; no industrial-control suitability is established |
+| [FHIR security](https://hl7.org/fhir/security.html) | Data shape alone does not supply deployment security or patient authorization |
+| [HHS cloud guidance](https://www.hhs.gov/hipaa/for-professionals/special-topics/health-information-technology/cloud-computing/index.html) | Applicability, agreements and risk assessment require customer review; synthetic fixtures are not compliance evidence |
+| [Cloudflare service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/) | Native Worker-to-Worker interaction is distinct from a public external-agent authentication endpoint |
+| [HubSpot contacts](https://developers.hubspot.com/docs/api-reference/legacy/crm/objects/contacts/guide) | Contact API is a representative CRM surface; no customer mapping or connector proof |
+| [Shopify webhook verification](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries) | Authenticating webhook deliveries is a provider integration requirement; it does not prove fulfillment semantics |
+| [OpenAI plan overview](https://developers.openai.com/siwc/token-sharing-open-source), [VM procedure](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms) | Remotely hosted app eligibility remains a separate process; the VM procedure does not establish Workers eligibility |
+
+A guessed OPC version-specific URL failed; the canonical Part 2 full page above succeeded. Secondary-vertical references not listed here retain their 2026-10-01 review date and provisional compatibility status; they were not silently redated. Repository-internal Markdown links are checked with `pnpm docs:check`. A retrievable provider page does not prove an integration.
+
+Product inputs were read with the Obsidian CLI from the `authored` vault: publication review, IAM surface/role contract, access review, mock-model and industry-pack notes. Their statuses are proposals/preview without new product proof. Pinned publication and Build/Use implementation claims are reconciled in [the capability inventory](extension-capabilities.md). Company-specific roles, review UI, pack migrations and production proof remain separate gaps. Harness HG is completely deferred; its notes create no Wave 5 implementation scope.

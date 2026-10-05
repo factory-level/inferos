@@ -148,3 +148,7 @@ Against [the design](../design/operate-mode.md):
 
 - When the event log should start compacting (by size or age), given that subject entries are kept.
 - Whether a cross-person subject trail is wanted, which would need a per-subject log rather than reads over each person's logs.
+
+## Wave 5 design boundary
+
+The [publication review](../design/operate-publication.md) and [approval/provider policy](../design/operate-policy.md) are proposed review artifacts, not new runtime behavior. #136/#149 already implement pinned installs, version-specific binding snapshots and explicit upgrades. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.

@@ -8,6 +8,10 @@ updated: 2026-10-02
 
 Tracking epic: [#52](https://github.com/factory-level/inferos/issues/52); roadmap: [#1](https://github.com/factory-level/inferos/issues/1); provider and consumer companions: [factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326) and [factory-level/inferops#2316](https://github.com/factory-level/inferops/issues/2316). Decision record: [ADR 0003](../adr/0003-distinct-agent-capabilities.md).
 
+## Wave 5 disposition
+
+Harness HG and all #81 work are completely deferred by the owner. No HG research, adapter/configuration, fixture, conformance or runtime-control work is included. The historical requirements below remain backlog, not current delivery scope. Wave 5 prepares only the [provider-neutral contract](external-agent-contract.md) and review scenarios for #79/#80. No runtime bridge or production client is implemented.
+
 ## Purpose
 
 Let Harness HG and other agent platforms install an integration that operates a customer's InferOS, InferOps and InferMind through the same governed capabilities, without requiring Harness HG, replacing those platforms' runtimes, or duplicating business APIs.
