@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Button, Dialog, Select } from '@cloudflare/kumo'
 import type { Issue, Run } from '@inferos/gatekeeper-inferops/src/types'
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import type { BoardActivity, BoardActivityItem } from './boardActivity'
 import type { ProposalResult } from './boardData'
 import type { CodingDispatchState } from './codingDispatch'
@@ -38,7 +37,6 @@ const newest = (items: readonly BoardActivityItem[]) => items.toSorted((a, b) =>
  * InferOps, says what happened after. Nothing here is shown as done before InferOps reports it.
  */
 export const KanbanCodingForm = ({ issue, run, coding }: { issue: Issue; run: Run | undefined; coding: CodingControl }) => {
-  const selectPortalContainer = useDialogSelectPortalContainer()
   const [repoChoice, setRepoChoice] = useState<string | null>(null)
   const [proposal, setProposal] = useState<Proposal | null>(null)
   const { state } = coding
@@ -107,7 +105,7 @@ export const KanbanCodingForm = ({ issue, run, coding }: { issue: Issue; run: Ru
           event.preventDefault()
           if (repoId) void propose('dispatch', () => coding.onDispatch(issue, repoId))
         }}>
-          <Select container={selectPortalContainer} label="Repository" value={repoId ?? ''}
+          <Select label="Repository" value={repoId ?? ''}
             renderValue={value => selectable.find(repo => repo.id === value)?.slug ?? ''}
             onValueChange={value => { if (value) setRepoChoice(String(value)) }}>
             {selectable.map(repo => <Select.Option key={repo.id} value={repo.id}>{repo.slug}</Select.Option>)}

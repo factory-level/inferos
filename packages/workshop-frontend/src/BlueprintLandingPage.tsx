@@ -21,7 +21,6 @@ import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControl
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
 import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
-import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
 import { openConnectWindow } from './connectHandoff'
 
 interface Props {
@@ -67,7 +66,6 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   // Per-binding URL collector functions exposed by each gatekeeper configurator iframe. We call
   // these at submit time to capture the chosen resource URL.
   const collectorsRef = useRef<Map<string, () => Promise<string>>>(new Map())
-  const selectPortalContainer = useDialogSelectPortalContainer()
   const [canManageFeatured, setCanManageFeatured] = useState(false)
   const [isFeatured, setIsFeatured] = useState(false)
   const [updatingFeatured, setUpdatingFeatured] = useState(false)
@@ -1046,7 +1044,6 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   onReconnectAccount={handleReconnectAccount}
                   onReadyChange={(ready) => handleGatekeeperReadyChange(activeBindingName, ready)}
                   onCollectorChange={(collect) => handleCollectorChange(activeBindingName, collect)}
-                  selectPortalContainer={selectPortalContainer}
                 />
               </div>
 
@@ -1350,7 +1347,6 @@ function BindingField({
   onReconnectAccount,
   onReadyChange,
   onCollectorChange,
-  selectPortalContainer,
 }: {
   name: string
   binding: BlueprintBinding
@@ -1366,7 +1362,6 @@ function BindingField({
   onReconnectAccount: (accountId: number) => void
   onReadyChange: (ready: boolean) => void
   onCollectorChange: (collect: (() => Promise<string>) | null) => void
-  selectPortalContainer?: HTMLElement | null
 }) {
   const title = binding.title || name
 
@@ -1406,7 +1401,6 @@ function BindingField({
           value={(value as any).modelId || undefined}
           onValueChange={(modelId) => onChange({ modelId } as any)}
           renderValue={(id) => models.find(m => m.id === id)?.name ?? String(id)}
-          container={selectPortalContainer}
           disabled={models.length === 0}
         >
           {models.map(m => (
@@ -1447,7 +1441,6 @@ function BindingField({
             if (id === NO_AGENT_MODEL_ID) return '(No agent)'
             return models.find(m => m.id === id)?.name ?? String(id)
           }}
-          container={selectPortalContainer}
         >
           <Select.Option value={NO_AGENT_MODEL_ID}>(No agent)</Select.Option>
           {models.map(m => (

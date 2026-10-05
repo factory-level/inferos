@@ -9,7 +9,8 @@ import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import type { OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
 
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
-vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({ overseer: { stub: CONSOLE_STUB }, error: null }) }))
+vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({ overseer: consoleOpen.overseer, error: null }) }))
+const consoleOpen = vi.hoisted(() => ({ overseer: null as null | { stub: unknown } }))
 vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ workpieces: new Map() }) }))
 const { CONSOLE_STUB } = vi.hoisted(() => ({ CONSOLE_STUB: { name: 'console' } }))
 const canvasProps = vi.hoisted(() => ({ last: null as null | { overseer: unknown; resourceScope?: { overseer: unknown } } }))
@@ -63,6 +64,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
   onEvent.mockClear()
+  consoleOpen.overseer = { stub: CONSOLE_STUB }
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
@@ -162,4 +164,28 @@ it('moves focus to the page when a board opens or closes', () => {
   ;(document.activeElement as HTMLElement).blur()
   render({ run: run({ viewId: 'board' }), entry: withBoard })
   expect(document.activeElement?.tagName).toBe('MAIN')
+})
+
+it('shows a restored board as opening, not as refused, until its workspace has reopened', () => {
+  const alerts = () => container.querySelectorAll('[role="alert"]').length
+  const status = () => container.querySelector('[role="status"]')?.textContent
+  const restored = { workspaceId: 'session-ws', boardRef: DEMO, issueId: null }
+  // A reconnect: the session state (and its board) is back before the workspaces are reopened.
+  consoleOpen.overseer = null
+  render({ run: run({ viewId: 'board' }), entry: useEntry, board: restored, sessionWorkspace: null })
+  expect(alerts()).toBe(0)
+  expect(status()).toBe('Opening the board…')
+  // A builder's board read through the console workspace waits for that workspace too.
+  render({ run: run({ viewId: 'board' }), entry: withBoard, board: { ...restored, workspaceId: 'w1' }, sessionWorkspace: SESSION })
+  expect(alerts()).toBe(0)
+  expect(status()).toBe('Opening the board…')
+
+  consoleOpen.overseer = { stub: CONSOLE_STUB }
+  render({ run: run({ viewId: 'board' }), entry: useEntry, board: restored, sessionWorkspace: SESSION })
+  expect(container.querySelector('[data-testid="full"]')?.getAttribute('data-scope')).toBe('session')
+  expect(alerts()).toBe(0)
+  // Once the workspaces are open, a board they don't read is refused.
+  render({ run: run({ viewId: 'board' }), entry: useEntry, board: { ...restored, workspaceId: 'elsewhere' }, sessionWorkspace: SESSION })
+  expect(alerts()).toBe(1)
+  expect(container.textContent).toContain("This board can't be shown here")
 })

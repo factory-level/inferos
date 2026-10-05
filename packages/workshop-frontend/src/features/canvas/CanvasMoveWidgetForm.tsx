@@ -1,4 +1,3 @@
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import { useState } from 'react'
 import { Button, Select } from '@cloudflare/kumo'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
@@ -11,7 +10,6 @@ export const CanvasMoveWidgetForm = ({ sections, gadgets, busy, onEdit }: {
   busy: boolean
   onEdit: (operations: CanvasOperation[]) => Promise<boolean>
 }) => {
-  const selectPortalContainer = useDialogSelectPortalContainer()
   const describe = (widget: CanvasWidget) => widget.kind === 'inferos.gadget'
     ? gadgets.get(gadgetIdOf(widget.targetRef))?.title ?? widget.targetRef : widget.targetRef
   const [widgetId, setWidgetId] = useState('')
@@ -30,7 +28,7 @@ export const CanvasMoveWidgetForm = ({ sections, gadgets, busy, onEdit }: {
       })
     }
   }}>
-    <Select container={selectPortalContainer} label="Widget to move" value={source ? widgetId : ''}
+    <Select label="Widget to move" value={source ? widgetId : ''}
       renderValue={value => {
         const owner = sections.find(section => section.widgets.some(widget => widget.id === value))
         const widget = owner?.widgets.find(item => item.id === value)
@@ -41,7 +39,7 @@ export const CanvasMoveWidgetForm = ({ sections, gadgets, busy, onEdit }: {
         {section.title} · {index + 1}: {describe(widget)}
       </Select.Option>))}
     </Select>
-    <Select container={selectPortalContainer} label="Destination section" value={destination?.id ?? ''}
+    <Select label="Destination section" value={destination?.id ?? ''}
       renderValue={value => sections.find(section => section.id === value)?.title ?? 'Choose a section'} disabled={busy || !source} placeholder="Choose a section"
       onValueChange={value => setDestinationId(String(value ?? ''))}>
       {sections.filter(section => section.id !== source?.id).map(section => <Select.Option key={section.id} value={section.id}>{section.title}</Select.Option>)}

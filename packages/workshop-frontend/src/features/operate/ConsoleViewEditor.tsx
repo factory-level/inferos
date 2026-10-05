@@ -2,7 +2,6 @@ import { Button, Checkbox, Input, Select } from '@cloudflare/kumo'
 import { ArrowDownIcon, ArrowUpIcon, XIcon } from '@phosphor-icons/react'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { MAX_CONSOLE_VIEWS, MAX_ROLLUP_SCREENS, type ConsoleView } from '@gadgets/workshop-shared/operate-console'
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 
 /** The console's navigation, with references to existing screens rather than copied definitions. */
 export const ConsoleViewEditor = ({ views, screens, onChange }: {
@@ -10,7 +9,6 @@ export const ConsoleViewEditor = ({ views, screens, onChange }: {
   screens: readonly CanvasDefinition[]
   onChange: (views: ConsoleView[]) => void
 }) => {
-  const container = useDialogSelectPortalContainer()
   const update = (view: ConsoleView) => onChange(views.map(item => item.id === view.id ? view : item))
   const move = (index: number, offset: number) => {
     const next = [...views]
@@ -30,7 +28,7 @@ export const ConsoleViewEditor = ({ views, screens, onChange }: {
           <Button size="sm" aria-label={`Remove ${view.title}`} onClick={() => onChange(views.filter(item => item.id !== view.id))}><XIcon aria-hidden /></Button>
         </div>
         {view.type === 'screen'
-          ? <Select label={`Screen for ${view.title}`} container={container} value={view.screen}
+          ? <Select label={`Screen for ${view.title}`} value={view.screen}
               renderValue={value => screens.find(screen => screen.id === value)?.title ?? 'Unavailable screen'}
               onValueChange={value => update({ ...view, screen: String(value) })}>
               {screens.map(screen => <Select.Option key={screen.id} value={screen.id}>{screen.title}</Select.Option>)}
@@ -47,7 +45,7 @@ export const ConsoleViewEditor = ({ views, screens, onChange }: {
       </li>)}
     </ol>
     <div className="flex flex-wrap gap-2">
-      <Select label="Add an existing screen" container={container} value="" placeholder="Choose a screen"
+      <Select label="Add an existing screen" value="" placeholder="Choose a screen"
         disabled={screens.length === 0 || views.length >= MAX_CONSOLE_VIEWS}
         onValueChange={value => {
           const screen = screens.find(item => item.id === value)

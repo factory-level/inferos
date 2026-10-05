@@ -5,7 +5,6 @@ import { DEFAULT_CANVAS_CATALOG, type CanvasContent, type CanvasDefinition } fro
 import { useAuthenticatedApi } from '../../AuthContext'
 import { WorkshopButton, WorkshopInput } from '../../components/WorkshopControls'
 import { useServerConfig } from '../../ServerConfigContext'
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import { useDocumentTitle } from '../../useDocumentTitle'
 import { MAX_SCREEN_WORKSPACES, canBuild, invalidateWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
 import { useOperateSession } from '../../features/operate/OperateSessionContext'
@@ -84,7 +83,6 @@ export const InferOpsCanvasHome = () => {
   const durableViews = canvasFeatures?.durableViews === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
   const operate = useOperateSession()
-  const selectPortalContainer = useDialogSelectPortalContainer()
   const [workspaceId, setWorkspaceId] = useState('')
   const [template, setTemplate] = useState(BLANK_TEMPLATE)
   const [creating, setCreating] = useState(false)
@@ -126,14 +124,14 @@ export const InferOpsCanvasHome = () => {
         if (workspaceId) void create(title)
       }}>
       <div className="basis-full"><Eyebrow>New screen</Eyebrow></div>
-      <Select container={selectPortalContainer} className={FILLED_SELECT} label="Workspace" value={workspaceId} disabled={creating || workspaces.length === 0}
+      <Select className={FILLED_SELECT} label="Workspace" value={workspaceId} disabled={creating || workspaces.length === 0}
         placeholder={workspaces.length === 0 ? 'No workspaces yet' : 'Choose a workspace'}
         renderValue={value => workspaces.find(entry => entry.workspace.id === value)?.workspace.title ?? 'Choose a workspace'}
         onValueChange={value => setWorkspaceId(String(value ?? ''))}>
         {workspaces.map(entry => <Select.Option key={entry.workspace.id} value={entry.workspace.id}>{entry.workspace.title}</Select.Option>)}
       </Select>
       <WorkshopInput label="Screen title" name="title" required maxLength={120} defaultValue="Operations" disabled={creating} />
-      {catalog.screens.length > 0 && <Select container={selectPortalContainer} className={FILLED_SELECT} label="Start from" value={template} disabled={creating}
+      {catalog.screens.length > 0 && <Select className={FILLED_SELECT} label="Start from" value={template} disabled={creating}
         onValueChange={value => setTemplate(String(value ?? BLANK_TEMPLATE))}
         renderValue={value => catalog.screens.find(item => item.id === value)?.content.title ?? 'Blank screen'}>
         <Select.Option value={BLANK_TEMPLATE}>Blank screen</Select.Option>

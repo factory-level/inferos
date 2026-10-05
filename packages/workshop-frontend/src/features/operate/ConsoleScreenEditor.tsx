@@ -5,7 +5,6 @@ import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-sha
 import { applyCanvasOperations, parseCanvasDefinition, type CanvasCatalog, type CanvasDefinition, type CanvasOperation } from '@gadgets/workshop-shared/canvas'
 import { CanvasSectionEditor } from '../canvas/CanvasSectionEditor'
 import { CanvasMoveWidgetForm } from '../canvas/CanvasMoveWidgetForm'
-import { useDialogSelectPortalContainer } from '../../useDialogSelectPortalContainer'
 import { invalidateWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 
 /** A local screen draft; only Save screen persists it in the selected workspace. */
@@ -23,7 +22,6 @@ export const ConsoleScreenEditor = ({ overseer, gadgets, catalog, onSaved, onCan
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [template, setTemplate] = useState(':blank')
-  const container = useDialogSelectPortalContainer()
   const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined)
   const edit = async (operations: CanvasOperation[]) => {
     try {
@@ -55,7 +53,7 @@ export const ConsoleScreenEditor = ({ overseer, gadgets, catalog, onSaved, onCan
     <div className="flex flex-wrap items-end gap-3">
       <Input label="Screen name" value={screen.title} maxLength={120} required disabled={saving}
         onChange={event => setScreen({ ...screen, title: event.target.value })} />
-      {catalog.screens.length > 0 && <Select label="Screen template" container={container} value={template} disabled={saving} renderValue={value => catalog.screens.find(item => item.id === value)?.content.title ?? 'Blank screen'}
+      {catalog.screens.length > 0 && <Select label="Screen template" value={template} disabled={saving} renderValue={value => catalog.screens.find(item => item.id === value)?.content.title ?? 'Blank screen'}
         onValueChange={value => {
           const next = String(value)
           const content = catalog.screens.find(item => item.id === next)?.content

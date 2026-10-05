@@ -102,7 +102,7 @@ describe('BlueprintLandingPage model configuration', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
   })
 
-  it('portals model options above the configure dialog and accepts a selection', async () => {
+  it('portals model options within the configure dialog and accepts a selection', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 320 })
     testState.authenticatedApi = authenticatedApi()
     rootContainer = document.createElement('div')
@@ -120,10 +120,11 @@ describe('BlueprintLandingPage model configuration', () => {
     await act(async () => trigger.click())
 
     const option = document.body.querySelector<HTMLElement>('[role="option"]')!
-    const portalHost = option.closest('[data-base-ui-portal]')!.parentElement!
-    expect(portalHost.parentElement).toBe(document.body)
-    expect(portalHost.style.position).toBe('relative')
-    expect(portalHost.style.zIndex).toBe('1100')
+    // Inside the dialog's own portal, where the modal dialog leaves it visible to assistive tech;
+    // styles.css raises its positioner above the dialog layers.
+    const dialogPortal = document.body.querySelector('[role="dialog"]')!.closest('[data-base-ui-portal]')!
+    expect(dialogPortal.contains(option)).toBe(true)
+    expect(option.closest('[aria-hidden="true"], [inert]')).toBeNull()
 
     await act(async () => option.click())
     expect(trigger.textContent).toContain('Model one')

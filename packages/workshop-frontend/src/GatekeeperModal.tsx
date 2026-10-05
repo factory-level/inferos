@@ -35,7 +35,6 @@ import { matchesResourceUrl } from './resourceMatching'
 import { reportIssue } from './errorReporting'
 import { useSiteName } from './ServerConfigContext'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
-import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
 import { refreshGatekeeperApps } from './useGatekeeperApps'
 import { openConnectWindow } from './connectHandoff'
 
@@ -215,7 +214,6 @@ export default function GatekeeperModal({
   const footerRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
-  const selectPortalContainer = useDialogSelectPortalContainer()
 
   const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
   const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
@@ -865,7 +863,6 @@ export default function GatekeeperModal({
                     availableModels={availableModels}
                     selectedModelId={selectedModelId}
                     onSelectedModelIdChange={setSelectedModelId}
-                    selectContainer={selectPortalContainer}
                   />
                 )}
 
@@ -879,7 +876,6 @@ export default function GatekeeperModal({
                     onDisplayNameChange={setSpawnerDisplayName}
                     onModelIdChange={setSpawnerModelId}
                     onEnvChange={setSpawnerEnv}
-                    selectContainer={selectPortalContainer}
                   />
                 )}
               </div>
