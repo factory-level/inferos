@@ -28,6 +28,8 @@ export type KanbanIssueDialogProps = {
   /** The control that opens the dialog. Focus returns to it when the dialog closes. */
   trigger: ReactElement
   control?: IssueDialogControl
+  /** Keeps the owning card mounted while its dialog is open. */
+  onOpenChange?: (open: boolean) => void
 } & Mode
 
 /**
@@ -39,10 +41,14 @@ export type KanbanIssueDialogProps = {
  * In `code` mode it is the issue's coding task instead: it stays open after a dispatch or cancel is
  * proposed, since it also follows the run (see `KanbanCodingForm`).
  */
-export const KanbanIssueDialog = ({ trigger, control, ...mode }: KanbanIssueDialogProps) => {
+export const KanbanIssueDialog = ({ trigger, control, onOpenChange, ...mode }: KanbanIssueDialogProps) => {
   const [ownOpen, setOwnOpen] = useState(false)
   const open = control ? control.open : ownOpen
-  const setOpen = control ? control.onOpenChange : setOwnOpen
+  const setOpen = (next: boolean) => {
+    if (control) control.onOpenChange(next)
+    else setOwnOpen(next)
+    onOpenChange?.(next)
+  }
   return <Dialog.Root open={open} onOpenChange={next => setOpen(next)}>
     <Dialog.Trigger render={trigger} />
     <Dialog className="responsive-dialog space-y-4 p-6" size="lg">

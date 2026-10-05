@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { ArrowLeftIcon, ArrowRightIcon, ChatCircleIcon, CheckIcon, XIcon } from '@phosphor-icons/react'
 import type { OperateEvent, OperateFlowRun } from '@gadgets/workshop-shared/operate-session'
 import { WorkshopButton } from '../../components/WorkshopControls'
@@ -14,6 +14,7 @@ export const FlowPage = ({ flow, chatOpen, onEvent }: {
   chatOpen: boolean
   onEvent: (event: OperateEvent) => void
 }) => {
+  const scrollRoot = useRef<HTMLElement>(null)
   const [stepTitle, setStepTitle] = useState<string | null>(null)
   const last = flow.index === flow.steps.length - 1
   const position = `Step ${flow.index + 1} of ${flow.steps.length}`
@@ -53,8 +54,8 @@ export const FlowPage = ({ flow, chatOpen, onEvent }: {
         </button>
       </header>
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-kumo-tint">
-          <FlowScreen key={`${flow.index}/${flow.steps[flow.index]}`} workspaceId={flow.workspaceId}
+        <main ref={scrollRoot} className="min-h-0 min-w-0 flex-1 overflow-auto bg-kumo-tint">
+          <FlowScreen scrollRoot={scrollRoot} key={`${flow.index}/${flow.steps[flow.index]}`} workspaceId={flow.workspaceId}
             screenId={flow.steps[flow.index]!} onTitle={setStepTitle} />
         </main>
       </div>

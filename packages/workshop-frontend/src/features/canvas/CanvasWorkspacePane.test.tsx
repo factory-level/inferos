@@ -101,3 +101,32 @@ it('opens a board card in its full view from the card, closes it from the full v
   expect(onOpenWidgetChange).toHaveBeenCalledWith(null)
   expect(container.querySelector('[data-presentation="card"]')).not.toBeNull()
 })
+
+it('preloads board cards against the canvas scroll pane with a 200px margin and keeps the first load', async () => {
+  const observers: { options: IntersectionObserverInit; report: (entries: { isIntersecting: boolean }[]) => void; target?: Element }[] = []
+  vi.stubGlobal('IntersectionObserver', class {
+    readonly entry: (typeof observers)[number]
+    constructor(report: (typeof observers)[number]['report'], options: IntersectionObserverInit) {
+      this.entry = { report, options }; observers.push(this.entry)
+    }
+    observe(target: Element) { this.entry.target = target }
+    disconnect() {}
+  })
+  const lookup = vi.spyOn(overseer, 'getGatekeeperByResourceUrl')
+  try {
+    await render(durable())
+    const pane = container.querySelector('.overflow-y-auto')
+    const observer = observers.find(item => item.target === container.querySelector('[data-presentation="card"]'))!
+    expect(observer.options.root).toBe(pane)
+    expect(observer.options.rootMargin).toBe('200px')
+    expect(lookup).not.toHaveBeenCalled()
+    // The browser reports an intersection with the expanded root before the widget enters the
+    // pane itself. Once loaded it stays subscribed when a later observation is outside the root.
+    await act(async () => observer.report([{ isIntersecting: true }]))
+    expect(lookup).toHaveBeenCalledOnce()
+    expect(container.textContent).toContain('Not connected')
+    await act(async () => observer.report([{ isIntersecting: false }]))
+    expect(lookup).toHaveBeenCalledOnce()
+    expect(container.textContent).toContain('Not connected')
+  } finally { lookup.mockRestore() }
+})

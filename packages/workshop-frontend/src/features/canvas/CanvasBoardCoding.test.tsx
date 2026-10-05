@@ -283,3 +283,21 @@ it('lets the repository be picked when several are offered', async () => {
   await act(async () => { dialogButton('Propose dispatch')!.click(); await settle() })
   expect(dispatch).toHaveBeenCalledWith('DEMO-1', { repoId: second.id }, '7')
 })
+
+it('keeps an open coding dialog mounted when its card leaves a long column’s window', async () => {
+  const large: Board = { ...demo, columns: [{ ...demo.columns[0]!, issues: Array.from({ length: 100 }, (_, index) => issue(String(index + 1))) }] }
+  const read = vi.spyOn(boardSession, 'readBoard').mockResolvedValue(large)
+  try {
+    await board()
+    await open('2')
+    await act(async () => {
+      const list = container.querySelector<HTMLUListElement>('[data-state-id="todo"] ul')!
+      list.scrollTop = 60 * 148
+      list.dispatchEvent(new Event('scroll'))
+    })
+    expect(card('2')).not.toBeNull()
+    expect(card('3')).toBeNull()
+    expect(dialog()?.querySelector('h2')?.textContent).toBe('Coding task for DEMO-2')
+    expect(dialogButton('Propose dispatch')).toBeDefined()
+  } finally { read.mockRestore() }
+})

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
@@ -18,8 +18,10 @@ export type CanvasResourceScope = {
   unboundAction: (targetRef: string, retry: () => void) => ReactNode
 }
 
-export const CanvasView = ({ definition, gadgets, overseer, resourceScope, onOpenWidget, codingDispatch, wikiEditable }: {
+export const CanvasView = ({ definition, gadgets, overseer, resourceScope, onOpenWidget, codingDispatch, wikiEditable, scrollRoot }: {
   definition: CanvasDefinition
+  /** The pane that clips and scrolls this canvas, for widget preloading. */
+  scrollRoot?: RefObject<HTMLElement | null>
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
   overseer: RpcStub<Overseer>
   resourceScope?: CanvasResourceScope
@@ -40,9 +42,9 @@ export const CanvasView = ({ definition, gadgets, overseer, resourceScope, onOpe
         : <div className={sectionGridClass(section.columns)}>
           {section.widgets.map(widget => <div key={widget.id} className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}>
             {widget.kind === 'inferos.gadget'
-              ? <CanvasGadgetWidget widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} />
-              : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget widget={widget} overseer={resources} editable={wikiEditable} />
-              : <CanvasBoardWidget widget={widget} overseer={resources} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch}
+              ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} />
+              : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget scrollRoot={scrollRoot} widget={widget} overseer={resources} editable={wikiEditable} />
+              : <CanvasBoardWidget scrollRoot={scrollRoot} widget={widget} overseer={resources} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch}
                   unboundAction={resourceScope && (retry => resourceScope.unboundAction(widget.targetRef, retry))} />}
           </div>)}
         </div>}

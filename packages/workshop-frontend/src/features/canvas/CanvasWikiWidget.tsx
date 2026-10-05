@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type RefObject } from 'react'
 import { Badge, Button, Loader } from '@cloudflare/kumo'
 import { ArrowClockwise } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
@@ -27,8 +27,9 @@ const PageTree = ({ nodes, selected, onSelect }: { nodes: readonly WikiTreeNode[
  * reference of the same Wiki opens that page. With `editable`, each section can be edited, the edit
  * being a proposal through the approval path. The agent view shows the page as an agent reads it.
  */
-export const CanvasWikiWidget = ({ widget, overseer, editable }: {
+export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
   widget: Widget
+  scrollRoot?: RefObject<HTMLElement | null>
   overseer: RpcStub<Overseer>
   /**
    * Offer section edits. Only the workspace's own canvas passes it; an Operate session or flow
@@ -51,7 +52,7 @@ export const CanvasWikiWidget = ({ widget, overseer, editable }: {
   const renderEmbed = (href: string, label: string) => {
     const reference = parseWikiReference(href)
     switch (reference.kind) {
-      case 'board': return <CanvasBoardWidget overseer={overseer} presentation="card" widget={{ id: `wiki-${reference.boardRef}`,
+      case 'board': return <CanvasBoardWidget scrollRoot={scrollRoot} overseer={overseer} presentation="card" widget={{ id: `wiki-${reference.boardRef}`,
         kind: 'inferops.project-board', version: 1, targetRef: reference.boardRef, size: 'full', params: { workflow: reference.workflow, showCompleted: false } }} />
       case 'issue': return <WikiIssueEmbed overseer={overseer} boardRef={reference.boardRef} identifier={reference.identifier} href={href} />
       case 'page': return reference.host === host
