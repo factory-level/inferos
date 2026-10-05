@@ -1,4 +1,4 @@
-// Who has one operate subject open (docs/design/operate-mode.md, "Collaboration is on records").
+// Who has one operate subject open (docs/architecture/operate-mode.md and its Obsidian design references, "Collaboration is on records").
 // Each person's session lives in their own user DO and workspace, so no existing object is shared
 // by two operators on the same board. One of these per subject reference (`idFromName(boardRef)`)
 // is that shared place. It holds only an in-memory roster, like a workspace's presence in the

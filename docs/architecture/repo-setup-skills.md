@@ -6,14 +6,18 @@ covers:
   - scripts/release/manifest-lib.ts
   - .agents/skills
   - packages/workshop-backend/scripts/upload-consumer-skills.ts
-updated: 2026-10-03
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Cloudflare OS Fork.md
+  sections:
+  - Repository setup skills
 ---
 
 # InferOS repository setup skills
 
 ## Overview
 
-InferOS supplies a bootstrap skill and deterministic consumer scripts. They create a pinned wrapper, validate its configuration and synthetic board, run native local development, and verify, upgrade and recover the wrapper locally. Cloud workflows are tracked in the [design](../design/repo-setup-skills.md).
+InferOS supplies a bootstrap skill and deterministic consumer scripts. They create a pinned wrapper, validate its configuration and synthetic board, run native local development, and verify, upgrade and recover the wrapper locally. Cloud workflows are tracked in the [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20OS%20Fork.md%23Repository%20setup%20skills).
 
 ## Components
 
@@ -68,3 +72,9 @@ Bootstrap, local startup, profile/style initialization, fixture validation and g
 ## Evidence
 
 See [source ledger](../wiki/research-sources.md) for sibling repository revisions and official references.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

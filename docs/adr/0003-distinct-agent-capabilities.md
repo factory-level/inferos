@@ -42,6 +42,6 @@ Persona and skills are behavior, not permissions.
 
 ## Related
 
-- Design: [`../design/agent-deployments.md`](../design/agent-deployments.md)
-- Design: [`../design/agent-platform-integrations.md`](../design/agent-platform-integrations.md)
-- Design: [`../design/local-coding-workflows.md`](../design/local-coding-workflows.md)
+- Design: [agent deployments](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Agent%20Deployments.md%23Native%20deployment%20lifecycle%20review)
+- Design: [agent platform integrations](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Agent%20Deployments.md%23External-agent%20platform%20integrations)
+- Design: [local coding workflows](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20Deployment.md%23Local%20coding%20workflows)

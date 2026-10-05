@@ -5,14 +5,18 @@ covers:
   - scripts/consumer/intake.schema.json
   - scripts/consumer/intake.test.ts
   - scripts/consumer/fixtures/intake
-updated: 2026-10-03
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Cloudflare Deployment.md
+  sections:
+  - Customer onboarding
 ---
 
 # Customer OS onboarding
 
 ## Overview
 
-Steps 6 and 7 of the [onboarding sequence](../design/customer-onboarding.md) have code: a wrapper derives its configuration from a reviewed intake with `pnpm inferos intake apply <file>`. The command writes a report with every requirement's disposition and can file the drafted gap issues. Bootstrap (step 5), local customization and the local checks (steps 8 and 9) are described in [consumer configuration](consumer-configuration.md). There is no upgrade or deploy command.
+Steps 6 and 7 of the [onboarding sequence](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20Deployment.md%23Customer%20onboarding) have code: a wrapper derives its configuration from a reviewed intake with `pnpm inferos intake apply <file>`. The command writes a report with every requirement's disposition and can file the drafted gap issues. Bootstrap (step 5), local customization and the local checks (steps 8 and 9) are described in [consumer configuration](consumer-configuration.md). There is no upgrade or deploy command.
 
 ## Components
 
@@ -63,7 +67,7 @@ The intake file is the input. Keeping it in the wrapper (for example `intake/<cu
 
 ## Divergences from Design
 
-- The [design](../design/customer-onboarding.md) has the intake yield a modeled tenant. The command reads a hand-reviewed intake and models nothing in InferOps.
+- The [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20Deployment.md%23Customer%20onboarding) has the intake yield a modeled tenant. The command reads a hand-reviewed intake and models nothing in InferOps.
 - `inferops.targetRef` and `fixtures/project-board.json` keep naming the synthetic fixture board, because fixture validation requires the fixture's project to match the reference and remote mode cannot start yet. The customer references live in the starter view and screen template only.
 - Branding is not derived: `styling` stays as written.
 - The operational inventory and pillars are recorded in the report and drive nothing else until the Wiki host ([#87](https://github.com/factory-level/inferos/issues/87)) and coverage work ([factory-level/inferops#2325](https://github.com/factory-level/inferops/issues/2325)) consume them.
@@ -73,3 +77,9 @@ The intake file is the input. Keeping it in the wrapper (for example `intake/<cu
 
 - Which repository gap issues belong in by default. Today the operator names one.
 - Whether a wrapper whose copied helpers predate the `inferos` script should gain it on a bootstrap rerun. Today a rerun rewrites nothing, so an older wrapper runs `node .inferos/runtime.ts intake apply <file>` after copying newer helpers.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

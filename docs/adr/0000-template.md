@@ -24,4 +24,5 @@ What becomes easier, harder, or newly required as a result.
 
 ## Related
 
-- Design: [`../design/topic-name.md`](../design/topic-name.md)
+- Design: link directly to the canonical Obsidian note and relevant heading, using
+  the owning architecture topic's `obsidian_designs` references.

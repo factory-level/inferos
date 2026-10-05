@@ -41,5 +41,5 @@ Provider and adapter versions, resource references, policies, publication destin
 
 ## Related
 
-- Design: [`../design/feature-capabilities.md`](../design/feature-capabilities.md)
-- Design: [`../design/consumer-configuration.md`](../design/consumer-configuration.md)
+- Design: [feature capabilities](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Feature%20Flags.md%23Capability%20contract%20and%20migration%20review)
+- Design: [consumer configuration](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Feature%20Flags.md%23Consumer%20configuration)

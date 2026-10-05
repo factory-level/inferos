@@ -14,7 +14,11 @@ covers:
   - scripts/scaffold-gatekeeper.test.ts
   - scripts/connection-template
   - custom-gatekeepers/gatekeeper-tickets
-updated: 2026-10-03
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Cloudflare OS Fork.md
+  sections:
+  - Connection packages and reviewed updates
 ---
 
 # Connection packages and reviewed fork updates
@@ -36,7 +40,7 @@ A contract's `status` is a ladder only a person climbs: `scaffold` (generated, n
 `scaffold` and nothing else, and only `reference` and `production` packages are released or bound
 by default.
 
-Not implemented from the [design](../design/connection-extensions.md): file classification, the
+Not implemented from the [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20OS%20Fork.md%23Connection%20packages%20and%20reviewed%20updates): file classification, the
 upgrade and reconciliation CLI, and cloud packaging of wrapper gatekeepers. Parts of
 [#73](https://github.com/factory-level/inferos/issues/73) and
 [#74](https://github.com/factory-level/inferos/issues/74), under
@@ -173,3 +177,9 @@ provider revision, and that a declared `gatekeeperApi` includes this checkout's 
   (cloud parity, [#11](https://github.com/factory-level/inferos/issues/11)).
 - Who may advance a package's status, and whether that review should be recorded beside the
   status (today it is a reviewed edit to `connection.json`).
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

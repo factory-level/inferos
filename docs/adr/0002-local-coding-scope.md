@@ -40,5 +40,5 @@ The following are not requirements or blockers: a hosted coding service, a remot
 
 ## Related
 
-- Design: [`../design/local-coding-workflows.md`](../design/local-coding-workflows.md)
-- Design: [`../design/feature-capabilities.md`](../design/feature-capabilities.md)
+- Design: [local coding workflows](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20Deployment.md%23Local%20coding%20workflows)
+- Design: [feature capabilities](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Feature%20Flags.md%23Capability%20contract%20and%20migration%20review)

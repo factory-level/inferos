@@ -5,7 +5,7 @@ description: Create or validate a consuming repository with a pinned InferOS sub
 
 # Bootstrap InferOS
 
-In a source InferOS checkout, use `scripts/consumer/bootstrap.ts`; read `docs/wiki/consumer-bootstrap.md` for commands and `docs/design/consumer-configuration.md` for design decisions. In a generated wrapper (identified by `inferos.config.json`), use its `.inferos/runtime.ts` check/setup/doctor/blueprints/dev/intake/config/verify/recover/upgrade commands and README. A pinned older submodule may not contain the new bootstrap source or design documents; the copied wrapper helpers are the runnable entrypoints. Inspect `.inferos/config.ts` for the exact current schema.
+In a source InferOS checkout, use `scripts/consumer/bootstrap.ts`; read `docs/wiki/consumer-bootstrap.md` for commands and the `obsidian_designs` references in `docs/architecture/consumer-configuration.md` for design decisions, using `docs/architecture/_brain.md` for CLI access. In a generated wrapper (identified by `inferos.config.json`), use its `.inferos/runtime.ts` check/setup/doctor/blueprints/dev/intake/config/verify/recover/upgrade commands and README. A pinned older submodule may not contain the new bootstrap source or design documents; the copied wrapper helpers are the runnable entrypoints. Inspect `.inferos/config.ts` for the exact current schema.
 
 Obtain the destination, source repository and reviewed full Git commit SHA from the task or checkout. Bootstrap into a new directory; an existing managed wrapper can be validated without replacing its edits. Do not point bootstrap at an arbitrary populated repository or silently select a moving revision.
 

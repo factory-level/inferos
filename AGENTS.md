@@ -180,27 +180,28 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
   Exception messages and stacks reach the external Reporter, so never intentionally put secrets,
   prompts, tokens, headers, or request/response bodies in thrown errors or report metadata.
 
-Documentation Loop (`docs/design/`, `docs/architecture/`, `docs/adr/`, `docs/wiki/`), from the `factory-level/doc-starter.template`:
+Documentation Loop (Obsidian design, `docs/architecture/`, `docs/adr/`, `docs/wiki/`), from the `factory-level/doc-starter.template`:
 
-* Each folder has a `README.md` index and a template (`_template.md`, or `0000-template.md` for ADRs). Start every new document from its template, keep its YAML front matter, and add it to the folder index. The flat `docs/*.md` files and `plans/` predate the loop and sit outside it.
+* **Canonical design lives in Obsidian**, vault `authored`, in the existing **InferOS …** notes directly under `software/InferOS/`. Each architecture topic's `obsidian_designs` front matter lists the designs it supports: one entry per vault-relative Markdown `note` path, with optional `sections` listing exact heading names. Omit `sections` for a whole-note reference. Multiple architecture topics may support the same note. References do not imply complete implementation; record gaps in "Divergences from Design". Read the full owning notes through the Obsidian CLI before editing their sections. Extend existing notes first; create new design notes sparingly, only when no existing note can coherently own the topic, directly in `software/InferOS/` with title `InferOS <Topic>`. `docs/architecture/_brain.md` explains discovery, conceptual searches, and CLI maintenance. `docs/design/` is retired and contains only a README; do not recreate local design pointers. Preserve draft status and unresolved requirements unless the user explicitly changes them. No CI publication is configured.
+* Each active documentation folder has a `README.md` index and a template (`_template.md`, or `0000-template.md` for ADRs). For new design, use the **Design authoring template** section of **InferOS Cloudflare OS Fork**, preserve the host note’s metadata/title format, and update its **Design navigation** section and relevant architecture references. Other documentation remains in Git: start from its local template, keep YAML front matter, and add it to the folder index. The flat `docs/*.md` files and `plans/` predate the loop and sit outside it.
 
   | Folder | Holds | Filename | Required front matter |
   | --- | --- | --- | --- |
-  | `docs/design/` | Intended behavior and requirements | `<topic>.md` | `title`, `status` (`draft`, `accepted`, `superseded`), `updated` |
-  | `docs/architecture/` | The current implementation | `<topic>.md`, same name as its design doc | `title`, `covers` (list of repo paths), `updated` |
+  | Existing Obsidian notes in `software/InferOS/` | Intended behavior and requirements | `InferOS <Topic>.md`, with owned sections | Preserve host metadata, draft status and historical migration evidence |
+  | `docs/architecture/` | The current implementation | `<topic>.md` | `title`, `covers` (list of repo paths), `updated`, nonempty `obsidian_designs` |
   | `docs/adr/` | Rationale for significant design changes | `NNNN-<slug>.md`, sequential | `title`, `status` (`proposed`, `accepted`, `superseded`, `deprecated`), `date` |
   | `docs/wiki/` | Setup, conventions, shared knowledge | `<topic>.md` | `title`, `updated` |
 
-  Dates are `YYYY-MM-DD`; filenames are lowercase and hyphen-separated.
+  Dates are `YYYY-MM-DD`; topic filenames are lowercase and hyphen-separated. `_brain.md` is the reserved navigation guide filename exception. The index, template and `_brain.md` are exempt from required design references; the template demonstrates the format.
 * Every functionality change to the default branch updates the architecture docs covering its paths **in the same commit or merge**. Update a design doc only when the change's stated intent (issue, PR description, commit message, explicit instruction) says intended behavior changed; never rewrite one to match code — record the gap under the architecture doc's "Divergences from Design". Add an ADR only when the intended design changed and the decision needs durable rationale.
 * Documentation agent procedure, per change (commit range, branch, or PR):
     1. Read the full diff and any linked issue, PR description, or commit messages; list every changed path.
-    2. Find architecture docs whose `covers` contains or is a parent of each path; each one's design counterpart shares its filename.
+    2. Find architecture docs whose `covers` contains or is a parent of each path; read their `obsidian_designs` notes and sections, then follow `_brain.md` for additional InferOS and conceptual searches.
     3. Classify: functionality change, intended-behavior change, or neither (formatting, comments, behavior-neutral bumps).
     4. For functionality changes, revise each matched architecture doc to describe the result and refresh `updated`. An uncovered path extends the closest topic's `covers` or gets a new topic from the template.
-    5. Touch design docs only on stated intent; otherwise record divergences.
+    5. Change canonical design in Obsidian only on stated intent; reference the note and change in the code PR. Otherwise record divergences in architecture. Keep architecture references current when note ownership or headings change.
     6. Draft an ADR only per the rule above, with `status: proposed` — a human accepts it.
     7. Update folder indexes and fix links broken by moved or deleted files.
-    8. Run `pnpm docs:check` (front matter, design/architecture pairing, covered paths, indexes, relative links under `docs/`) and `git diff --check`; fix every error.
+    8. Run `pnpm docs:check` (front matter, Obsidian reference structure, covered paths, indexes, relative links under `docs/`) and `git diff --check`; fix every error. Verify changed note paths and headings through the Obsidian CLI; CI does not require vault access.
     9. Report documents changed, divergences recorded, ADRs proposed, and open questions.
 * Agents must not invent behavior, requirements, or rationale the code, diff, or stated intent doesn't support (record uncertainty under "Open Questions"); set a design doc or ADR to `accepted` without human instruction; delete docs for removed functionality without updating their design counterparts and indexes (prefer marking design docs `superseded`); or defer an architecture update to a later commit.
