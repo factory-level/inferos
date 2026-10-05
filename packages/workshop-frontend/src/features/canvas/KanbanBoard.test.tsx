@@ -320,3 +320,119 @@ it('announces a denied edit as rejected though an outside edit moved the issue\'
   expect(status()).toBe('Edit of DEMO-13 was rejected; it keeps its previous values.')
   expect(card('13').textContent).toContain('Edit rejected')
 })
+
+const manyIssues = (count = 100) => Array.from({ length: count }, (_, index) => issue(String(index + 1), 'todo'))
+const scrollColumn = (stateId: string, top: number) => act(async () => {
+  const list = column(stateId).querySelector('ul')!
+  list.scrollTop = top
+  list.dispatchEvent(new Event('scroll'))
+})
+const tab = (element: HTMLElement, shiftKey = false) => act(async () => {
+  element.focus()
+  element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true }))
+})
+
+it('windows long columns while exposing the full count and each rendered card’s sorted position', async () => {
+  await render(board([TODO, manyIssues()]))
+  expect(column('todo').querySelector('h3')?.textContent).toBe('Todo100')
+  expect(column('todo').querySelector('[aria-label="100 issues"]')).not.toBeNull()
+  expect(column('todo').querySelectorAll('[data-issue-id]').length).toBeLessThan(20)
+  expect(card('1').getAttribute('aria-setsize')).toBe('100')
+  expect(card('100').getAttribute('aria-posinset')).toBe('100')
+  expect(card('50')).toBeUndefined()
+  await scrollColumn('todo', 49 * 148)
+  expect(card('50').getAttribute('aria-posinset')).toBe('50')
+  expect(card('50').getAttribute('aria-setsize')).toBe('100')
+  expect(card('2')).toBeUndefined()
+  expect(column('todo').querySelectorAll('[data-issue-id]').length).toBeLessThan(20)
+  expect([...column('todo').querySelectorAll('li[role="presentation"]')].every(spacer => spacer.getAttribute('aria-hidden') === 'true')).toBe(true)
+  await render(board([TODO, manyIssues(50)]))
+  expect(column('todo').querySelectorAll('[data-issue-id]').length).toBe(50)
+})
+
+it('keeps Tab and Shift+Tab traversing logical neighbors across window gaps, including card controls', async () => {
+  await render(board([TODO, manyIssues()], [DOING, []]))
+  const visible = [...column('todo').querySelectorAll<HTMLElement>('[data-issue-id]')]
+  const beforeGap = visible.at(-2)!
+  const nextId = String(Number(beforeGap.dataset.issueId) + 1)
+  expect(card(nextId)).toBeUndefined()
+  await tab([...beforeGap.querySelectorAll<HTMLButtonElement>('button')].at(-1)!)
+  expect(document.activeElement).toBe(card(nextId))
+  expect(column('todo').querySelector('ul')!.scrollTop).toBeGreaterThan(0)
+  // The last card is a native reverse-entry point, even while the window is at the start.
+  expect(card('99')).toBeUndefined()
+  await tab(card('100'), true)
+  expect(card('99')).not.toBeUndefined()
+  expect(document.activeElement).toBe([...card('99').querySelectorAll('button')].at(-1))
+  // Controls keep their keys; column navigation runs only on the card itself.
+  const edit = button('Edit DEMO-99')!
+  await key(edit, 'Home')
+  expect(document.activeElement).not.toBe(card('1'))
+  await key(card('99'), 'Home')
+  expect(document.activeElement).toBe(card('1'))
+  await key(card('1'), 'End')
+  expect(document.activeElement).toBe(card('100'))
+})
+
+it('keeps pending moves, edits, external proposals and provisional cards mounted outside the window', async () => {
+  const issues = manyIssues().map(item => item.id === '83' ? { ...item, pending: 'update' as const }
+    : item.id === '84' ? { ...item, pending: 'create' as const } : item)
+  const b = board([TODO, issues], [DOING, []])
+  await render(b, [{ issueId: '80', fromStateId: 'todo', toStateId: 'doing', expectedRevision: '1', phase: 'proposing' }],
+    'embedded', b.columns, new Map([['DEMO-82', { id: 1, kind: 'awaiting', actor: 'Agent', title: 'External edit', issue: 'DEMO-82', at: new Date() }]]),
+    [{ kind: 'update', issueId: '81', expectedRevision: '1', phase: 'awaiting', changes: { title: 'Changed' } }])
+  for (const id of ['80', '81', '82', '83', '84']) expect(card(id)).not.toBeUndefined()
+  expect(card('79')).toBeUndefined()
+  expect(column('todo').querySelectorAll('[data-issue-id]').length).toBeLessThan(20)
+  expect(card('80').textContent).toContain('Proposing move')
+  expect(card('82').textContent).toContain('External edit')
+})
+
+it('restores a moved card’s focus when its sorted destination is outside that column’s window', async () => {
+  await render(board([TODO, [issue('70', 'todo')]], [DOING, manyIssues().filter(item => item.id !== '70').map(item => ({ ...item, stateId: 'doing' }))]))
+  await act(async () => card('70').focus())
+  await key(card('70'), 'ArrowRight')
+  await key(card('70'), 'Enter')
+  await render(board([TODO, []], [DOING, manyIssues().map(item => ({ ...item, stateId: 'doing' }))]))
+  expect(column('doing').contains(card('70'))).toBe(true)
+  expect(document.activeElement).toBe(card('70'))
+  expect(column('doing').querySelectorAll('[data-issue-id]').length).toBeLessThan(20)
+})
+
+it('keeps an ordinary edit dialog and its draft mounted when its card scrolls out of the window', async () => {
+  await render(board([TODO, manyIssues()], [DOING, []]))
+  await act(async () => button('Edit DEMO-2')!.click())
+  await enter(field('Title'), 'Unsaved draft')
+  await scrollColumn('todo', 60 * 148)
+  expect(card('2')).not.toBeUndefined()
+  expect(card('3')).toBeUndefined()
+  expect(field<HTMLInputElement>('Title').value).toBe('Unsaved draft')
+  await act(async () => { [...dialog()!.querySelectorAll('button')].find(element => element.textContent === 'Cancel')!.click() })
+  expect(dialog()).toBeNull()
+  expect(button('Edit DEMO-2')).not.toBeNull()
+})
+
+it('mounts an externally controlled issue dialog before its off-window card has been visited', async () => {
+  const b = board([TODO, manyIssues()], [DOING, []])
+  await act(async () => root.render(<KanbanBoard board={b} columns={b.columns} pending={[]} changes={[]} awaiting={new Map()} decided={[]}
+    layout="embedded" onMove={onMove} onCreate={onCreate} onUpdate={onUpdate} openIssue={{ issueId: '80', onChange: vi.fn<(issueId: string | null) => void>() }} />))
+  expect(card('80')).not.toBeUndefined()
+  expect(dialog()?.querySelector('h2')?.textContent).toBe('Edit DEMO-80')
+  await scrollColumn('todo', 30 * 148)
+  expect(dialog()?.querySelector('h2')?.textContent).toBe('Edit DEMO-80')
+})
+
+it('keeps a focused card mounted during pointer scrolling, then releases it when focus leaves the board', async () => {
+  await render(board([TODO, manyIssues()], [DOING, []]))
+  await act(async () => card('3').focus())
+  await scrollColumn('todo', 60 * 148)
+  expect(document.activeElement).toBe(card('3'))
+  expect(card('4')).toBeUndefined()
+  const outside = document.createElement('button'); document.body.append(outside)
+  try {
+    await act(async () => outside.focus())
+    await scrollColumn('todo', 70 * 148)
+    expect(card('3')).toBeUndefined()
+    expect(document.activeElement).toBe(outside)
+  } finally { outside.remove() }
+})

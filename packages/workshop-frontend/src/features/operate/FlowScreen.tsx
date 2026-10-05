@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type RefObject } from 'react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { parseCanvasDefinition, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { useAuthenticatedApi } from '../../AuthContext'
@@ -15,8 +15,9 @@ type Step = { status: 'loading' } | { status: 'unavailable' } | { status: 'ready
  * and no layout editing), through the viewer's own access to its workspace. A step whose screen
  * is gone or out of reach says so, and the flow's controls stay usable.
  */
-export const FlowScreen = ({ workspaceId, screenId, onTitle }: {
+export const FlowScreen = ({ workspaceId, screenId, onTitle, scrollRoot }: {
   workspaceId: string
+  scrollRoot?: RefObject<HTMLElement | null>
   screenId: string
   /** Reports the step's screen title once it is known, for the flow's header. */
   onTitle: (title: string | null) => void
@@ -60,7 +61,7 @@ export const FlowScreen = ({ workspaceId, screenId, onTitle }: {
   for (const workpiece of workpieces.values()) if (workpiece.type === 'gadget') gadgets.set(workpiece.id, workpiece)
   return (
     <div className="mx-auto w-full max-w-6xl p-6">
-      <CanvasView definition={step.definition} gadgets={gadgets} overseer={overseer.stub} />
+      <CanvasView scrollRoot={scrollRoot} definition={step.definition} gadgets={gadgets} overseer={overseer.stub} />
     </div>
   )
 }

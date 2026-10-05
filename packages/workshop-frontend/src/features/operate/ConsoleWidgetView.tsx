@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button, Dialog } from '@cloudflare/kumo'
 import { XIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
@@ -21,6 +21,7 @@ export const ConsoleWidgetView = ({ workspaceId, target, onClose }: {
   target: ConsoleWidgetTarget
   onClose: () => void
 }) => {
+  const scrollRoot = useRef<HTMLDivElement>(null)
   const { authenticatedApi } = useAuthenticatedApi()
   const { overseer, error } = useWorkspaceOpen({ id: workspaceId, authenticatedApi,
     onMetadata: ignore, onShareKeyConsumed: ignore, onInvalidShareKey: ignore })
@@ -42,9 +43,9 @@ export const ConsoleWidgetView = ({ workspaceId, target, onClose }: {
     ? <p role="alert" className="p-5 text-sm text-kumo-danger">This widget is unavailable. It may have been removed, or you may no longer have access.</p>
     : !overseer || !screen || !widget || !ready ? <p role="status" className="p-5 text-sm text-kumo-subtle">Opening widget…</p>
     : widget.kind === 'inferos.gadget'
-      ? <CanvasGadgetWidget widget={{ ...widget, size: 'full' }} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer.stub} />
+      ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={{ ...widget, size: 'full' }} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer.stub} />
       // Wiki is operated read-only, as on session screens (no `editable`).
-      : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget widget={widget} overseer={overseer.stub} />
+      : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget scrollRoot={scrollRoot} widget={widget} overseer={overseer.stub} />
       : <CanvasBoardWidget widget={widget} overseer={overseer.stub} presentation="full" />
   if (target.presentation === 'modal') return <Dialog.Root open onOpenChange={open => { if (!open) onClose() }}>
     <Dialog size="lg" className="flex max-h-[90dvh] !w-[min(1000px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl bg-kumo-base p-0">
@@ -53,11 +54,11 @@ export const ConsoleWidgetView = ({ workspaceId, target, onClose }: {
         <Dialog.Close render={<Button size="sm" variant="ghost" aria-label="Close widget"><XIcon size={16} aria-hidden /></Button>} />
       </header>
       <Dialog.Description className="sr-only">Widget opened from the console assistant.</Dialog.Description>
-      <div className="min-h-0 overflow-auto p-5">{body}</div>
+      <div ref={scrollRoot} className="min-h-0 overflow-auto p-5">{body}</div>
     </Dialog>
   </Dialog.Root>
   return <div className="flex h-full min-h-0 flex-col gap-4 p-5">
     <div><Button size="sm" variant="ghost" onClick={onClose}>Back to {screen?.title ?? 'screen'}</Button></div>
-    <div className="min-h-0 flex-1 overflow-auto">{body}</div>
+    <div ref={scrollRoot} className="min-h-0 flex-1 overflow-auto">{body}</div>
   </div>
 }

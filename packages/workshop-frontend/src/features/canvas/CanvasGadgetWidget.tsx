@@ -1,18 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { GadgetClient, GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasGadgetWidget as Widget } from '@gadgets/workshop-shared/canvas'
 import GadgetUI from '../../GadgetUI'
 import { useHasBeenOnScreen } from './useHasBeenOnScreen'
 
-export const CanvasGadgetWidget = ({ widget, gadget, overseer }: {
+export const CanvasGadgetWidget = ({ widget, gadget, overseer, scrollRoot }: {
   widget: Widget
+  scrollRoot?: RefObject<HTMLElement | null>
   /** The live summary of the referenced gadget, or undefined if the workspace has no such gadget. */
   gadget: GadgetSummary | undefined
   overseer: RpcStub<Overseer>
 }) => {
   const ref = useRef<HTMLElement>(null)
-  const visible = useHasBeenOnScreen(ref)
+  const visible = useHasBeenOnScreen(ref, false, scrollRoot)
   const [client, setClient] = useState<{ id: WorkpieceId; stub: RpcStub<GadgetClient> } | null>(null)
   // A draft belongs to its conversation until accepted, so it is never shown on a shared canvas.
   const gadgetId = gadget && gadget.chatId === undefined ? gadget.id : undefined

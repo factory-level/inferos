@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from 'react'
+import { useRef, type ReactNode, type RefObject } from 'react'
 import { Badge, Button, Loader } from '@cloudflare/kumo'
 import { ArrowClockwise, ArrowsOutSimple } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
@@ -16,6 +16,7 @@ import { useHasBeenOnScreen } from './useHasBeenOnScreen'
 
 export type CanvasBoardWidgetProps = {
   widget: CanvasProjectBoardWidget
+  scrollRoot?: RefObject<HTMLElement | null>
   overseer: RpcStub<Overseer>
   /**
    * Offer coding dispatch when the workspace also holds the project's coding-dispatch connection.
@@ -53,7 +54,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   const ref = useRef<HTMLElement>(null)
   // A card reads nothing (the board, its coding runs) until it first comes near the screen, and
   // stays subscribed after (see the Kanban performance notes); the full view is always on screen.
-  const nearScreen = useHasBeenOnScreen(ref, presentation === 'full')
+  const nearScreen = useHasBeenOnScreen(ref, presentation === 'full', props.scrollRoot)
   const { state, refresh, move, create, update } = useBoardData(overseer, widget, nearScreen)
   const dispatchRef = props.codingDispatch && nearScreen ? dispatchRefOf(widget.targetRef) : null
   const coding = useCodingDispatch(overseer, dispatchRef)

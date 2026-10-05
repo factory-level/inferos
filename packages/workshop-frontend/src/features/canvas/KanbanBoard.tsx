@@ -1,14 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent } from 'react'
-import { Button } from '@cloudflare/kumo'
-import { Plus } from '@phosphor-icons/react'
 import type { Board, Issue, IssueChanges, NewIssue, Run, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
 import type { PendingChange, PendingMove, ProposalResult } from './boardData'
 import { describeRun, finishedRuns, latestRunOf } from './codingRuns'
 import { KanbanCard } from './KanbanCard'
 import type { CodingControl } from './KanbanCodingForm'
-import { KanbanIssueDialog } from './KanbanIssueDialog'
-import { advanceDecisions, moveTargets, pendingMoveOf, sortIssues, startDecisions, stateOf, type ChangeDecision } from './kanbanBoard'
+import { KanbanColumn } from './KanbanColumn'
+import { advanceDecisions, moveTargets, pendingMoveOf, startDecisions, stateOf, type ChangeDecision } from './kanbanBoard'
 
 /** `embedded`: fixed-width columns that scroll sideways in the card's cell. `full`: columns share the width and the height. */
 export type KanbanLayout = 'embedded' | 'full'
@@ -208,53 +206,44 @@ export const KanbanBoard = ({ board, columns, pending, changes, awaiting, decide
     className={`flex gap-3 overflow-x-auto ${layout === 'full' ? 'h-full min-h-0 items-stretch' : 'max-h-[32rem] items-start pb-1'}`}
     onFocus={event => { focused.current = event.target.closest<HTMLElement>('[data-issue-id]')?.dataset.issueId ?? focused.current }}
     onBlur={event => { if (!(event.relatedTarget instanceof Node) || !root.current?.contains(event.relatedTarget)) focused.current = null }}>
-    <p id={instructionsId} className="sr-only">Issue card. Press the right or left arrow key to choose a column, Enter to propose the move, Escape to cancel. The move is applied once approved.</p>
+    <p id={instructionsId} className="sr-only">Issue card. Press up or down to navigate cards, Home or End for the first or last card. Press the right or left arrow key to choose a column, Enter to propose the move, Escape to cancel. The move is applied once approved.</p>
     <p role="status" aria-live="polite" className="sr-only">{announcement?.text}</p>
     {columns.map(({ state, issues }) => {
       const headingId = `${instructionsId}-${state.id}`
       const dropOk = dropTarget === state.id
       const dropNo = dragging !== null && !allowedDrop(state.id) && dragging.stateId !== state.id
-      return <section key={state.id} data-state-id={state.id} aria-labelledby={headingId}
-        className={`flex max-h-full flex-col rounded-lg border bg-kumo-tint ${layout === 'full' ? 'min-w-64 flex-1' : 'w-64 shrink-0'} ${dropOk ? 'border-kumo-brand' : 'border-kumo-line'} ${dropNo ? 'opacity-60' : ''}`}
-        onDragOver={onDragOver(state.id)} onDragLeave={() => { if (dropTarget === state.id) setDropTarget(null) }} onDrop={onDrop(state)}>
-        <div className="flex items-center gap-2 px-3 py-2">
-          <h3 id={headingId} className="flex min-w-0 flex-1 items-baseline gap-2 text-sm font-medium text-kumo-default">
-            <span className="truncate">{state.name}</span>
-            <span className="text-xs text-kumo-subtle" aria-label={`${issues.length} ${issues.length === 1 ? 'issue' : 'issues'}`}>{issues.length}</span>
-          </h3>
-          <KanbanIssueDialog kind="create" state={state} onCreate={create(state)}
-            trigger={<Button size="xs" shape="square" variant="ghost" aria-label={`New issue in ${state.name}`} icon={Plus} />} />
-        </div>
-        <ul aria-labelledby={headingId} className="flex min-h-12 flex-col gap-2 overflow-y-auto px-2 pb-2">
-          {issues.length === 0 && <li className="px-1 text-xs text-kumo-subtle">No issues</li>}
-          {sortIssues(issues).map(issue => {
-            const pendingMove = pendingMoveOf(issue, pending)
-            const edit = changes.find((change): change is Extract<PendingChange, { kind: 'update' }> => change.kind === 'update' && change.issueId === issue.id)
-            const decision = decisions.get(issue.id)
-            const editDecision = editDecisions.get(issue.id)
-            const proposed = pendingMove ? undefined : awaiting.get(issue.identifier)
-            // The gatekeeper refuses a second change of an issue whose change awaits approval, and
-            // a provisional card has no issue behind it yet.
-            const locked = pendingMove !== undefined || edit !== undefined || proposed !== undefined || issue.pending !== undefined
-            return <KanbanCard key={issue.id} issue={issue} state={state} today={day} instructionsId={instructionsId}
-              targets={locked ? [] : moveTargets(board, issue)}
-              edit={edit}
-              editDecision={editDecision && editDecision.revision === issue.revision ? editDecision.outcome : undefined}
-              onUpdate={locked ? undefined : update(issue)}
-              editControl={openIssue && {
-                open: openIssue.issueId === issue.id,
-                onOpenChange: open => openIssue.onChange(open ? issue.id : null),
-              }}
-              coding={coding && { control: coding, run: latestRunOf(runs, issue.id) }}
-              pending={pendingMove && { move: pendingMove, toState: stateOf(board, pendingMove.toStateId) }}
-              proposed={proposed}
-              decision={decision && decision.revision === issue.revision ? { outcome: decision.outcome, toState: decision.toStateId === undefined ? undefined : stateOf(board, decision.toStateId) } : undefined}
-              // A keyboard or menu move keeps focus with the card wherever the board places it next.
-              onMove={toState => { focused.current = issue.id; void move(issue, toState) }}
-              onDragStart={() => setDragging(issue)} onDragEnd={() => { setDragging(null); setDropTarget(null) }} />
-          })}
-        </ul>
-      </section>
+      const retained = new Set(issues.filter(issue => issue.pending !== undefined || pendingMoveOf(issue, pending)
+        || changes.some(change => change.kind === 'update' && change.issueId === issue.id) || awaiting.has(issue.identifier)
+        || openIssue?.issueId === issue.id || dragging?.id === issue.id || latestRunOf(runs, issue.id)?.pending).map(issue => issue.id))
+      return <KanbanColumn key={state.id} state={state} issues={issues} headingId={headingId} layout={layout}
+        dropOk={dropOk} dropNo={dropNo} retained={retained} focusedIssueId={focused.current} onCreate={create(state)}
+        onDragOver={onDragOver(state.id)} onDragLeave={() => { if (dropTarget === state.id) setDropTarget(null) }} onDrop={onDrop(state)}
+        renderCard={(issue, position, onDialogOpenChange) => {
+          const pendingMove = pendingMoveOf(issue, pending)
+          const edit = changes.find((change): change is Extract<PendingChange, { kind: 'update' }> => change.kind === 'update' && change.issueId === issue.id)
+          const decision = decisions.get(issue.id)
+          const editDecision = editDecisions.get(issue.id)
+          const proposed = pendingMove ? undefined : awaiting.get(issue.identifier)
+          // The gatekeeper refuses a second change of an issue whose change awaits approval, and
+          // a provisional card has no issue behind it yet.
+          const locked = pendingMove !== undefined || edit !== undefined || proposed !== undefined || issue.pending !== undefined
+          return <KanbanCard key={issue.id} position={position} onDialogOpenChange={onDialogOpenChange} issue={issue} state={state} today={day} instructionsId={instructionsId}
+            targets={locked ? [] : moveTargets(board, issue)}
+            edit={edit}
+            editDecision={editDecision && editDecision.revision === issue.revision ? editDecision.outcome : undefined}
+            onUpdate={locked ? undefined : update(issue)}
+            editControl={openIssue && {
+              open: openIssue.issueId === issue.id,
+              onOpenChange: open => openIssue.onChange(open ? issue.id : null),
+            }}
+            coding={coding && { control: coding, run: latestRunOf(runs, issue.id) }}
+            pending={pendingMove && { move: pendingMove, toState: stateOf(board, pendingMove.toStateId) }}
+            proposed={proposed}
+            decision={decision && decision.revision === issue.revision ? { outcome: decision.outcome, toState: decision.toStateId === undefined ? undefined : stateOf(board, decision.toStateId) } : undefined}
+            // A keyboard or menu move keeps focus with the card wherever the board places it next.
+            onMove={toState => { focused.current = issue.id; void move(issue, toState) }}
+            onDragStart={() => setDragging(issue)} onDragEnd={() => { setDragging(null); setDropTarget(null) }} />
+        }} />
     })}
   </div>
 }

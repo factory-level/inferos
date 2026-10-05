@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button, Input, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
@@ -43,6 +43,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   wikiEditable?: boolean
 }) => {
   const canvas = useCanvasWorkspace(storage, viewId)
+  const scrollRoot = useRef<HTMLDivElement>(null)
   const [template, setTemplate] = useState(BLANK_TEMPLATE)
   const [editing, setEditing] = useState(false)
   const activeId = canvas.active?.id ?? null
@@ -94,7 +95,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
       </p>
       <Button size="sm" aria-pressed={editing} onClick={() => setEditing(value => !value)}>{editing ? 'Done editing' : 'Edit layout'}</Button>
     </div>
-    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+    <div ref={scrollRoot} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
       {canvas.error && <p role="alert" className="text-sm text-kumo-danger">{canvas.error}</p>}
       {!active && <div className="space-y-4">
         <p className="text-kumo-subtle">Compose gadgets, InferOps boards and InferMind Wikis into a page. Choose a view, create one, or import a definition from your repository. You can also ask the agent in chat to build a screen for you.</p>
@@ -105,7 +106,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
           codingDispatch={codingDispatch} />
         : <>
           <h1 className="text-lg font-semibold text-kumo-default">{active.title}</h1>
-          <CanvasView definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} codingDispatch={codingDispatch}
+          <CanvasView scrollRoot={scrollRoot} definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} codingDispatch={codingDispatch}
             wikiEditable={wikiEditable} />
         </>)}
       {active && editing && <div className="space-y-4">

@@ -103,7 +103,7 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   else if (!overseer || (useRole && !sessionWorkspace)) body = <p role="status" className="text-sm text-kumo-subtle">Loading…</p>
   else if (screenId !== null) {
     body = !screen ? <Notice>This screen is unavailable. It may have been removed.</Notice>
-      : <CanvasView definition={screen} gadgets={gadgets} overseer={overseer.stub} resourceScope={resourceScope}
+      : <CanvasView scrollRoot={main} definition={screen} gadgets={gadgets} overseer={overseer.stub} resourceScope={resourceScope}
           onOpenWidget={openBoard} />
   } else if (view.type === 'rollup') {
     body = <ConsoleRollup screenIds={view.screens} screens={entry.screens} gadgets={gadgets}
