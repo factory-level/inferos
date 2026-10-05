@@ -19,7 +19,24 @@ covers:
   - packages/integration-tests/__tests__/operate-chat-boards.test.ts
   - packages/integration-tests/__tests__/operate-board-recovery.test.ts
   - packages/integration-tests/__tests__/operate-chat-no-wiki.test.ts
-updated: 2026-10-04
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Operate and Build.md
+  sections:
+  - Repository Operate baseline
+  - Functional release acceptance
+- note: software/InferOS/InferOS Consoles.md
+  sections:
+  - Durable console library
+  - Per-console widget registry
+- note: software/InferOS/InferOS IAM.md
+  sections:
+  - Approval guards for release
+  - Approval roles and restricted-data policy
+- note: software/InferOS/InferOS Gadget Authoring Operate Widgets and Operate Apps.md
+  sections:
+  - Widget promotion for release
+  - Publication and installation review
 ---
 
 # Operate mode
@@ -124,7 +141,7 @@ None. Limits are constants in `operate-session.ts`: references and screen ids up
 
 ## Divergences from Design
 
-Against [the design](../design/operate-mode.md):
+Against [the design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Operate%20and%20Build.md%23Repository%20Operate%20baseline):
 
 - A console is stored in, and references screens of, one workspace; there is no operate space yet. It has no state machine (`consoleEvent`, `navigateBack`), no app or widget assignments, no role assignment, and no derived inventory. Operators with only the use role read a workspace's consoles and the screens they show, but not its flows, and they never reach its connections; their boards resolve only through a connection in their own session workspace (above). The operate agent's `operatePage` offers `showHome` but not the other console events.
 - Full chat is a page presentation only: the conversation does not yet render widgets inline.
@@ -151,4 +168,10 @@ Against [the design](../design/operate-mode.md):
 
 ## Wave 5 design boundary
 
-The [publication review](../design/operate-publication.md) and [approval/provider policy](../design/operate-policy.md) are proposed review artifacts, not new runtime behavior. #136/#149 already implement pinned installs, version-specific binding snapshots and explicit upgrades. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.
+The [publication review](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Gadget%20Authoring%20Operate%20Widgets%20and%20Operate%20Apps.md%23Publication%20and%20installation%20review) and [approval/provider policy](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20IAM.md%23Approval%20roles%20and%20restricted-data%20policy) are proposed review artifacts, not new runtime behavior. #136/#149 already implement pinned installs, version-specific binding snapshots and explicit upgrades. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

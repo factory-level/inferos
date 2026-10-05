@@ -19,6 +19,13 @@ We are making Cloudflare OS open source so that others can copy it and customize
 
 ## Quick Start
 
+InferOS design is authoritative in the **authored** Obsidian vault, under
+**software/InferOS/**, absorbed into the existing `InferOS …` notes. Extend those notes;
+create new design notes sparingly. Each [architecture topic](docs/architecture/README.md)
+lists the Obsidian notes and sections it supports in its `obsidian_designs` front matter.
+Local design pointers are retired. Read the [Obsidian navigation guide](docs/architecture/_brain.md)
+for CLI access and contribution instructions. Architecture and ADRs remain in Git.
+
 To quickly run Cloudflare OS locally, [install pnpm](https://pnpm.io/), then do:
 
     pnpm run-local

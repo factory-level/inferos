@@ -5,14 +5,22 @@ covers:
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
   - packages/gatekeeper-scheduler
   - docs/blueprints.md
-updated: 2026-10-01
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Agent Deployments.md
+  sections:
+  - Agent deployments
+- note: software/InferOS/InferOS Durable Agents.md
+- note: software/InferOS/InferOS IAM.md
+  sections:
+  - Remote agent boundary
 ---
 
 # Reusable native agent authoring
 
 ## Overview
 
-Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa00851`. Proposed work is recorded in the [design](../design/agent-authoring.md), not asserted as implemented here.
+Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa00851`. Proposed work is recorded in the [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Agent%20Deployments.md%23Agent%20deployments), not asserted as implemented here.
 
 ## Components
 
@@ -33,13 +41,20 @@ Model and gatekeeper bindings are installed in the destination workspace. Schedu
 
 ## Divergences from Design
 
-Unified authoring operations, pinned-skill qualification and cross-install proof/rebind workflows are not established by current native Blueprint operations.
+The owner clarified on 2026-10-05 that agents belong to the deployment feature and are independently authored. Both native Gadget-based and Mastra-connected agents remain in scope; the earlier shared agent-creation API proposal is superseded. Existing native primitives do not establish a complete deployment lifecycle or remote approval contract. All intended IAM goes through InferOS gatekeepers. Durable-agent execution remains undecided in Obsidian.
 
 ## Open Questions
 
-- Choose the smallest native authoring API after inventorying existing Gadget/Blueprint operations.
-- Define digest canonicalization and compatibility policy before labeling artifacts portable or qualified.
+- Define registration, configuration, activation, updates and removal for supplied agents using existing runtime primitives where possible.
+- Prove remote gatekeeper authority and approval behavior separately from AG-UI transport.
+- Resolve durable execution, recovery and version-update behavior in InferOS Durable Agents before claiming those guarantees.
 
 ## Evidence
 
 See [source ledger](../wiki/research-sources.md) for sibling repository revisions and official references.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

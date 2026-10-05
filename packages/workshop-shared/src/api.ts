@@ -410,7 +410,7 @@ export const createAuthError = authErrors.create;
 export const getAuthErrorCode = authErrors.getCode;
 
 /**
- * A person's operate session (docs/design/operate-mode.md, "Sessions"): one continuous operate
+ * A person's operate session (docs/architecture/operate-mode.md and its Obsidian design references, "Sessions"): one continuous operate
  * chat plus a page state that is the replay of an ordered event log. The person's tabs and devices
  * change the page through `dispatch()`, and the operate agent through the same log, each applied by
  * the shared `applyOperateEvent`. The session holds references only and grants no access.

@@ -7,14 +7,18 @@ covers:
   - packages/gatekeeper-scheduler
   - packages/mcp-shared
   - scripts/recipes
-updated: 2026-10-04
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Cloudflare OS Fork.md
+  sections:
+  - Vertical extension research
 ---
 
 # Vertical extension research and decision matrix
 
 ## Overview
 
-Current-state baseline inspected at InferOS `21708d3449a482843e13cb2268d1ae79451c7dfb`. Proposed work is recorded in the [design](../design/vertical-extension-research.md), not asserted as implemented here.
+Current-state baseline inspected at InferOS `21708d3449a482843e13cb2268d1ae79451c7dfb`. Proposed work is recorded in the [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20OS%20Fork.md%23Vertical%20extension%20research), not asserted as implemented here.
 
 ## Components
 
@@ -55,3 +59,9 @@ The capability inventory now includes shipped wrapper maintenance, connection pa
 `scripts/recipes/create.ts` builds a new pinned wrapper through `bootstrapConsumer`, selects the existing InferOps fixture capability, sets its port and synthetic three-card board, and carries its view, inherited blueprints/skills and explicit domain limits. Creation is staged then renamed; failures clean only the staging directory. Reruns verify recipe identity and upstream pin, then preserve customer edits. It adds no kernel/RPC API or provider. Industrial and medical JSON files are future scenario inputs, not running adapters. See [recipe runbook](../wiki/vertical-recipes.md). Cloud/provider acceptance stays open in #32.
 
 The pinned mock does not import wrapper fixture JSON. `packages/workshop-backend/scripts/propose-recipe.ts` is a Node operator, not a kernel endpoint: it uses existing authenticated RPC to queue the catalog cards and create a saved view on the local synthetic board. It never approves; the operator reviews creation in the normal queue. Existing demo cards remain, and fixture IDs/data are not imported.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

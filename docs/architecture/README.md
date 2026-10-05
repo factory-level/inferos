@@ -1,13 +1,14 @@
 # Architecture
 
-Current implementation and explicit gaps against the paired draft designs.
+Current implementation and explicit gaps against canonical Obsidian designs.
 
-Create documents from [`_template.md`](_template.md).
+Create documents from [`_template.md`](_template.md). Read each topic’s `obsidian_designs` notes and optional section headings through the [Obsidian CLI workflow](_brain.md). References identify intended design, not implementation completeness.
 
 ## Index
 
 | Document | Covers | Summary |
 | --- | --- | --- |
+| [InferOS brain](_brain.md) | Documentation discovery and validation | Canonical Obsidian design references and CLI workflow |
 | [Platform pillars](platform-pillars.md) | Workshop, shared API, router | Overall scope and boundaries |
 | [Cloudflare-like local development](local-development.md) | `scripts/run-dev-server.ts`, `scripts/run-local.ts`, `scripts/local`, `scripts/worker-config.ts`, `packages/workshop-backend/scripts`, `packages/router`, `packages/integration-tests` | Give a consuming repository a repeatable, agent-operable environment before it customizes an InferOS deployment. |
 | [Personal ChatGPT connection](chatgpt-connection.md) | `assistant-plugins/openai`, `packages/workshop-backend/src/openai-plugin.ts`, `packages/workshop-backend/src/ai-models.ts`, `packages/workshop-frontend/src/features/openai` | ChatGPT plan usage through a local Bun companion, with an explicit API-key fallback; no Cloudflare-hosted connection. |
@@ -29,5 +30,5 @@ These draft designs from the 2026-10-02 baseline have no architecture page becau
 
 | Design | Current state |
 | --- | --- |
-| [External-agent platform integrations](../design/agent-platform-integrations.md) | Provider-neutral design/fixtures only (#79/#80); all HG/#81 work is deferred. No bridge code. `HARNESS_HG_ENABLED` is accepted by the configuration schema and reported unsupported. Tracked by [#52](https://github.com/factory-level/inferos/issues/52). |
-| [Native agent deployments](../design/agent-deployments.md) | No code. `AGENT_DEPLOYMENTS` is accepted by the configuration schema and reported unsupported. Tracked by [#53](https://github.com/factory-level/inferos/issues/53). |
+| [External-agent platform integrations](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Agent%20Deployments.md%23External-agent%20platform%20integrations) | Provider-neutral design/fixtures only (#79/#80); all HG/#81 work is deferred. No bridge code. `HARNESS_HG_ENABLED` is accepted by the configuration schema and reported unsupported. Tracked by [#52](https://github.com/factory-level/inferos/issues/52). |
+| [Native agent deployments](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Agent%20Deployments.md%23Native%20deployment%20lifecycle%20review) | No code. `AGENT_DEPLOYMENTS` is accepted by the configuration schema and reported unsupported. Tracked by [#53](https://github.com/factory-level/inferos/issues/53). |

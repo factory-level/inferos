@@ -1,7 +1,7 @@
 // The operate session's page state machine: its state, its events, and the one pure function that
 // applies an event. The kernel applies events with it before storing them, and clients and the
 // operate agent use the same function, so every party derives the same page from the same log.
-// See docs/design/operate-mode.md ("Sessions").
+// See docs/architecture/operate-mode.md and its Obsidian design references ("Sessions").
 
 import type { ConsoleFullChat } from "./operate-console.js";
 

@@ -7,7 +7,11 @@ covers:
   - custom-gatekeepers/gatekeeper-inferops/src/enablement.ts
   - custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts
   - custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts
-updated: 2026-10-03
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Feature Flags.md
+  sections:
+  - Capability contract and migration review
 ---
 
 # Customer feature capabilities
@@ -50,9 +54,15 @@ A version 2 file resolves each capability from its default (off), then its profi
 
 ## Divergences from Design
 
-- The [design](../design/feature-capabilities.md) still says current code accepts only the legacy flags. Since #84 the eight names are accepted in version 2; that sentence describes the state before #84.
+- The [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Feature%20Flags.md%23Capability%20contract%20and%20migration%20review) still says current code accepts only the legacy flags. Since #84 the eight names are accepted in version 2; that sentence describes the state before #84.
 - The design requires each capability to be enforced at server operations, declared tools, the CLI and the UI, with a named owner, default and disable policy. Only `INFEROPS_ENABLED` has all of these recorded. `INFEROPS_AUTH` has startup and sign-in enforcement only. `CODING_WORKBENCH_ENABLED` is enforced by the gatekeeper and has a default (off), but no declared-tool, CLI or UI surface yet. None has a cloud deployment path: the release manifest sets neither `INFEROPS_ENABLED` (so cloud installs are always on) nor `CODING_WORKBENCH_ENABLED` (always off).
 
 ## Open Questions
 
 - The owner and default of each capability other than `INFEROPS_ENABLED`, and when bootstrap should write version 2. These are listed under the [consumer configuration open questions](consumer-configuration.md#open-questions).
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

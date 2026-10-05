@@ -24,14 +24,21 @@ covers:
   - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-10-04
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Consoles.md
+  sections:
+  - Screen requirements and delivery
+- note: software/InferOS/InferOS Gadget Authoring Operate Widgets and Operate Apps.md
+  sections:
+  - Widget promotion for release
 ---
 
 # InferOps canvas and transactional widgets
 
 ## Overview
 
-Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa00851`. Proposed work is recorded in the [design](../design/inferops-canvas.md), not asserted as implemented here.
+Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa00851`. Proposed work is recorded in the [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Consoles.md%23Screen%20requirements%20and%20delivery), not asserted as implemented here.
 
 ## Components
 
@@ -61,7 +68,7 @@ A guarded composition schema and pure edit engine now exist; workspace-authorize
 
 Console board and issue continuity (#63) covers one board and one issue in the session; it has no multi-board history beyond the browser's, and a duplicate mutation is prevented only within one form (the in-flight guard) and, for an issue that already has a change awaiting approval, by the gatekeeper's `CONFLICT`: two tabs proposing the same new issue still queue two creates. Narrow and wide layouts reuse the existing console and full-view layout and are not separately browser-tested here; live real-provider browser evidence for #59 is not recorded by this change.
 
-Durable views are released as a bounded slice (#34, MVP scope in #1): the one private Kanban/Operate view keeps its definition through reload and Worker restart, refuses stale expected revisions and inherits the workspace's build-access boundary (see the evidence under [Resolving a board reference](#resolving-a-board-reference)). The durable-view requirements in the [consumer configuration design](../design/consumer-configuration.md) for generalized export/import/rebind, independent view-sharing controls, deployment-update recovery, schema migrations and cross-customer upgrade matrices are post-release and not implemented; today a view is shared only by sharing its workspace, and import always creates a new definition.
+Durable views are released as a bounded slice (#34, MVP scope in #1): the one private Kanban/Operate view keeps its definition through reload and Worker restart, refuses stale expected revisions and inherits the workspace's build-access boundary (see the evidence under [Resolving a board reference](#resolving-a-board-reference)). The durable-view requirements in the [consumer configuration design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Feature%20Flags.md%23Consumer%20configuration) for generalized export/import/rebind, independent view-sharing controls, deployment-update recovery, schema migrations and cross-customer upgrade matrices are post-release and not implemented; today a view is shared only by sharing its workspace, and import always creates a new definition.
 
 ## Open Questions
 
@@ -337,7 +344,7 @@ The agent's `writeFile` and `editFile` refuse `client.js` in a workflow workspac
 
 `AuthenticatedApi.newGadget(kind?)` creates a workspace of a kind, storing it before the workspace is returned. `newGadgetFromBlueprint()` does not take or carry a kind, so a workspace installed from a blueprint is an app until switched.
 
-Behind the `operate-mode` UI flag (on in local development; also requires composable views), the frontend acts on the kind. The Build home page shows a kind picker (App, Widget, Workflow) above the composer. It is a Kumo `Radio.Group` of cards, so the keyboard pattern comes from Kumo: one tab stop on the chosen kind, arrow keys move to and select a neighbour and wrap at the ends, and Home/End do nothing (Kumo's radio group disables them, as the WAI-ARIA radio pattern does not define them). The chosen kind is set on the new workspace in the same batch as its first chat, ahead of it, so that chat's agent builds that kind. The workspace editor header shows a kind switch, with a confirmation step, for the build role. Apps get a Chat ↔ App toggle. Workflows replace the app preview with a Triggers panel listing their bound hooks (scheduled tasks register as hooks) and the pending-approval count. The workspace list shows a kind chip. The Build sidebar gains a Build | Operate toggle whose mode is derived from the URL: the InferOps Canvas routes are Operate, where console navigation lives in a separate operator shell (see [Operate session page](#operate-session-page)). Creating a workspace with a kind and publishing to Operate are designed in [operate-mode](../design/operate-mode.md) but not implemented.
+Behind the `operate-mode` UI flag (on in local development; also requires composable views), the frontend acts on the kind. The Build home page shows a kind picker (App, Widget, Workflow) above the composer. It is a Kumo `Radio.Group` of cards, so the keyboard pattern comes from Kumo: one tab stop on the chosen kind, arrow keys move to and select a neighbour and wrap at the ends, and Home/End do nothing (Kumo's radio group disables them, as the WAI-ARIA radio pattern does not define them). The chosen kind is set on the new workspace in the same batch as its first chat, ahead of it, so that chat's agent builds that kind. The workspace editor header shows a kind switch, with a confirmation step, for the build role. Apps get a Chat ↔ App toggle. Workflows replace the app preview with a Triggers panel listing their bound hooks (scheduled tasks register as hooks) and the pending-approval count. The workspace list shows a kind chip. The Build sidebar gains a Build | Operate toggle whose mode is derived from the URL: the InferOps Canvas routes are Operate, where console navigation lives in a separate operator shell (see [Operate session page](#operate-session-page)). Creating a workspace with a kind and publishing to Operate are designed in [operate-mode](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Operate%20and%20Build.md%23Repository%20Operate%20baseline) but not implemented.
 
 ## Operate session page
 
@@ -375,3 +382,9 @@ With Operate available, `/inferops-canvas` renders `OperateSessionPage` (`featur
 - **Agent view.** The **Agent view** toggle shows `WikiAgentText`: the page as an agent reads it (`readDocumentText`, through the same connection, an observation in the action log), re-read whenever the page read changes, beside a badge saying whether it equals the text built from the sections shown (`pageText`, the gatekeeper's `documentText` over the shown bodies). Embedded references stay as the links they are written as, which is what the gatekeeper's text gives an agent today.
 
 `wikiPage.test.ts` covers the tree (order, unlisted parent, cycle), embed splitting equal to the gatekeeper's references over the demo fixture, the agent text, reference parsing and edit reconciliation; `wikiData.test.ts` covers canonical resolution and unbound, missing pages, failed refresh, lost access, `DISABLED` and a removed connection, newest-read ordering, an edit through proposing, awaiting and applied, rejected and stale outcomes (and a read older than the edit never deciding it), a refused stale proposal, the agent text and disposal; `CanvasWikiWidget.test.tsx` renders it in `CanvasView` and covers the tree and Markdown (no raw HTML, no `javascript:`/`data:` href), the configured and an unknown first page, the live Kanban and issue embed from one board read, a wrong-tenant issue as not connected, the embed following the Kanban's state and revision and a deleted issue, a failing embed beside working ones, the Wiki not connected and refused, an edit through *Waiting for approval* to *Saved* after a decided action, rejected and stale edits, read-only rendering, agent text equal to the rendered sections, and disposal of the Wiki and board sessions. Live acceptance against a running InferOps/InferMind is not recorded here.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

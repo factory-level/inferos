@@ -13,7 +13,14 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-04
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS IAM.md
+  sections:
+  - InferOps project gatekeeper
+  - Repository gatekeeper contract
+  - InferOps project API declaration
+  - Approval guards for release
 ---
 
 # InferOps gatekeeper
@@ -22,7 +29,7 @@ updated: 2026-10-04
 
 `custom-gatekeepers/gatekeeper-inferops` (package `@inferos/gatekeeper-inferops`, vendor id
 `inferops`) implements the reviewed agent-facing API from the
-[design](../design/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
+[design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20IAM.md%23InferOps%20project%20gatekeeper). Its `src/types.d.ts` is the design's
 `inferops-gatekeeper-api.d.ts` verbatim, plus `findBoards` (below): `InferOpsProjectSession` (`readBoard`, `openIssue`,
 `createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`), with `Issue.pending`
 marking simulated changes. The gatekeeper code is written against a data-source
@@ -596,3 +603,9 @@ Findings:
 
 Left in InferOps, none of it deletable through the API: the issues above, repository `live-fork`,
 project CODE, the cancelled runs, and section `gripper` at version 11 with the runs' marker lines.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

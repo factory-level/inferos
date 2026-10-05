@@ -17,14 +17,18 @@ covers:
   - packages/workshop-frontend/src/features/canvas/codingRuns.ts
   - packages/workshop-frontend/src/features/canvas/KanbanCodingForm.tsx
   - packages/workshop-frontend/src/features/canvas/CodingRunStatus.tsx
-updated: 2026-10-03
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Cloudflare Deployment.md
+  sections:
+  - Local coding workflows
 ---
 
 # Local coding workflows and agent dispatch
 
 ## Overview
 
-The InferOS half of the [design](../design/local-coding-workflows.md) is the governed dispatch path ([#70](https://github.com/factory-level/inferos/issues/70)) and the deployment switch for it (the flag part of [#69](https://github.com/factory-level/inferos/issues/69)). A human or an agent with a coding-dispatch binding proposes handing a software issue of one InferOps project to the local coding runner; on approval the InferOps gatekeeper sends the dispatch with the person's own token, and InferOps queues a run that its runner pulls. The same binding lists the project's runs and their results and proposes cancels.
+The InferOS half of the [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20Deployment.md%23Local%20coding%20workflows) is the governed dispatch path ([#70](https://github.com/factory-level/inferos/issues/70)) and the deployment switch for it (the flag part of [#69](https://github.com/factory-level/inferos/issues/69)). A human or an agent with a coding-dispatch binding proposes handing a software issue of one InferOps project to the local coding runner; on approval the InferOps gatekeeper sends the dispatch with the person's own token, and InferOps queues a run that its runner pulls. The same binding lists the project's runs and their results and proposes cancels.
 
 The runner itself is InferOps' (`inferops runner codex`), extended in InferOps by [factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327). Its patch-result mode, local worktree, environment allowlist and captured test evidence are not part of this repository. InferOS runs it locally ([#72](https://github.com/factory-level/inferos/issues/72)): `pnpm local runner start|status|stop` writes its `runner.json` from the wrapper's allowlist and starts it with an allowlisted environment, `pnpm local coding doctor` says whether it may start, and two skills tell agents how to dispatch (`coding-dispatch`) and how to set up and recover the runner (`local-coding`). Its control surface is the Kanban's coding task dialog on the workspace's own canvas (step 7 below; [InferOps canvas](inferops-canvas.md#coding-control-surface)). The runbook is [Run the local coding runner](../wiki/local-coding-runner.md).
 
@@ -115,3 +119,9 @@ No runner was started, so nothing claimed or executed the run, and no Codex turn
 The control surface's tests are listed under [InferOps canvas](inferops-canvas.md#coding-control-surface) (`CanvasBoardCoding.test.tsx`, `codingDispatch.test.ts`, `codingRuns.test.ts`, `OperateCoding.test.tsx`); result parsing of `tests` and `reasonCode` is in `__tests__/http-inferops.test.ts`. All of it runs against fakes; no live run is recorded.
 
 `custom-gatekeepers/gatekeeper-inferops/__tests__/dispatch.test.ts` (workerd, over the demo data) covers the grammar, the kind offered only while on, dispatch and board URLs minting different gatekeepers, a board binding with no dispatch method, another project or host refused like a missing project, repositories with their allowlist status, a dispatch queued for approval with a provisional run and applied once, a repository off the allowlist (or no allowlist) refused before anything is read, wrong project, content issue, closed issue, stale revision, disabled repository and malformed arguments refused without a proposal, a second dispatch refused while one is pending and while the run is active, duplicate approval applying once, a replayed key and a reused key with another payload, a tampered stored dispatch refused by its fingerprint, a revision changed before apply, a repository taken off the allowlist before apply, rejection, run reads with a patch and test summary, a run of another project refused like an unknown one, cancels of queued and running runs, and the switch: unset is off, a new binding refused while it or InferOps is off, every call of an existing and a stale session refused and served again once on, and a queued dispatch never applied while off and applied once on. `__tests__/http-inferops.test.ts` covers the repository, run, dispatch and cancel requests and their error mapping (`FORBIDDEN`, `RUN_ACTIVE`, `STALE_REVISION`, `LEASE_QUARANTINED`, `WORKFLOW_MISMATCH`, `VALIDATION`). `packages/integration-tests/__tests__/inferops-isolation.test.ts` covers, against the fake InferOps through the real Workshop: a dispatch applied once with the person's own token and delegate permission, then cancelled; a person without `issue:delegate` refused at apply with nothing queued; a board binding unable to dispatch and an unlisted repository refused with no request; a stale dispatch; and the switch turned off refusing a stale session, a queued dispatch and a new binding without a request while the board stays available. `scripts/consumer/config.test.ts`, `scripts/dev-server-config.test.ts` and `scripts/consumer/bootstrap.test.ts` cover the configuration, its resolution and the capability reported supported.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

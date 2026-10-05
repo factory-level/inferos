@@ -5,14 +5,18 @@ covers:
   - packages/workshop-frontend
   - packages/workshop-shared
   - packages/router
-updated: 2026-10-02
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Cloudflare OS Fork.md
+  sections:
+  - Platform requirements
 ---
 
 # InferOS platform baseline
 
 ## Overview
 
-InferOS is a Cloudflare Workers application with a browser SPA and sandboxed Gadgets. This page describes the native mechanisms every pillar builds on, separately from the [intended pillars](../design/platform-pillars.md). Each topic page records what its pillar has implemented; the [implementation roadmap](../wiki/implementation-roadmap.md) tracks merged work against the MVP walkthrough in [#1](https://github.com/factory-level/inferos/issues/1).
+InferOS is a Cloudflare Workers application with a browser SPA and sandboxed Gadgets. This page describes the native mechanisms every pillar builds on, separately from the [intended pillars](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20OS%20Fork.md%23Platform%20requirements). Each topic page records what its pillar has implemented; the [implementation roadmap](../wiki/implementation-roadmap.md) tracks merged work against the MVP walkthrough in [#1](https://github.com/factory-level/inferos/issues/1).
 
 ## Components
 
@@ -41,6 +45,12 @@ Partly implemented, all without live acceptance: the InferOps gatekeeper (per-pe
 
 ## Open Questions
 
-See each [draft pillar](../design/platform-pillars.md) and the [roadmap](../wiki/implementation-roadmap.md).
+See each [draft pillar](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20OS%20Fork.md%23Platform%20requirements) and the [roadmap](../wiki/implementation-roadmap.md).
 
 The consumer bootstrap, parser and skills are described in [consumer configuration](consumer-configuration.md); applied profiles and styling ([#35](https://github.com/factory-level/inferos/issues/35)) are still outstanding.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

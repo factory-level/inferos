@@ -4,7 +4,7 @@ import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from
 // workspace's screens (canvas ids), stored in that workspace beside its screens and flows. Opening
 // one copies what the page needs into the opener's operate session (see `openConsole` in
 // operate-session.ts); the console itself holds references, order and settings only, and grants
-// nothing. See docs/design/operate-mode.md ("Role consoles").
+// nothing. See docs/architecture/operate-mode.md and its Obsidian design references ("Role consoles").
 
 /** Most consoles one workspace stores. */
 export const MAX_WORKSPACE_CONSOLES = 16;

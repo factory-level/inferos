@@ -19,14 +19,18 @@ covers:
   - packages/integration-tests
   - scripts/preview/smoke.ts
   - scripts/preview/smoke.test.ts
-updated: 2026-10-03
+updated: '2026-10-05'
+obsidian_designs:
+- note: software/InferOS/InferOS Cloudflare Deployment.md
+  sections:
+  - Local development
 ---
 
 # Cloudflare-like local development
 
 ## Overview
 
-The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)). For local-to-cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)), the production router's request path is exercised in workerd and an opt-in smoke recipe checks a deployed instance (see [router-path parity](#router-path-parity)); wrapper-aware cloud packaging is not implemented. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
+The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)). For local-to-cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)), the production router's request path is exercised in workerd and an opt-in smoke recipe checks a deployed instance (see [router-path parity](#router-path-parity)); wrapper-aware cloud packaging is not implemented. Proposed work is recorded in the [design](obsidian://open?vault=authored&file=software%2FInferOS%2FInferOS%20Cloudflare%20Deployment.md%23Local%20development), not asserted as implemented here.
 
 ## Components
 
@@ -141,3 +145,9 @@ The dev server resolves these before it writes the per-Worker dev configs:
 ## Evidence
 
 See [source ledger](../wiki/research-sources.md) for sibling repository revisions and official references.
+
+## Design authority
+
+The `obsidian_designs` front matter identifies intended design in the `authored` vault.
+Read the owning notes through the [Obsidian CLI workflow](_brain.md); references do not
+imply complete implementation.

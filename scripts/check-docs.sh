@@ -17,16 +17,16 @@ front_matter() {
   awk 'NR == 1 && $0 != "---" { exit } NR > 1 && $0 == "---" { exit } NR > 1 { print }' "$1"
 }
 
-# Print the value of a top-level front matter key.
+# Print a scalar, including the quoted dates emitted by the migration helper.
 fm_value() {
-  front_matter "$1" | sed -n "s/^$2:[[:space:]]*//p" | head -n 1
+  front_matter "$1" | sed -n "s/^$2:[[:space:]]*//p" | head -n 1 | sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/'
 }
 
-# Print the list items under a top-level front matter key.
+# Accept indented lists and PyYAML's indentless block lists.
 fm_list() {
   front_matter "$1" | awk -v key="$2" '
     $0 ~ "^" key ":" { in_list = 1; next }
-    in_list && /^[[:space:]]+-[[:space:]]/ { sub(/^[[:space:]]+-[[:space:]]+/, ""); print; next }
+    in_list && /^[[:space:]]*-[[:space:]]/ { sub(/^[[:space:]]*-[[:space:]]+/, ""); print; next }
     in_list && /^[^[:space:]]/ { in_list = 0 }
   '
 }
@@ -86,27 +86,22 @@ shopt -s nullglob
 
 for file in docs/*/*.md; do
   is_template "$file" && continue
+  [ "$file" = docs/architecture/_brain.md ] && continue
   if ! [[ "$(basename "$file")" =~ ^[a-z0-9][a-z0-9-]*\.md$ ]]; then
     error "$file: filename must be lowercase and hyphen-separated"
   fi
 done
 
-for file in docs/design/*.md; do
-  is_template "$file" && continue
-  check_keys "$file" title status updated
-  check_enum "$file" status draft accepted superseded
-  check_date "$file" updated
-  check_indexed "$file"
-done
+# Keep one design authority: the retired local folder contains only its README.
+while IFS= read -r file; do
+  [ "$file" = docs/design/README.md ] || error "$file: design belongs in Obsidian; follow docs/architecture/_brain.md"
+done < <(find docs/design -type f | sort)
 
 for file in docs/architecture/*.md; do
   is_template "$file" && continue
   check_keys "$file" title covers updated
   check_date "$file" updated
   check_indexed "$file"
-  if [ ! -f "docs/design/$(basename "$file")" ]; then
-    warn "$file: no matching design document docs/design/$(basename "$file")"
-  fi
   covered=0
   while IFS= read -r path; do
     [ -z "$path" ] && continue
@@ -150,13 +145,16 @@ while IFS= read -r file; do
     target="${target%%#*}"
     [ -z "$target" ] && continue
     case "$target" in
-      http://* | https://* | mailto:*) continue ;;
+      http://* | https://* | mailto:* | obsidian://*) continue ;;
     esac
     if [ ! -e "$dir/$target" ]; then
       error "$file: broken link '$target'"
     fi
   done < <(grep -o '\]([^)[:space:]]*)' "$file" | sed 's/^](//; s/)$//')
 done < <(find docs -name '*.md' -type f | sort)
+
+# Architecture records its Obsidian designs; CI validates structure without vault access.
+node scripts/check-obsidian-designs.ts docs/architecture/*.md || error "Obsidian design reference validation failed"
 
 printf '%d error(s), %d warning(s)\n' "$errors" "$warnings"
 [ "$errors" -eq 0 ]
