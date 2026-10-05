@@ -1,6 +1,6 @@
 ---
 title: Implementation roadmap
-updated: 2026-10-03
+updated: 2026-10-04
 ---
 
 # Implementation roadmap
@@ -9,7 +9,7 @@ The MVP release walkthrough, the wave milestones that group the work, and what h
 
 Roadmap: [#1](https://github.com/factory-level/inferos/issues/1). Its MVP decision (2026-10-02) is the canonical release scope: **InferOps Kanban and the InferMind Wiki are the customer-facing MVP, and InferOS is the configurable private shell that boots and hosts them.** The wave milestones below are work groupings, not release gates; an issue's own phase note decides which slice of it is release-critical.
 
-This page tracks merge state only. A merged pull request is implementation evidence for a slice of an issue, not acceptance of the issue or of a walkthrough step. Status was taken from `main` after PR [#147](https://github.com/factory-level/inferos/pull/147) on 2026-10-03.
+This page tracks merge state only. A merged pull request is implementation evidence for a slice of an issue, not acceptance of the issue or of a walkthrough step. The Wave 4 section records its 2026-10-04 implementation and closeout status; other waves retain their earlier evidence boundaries.
 
 ## Evidence so far
 
@@ -93,7 +93,7 @@ Local coding with authorized dispatch, wrapper topology and settings, the InferO
 
 ### Wave 4: Native agents and connection packages
 
-Post-release per #1. The consoles kernel and UI, connection packages and fork upgrades, wrapper verify/upgrade, cloud parity, the Kanban performance baseline, pinned installs, and Operate console and subject work merged on 2026-10-03. Native agent authoring, agent deployments and publication destinations have contract or design pull requests waiting on owner review; their implementation has not started.
+Wave 4’s remaining implementation work is merged; #28 still awaits the owner’s numeric budget agreement. Role-console context/navigation (#63) is the bounded release-critical slice; the other Wave 4 tracks remain post-release per #1. The consoles, connection packages, reviewed upgrades, wrapper tooling, router-path parity, pinned installs and measured/windowed Kanban are merged. The milestone remains open for that decision and the eight owner-deferred issues listed below; agent contract/publication drafts remain parked.
 
 Owner decision (2026-10-03): a use-role operator reads boards through their own InferOps sign-in, never through the owner's connection. #139 and #142 implement it.
 
@@ -115,6 +115,10 @@ Merged pull requests:
 | [#143](https://github.com/factory-level/inferos/pull/143), [#144](https://github.com/factory-level/inferos/pull/144), [#145](https://github.com/factory-level/inferos/pull/145) | [#64](https://github.com/factory-level/inferos/issues/64) | Operate subjects, handover and per-subject audit; presence; the Operate UI for them |
 | [#146](https://github.com/factory-level/inferos/pull/146) | #63 | A workspace shared for use is listed for its collaborator as soon as it is shared |
 | [#147](https://github.com/factory-level/inferos/pull/147) | [#59](https://github.com/factory-level/inferos/issues/59), #63 | Action outcomes announced from the action log, never inferred from a revision change; console recovery |
+| [#149](https://github.com/factory-level/inferos/pull/149) | #60 | Version-specific install bindings, explicit upgrade checks and use-role resource-access failure coverage |
+| [#150](https://github.com/factory-level/inferos/pull/150), [#152](https://github.com/factory-level/inferos/pull/152) | #63 | Identical creates join one pending action; reconnect, deleted-issue and pending-action recovery coverage |
+| [#154](https://github.com/factory-level/inferos/pull/154) | #59, #63 | Reconnect opening status and accessible dialog Select portals |
+| [#153](https://github.com/factory-level/inferos/pull/153), [#156](https://github.com/factory-level/inferos/pull/156) | #28 | Offscreen read deferral, per-column card windowing, explicit 200px pane preloading and paired browser measurements |
 
 Issue status:
 
@@ -125,12 +129,15 @@ Issue status:
 | [#73](https://github.com/factory-level/inferos/issues/73) Reference connection package and conformance suite | Closed | #132 |
 | [#74](https://github.com/factory-level/inferos/issues/74) Connector scaffolder and second connector | Closed | #138 |
 | [#75](https://github.com/factory-level/inferos/issues/75) Reviewed upgrades across customized repositories | Closed | #137 |
-| [#11](https://github.com/factory-level/inferos/issues/11) Local-to-Cloudflare behavior | Open | The preview smoke recipe has not been run against a Cloudflare deployment (needs an owner-approved preview deploy); a wrapper gatekeeper is not routed through the router suite |
-| [#28](https://github.com/factory-level/inferos/issues/28) Kanban performance | Open | No browser p50/p95, long tasks or memory under recorded conditions; no request counts against a live InferOps; offscreen board cards are not deferred; budgets are not agreed |
-| [#60](https://github.com/factory-level/inferos/issues/60) Publish to Operate | Open | Fail-closed is proven only at install time, not for a use-share viewer without access to a bound resource; no operate-space container or Publish to Operate UI; an older pin checks its bindings against the current binding list, not that version's |
-| [#59](https://github.com/factory-level/inferos/issues/59), [#61](https://github.com/factory-level/inferos/issues/61), [#63](https://github.com/factory-level/inferos/issues/63) Console Kanban, chat and continuity | Open | Live browser evidence is recorded against InferOps with a stub persona token only; per-person identity waits on the owner's Google sign-in (#66, #23); ambiguous and empty chat cases have not been run with a real LLM; `findBoards` searches only the InferOps workspace the person has already connected |
+| [#11](https://github.com/factory-level/inferos/issues/11) Local-to-Cloudflare behavior | Deferred | Router-path parity is implemented; the Cloudflare smoke remains parked by the owner |
+| [#28](https://github.com/factory-level/inferos/issues/28) Kanban performance | Open: budget agreement | #129, #153, #156; windowing/preload browser proof and proposed local-fixture budgets in [Kanban performance](../architecture/inferops-canvas.md#kanban-performance); upstream paging/delta request [inferops#2335](https://github.com/factory-level/inferops/issues/2335) |
+| [#60](https://github.com/factory-level/inferos/issues/60) Pinned install and explicit upgrade | Closed | #136, #149; all acceptance boxes covered by `operate-published.test.ts` and green CI. Container and Publish UI moved to design-first [#155](https://github.com/factory-level/inferos/issues/155), Wave 5 |
+| [#63](https://github.com/factory-level/inferos/issues/63) Console context and continuity | Closed | #139, #140, #142, #146, #147, #150, #152, #154 and two live-provider browser runs; per-person identity stays with #59/#66/#23 |
+| [#59](https://github.com/factory-level/inferos/issues/59), [#61](https://github.com/factory-level/inferos/issues/61) Integrated operating proof and chat (other milestones) | Open | The runs used stub-persona/shared-stopgap credentials and a scripted model; per-person identity and real-LLM proof are not established by the #63 closure |
 
-Waiting on owner review (contract and design pull requests, not merged):
+Browser evidence: [first run](https://github.com/factory-level/inferos/issues/63#issuecomment-5976606582) and [second run](https://github.com/factory-level/inferos/issues/63#issuecomment-5977886294), at 1440 and 390 widths, record IDs/revisions, create/deny/approve, identical multi-tab proposals and reconnect recovery. Both reached live InferOps through the development stopgap; neither proves per-person sign-in. The second run’s accessibility findings are fixed by #154.
+
+Owner-deferred, still open in milestone 4: **#11, #15, #16, #17, #68, #76, #77 and #78**. Each keeps its `deferred` label. Waiting on owner review (draft contract and design pull requests, not merged or modified by this closeout):
 
 - [#130](https://github.com/factory-level/inferos/pull/130) agent artifact revision contract (ADR 0006) for [#15](https://github.com/factory-level/inferos/issues/15), [#16](https://github.com/factory-level/inferos/issues/16), [#17](https://github.com/factory-level/inferos/issues/17).
 - [#133](https://github.com/factory-level/inferos/pull/133) agent deployment contract (ADR 0007, stacked on #130) for [#76](https://github.com/factory-level/inferos/issues/76), [#77](https://github.com/factory-level/inferos/issues/77), [#78](https://github.com/factory-level/inferos/issues/78).
@@ -142,7 +149,7 @@ Still deferred from Wave 3: one real signed-in Codex patch run for [#69](https:/
 
 ### Wave 5: External platforms and later tracks
 
-Post-release per #1. All open: external-agent integrations [#79](https://github.com/factory-level/inferos/issues/79), [#80](https://github.com/factory-level/inferos/issues/80), [#81](https://github.com/factory-level/inferos/issues/81); regulated-data rules [#65](https://github.com/factory-level/inferos/issues/65); ChatGPT connection on Cloudflare [#12](https://github.com/factory-level/inferos/issues/12), [#13](https://github.com/factory-level/inferos/issues/13), [#14](https://github.com/factory-level/inferos/issues/14); vertical research [#30](https://github.com/factory-level/inferos/issues/30), [#31](https://github.com/factory-level/inferos/issues/31), [#32](https://github.com/factory-level/inferos/issues/32); maps [#29](https://github.com/factory-level/inferos/issues/29).
+Post-release per #1. The [operate-space container and Publish to Operate UI](https://github.com/factory-level/inferos/issues/155), split from #60, requires a design first and references [Operate mode](../design/operate-mode.md). All other tracks remain open: external-agent integrations [#79](https://github.com/factory-level/inferos/issues/79), [#80](https://github.com/factory-level/inferos/issues/80), [#81](https://github.com/factory-level/inferos/issues/81); regulated-data rules [#65](https://github.com/factory-level/inferos/issues/65); ChatGPT connection on Cloudflare [#12](https://github.com/factory-level/inferos/issues/12), [#13](https://github.com/factory-level/inferos/issues/13), [#14](https://github.com/factory-level/inferos/issues/14); vertical research [#30](https://github.com/factory-level/inferos/issues/30), [#31](https://github.com/factory-level/inferos/issues/31), [#32](https://github.com/factory-level/inferos/issues/32); maps [#29](https://github.com/factory-level/inferos/issues/29).
 
 ## Epics
 

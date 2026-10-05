@@ -272,6 +272,27 @@ Ten keyboard moves on distinct issues per row, measured from the actual Enter ev
 
 Windowing reduces initial DOM elements by 83.5% for x1 and 85.1% for x4; heap drops from about 31/55MiB to 12/16MiB. The p95 local move badge falls from 107→29ms and 233→36ms unthrottled, and 570→83ms and 952→144ms at 4× CPU. Startup still includes a worst 1,148ms task under the throttled x4 profile (down from 2,075ms); reducing issue-card rendering does not eliminate the page’s initial load cost. Host contention and ten-sample tails remain noisy. The earlier proposed 100ms move limit holds for both unthrottled views and throttled x1, but throttled x4 needs an explicit budget decision. Numeric ceilings remain proposals until the owner’s agreement is recorded.
 
+
+**Budget decision — proposed 2026-10-04, awaiting owner agreement.** The owner was asked to agree the following ceilings against the paired windowing measurements. They are not yet agreed and do not close #28. These budgets cover the local 500-issue PERF x1/x4 **initial viewport** under the conditions above (x4 initially loads two widgets). They do not claim a live-provider, shaped-WebSocket, arbitrary-device or all-widgets-loaded guarantee.
+
+| Metric | Unthrottled ceiling | 4× CPU + Fast 4G ceiling | Highest observed, 1× / 4× |
+| --- | --- | --- | --- |
+| p95 viewport load | 1,500ms | 4,000ms | 777 / 3,672ms |
+| p95 local move-to-proposing | 100ms | 200ms | 36 / 144ms |
+| p95 queued/awaiting feedback | 500ms | 750ms | 319 / 461ms |
+| Median long-task total per load | 150ms | 1,000ms | 108 / 851ms |
+| Worst individual long task | 200ms | 1,250ms | 132 / 1,148ms |
+| Median long-task count per load | 2 | 8 | 1 / 6 |
+| Post-GC heap | 20MiB | 20MiB | 16.1 / 16.0MiB |
+| Initial DOM element count | 1,600 | 1,600 | 1,320 / 1,320 |
+| Board payload per read | 256KiB | 256KiB | 153.9 / 153.9KiB |
+| Reads per target per demand | 1 | 1 | 1 / 1 |
+| Adapter decode/land/render-prep CPU, 500 issues | 4ms | 16ms | Earlier adapter baseline about 0.5ms; 4× is a scaling allowance |
+
+All paired browser rows meet these proposed ceilings. The long-task ceiling explicitly includes startup work, which still has a 1.148s worst task at 4× CPU. The separate all-four-widgets scroll-through count is 2,766 DOM elements, outside the initial-viewport budget’s scope. Larger full-board payloads remain an upstream paging/delta follow-up ([inferops#2335](https://github.com/factory-level/inferops/issues/2335)); the 256KiB ceiling is a fixture budget and paging threshold, not a newly enforced runtime rejection.
+
+Additional browser checks passed for a keyboard move into destination position 85 with focus retained, and a 390px viewport with no document-level horizontal overflow.
+
 ## Action attribution
 
 Every workspace action log entry (`ActionLogEntry`, from `listActions` and `subscribeToActions`) carries an optional `requestedBy`: `agent`, `person`, `gadget` or `hook`, mapped in `actionRecordToLog` from the kind of the stored record's `caller` (`user` becomes `person`). It is the groundwork for agent activity and approval displays. It is a display label only: no decision reads it, and the caller's chat id, gadget id and identity stay on the server. Records persisted before callers were tracked have no `caller`, so their entries omit the field. `workshop-agent-actions.test.ts` checks that an agent's writes report `agent`, and `workshop-action-history.test.ts` that writes and reads through the owner's own connection session report `person`. The canvas board activity line (see [Board activity](#board-activity)) and the operate session's approvals show it, the latter as *Requested by the agent*, *a person*, *a gadget* or *a hook* (see [Operate session page](#operate-session-page)).
