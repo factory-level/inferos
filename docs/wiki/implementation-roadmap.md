@@ -9,7 +9,7 @@ The MVP release walkthrough, the wave milestones that group the work, and what h
 
 Roadmap: [#1](https://github.com/factory-level/inferos/issues/1). Its MVP decision (2026-10-02) is the canonical release scope: **InferOps Kanban and the InferMind Wiki are the customer-facing MVP, and InferOS is the configurable private shell that boots and hosts them.** The wave milestones below are work groupings, not release gates; an issue's own phase note decides which slice of it is release-critical.
 
-This page tracks merge state only. A merged pull request is implementation evidence for a slice of an issue, not acceptance of the issue or of a walkthrough step. The Wave 4 section records its 2026-10-04 implementation and closeout status; other waves retain their earlier evidence boundaries.
+This page tracks merge state only. A merged pull request is implementation evidence for a slice of an issue, not acceptance of the issue or of a walkthrough step. The Wave 4 and Wave 5 sections record their 2026-10-04 implementation and disposition status; earlier waves retain their evidence boundaries.
 
 ## Evidence so far
 
@@ -149,7 +149,26 @@ Still deferred from Wave 3: one real signed-in Codex patch run for [#69](https:/
 
 ### Wave 5: External platforms and later tracks
 
-Post-release per #1. The [operate-space container and Publish to Operate UI](https://github.com/factory-level/inferos/issues/155), split from #60, requires a design first and references [Operate mode](../design/operate-mode.md). All other tracks remain open: external-agent integrations [#79](https://github.com/factory-level/inferos/issues/79), [#80](https://github.com/factory-level/inferos/issues/80), [#81](https://github.com/factory-level/inferos/issues/81); regulated-data rules [#65](https://github.com/factory-level/inferos/issues/65); ChatGPT connection on Cloudflare [#12](https://github.com/factory-level/inferos/issues/12), [#13](https://github.com/factory-level/inferos/issues/13), [#14](https://github.com/factory-level/inferos/issues/14); vertical research [#30](https://github.com/factory-level/inferos/issues/30), [#31](https://github.com/factory-level/inferos/issues/31), [#32](https://github.com/factory-level/inferos/issues/32); maps [#29](https://github.com/factory-level/inferos/issues/29).
+The authorized research, design preparation and synthetic recipe work is complete. [#159](https://github.com/factory-level/inferos/pull/159) refreshes the capability inventory, the 12-area/36-workflow matrix and official-source ledger, audits the existing local ChatGPT companion, and adds proposed publication, policy and provider-neutral external-agent designs. [#160](https://github.com/factory-level/inferos/pull/160) adds reproducible synthetic wrapper recipes and an explicit proposal operator. Every merge requires both Lint and Build and test to pass at an unchanged, conflict-free head.
+
+**Harness HG is entirely deferred by the owner.** No HG research, configuration, adapter, fixture, conformance or runtime-control work is in this wave. #81 remains parked in full, including its paired independent-client delivery. Existing deferred Wave 4 issues and draft PRs #130/#133/#134 are untouched.
+
+| Track | Disposition | Evidence and requirement to resume |
+| --- | --- | --- |
+| [#30](https://github.com/factory-level/inferos/issues/30) Capability wiki | Closed on research acceptance | [Capability inventory](extension-capabilities.md), pinned baseline and dated [source ledger](research-sources.md); stale/product-note claims separated from implementation |
+| [#31](https://github.com/factory-level/inferos/issues/31) Vertical matrix | Closed on research acceptance | [36 workflows across 12 areas](vertical-decision-matrix.md), three each, with surfaces, owner, authority, gap, proof and source; priority primary-source constraints refreshed |
+| [#32](https://github.com/factory-level/inferos/issues/32) Recipes | Synthetic preparation delivered; open/deferred | [Runbook and local evidence](vertical-recipes.md); cloud proof (#11), customer/provider choices and actual domain operations remain |
+| [#155](https://github.com/factory-level/inferos/issues/155) Operate container/Publish UI | Design delivered; implementation deferred | Review [publication design](../design/operate-publication.md): container ownership, mock handling, migration/rollback; then separate kernel/UI slices |
+| [#65](https://github.com/factory-level/inferos/issues/65) Roles/restricted data | Design and acceptance specifications delivered; enforcement deferred | Review [policy design](../design/operate-policy.md): trusted policy source, identity/role mapping, action classes and provider restrictions |
+| [#79](https://github.com/factory-level/inferos/issues/79), [#80](https://github.com/factory-level/inferos/issues/80) External-agent contract/auth | Provider-neutral design and specifications delivered; runtime deferred | [Contract proposal](../design/external-agent-contract.md), linked to [inferops#2326](https://github.com/factory-level/inferops/issues/2326); actual delegation, schema, revision and retry agreement required; no bridge/SDK/auth endpoint |
+| [#81](https://github.com/factory-level/inferos/issues/81) Harness HG and independent client | Entirely deferred | Explicit owner resumption required; no part silently carried into #79/#80 |
+| [#12](https://github.com/factory-level/inferos/issues/12), [#13](https://github.com/factory-level/inferos/issues/13), [#14](https://github.com/factory-level/inferos/issues/14) Hosted ChatGPT | Local audit delivered; hosted work/live sign-in deferred | [Feasibility and audit](chatgpt-feasibility.md): 39 tests/166 assertions; official supported deployment, token custody, entitlement and owner live validation remain |
+| [#29](https://github.com/factory-level/inferos/issues/29) Maps | Deferred | Provider/viewport choices and unresolved live performance validation |
+| [#158](https://github.com/factory-level/inferos/issues/158) Kanban budgets | Deferred | Owner agreement against the recorded numbers; all ceilings remain proposed, not agreed |
+
+The 19 JSON design scenarios are acceptance **specifications**, not executable policy/auth tests. The industrial and medical fixtures are scenario inputs, not adapters or compliance evidence. Three recipe wrappers were generated and exercised against one isolated synthetic stack on :28787: normal creation proposals, rejection preserving revision, approved state change, stale-revision refusal and browser rendering. The pinned runtime does not import wrapper fixture JSON; the explicit operator queues catalog titles and retains the existing demo board. No real model, provider, cloud deployment or per-person identity proof is claimed.
+
+Milestone 5 remains open only for the eleven deferred issues above. Earlier unresolved identity and Wiki work is explicitly parked in #59/#82/#87 with its upstream/owner dependencies; none of this closes the MVP walkthrough.
 
 ## Epics
 

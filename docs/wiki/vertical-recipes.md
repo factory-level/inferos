@@ -60,7 +60,7 @@ Runtime pin `21708d3449a482843e13cb2268d1ae79451c7dfb`, local :28787, mock Infer
 | Check | Result |
 | --- | --- |
 | Generated wrappers and refusal/preservation tests | 2 tests passed, all three recipes |
-| Existing wrapper maintenance/reconcile | 10 passed, 1 optional test skipped |
+| Existing wrapper maintenance/reconcile | 11 passed, 0 skipped (rerun with pnpm on PATH) |
 | Tickets / InferOps conformance | 14 / 248 tests passed |
 | Recipe create proposals | 3 per recipe, no implicit approval; repeated field proposal returned 0 |
 | Rejection / approval / stale revision | Each recipe: rejection preserved revision; fresh approval changed state; old-revision transition refused |
