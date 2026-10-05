@@ -1,6 +1,6 @@
 ---
 title: Priority vertical research
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 
 # Priority vertical research
@@ -55,3 +55,7 @@ Where HIPAA applies, [HHS cloud guidance](https://www.hhs.gov/hipaa/for-professi
 Proposed first composition: synthetic administrative scheduling/intake worklists, a narrowly scoped EHR/scheduling gatekeeper and minimal data projections. Preserve patient/encounter identity, source provenance and role scope. Keep clinical decision support separate from administrative tooling: it needs its own clinical validation, intended-use assessment and human review requirements. Do not silently send sensitive records to a newly selected model/provider.
 
 First proof: synthetic patients, appointment concurrency, wrong-patient reference, revoked staff role and redacted diagnostics. Open questions: jurisdiction, actual contracts, minimum necessary data, consent, retention/deletion, clinical intended use and model-provider eligibility.
+
+## Wave 5 evidence boundary
+
+The Field Service, Jira Service Management, GitHub environment, OPC UA, FHIR and HHS references were reopened on 2026-10-04; see [source ledger](research-sources.md). They substantiate representative constraints, not provider selection, deployment eligibility or certification. Current InferOS mechanism evidence is pinned in [the capability inventory](extension-capabilities.md); each matrix area has explicit follow-up ownership. #32 supplies synthetic preparation, while real provider/customer acceptance remains deferred.

@@ -1,6 +1,6 @@
 ---
 title: Vertical customization decision matrix
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 
 # Vertical customization decision matrix
@@ -64,3 +64,24 @@ Legend: **C** configuration; **S** skill; **G** native Gadget; **B** Blueprint; 
 Configuration and skills can specialize terminology, defaults and authoring behavior. They cannot implement an absent external API or grant authority. A Gadget/Blueprint is appropriate for user-facing workflows when existing bindings suffice; a custom gatekeeper supplies missing typed actions. External systems remain authoritative for orders, tickets, patient records and devices. Shared canvas widgets can visualize these domains later, but initial delivery only implements the InferOps project/board slice.
 
 See [priority vertical analysis](priority-verticals.md) for the first five areas and the [source ledger](research-sources.md) for evidence limitations. Additional source-provider investigations belong in the research issues rather than being silently treated as complete.
+
+## Validation disposition — 2026-10-04
+
+All 36 rows were reviewed for composition, authority, data owner, gap and a falsifiable proof. **Document validation, not 36 executed workflows.** Native mechanisms are pinned in [the inventory](extension-capabilities.md). A provider source supports its own constraints, not an implemented InferOS adapter. The matrix distinguishes configuration (C), skill (S), custom sandbox code (G/B), connector (K) and external execution/storage (E); no row currently establishes a need to change the kernel.
+
+| Area (three rows each) | Mechanism confidence / remaining proof | Gap issue |
+| --- | --- | --- |
+| Field operations | Board/revision/approval primitives exist; resource assignment, availability, offline reconciliation and route provider are unverified | #32; maps #29 |
+| IT | Synthetic queue connector/conformance exists; real ITSM, identity provisioning and separation of duties require provider proof | #32; role policy #65 |
+| DevOps | Scoped telemetry and coding dispatch exist; real incident/deployment provider integration and fixed-commit approval are not established | #32; runner live proof #72 |
+| Industrial | Observed read/approved write primitives fit monitoring and maintenance; no plant transport, safety control or latency guarantee | #32; customer decisions #82 |
+| Medical | Synthetic administrative records only; no EHR connector, clinical validation, provider/jurisdiction approval or regulatory suitability claim | #32; restricted-data policy #65 |
+| Social/content | Native drafts can use Gadgets; platform publication and analytics compatibility still need exact-provider proof | #32 |
+| Agency/client delivery | Scoped project bindings and portable code exist; per-person source isolation and customer-specific delivery proof remain | #23/#32 |
+| Knowledge/research | Context collections and scoped Wiki hosting exist; complete source Wiki/pillar/coverage features remain upstream | #87; inferops#2324/#2325 |
+| AI trading | Native callbacks/approvals are mechanisms only; venue integration, risk policy and live execution remain unverified | #32; native artifact contracts #15/#16 |
+| Sales/CRM | Connector composition is plausible; exact CRM permissions, field mappings and retry semantics remain unverified | #32 |
+| Support | Synthetic queue workflow is executable; actual provider, sensitive content and pagination require independent proof | #32 |
+| Ecommerce | Webhook verification is a provider requirement, not an implemented connector; fulfillment/stock/refund semantics remain unverified | #32 |
+
+These issue references are the follow-up owners, not claims that those issues implement every provider. Customer/provider choices must become bounded implementation issues before building adapters. The first five areas retain deeper source-backed constraints in [priority verticals](priority-verticals.md). Industry object/relation packs are proposed InferOps schema products; these wrapper recipes do not implement pack installation or schema migration.

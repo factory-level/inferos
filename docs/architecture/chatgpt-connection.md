@@ -12,7 +12,7 @@ covers:
   - assistant-plugins/openai
   - scripts/openai-companion.ts
   - scripts/local-secrets.ts
-updated: 2026-10-02
+updated: 2026-10-04
 ---
 
 # Personal ChatGPT connection
@@ -73,3 +73,7 @@ When the user has chosen an API-key fallback, `#getChatContext` swaps it in only
 ## Evidence
 
 See the [feasibility findings](../wiki/chatgpt-feasibility.md) and the [source ledger](../wiki/research-sources.md) for official references.
+
+## Wave 5 disposition
+
+The [local audit table](../wiki/chatgpt-feasibility.md#local-implementation-audit--2026-10-04) maps #12/#13/#14 to the existing companion and its fake-backed tests. No new runtime feature or hosted topology was introduced. Cloudflare eligibility, owner sign-in and live subscription inference remain deferred; the local companion is preserved.

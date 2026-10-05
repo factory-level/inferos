@@ -6,14 +6,14 @@ covers:
   - packages/gatekeeper-context
   - packages/gatekeeper-scheduler
   - packages/mcp-shared
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 
 # Vertical extension research and decision matrix
 
 ## Overview
 
-Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa00851`. Proposed work is recorded in the [design](../design/vertical-extension-research.md), not asserted as implemented here.
+Current-state baseline inspected at InferOS `21708d3449a482843e13cb2268d1ae79451c7dfb`. Proposed work is recorded in the [design](../design/vertical-extension-research.md), not asserted as implemented here.
 
 ## Components
 
@@ -45,3 +45,7 @@ Vertical recipes and their validation evidence must be built and tested; the res
 ## Evidence
 
 See [source ledger](../wiki/research-sources.md) for sibling repository revisions and official references.
+
+## Wave 5 research refresh
+
+The capability inventory now includes shipped wrapper maintenance, connection packages, pinned installs and bounded Kanban rendering. The 36-row matrix records mechanism confidence and follow-up ownership for all 12 areas. Primary sources for the first five verticals were reopened on 2026-10-04. This validates the research artifact, not provider integrations or 36 executable workflows. Synthetic recipe delivery and cloud/customer acceptance remain #32; industry object packs/schema migrations are not implemented by wrapper recipes.

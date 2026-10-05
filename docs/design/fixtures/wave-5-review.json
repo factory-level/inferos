@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "status": "proposed",
+  "evidence": "acceptance-specification-only",
+  "synthetic": true,
+  "scenarios": [
+    {
+      "id": "policy-wrong-role",
+      "issue": 65,
+      "given": {
+        "approver": "employee",
+        "requiredRole": "release-reviewer",
+        "directCall": true
+      },
+      "expected": "deny-before-mutation"
+    },
+    {
+      "id": "policy-stale-review",
+      "issue": 65,
+      "given": {
+        "reviewedPolicyRevision": "7",
+        "currentPolicyRevision": "8"
+      },
+      "expected": "require-fresh-review"
+    },
+    {
+      "id": "policy-revoked-approver",
+      "issue": 65,
+      "given": {
+        "roleAtProposal": true,
+        "roleAtApply": false
+      },
+      "expected": "deny-before-mutation"
+    },
+    {
+      "id": "restricted-fallback",
+      "issue": 65,
+      "given": {
+        "restricted": true,
+        "selectedProvider": "allowed",
+        "fallbackProvider": "unlisted"
+      },
+      "expected": "zero-requests-to-fallback"
+    },
+    {
+      "id": "restricted-history",
+      "issue": 65,
+      "given": {
+        "historyContainsRestrictedData": true,
+        "visibleSpaceRestricted": false,
+        "provider": "unlisted"
+      },
+      "expected": "zero-model-requests"
+    },
+    {
+      "id": "agent-discovery",
+      "issue": 80,
+      "given": {
+        "agentA": [
+          "read"
+        ],
+        "agentB": [
+          "read",
+          "propose"
+        ],
+        "dispatchGranted": false
+      },
+      "expected": "different-discovery-and-no-dispatch"
+    },
+    {
+      "id": "forged-actor",
+      "issue": 80,
+      "given": {
+        "verifiedPrincipal": "agent-a",
+        "claimedPrincipal": "admin"
+      },
+      "expected": "deny-without-disclosure"
+    },
+    {
+      "id": "scope-substitution",
+      "issue": 80,
+      "given": {
+        "boundWorkspace": "alpha",
+        "requestedWorkspace": "beta"
+      },
+      "expected": "deny-without-disclosure"
+    },
+    {
+      "id": "expired-session",
+      "issue": 80,
+      "given": {
+        "sessionExpired": true
+      },
+      "expected": "deny-without-disclosure"
+    },
+    {
+      "id": "revoked-result-cache",
+      "issue": 80,
+      "given": {
+        "cachedResult": true,
+        "connectionRevoked": true
+      },
+      "expected": "invalidate-and-deny"
+    },
+    {
+      "id": "stale-approval",
+      "issue": 79,
+      "given": {
+        "approvedRevision": "12",
+        "currentRevision": "13"
+      },
+      "expected": "refuse-apply"
+    },
+    {
+      "id": "retry-same",
+      "issue": 79,
+      "given": {
+        "retryKey": "synthetic-retry",
+        "sameScopeAndArguments": true,
+        "alreadyApplied": true
+      },
+      "expected": "same-logical-result"
+    },
+    {
+      "id": "retry-changed",
+      "issue": 79,
+      "given": {
+        "retryKey": "synthetic-retry",
+        "sameScopeAndArguments": false
+      },
+      "expected": "retry-conflict"
+    },
+    {
+      "id": "no-dispatch-right",
+      "issue": 80,
+      "given": {
+        "grants": [
+          "read",
+          "propose"
+        ],
+        "operation": "dispatch"
+      },
+      "expected": "deny-before-dispatch"
+    },
+    {
+      "id": "knowledge-scope",
+      "issue": 80,
+      "given": {
+        "knowledgeGrant": true,
+        "underlyingRecordGrant": false
+      },
+      "expected": "deny-underlying-content"
+    },
+    {
+      "id": "unsupported-control",
+      "issue": 79,
+      "given": {
+        "runtimeControlSupported": false,
+        "operation": "start"
+      },
+      "expected": "unsupported-with-no-dispatch"
+    },
+    {
+      "id": "publish-install-failure",
+      "issue": 155,
+      "given": {
+        "publishedVersion": 2,
+        "installedVersion": 1,
+        "installResult": "failed"
+      },
+      "expected": "show-version-1-and-published-candidate-2"
+    },
+    {
+      "id": "publication-wrong-kind",
+      "issue": 155,
+      "given": {
+        "artifactKind": "app",
+        "placementRequires": "widget"
+      },
+      "expected": "reject-before-assignment"
+    },
+    {
+      "id": "publication-unknown-migration",
+      "issue": 155,
+      "given": {
+        "persistenceCompatibility": "unknown"
+      },
+      "expected": "review-blocked-pending-contract"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 ---
 title: ChatGPT subscription feasibility findings
-updated: 2026-10-01
+updated: 2026-10-04
 ---
 
 # ChatGPT subscription feasibility findings
@@ -28,9 +28,20 @@ The [preview limitations](https://developers.openai.com/siwc/token-sharing-open-
 
 The [model/inference guide](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) uses the selected OAuth token for model discovery and inference. Completion must wait for response.completed. Partial deltas can precede a usage failure; response.incomplete and interrupted streams need separate handling.
 
-## Local code gap
+## Local implementation audit — 2026-10-04
 
-`packages/workshop-backend/src/ai-models.ts` selects the existing OpenAI Responses provider. Inspection of the installed pi-ai provider found max_output_tokens generation. That dependency behavior requires adaptation and regression tests; supplying an OAuth token alone is insufficient. Keep API-key behavior supported through its current route.
+The old “OAuth token alone” gap is superseded by merged local companion #40. [Current architecture](../architecture/chatgpt-connection.md) describes its loopback-only capability, per-owner registrations, token refresh/revocation, request shaping, completion checks and explicit API-key fallback. No hosted implementation is inferred.
+
+| Issue / requirement | Local implementation and fake-backed test evidence | Remaining gate |
+| --- | --- | --- |
+| #12 registration/topology | Loopback callback, PKCE/state/nonce, ID token validation and companion bridge | Eligible Workers topology and actual owner sign-in/completed request |
+| #13 account lifecycle | Protected per-owner credential files, exclusive process lock, serialized refresh, signout/refresh races, account-switch cancellation, visible models | Hosted storage/refresh ownership and signed-in isolation proof |
+| #14 inference | Unsupported request fields/tools rejected, local function history preserved, only terminal completion succeeds; incomplete/usage failures/cancellation covered | Live native observation and approved write with eligible hosted subscription inference |
+| Existing API-key behavior | Separate explicit disconnected-only fallback; quota/network errors do not silently select it | Future changes must retain regression coverage and disclose billing source |
+
+The companion suite is `pnpm --filter @gadgets/assistant-plugin-openai test:run` (`src/plugin.test.ts`, Bun). Wave 5 execution: **39 tests passed, 166 assertions, zero failures** on the pinned baseline. Its mocked OAuth/provider replies cannot establish eligibility, real account access, absence of secrets in every runtime sink, or live operation proof. Review new egress/storage paths if a hosted design is ever approved.
+
+The official overview and VM procedure were reopened on 2026-10-04 and still do not establish a personal Cloudflare Workers topology. #12 remains unresolved. #13/#14 stay open for their hosted target while preserving the implemented local feature. No provider login or account-credential transfer was attempted.
 
 ## Required evidence
 
