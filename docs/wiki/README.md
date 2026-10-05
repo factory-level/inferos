@@ -21,3 +21,5 @@ Create documents from [`_template.md`](_template.md).
 | [Upstream starter inventory and provenance](starter-inventory.md) | Each step of the cloudflare-os-starter operator flow, the InferOS command that covers it, and the licence review |
 | [Run the local coding runner](local-coding-runner.md) | Setup, `pnpm local runner`/`coding doctor`, recovery, and what is mocked |
 | [Local verification evidence](local-verification-evidence.md) | Actual startup, browser/restart proof and requirement-by-requirement remaining gaps |
+
+- [Runnable synthetic vertical recipes](vertical-recipes.md) — pinned worklist wrappers, verification and explicit provider limits.

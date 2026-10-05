@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "status": "scenario-input-only",
+  "scope": { "clinic": "synthetic-clinic-a", "operation": "appointment-administration" },
+  "appointments": [
+    { "id": "synthetic-appointment-a", "patient": "synthetic-patient-a", "clinic": "synthetic-clinic-a", "revision": "3", "slot": "synthetic-slot-1" },
+    { "id": "synthetic-appointment-b", "patient": "synthetic-patient-b", "clinic": "synthetic-clinic-b", "revision": "1", "slot": "synthetic-slot-2" }
+  ],
+  "expectedFutureChecks": ["deny foreign clinic and wrong-patient substitution", "refuse stale appointment revision", "deduplicate repeated booking", "deny revoked staff", "redact diagnostics"],
+  "boundaries": ["No real patient information or EHR connector", "No clinical decision support or compliance claim"]
+}

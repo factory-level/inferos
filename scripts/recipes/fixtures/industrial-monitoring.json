@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "status": "scenario-input-only",
+  "scope": { "site": "synthetic-north", "asset": "pump-a", "readOnly": true },
+  "observations": [
+    { "site": "synthetic-north", "asset": "pump-a", "sequence": 2, "sampledAt": "2026-10-04T10:00:00Z", "value": 23, "unit": "degC" },
+    { "site": "synthetic-north", "asset": "pump-a", "sequence": 1, "sampledAt": "2026-10-04T09:00:00Z", "value": 22, "unit": "degC" },
+    { "site": "synthetic-south", "asset": "pump-b", "sequence": 3, "sampledAt": "2026-10-04T10:00:00Z", "value": 25, "unit": "degC" }
+  ],
+  "expectedFutureChecks": ["reject foreign asset", "mark stale samples", "do not replace newer sample with older sequence", "show gateway outage", "refuse every control request"],
+  "boundaries": ["No industrial transport or controller", "No safety, freshness or availability guarantee"]
+}

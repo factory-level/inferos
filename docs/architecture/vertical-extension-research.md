@@ -6,6 +6,7 @@ covers:
   - packages/gatekeeper-context
   - packages/gatekeeper-scheduler
   - packages/mcp-shared
+  - scripts/recipes
 updated: 2026-10-04
 ---
 
@@ -35,7 +36,7 @@ Admin-config controls offered connectors/resources and optional auto-provisionin
 
 ## Divergences from Design
 
-Vertical recipes and their validation evidence must be built and tested; the researched matrix is an implementation decision aid, not a feature catalog.
+Synthetic wrapper recipes now exercise existing local mechanisms; actual domain adapters and cloud/customer validation remain open. The researched matrix is an implementation decision aid, not a feature catalog.
 
 ## Open Questions
 
@@ -49,3 +50,8 @@ See [source ledger](../wiki/research-sources.md) for sibling repository revision
 ## Wave 5 research refresh
 
 The capability inventory now includes shipped wrapper maintenance, connection packages, pinned installs and bounded Kanban rendering. The 36-row matrix records mechanism confidence and follow-up ownership for all 12 areas. Primary sources for the first five verticals were reopened on 2026-10-04. This validates the research artifact, not provider integrations or 36 executable workflows. Synthetic recipe delivery and cloud/customer acceptance remain #32; industry object packs/schema migrations are not implemented by wrapper recipes.
+## Synthetic recipe generator
+
+`scripts/recipes/create.ts` builds a new pinned wrapper through `bootstrapConsumer`, selects the existing InferOps fixture capability, sets its port and synthetic three-card board, and carries its view, inherited blueprints/skills and explicit domain limits. Creation is staged then renamed; failures clean only the staging directory. Reruns verify recipe identity and upstream pin, then preserve customer edits. It adds no kernel/RPC API or provider. Industrial and medical JSON files are future scenario inputs, not running adapters. See [recipe runbook](../wiki/vertical-recipes.md). Cloud/provider acceptance stays open in #32.
+
+The pinned mock does not import wrapper fixture JSON. `packages/workshop-backend/scripts/propose-recipe.ts` is a Node operator, not a kernel endpoint: it uses existing authenticated RPC to queue the catalog cards and create a saved view on the local synthetic board. It never approves; the operator reviews creation in the normal queue. Existing demo cards remain, and fixture IDs/data are not imported.
