@@ -4,6 +4,7 @@ import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { WorkspaceConsoleStore } from "./console-store";
 import { WorkspaceFlowStore } from "./flow-store";
+import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
 import {
   artifactRefusalError, diffManifests, qualificationFindings, requireNameAndNumber, requireQualification,
   revisionKey, revisionOf, WorkspaceArtifactStore, type ArtifactRevisionRecord,
@@ -608,6 +609,7 @@ function connectionTypeFromCreationSpec(
     case "aiModel": return "ai_model";
     case "agentSpawner": return "agent_spawner";
     case "ambient": return undefined;   // auto-provided, not a user-initiated connection
+    case "artifactPublisher": return undefined;  // workspace authoring, not an external connection
     case undefined: return undefined;
   }
 }
@@ -5500,11 +5502,23 @@ class OverseerImpl implements AgentHooks {
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
+    // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
+    // auto-approval never publishes, since no person approved it.
+    let approvingKey = `${record.gatekeeperId}:${record.action}`;
+    if (!autoApproved && resolvedBy.type === "user" &&
+        this.storage.gatekeepers.get(record.gatekeeperId)?.creationSpec?.type === "artifactPublisher") {
+      this.#approvingPublishers.set(approvingKey,
+          {type: "user", id: resolvedBy.id, name: resolvedBy.name});
+    }
     // The apply-time cache stub is scoped to the gatekeeper AND to this action (approval can
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
     // binding that makes buildPack() serve exactly this action's pending-push closure.
-    await gatekeeper.applyAction(record.action,
-        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
+    try {
+      await gatekeeper.applyAction(record.action,
+          new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
+    } finally {
+      this.#approvingPublishers.delete(approvingKey);
+    }
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -8243,6 +8257,74 @@ class OverseerImpl implements AgentHooks {
   // Blueprint helpers
   // =======================================================================================
 
+  // --- Agent artifact authoring (see artifact-store.ts) ---
+  //
+  // Shared by a person's build session (OverseerClientInterface) and the artifact publisher
+  // gatekeeper (artifact-publisher.ts), whose approved requests publish as the approving person.
+
+  artifactStore(): WorkspaceArtifactStore {
+    if (!this.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceArtifactStore(this.ctx.storage, this.storage);
+  }
+
+  // A permanent gadget's committed code as an artifact draft, with the commit it was read from.
+  async draftArtifact(gadgetId: WorkpieceId, kind: ArtifactKind, pins: ArtifactPin[],
+      model: ArtifactModelRequirement | null) {
+    let store = this.artifactStore();
+    let gadget = this.getGadgetRecord(gadgetId);
+    if (gadget.pending) {
+      throw new Error("This gadget is a provisional creation in a chat. Accept the chat's changes first.");
+    }
+    let commitId = await this.assertPublishableCommit(gadget.commitId);
+    let files = await this.gitStore.readCommitFiles(commitId);
+    let draft = await store.draft(kind, files, pins, model, this.collectBindingMetadata(gadgetId));
+    return {...draft, commitId, store};
+  }
+
+  // Rebuild the gadget's draft, check every refusal and store the revision as `publishedBy`.
+  async publishArtifact(gadgetId: WorkpieceId, kind: ArtifactKind, name: string, number: number,
+      pins: ArtifactPin[], model: ArtifactModelRequirement | null, qualification: ArtifactQualification,
+      publishedBy: ArtifactRevision["publishedBy"]): Promise<ArtifactPublishResult> {
+    requireNameAndNumber(name, number);
+    qualification = requireQualification(qualification);
+    let draft = await this.draftArtifact(gadgetId, kind, pins, model);
+    let refused = [...draft.findings, ...qualificationFindings(qualification, draft.digest)][0];
+    if (refused) return {ok: false, ...refused};
+    let result = draft.store.publish({
+      ref: artifactRef(kind, name, number), kind, name, number, digest: draft.digest,
+      manifest: draft.manifest, qualification, publishedBy, publishedAt: new Date(),
+      commitId: draft.commitId, bindingTemplates: draft.bindingTemplates,
+    });
+    if ("refusal" in result) return {ok: false, ...result};
+    return {ok: true, created: result.created, revision: revisionOf(result.record)};
+  }
+
+  // The person approving each artifact publisher action while its applyAction() runs, keyed by
+  // `<gatekeeperId>:<action>`. Set and cleared only by applyPendingAction, around the gatekeeper
+  // call, and only for a manual approval.
+  //
+  // Why in memory: an approved publish must be recorded as published by the approving person, and
+  // this is how the publisher gatekeeper's call back into the Overseer learns who that is without
+  // the Gatekeeper interface carrying approver identity to every (third-party) gatekeeper.
+  //
+  // On a DO restart mid-apply the map is empty and the action record is still "pending" (it is
+  // marked approved only after applyAction returns). If the restart came before the gatekeeper's
+  // publishApprovedArtifact() call, that call finds no approver and refuses, so nothing is ever
+  // published without a known approver. If it came after the publish but before the record was
+  // marked, the revision is stored and the action stays pending. Either way the person approves
+  // again, and the retry publishes or meets the identical revision (`created: false`) and
+  // completes.
+  #approvingPublishers = new Map<string, AiChatAuthorInfo & {type: "user"}>();
+
+  // Publish the request behind artifact publisher action `action`, as the person approving it now.
+  // Throws unless exactly one publisher gatekeeper is applying that action under manual approval.
+  async publishApprovedArtifact(action: number, request: ArtifactPublishRequest): Promise<ArtifactPublishResult> {
+    let approving = [...this.#approvingPublishers].filter(([key]) => key.endsWith(`:${action}`));
+    if (approving.length !== 1) throw new Error("Artifact publishing needs a person's approval.");
+    return this.publishArtifact(request.gadgetId, request.kind, request.name, request.number,
+        request.pins, request.model, request.qualification, approving[0]![1]);
+  }
+
   // Collect binding metadata from the given gadget's binding edges for blueprint creation/update.
   collectBindingMetadata(gadgetId: WorkpieceId): Record<string, BlueprintBinding> {
     let bindings: Record<string, BlueprintBinding> = {};
@@ -8279,6 +8361,8 @@ class OverseerImpl implements AgentHooks {
       // user-configured, so they're excluded from blueprints (re-added automatically on open). This
       // also covers an ambient capsule the agent promoted to a named binding via setGadgetBinding.
       if (gk.creationSpec?.type === "ambient") continue;
+      // The artifact publisher is this workspace's own authoring authority, never portable.
+      if (gk.creationSpec?.type === "artifactPublisher") continue;
 
       // Annotation is optional. When absent, the binding is included with an empty
       // description and no resource suggestion. Legacy records may carry an `included:
@@ -10577,6 +10661,21 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         chatId, methodName, args, initiatorUserId, initiatorModelId);
   }
 
+  /** Implements ArtifactPublisherBinding.validate() for this workspace's artifact publisher. */
+  async validateArtifactDraft(gadgetId: WorkpieceId, kind: ArtifactKind, pins: ArtifactPin[],
+      model: ArtifactModelRequirement | null): Promise<{digest: ArtifactDigest, refusals: ArtifactRefusal[]}> {
+    let {digest, findings} = await this.impl.draftArtifact(gadgetId, kind, pins, model);
+    return {digest, refusals: [...new Set(findings.map(finding => finding.refusal))]};
+  }
+
+  /**
+   * Applies an approved artifact publisher action: publishes `request` as the person approving
+   * action `action` right now (see OverseerImpl.publishApprovedArtifact).
+   */
+  async publishApprovedArtifact(action: number, request: ArtifactPublishRequest): Promise<ArtifactPublishResult> {
+    return this.impl.publishApprovedArtifact(action, request);
+  }
+
   /** Implements AgentSpawnerBinding.spawn(): the agent starts at once on `prompt`. */
   async spawnAgent(
       title: string, prompt: string, config: AgentSpawnerConfig,
@@ -11020,35 +11119,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async deleteConsole(id: string, expectedRevision: string): Promise<void> { this.#consoleStore().delete(id, expectedRevision); }
 
-  #artifactStore(): WorkspaceArtifactStore {
-    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
-    return new WorkspaceArtifactStore(this.impl.ctx.storage, this.impl.storage);
-  }
-
-  // A permanent gadget's committed code as an artifact draft, with the commit it was read from.
-  async #artifactDraft(gadgetId: WorkpieceId, kind: ArtifactKind, pins: ArtifactPin[],
-      model: ArtifactModelRequirement | null) {
-    let store = this.#artifactStore();
-    let gadget = this.impl.getGadgetRecord(gadgetId);
-    if (gadget.pending) {
-      throw new Error("This gadget is a provisional creation in a chat. Accept the chat's changes first.");
-    }
-    let commitId = await this.impl.assertPublishableCommit(gadget.commitId);
-    let files = await this.impl.gitStore.readCommitFiles(commitId);
-    let draft = await store.draft(kind, files, pins, model, this.impl.collectBindingMetadata(gadgetId));
-    return {...draft, commitId, store};
-  }
-
   #artifactRevision(ref: ArtifactRef): ArtifactRevisionRecord | null {
     let parsed = parseArtifactRef(ref);
     if (!parsed) throw artifactRefusalError("inexact_reference", `${ref} is not an exact revision`);
-    return this.#artifactStore().get(parsed.kind, parsed.name, parsed.number);
+    return this.impl.artifactStore().get(parsed.kind, parsed.name, parsed.number);
   }
 
   async validateArtifact(gadgetId: WorkpieceId, kind: ArtifactKind, pins: ArtifactPin[],
       model: ArtifactModelRequirement | null)
       : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> {
-    let {manifest, digest, findings} = await this.#artifactDraft(gadgetId, kind, pins, model);
+    let {manifest, digest, findings} = await this.impl.draftArtifact(gadgetId, kind, pins, model);
     return {manifest, digest, refusals: [...new Set(findings.map(finding => finding.refusal))]};
   }
 
@@ -11062,25 +11142,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async publishArtifactRevision(gadgetId: WorkpieceId, kind: ArtifactKind, name: string, number: number,
       pins: ArtifactPin[], model: ArtifactModelRequirement | null,
       qualification: ArtifactQualification): Promise<ArtifactPublishResult> {
-    requireNameAndNumber(name, number);
-    qualification = requireQualification(qualification);
-    let draft = await this.#artifactDraft(gadgetId, kind, pins, model);
-    let refused = [...draft.findings, ...qualificationFindings(qualification, draft.digest)][0];
-    if (refused) return {ok: false, ...refused};
     // The publisher is the person this session belongs to; no agent holds this capability.
     let profile = await this.#getClientProfile();
-    let result = draft.store.publish({
-      ref: artifactRef(kind, name, number), kind, name, number, digest: draft.digest,
-      manifest: draft.manifest, qualification,
-      publishedBy: {type: "user", id: profile.id, name: profile.name}, publishedAt: new Date(),
-      commitId: draft.commitId, bindingTemplates: draft.bindingTemplates,
-    });
-    if ("refusal" in result) return {ok: false, ...result};
-    return {ok: true, created: result.created, revision: revisionOf(result.record)};
+    return this.impl.publishArtifact(gadgetId, kind, name, number, pins, model, qualification,
+        {type: "user", id: profile.id, name: profile.name});
   }
 
   async listArtifactRevisions(kind: ArtifactKind, name: string): Promise<ArtifactRevision[]> {
-    return this.#artifactStore().list(kind, name).map(revisionOf);
+    return this.impl.artifactStore().list(kind, name).map(revisionOf);
   }
 
   async getArtifactRevision(ref: ArtifactRef): Promise<ArtifactRevision | null> {
@@ -11166,6 +11235,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       await bind(name, await this.newAgentSpawnerGatekeeper({displayName: template.title, modelId: assignment.modelId, env}));
     }
     return gadget.id;
+  }
+
+  async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> {
+    let props: ArtifactPublisherProps = {overseerId: this.impl.ctx.id.toString()};
+    return this.impl.addGatekeeper(this.impl.ctx.exports.ArtifactPublisherGatekeeper({props}),
+        {type: "artifactPublisher"}, this.clientUserId, this.#mintedCapabilityKind());
   }
 
   constructor(private impl: OverseerImpl,
@@ -13061,6 +13136,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getArtifactRevision(_ref: ArtifactRef): Promise<ArtifactRevision | null> { this.#deny(); }
   async bindArtifactRevision(_ref: ArtifactRef, _bindings: Record<string, BlueprintBindingAssignment>)
       : Promise<WorkpieceId> { this.#deny(); }
+  async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
 
   #canvasStore(): WorkspaceCanvasStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -13550,6 +13626,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getArtifactRevision(_ref: ArtifactRef): Promise<ArtifactRevision | null> { this.#deny(); }
   async bindArtifactRevision(_ref: ArtifactRef, _bindings: Record<string, BlueprintBindingAssignment>)
       : Promise<WorkpieceId> { this.#deny(); }
+  async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)

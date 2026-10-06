@@ -20,6 +20,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 export { PendingLogin, LoginConnectCallbackImpl };
 import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
+import { ArtifactPublisherGatekeeper } from "./artifact-publisher";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, blueprintVersionMetadata, buildBlueprintArchiveStream, sanitizeBlueprintOutput, sanitizeDataContract, sanitizeWorkspaceKind, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintKvRecord } from "./blueprint-archive.js";
@@ -61,7 +62,7 @@ function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata
 }
 
 // Re-export entrypoint types from ai-models.ts.
-export { LanguageModelGatekeeper };
+export { LanguageModelGatekeeper, ArtifactPublisherGatekeeper };
 
 // Re-export entrypoint types from admin-settings.ts.
 export { AdminSettings };
