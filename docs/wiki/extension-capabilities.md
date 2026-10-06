@@ -1,6 +1,6 @@
 ---
 title: Choosing an InferOS extension
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 
 # Choosing an InferOS extension
@@ -52,7 +52,7 @@ The classifications below are engineering inferences from inspected mechanisms, 
 | Wrapper intake, pinning, rerun preservation and reviewed upgrade | `scripts/consumer/bootstrap.ts`, `intake.ts`, `upgrade.ts`, `reconcile.ts`; their colocated tests | Cloud parity #11; customer Wiki gates #82/#87 |
 | Connection package scaffolding and discovery | `scripts/scaffold-gatekeeper.ts`, `scripts/connection-package.schema.json`, `scripts/worker-dirs.ts`, `custom-gatekeepers/gatekeeper-tickets` | Tickets is synthetic/conformant, not a real provider |
 | Pinned app/widget/workflow installs | `packages/integration-tests/__tests__/operate-published.test.ts`, shared API `upgradeInstall` | Publication review UI/container #155; destination flags #68 remain deferred |
-| Board composition and bounded rendering | `features/canvas/KanbanColumn.tsx` in Workshop frontend, `boardData.ts`; #156 paired browser measurements | Full provider read, proposed budgets #158, paging inferops#2335, maps #29 |
+| Board composition and bounded rendering | `features/canvas/KanbanColumn.tsx` in Workshop frontend, `boardData.ts`; #156 paired browser measurements | Full provider read, budgets agreed for the local mock scope (#158; production guarantee needs #164), paging inferops#2335, maps #29 |
 | Per-person Operate session and use-only capabilities | `packages/workshop-shared/src/operate-session.ts`, backend `user.ts` and `overseer.ts`; #63 browser evidence | Company IAM roles/policy #65/#80; per-person live identity #59/#66/#23 |
 | Local subscription inference | `assistant-plugins/openai`, `workshop-backend/src/openai-plugin.ts` | Fake-backed tests; Cloudflare eligibility/live proof #12–#14 |
 | Native deployments / external agents | Configuration accepts names but reports unsupported runtime | #15–#17/#76–#78 and #79/#80; HG/#81 entirely deferred |
