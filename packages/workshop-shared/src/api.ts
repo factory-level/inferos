@@ -2461,7 +2461,9 @@ export interface Overseer extends RpcTarget {
   /**
    * Publish a console's draft at its expected revision, with its screens as they are now: operators
    * move to it, and later edits to the console or its screens stay draft until the next publish.
-   * Needs build access; a stale revision throws the canvas conflict error.
+   * Publishing raises the console's revision, which becomes the published revision, so each
+   * publish is a new revision open sessions move to. Needs build access; a stale revision
+   * (including one already published) throws the canvas conflict error.
    */
   publishConsole(id: string, expectedRevision: string): Promise<OperateConsole>;
   /**
