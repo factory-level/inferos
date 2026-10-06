@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
+import { Banner, Button } from '@cloudflare/kumo'
 import { ArrowLeftIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
@@ -10,7 +11,7 @@ import { canonicalBoardRef } from '../canvas/boardData'
 import { CanvasView, type CanvasResourceScope } from '../canvas/CanvasView'
 import { BoardConnectPrompt } from './BoardConnectPrompt'
 import { ConsoleRollup } from './ConsoleRollup'
-import type { ConsoleEntry } from './consoles'
+import { openConsoleEvent, type ConsoleEntry } from './consoles'
 import { SessionBoard } from './SessionBoard'
 import type { SessionWorkspace } from './useSessionWorkspace'
 
@@ -23,10 +24,14 @@ const ignore = () => {}
  * their own InferOps account (`BoardConnectPrompt`); the console owner's connection is never used
  * for them. A board card's full view is the session's shown board (`openBoard`), so it survives
  * reload and reconnect and Back is a session event.
+ *
+ * A draft opened as a preview says so, and offers publishing it. When the revision the session
+ * opened is no longer the latest (a newer one was published, or the previewed draft was saved
+ * again), the kernel refuses the next move, so the page offers to reopen it on the latest one.
  */
-export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEvent }: {
+export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEvent, onPublish }: {
   run: OperateConsoleRun
-  /** The console's saved definition, or undefined when it is gone (or not loaded yet). */
+  /** The latest saved revision of the kind the session opened, or undefined when it is gone (or not loaded yet). */
   entry: ConsoleEntry | undefined
   /** Whether the saved consoles are still loading. */
   loading: boolean
@@ -35,6 +40,8 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   /** The viewer's own session workspace, null until it has opened. */
   sessionWorkspace: SessionWorkspace | null
   onEvent: (event: OperateEvent) => void
+  /** Publish the previewed draft. */
+  onPublish: (entry: ConsoleEntry) => void
 }) => {
   const { authenticatedApi } = useAuthenticatedApi()
   const { overseer, error } = useWorkspaceOpen({
@@ -110,6 +117,15 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
       onShowScreen={id => onEvent({ type: 'showScreen', screenId: id })} />
   }
 
+  const outdated = !!entry && entry.console.revision !== run.revision
+  const reopen = () => {
+    if (!entry) return
+    const event = openConsoleEvent(entry, run.source)
+    if (event?.type !== 'openConsole') return
+    const keep = entry.console.views.some(candidate => candidate.id === run.viewId)
+    onEvent({ ...event, viewId: keep ? run.viewId : event.viewId })
+  }
+
   const crumbs = [run.title, view?.title, run.screenId !== null ? screen?.title : undefined,
     board ? `Board ${board.boardRef.split('/').at(-1) ?? ''}` : undefined].filter((crumb): crumb is string => !!crumb)
   return (
@@ -124,6 +140,18 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
           </ol>
         </nav>
       </div>
+      {(run.source === 'draft' || outdated) && <div className="space-y-2 px-5 pt-3">
+        {run.source === 'draft' && <Banner variant="secondary" title="Previewing the draft"
+          description="Operators don't see these changes until you publish. Actions use your own access and still need approval."
+          action={<span className="flex gap-2">
+            {entry && <Button size="sm" variant="primary" onClick={() => onPublish(entry)}>Publish</Button>}
+            <Button size="sm" onClick={() => onEvent({ type: 'closeConsole' })}>Exit preview</Button>
+          </span>} />}
+        {outdated && <Banner variant="alert"
+          title={run.source === 'draft' ? 'This draft has been saved since you opened it' : 'A newer version of this console was published'}
+          description="Reopen it to continue on the latest version."
+          action={<Button size="sm" onClick={reopen}>Reopen</Button>} />}
+      </div>}
       <main ref={main} tabIndex={-1} aria-label={crumbs.at(-1)} className="min-h-0 min-w-0 flex-1 overflow-auto focus:outline-none">
         <div className="mx-auto w-full max-w-6xl p-5">{body}</div>
       </main>

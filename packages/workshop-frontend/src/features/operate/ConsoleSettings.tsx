@@ -46,7 +46,7 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
     </div><Button variant="ghost" disabled={saving} onClick={onClose}>Done</Button></header>
     <div className="space-y-5">
       <div><h2 className="text-sm font-medium text-kumo-default">User customization</h2>
-        <p className="mt-1 text-sm text-kumo-subtle">Personal additions leave the shared pages unchanged. Pages can be reused across consoles.</p></div>
+        <p className="mt-1 text-sm text-kumo-subtle">Personal additions leave the shared pages unchanged. Pages can be reused across consoles. Settings save to the draft; operators get them when you publish.</p></div>
       {options.map(option => <div key={option.key} className="space-y-1">
         <Checkbox label={option.title} checked={customization[option.key]} disabled={!editable || saving}
           onCheckedChange={checked => setCustomization({ ...customization, [option.key]: checked })} />

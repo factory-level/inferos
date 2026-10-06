@@ -29,11 +29,11 @@ vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWo
 import { ConsoleBuilder } from './ConsoleBuilder'
 
 const workspace = { id: 'w1', title: 'Operations', role: 'build' } as ConsoleEntry['workspace']
-const workspaces: WorkspaceScreens[] = [{ workspace, flows: [], consoles: [], screens: [
+const workspaces: WorkspaceScreens[] = [{ workspace, flows: [], consoles: [], publishedScreens: {}, screens: [
   { schemaVersion: 1, id: 's1', title: 'Board', revision: '0', sections: [] },
   { schemaVersion: 1, id: 's2', title: 'Activity', revision: '0', sections: [] },
 ] }]
-const initial: ConsoleEntry = { workspace, screens: workspaces[0].screens!, console: {
+const initial: ConsoleEntry = { workspace, screens: workspaces[0].screens!, publishedScreens: [], console: {
   id: 'c1', revision: '7', published: null, title: 'Operations lead', fullChat: 'available',
   views: [{ id: 'board', title: 'Board', type: 'screen', screen: 's1' }],
 } }
@@ -76,7 +76,7 @@ it('creates an assistant-first console with screens in the chosen navigation ord
   expect(field('Starting experience').value).toBe('default')
   await click('Continue')
   expect(container.querySelector('[aria-label="Console preview"]')).not.toBeNull()
-  await click('Create console')
+  await click('Create draft')
   expect(testState.createConsole).toHaveBeenCalledWith(expect.objectContaining({ title: 'My operations', fullChat: 'default', views: [
     expect.objectContaining({ screen: 's2', title: 'Activity' }), expect.objectContaining({ screen: 's1', title: 'Board' }),
   ] }))
@@ -103,7 +103,7 @@ it('uses the original revision and retains the draft after a failed edit', async
   testState.replaceConsole.mockRejectedValueOnce(new Error('Revision conflict'))
   render(initial)
   fill('Console name', 'Updated console')
-  await click('Continue'); await click('Continue'); await click('Continue'); await click('Save console')
+  await click('Continue'); await click('Continue'); await click('Continue'); await click('Save draft')
   expect(testState.replaceConsole).toHaveBeenCalledWith('c1', '7', expect.objectContaining({ title: 'Updated console' }))
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Your draft is still here')
   expect(onSaved).not.toHaveBeenCalled()

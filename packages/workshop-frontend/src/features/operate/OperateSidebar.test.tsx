@@ -66,5 +66,5 @@ it('re-reads the console when the session refuses a view the builder removed, an
   expect(dispatch).toHaveBeenCalledWith({ type: 'openView', viewId: 'code' }, 2)
   expect(views()).not.toContain('CODE board')
   expect(views()).toContain('ENG board')
-  expect(harness.toasts).toEqual(['This console has changed since it was loaded. It now shows as it is saved.'])
+  expect(harness.toasts).toEqual(['This console has changed since it was opened. Reopen it to continue on the latest version.'])
 })

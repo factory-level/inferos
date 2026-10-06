@@ -18,7 +18,7 @@ vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWorkspaceScreens: state.invalidate }))
 import { ConsoleSettings } from './ConsoleSettings'
 
-const entry: ConsoleEntry = { workspace: { id: 'w1', title: 'Operations', created: new Date(), lastActive: new Date() }, screens: [], console: {
+const entry: ConsoleEntry = { workspace: { id: 'w1', title: 'Operations', created: new Date(), lastActive: new Date() }, screens: [], publishedScreens: [], console: {
   id: 'c1', revision: '3', published: null, title: 'Operations', fullChat: 'default',
   views: [{ id: 'v1', type: 'screen', title: 'Board', screen: 's1' }],
 } }

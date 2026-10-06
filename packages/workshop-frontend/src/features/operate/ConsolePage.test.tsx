@@ -42,6 +42,7 @@ vi.mock('./OperateChatPanel', () => ({
 }))
 
 import { ConsolePage } from './ConsolePage'
+import type { ConsoleEntry } from './consoles'
 import type { SessionWorkspace } from './useSessionWorkspace'
 
 const screen = (id: string, title: string): CanvasDefinition => ({ schemaVersion: 1, id, revision: '0', title, sections: [] })
@@ -52,25 +53,49 @@ const SAVED: OperateConsole = {
     { id: 'board', title: 'Board', type: 'screen', screen: 's1' },
   ],
 }
-const entry = { workspace: { id: 'w1' } as never, console: SAVED, screens: [screen('s1', 'Board screen')] }
+const entry = { workspace: { id: 'w1' } as never, console: SAVED, screens: [screen('s1', 'Board screen')], publishedScreens: [] }
 const run = (extra: Partial<OperateConsoleRun> = {}): OperateConsoleRun =>
-  ({ workspaceId: 'w1', consoleId: 'c1', title: 'Operations lead', source: 'draft', revision: '0', fullChat: 'available', viewId: 'overview', screenId: null, ...extra })
+  ({ workspaceId: 'w1', consoleId: 'c1', title: 'Operations lead', source: 'published', revision: '0', fullChat: 'available', viewId: 'overview', screenId: null, ...extra })
 
 const SESSION: SessionWorkspace = { stub: { name: 'session' } as never, id: 'session-ws', restricted: false }
 let container: HTMLDivElement
 let root: Root
 const onEvent = vi.fn<(event: OperateEvent) => void>()
+const onPublish = vi.fn<(entry: ConsoleEntry) => void>()
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  onEvent.mockClear()
+  onEvent.mockClear(); onPublish.mockClear()
   consoleOpen.overseer = { stub: CONSOLE_STUB }
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
 const render = (props: Partial<Parameters<typeof ConsolePage>[0]> = {}) => act(() => root.render(
-  <ConsolePage run={run()} entry={entry} loading={false} board={null} sessionWorkspace={SESSION} onEvent={onEvent} {...props} />))
+  <ConsolePage run={run()} entry={entry} loading={false} board={null} sessionWorkspace={SESSION} onEvent={onEvent} onPublish={onPublish} {...props} />))
 const back = () => [...container.querySelectorAll('button')].find(b => b.textContent?.startsWith('Back to'))
+
+const buttonNamed = (label: string) => [...container.querySelectorAll('button')].find(b => b.textContent === label)
+
+it('labels a draft preview, and publishes it or exits the preview', () => {
+  render()
+  expect(container.textContent).not.toContain('Previewing the draft')
+  render({ run: run({ source: 'draft' }) })
+  expect(container.textContent).toContain('Previewing the draft')
+  act(() => buttonNamed('Publish')!.click())
+  expect(onPublish).toHaveBeenCalledWith(entry)
+  act(() => buttonNamed('Exit preview')!.click())
+  expect(onEvent).toHaveBeenCalledWith({ type: 'closeConsole' })
+})
+
+it('offers to reopen on a newer published revision, at the same view while it still exists', () => {
+  const published = { ...SAVED, revision: '2', published: { revision: '2', publishedAt: '2026-10-06T00:00:00.000Z', content: SAVED } }
+  render({ entry: { ...entry, console: published } })
+  expect(container.textContent).toContain('A newer version of this console was published')
+  act(() => buttonNamed('Reopen')!.click())
+  expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'openConsole', source: 'published', revision: '2', viewId: 'overview' }))
+  render({ entry: { ...entry, console: published }, run: run({ revision: '2' }) })
+  expect(buttonNamed('Reopen')).toBeUndefined()
+})
 
 it('shows a rollup view with no Back at the view itself', () => {
   render()
