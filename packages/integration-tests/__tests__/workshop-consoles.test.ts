@@ -207,7 +207,6 @@ it("gives every publish a new revision: one winner per expected revision, and a 
 
     // Two publishes with the same expected revision: exactly one wins.
     const first = await workspace.publishConsole(created.id, created.revision);
-    await expect(workspace.publishConsole(created.id, created.revision)).rejects.toThrow(/reload/);
     expect(first.published?.revision).toBe(first.revision);
     expect(first.revision).not.toBe(created.revision);
 
@@ -215,15 +214,22 @@ it("gives every publish a new revision: one winner per expected revision, and a 
     let page = await session.dispatch({ type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
       source: "published", revision: first.revision, fullChat: "off", viewId: "board" }, 0);
 
-    // A screen-only edit and republish changes the publication identity, so the open console is
-    // refused on its next move and reopens on the new revision, with the edited screen.
+    // The losing publish, made after a screen edit, changes nothing operators see.
     const renamed = await workspace.editCanvas(board.id, board.revision, [{ type: "rename", title: "Board v2" }]);
+    await expect(workspace.publishConsole(created.id, created.revision)).rejects.toThrow(/reload/);
+    expect(await useWorkspace.getConsole(created.id, "published")).toEqual(first);
+    expect(await useWorkspace.getConsoleScreen(created.id, board.id, "published")).toEqual(board);
+    page = await session.dispatch({ type: "openView", viewId: "board" }, page.seq);
+
+    // A screen-only republish changes the publication identity, so the open console is refused on
+    // its next move, and reopening it reads the new screen snapshot.
     const second = await workspace.publishConsole(created.id, first.revision);
     expect(second.published?.revision).toBe(second.revision);
     expect(second.revision).not.toBe(first.revision);
-    expect(await useWorkspace.getConsoleScreen(created.id, board.id, "published")).toEqual(renamed);
     await expect(session.dispatch({ type: "openView", viewId: "board" }, page.seq)).rejects.toSatisfy(consoleChanged);
     page = await session.dispatch({ type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
       source: "published", revision: second.revision, fullChat: "off", viewId: "board" }, page.seq);
     expect(page.state.console).toMatchObject({ revision: second.revision });
+    expect(await useWorkspace.getConsole(created.id, "published")).toEqual(second);
+    expect(await useWorkspace.getConsoleScreen(created.id, board.id, "published")).toEqual(renamed);
   }));
