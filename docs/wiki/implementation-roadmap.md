@@ -1,6 +1,6 @@
 ---
 title: Implementation roadmap
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 
 # Implementation roadmap
@@ -158,7 +158,7 @@ The authorized research, design preparation and synthetic recipe work is complet
 | [#30](https://github.com/factory-level/inferos/issues/30) Capability wiki | Closed on research acceptance | [Capability inventory](extension-capabilities.md), pinned baseline and dated [source ledger](research-sources.md); stale/product-note claims separated from implementation |
 | [#31](https://github.com/factory-level/inferos/issues/31) Vertical matrix | Closed on research acceptance | [36 workflows across 12 areas](vertical-decision-matrix.md), three each, with surfaces, owner, authority, gap, proof and source; priority primary-source constraints refreshed |
 | [#32](https://github.com/factory-level/inferos/issues/32) Recipes | Synthetic preparation delivered; open/deferred | [Runbook and local evidence](vertical-recipes.md); cloud proof (#11), customer/provider choices and actual domain operations remain |
-| [#155](https://github.com/factory-level/inferos/issues/155) Operate container/Publish UI | Design delivered; implementation deferred | Review [publication design](../design/operate-publication.md): container ownership, mock handling, migration/rollback; then separate kernel/UI slices |
+| [#155](https://github.com/factory-level/inferos/issues/155) Operate container/Publish UI | Design accepted 2026-10-05; implementation resuming | [Publication design](../design/operate-publication.md) decisions recorded (workspace container, build-access install across owners, integer `dataContract`, mock rejection outside test-only spaces); next the separate kernel/UI slices |
 | [#65](https://github.com/factory-level/inferos/issues/65) Roles/restricted data | Design and acceptance specifications delivered; enforcement deferred | Review [policy design](../design/operate-policy.md): trusted policy source, identity/role mapping, action classes and provider restrictions |
 | [#79](https://github.com/factory-level/inferos/issues/79), [#80](https://github.com/factory-level/inferos/issues/80) External-agent contract/auth | Provider-neutral design and specifications delivered; runtime deferred | [Contract proposal](../design/external-agent-contract.md), linked to [inferops#2326](https://github.com/factory-level/inferops/issues/2326); actual delegation, schema, revision and retry agreement required; no bridge/SDK/auth endpoint |
 | [#81](https://github.com/factory-level/inferos/issues/81) Harness HG and independent client | Entirely deferred | Explicit owner resumption required; no part silently carried into #79/#80 |

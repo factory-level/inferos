@@ -27,6 +27,6 @@ Create documents from [`_template.md`](_template.md).
 
 ## Wave 5 review artifacts
 
-- [Operate space and publication review](operate-publication.md) — #155; proposed container and review journey, no runtime additions.
+- [Operate space and publication review](operate-publication.md) — #155; accepted 2026-10-05 (space is a workspace, integer `dataContract`, mock rejection outside test-only spaces, review plus explicit install/upgrade); not implemented yet.
 - [Approval roles and restricted-data policy](operate-policy.md) — #65; authority and inference policy review.
 - [Provider-neutral external-agent contract](external-agent-contract.md) — #79/#80; proposed vocabulary and fixtures, no adapter.
