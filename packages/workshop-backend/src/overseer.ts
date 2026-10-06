@@ -8301,8 +8301,19 @@ class OverseerImpl implements AgentHooks {
 
   // The person approving each artifact publisher action while its applyAction() runs, keyed by
   // `<gatekeeperId>:<action>`. Set and cleared only by applyPendingAction, around the gatekeeper
-  // call, and only for a manual approval: this is how an approved publish learns who approved it
-  // without the Gatekeeper interface carrying approver identity to every gatekeeper.
+  // call, and only for a manual approval.
+  //
+  // Why in memory: an approved publish must be recorded as published by the approving person, and
+  // this is how the publisher gatekeeper's call back into the Overseer learns who that is without
+  // the Gatekeeper interface carrying approver identity to every (third-party) gatekeeper.
+  //
+  // On a DO restart mid-apply the map is empty and the action record is still "pending" (it is
+  // marked approved only after applyAction returns). If the restart came before the gatekeeper's
+  // publishApprovedArtifact() call, that call finds no approver and refuses, so nothing is ever
+  // published without a known approver. If it came after the publish but before the record was
+  // marked, the revision is stored and the action stays pending. Either way the person approves
+  // again, and the retry publishes or meets the identical revision (`created: false`) and
+  // completes.
   #approvingPublishers = new Map<string, AiChatAuthorInfo & {type: "user"}>();
 
   // Publish the request behind artifact publisher action `action`, as the person approving it now.
