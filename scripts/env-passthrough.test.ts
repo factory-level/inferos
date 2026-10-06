@@ -70,6 +70,7 @@ const EXPECTED: Record<string, ExpectedArea> = {
     forwarded: [
       "VITE_BACKEND_HOST",
       "VITE_CF_ACCESS_MODE",
+      "VITE_DEMO",
       "VITE_DEV_AUTO_LOGIN",
       "VITE_DEV_PASSWORD",
       "VITE_DEV_USERNAME",

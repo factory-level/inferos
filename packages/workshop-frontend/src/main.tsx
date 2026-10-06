@@ -140,12 +140,9 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('online', () => void probeOnWake());
 
-// Current stub. handleBroken() will replace this on disconnect.
-installWorkshopErrorReporting()
-let currentStub = startConnection();
-
-const router = createRouter()
-applyStoredThemeMode()
+// Current stub. handleBroken() will replace this on disconnect. Assigned by boot().
+let currentStub: RpcStub<PublicApi>;
+let router: ReturnType<typeof createRouter>;
 
 function AppWithConnection() {
   const [rpcState, setRpcState] = useState<{stub: RpcStub<PublicApi>; connectionLost: boolean}>({
@@ -229,16 +226,31 @@ function AppWithConnection() {
   );
 }
 
-const root = createRoot(document.getElementById('root')!, {
-  onUncaughtError: (error) => reportIssue('workshop.react-root', error, {
-    handled: false, severity: 'fatal', captureMechanism: 'react',
-  }),
-})
+function boot(connect: () => RpcStub<PublicApi>) {
+  currentStub = connect();
+  router = createRouter()
+  applyStoredThemeMode()
 
-root.render(
-  <StrictMode>
-    <FrontendErrorBoundary>
-      <AppWithConnection />
-    </FrontendErrorBoundary>
-  </StrictMode>
-)
+  const root = createRoot(document.getElementById('root')!, {
+    onUncaughtError: (error) => reportIssue('workshop.react-root', error, {
+      handled: false, severity: 'fatal', captureMechanism: 'react',
+    }),
+  })
+
+  root.render(
+    <StrictMode>
+      <FrontendErrorBoundary>
+        <AppWithConnection />
+      </FrontendErrorBoundary>
+    </StrictMode>
+  )
+}
+
+// Demo mode (`pnpm views demo`) serves every screen from in-page fixtures instead of the backend;
+// the constant condition compiles this branch, and src/demo, out of real builds.
+if (import.meta.env.VITE_DEMO === 'true') {
+  void import('./demo/boot').then(demo => boot(demo.connectDemo))
+} else {
+  installWorkshopErrorReporting()
+  boot(startConnection)
+}
