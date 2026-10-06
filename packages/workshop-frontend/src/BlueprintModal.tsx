@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { flushSync } from 'react-dom'
 import { Dialog, useKumoToastManager } from '@cloudflare/kumo'
-import { ArrowsClockwise, Check, Copy, ImageSquare, Pencil, Plus, Trash, Warning, X } from '@phosphor-icons/react'
+import { ArrowsClockwise, Check, Copy, ImageSquare, Pencil, Plus, ShareNetwork, Trash, Warning, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { BlueprintGadgetSummary, GadgetClient, GadgetMetadata, Overseer, BlueprintBindingAnnotation, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput, WorkshopInputArea } from './components/WorkshopControls'
@@ -10,6 +11,9 @@ import {
   BlueprintBindingCard,
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
+import { useServerConfig } from './ServerConfigContext'
+import { PublicationReview } from './features/publication/PublicationReview'
+import { isPublicationOffered } from './features/publication/publicationText'
 
 const BLUEPRINT_SCREENSHOT_WIDTH = 1280
 const BLUEPRINT_SCREENSHOT_HEIGHT = 720
@@ -88,6 +92,10 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
   const [editingBlueprint, setEditingBlueprint] = useState<BlueprintGadgetSummary | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  // The blueprint whose publication step is open in place of the list (see PublicationReview).
+  const [publishingId, setPublishingId] = useState<string | null>(null)
+  const publicationOffered = isPublicationOffered(useServerConfig())
+  const listHeadingRef = useRef<HTMLHeadingElement>(null)
 
   const [bindings, setBindings] = useState<BindingCardData[]>([])
   const [bindingsLoading, setBindingsLoading] = useState(false)
@@ -126,6 +134,7 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
     if (open) {
       loadBlueprints()
       setFormMode('list')
+      setPublishingId(null)
       setNewTitle(metadata.title)
       setNewDescription('')
       setNewScreenshotBlob(null)
@@ -450,6 +459,14 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
                   </div>
                 </div>
               </div>
+            ) : publishingId !== null ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <PublicationReview blueprintId={publishingId} onBack={() => {
+                  // Back in the list, focus lands where the list starts rather than on the body.
+                  flushSync(() => setPublishingId(null))
+                  listHeadingRef.current?.focus()
+                }} />
+              </div>
             ) : (
               <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
               <button
@@ -477,7 +494,7 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
               </button>
 
             <section>
-              <h3 className="mb-2 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+              <h3 ref={listHeadingRef} tabIndex={-1} className="mb-2 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default focus-visible:outline-none">
                 Existing blueprints
               </h3>
 
@@ -525,6 +542,7 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
                           toasts.add({ title: err.message || 'Retry failed.', variant: 'error' })
                         }
                       }}
+                      onPublish={publicationOffered ? () => setPublishingId(bp.id) : undefined}
                       onCopyLink={async () => {
                         const url = `${window.location.origin}/blueprint/${bp.id}`
                         return copyToClipboard(url)
@@ -553,6 +571,7 @@ function BlueprintRow({
   onUpdateCode,
   onRetryPublish,
   onCopyLink,
+  onPublish,
   isConfirmingDelete,
   isDeleting,
   onStartDelete,
@@ -565,6 +584,8 @@ function BlueprintRow({
   onUpdateCode: () => void
   onRetryPublish: () => void
   onCopyLink: () => Promise<boolean>
+  /** Opens the publication step; absent while the deployment offers no publication. */
+  onPublish?: () => void
   isConfirmingDelete: boolean
   isDeleting: boolean
   onStartDelete: () => void
@@ -677,6 +698,11 @@ function BlueprintRow({
           >
             {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy link'}
           </GhostButton>
+          {onPublish && (
+            <GhostButton onClick={onPublish} icon={<ShareNetwork size={13} />}>
+              Publish…
+            </GhostButton>
+          )}
         </div>
         <div className="-mr-1.5 ml-auto flex items-center gap-0.5 opacity-60 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
           <button

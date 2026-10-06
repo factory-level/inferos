@@ -82,12 +82,14 @@ function authenticatedApi(): RpcStub<AuthenticatedApi> {
     isBlueprintInLibrary: async () => null,
     isBlueprintPinned: async () => false,
     getOwnBlueprint: async () => null,
+    getBlueprintInfo: async () => BLUEPRINT,
   } as unknown as RpcStub<AuthenticatedApi>
 }
 
+// The public read serves published blueprints only; a signed-in page must not depend on it.
 function publicApi(): RpcStub<PublicApi> {
   return {
-    getBlueprint: async () => BLUEPRINT,
+    getBlueprint: async () => null,
   } as unknown as RpcStub<PublicApi>
 }
 
@@ -132,5 +134,17 @@ describe('BlueprintLandingPage model configuration', () => {
     const save = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button'))
       .find(button => button.textContent === 'Save connection')!
     expect(save.disabled).toBe(false)
+  })
+
+  it('reads an unpublished blueprint as a signed-in person of the deployment', async () => {
+    testState.authenticatedApi = authenticatedApi()
+    rootContainer = document.createElement('div')
+    document.body.appendChild(rootContainer)
+    root = createRoot(rootContainer)
+
+    await act(async () => root!.render(<BlueprintLandingPage rpcStub={publicApi()} />))
+    await act(async () => { await Promise.resolve() })
+
+    expect(document.body.textContent).toContain('Model blueprint')
   })
 })

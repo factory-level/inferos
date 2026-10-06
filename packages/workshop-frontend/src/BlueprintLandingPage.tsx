@@ -2,7 +2,7 @@ import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
-import { PublicApi, AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { PublicApi, AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, getPublicationErrorCode, PUBLICATION_ERROR_CODES } from '@gadgets/workshop-shared/api'
 import { SupportedResource, VendorDescription, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { Button, Dialog, DropdownMenu, Select, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, Lightning, Plus, Robot, Sparkle, Star, Trash, X } from '@phosphor-icons/react'
@@ -22,6 +22,7 @@ import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyl
 import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { openConnectWindow } from './connectHandoff'
+import { publicationErrorMessage } from './features/publication/publicationText'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -94,22 +95,30 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       setNotFound(true)
       return
     }
+    if (authLoading) return
     setLoading(true)
     setNotFound(false)
     setError(null)
 
-    rpcStub.getBlueprint(id).then(result => {
+    // Signed in, the page reads as a person of this deployment: an unpublished blueprint is still
+    // visible to its owner and installable by id here. The public read serves published ones only.
+    let cancelled = false
+    const read = isAuthenticated && authenticatedApi
+      ? authenticatedApi.getBlueprintInfo(id) : rpcStub.getBlueprint(id)
+    read.then(result => {
+      if (cancelled) return
       if (result) {
         setBlueprint(result)
       } else {
         setNotFound(true)
       }
     }).catch(err => {
-      setError(err.message || 'Failed to load blueprint.')
+      if (!cancelled) setError(err.message || 'Failed to load blueprint.')
     }).finally(() => {
-      setLoading(false)
+      if (!cancelled) setLoading(false)
     })
-  }, [id, rpcStub])
+    return () => { cancelled = true }
+  }, [id, rpcStub, authLoading, isAuthenticated, authenticatedApi])
 
   useEffect(() => {
     setActiveBindingName(null)
@@ -589,8 +598,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           extension: BLUEPRINT_ARCHIVE_EXTENSION,
         },
       )
-    } catch (err: any) {
-      setError(err.message || 'Failed to download blueprint.')
+    } catch (err) {
+      setError(publicationErrorMessage(err, 'Failed to download blueprint.'))
     } finally {
       setDownloading(false)
     }
@@ -608,7 +617,9 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     } catch (err: any) {
       console.error('Failed to update featured status:', err)
       toasts.add({
-        title: nextFeatured ? 'Failed to feature blueprint' : 'Failed to unfeature blueprint',
+        title: getPublicationErrorCode(err) === PUBLICATION_ERROR_CODES.notPublished
+          ? 'Featuring needs an approved publication to this deployment (Admin, Publications).'
+          : nextFeatured ? 'Failed to feature blueprint' : 'Failed to unfeature blueprint',
         variant: 'error',
       })
     } finally {
