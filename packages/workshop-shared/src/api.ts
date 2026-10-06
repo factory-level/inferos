@@ -2024,6 +2024,20 @@ export type BlueprintInstallOptions = {
   kind?: WorkspaceKind;
 };
 
+/** Options for `Overseer.installBlueprint`: those of `BlueprintInstallOptions`, plus a request key. */
+export type SpaceInstallOptions = {
+  /** The version to install. Absent means the blueprint's current version. */
+  version?: number;
+  /** The kind the caller is installing for. A version of another kind is refused. */
+  kind?: WorkspaceKind;
+  /**
+   * A caller-chosen key (1 to 128 characters) naming this install request, so a repeat of it
+   * returns the first one's gadget instead of installing again. Reusing a key for a different
+   * blueprint or version is refused.
+   */
+  requestKey?: string;
+};
+
 /**
  * GadgetMetadata extended with timestamps. These are available when listing gadgets from the
  * user's collection, but not from the Overseer (which doesn't track them).
@@ -2487,13 +2501,18 @@ export interface Overseer extends RpcTarget {
    * `newGatekeeper`. `options` pins the version and kind exactly as for `newGadgetFromBlueprint`.
    * A binding that resolves to a mock dependency (a model registered as `mock`, or a resource
    * its gatekeeper reports as mock data) is refused, naming the binding, unless the workspace is
-   * test-only (see `setTestOnly`). Every refusal happens before anything is created. Returns the
-   * new gadget's id.
+   * test-only (see `setTestOnly`). Every refusal happens before anything is created. Later, a
+   * binding to a mock dependency added to the installed gadget is refused the same way. Returns
+   * the new gadget's id.
+   *
+   * With `options.requestKey`, the install is idempotent per workspace: a repeated request with the
+   * same key (a double submission, or a retry after a lost connection) creates nothing and returns
+   * the gadget the first one created, waiting for it if it is still running.
    */
   installBlueprint(
     blueprintId: string,
     bindings: Record<string, BlueprintBindingAssignment>,
-    options?: BlueprintInstallOptions
+    options?: SpaceInstallOptions
   ): Promise<WorkpieceId>;
 
   /**

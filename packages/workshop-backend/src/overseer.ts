@@ -8,7 +8,7 @@ import { consoleScreens, type OperateConsole, type OperateConsoleContent } from 
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintInstallOptions, BlueprintPublishOptions } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -273,6 +273,11 @@ type GatekeeperRecord = {
   // Records how this gatekeeper was originally created, enabling blueprint metadata derivation.
   creationSpec?: GatekeeperCreationSpec;
 
+  // Set when its creator's account or model reported it as a mock dependency (see
+  // Overseer.installBlueprint): binding it into an install is refused outside a test-only
+  // workspace (bindWorkpiece). Records created before this was kept have none.
+  mock?: true;
+
   // OBSOLETE: Before we had support for multiple gadgets per workspace, the binding name and
   // blueprint annotation information lived on the GatekeeperRecord. These properties continue
   // to be declared only to support migrating them away. The version 0 -> 1 migration copies
@@ -281,6 +286,19 @@ type GatekeeperRecord = {
   bindingName?: string;
   blueprintAnnotation?: BlueprintBindingAnnotation;
 };
+
+// What a mock gatekeeper record is, for a refusal naming it: its resource, or its model.
+function mockDescription(record: GatekeeperRecord): string {
+  let spec = record.creationSpec;
+  if (spec?.type === "aiModel") return `mock model ${spec.modelId}`;
+  if (spec?.type === "agentSpawner") return `agent on mock model ${spec.config.modelId}`;
+  return `mock data ${record.resourceUrl ?? ""}`.trim();
+}
+
+// Whether a model registration is a mock stand-in (ApiKeyModelConfig.mock).
+function isMockModel(config: AiModelConfig | undefined): boolean {
+  return config !== undefined && config.billing !== "chatgpt-plan" && config.mock === true;
+}
 
 function gatekeeperVendorId(record: GatekeeperRecord | undefined): string | undefined {
   let spec = record?.creationSpec;
@@ -384,7 +402,16 @@ export type GadgetRecord = {
    * instead, for its default gadget.
    */
   installedFrom?: BlueprintInstall;
+
+  /**
+   * The request that installed this gadget, when it named one (SpaceInstallOptions.requestKey):
+   * a repeat of it returns this gadget rather than installing again.
+   */
+  installRequest?: InstallRequest;
 };
+
+/** An install request named by a key: the blueprint and the version option it asked for. */
+type InstallRequest = {key: string, blueprintId: string, version?: number};
 
 /**
  * A worktree workpiece (the other variant of WorkpieceRecord): a file tree rooted at a git
@@ -2677,6 +2704,13 @@ class OverseerImpl implements AgentHooks {
         throw new Error(`Gadget-to-gadget bindings are not supported yet.`);
       }
       throw new Error(`No such gatekeeper: ${target}`);
+    }
+    // An install in a workspace that is not test-only never depends on mock data or models, however
+    // the binding arrives: at install (Overseer.installBlueprint) or added later.
+    if (targetRecord.mock && gadget.installedFrom && !this.storage.testOnly.get()) {
+      throw new Error(`This workspace is not test-only, so the install "${gadget.title}" cannot ` +
+          `bind the mock dependency "${name}" (${mockDescription(targetRecord)}). Bind a real ` +
+          `resource or model instead, or mark the workspace test-only.`);
     }
     // A permanent edge can put an account-requiring connection into every "use" collaborator's
     // verification scope, since the gadget UI they drive can now invoke it. Snapshot the scope
@@ -5526,13 +5560,14 @@ class OverseerImpl implements AgentHooks {
   // GadgetClientImpl). `actorUserId` is who the returned client acts for, for analytics only.
   async addGatekeeper(
       cls: GatekeeperClass, creationSpec: GatekeeperCreationSpec, actorUserId: string,
-      joinAs?: SessionKind)
+      joinAs?: SessionKind, mock = false)
       : Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
       id,
       class: cls,
       creationSpec,
+      ...(mock ? {mock: true} : {}),
     };
 
     // The record is published only once, below, after describe() resolves -- the facet takes the
@@ -6434,6 +6469,10 @@ class OverseerImpl implements AgentHooks {
   // scheduled -- marking without one would brick the connection until some unrelated restart came
   // along.
   #gatekeepersPendingRestart = new Set<number>();
+
+  // Space installs running in this instance, by request key (see Overseer.installBlueprint), so a
+  // concurrent repeat of one joins it. Completed ones are found by GadgetRecord.installRequest.
+  runningInstalls = new Map<string, {request: InstallRequest, gadgetId: Promise<WorkpieceId>}>();
 
   // Whether `id` is NOT blocked pending a scheduled restart (see #gatekeepersPendingRestart).
   // For callers that enumerate connections (listSlashCommands, prepareChatBindings' ambient
@@ -11239,7 +11278,37 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async installBlueprint(blueprintId: string, bindings: Record<string, BlueprintBindingAssignment>,
-                         options?: BlueprintInstallOptions): Promise<WorkpieceId> {
+                         options?: SpaceInstallOptions): Promise<WorkpieceId> {
+    let key = options?.requestKey;
+    if (key === undefined) return await this.#installBlueprint(blueprintId, bindings, options);
+    if (key.length === 0 || key.length > 128) {
+      throw new Error("An install request key must be 1 to 128 characters.");
+    }
+    // A repeat of a request (by key) gets the first one's gadget: from the running install, which
+    // is registered before its first await so a concurrent repeat can't miss it, or from the
+    // gadget record it stamped, which survives a lost connection or a restart.
+    let request: InstallRequest = {key, blueprintId, version: options?.version};
+    let running = this.impl.runningInstalls.get(key);
+    let installed = [...this.impl.storage.gadgets.list()].find(
+        workpiece => workpiece.type === "gadget" && workpiece.installRequest?.key === key);
+    let prior = running?.request ?? (installed?.type === "gadget" ? installed.installRequest : undefined);
+    if (prior && (prior.blueprintId !== blueprintId || prior.version !== request.version)) {
+      throw new Error(`The install request key "${key}" was already used for another install.`);
+    }
+    if (running) return await running.gadgetId;
+    if (installed) return installed.id;
+    let gadgetId = this.#installBlueprint(blueprintId, bindings, options, request);
+    this.impl.runningInstalls.set(key, {request, gadgetId});
+    try {
+      return await gadgetId;
+    } finally {
+      this.impl.runningInstalls.delete(key);
+    }
+  }
+
+  async #installBlueprint(blueprintId: string, bindings: Record<string, BlueprintBindingAssignment>,
+                          options?: SpaceInstallOptions, request?: InstallRequest)
+      : Promise<WorkpieceId> {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
     let {kvRecord, code, install, bindings: blueprintBindings} =
         await readBlueprintVersionToInstall(this.impl.env, blueprintId, bindings, options);
@@ -11272,6 +11341,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let record = this.impl.createGadget(title, fallbackBindingName(title, name => taken.has(name)),
         undefined, output, commitId);
     record.installedFrom = install;
+    if (request) record.installRequest = request;
     this.impl.storage.gadgets.put(record);
     this.impl.recordGadgetAnalytics({
       event_name: "workpiece_created",
@@ -11325,7 +11395,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async setTestOnly(testOnly: boolean): Promise<void> {
     if (!testOnly) {
       let mocked = [...this.impl.storage.gadgets.list()].flatMap(workpiece =>
-          workpiece.type === "gadget" && workpiece.installedFrom?.mockDependencies?.length
+          workpiece.type === "gadget" && workpiece.installedFrom &&
+          (workpiece.installedFrom.mockDependencies?.length || Object.values(workpiece.bindings)
+              .some(edge => this.impl.storage.gatekeepers.get(edge.target)?.mock))
               ? [`"${workpiece.title}"`] : []);
       if (mocked.length > 0) {
         throw new Error(`This workspace holds installs with mock dependencies ` +
@@ -11540,7 +11612,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    let {class: cls, vendorId, typeUrlPattern} =
+    let {class: cls, vendorId, typeUrlPattern, mock} =
         await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
     let creationSpec: GatekeeperCreationSpec = {
       type: "gatekeeper",
@@ -11549,7 +11621,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       typeUrlPattern,
     };
     let result = await this.impl.addGatekeeper(
-        cls, creationSpec, this.clientUserId, this.#mintedCapabilityKind());
+        cls, creationSpec, this.clientUserId, this.#mintedCapabilityKind(), mock);
     await this.recordConnectionCreated(result, "gatekeeper", vendorId);
     return result;
   }
@@ -11573,7 +11645,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.LanguageModelGatekeeper({props}), creationSpec,
-        this.clientUserId, this.#mintedCapabilityKind());
+        this.clientUserId, this.#mintedCapabilityKind(), isMockModel(chatMeta.aiModel!.config));
     await this.recordConnectionCreated(result, "ai_model");
     return result;
   }
@@ -11617,18 +11689,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       type: "agentSpawner",
       config,
     };
+    let mock = false;
     if (config.modelId) {
       let chatMeta = await retryOnDoReset(
           () => this.#clientUser.getChatContext(config.modelId), this.impl.logger);
       if (chatMeta.aiModel) {
         creationSpec.modelProvider = chatMeta.aiModel.config.provider;
         creationSpec.modelName = chatMeta.aiModel.config.model;
+        mock = isMockModel(chatMeta.aiModel.config);
       }
     }
 
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
-        this.clientUserId, this.#mintedCapabilityKind());
+        this.clientUserId, this.#mintedCapabilityKind(), mock);
     await this.recordConnectionCreated(result, "agent_spawner");
     return result;
   }
@@ -12978,7 +13052,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async upgradeInstall(_version: number, _gadgetId?: WorkpieceId): Promise<void> { this.#deny(); }
   async installBlueprint(_blueprintId: string,
       _bindings: Record<string, BlueprintBindingAssignment>,
-      _options?: BlueprintInstallOptions): Promise<WorkpieceId> { this.#deny(); }
+      _options?: SpaceInstallOptions): Promise<WorkpieceId> { this.#deny(); }
   async setTestOnly(_testOnly: boolean): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
@@ -13262,7 +13336,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async upgradeInstall(_version: number, _gadgetId?: WorkpieceId): Promise<void> { this.#deny(); }
   async installBlueprint(_blueprintId: string,
       _bindings: Record<string, BlueprintBindingAssignment>,
-      _options?: BlueprintInstallOptions): Promise<WorkpieceId> { this.#deny(); }
+      _options?: SpaceInstallOptions): Promise<WorkpieceId> { this.#deny(); }
   async setTestOnly(_testOnly: boolean): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }

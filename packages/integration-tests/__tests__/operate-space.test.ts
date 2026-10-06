@@ -358,8 +358,29 @@ describe("Publish to Operate", () => {
       .rejects.toThrow(/the binding "MODEL" uses the mock model "Helper"/);
     expect(s.watched.gadgetCount()).toBe(before);
     // Real dependencies install, whatever their names sound like.
-    await s.built.installBlueprint(blueprintId, assign("real-thing", "real-model"));
+    const real = await s.built.installBlueprint(blueprintId, assign("real-thing", "real-model"));
     await s.settle(installerAccount.id);
+
+    // A mock dependency bound into that install later is refused the same way, naming it, and
+    // the install keeps only its real bindings.
+    const mockThing = await s.built.newGatekeeper(installerAccount.id, thingUrl("mock-later"));
+    if (!mockThing) throw new Error("Failed to connect the mock thing");
+    const mockThingId = await mockThing.getId();
+    await s.settle(installerAccount.id);
+    const mockModelId = await (await s.built.newAiModelGatekeeper("scripted-model")).getId();
+    {
+      using gadget = await s.built.getGadget(real);
+      await expect(gadget.bind("LATER", mockThingId))
+        .rejects.toThrow(/not test-only.*mock dependency "LATER" \(mock data .*mock-later\)/);
+      await expect(gadget.bind("HELPER", mockModelId))
+        .rejects.toThrow(/mock dependency "HELPER" \(mock model scripted-model\)/);
+      expect(await gadget.getBinding("LATER")).toBeNull();
+    }
+    // Outside an install, the same connection binds as it always has.
+    {
+      using own = s.built.createGadget("Scratch", undefined, "SCRATCH");
+      await own.bind("LATER", mockThingId);
+    }
 
     // Marked test-only (by a build collaborator), the space accepts them and records which.
     await s.built.setTestOnly(true);
@@ -370,5 +391,40 @@ describe("Publish to Operate", () => {
     // While it holds them, the space stays test-only.
     await expect(s.ownerSpace.setTestOnly(false)).rejects.toThrow(/must stay test-only/);
     expect((await s.ownerSpace.getMetadata()).testOnly).toBe(true);
+
+    // In a test-only space a mock bound later is accepted, and also keeps the space test-only.
+    {
+      using gadget = await s.built.getGadget(real);
+      await gadget.bind("LATER", mockThingId);
+      expect(await gadget.getBinding("LATER")).not.toBeNull();
+    }
+  });
+
+  it("installs once per request key, however often the request is repeated", async () => {
+    const author = await person("onceauthor");
+    const source = await build(author.api, "app", appFiles("v1"));
+    const blueprintId = await publish(source.gadget, "Once", 1);
+    const s = await space("once", blueprintId);
+    const before = s.watched.gadgetCount();
+    const key = crypto.randomUUID();
+
+    // A double submission: both requests arrive, and they get the same one install.
+    const [first, second] = await Promise.all([
+      s.built.installBlueprint(blueprintId, {}, { version: 1, requestKey: key }),
+      s.built.installBlueprint(blueprintId, {}, { version: 1, requestKey: key }),
+    ]);
+    expect(second).toBe(first);
+    // A retry after the result was lost (a fresh connection) gets it again, and creates nothing.
+    using retried = await (await logIn(connect(harness.url), s.installer.name)).openGadget(s.spaceId);
+    expect(await retried.installBlueprint(blueprintId, {}, { version: 1, requestKey: key })).toBe(first);
+    await waitFor("the one install", async () => s.watched.gadgetCount() === before + 1 || null);
+    expect(s.watched.gadget(first).installedFrom).toMatchObject({ blueprintId, version: 1 });
+    // The key names that request only: reusing it for another version is refused.
+    await expect(s.built.installBlueprint(blueprintId, {}, { version: 2, requestKey: key }))
+      .rejects.toThrow(/already used for another install/);
+    await expect(s.built.installBlueprint(blueprintId, {}, { requestKey: "" })).rejects.toThrow(/1 to 128/);
+    // Without a key, each request is its own install.
+    const other = await s.built.installBlueprint(blueprintId, {}, { version: 1 });
+    expect(other).not.toBe(first);
   });
 });
