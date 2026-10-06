@@ -762,7 +762,8 @@ export class InferOpsFake {
       const documentMatch = /^\/knowledge\/documents\/([^/]+)$/.exec(url.pathname);
       if (documentMatch) {
         const doc = documentIn(documentMatch[1]!);
-        return json(doc ? { ...wireDocument(doc), body: "" } : null);
+        // The detail shape: InferOps adds the page's body, version and Master role.
+        return json(doc ? { ...wireDocument(doc), body: "", version: 1, masterRole: null } : null);
       }
       if (url.pathname === "/knowledge/sections") {
         const documentId = url.searchParams.get("documentId") ?? "";

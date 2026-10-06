@@ -19,8 +19,15 @@
 //
 // Wiki: a small synthetic InferMind Wiki (`src/fixtures/demo-wiki.json`), with InferOps' section
 // semantics: a body write advances the section's version by one, takes no expected version and
-// does not replay an idempotency key (the gatekeeper's own re-read is what guards it). Pages are
-// listed by sibling order, then title, and sections in page order. `setInferMindEnabled(false)`
+// does not replay an idempotency key (the gatekeeper's own re-read is what guards it). Pages carry
+// InferOps' page semantics: a body, a version and a Master role; a page body write is a strict
+// compare-and-swap on the version that replays only a retry of the page's last write: the same key,
+// expected version and payload (InferOps' receipt over key, principal, expected version, operation
+// and payload; one account is one principal here) while the page is exactly one version later (`lockForPageWrite`). A key
+// reused with another payload is refused as stale, like any other stale write. The structure read
+// mirrors InferOps' `getWikiStructure`: live pillars by position, members by title, the root, and
+// the unfiled pages (no Master, in no pillar). Pages are listed by sibling order, then title, and
+// sections in page order. `setInferMindEnabled(false)`
 // turns the demo workspace into one without InferMind, so every Wiki call fails FORBIDDEN as
 // InferOps' product gate does.
 //
@@ -38,7 +45,8 @@ import WIKI_SEED from "./fixtures/demo-wiki.json";
 import {
   InferOpsError, type DispatchRequest, type InferOpsClient, type IssueChanges, type NewIssueRequest,
   type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord, type WikiDocumentHead,
-  type WikiDocumentRecord, type WikiSectionRecord,
+  type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord,
+  type WikiStructureRecord,
 } from "./inferops-client";
 import type { Issue, Revision, RunResult, RunStatus } from "./types";
 
@@ -48,12 +56,24 @@ export const MOCK_HOST = "demo.local";
 const DATA_KEY = "data:v1";
 const RUNS_KEY = "runs:v1";
 const IDEMPOTENCY_PREFIX = "idem:";
-const WIKI_KEY = "wiki:v1";
+// v2 added page bodies, versions, Master roles and pillars; a v1 copy is left unread.
+const WIKI_KEY = "wiki:v2";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
 const REVOKED_KEY = "revoked";
 
-/** The demo Wiki: its pages and their sections. */
-type MockWiki = { documents: WikiDocumentRecord[]; sections: WikiSectionRecord[] };
+/** A demo page: its listed fields, its body, version and Master role, and its last write's receipt. */
+type MockDocument = WikiDocumentRecord & Omit<WikiDocumentHead, "id" | "slug" | "title"> & {
+  lastWriteReceipt?: string;
+};
+
+/** A demo pillar: its Master page and the pages filed in it. */
+type MockPillar = {
+  key: string; title: string; position: number; masterId: string | null;
+  members: { documentId: string; source: "intake" | "human" }[];
+};
+
+/** The demo Wiki: its pages, their sections and its pillars. */
+type MockWiki = { documents: MockDocument[]; sections: WikiSectionRecord[]; pillars: MockPillar[] };
 
 /** The demo workspace's repositories. Only ids reach a dispatch; there is nothing to clone. */
 export const MOCK_REPOS: readonly RepoRecord[] = [
@@ -73,6 +93,16 @@ type MockData = { projects: ProjectSnapshot[]; descriptions?: Record<string, str
  * its JSON text, built in a fixed member order, so two uses compare as strings.
  */
 type IdempotencyRecord<T = Issue> = { operation: string; result: T };
+
+/** A demo page as a structure read names it. */
+function structurePage({ id, slug, title, parentId }: MockDocument) {
+  return { id, slug, title, parentId };
+}
+
+/** Orders by title, as InferOps orders siblings and pillar members after their position. */
+function byTitle(a: { title: string }, b: { title: string }): number {
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
 
 function notFound(): InferOpsError {
   // One message for "no such issue" and "issue of another project", so a caller cannot probe.
@@ -411,22 +441,73 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     }
     let wiki = this.ctx.storage.kv.get<MockWiki>(WIKI_KEY);
     if (!wiki) {
-      const { documents, sections } = structuredClone(WIKI_SEED) as unknown as MockWiki;
-      wiki = { documents, sections };
+      const { documents, sections, pillars } = structuredClone(WIKI_SEED) as unknown as MockWiki;
+      wiki = { documents, sections, pillars };
       this.ctx.storage.kv.put(WIKI_KEY, wiki);
     }
     return wiki;
   }
 
   async listDocuments(): Promise<WikiDocumentRecord[]> {
-    return this.#wiki().documents.toSorted((a, b) =>
-      a.siblingOrder - b.siblingOrder || (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
+    return this.#wiki().documents
+      .toSorted((a, b) => a.siblingOrder - b.siblingOrder || byTitle(a, b))
+      .map(({ id, slug, title, parentId, siblingOrder }) => ({ id, slug, title, parentId, siblingOrder }));
   }
 
   async readDocument(documentId: string): Promise<WikiDocumentHead> {
     const found = this.#wiki().documents.find(d => d.id === documentId);
     if (!found) throw new InferOpsError("NOT_FOUND", "No such page in this Wiki.");
-    return { id: found.id, slug: found.slug, title: found.title };
+    return {
+      id: found.id, slug: found.slug, title: found.title, body: found.body, version: found.version,
+      masterRole: found.masterRole,
+    };
+  }
+
+  async readStructure(): Promise<WikiStructureRecord> {
+    const { documents, pillars } = this.#wiki();
+    const byId = new Map(documents.map(d => [d.id, d]));
+    const filed = new Set<string>();
+    const shown = pillars.toSorted((a, b) => a.position - b.position || (a.key < b.key ? -1 : 1)).map(p => {
+      const master = p.masterId ? byId.get(p.masterId) : undefined;
+      const members = p.members.flatMap(m => {
+        const document = byId.get(m.documentId);
+        if (!document) return [];
+        filed.add(document.id);
+        return [{ ...structurePage(document), source: m.source }];
+      });
+      return {
+        key: p.key, title: p.title, position: p.position, master: master ? structurePage(master) : null,
+        members: members.toSorted(byTitle),
+      };
+    });
+    const root = documents.find(d => d.masterRole === "root");
+    return {
+      root: root ? structurePage(root) : null,
+      pillars: shown,
+      unfiled: documents.filter(d => d.masterRole === null && !filed.has(d.id)).map(structurePage),
+    };
+  }
+
+  async updateDocument(documentId: string, changes: WikiPageChanges, expectedVersion: number,
+                       idempotencyKey: string): Promise<WikiPageWrite> {
+    if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+    const wiki = this.#wiki();
+    const document = wiki.documents.find(d => d.id === documentId);
+    if (!document) throw new InferOpsError("NOT_FOUND", "No such page in this Wiki.");
+    const receipt = JSON.stringify([idempotencyKey, expectedVersion, "page.edit", changes.body]);
+    if (document.version !== expectedVersion) {
+      // Only this exact write's own retry, one version on, is replayed; matching text proves nothing.
+      if (document.lastWriteReceipt === receipt && document.version === expectedVersion + 1) {
+        logger.info("write replayed", { event: "mock.write.replayed", replayed: true });
+        return { id: document.id, version: document.version };
+      }
+      throw new InferOpsError("STALE_REVISION", `The page changed (it is now version ${document.version}).`);
+    }
+    document.body = changes.body;
+    document.version += 1;
+    document.lastWriteReceipt = receipt;
+    this.ctx.storage.kv.put(WIKI_KEY, wiki);
+    return { id: document.id, version: document.version };
   }
 
   async listSections(documentId: string): Promise<WikiSectionRecord[]> {
@@ -525,6 +606,9 @@ export function openInferOpsClient(
     cancelRun: (projectKey, runId, idempotencyKey) => stub.cancelRun(projectKey, runId, idempotencyKey),
     listDocuments: () => stub.listDocuments(),
     readDocument: documentId => stub.readDocument(documentId),
+    readStructure: () => stub.readStructure(),
+    updateDocument: (documentId, changes, expectedVersion, idempotencyKey) =>
+      stub.updateDocument(documentId, changes, expectedVersion, idempotencyKey),
     listSections: documentId => stub.listSections(documentId),
     readSection: sectionId => stub.readSection(sectionId),
     updateSection: (sectionId, body, idempotencyKey) => stub.updateSection(sectionId, body, idempotencyKey),

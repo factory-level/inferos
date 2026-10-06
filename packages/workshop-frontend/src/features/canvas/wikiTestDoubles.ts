@@ -45,7 +45,7 @@ export const fakeWiki = () => {
     listDocuments: vi.fn<InferOpsWikiSession['listDocuments']>(async () => documents),
     readDocument: vi.fn<InferOpsWikiSession['readDocument']>(async slug => {
       const { head, shownSections } = page(slug)
-      return { id: head.id, slug: head.slug, title: head.title, sections: shownSections, references: embeddedReferences(shownSections.map(s => s.body)) } satisfies WikiDocument
+      return { id: head.id, slug: head.slug, title: head.title, body: '', version: 1, masterRole: null, sections: shownSections, references: embeddedReferences(shownSections.map(s => s.body)) } satisfies WikiDocument
     }),
     readDocumentText: vi.fn<InferOpsWikiSession['readDocumentText']>(async slug => {
       const { head, shownSections } = page(slug)

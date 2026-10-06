@@ -1,6 +1,6 @@
 // The actions a binding records between proposal and decision: on a board binding a transition, an
 // issue create or an issue update; on a coding-dispatch binding a dispatch or a run cancel; on a
-// Wiki binding a section update. Each is
+// Wiki binding a section update or a page body update. Each is
 // stored in the facet's KV under `action:<n>` (inferops.ts)
 // and carries the exact request it will send when applied, plus a fingerprint of that request.
 //
@@ -99,16 +99,38 @@ export type SectionUpdateAction = ActionBase & {
   appliedVersion?: number;
 };
 
+/**
+ * A proposed replacement of a Wiki page's body, and the body before it, for revert. Unlike a
+ * section edit, InferOps compares the page version itself (a strict compare-and-swap), so apply and
+ * revert send the version and never decide from the page's text.
+ */
+export type DocumentUpdateAction = ActionBase & {
+  kind: "document-update";
+  documentId: string;
+  /** The page's title, for messages. */
+  documentTitle: string;
+  body: string;
+  /** The page version the edit was proposed at; InferOps refuses the write if it has changed. */
+  expectedVersion: number;
+  /** The body the edit replaces. */
+  previousBody: string;
+  /** The version InferOps reported for the applied edit; a revert is sent expecting it. */
+  appliedVersion?: number;
+};
+
 /** Any recorded action. */
 export type ActionRecord =
   | TransitionAction | CreateAction | UpdateAction | DispatchAction | CancelRunAction
-  | SectionUpdateAction;
+  | SectionUpdateAction | DocumentUpdateAction;
 
 /** An action a board binding records. */
 export type BoardAction = TransitionAction | CreateAction | UpdateAction;
 
 /** An action a coding-dispatch binding records. */
 export type CodingAction = DispatchAction | CancelRunAction;
+
+/** An action a Wiki binding records. */
+export type WikiAction = SectionUpdateAction | DocumentUpdateAction;
 
 /** A pending change to an existing issue: what simulation overlays and what blocks another. */
 export type PendingIssueChange = TransitionAction | UpdateAction;
@@ -120,7 +142,8 @@ export type StagedAction =
   | Omit<UpdateAction, "actionId" | "status">
   | Omit<DispatchAction, "actionId" | "status">
   | Omit<CancelRunAction, "actionId" | "status">
-  | Omit<SectionUpdateAction, "actionId" | "status">;
+  | Omit<SectionUpdateAction, "actionId" | "status">
+  | Omit<DocumentUpdateAction, "actionId" | "status">;
 
 /** A stored record, with legacy records (no `kind`) read as the transitions they are. */
 export function readAction(raw: unknown): ActionRecord | undefined {
@@ -153,6 +176,9 @@ export function requestOf(record: StagedAction | ActionRecord): unknown {
     case "section-update":
       return { kind: record.kind, sectionId: record.sectionId, body: record.body,
                expectedVersion: record.expectedVersion };
+    case "document-update":
+      return { kind: record.kind, documentId: record.documentId, body: record.body,
+               expectedVersion: record.expectedVersion };
   }
 }
 
@@ -162,8 +188,8 @@ export function isCodingAction(record: ActionRecord): record is CodingAction {
 }
 
 /** Whether an action belongs to a Wiki binding. */
-export function isWikiAction(record: ActionRecord): record is SectionUpdateAction {
-  return record.kind === "section-update";
+export function isWikiAction(record: ActionRecord): record is WikiAction {
+  return record.kind === "section-update" || record.kind === "document-update";
 }
 
 /** JSON with object keys sorted and undefined members dropped, so equal requests hash equally. */
