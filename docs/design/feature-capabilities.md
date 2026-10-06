@@ -1,7 +1,7 @@
 ---
 title: Customer feature capabilities
 status: draft
-updated: 2026-10-03
+updated: 2026-10-05
 ---
 
 # Customer feature capabilities
@@ -70,13 +70,13 @@ A flag states availability. Five states stay distinct: installed, enabled, accou
 
 Disabling a runtime feature follows an explicit admission, drain and cancel policy. Retained definitions, history and authorized diagnostics are preserved. Running work is not orphaned, and disabling does not imply deletion. Re-enabling does not restore revoked grants. Scope revocation stays effective after reload, after a feature is disabled and re-enabled, and after a copied view or artifact is imported.
 
-## Publication destinations (proposed, pending owner decision)
+## Publication destinations
 
-Tracking: [#68](https://github.com/factory-level/inferos/issues/68). Decision record: [ADR 0008](../adr/0008-publication-destinations.md) (proposed). This section is a proposal for the owner to decide on. Nothing in it is accepted, and `PUBLISH_CLOUDFLAREOS_WIDGET` and `PUBLISH_CLOUDFLAREOS_APP` stay unsupported until the owner decides and an implementation lands. Publication is post-release; the MVP private shell does not need it.
+Tracking: [#68](https://github.com/factory-level/inferos/issues/68). Decision record: [ADR 0008](../adr/0008-publication-destinations.md) (accepted). Proposed 2026-10-03; **decided by the owner on 2026-10-05** ([#68 decision](https://github.com/factory-level/inferos/issues/68)). The decisions are listed under [decisions](#publication-decisions) below. Nothing is implemented yet, and `PUBLISH_CLOUDFLAREOS_WIDGET` and `PUBLISH_CLOUDFLAREOS_APP` stay unsupported until an implementation lands. Publication is post-release; the MVP private shell does not need it.
 
 ### Existing mechanisms
 
-The proposal reuses what the Workshop already has rather than adding a parallel system. See [blueprints](../blueprints.md) and [sharing](../sharing.md).
+The design reuses what the Workshop already has rather than adding a parallel system. See [blueprints](../blueprints.md) and [sharing](../sharing.md).
 
 | Mechanism | What it does today | Who can reach it |
 | --- | --- | --- |
@@ -110,14 +110,14 @@ Rejected or deferred:
 
 ### Options
 
-**Option A (recommended): publication records decide reachability.** A blueprint is reachable beyond its owner and its Operate installs only while it has an active publication record for a destination. With no record, a blueprint is unpublished: its owner can use it and Publish to Operate can install it, but `PublicApi.getBlueprint` and `downloadBlueprint` refuse it and an admin cannot feature it. The initial destinations are `deployment` and `export`. `link` is defined but not offered at first, because it is unauthenticated and reaches outside the deployment, and the MVP is a private shell.
+**Option A (chosen by the owner, 2026-10-05): publication records decide reachability.** A blueprint is reachable beyond its owner and its Operate installs only while it has an active publication record for a destination. With no record, a blueprint is unpublished: its owner can use it and Publish to Operate can install it, but `PublicApi.getBlueprint` and `downloadBlueprint` refuse it and an admin cannot feature it. The initial destinations are `deployment` and `export`. `link` is defined but not offered at first, because it is unauthenticated and reaches outside the deployment, and the MVP is a private shell.
 
 - With both flags off, nothing leaves the deployment through a blueprint, which is what #68's acceptance requires.
-- It changes upstream behavior in the kernel (`PublicApi` and featuring), so it is a fork divergence from `cloudflare/cloudflare-os` and is held to the [kernel bar](../../REVIEW.md). Existing blueprint links stop working unless a migration grandfathers them (see the decisions below).
+- It changes upstream behavior in the kernel (`PublicApi` and featuring), so it is a fork divergence from `cloudflare/cloudflare-os` and is held to the [kernel bar](../../REVIEW.md). Existing blueprint links stop working: the owner decided against grandfathering (see [migration effect](#migration-effect-on-existing-blueprint-links)).
 
-**Option B: the flags gate only new destinations.** Blueprint links, archive downloads and featuring keep their upstream behavior, and the flags gate only a new `deployment`/`export` publish action. It is the smallest change and needs no kernel change. But with both flags off, any blueprint's code still leaves the deployment by link, so a flag-off deployment is not one that publishes nothing. Choose it only if the owner rules that a blueprint link is data sharing, not publication.
+**Option B (not chosen): the flags gate only new destinations.** Blueprint links, archive downloads and featuring keep their upstream behavior, and the flags gate only a new `deployment`/`export` publish action. It is the smallest change and needs no kernel change. But with both flags off, any blueprint's code still leaves the deployment by link, so a flag-off deployment is not one that publishes nothing. Choose it only if the owner rules that a blueprint link is data sharing, not publication.
 
-**Option C: a flag gates blueprint creation for its kind.** It is coarse, and it breaks Publish to Operate and output formats, which are built on blueprints. Not recommended.
+**Option C (not chosen): a flag gates blueprint creation for its kind.** It is coarse, and it breaks Publish to Operate and output formats, which are built on blueprints. Not recommended.
 
 ### Publication record
 
@@ -131,17 +131,19 @@ Each publication appends one record. A record is never edited except to add its 
 | `audience` | What the destination reaches, stated in words the reviewer saw: this deployment's users, an export's stated target, or link holders. |
 | `publishedBy` | The person who requested it. |
 | `approvedBy` | The admin who approved it. |
+| `selfApproved` | `true` when `approvedBy` is `publishedBy`, which is possible only with `PUBLICATION_SELF_APPROVAL` set. |
 | `at` | When it took effect. |
 | `withdrawnBy`, `withdrawnAt`, `reason` | Set when it is withdrawn. |
 
 - A record pins one version. `updateBlueprint({ updateCode: true })` does not move a publication. Publishing a newer version to the same destination appends a new record that replaces the earlier one at that destination.
 - Withdrawing stops new reach at that destination immediately. It does not uninstall gadgets already created from the artifact, and it cannot recall archives already downloaded. The record and the UI say both.
-- Proposed storage: the owner's User DO is authoritative, next to the blueprint record, as it is for the `featured` bit, and `AdminSettings` mirrors active `deployment` records for listing.
+- Storage (decided): the owner's User DO is authoritative, next to the blueprint record, as it is for the `featured` bit, and `AdminSettings` mirrors active `deployment` records for listing.
 
 ### Review step
 
 1. The author requests a publication and sees exactly what will go out: the artifact version and digest, its kind, title, description, screenshot and binding annotations, the destination and the audience.
 2. A deployment admin approves or refuses it in the admin panel, where featuring already lives. The request and the decision are both kept.
+   - **Self-approval** (an admin approving their own request) is off by default. It is allowed only when the deployment sets the environment variable `PUBLICATION_SELF_APPROVAL`. That setting is authorization configuration, so it is deliberately **not** part of `AdminConfig`: like `AUTH_GATEKEEPERS` and `DISABLE_PASSWORD_AUTH`, it stays env-driven so a compromised admin session cannot turn it on (see `AGENTS.md`). A self-approved record says so: `approvedBy` equals `publishedBy`, and the record carries `selfApproved: true`, which the record view and admin panel show.
 3. An agent may at most draft a request. It never approves one, and the operate chat never publishes, because Operate does not author.
 
 ### Enforcement with the flag off
@@ -160,18 +162,31 @@ Turning a flag off makes its destinations unreachable without changing the recor
 - Turning a flag on makes the request action available, and nothing else. No blueprint, record, listing or archive is created by a deploy, a profile, `intake apply`, `config migrate`, or a flag change. No profile sets either flag.
 - Publishing an app does not activate an agent: that is [`AGENT_DEPLOYMENTS`](agent-deployments.md). It does not share business data either: an installer reaches InferOps only through their own gatekeeper bindings and grants.
 
-### Decisions needed
+### Migration effect on existing blueprint links
 
-- [ ] Choose Option A (recommended), B or C.
-- [ ] The initial destination set: `deployment` and `export` (recommended), whether `link` is offered now or later, and confirm that public live hosting and an external marketplace are out.
-- [ ] What happens to existing blueprint links under Option A: grandfather each one as a `link` record at migration, or make them unpublished. And whether that applies to every deployment of this fork or only to wrappers on schema version 2.
-- [ ] Who approves: a deployment admin (recommended), and whether an admin may approve their own request.
-- [ ] Which flag covers `workflow`-kind workspaces: the app flag (recommended), a separate flag, or no publication.
-- [ ] Confirm that bundled blueprints and output formats are deployment configuration, not publication (recommended).
-- [ ] Turning a flag off suspends reach, and turning it on again requires each record to be confirmed again (recommended).
-- [ ] Where records live: the owner's User DO, mirrored by `AdminSettings` (recommended).
-- [ ] Whether the kernel change in Option A is acceptable as a fork divergence or should be proposed upstream.
-- [ ] The default for both flags in-repo, with no wrapper: off (recommended).
+The owner decided that existing unauthenticated blueprint links are **unpublished, with no grandfathering**. When Option A lands:
+
+- No `link` record is created for any existing blueprint. Every blueprint that exists at migration has no publication record, so it is unpublished.
+- `/blueprint/<id>`, `PublicApi.getBlueprint` and `PublicApi.downloadBlueprint` refuse every such blueprint for anyone but its owner. Links already handed out stop working, including in bookmarks, chats and documents, and a signed-out visitor gets the refusal instead of the metadata and archive.
+- Featured blueprints are no longer listed until a `deployment` record is approved for them; the stored `featured` bit stays but no longer grants reach.
+- Nothing is deleted. The owner keeps using the blueprint, Publish to Operate can still install it, and existing library references and gadgets already created from it keep working, because those are the owner's own use or independent copies.
+- To make one reachable again, its owner requests a publication for `deployment` or `export` and an admin approves it. `link` is not offered yet, so there is no way to restore an unauthenticated link until it is.
+- Archives already downloaded and imports already made elsewhere are unaffected and cannot be recalled.
+
+### Publication decisions
+
+Decided by the owner on 2026-10-05 ([#68 decision](https://github.com/factory-level/inferos/issues/68)):
+
+- [x] **Option A.** Publication records decide reachability.
+- [x] **Initial destinations** are `deployment` and `export`. `link` comes later. Public live hosting is rejected and an external marketplace is deferred.
+- [x] **Existing unauthenticated blueprint links are unpublished**, with no grandfathering. See [migration effect](#migration-effect-on-existing-blueprint-links).
+- [x] **A deployment admin approves.** Self-approval is allowed only with the explicit env setting `PUBLICATION_SELF_APPROVAL` (default off). It is authorization configuration, so it stays out of `AdminConfig`. A self-approved record says so.
+- [x] **`workflow`-kind workspaces** fall under the app flag.
+- [x] **Bundled blueprints and output formats** are deployment configuration, not publication.
+- [x] **Turning a flag off suspends reach**; turning it on again requires each record to be confirmed again.
+- [x] **Records live in the owner's User DO**, mirrored by `AdminSettings`.
+- [x] **The kernel change in Option A is kept as a fork divergence** from `cloudflare/cloudflare-os`.
+- [x] **Both flags default to off.**
 
 ## Non-Goals
 
@@ -196,7 +211,7 @@ Tracking issue: [#33](https://github.com/factory-level/inferos/issues/33).
 - The exact mapping from each legacy flag to the new vocabulary, and which legacy flags are retained because their semantics differ.
 - The named owner and default for each flag.
 - The drain or cancel policy for each runtime feature when it is disabled.
-- The publication destinations, review and records for the two publication flags. A proposal is under [publication destinations](#publication-destinations-proposed-pending-owner-decision), with its decisions listed there.
+- Decided by the owner on 2026-10-05: the publication destinations, review and records for the two publication flags. See [publication destinations](#publication-destinations).
 
 ## Related
 

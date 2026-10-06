@@ -1,10 +1,12 @@
 ---
 title: Publication destinations for the widget and app flags
-status: proposed
-date: 2026-10-03
+status: accepted
+date: 2026-10-05
 ---
 
 # 0008. Publication destinations for the widget and app flags
+
+Proposed 2026-10-03. Accepted by the owner on 2026-10-05 ([#68](https://github.com/factory-level/inferos/issues/68)), with Option A, no grandfathering of existing links, and an env-only self-approval setting.
 
 ## Context
 
@@ -14,21 +16,25 @@ The upstream Workshop already publishes. A blueprint is a versioned snapshot of 
 
 ## Decision
 
-Proposed, pending the owner's decision:
+Decided by the owner on 2026-10-05:
 
 - An artifact is one pinned blueprint version of a `widget`-kind workspace (widget flag) or an `app`-kind workspace (app flag), identified by blueprint id, version and a digest of the snapshot. It never carries chat history, storage, credentials, bindings or InferOps data.
 - Publication records decide reachability. A blueprint reaches beyond its owner and its Operate installs only while it has an active, admin-approved publication record for a destination. Without one, `PublicApi` reads refuse it and it cannot be featured.
-- The destinations are `deployment` (the featured listing, for this deployment's signed-in users), `export` (a `.gadget` archive for import into another deployment) and `link` (today's unauthenticated blueprint link). `deployment` and `export` are offered first. `link` is defined but deferred. Public hosting of a live app is rejected, and an external marketplace is deferred.
+- The destinations are `deployment` (the featured listing, for this deployment's signed-in users), `export` (a `.gadget` archive for import into another deployment) and `link` (today's unauthenticated blueprint link). `deployment` and `export` are offered first. `link` comes later. Public hosting of a live app is rejected, and an external marketplace is deferred.
+- **Existing unauthenticated blueprint links are unpublished, with no grandfathering.** No `link` record is created at migration, so every existing blueprint loses link reach and featuring until an admin approves a new record. Nothing is deleted, and the owner's own use and Operate installs are unaffected.
+- A deployment admin approves. Self-approval is off unless the env setting `PUBLICATION_SELF_APPROVAL` is set. It is authorization configuration, so it stays env-driven and out of `AdminConfig`, which a compromised admin session could change. A self-approved record says so (`selfApproved: true`).
+- `workflow`-kind workspaces fall under the app flag. Bundled blueprints and output formats are deployment configuration, not publication.
+- Records live in the owner's User DO, mirrored by `AdminSettings`. The kernel change is kept as a fork divergence. Both flags default to off.
 - A record holds the artifact, destination, audience, requester, approver and time. It is append-only and withdrawn by adding the withdrawal. Withdrawing stops new reach but cannot uninstall copies or recall downloaded archives, and says so.
 - With a flag off, every surface refuses: server, CLI, agent tools and UI. Turning a flag off suspends reach without changing records, and turning it on again resumes nothing without fresh confirmation. A flag, profile, deploy, migration or intake never publishes.
 
-The full proposal and the decision checklist are in [feature capabilities: publication destinations](../design/feature-capabilities.md#publication-destinations-proposed-pending-owner-decision).
+The full design and the decision checklist are in [feature capabilities: publication destinations](../design/feature-capabilities.md#publication-destinations).
 
 ## Consequences
 
 - With both flags off, a deployment publishes nothing, which matches the private-shell MVP.
 - `PublicApi` and featuring change behavior in the kernel. That diverges from `cloudflare/cloudflare-os`, so it has to meet the kernel review bar and be kept in step through upstream merges.
-- Existing blueprint links break unless a migration grandfathers them as `link` records.
+- Existing blueprint links break: links already shared stop resolving, and featured blueprints drop off the listing until re-approved. This is deliberate, so a deployment upgraded with both flags off publishes nothing.
 - The blueprint must record its workspace kind before an artifact can be mapped to a flag. That is an existing gap in Publish to Operate.
 - Each flag needs a backend variable on the dev server and later the release manifest, like `CODING_WORKBENCH_ENABLED`. Until then cloud deployments stay off.
 
