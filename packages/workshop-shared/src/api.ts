@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { ConsoleSource, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
@@ -2413,13 +2413,15 @@ export type AgentSpawnerConfig = {
 export interface Overseer extends RpcTarget {
   /**
    * List stored composition definitions in this workspace. Requires both view flags. Build access
-   * lists every one; the use role lists only the screens this workspace's consoles show (see
-   * `listConsoles()`), read-only, so an operator renders their console without Build.
+   * lists every one; the use role lists only the screens this workspace's published consoles show,
+   * as they were published (see `publishConsole()`), read-only, so an operator renders their
+   * console without Build and never sees a draft.
    */
   listCanvases(): Promise<CanvasDefinition[]>;
   /**
    * Read a composition with both view flags; never resolves or grants domain resources. For the use
-   * role, a screen no console of this workspace shows reads as null, like a missing one.
+   * role, it reads the screen as a published console shows it, and a screen no published console
+   * of this workspace shows reads as null, like a missing one.
    */
   getCanvas(id: string): Promise<CanvasDefinition | null>;
   /** Create content under a server-minted ID and revision zero. Requires build access and both flags; limit 64 per workspace. */
@@ -2445,15 +2447,33 @@ export interface Overseer extends RpcTarget {
    * List this workspace's consoles: one operator role's menu of views over this workspace's
    * screens, opened in an operate session. Needs both view flags, like canvases and flows. Unlike
    * them it is also allowed to the use role and the operate session (read-only), so an operator
-   * reaches their console without Build; creating, replacing and deleting need build access.
+   * reaches their console without Build. Build access lists every console's draft, with its
+   * published revision in `published`; the use role lists only published consoles, as published
+   * (see `publishedConsole()`). Creating, replacing, publishing and deleting need build access.
    */
   listConsoles(): Promise<OperateConsole[]>;
-  /** Create a console under a server-minted ID and revision zero. Its views must reference canvases of this workspace; limit 16 per workspace. */
+  /** Create an unpublished console draft under a server-minted ID and revision zero. Its views must reference canvases of this workspace; limit 16 per workspace. */
   createConsole(content: OperateConsoleContent): Promise<OperateConsole>;
-  /** Replace a console's content at its expected revision. Sessions that already have it open keep what they copied in. */
+  /** Replace a console's draft at its expected revision. Operators keep the published revision until `publishConsole()`. */
   replaceConsole(id: string, expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole>;
-  /** Delete a console at its expected revision. */
+  /** Delete a console, draft and published revision alike, at its expected draft revision. */
   deleteConsole(id: string, expectedRevision: string): Promise<void>;
+  /**
+   * Publish a console's draft at its expected revision, with its screens as they are now: operators
+   * move to it, and later edits to the console or its screens stay draft until the next publish.
+   * Needs build access; a stale revision throws the canvas conflict error.
+   */
+  publishConsole(id: string, expectedRevision: string): Promise<OperateConsole>;
+  /**
+   * Read one console: its `published` revision as operators see it, or its `draft`, which needs
+   * build access. Null if there is no such console or it has never been published.
+   */
+  getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null>;
+  /**
+   * Read a screen of one console: as that console published it, or the canvas as it is now for
+   * its `draft`, which needs build access. Null if that revision of the console doesn't show it.
+   */
+  getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null>;
 
   // --- Agent artifact revisions (see `@gadgets/workshop-shared/agent-artifact`) ---
   //

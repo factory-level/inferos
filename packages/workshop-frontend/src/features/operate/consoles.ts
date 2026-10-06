@@ -1,6 +1,6 @@
 import type { GadgetMetadataWithTimestamps, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import type { ConsoleView, OperateConsole } from '@gadgets/workshop-shared/operate-console'
+import { publishedConsole, type ConsoleView, type OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import type { OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
 import type { WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { gadgetIdOf } from '../canvas/canvasLayout'
@@ -22,11 +22,19 @@ export const findConsole = (workspaces: readonly WorkspaceScreens[], run: Operat
   consoleEntries(workspaces).find(entry =>
     entry.workspace.id === run.workspaceId && entry.console.id === run.consoleId)
 
-/** The event that opens a console at its first view. */
-export const openConsoleEvent = ({ workspace, console: saved }: ConsoleEntry): OperateEvent => ({
-  type: 'openConsole', workspaceId: workspace.id, consoleId: saved.id, title: saved.title,
-  fullChat: saved.fullChat, viewId: saved.views[0].id,
-})
+/**
+ * The event that opens a console at its first view: its published revision, or (for a builder, if
+ * it has never been published) its draft.
+ */
+export const openConsoleEvent = ({ workspace, console: saved }: ConsoleEntry): OperateEvent => {
+  const published = publishedConsole(saved)
+  const shown = published ?? saved
+  return {
+    type: 'openConsole', workspaceId: workspace.id, consoleId: shown.id, title: shown.title,
+    source: published ? 'published' : 'draft', revision: shown.revision,
+    fullChat: shown.fullChat, viewId: shown.views[0].id,
+  }
+}
 
 /** The screen ids a view shows: a rollup's in order, or a screen view's one. */
 export const viewScreens = (view: ConsoleView): string[] => view.type === 'rollup' ? view.screens : [view.screen]

@@ -46,7 +46,7 @@ import type { SessionWorkspace } from './useSessionWorkspace'
 
 const screen = (id: string, title: string): CanvasDefinition => ({ schemaVersion: 1, id, revision: '0', title, sections: [] })
 const SAVED: OperateConsole = {
-  id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',
+  id: 'c1', revision: '0', published: null, title: 'Operations lead', fullChat: 'available',
   views: [
     { id: 'overview', title: 'Overview', type: 'rollup', screens: ['s1'] },
     { id: 'board', title: 'Board', type: 'screen', screen: 's1' },
@@ -54,7 +54,7 @@ const SAVED: OperateConsole = {
 }
 const entry = { workspace: { id: 'w1' } as never, console: SAVED, screens: [screen('s1', 'Board screen')] }
 const run = (extra: Partial<OperateConsoleRun> = {}): OperateConsoleRun =>
-  ({ workspaceId: 'w1', consoleId: 'c1', title: 'Operations lead', fullChat: 'available', viewId: 'overview', screenId: null, ...extra })
+  ({ workspaceId: 'w1', consoleId: 'c1', title: 'Operations lead', source: 'draft', revision: '0', fullChat: 'available', viewId: 'overview', screenId: null, ...extra })
 
 const SESSION: SessionWorkspace = { stub: { name: 'session' } as never, id: 'session-ws', restricted: false }
 let container: HTMLDivElement

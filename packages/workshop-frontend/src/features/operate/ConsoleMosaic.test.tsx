@@ -13,7 +13,7 @@ const onOpen = vi.fn<(entry: ConsoleEntry) => void>()
 const onEdit = vi.fn<(entry: ConsoleEntry) => void>()
 const screens = (count: number): WorkspaceScreensState => ({ status: 'ready', workspaces: [{
   workspace: { id: 'workspace', title: 'Operations' } as ConsoleEntry['workspace'], screens: [], flows: [],
-  consoles: Array.from({ length: count }, (_, index) => ({ id: `c${index}`, title: `Console ${index + 1}`, revision: '0', fullChat: 'default',
+  consoles: Array.from({ length: count }, (_, index) => ({ id: `c${index}`, title: `Console ${index + 1}`, revision: '0', published: null, fullChat: 'default',
     views: [{ id: 'main', title: 'Main', type: 'screen', screen: 'screen' }] })),
 }] })
 beforeEach(() => {

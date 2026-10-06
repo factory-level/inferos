@@ -144,7 +144,7 @@ async function ensureConsole(api: RpcStub<PublicApi>, user: RpcStub<Authenticate
     const activity = await screen(boardScreen("Activity", "wide", true));
 
     const existing = (await overseer.listConsoles()).find(entry => entry.title === CONSOLE_TITLE);
-    const saved = existing ?? await overseer.createConsole({
+    const created = existing ?? await overseer.createConsole({
       title: CONSOLE_TITLE, fullChat: "available",
       views: [
         { id: "overview", title: "Overview", type: "rollup", screens: [board.id, activity.id] },
@@ -152,6 +152,8 @@ async function ensureConsole(api: RpcStub<PublicApi>, user: RpcStub<Authenticate
         { id: "activity", title: "Activity", type: "screen", screen: activity.id },
       ],
     });
+    // Publish it, so a use-role operator sees it too; a console a builder is editing keeps its draft.
+    const saved = created.published ? created : await overseer.publishConsole(created.id, created.revision);
     return { workspaceId, consoleId: saved.id, screens: { board: board.id, activity: activity.id },
       url: new URL("/inferops-canvas", base).toString() };
   } finally {

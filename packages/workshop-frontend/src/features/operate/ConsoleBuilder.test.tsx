@@ -34,7 +34,7 @@ const workspaces: WorkspaceScreens[] = [{ workspace, flows: [], consoles: [], sc
   { schemaVersion: 1, id: 's2', title: 'Activity', revision: '0', sections: [] },
 ] }]
 const initial: ConsoleEntry = { workspace, screens: workspaces[0].screens!, console: {
-  id: 'c1', revision: '7', title: 'Operations lead', fullChat: 'available',
+  id: 'c1', revision: '7', published: null, title: 'Operations lead', fullChat: 'available',
   views: [{ id: 'board', title: 'Board', type: 'screen', screen: 's1' }],
 } }
 let root: Root

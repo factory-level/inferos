@@ -5,6 +5,10 @@ import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from
 // one copies what the page needs into the opener's operate session (see `openConsole` in
 // operate-session.ts); the console itself holds references, order and settings only, and grants
 // nothing. See docs/design/operate-mode.md ("Role consoles").
+//
+// A console is edited as a draft and reaches operators only when a builder publishes it: the
+// stored record's top-level content is the draft, and `published` holds the content (and, in the
+// store, the screens) operators use. Saving or previewing a draft never changes what operators see.
 
 /** Most consoles one workspace stores. */
 export const MAX_WORKSPACE_CONSOLES = 16;
@@ -64,13 +68,48 @@ export type OperateConsoleContent = {
   customization?: ConsoleCustomization;
 };
 
-/** A stored console. */
+/**
+ * Which revision of a console to read or open: the `published` one operators use, or the `draft`
+ * a builder edits and previews. Reading or opening a draft needs build access.
+ */
+export type ConsoleSource = "published" | "draft";
+
+/** Every `ConsoleSource` value. */
+export const CONSOLE_SOURCES: readonly ConsoleSource[] = ["published", "draft"];
+
+/** The revision of a console operators use, frozen when a builder published it. */
+export type ConsolePublication = {
+  /** The draft revision that was published. */
+  revision: string;
+  /** When it was published, as an ISO 8601 timestamp. */
+  publishedAt: string;
+  /** The console's content as published. */
+  content: OperateConsoleContent;
+};
+
+/**
+ * A stored console. Its content is the draft; `published` is what operators use, or null until a
+ * builder first publishes it. The draft has unpublished changes when `published?.revision` differs
+ * from `revision`.
+ */
 export type OperateConsole = OperateConsoleContent & {
   /** Server-minted id, stable for the console's life. */
   id: string;
-  /** Decimal revision, starting at "0" and raised by one on each replacement. */
+  /** Decimal draft revision, starting at "0" and raised by one on each replacement. */
   revision: string;
+  /** The published revision, or null if the console has never been published. */
+  published: ConsolePublication | null;
 };
+
+/**
+ * A console as operators see it: its published content and revision in place of the draft's, or
+ * null if it has never been published.
+ */
+export function publishedConsole(stored: OperateConsole): OperateConsole | null {
+  let published = stored.published;
+  if (!published) return null;
+  return { ...published.content, id: stored.id, revision: published.revision, published };
+}
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
@@ -138,24 +177,30 @@ const CONSOLE_CUSTOMIZATION_KEYS = Object.keys(DEFAULT_CONSOLE_CUSTOMIZATION) as
 
 /**
  * Checks a console navigation event against the console's current definition, since a session
- * copies a console in when it opens and the definition may change after. `openConsole` must name
- * one of `saved`'s views and its current full chat setting; `openView` one of its views; and
- * `showScreen` a screen of the view `run` shows (a rollup's screens, or a screen view's one), or
- * null. Returns why the event no longer fits, or null when it does or is not a console navigation
- * event. `saved` is the console the event addresses: the one being opened, else `run`'s.
+ * copies a console in when it opens and the definition may change after. `saved` is the revision
+ * the event addresses (the published one, or the draft when previewing), read for the console
+ * being opened, else `run`'s. The event or `run` must name `saved`'s revision, so a session moves
+ * onto a newly published revision by reopening. `openConsole` must also name one of `saved`'s
+ * views and its full chat setting; `openView` one of its views; and `showScreen` a screen of the
+ * view `run` shows (a rollup's screens, or a screen view's one), or null. Returns why the event no
+ * longer fits, or null when it does or is not a console navigation event.
  */
 export function consoleEventMismatch(saved: OperateConsole, run: OperateConsoleRun | null,
     event: OperateEvent): string | null {
   let view = (id: string) => saved.views.find(candidate => candidate.id === id);
+  let changed = `Console ${saved.id} has changed since it was opened.`;
   switch (event.type) {
     case "openConsole":
+      if (event.revision !== saved.revision) return changed;
       if (!view(event.viewId)) return `View ${event.viewId} is not part of console ${saved.id}.`;
       if (event.fullChat !== saved.fullChat) return `Console ${saved.id}'s full chat setting has changed.`;
       return null;
     case "openView":
+      if (run && run.revision !== saved.revision) return changed;
       return view(event.viewId) ? null : `View ${event.viewId} is not part of console ${saved.id}.`;
     case "showScreen": {
       if (event.screenId === null || !run) return null;
+      if (run.revision !== saved.revision) return changed;
       let shown = view(run.viewId);
       if (!shown) return `View ${run.viewId} is no longer part of console ${saved.id}.`;
       let screens = shown.type === "rollup" ? shown.screens : [shown.screen];

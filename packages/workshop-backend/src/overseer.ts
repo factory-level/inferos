@@ -2,7 +2,7 @@ import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/
 import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
-import { WorkspaceConsoleStore } from "./console-store";
+import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot } from "./console-store";
 import { WorkspaceFlowStore } from "./flow-store";
 import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
 import {
@@ -14,7 +14,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, type ConsoleSource, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -1177,6 +1177,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       //   4 = unified workpiece records: every row of the `gadgets` collection carries the
       //       WorkpieceRecord `type` discriminant (pre-existing rows stamped "gadget"); worktree
       //       rows may exist from here on.
+      //   5 = published consoles: every `consoles` row carries `published` (consoles saved
+      //       before were published as they stood, with copies of their screens in
+      //       `consoleScreens`).
       version: 0,
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
@@ -1259,6 +1262,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       flows: collection<OperateFlow>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
       consoles: collection<OperateConsole>()({ primaryKey: "id" }),
+      // Each published console's screens as they were when it was published, keyed
+      // `<consoleId>/<screenId>` so one console's list together (see console-store.ts).
+      consoleScreens: collection<ConsoleScreenSnapshot>()({
+        primaryKey: record => consoleScreenKey(record.consoleId, record.screenId),
+      }),
       // Published agent artifact revisions, immutable, keyed `<kind>/<name>@<number>` so one
       // name's revisions list in number order (see artifact-store.ts).
       artifactRevisions: collection<ArtifactRevisionRecord>()({
@@ -2112,10 +2120,12 @@ class OverseerImpl implements AgentHooks {
         await this.#migrateToGitStorage();
         this.#migrateToActionIndexes();
         this.#migrateToWorkpieceTypes();
+        this.#migrateToPublishedConsoles();
       }).then(() => this.#resumeInterruptedAgents(), () => {});
     } else {
       this.#migrateToActionIndexes();
       this.#migrateToWorkpieceTypes();
+      this.#migrateToPublishedConsoles();
       this.#resumeInterruptedAgents();
     }
   }
@@ -2222,6 +2232,25 @@ class OverseerImpl implements AgentHooks {
     });
     this.logger.info("stamped workpiece record types", {
       event: "storage.migration.workpiece-types.completed",
+    });
+  }
+
+  // Version 4 -> 5: publish every console saved before consoles had a draft and a published
+  // revision, as it stands, with copies of its screens, so operators keep the consoles they had.
+  // Same shape as #migrateToWorkpieceTypes: chained after it, atomic, and write-free for
+  // never-initialized DOs.
+  #migrateToPublishedConsoles(): void {
+    if (this.storage.version.get() !== 4) return;
+    this.ctx.storage.transactionSync(() => {
+      let now = new Date().toISOString();
+      for (let stored of Array.from(this.storage.consoles.list())) {
+        // Pre-v5 rows lack `published` at runtime, whatever the type says.
+        publishConsoleRecord(this.storage, { ...stored, published: null }, now);
+      }
+      this.storage.version.put(5);
+    });
+    this.logger.info("published existing consoles", {
+      event: "storage.migration.published-consoles.completed",
     });
   }
 
@@ -10194,7 +10223,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // A workspace initialized by this version of the code is born at the current schema version;
     // there is nothing to migrate.
-    this.impl.storage.version.put(4);
+    this.impl.storage.version.put(5);
   }
 
   /**
@@ -11118,6 +11147,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.#consoleStore().replace(id, expectedRevision, content);
   }
   async deleteConsole(id: string, expectedRevision: string): Promise<void> { this.#consoleStore().delete(id, expectedRevision); }
+  async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
+    return this.#consoleStore().publish(id, expectedRevision);
+  }
+  async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
+    return this.#consoleStore().get(id, source);
+  }
+  async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
+    return this.#consoleStore().screen(consoleId, screenId, source);
+  }
 
   #artifactRevision(ref: ArtifactRef): ArtifactRevisionRecord | null {
     let parsed = parseArtifactRef(ref);
@@ -13101,16 +13139,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // whether "use" callers may invoke it.
 @validateRpc()
 class UseOverseerInterface extends RpcTarget implements Overseer {
-  // An operator granted "use" reads the screens this workspace's consoles show, read-only, so a
-  // console renders without Build. A screen is layout and references only: every board on it
-  // resolves through the viewer's own connection, never this workspace's. A screen no console
-  // lists reads as missing.
+  // An operator granted "use" reads the screens this workspace's published consoles show, as they
+  // were published, read-only, so a console renders without Build and draft edits stay out of
+  // sight. A screen is layout and references only: every board on it resolves through the
+  // viewer's own connection, never this workspace's. A screen no published console shows reads as
+  // missing.
   async listCanvases(): Promise<CanvasDefinition[]> {
-    let shown = this.#consoleScreenIds();
-    return this.#canvasStore().list().filter(canvas => shown.has(canvas.id));
+    let store = this.#consoleStore();
+    let shown = new Set(store.listPublished().flatMap(consoleScreens));
+    return [...shown].flatMap(id => store.publishedScreen(id) ?? []);
   }
   async getCanvas(id: string): Promise<CanvasDefinition | null> {
-    return this.#consoleScreenIds().has(id) ? this.#canvasStore().get(id) : null;
+    return this.#consoleStore().publishedScreen(id);
   }
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
@@ -13119,12 +13159,22 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
-  // An operator granted "use" reaches the consoles of the workspace without Build, read-only: a
-  // console is references and presentation, and grants nothing. Writes stay build-only.
-  async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
+  // An operator granted "use" reaches the published consoles of the workspace without Build,
+  // read-only: a console is references and presentation, and grants nothing. Drafts, and every
+  // write, stay build-only.
+  async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().listPublished(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
+  async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
+    if (source !== "published") this.#deny();
+    return this.#consoleStore().get(id, source);
+  }
+  async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
+    if (source !== "published") this.#deny();
+    return this.#consoleStore().screen(consoleId, screenId, source);
+  }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
       _model: ArtifactModelRequirement | null)
       : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> { this.#deny(); }
@@ -13138,18 +13188,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       : Promise<WorkpieceId> { this.#deny(); }
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
 
-  #canvasStore(): WorkspaceCanvasStore {
-    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
-    return new WorkspaceCanvasStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
-  }
-
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
     return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
-  }
-
-  #consoleScreenIds(): Set<string> {
-    return new Set(this.#consoleStore().list().flatMap(consoleScreens));
   }
 
   constructor(private impl: OverseerImpl,
@@ -13504,6 +13545,12 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.owner.getCanvas(id); }
   async listFlows(): Promise<OperateFlow[]> { return this.owner.listFlows(); }
   async listConsoles(): Promise<OperateConsole[]> { return this.owner.listConsoles(); }
+  async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
+    return this.owner.getConsole(id, source);
+  }
+  async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
+    return this.owner.getConsoleScreen(consoleId, screenId, source);
+  }
 
   // --- Allowed: the chat ---
 
@@ -13615,6 +13662,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
       : Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
       _model: ArtifactModelRequirement | null)
       : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> { this.#deny(); }

@@ -75,12 +75,13 @@ async function outcomes<T>(calls: Calls<T>, target: T) {
 const allDenied = (calls: object) =>
   Object.fromEntries(Object.keys(calls).map(name => [name, DENIED]));
 
-// What renders the gadget UI, plus the inert action/console reads and the read-only console
-// listing and console screens (covered in workshop-consoles.test.ts). Everything else must be
+// What renders the gadget UI, plus the inert action/console reads and the read-only published
+// consoles and their screens (covered, with drafts denied, in workshop-consoles.test.ts). Everything else must be
 // classified below, so a new Overseer or GadgetClient method fails to compile until it is.
 type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" |
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
-    "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas";
+    "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
+    "getConsoleScreen";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
@@ -94,6 +95,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
+  publishConsole: ws => ws.publishConsole("console", "0"),
   validateArtifact: ws => ws.validateArtifact(1, "skill", [], null),
   diffArtifactRevisions: ws => ws.diffArtifactRevisions("skill/a@1", "skill/a@2"),
   publishArtifactRevision: ws => ws.publishArtifactRevision(1, "skill", "a", 1, [], null,

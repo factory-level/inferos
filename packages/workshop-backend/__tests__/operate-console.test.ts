@@ -5,6 +5,7 @@ import {
   MAX_CONSOLE_VIEWS,
   MAX_ROLLUP_SCREENS,
   parseOperateConsoleContent,
+  publishedConsole,
   type ConsoleView,
   type OperateConsole,
   type OperateConsoleContent,
@@ -56,12 +57,24 @@ it('retains independent customization flags, with old consoles remaining opt-out
   }
 });
 
+describe("published consoles", () => {
+  it("shows operators the published content and revision, and nothing before the first publish", () => {
+    let draft: OperateConsole = { ...content([overview, board]), id: "c1", revision: "5", published: null };
+    expect(publishedConsole(draft)).toBeNull();
+    let published = { revision: "3", publishedAt: "2026-10-06T00:00:00.000Z", content: content([board], { title: "Old" }) };
+    expect(publishedConsole({ ...draft, published })).toEqual({
+      title: "Old", views: [board], fullChat: "available", id: "c1", revision: "3", published,
+    });
+  });
+});
+
 describe("console navigation against the current definition", () => {
-  const saved: OperateConsole = { ...content([overview, board]), id: "c1", revision: "3" };
-  const run = (viewId: string, screenId: string | null = null): OperateConsoleRun =>
-    ({ workspaceId: "ws1", consoleId: "c1", title: "Operations lead", fullChat: "available", viewId, screenId });
+  const saved: OperateConsole = { ...content([overview, board]), id: "c1", revision: "3", published: null };
+  const run = (viewId: string, screenId: string | null = null, revision = "3"): OperateConsoleRun =>
+    ({ workspaceId: "ws1", consoleId: "c1", title: "Operations lead", source: "published", revision,
+      fullChat: "available", viewId, screenId });
   const open = { type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations lead",
-    fullChat: "available", viewId: "overview" } as const;
+    source: "published", revision: "3", fullChat: "available", viewId: "overview" } as const;
 
   it("opens only at one of the console's views, with its current full chat setting", () => {
     expect(consoleEventMismatch(saved, null, open)).toBeNull();
@@ -80,6 +93,13 @@ describe("console navigation against the current definition", () => {
     expect(consoleEventMismatch(saved, run("board"), { type: "showScreen", screenId: "activity" })).toMatch(/not part of view/);
     expect(consoleEventMismatch(saved, run("gone"), { type: "showScreen", screenId: "board" })).toMatch(/no longer part/);
     expect(consoleEventMismatch(saved, run("gone", "board"), { type: "showScreen", screenId: null })).toBeNull();
+  });
+
+  it("refuses navigation once the revision the session opened is no longer the one addressed", () => {
+    expect(consoleEventMismatch(saved, null, { ...open, revision: "2" })).toMatch(/has changed/);
+    expect(consoleEventMismatch(saved, run("overview", null, "2"), { type: "openView", viewId: "board" })).toMatch(/has changed/);
+    expect(consoleEventMismatch(saved, run("overview", null, "2"), { type: "showScreen", screenId: "activity" })).toMatch(/has changed/);
+    expect(consoleEventMismatch(saved, run("overview", "activity", "2"), { type: "showScreen", screenId: null })).toBeNull();
   });
 
   it("ignores events that are not console navigation", () => {

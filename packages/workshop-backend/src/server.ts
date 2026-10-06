@@ -651,9 +651,11 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
   }
 
   // The reducer is pure, so it can't know whether a view or screen still belongs to the console a
-  // session copied in. Console navigation is checked here against the console's current definition,
-  // read through the caller's own role in its workspace (build or use), so a stale or forged event
-  // can't point the page outside the console. The operate agent can't send these events.
+  // session copied in. Console navigation is checked here against the revision the session opened
+  // (the published one, or the draft a builder previews), read through the caller's own role in its
+  // workspace, so a stale or forged event can't point the page outside the console, and only build
+  // access reads a draft. Once a new revision is published, the next navigation is refused and the
+  // person reopens the console on it. The operate agent can't send these events.
   async #checkConsoleEvent(event: OperateEvent): Promise<void> {
     if (event.type !== "openConsole" && event.type !== "openView" &&
         !(event.type === "showScreen" && event.screenId !== null)) return;
@@ -663,7 +665,7 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     let saved;
     try {
       using workspace = await this.openConsoleWorkspace(target.workspaceId);
-      saved = (await workspace.listConsoles()).find(candidate => candidate.id === target.consoleId);
+      saved = await workspace.getConsole(target.consoleId, target.source);
     } catch {
       saved = undefined;
     }

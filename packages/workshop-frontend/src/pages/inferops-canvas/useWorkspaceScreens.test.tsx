@@ -9,7 +9,7 @@ import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import { canBuild, useWorkspaceScreens, type WorkspaceScreensState } from './useWorkspaceScreens'
 
-const CONSOLE: OperateConsole = { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'off',
+const CONSOLE: OperateConsole = { id: 'c1', revision: '0', published: null, title: 'Operations lead', fullChat: 'off',
   views: [{ id: 'board', title: 'Board', type: 'screen', screen: 's1' }] }
 const workspace = (id: string, role: 'build' | 'use' | undefined, lastActive: string) =>
   ({ id, title: id, role, lastActive: new Date(lastActive) }) as unknown as GadgetMetadataWithTimestamps

@@ -1040,11 +1040,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   // The stored page, with any field added to OperatePageState since it was stored filled in from
   // the initial page, so a session that predates a field reads as if it always had it. A subject
-  // stored before it was derived from the board is re-derived the same way.
+  // stored before it was derived from the board is re-derived the same way. A console opened
+  // before consoles were published reads as the published one at no revision, so its next
+  // navigation is refused as changed and the person reopens it at the published revision.
   #operatePage(): OperateSessionSnapshot {
     let { seq, state } = this.storage.operatePage.get();
     let filled = { ...INITIAL_OPERATE_PAGE, ...state };
-    return { seq, state: { ...filled, subject: filled.board?.boardRef ?? null } };
+    // Pre-publication runs lack both fields at runtime, whatever the type says.
+    let console = filled.console && {
+      ...filled.console,
+      source: filled.console.source ?? "published", revision: filled.console.revision ?? "",
+    };
+    return { seq, state: { ...filled, console, subject: filled.board?.boardRef ?? null } };
   }
 
   /** The session's current page. */
