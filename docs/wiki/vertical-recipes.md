@@ -1,6 +1,6 @@
 ---
 title: Runnable synthetic vertical recipes
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 
 # Runnable synthetic vertical recipes
@@ -81,4 +81,4 @@ Loading JSON is not executing those future checks. The [vertical matrix](vertica
 
 Keep views, blueprints, profiles and skills in the wrapper, not its pinned submodule. Run `pnpm inferos upgrade <reviewed-sha> --plan` before an explicit `--apply`; inspect the review report and resolve conflicts without deleting custom files. A source revision change does not imply a domain-data migration or approved production deployment.
 
-#32 remains open for Cloudflare proof (#11), actual provider/customer choices and the unimplemented domain operations above. Industry object/relation packs and schema migrations described in the product notes belong to InferOps; these recipes do not implement them. #65's company-role/restricted-data policy and #158's numeric budgets remain proposed. Harness HG is entirely outside this work.
+#32 remains open for Cloudflare proof (#11), actual provider/customer choices and the unimplemented domain operations above. Industry object/relation packs and schema migrations described in the product notes belong to InferOps; these recipes do not implement them. #65's company-role/restricted-data policy remains proposed; #158's numeric budgets are agreed for the local mock measurement scope only (2026-10-05), with a production guarantee pending #164. Harness HG is entirely outside this work.

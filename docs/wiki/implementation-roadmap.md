@@ -1,6 +1,6 @@
 ---
 title: Implementation roadmap
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 
 # Implementation roadmap
@@ -93,7 +93,7 @@ Local coding with authorized dispatch, wrapper topology and settings, the InferO
 
 ### Wave 4: Native agents and connection packages
 
-Wave 4’s non-deferred work is complete: #28, #60 and #63 are closed. The owner directed remaining human input into follow-up issues; numeric Kanban budget agreement is deferred to [#158](https://github.com/factory-level/inferos/issues/158), Wave 5, and the recorded ceilings remain proposed. Role-console context/navigation (#63) is the bounded release-critical slice; the other Wave 4 tracks remain post-release per #1. The consoles, connection packages, reviewed upgrades, wrapper tooling, router-path parity, pinned installs and measured/windowed Kanban are merged. The milestone remains open only for the eight owner-deferred issues listed below; agent contract/publication drafts remain parked.
+Wave 4’s non-deferred work is complete: #28, #60 and #63 are closed. The owner directed remaining human input into follow-up issues; numeric Kanban budgets were agreed by the owner on 2026-10-05 for the local mock measurement scope ([#158](https://github.com/factory-level/inferos/issues/158)); a production guarantee needs the live-provider and shaped-WebSocket runs in [#164](https://github.com/factory-level/inferos/issues/164). Role-console context/navigation (#63) is the bounded release-critical slice; the other Wave 4 tracks remain post-release per #1. The consoles, connection packages, reviewed upgrades, wrapper tooling, router-path parity, pinned installs and measured/windowed Kanban are merged. The milestone remains open only for the eight owner-deferred issues listed below; agent contract/publication drafts remain parked.
 
 Owner decision (2026-10-03): a use-role operator reads boards through their own InferOps sign-in, never through the owner's connection. #139 and #142 implement it.
 
@@ -130,7 +130,7 @@ Issue status:
 | [#74](https://github.com/factory-level/inferos/issues/74) Connector scaffolder and second connector | Closed | #138 |
 | [#75](https://github.com/factory-level/inferos/issues/75) Reviewed upgrades across customized repositories | Closed | #137 |
 | [#11](https://github.com/factory-level/inferos/issues/11) Local-to-Cloudflare behavior | Deferred | Router-path parity is implemented; the Cloudflare smoke remains parked by the owner |
-| [#28](https://github.com/factory-level/inferos/issues/28) Kanban performance | Closed: implementation and measurements | #129, #153, #156; windowing/preload browser proof and proposed local-fixture budgets in [Kanban performance](../architecture/inferops-canvas.md#kanban-performance); owner budget decision deferred to [#158](https://github.com/factory-level/inferos/issues/158), Wave 5; upstream paging/delta request [inferops#2335](https://github.com/factory-level/inferops/issues/2335) |
+| [#28](https://github.com/factory-level/inferos/issues/28) Kanban performance | Closed: implementation and measurements | #129, #153, #156; windowing/preload browser proof and proposed local-fixture budgets in [Kanban performance](../architecture/inferops-canvas.md#kanban-performance); budgets agreed for the local mock scope on 2026-10-05 ([#158](https://github.com/factory-level/inferos/issues/158)), production guarantee pending [#164](https://github.com/factory-level/inferos/issues/164); upstream paging/delta request [inferops#2335](https://github.com/factory-level/inferops/issues/2335) |
 | [#60](https://github.com/factory-level/inferos/issues/60) Pinned install and explicit upgrade | Closed | #136, #149; all acceptance boxes covered by `operate-published.test.ts` and green CI. Container and Publish UI moved to design-first [#155](https://github.com/factory-level/inferos/issues/155), Wave 5 |
 | [#63](https://github.com/factory-level/inferos/issues/63) Console context and continuity | Closed | #139, #140, #142, #146, #147, #150, #152, #154 and two live-provider browser runs; per-person identity stays with #59/#66/#23 |
 | [#59](https://github.com/factory-level/inferos/issues/59), [#61](https://github.com/factory-level/inferos/issues/61) Integrated operating proof and chat (other milestones) | Open | The runs used stub-persona/shared-stopgap credentials and a scripted model; per-person identity and real-LLM proof are not established by the #63 closure |
@@ -164,7 +164,7 @@ The authorized research, design preparation and synthetic recipe work is complet
 | [#81](https://github.com/factory-level/inferos/issues/81) Harness HG and independent client | Entirely deferred | Explicit owner resumption required; no part silently carried into #79/#80 |
 | [#12](https://github.com/factory-level/inferos/issues/12), [#13](https://github.com/factory-level/inferos/issues/13), [#14](https://github.com/factory-level/inferos/issues/14) Hosted ChatGPT | Local audit delivered; hosted work/live sign-in deferred | [Feasibility and audit](chatgpt-feasibility.md): 39 tests/166 assertions; official supported deployment, token custody, entitlement and owner live validation remain |
 | [#29](https://github.com/factory-level/inferos/issues/29) Maps | Deferred | Provider/viewport choices and unresolved live performance validation |
-| [#158](https://github.com/factory-level/inferos/issues/158) Kanban budgets | Deferred | Owner agreement against the recorded numbers; all ceilings remain proposed, not agreed |
+| [#158](https://github.com/factory-level/inferos/issues/158) Kanban budgets | Decided 2026-10-05 | Ceilings agreed for the local mock measurement scope; live-provider and shaped-WebSocket runs before a production guarantee are [#164](https://github.com/factory-level/inferos/issues/164) |
 
 The 19 JSON design scenarios are acceptance **specifications**, not executable policy/auth tests. The industrial and medical fixtures are scenario inputs, not adapters or compliance evidence. Three recipe wrappers were generated and exercised against one isolated synthetic stack on :28787: normal creation proposals, rejection preserving revision, approved state change, stale-revision refusal and browser rendering. The pinned runtime does not import wrapper fixture JSON; the explicit operator queues catalog titles and retains the existing demo board. No real model, provider, cloud deployment or per-person identity proof is claimed.
 
