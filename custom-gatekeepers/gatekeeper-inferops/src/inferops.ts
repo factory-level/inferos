@@ -456,11 +456,13 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
    * id in its props, which is the only place the gatekeeper ever reads its scope from. A workspace
    * the person lacks, an unknown host and a missing project are refused with one message, so a URL
    * cannot probe for any of them. A dispatch binding is refused while coding dispatch is off.
+   * `mock` reports the demo host, whose data is the built-in mock's, never an InferOps tenant's.
    */
   @skipRpcValidation()
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
+    mock: boolean;
   }> {
     assertInferOpsEnabled(this.env);
     const kind = resourceKind(url);
@@ -476,9 +478,10 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     const props: ProjectGatekeeperProps = {
       accountId, connected, host, projectKey, workspaceId: workspaceId ?? undefined,
     };
+    const mock = host === DEMO_HOST;
     return dispatch
-      ? { class: this.ctx.exports.InferOpsDispatchGatekeeper({ props }), resource: PROJECT_DISPATCH_RESOURCE }
-      : { class: this.ctx.exports.InferOpsProjectGatekeeper({ props }), resource: PROJECT_BOARD_RESOURCE };
+      ? { class: this.ctx.exports.InferOpsDispatchGatekeeper({ props }), resource: PROJECT_DISPATCH_RESOURCE, mock }
+      : { class: this.ctx.exports.InferOpsProjectGatekeeper({ props }), resource: PROJECT_BOARD_RESOURCE, mock };
   }
 
   /**
@@ -490,13 +493,17 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   async #wikiClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
+    mock: boolean;
   }> {
     const { host } = parseWikiUrl(url);
     const workspaceId = await this.#wikiWorkspaceFor(host);
     if (!(await this.#hasWiki(host, workspaceId))) throw new Error(unavailableWiki(host));
     const { accountId, connected } = this.ctx.props;
     const props: WikiGatekeeperProps = { accountId, connected, host, workspaceId: workspaceId ?? undefined };
-    return { class: this.ctx.exports.InferOpsWikiGatekeeper({ props }), resource: KNOWLEDGE_WIKI_RESOURCE };
+    return {
+      class: this.ctx.exports.InferOpsWikiGatekeeper({ props }), resource: KNOWLEDGE_WIKI_RESOURCE,
+      mock: host === DEMO_HOST,
+    };
   }
 
   @skipRpcValidation()

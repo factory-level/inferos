@@ -648,11 +648,15 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * usually after first calling describe() to find out what the resource can do.
    *
    * The returned class is imbued (via `ctx.props`) with the user's credentials and the resource
-   * ID. The returned `resource` indicates which SupportedResource matched the URL.
+   * ID. The returned `resource` indicates which SupportedResource matched the URL. `mock` is true
+   * when the URL names built-in demonstration data rather than a real system (for example a demo
+   * host the gatekeeper serves itself); the Workshop refuses such a binding in an install into a
+   * workspace that is not test-only. It only narrows where a resource is used.
    */
   getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
+    mock?: boolean;
   }>;
 
   /**

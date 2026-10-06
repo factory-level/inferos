@@ -128,12 +128,30 @@ export function sanitizeWorkspaceKind(kind: unknown): WorkspaceKind | undefined 
   return WORKSPACE_KINDS.find(known => known === kind);
 }
 
+/** A data contract (see `BlueprintMetadata.dataContract`) from untrusted input, or undefined. */
+export function sanitizeDataContract(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** A publisher's declared data contract, throwing if it is declared but not one. */
+export function checkDataContract(value: number | undefined): number | undefined {
+  if (value !== undefined && sanitizeDataContract(value) === undefined) {
+    throw new Error("A data contract must be a non-negative integer.");
+  }
+  return value;
+}
+
 /**
  * The R2 custom metadata stored with each blueprint version's content: the kind that version was
- * published as, so an install pinned to it takes that kind even after the blueprint moves on.
+ * published as and the data contract it declared, so an install pinned to it takes that kind, and
+ * an upgrade compares that contract, even after the blueprint moves on.
  */
-export function blueprintVersionMetadata(kind: WorkspaceKind | undefined): Record<string, string> {
-  return {kind: kind ?? DEFAULT_WORKSPACE_KIND};
+export function blueprintVersionMetadata(
+    kind: WorkspaceKind | undefined, dataContract: number | undefined): Record<string, string> {
+  return {
+    kind: kind ?? DEFAULT_WORKSPACE_KIND,
+    ...(dataContract !== undefined ? {dataContract: String(dataContract)} : {}),
+  };
 }
 
 /**
@@ -180,14 +198,15 @@ export async function readBlueprintVersionBindings(
 
 /**
  * Read a blueprint version's code snapshot (an uncompressed Yjs V2 state update of a doc whose
- * unnamed root map is filename -> Y.Text) and kind from R2, or null if that version doesn't exist.
- * Content stored without a kind (from before kinds, or bundled) is an app; an unknown kind throws.
+ * unnamed root map is filename -> Y.Text), kind and data contract from R2, or null if that version
+ * doesn't exist. Content stored without a kind (from before kinds, or bundled) is an app; an
+ * unknown kind throws. Content stored without a valid data contract has none (unknown).
  */
 export async function readBlueprintContent(
   env: Pick<Cloudflare.Env, 'BLUEPRINT_CONTENT'>,
   blueprintId: string,
   version: number,
-): Promise<{code: Uint8Array, kind: WorkspaceKind} | null> {
+): Promise<{code: Uint8Array, kind: WorkspaceKind, dataContract?: number} | null> {
   let r2Object = await env.BLUEPRINT_CONTENT.get(`${blueprintId}/${version}`);
   if (!r2Object) {
     return null;
@@ -199,8 +218,13 @@ export async function readBlueprintContent(
     throw new Error(`Blueprint version ${version} has an unknown kind.`);
   }
 
+  let storedContract = r2Object.customMetadata?.dataContract;
+  let dataContract = storedContract !== undefined && /^[0-9]+$/.test(storedContract)
+      ? sanitizeDataContract(Number(storedContract)) : undefined;
+
   let decompressed = r2Object.body.pipeThrough(new DecompressionStream("gzip"));
-  return {code: new Uint8Array(await new Response(decompressed).arrayBuffer()), kind};
+  let code = new Uint8Array(await new Response(decompressed).arrayBuffer());
+  return dataContract !== undefined ? {code, kind, dataContract} : {code, kind};
 }
 
 /** The files in a blueprint code snapshot, by name. Archives always use the doc's unnamed root. */

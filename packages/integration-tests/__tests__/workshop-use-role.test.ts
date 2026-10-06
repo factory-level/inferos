@@ -97,6 +97,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   setTitle: ws => ws.setTitle("Title"),
   setKind: ws => ws.setKind("workflow"),
   upgradeInstall: ws => ws.upgradeInstall(2),
+  installBlueprint: ws => ws.installBlueprint("blueprint", {}),
+  setTestOnly: ws => ws.setTestOnly(true),
   setPinned: ws => ws.setPinned(true),
   deleteSelf: ws => ws.deleteSelf(),
   createGadget: ws => ws.createGadget("App"),

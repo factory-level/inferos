@@ -425,7 +425,7 @@ describe("workspaces named by board URLs", () => {
     for (const call of inferlab.apiCalls) {
       expect(call.workspaceId).toBe(OPS);
       expect(call.token).toBe(inferlab.accessOf("refresh-1"));
-    }
+    }    expect(await hooks().mockOf(account, BOARD_URL)).toBe(false);
   });
 
   it("binds each of several workspaces by its own slug", async () => {
@@ -489,6 +489,8 @@ describe("workspaces named by board URLs", () => {
     const board = await session.readBoard();
     expect(board.project.identifier).toBe("DEMO");
     expect(inferlab.apiCalls).toEqual([]);
+    // Reported as mock data, so the Workshop refuses it in a space that is not test-only.
+    expect(await hooks().mockOf(account, "inferops://demo.local/project/board/DEMO")).toBe(true);
   });
 
   it("fails the connect and signs the session out when InferOps cannot list the workspaces", async () => {

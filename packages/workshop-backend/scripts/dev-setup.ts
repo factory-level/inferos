@@ -67,10 +67,11 @@ async function signIn(api: RpcStub<PublicApi>): Promise<{ token: string; created
 
 async function ensureMockModel(user: RpcStub<AuthenticatedApi>, apiUrl: string): Promise<string> {
   const models = await user.listModels();
-  if (!models.some(model => model.id === SCRIPTED_MODEL_ID)) {
-    await user.addModel({ type: "agent", id: SCRIPTED_MODEL_ID, name: "Scripted InferOps (mock)" },
-      { provider: "ollama", model: SCRIPTED_MODEL_ID, apiToken: "", apiUrl });
-  }
+  // Registered as `mock`, so an install into a space that is not test-only refuses it.
+  const profile = { type: "agent" as const, id: SCRIPTED_MODEL_ID, name: "Scripted InferOps (mock)" };
+  const config = { provider: "ollama" as const, model: SCRIPTED_MODEL_ID, apiToken: "", apiUrl, mock: true };
+  if (!models.some(model => model.id === SCRIPTED_MODEL_ID)) await user.addModel(profile, config);
+  else await user.updateModel(profile, config);
   await user.setPreferredModel(SCRIPTED_MODEL_ID);
   return SCRIPTED_MODEL_ID;
 }
