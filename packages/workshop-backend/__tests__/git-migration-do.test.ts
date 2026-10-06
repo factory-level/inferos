@@ -94,9 +94,9 @@ describe("git-storage migration via the Overseer constructor", () => {
 
     await inOverseer("git-migration-single", async impl => {
       // The constructor's blockConcurrencyWhile completed before this event was delivered,
-      // running the whole migration ladder: git storage (2), the action indexes (3), then the
-      // workpiece-type stamp (4).
-      expect(impl.storage.version.get()).toBe(4);
+      // running the whole migration ladder: git storage (2), the action indexes (3), the
+      // workpiece-type stamp (4), then published consoles (5).
+      expect(impl.storage.version.get()).toBe(5);
       expect([...impl.storage.actions.pendingByGatekeeper.list()].map((r: any) => r.id))
           .toEqual([1]);
       // The type stamp (3→4) covered the row the git migration wrote.
@@ -151,7 +151,7 @@ describe("git-storage migration via the Overseer constructor", () => {
     await abortAllDurableObjects();
 
     await inOverseer("git-migration-multi", async impl => {
-      expect(impl.storage.version.get()).toBe(4);
+      expect(impl.storage.version.get()).toBe(5);
 
       // Every gadget's head equals its own root's content in an independent replay of the log.
       await expectHeadsMatchDoc(impl.storage, impl.gitStore, ws.docAt("current"), 1);
@@ -196,7 +196,7 @@ describe("action-index backfills via the Overseer constructor", () => {
     await abortAllDurableObjects();
 
     await inOverseer("pending-index-v2", async impl => {
-      expect(impl.storage.version.get()).toBe(4);
+      expect(impl.storage.version.get()).toBe(5);
       // The pending index sees exactly the pendings (grouped by gatekeeper, so 1 before 3 here).
       expect([...impl.storage.actions.pendingByGatekeeper.list()].map((r: any) => r.id))
           .toEqual([1, 3]);
