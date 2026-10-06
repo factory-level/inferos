@@ -2,6 +2,7 @@ import { useServerConfig } from './ServerConfigContext'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
+import { TestSpaceBadge } from './components/TestSpaceBadge'
 import {
   ShareNetwork,
   Pencil,
@@ -1406,9 +1407,11 @@ export default function GadgetEditor() {
             appView={previewMode}
             onAppViewChange={setAppViewChosen}
           />
+          {metadata.testOnly && <TestSpaceBadge />}
         </div>
 
         {canvasFeatures?.composableViews && <WorkshopButton onClick={() => navigate({ to: '/workspace/$id/inferops-canvas', params: { id: id! }, search: {} })}>InferOps Canvas</WorkshopButton>}
+        {canvasFeatures?.composableViews && <WorkshopButton onClick={() => navigate({ to: '/workspace/$id/publish', params: { id: id! }, search: {} })}>Publish to Operate</WorkshopButton>}
 
         {/* Right: presence, cost, workspace, share, blueprints */}
         <div className="hidden flex-shrink-0 items-center gap-1 md:flex">

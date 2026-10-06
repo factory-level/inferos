@@ -15,6 +15,7 @@ import UserMenu from './components/UserMenu'
 import { GadgetPresence } from './components/GadgetPresence'
 import TopBarNotice from './TopBarNotice'
 import SiteLogo from './components/SiteLogo'
+import { TestSpaceBadge } from './components/TestSpaceBadge'
 import GadgetExportMenu from './GadgetExportMenu'
 
 // The minimal, "use"-only experience: a shared top bar plus the gadget's deployed UI, and nothing
@@ -82,6 +83,7 @@ export default function GadgetUseView({
               by {metadata.owner.name}
             </span>
           )}
+          {metadata.testOnly && <TestSpaceBadge />}
         </div>
 
         {/* Center: gadget picker (only when there's a real choice) */}
