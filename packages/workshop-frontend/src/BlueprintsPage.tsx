@@ -11,6 +11,8 @@ import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { useAuthenticatedApi } from "./AuthContext";
 import { BindingBadge, uniqueBindingBadges } from "./components/BlueprintCard";
 import { BlueprintPreviewPlaceholder } from "./components/BlueprintPreviewImage";
+import { useOptionalAuthenticatedApi } from "./AuthContext";
+import { useBlueprintScreenshotSrc } from "./hooks/useBlueprintScreenshotSrc";
 import { useDisplayDensity } from "./ServerConfigContext";
 import ViewToggle from "./components/ViewToggle";
 
@@ -158,11 +160,13 @@ export default function BlueprintsPage() {
 }
 
 function BlueprintThumbnail({ blueprint }: { blueprint: BlueprintPublicInfo }) {
+  const src = useBlueprintScreenshotSrc(
+      useOptionalAuthenticatedApi()?.authenticatedApi ?? null, blueprint.id, blueprint.screenshotUrl);
   return (
     <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-kumo-line bg-kumo-overlay">
-      {blueprint.screenshotUrl ? (
+      {src ? (
         <img
-          src={blueprint.screenshotUrl}
+          src={src}
           alt={`Screenshot of ${blueprint.metadata.title}`}
           className="h-full w-full object-cover"
           loading="lazy"

@@ -12,6 +12,8 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import { useServerConfig } from './ServerConfigContext'
+import { useOptionalAuthenticatedApi } from './AuthContext'
+import { useBlueprintScreenshotSrc } from './hooks/useBlueprintScreenshotSrc'
 import { PublicationReview } from './features/publication/PublicationReview'
 import { isPublicationOffered } from './features/publication/publicationText'
 
@@ -95,6 +97,7 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
   // The blueprint whose publication step is open in place of the list (see PublicationReview).
   const [publishingId, setPublishingId] = useState<string | null>(null)
   const publicationOffered = isPublicationOffered(useServerConfig())
+  const authApi = useOptionalAuthenticatedApi()
   const listHeadingRef = useRef<HTMLHeadingElement>(null)
 
   const [bindings, setBindings] = useState<BindingCardData[]>([])
@@ -281,8 +284,10 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
     }
   }
 
-  const savedScreenshotUrl = formMode === 'edit' && editingBlueprint?.screenshotUrl && !clearScreenshot
-    ? editingBlueprint.screenshotUrl
+  const savedScreenshotSrc = useBlueprintScreenshotSrc(
+      authApi?.authenticatedApi ?? null, editingBlueprint?.id, editingBlueprint?.screenshotUrl)
+  const savedScreenshotUrl = formMode === 'edit' && savedScreenshotSrc && !clearScreenshot
+    ? savedScreenshotSrc
     : null
   const screenshotPreviewUrl = newScreenshotUrl ?? savedScreenshotUrl
 

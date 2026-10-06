@@ -23,6 +23,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { openConnectWindow } from './connectHandoff'
 import { publicationErrorMessage } from './features/publication/publicationText'
+import { useBlueprintScreenshotSrc } from './hooks/useBlueprintScreenshotSrc'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -41,6 +42,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const toasts = useKumoToastManager()
 
   const [blueprint, setBlueprint] = useState<BlueprintPublicInfo | null>(null)
+  const screenshotSrc = useBlueprintScreenshotSrc(
+      isAuthenticated ? authenticatedApi : null, blueprint?.id, blueprint?.screenshotUrl)
   useDocumentTitle(blueprint?.metadata.title)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
@@ -826,10 +829,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           </div>
 
           <aside className="space-y-3 lg:w-[360px] lg:justify-self-end lg:pt-1">
-            {blueprint.screenshotUrl && (
+            {screenshotSrc && (
               <BlueprintScreenshotHero
                 title={meta.title}
-                screenshotUrl={blueprint.screenshotUrl}
+                screenshotUrl={screenshotSrc}
               />
             )}
             <div className="flex items-center gap-2">

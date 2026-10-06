@@ -1,21 +1,26 @@
 import { Hexagon } from '@phosphor-icons/react'
+import { useOptionalAuthenticatedApi } from '../AuthContext'
+import { useBlueprintScreenshotSrc } from '../hooks/useBlueprintScreenshotSrc'
 
 export function BlueprintPreviewImage({
+  blueprintId,
   title,
   screenshotUrl,
   className,
 }: {
-  /** Accepted for callers that identify the blueprint; the placeholder is no longer tinted per id. */
+  /** Whose screenshot to read; a signed-in viewer reads it over RPC (see useBlueprintScreenshotSrc). */
   blueprintId: string
   title: string
   screenshotUrl?: string
   className?: string
 }) {
+  const src = useBlueprintScreenshotSrc(
+      useOptionalAuthenticatedApi()?.authenticatedApi ?? null, blueprintId, screenshotUrl)
   return (
     <div className={`overflow-hidden rounded-xl bg-kumo-overlay ${className ?? ''}`}>
-      {screenshotUrl ? (
+      {src ? (
         <img
-          src={screenshotUrl}
+          src={src}
           alt={`Screenshot of ${title}`}
           className="aspect-[16/9] w-full object-cover"
           loading="lazy"
