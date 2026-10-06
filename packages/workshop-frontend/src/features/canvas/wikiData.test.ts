@@ -2,13 +2,18 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { WikiData } from './wikiData'
-import { WIKI, fakeWiki } from './wikiTestDoubles'
+import { WIKI, fakeWiki, organizedWiki } from './wikiTestDoubles'
 
 let wiki: ReturnType<typeof fakeWiki>
 const clientDispose = vi.fn<() => void>()
 const lookup = vi.fn<(url: string) => Promise<object | null>>()
 const overseer = { getGatekeeperByResourceUrl: lookup } as unknown as RpcStub<Overseer>
 const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+const pageOf = (data: WikiData, slug: string) => {
+  const page = data.snapshot.pages.get(slug)
+  if (page?.status !== 'ready') throw new Error(`page ${slug} is ${page?.status}`)
+  return page.document
+}
 const sectionOf = (data: WikiData, slug: string, id: string) => {
   const page = data.snapshot.pages.get(slug)
   if (page?.status !== 'ready') throw new Error(`page ${slug} is ${page?.status}`)
@@ -166,9 +171,147 @@ it('reads the agent text through the same connection, and disposes the session w
   await flush()
   const result = await data.readAgentText('handbook')
   expect(result).toMatchObject({ ok: true })
-  expect(await data.readAgentText('drafts')).toEqual({ ok: false, code: 'NOT_FOUND', message: 'No section of this page is readable.' })
+  expect(await data.readAgentText('drafts')).toEqual({ ok: false, code: 'NOT_FOUND', message: 'Nothing on this page is readable.' })
   data.dispose()
   await flush()
   expect(wiki.session.dispose).toHaveBeenCalledTimes(1)
   expect(await data.readAgentText('handbook')).toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+})
+
+it('reads the structure beside the page list, states its failure apart from the list, and re-reads it on refresh', async () => {
+  const organized = organizedWiki()
+  wiki = fakeWiki(organized)
+  wiki.session.readStructure.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: InferOps did not answer.'))
+  const data = new WikiData(overseer, WIKI)
+  await flush()
+  expect(data.snapshot.list).toMatchObject({ status: 'ready', refreshing: false })
+  expect(data.snapshot.structure).toEqual({ status: 'error', code: 'UNAVAILABLE', message: 'InferOps did not answer.' })
+  data.refresh()
+  await flush()
+  expect(data.snapshot.structure).toEqual({ status: 'ready', structure: organized.structure, refreshing: false })
+  // A failed refresh keeps the structure read, with its error.
+  wiki.session.readStructure.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: Still down.'))
+  data.refresh()
+  await flush()
+  expect(data.snapshot.structure).toMatchObject({ status: 'ready', structure: organized.structure, error: 'Still down.' })
+  data.dispose()
+})
+
+it('drops the structure with everything else when access to the Wiki is lost, and keeps it when only a page read fails', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  wiki.session.readDocument.mockRejectedValueOnce(new Error('Error: INTERNAL: boom'))
+  data.openPage('company')
+  await flush()
+  expect(data.snapshot.pages.get('company')).toEqual({ status: 'error', message: 'boom' })
+  expect(data.snapshot.structure.status).toBe('ready')
+  wiki.session.readStructure.mockRejectedValueOnce(new Error('Error: FORBIDDEN: Your InferOps access lacks knowledge permission.'))
+  data.refresh()
+  await flush()
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'FORBIDDEN' })
+  expect(data.snapshot.structure).toEqual({ status: 'loading' })
+  expect(data.snapshot.pages.size).toBe(0)
+  data.dispose()
+})
+
+it('lands only the newest structure read', async () => {
+  const organized = organizedWiki()
+  wiki = fakeWiki(organized)
+  let release!: () => void
+  wiki.session.readStructure.mockImplementationOnce(async () => {
+    await new Promise<void>(resolve => { release = resolve })
+    return { root: null, pillars: [], unfiled: [] }
+  })
+  const data = new WikiData(overseer, WIKI)
+  await flush()
+  data.refresh()
+  await flush()
+  release()
+  await flush()
+  expect(data.snapshot.structure).toMatchObject({ status: 'ready', structure: organized.structure })
+  data.dispose()
+})
+
+it('takes a body edit from proposing to awaiting under the page\'s pendingBody, and applied only from a later read', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('ops/incident-response')
+  await flush()
+  const page = pageOf(data, 'ops/incident-response')
+  let release!: () => void
+  wiki.session.updateDocumentBody.mockImplementationOnce(async (...args) => {
+    await new Promise<void>(resolve => { release = resolve })
+    return wiki.session.updateDocumentBody.getMockImplementation()!(...args)
+  })
+  const proposal = data.proposeBodyEdit(page, '# Incident response\n\nCall the on-call engineer.')
+  await flush()
+  expect(data.snapshot.bodyEdits.get('p1')).toMatchObject({ phase: 'proposing', expectedVersion: 4 })
+  expect(await data.proposeBodyEdit(page, 'Again')).toMatchObject({ ok: false, code: 'CONFLICT' })
+  release()
+  expect(await proposal).toEqual({ ok: true })
+  expect(wiki.session.updateDocumentBody).toHaveBeenCalledWith('p1', '# Incident response\n\nCall the on-call engineer.', 4)
+  await flush()
+  expect(data.snapshot.bodyEdits.get('p1')?.phase).toBe('awaiting')
+  expect(pageOf(data, 'ops/incident-response')).toMatchObject({ version: 4, pendingBody: true, body: '# Incident response\n\nCall the on-call engineer.' })
+  // The page's own overlay blocks a second edit, even from another instance.
+  expect(await data.proposeBodyEdit(pageOf(data, 'ops/incident-response'), 'Third')).toMatchObject({ ok: false, code: 'CONFLICT' })
+  wiki.approveBody('p1')
+  data.refresh()
+  await flush()
+  expect(data.snapshot.bodyEdits.get('p1')?.phase).toBe('applied')
+  expect(pageOf(data, 'ops/incident-response')).toMatchObject({ version: 5, body: '# Incident response\n\nCall the on-call engineer.' })
+  expect(pageOf(data, 'ops/incident-response').pendingBody).toBeUndefined()
+  data.dismissBodyEdit('p1')
+  expect(data.snapshot.bodyEdits.has('p1')).toBe(false)
+  data.dispose()
+})
+
+it('says a body edit was rejected, stale when the page changed first, or refused at an old version, re-reading the page', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('operations')
+  await flush()
+  await data.proposeBodyEdit(pageOf(data, 'operations'), 'Rejected text')
+  await flush()
+  wiki.rejectBody('m2')
+  data.refresh()
+  await flush()
+  expect(data.snapshot.bodyEdits.get('m2')?.phase).toBe('rejected')
+  expect(pageOf(data, 'operations').body).toBe('How the team runs day to day.')
+
+  await data.proposeBodyEdit(pageOf(data, 'operations'), 'Mine')
+  wiki.writeBodyElsewhere('m2', 'Theirs')
+  data.refresh()
+  await flush()
+  expect(data.snapshot.bodyEdits.get('m2')?.phase).toBe('stale')
+
+  const read = pageOf(data, 'operations')
+  wiki.writeBodyElsewhere('m2', 'Changed again')
+  const reads = wiki.session.readDocument.mock.calls.length
+  expect(await data.proposeBodyEdit(read, 'Mine')).toMatchObject({ ok: false, code: 'STALE_REVISION' })
+  await flush()
+  expect(data.snapshot.bodyEdits.get('m2')).toMatchObject({ phase: 'refused', code: 'STALE_REVISION' })
+  expect(wiki.session.readDocument.mock.calls.length).toBe(reads + 1)
+  expect(pageOf(data, 'operations').body).toBe('Changed again')
+  expect(await data.proposeBodyEdit(pageOf(data, 'operations'), 'Changed again')).toMatchObject({ ok: false, code: 'UNCHANGED' })
+  wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: FORBIDDEN: You cannot edit this Wiki.'))
+  expect(await data.proposeBodyEdit(pageOf(data, 'operations'), 'Mine')).toMatchObject({ ok: false, code: 'FORBIDDEN', message: 'You cannot edit this Wiki.' })
+  data.dispose()
+})
+
+it('never lets a page list read started before access was lost land after it', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  await flush()
+  let release!: () => void
+  const original = wiki.session.listDocuments.getMockImplementation()!
+  wiki.session.listDocuments.mockImplementationOnce(async () => { const pages = await original(); await new Promise<void>(resolve => { release = resolve }); return pages })
+  wiki.session.readStructure.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  data.refresh()
+  await flush()
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'UNAUTHORIZED' })
+  release()
+  await flush()
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'UNAUTHORIZED' })
+  data.dispose()
 })
