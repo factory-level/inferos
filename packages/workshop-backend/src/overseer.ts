@@ -4,6 +4,15 @@ import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { WorkspaceConsoleStore } from "./console-store";
 import { WorkspaceFlowStore } from "./flow-store";
+import {
+  artifactRefusalError, diffManifests, qualificationFindings, requireNameAndNumber, requireQualification,
+  revisionKey, revisionOf, WorkspaceArtifactStore, type ArtifactRevisionRecord,
+} from "./artifact-store";
+import {
+  artifactRef, parseArtifactRef, type ArtifactChange, type ArtifactDigest, type ArtifactKind,
+  type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
+  type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
+} from "@gadgets/workshop-shared/agent-artifact";
 import { consoleScreens, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
@@ -1244,6 +1253,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       flows: collection<OperateFlow>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
       consoles: collection<OperateConsole>()({ primaryKey: "id" }),
+      // Published agent artifact revisions, immutable, keyed `<kind>/<name>@<number>` so one
+      // name's revisions list in number order (see artifact-store.ts).
+      artifactRevisions: collection<ArtifactRevisionRecord>()({
+        primaryKey: record => revisionKey(record.kind, record.name, record.number),
+      }),
       // READ-ONLY LEGACY: the pre-git-storage incremental code log, tightly-packed from version 1
       // (there's no entry for version 0, the starting empty state). Nothing writes it anymore --
       // mainline code lives in `gitObjects` as commits -- and it is read only by the git-storage
@@ -11002,6 +11016,142 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async deleteConsole(id: string, expectedRevision: string): Promise<void> { this.#consoleStore().delete(id, expectedRevision); }
 
+  #artifactStore(): WorkspaceArtifactStore {
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceArtifactStore(this.impl.ctx.storage, this.impl.storage);
+  }
+
+  // A permanent gadget's committed code as an artifact draft, with the commit it was read from.
+  async #artifactDraft(gadgetId: WorkpieceId, kind: ArtifactKind, pins: ArtifactPin[],
+      model: ArtifactModelRequirement | null) {
+    let store = this.#artifactStore();
+    let gadget = this.impl.getGadgetRecord(gadgetId);
+    if (gadget.pending) {
+      throw new Error("This gadget is a provisional creation in a chat. Accept the chat's changes first.");
+    }
+    let commitId = await this.impl.assertPublishableCommit(gadget.commitId);
+    let files = await this.impl.gitStore.readCommitFiles(commitId);
+    let draft = await store.draft(kind, files, pins, model, this.impl.collectBindingMetadata(gadgetId));
+    return {...draft, commitId, store};
+  }
+
+  #artifactRevision(ref: ArtifactRef): ArtifactRevisionRecord | null {
+    let parsed = parseArtifactRef(ref);
+    if (!parsed) throw artifactRefusalError("inexact_reference", `${ref} is not an exact revision`);
+    return this.#artifactStore().get(parsed.kind, parsed.name, parsed.number);
+  }
+
+  async validateArtifact(gadgetId: WorkpieceId, kind: ArtifactKind, pins: ArtifactPin[],
+      model: ArtifactModelRequirement | null)
+      : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> {
+    let {manifest, digest, findings} = await this.#artifactDraft(gadgetId, kind, pins, model);
+    return {manifest, digest, refusals: [...new Set(findings.map(finding => finding.refusal))]};
+  }
+
+  async diffArtifactRevisions(from: ArtifactRef, to: ArtifactRef): Promise<ArtifactChange[]> {
+    let [a, b] = [this.#artifactRevision(from), this.#artifactRevision(to)];
+    if (!a || !b) throw new Error(`No such revision: ${!a ? from : to}`);
+    if (a.kind !== b.kind || a.name !== b.name) throw new Error("Only revisions of one name can be compared.");
+    return diffManifests(a.manifest, b.manifest);
+  }
+
+  async publishArtifactRevision(gadgetId: WorkpieceId, kind: ArtifactKind, name: string, number: number,
+      pins: ArtifactPin[], model: ArtifactModelRequirement | null,
+      qualification: ArtifactQualification): Promise<ArtifactPublishResult> {
+    requireNameAndNumber(name, number);
+    qualification = requireQualification(qualification);
+    let draft = await this.#artifactDraft(gadgetId, kind, pins, model);
+    let refused = [...draft.findings, ...qualificationFindings(qualification, draft.digest)][0];
+    if (refused) return {ok: false, ...refused};
+    // The publisher is the person this session belongs to; no agent holds this capability.
+    let profile = await this.#getClientProfile();
+    let result = draft.store.publish({
+      ref: artifactRef(kind, name, number), kind, name, number, digest: draft.digest,
+      manifest: draft.manifest, qualification,
+      publishedBy: {type: "user", id: profile.id, name: profile.name}, publishedAt: new Date(),
+      commitId: draft.commitId, bindingTemplates: draft.bindingTemplates,
+    });
+    if ("refusal" in result) return {ok: false, ...result};
+    return {ok: true, created: result.created, revision: revisionOf(result.record)};
+  }
+
+  async listArtifactRevisions(kind: ArtifactKind, name: string): Promise<ArtifactRevision[]> {
+    return this.#artifactStore().list(kind, name).map(revisionOf);
+  }
+
+  async getArtifactRevision(ref: ArtifactRef): Promise<ArtifactRevision | null> {
+    let record = this.#artifactRevision(ref);
+    return record ? revisionOf(record) : null;
+  }
+
+  async bindArtifactRevision(ref: ArtifactRef, bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkpieceId> {
+    let record = this.#artifactRevision(ref);
+    if (!record) throw new Error(`No such revision: ${ref}`);
+    let assignments = new Map(Object.entries(bindings));
+    let required = new Map(Object.entries(record.manifest.bindings));
+    for (let name of new Set([...assignments.keys(), ...required.keys()])) {
+      let [assignment, requirement] = [assignments.get(name), required.get(name)];
+      if (!requirement) throw new Error(`Unknown binding name: ${name} (${ref}).`);
+      if (!assignment) throw new Error(`Binding "${name}" must be assigned.`);
+      if (assignment.type !== requirement.type) {
+        throw artifactRefusalError("incompatible_requirement", `binding ${name} requires ${requirement.type}`);
+      }
+    }
+    // An exact model requirement is checked against every model the destination assigns before
+    // anything is created.
+    let exact = record.manifest.model?.type === "exact" ? record.manifest.model : null;
+    for (let [name, assignment] of assignments) {
+      let modelId = assignment.type === "aiModel" || assignment.type === "agentSpawner" ? assignment.modelId : null;
+      if (!exact || modelId === null) continue;
+      let config = (await retryOnDoReset(() => this.#clientUser.getChatContext(modelId), this.impl.logger))
+          .aiModel?.config;
+      if (config?.provider !== exact.provider || config.model !== exact.modelName) {
+        throw artifactRefusalError("incompatible_requirement", `binding ${name} must use ${exact.provider}/${exact.modelName}`);
+      }
+    }
+
+    let taken = (candidate: string) => this.impl.storage.gadgets.byBindingName.get(candidate) !== undefined;
+    let gadget = this.impl.createGadget(ref, fallbackBindingName(record.name.toUpperCase().replaceAll("-", "_"), taken),
+        undefined, undefined, record.commitId);
+
+    // The phases newGadgetFromBlueprint() uses: plain bindings first, recording each created id by
+    // binding name, then agent spawners, whose env refers to those symbolically.
+    let created = new Map<string, WorkpieceId>();
+    let bind = async (name: string, client: GatekeeperClient<any> | null) => {
+      if (!client) throw new Error(`Failed to create a connection for binding "${name}".`);
+      let id = await client.getId();
+      let requirement = required.get(name)!;
+      let spec = this.impl.storage.gatekeepers.get(id)?.creationSpec;
+      // The account the person chose must be of the vendor the revision requires.
+      if (requirement.type === "gatekeeper" &&
+          (spec?.type !== "gatekeeper" || spec.vendorId !== requirement.gatekeeperName)) {
+        throw artifactRefusalError("incompatible_requirement", `binding ${name} requires ${requirement.gatekeeperName}`);
+      }
+      created.set(name, id);
+      if (!record.bindingTemplates[name]?.spawnerOnly) this.impl.bindWorkpiece(gadget.id, name, id);
+    };
+    for (let [name, assignment] of assignments) {
+      if (assignment.type === "gatekeeper") {
+        await bind(name, await this.newGatekeeper(assignment.accountId, assignment.resourceUrl));
+      } else if (assignment.type === "aiModel") {
+        await bind(name, await this.newAiModelGatekeeper(assignment.modelId));
+      }
+    }
+    for (let [name, assignment] of assignments) {
+      let template = record.bindingTemplates[name];
+      if (assignment.type !== "agentSpawner" || template?.type !== "agentSpawner") continue;
+      let env: Record<string, WorkpieceId> = {};
+      for (let [envName, target] of Object.entries(template.env)) {
+        let id = target.type === "gadget" ? gadget.id : created.get(target.name);
+        if (id === undefined) throw new Error(`Agent spawner binding "${name}" references "${envName}", which was not assigned.`);
+        env[envName] = id;
+      }
+      await bind(name, await this.newAgentSpawnerGatekeeper({displayName: template.title, modelId: assignment.modelId, env}));
+    }
+    return gadget.id;
+  }
+
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,
@@ -12874,6 +13024,17 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
+      _model: ArtifactModelRequirement | null)
+      : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> { this.#deny(); }
+  async diffArtifactRevisions(_from: ArtifactRef, _to: ArtifactRef): Promise<ArtifactChange[]> { this.#deny(); }
+  async publishArtifactRevision(_gadgetId: WorkpieceId, _kind: ArtifactKind, _name: string, _number: number,
+      _pins: ArtifactPin[], _model: ArtifactModelRequirement | null,
+      _qualification: ArtifactQualification): Promise<ArtifactPublishResult> { this.#deny(); }
+  async listArtifactRevisions(_kind: ArtifactKind, _name: string): Promise<ArtifactRevision[]> { this.#deny(); }
+  async getArtifactRevision(_ref: ArtifactRef): Promise<ArtifactRevision | null> { this.#deny(); }
+  async bindArtifactRevision(_ref: ArtifactRef, _bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkpieceId> { this.#deny(); }
 
   #canvasStore(): WorkspaceCanvasStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -13352,6 +13513,17 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
       : Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
+      _model: ArtifactModelRequirement | null)
+      : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> { this.#deny(); }
+  async diffArtifactRevisions(_from: ArtifactRef, _to: ArtifactRef): Promise<ArtifactChange[]> { this.#deny(); }
+  async publishArtifactRevision(_gadgetId: WorkpieceId, _kind: ArtifactKind, _name: string, _number: number,
+      _pins: ArtifactPin[], _model: ArtifactModelRequirement | null,
+      _qualification: ArtifactQualification): Promise<ArtifactPublishResult> { this.#deny(); }
+  async listArtifactRevisions(_kind: ArtifactKind, _name: string): Promise<ArtifactRevision[]> { this.#deny(); }
+  async getArtifactRevision(_ref: ArtifactRef): Promise<ArtifactRevision | null> { this.#deny(); }
+  async bindArtifactRevision(_ref: ArtifactRef, _bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkpieceId> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)

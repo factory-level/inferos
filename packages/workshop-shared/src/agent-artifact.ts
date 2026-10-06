@@ -1,12 +1,12 @@
-// Revisioned, digest-identified agent artifacts: the proposed contract for issues #15, #16 and #17.
+// Revisioned, digest-identified agent artifacts (issues #15, #16 and #17).
 //
-// PROPOSAL PENDING OWNER REVIEW. Nothing in this module is implemented, stored or reachable over
-// RPC yet: no backend code imports it, and ArtifactAuthoringProposal is deliberately not a member
-// of Overseer or AuthenticatedApi. The only runtime code is the canonical-JSON digest helper, which
-// pins the canonicalisation rule down precisely enough to test. See docs/design/agent-authoring.md
-// and docs/adr/0006-agent-artifact-revisions.md.
+// Accepted by the owner on 2026-10-05 (docs/adr/0006-agent-artifact-revisions.md). The six authoring
+// operations are members of Overseer (api.ts) and are implemented by the workspace's Overseer
+// (workshop-backend/src/artifact-store.ts). This module holds the wire types and the pure helpers
+// both sides share: the canonical-JSON digest, the qualification predicate and the reference form.
+// See docs/design/agent-authoring.md.
 
-import type { AiChatAuthorInfo, BlueprintBinding, BlueprintBindingAssignment } from "./api";
+import type { AiChatAuthorInfo, BlueprintBinding } from "./api";
 
 /**
  * Kinds of authored artifact this contract versions. `skill` is a reusable instruction or code
@@ -180,7 +180,14 @@ export interface ArtifactQualification {
  * - `inexact_reference`: a reference was `latest`, a range or an alias rather than an exact pin.
  * - `unsupported_format`: an unknown manifest or archive format version.
  * - `incompatible_requirement`: the destination cannot satisfy a model or binding requirement.
- * - `secret_present`: validation found credential-shaped material in a file or field.
+ * - `secret_present`: validation found credential-shaped material in a file or field. The rule is
+ *   deliberately conservative: only well-known credential formats with a distinctive prefix or
+ *   frame (private-key PEM blocks, cloud and source-host access tokens, signed JWTs) are matched,
+ *   and the refusal names the file path or field, never the matched text.
+ *
+ * A method whose result has no refusal slot (getArtifactRevision(), diffArtifactRevisions(),
+ * bindArtifactRevision()) throws an Error whose message starts with the code and a colon, for
+ * example `inexact_reference: latest is not an exact revision`; artifactRefusalOf() reads it back.
  */
 export type ArtifactRefusal =
   | "digest_mismatch"
@@ -194,6 +201,23 @@ export type ArtifactRefusal =
   | "unsupported_format"
   | "incompatible_requirement"
   | "secret_present";
+
+/** Every ArtifactRefusal code, in declaration order. */
+export const ARTIFACT_REFUSALS: readonly ArtifactRefusal[] = [
+  "digest_mismatch", "qualification_incomplete", "qualification_stale", "pin_unresolved",
+  "pin_digest_mismatch", "revision_exists_different_digest", "number_not_increasing",
+  "inexact_reference", "unsupported_format", "incompatible_requirement", "secret_present",
+];
+
+/**
+ * The refusal code a thrown authoring error carries (see ArtifactRefusal), or null when `error` is
+ * not a refusal.
+ */
+export function artifactRefusalOf(error: unknown): ArtifactRefusal | null {
+  let message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  let code = message.slice(0, Math.max(0, message.indexOf(":")));
+  return (ARTIFACT_REFUSALS as readonly string[]).includes(code) ? code as ArtifactRefusal : null;
+}
 
 /**
  * One immutable published revision. Never edited: a change is a new number. A superseded revision
@@ -232,49 +256,25 @@ export type ArtifactChange =
   | { type: "model"; from: ArtifactModelRequirement | null; to: ArtifactModelRequirement | null }
   | { type: "binding"; name: string; change: "added" | "removed" | "modified" };
 
+/** Pattern every ArtifactRef must match: kind, name and a decimal number with no leading zero. */
+export const ARTIFACT_REF_PATTERN = /^(skill|agent|gadget)\/([a-z0-9][a-z0-9-]{0,62})@([1-9][0-9]{0,9})$/;
+
+/** The display reference of one exact revision, `<kind>/<name>@<number>`. */
+export function artifactRef(kind: ArtifactKind, name: string, number: number): ArtifactRef {
+  return `${kind}/${name}@${number}`;
+}
+
 /**
- * PROPOSAL PENDING OWNER REVIEW: the operations #15 found missing, and only those. Not
- * implemented and not a member of any RPC interface; on acceptance each method lands on Overseer
- * (workspace build access) in a separate kernel PR. Create, read, edit, export, import and rebind
- * reuse existing methods, as mapped in docs/design/agent-authoring.md:
- * GadgetClient.createBlueprint(), Overseer.listTree()/readFilesAtCommit(), chat code changes,
- * PublicApi.downloadBlueprint(), AuthenticatedApi.importBlueprint() and
- * AuthenticatedApi.newGadgetFromBlueprint().
+ * Split an exact reference into kind, name and number, or return null when `ref` is not exact:
+ * `latest`, a range, an alias, a malformed name or a number outside 1..MAX_ARTIFACT_REVISION_NUMBER.
+ * Callers refuse a null result with `inexact_reference`.
  */
-export interface ArtifactAuthoringProposal {
-  /**
-   * Build the manifest for a gadget's committed code under the given kind, compute its digest and
-   * report every refusal that publishing it now would meet, without storing anything.
-   */
-  validateArtifact(gadgetId: number, kind: ArtifactKind, pins: ArtifactPin[],
-      model: ArtifactModelRequirement | null): Promise<
-      { manifest: ArtifactManifest; digest: ArtifactDigest; refusals: ArtifactRefusal[] }>;
-
-  /** Compare two exact revisions of one name (or a revision with a draft digest) by manifest. */
-  diffArtifactRevisions(from: ArtifactRef, to: ArtifactRef): Promise<ArtifactChange[]>;
-
-  /**
-   * Publish an immutable revision from a gadget's committed code. The receiver rebuilds the
-   * manifest, recomputes the digest, checks the qualification and every pin, and only then stores
-   * the revision as a new Blueprint version. Requires a signed-in person; an agent's request is
-   * queued as an action for that person to approve.
-   */
-  publishArtifactRevision(gadgetId: number, kind: ArtifactKind, name: string, number: number,
-      pins: ArtifactPin[], model: ArtifactModelRequirement | null,
-      qualification: ArtifactQualification): Promise<ArtifactPublishResult>;
-
-  /** Every revision of one name, lowest number first, including superseded ones. */
-  listArtifactRevisions(kind: ArtifactKind, name: string): Promise<ArtifactRevision[]>;
-
-  /** One exact revision, or null. */
-  getArtifactRevision(ref: ArtifactRef): Promise<ArtifactRevision | null>;
-
-  /**
-   * Instantiate an exact revision with destination bindings. The same assignment shape as
-   * newGadgetFromBlueprint(); nothing from the source environment is carried.
-   */
-  bindArtifactRevision(ref: ArtifactRef,
-      bindings: Record<string, BlueprintBindingAssignment>): Promise<number>;
+export function parseArtifactRef(ref: string): { kind: ArtifactKind; name: string; number: number } | null {
+  let match = ARTIFACT_REF_PATTERN.exec(ref);
+  if (!match) return null;
+  let number = Number(match[3]);
+  if (number > MAX_ARTIFACT_REVISION_NUMBER) return null;
+  return { kind: match[1] as ArtifactKind, name: match[2]!, number };
 }
 
 /**
@@ -324,7 +324,8 @@ export function canonicalArtifactJson(value: unknown): string {
 }
 
 async function sha256(bytes: Uint8Array): Promise<ArtifactDigest> {
-  let hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  // Copied so the argument is ArrayBuffer-backed, as BufferSource requires under every lib setting.
+  let hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(bytes)));
   return `sha256:${Array.from(hash, byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 

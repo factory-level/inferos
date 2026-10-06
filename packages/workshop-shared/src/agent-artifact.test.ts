@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   ARTIFACT_DIGEST_PATTERN, ARTIFACT_MANIFEST_FORMAT, artifactDigest, canonicalArtifactJson, fileDigest,
-  isQualified, type ArtifactDigest, type ArtifactManifest, type ArtifactQualification,
+  isQualified, parseArtifactRef, artifactRef, type ArtifactDigest, type ArtifactManifest, type ArtifactQualification,
 } from "./agent-artifact";
 
 /** A well-formed digest made of one repeated hex digit. */
@@ -83,5 +83,15 @@ describe("isQualified", () => {
       { name: "a", mode: "deterministic", passed: true },
       { name: "live", mode: "liveModel", passed: false },
     ]), digest)).toBe(true);
+  });
+});
+
+describe("parseArtifactRef", () => {
+  test("accepts only exact references", () => {
+    expect(parseArtifactRef(artifactRef("skill", "triage", 3))).toEqual({ kind: "skill", name: "triage", number: 3 });
+    for (let inexact of ["skill/triage@latest", "skill/triage@^3", "skill/triage", "skill/triage@03",
+      "skill/triage@0", "strategy/x@1", "skill/Triage@1", "skill/triage@2147483648"]) {
+      expect(parseArtifactRef(inexact), inexact).toBeNull();
+    }
   });
 });
