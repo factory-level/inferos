@@ -106,12 +106,18 @@ export class WorkspaceConsoleStore {
 
   /**
    * Publishes the draft at `expectedRevision`: operators move to it, with each screen as it is
-   * now, and later edits to the console or its screens stay draft until the next publish.
+   * now, and later edits to the console or its screens stay draft until the next publish. Each
+   * publish raises the revision, like a replace, so of two publishes at one revision only the
+   * first wins, and a republish of unchanged content (picking up edited screens) is still a new
+   * revision that open sessions move to.
    */
   publish(id: string, expectedRevision: string): OperateConsole {
     this.#requireEnabled();
-    return this.durableStorage.transactionSync(() =>
-      publishConsoleRecord(this.storage, this.#current(id, expectedRevision), new Date().toISOString()));
+    return this.durableStorage.transactionSync(() => {
+      let current = this.#current(id, expectedRevision);
+      let raised = { ...current, revision: String(BigInt(current.revision) + 1n) };
+      return publishConsoleRecord(this.storage, raised, new Date().toISOString());
+    });
   }
 
   create(content: OperateConsoleContent): OperateConsole {
