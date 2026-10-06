@@ -1585,6 +1585,14 @@ export type ApiKeyModelConfig = {
    * table, it is both the requested response cap and the space reserved for it in the window.
    */
   outputLimit?: number;
+
+  /**
+   * True when this registration is a scripted or simulated stand-in rather than a real model (as
+   * `pnpm dev:setup --mock-model` registers). Declared by whoever registers it, never inferred
+   * from a name: an install into a workspace that is not test-only refuses an AI-model binding to
+   * it (see `Overseer.installBlueprint`).
+   */
+  mock?: boolean;
 };
 
 /** An OpenAI model billed only to one explicitly selected ChatGPT registration. */
@@ -1824,6 +1832,13 @@ export type GadgetMetadata = {
   /** Set when the workspace was installed from a blueprint: what it runs, at which version. */
   installedFrom?: BlueprintInstall;
 
+  /**
+   * True when the workspace is marked test-only (see `Overseer.setTestOnly`): it may hold installs
+   * that depend on mock data or models, and clients show it with a test badge. Absent means a
+   * normal workspace.
+   */
+  testOnly?: boolean;
+
   // TODO:
   // - created / modified / activity times
   // - icon? thumbnail?
@@ -1845,8 +1860,8 @@ export const DEFAULT_WORKSPACE_KIND: WorkspaceKind = "app";
 
 /**
  * Where a blueprint install came from: the blueprint, the version it is pinned to, and the kind
- * that version was published as. Recorded by `newGadgetFromBlueprint` and changed only by
- * `Overseer.upgradeInstall`.
+ * and data contract that version was published with. Recorded by `newGadgetFromBlueprint` and
+ * `Overseer.installBlueprint`, and changed only by `Overseer.upgradeInstall`.
  */
 export type BlueprintInstall = {
   /** The installed blueprint's id. */
@@ -1855,9 +1870,31 @@ export type BlueprintInstall = {
   version: number;
   /** The kind the pinned version was published as. An upgrade must keep it. */
   kind: WorkspaceKind;
+  /**
+   * The data contract the pinned version declared (see `BlueprintMetadata.dataContract`). Absent
+   * means unknown. An upgrade is allowed only to a version declaring the same contract: a
+   * different one needs a migration, and an unknown one on either side is refused.
+   */
+  dataContract?: number;
+  /**
+   * The bindings that resolved to mock dependencies when this was installed, by binding name.
+   * Only an install in a test-only workspace has any (see `Overseer.installBlueprint`).
+   */
+  mockDependencies?: string[];
 };
 
-/** Options for `AuthenticatedApi.newGadgetFromBlueprint`. */
+/**
+ * Options for publishing a blueprint version: `GadgetClient.createBlueprint` and
+ * `Overseer.updateBlueprint` with `updateCode`.
+ */
+export type BlueprintPublishOptions = {
+  /** The version's data contract (see `BlueprintMetadata.dataContract`). Absent means unknown. */
+  dataContract?: number;
+};
+
+/**
+ * Options for `AuthenticatedApi.newGadgetFromBlueprint` and `Overseer.installBlueprint`.
+ */
 export type BlueprintInstallOptions = {
   /** The version to install. Absent means the blueprint's current version. */
   version?: number;
@@ -2305,13 +2342,44 @@ export interface Overseer extends RpcTarget {
   setKind(kind: WorkspaceKind): Promise<void>;
 
   /**
-   * Re-pin this blueprint install (see `GadgetMetadata.installedFrom`) to `version` of the same
-   * blueprint, replacing its default gadget's code with that version's as a new commit. The
+   * Re-pin a blueprint install to `version` of the same blueprint, replacing the installed
+   * gadget's code with that version's as a new commit. The install is gadget `gadgetId`'s, one
+   * made by `installBlueprint` (see `GadgetSummary.installedFrom`), or, with no `gadgetId`, the
+   * workspace's own (see `GadgetMetadata.installedFrom`), whose default gadget it replaces. The
    * explicit upgrade: nothing else moves an install. Bindings are kept as they are, and nothing is
-   * copied from the source. Throws if the workspace is not an install, the version doesn't exist,
-   * or that version's kind differs from the install's. Build role only.
+   * copied from the source. Throws if there is no such install, the version doesn't exist, that
+   * version's kind differs from the install's, or the two versions' data contracts are not both
+   * declared and equal (see `BlueprintInstall.dataContract`). Build role only.
    */
-  upgradeInstall(version: number): Promise<void>;
+  upgradeInstall(version: number, gadgetId?: WorkpieceId): Promise<void>;
+
+  /**
+   * Install a published blueprint version into this workspace as a new gadget, which is then an
+   * install pinned to that version (see `GadgetSummary.installedFrom`) like the workspace one
+   * `AuthenticatedApi.newGadgetFromBlueprint` makes. This is how an operate space (a workspace)
+   * receives what Build published: the gadget can be placed on the space's screens and reached
+   * through its consoles. Build role only; the workspace may be another person's.
+   *
+   * The caller must be able to read the blueprint (its id is the read capability). `bindings` are
+   * resolved under the caller's own authority: accounts and models are the caller's, as with
+   * `newGatekeeper`. `options` pins the version and kind exactly as for `newGadgetFromBlueprint`.
+   * A binding that resolves to a mock dependency (a model registered as `mock`, or a resource
+   * its gatekeeper reports as mock data) is refused, naming the binding, unless the workspace is
+   * test-only (see `setTestOnly`). Every refusal happens before anything is created. Returns the
+   * new gadget's id.
+   */
+  installBlueprint(
+    blueprintId: string,
+    bindings: Record<string, BlueprintBindingAssignment>,
+    options?: BlueprintInstallOptions
+  ): Promise<WorkpieceId>;
+
+  /**
+   * Mark this workspace test-only, or clear the mark (see `GadgetMetadata.testOnly`). A test-only
+   * workspace accepts installs that depend on mock data or models; clearing the mark is refused
+   * while one of its installs has such a dependency. The mark grants nothing. Build role only.
+   */
+  setTestOnly(testOnly: boolean): Promise<void>;
 
   /** Pin or unpin this workspace in the user's list. */
   setPinned(pinned: boolean): Promise<void>;
@@ -2849,6 +2917,8 @@ export interface Overseer extends RpcTarget {
    *   blueprint and increment the blueprint version.
    * - `updateBindings`: if true, refresh the blueprint's connection annotations from
    *   the source gadget's current bindings without changing the code snapshot.
+   * - `dataContract`: the new version's data contract (see `BlueprintPublishOptions`). Only with
+   *   `updateCode`; a version published without one has an unknown contract.
    *
    * At least one option must be provided.
    */
@@ -2858,6 +2928,7 @@ export interface Overseer extends RpcTarget {
     updateCode?: boolean;
     updateBindings?: boolean;
     screenshot?: BlueprintScreenshotUpload | null;
+    dataContract?: number;
   }): Promise<void>;
 
   /** Delete a blueprint. Cleans up KV, R2, User DO, and local storage. */
@@ -4460,6 +4531,12 @@ export type GadgetSummary = {
   commitId?: string;
 
   /**
+   * Set when the gadget was installed into its workspace from a blueprint by
+   * `Overseer.installBlueprint`: what it runs, at which version.
+   */
+  installedFrom?: BlueprintInstall;
+
+  /**
    * If present, this workpiece exists only in the context of the given chat. The UI should display
    * it only while the given chat is open.
    *
@@ -4750,6 +4827,14 @@ export type BlueprintMetadata = {
    */
   kind?: WorkspaceKind;
 
+  /**
+   * The persistence contract the current version declared when it was published: a non-negative
+   * integer the publisher changes whenever the version's stored data stops being compatible with
+   * the previous one's. Absent means undeclared, which counts as unknown. Each version's contract
+   * is also stored with its content, which is what an install and an upgrade read.
+   */
+  dataContract?: number;
+
   /** Key = binding name. */
   bindings: Record<string, BlueprintBinding>;
 };
@@ -4982,7 +5067,8 @@ export interface GadgetClient extends WorkpieceClient {
    * to User DO + KV + R2. Maintenance of existing blueprints stays on Overseer (see
    * Overseer.updateBlueprint() etc.).
    */
-  createBlueprint(title?: string, description?: string, screenshot?: BlueprintScreenshotUpload): Promise<BlueprintGadgetSummary>;
+  createBlueprint(title?: string, description?: string, screenshot?: BlueprintScreenshotUpload,
+                  options?: BlueprintPublishOptions): Promise<BlueprintGadgetSummary>;
 }
 
 /**

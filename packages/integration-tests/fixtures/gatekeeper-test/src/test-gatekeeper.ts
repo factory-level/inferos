@@ -444,11 +444,13 @@ export class TestAccount
 
   /**
    * Bind a resource. The Workshop calls this when the owner pastes a URL; the returned class becomes
-   * a Gatekeeper facet under that gadget's Overseer.
+   * a Gatekeeper facet under that gadget's Overseer. A thing whose name starts with `mock-` is
+   * reported as mock data, for the Workshop's refusal of mock dependencies.
    */
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<TestSession>>;
     resource: SupportedResource;
+    mock: boolean;
   }> {
     const parsed = new URL(url);
     if (parsed.host !== VENDOR_HOST || !parsed.pathname.startsWith("/things/")) {
@@ -459,6 +461,7 @@ export class TestAccount
         props: { label: this.ctx.props.label, resourceUrl: url },
       }),
       resource: SUPPORTED_RESOURCES[0],
+      mock: parsed.pathname.startsWith("/things/mock-"),
     };
   }
 

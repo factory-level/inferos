@@ -2257,10 +2257,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
-                  typeUrlPattern: string}> {
+                  typeUrlPattern: string, mock: boolean}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
-    let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
+    let {class: cls, resource, mock} = await account.account.getGatekeeperClassFor(url);
 
     // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a
     // resourceUrl becomes a capability (reached only via the user/UI-facing Overseer.newGatekeeper
@@ -2281,7 +2281,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }
 
-    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
+    // `mock` is the account's own statement that the URL names demonstration data; installs into a
+    // workspace that is not test-only refuse it (see Overseer.installBlueprint).
+    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern,
+            mock: mock === true};
   }
 
   /**

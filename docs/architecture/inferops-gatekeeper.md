@@ -13,7 +13,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-04
+updated: 2026-10-06
 ---
 
 # InferOps gatekeeper
@@ -148,7 +148,11 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   identity whose binding's workspace label is the stopgap's `INFEROPS_WORKSPACE_SLUG` gets the HTTP
   client with that fixed credential. Everything else gets the mock, which refuses any host but
   `demo.local` as `NOT_FOUND`. No address or credential is taken from a URL, and the stopgap never
-  backs a connected person.
+  backs a connected person. `getGatekeeperClassFor` reports a `demo.local` board, dispatch or Wiki
+  URL as `mock` (the `GatekeeperUser` contract in `workshop-shared/src/gatekeeper.ts`), so the
+  Workshop refuses it in an install into a workspace that is not test-only (see
+  [Operate mode](operate-mode.md#pinned-installs-and-upgrades)); `__tests__/account.test.ts`
+  checks the demo host is reported and a connected workspace is not.
 - **HTTP client.** Each call sends `Authorization: Bearer`, `X-Workspace-Id` and, on a
   write, `X-Idempotency-Key`, with a 15 s timeout and redirects not followed. A project key is
   resolved to its UUID through `GET /project/projects` on every use. `readProject` requests

@@ -102,16 +102,21 @@ async function build(author: RpcStub<AuthenticatedApi>, kind: WorkspaceKind, fil
   return { workspace, gadget, gadgetId, commit, id: (await workspace.getMetadata()).id };
 }
 
+// Every version here declares the same data contract, so upgrades between them are allowed; the
+// refusals of other and undeclared contracts are covered in operate-space.test.ts.
+const DATA_CONTRACT = 1;
+
 /** Publishes a built gadget as a blueprint and waits until it can be installed. */
 async function publish(gadget: Awaited<ReturnType<typeof build>>["gadget"], title: string) {
-  const blueprint = await gadget.createBlueprint(title, `${title} for Operate`);
+  const blueprint = await gadget.createBlueprint(title, `${title} for Operate`, undefined,
+      { dataContract: DATA_CONTRACT });
   await waitFor("the published blueprint", () => publicApi.getBlueprint(blueprint.id));
   return blueprint.id;
 }
 
 /** Republishes a built gadget's current code as the blueprint's next version. */
 async function republish(built: Awaited<ReturnType<typeof build>>, blueprintId: string, version: number) {
-  await built.workspace.updateBlueprint(blueprintId, { updateCode: true });
+  await built.workspace.updateBlueprint(blueprintId, { updateCode: true, dataContract: DATA_CONTRACT });
   await waitFor(`version ${version} of the blueprint`, async () =>
     (await publicApi.getBlueprint(blueprintId))?.metadata.version === version || null);
 }
@@ -375,7 +380,8 @@ describe.each<WorkspaceKind>(["app", "widget", "workflow"])("a published %s", ki
 
     // The install carries the kind it was built as, and records what it runs.
     const live = await install(operator, blueprintId);
-    expect(live.metadata).toMatchObject({ kind, installedFrom: { blueprintId, version: 1, kind } });
+    expect(live.metadata).toMatchObject(
+        { kind, installedFrom: { blueprintId, version: 1, kind, dataContract: DATA_CONTRACT } });
     expect((await operator.listGadgets()).find(listed => listed.id === live.metadata.id)?.kind ?? "app")
       .toBe(kind);
     await expect(operator.openGadget(built.id)).rejects.toThrow();

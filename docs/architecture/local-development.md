@@ -19,7 +19,7 @@ covers:
   - packages/integration-tests
   - scripts/preview/smoke.ts
   - scripts/preview/smoke.test.ts
-updated: 2026-10-03
+updated: 2026-10-06
 ---
 
 # Cloudflare-like local development
@@ -70,7 +70,7 @@ A consumer wrapper ([consumer configuration](consumer-configuration.md)) runs th
 
 `pnpm dev:setup` drives a running local Workshop over the same Cap'n Web API the browser uses, so neither a person nor an agent clicks through signup, onboarding and settings before testing. It signs in as `dev`/`devpassword` (the `VITE_DEV_AUTO_LOGIN` defaults; `--user`/`--password` override), creating the account on first run. The password hash is derived exactly as the browser derives it (Argon2id over `SERVICE_SALT` plus the username, via Node's `crypto.argon2Sync`), so the same credentials work on the login page; `SERVICE_SALT` lives in its own import-free `password-salt.ts` so Node tooling can import it. It then marks onboarding complete and, on request:
 
-- `--mock-model [url]` registers the scripted model as an Ollama model (default `http://localhost:11434`) and makes it the preferred model. `pnpm dev:mock-model` serves it: it answers in the OpenAI-compatible format and plays the agent's side of "add an InferOps Kanban to this canvas", choosing each step from the conversation so far. Every action it triggers runs through the real Workshop and gatekeepers.
+- `--mock-model [url]` registers the scripted model as an Ollama model (default `http://localhost:11434`), marked `mock` (re-marking an existing registration), and makes it the preferred model. The mark makes an install into a space that is not test-only refuse it (see [Operate mode](operate-mode.md#pinned-installs-and-upgrades)). `pnpm dev:mock-model` serves it: it answers in the OpenAI-compatible format and plays the agent's side of "add an InferOps Kanban to this canvas", choosing each step from the conversation so far. Every action it triggers runs through the real Workshop and gatekeepers.
 - `--inferops` opts into the auto-provisioned InferOps gatekeeper (mock data).
 - `--screen <templateId>` ensures an "InferOps Canvas demo" workspace with a screen from that catalog template, and reports its URL.
 

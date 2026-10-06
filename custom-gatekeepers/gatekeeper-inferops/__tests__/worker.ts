@@ -306,6 +306,11 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /** Whether the account's own `getGatekeeperClassFor` reports `url` as mock data. */
+  async mockOf(props: AccountProps, url: string): Promise<boolean> {
+    return (await this.#account(props).getGatekeeperClassFor(url)).mock === true;
+  }
+
   /** Binds `url` through the account's own `getGatekeeperClassFor`; the failure message, or null. */
   async bindAccount(name: string, props: AccountProps, url: string): Promise<string | null> {
     try {
