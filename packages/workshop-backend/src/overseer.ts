@@ -1099,6 +1099,10 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   }
 }
 
+// An account and resource resolved through the admin-policy chokepoint (UserDurableObject's
+// getGatekeeperClassFor), ready to become a workspace connection.
+type ResolvedConnection = Awaited<ReturnType<UserDurableObject["getGatekeeperClassFor"]>>;
+
 // Reflect a hook toggle (or deletion, which also severs the hookId reference) onto the hook's
 // bindHook action record, stamping the state-change time the byLastChanged index keys on.
 function stampBindHookAction(storage: OverseerStorage, actionId: number, enabled: boolean,
@@ -11098,8 +11102,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         throw artifactRefusalError("incompatible_requirement", `binding ${name} requires ${requirement.type}`);
       }
     }
-    // An exact model requirement is checked against every model the destination assigns before
-    // anything is created.
+    // Every compatibility check runs before anything is created, so a refusal leaves nothing behind:
+    // each chosen account is resolved through the admin-policy chokepoint (which mints no state)
+    // and must be of the required vendor, every assigned model must meet an exact model
+    // requirement, and every spawner env entry must name an assigned connection.
+    let resolved = new Map<string, ResolvedConnection>();
+    for (let [name, assignment] of assignments) {
+      let requirement = required.get(name)!;
+      if (assignment.type !== "gatekeeper" || requirement.type !== "gatekeeper") continue;
+      let connection = await this.#resolveConnection(assignment.accountId, assignment.resourceUrl);
+      if (connection.vendorId !== requirement.gatekeeperName) {
+        throw artifactRefusalError("incompatible_requirement", `binding ${name} requires ${requirement.gatekeeperName}`);
+      }
+      resolved.set(name, connection);
+    }
     let exact = record.manifest.model?.type === "exact" ? record.manifest.model : null;
     for (let [name, assignment] of assignments) {
       let modelId = assignment.type === "aiModel" || assignment.type === "agentSpawner" ? assignment.modelId : null;
@@ -11110,6 +11126,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         throw artifactRefusalError("incompatible_requirement", `binding ${name} must use ${exact.provider}/${exact.modelName}`);
       }
     }
+    for (let [name, template] of Object.entries(record.bindingTemplates)) {
+      if (template.type !== "agentSpawner") continue;
+      for (let [envName, target] of Object.entries(template.env)) {
+        if (target.type === "binding" && assignments.get(target.name)?.type !== "gatekeeper" &&
+            assignments.get(target.name)?.type !== "aiModel") {
+          throw new Error(`Agent spawner binding "${name}" references "${envName}", which was not assigned.`);
+        }
+      }
+    }
 
     let taken = (candidate: string) => this.impl.storage.gadgets.byBindingName.get(candidate) !== undefined;
     let gadget = this.impl.createGadget(ref, fallbackBindingName(record.name.toUpperCase().replaceAll("-", "_"), taken),
@@ -11118,22 +11143,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // The phases newGadgetFromBlueprint() uses: plain bindings first, recording each created id by
     // binding name, then agent spawners, whose env refers to those symbolically.
     let created = new Map<string, WorkpieceId>();
-    let bind = async (name: string, client: GatekeeperClient<any> | null) => {
-      if (!client) throw new Error(`Failed to create a connection for binding "${name}".`);
+    let bind = async (name: string, client: GatekeeperClient<any>) => {
       let id = await client.getId();
-      let requirement = required.get(name)!;
-      let spec = this.impl.storage.gatekeepers.get(id)?.creationSpec;
-      // The account the person chose must be of the vendor the revision requires.
-      if (requirement.type === "gatekeeper" &&
-          (spec?.type !== "gatekeeper" || spec.vendorId !== requirement.gatekeeperName)) {
-        throw artifactRefusalError("incompatible_requirement", `binding ${name} requires ${requirement.gatekeeperName}`);
-      }
       created.set(name, id);
       if (!record.bindingTemplates[name]?.spawnerOnly) this.impl.bindWorkpiece(gadget.id, name, id);
     };
     for (let [name, assignment] of assignments) {
-      if (assignment.type === "gatekeeper") {
-        await bind(name, await this.newGatekeeper(assignment.accountId, assignment.resourceUrl));
+      let connection = resolved.get(name);
+      if (assignment.type === "gatekeeper" && connection) {
+        await bind(name, await this.#addConnection(connection, assignment.resourceUrl));
       } else if (assignment.type === "aiModel") {
         await bind(name, await this.newAiModelGatekeeper(assignment.modelId));
       }
@@ -11143,9 +11161,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       if (assignment.type !== "agentSpawner" || template?.type !== "agentSpawner") continue;
       let env: Record<string, WorkpieceId> = {};
       for (let [envName, target] of Object.entries(template.env)) {
-        let id = target.type === "gadget" ? gadget.id : created.get(target.name);
-        if (id === undefined) throw new Error(`Agent spawner binding "${name}" references "${envName}", which was not assigned.`);
-        env[envName] = id;
+        env[envName] = target.type === "gadget" ? gadget.id : created.get(target.name)!;
       }
       await bind(name, await this.newAgentSpawnerGatekeeper({displayName: template.title, modelId: assignment.modelId, env}));
     }
@@ -11762,8 +11778,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    let {class: cls, vendorId, typeUrlPattern, mock} =
-        await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
+    return this.#addConnection(await this.#resolveConnection(accountId, resourceUrl), resourceUrl);
+  }
+
+  // Resolve a connected account and resource through the admin-policy chokepoint without creating
+  // anything, so a caller can check the vendor before any connection exists (bindArtifactRevision).
+  async #resolveConnection(accountId: number, resourceUrl: string): Promise<ResolvedConnection> {
+    return this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
+  }
+
+  // Create the workspace connection for a resolved account and resource (newGatekeeper's second half).
+  async #addConnection({class: cls, vendorId, typeUrlPattern, mock}: ResolvedConnection,
+      resourceUrl: string): Promise<GatekeeperClient<any>> {
     let creationSpec: GatekeeperCreationSpec = {
       type: "gatekeeper",
       vendorId,

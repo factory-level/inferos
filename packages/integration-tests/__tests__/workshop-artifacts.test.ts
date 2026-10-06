@@ -7,6 +7,7 @@ import type { Overseer, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { diffFiles, type CodeContent } from "@gadgets/workshop-shared/code-change";
 import { startHarness, type Harness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
+import { SCRIPTED_MODEL_CONFIG, SCRIPTED_MODEL_ID, SCRIPTED_MODEL_PROFILE } from "../src/mock-model.js";
 import { connect, signUp, stubFor, waitFor, WorkpieceRecorder } from "../src/rpc-client.js";
 
 let harness: Harness | undefined;
@@ -59,7 +60,7 @@ async function authoringWorkspace(username: string) {
     return headOf(gadgetId, head);
   };
   return {
-    workspace, gadget, commit, headOf,
+    owner, workspace, gadget, commit, headOf, workpieceCount: () => workpieces.summaries.size,
     [Symbol.dispose]() {
       for (const stub of [subscription, subscriber, workspace, owner, api]) stub[Symbol.dispose]();
     },
@@ -149,4 +150,43 @@ it("publishes qualified revisions, refuses stale or incomplete proof, and rebind
   const head = await env.headOf(rebound);
   expect(await ws.readFilesAtCommit(head, ["SKILL.md"]))
       .toEqual([["SKILL.md", { kind: "text", text: "Route bugs.\n" }]]);
+});
+
+it("refuses an incompatible model before creating anything, and binds a compatible one", async () => {
+  using env = await authoringWorkspace("artifactbinder");
+  const ws: RpcStub<Overseer> = env.workspace;
+  await env.owner.addModel(SCRIPTED_MODEL_PROFILE, SCRIPTED_MODEL_CONFIG);
+  const agent = await env.gadget("Agent", "AGENT");
+  await env.commit(agent, "persona.md", undefined, "Be brief.\n");
+  {
+    using model = await ws.newAiModelGatekeeper(SCRIPTED_MODEL_ID);
+    using gadget = await ws.getGadget(agent);
+    await gadget.bind("MODEL", await model.getId());
+  }
+  const exactOther = { type: "exact" as const, provider: "openai", modelName: "gpt" };
+  const other = await ws.validateArtifact(agent, "agent", [], exactOther);
+  expect(other.manifest.bindings).toEqual({ MODEL: { type: "aiModel" } });
+  expect(await ws.publishArtifactRevision(agent, "agent", "brief", 1, [], exactOther, qualified(other.digest)))
+      .toMatchObject({ ok: true });
+  const exactOwn = { type: "exact" as const, provider: SCRIPTED_MODEL_CONFIG.provider, modelName: SCRIPTED_MODEL_ID };
+  const own = await ws.validateArtifact(agent, "agent", [], exactOwn);
+  expect(await ws.publishArtifactRevision(agent, "agent", "brief", 2, [], exactOwn, qualified(own.digest)))
+      .toMatchObject({ ok: true });
+
+  const assignment = { MODEL: { type: "aiModel" as const, modelId: SCRIPTED_MODEL_ID } };
+  const before = env.workpieceCount();
+  expect(await refusalOf(ws.bindArtifactRevision("agent/brief@1", assignment))).toBe("incompatible_requirement");
+  expect(await refusalOf(ws.bindArtifactRevision("agent/brief@1", { MODEL: { type: "agentSpawner", modelId: null } })))
+      .toBe("incompatible_requirement");
+  const rebound = await ws.bindArtifactRevision("agent/brief@2", assignment);
+  // The successful bind adds exactly one gadget; the refusals added none.
+  await waitFor("the rebound gadget", async () => env.workpieceCount() === before + 1 || null);
+  using gadget = await ws.getGadget(rebound);
+  const bindings = await gadget.listBindings();
+  expect(bindings.map(binding => binding.name)).toEqual(["MODEL"]);
+  // Workpiece ids are allocated sequentially: the source's model connection, then the rebound
+  // gadget, then its connection. A refusal that had created anything would leave a gap.
+  using source = await ws.getGadget(agent);
+  const [sourceModel] = await source.listBindings();
+  expect([rebound, bindings[0]!.target]).toEqual([sourceModel!.target + 1, sourceModel!.target + 2]);
 });
