@@ -81,8 +81,10 @@ export const capabilitySources: Record<CapabilityName, string | null> = {
   HARNESS_HG_ENABLED: null,
   // The InferLab sign-in and per-person connect flows; `features.inferlabLogin` is its v1 spelling.
   INFEROPS_AUTH: "custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts",
-  PUBLISH_CLOUDFLAREOS_WIDGET: null,
-  PUBLISH_CLOUDFLAREOS_APP: null,
+  // The backend's publication records (#68): off refuses every publication operation and suspends
+  // the publications of that kind; an admin approves each one, and nothing publishes by flag alone.
+  PUBLISH_CLOUDFLAREOS_WIDGET: "packages/workshop-backend/src/publication.ts",
+  PUBLISH_CLOUDFLAREOS_APP: "packages/workshop-backend/src/publication.ts",
   AGENT_DEPLOYMENTS: null,
   // The gatekeeper's coding-dispatch switch and repository allowlist (#69, #70): off refuses new
   // dispatch bindings and every call on existing ones (DISABLED).

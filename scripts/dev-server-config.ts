@@ -234,6 +234,29 @@ export function resolveInferOpsEnabled(options: {
   return capability ? "true" : "false";
 }
 
+/** The backend's publication switches (`PUBLISH_CLOUDFLAREOS_WIDGET`, `PUBLISH_CLOUDFLAREOS_APP`). */
+export type PublicationFlagName = "PUBLISH_CLOUDFLAREOS_WIDGET" | "PUBLISH_CLOUDFLAREOS_APP";
+
+/**
+ * A publication flag the Workshop backend gets, which it checks on every publication operation and
+ * reach check (`packages/workshop-backend/src/publication.ts`). Always set here. A version 2
+ * wrapper switches it with the capability, whatever the shell says; otherwise it is off unless the
+ * shell sets it to "true". Any other shell value fails startup. On is availability only: it
+ * publishes nothing, and an admin still approves each publication.
+ */
+export function resolvePublicationFlag(name: PublicationFlagName, options: {
+  /** The wrapper's version 2 capability, or null for a version 1 wrapper or no wrapper. */
+  capability: boolean | null;
+  /** The shell's value, used only without a version 2 wrapper. */
+  shell: string | undefined;
+}): "true" | "false" {
+  const { capability, shell } = options;
+  if (capability === null && shell !== undefined && shell !== "true" && shell !== "false") {
+    throw new Error(`${name} must be "true" or "false"`);
+  }
+  return (capability ?? shell === "true") ? "true" : "false";
+}
+
 /**
  * The `CODING_WORKBENCH_ENABLED` var the InferOps gatekeeper gets, which it checks on every
  * coding-dispatch binding and call (`coding-workbench.ts`). Always set here.

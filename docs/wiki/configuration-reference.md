@@ -1,6 +1,6 @@
 ---
 title: Configuration ownership and required settings
-updated: 2026-10-03
+updated: 2026-10-05
 ---
 
 # Configuration ownership and required settings
@@ -17,7 +17,8 @@ A starting settings inventory for the setup skills, grounded in current code.
 ## Selected customer settings
 
 The settings a private local customer needs (#19's MVP scope): identity, the tenant, workspace,
-project and Wiki references, host and runtime, local custom components and the coding adapter. This
+project and Wiki references, host and runtime, local custom components, the coding adapter and the
+publication switches (#68). This
 section is generated from `scripts/consumer/settings.ts`, which `pnpm doctor` in a wrapper also runs
 as its `settings` check. Doctor reports a secret by presence only and never prints a value. Run
 `node scripts/consumer/settings.ts` after changing the table; the scripts test suite runs the
@@ -72,6 +73,14 @@ as its `settings` check. Doctor reports a secret by presence only and never prin
 | `INFEROPS_CLI` | reference | developer | none | `CODING_WORKBENCH_ENABLED` is on. | local | Shell; for the local runner lifecycle (`pnpm local runner`, factory-level/inferos#72), which this revision does not ship yet | Absolute path of the pinned InferOps CLI that runs `inferops runner codex --result patch`. |
 | `INFEROPS_API_KEY` | secret | developer | none | `CODING_WORKBENCH_ENABLED` is on. | local | Shell of the InferOps runner (`inferops runner codex`) | The runner's InferOps credential for claiming and finishing runs. The runner never passes it to Codex. |
 | `codex login` | secret | developer | none | `CODING_WORKBENCH_ENABLED` is on. | local | `CODEX_HOME`, through `codex login status` in the InferOps runner preflight (factory-level/inferos#71) | Codex signed in with ChatGPT. API-key login is refused; there is no fallback. |
+
+### Publication
+
+| Setting | Kind | Owner | Default | Required when | Source | Read from | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `PUBLISH_CLOUDFLAREOS_WIDGET` | value | deployer | off | Optional. | local | `inferos.config.json` `capabilities.PUBLISH_CLOUDFLAREOS_WIDGET` (version 2), else the shell; the backend's `publication.ts` | Lets widget-kind blueprints be published (`deployment` or `export`) once a deployment admin approves each one. Off refuses every publication operation and suspends widget publications; on again needs each one re-confirmed. Never publishes by itself. |
+| `PUBLISH_CLOUDFLAREOS_APP` | value | deployer | off | Optional. | local | `inferos.config.json` `capabilities.PUBLISH_CLOUDFLAREOS_APP` (version 2), else the shell; the backend's `publication.ts` | The same switch for app- and workflow-kind blueprints. |
+| `PUBLICATION_SELF_APPROVAL` | value | deployer | off | Optional. | both | Shell, then the backend's `auth/config.ts` | `true` lets a deployment admin approve a publication they requested; the record says so. Authorization config: env only, never an admin setting. |
 
 <!-- settings:end -->
 

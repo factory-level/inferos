@@ -24,6 +24,7 @@ import { resolveBinEntry } from "./bin-entry.ts";
 import {
   INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, gatekeeperBaseUrl, gatekeeperBinding, getDevRouterAssets,
   getDevRouterConfig, getDevServerConfig, getInferLabLoginVars, inferLabLoginStartupError, resolveCodingWorkbenchEnabled, resolveInferOpsEnabled,
+  resolvePublicationFlag,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
@@ -163,6 +164,13 @@ const codingWorkbenchEnabled = resolveCodingWorkbenchEnabled({
   inferOpsEnabled,
   shell: process.env.CODING_WORKBENCH_ENABLED,
 });
+// Publication (#68): a version 2 wrapper's PUBLISH_CLOUDFLAREOS_* capabilities switch it; otherwise
+// off unless the shell turns it on. The backend enforces the resulting vars (publication.ts).
+const publicationFlags = Object.fromEntries((["PUBLISH_CLOUDFLAREOS_WIDGET", "PUBLISH_CLOUDFLAREOS_APP"] as const)
+  .map(name => [name, resolvePublicationFlag(name, {
+    capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities[name] : null,
+    shell: process.env[name],
+  })]));
 const codingWorkbenchRepos = consumerConfig?.schemaVersion === 2
   ? codingRepoIds(consumerConfig) : process.env.CODING_WORKBENCH_REPOS ?? "";
 const gatekeepers = [
@@ -640,6 +648,7 @@ for (const gk of gatekeepers) {
   config.vars.COMPOSABLE_VIEWS = canvasFeatures.composableViews ? "true" : "false";
   config.vars.DURABLE_VIEWS = canvasFeatures.durableViews ? "true" : "false";
   if (canvasConfig) config.vars.CANVAS_CATALOG = JSON.stringify(canvasConfig.catalog);
+  Object.assign(config.vars, publicationFlags);
 
   // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
   // environment, so you can run e.g.
@@ -647,6 +656,8 @@ for (const gk of gatekeepers) {
   // without editing any config files.
   const OPTIONAL_FEATURE_VARS = [
     "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
+    // Whether an admin may approve their own publication request (auth config, never AdminConfig).
+    "PUBLICATION_SELF_APPROVAL",
     "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
     // Platform AI Gateway — makes the cross-provider model catalog available. CF_AI_GATEWAY
     // always needs CF_AI_GATEWAY_ACCOUNT_ID plus one transport: the WORKERS_AI binding
