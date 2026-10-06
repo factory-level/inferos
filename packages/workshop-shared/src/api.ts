@@ -158,14 +158,18 @@ export interface PublicApi extends RpcTarget {
       : Promise<string | null>;
 
   /**
-   * Fetch blueprint metadata by ID. Returns null if the blueprint doesn't exist. No
-   * authentication required (knowing the ID is sufficient, since a blueprint is "just data").
+   * Fetch blueprint metadata by ID, without authentication. Returns null unless the blueprint is
+   * reachable outside the deployment: one the deployment installed itself (a bundled blueprint),
+   * or one whose current version has an active `export` publication (see `PublicationRecord`).
+   * An unpublished blueprint reads as missing. Signed-in people use
+   * `AuthenticatedApi.getBlueprintInfo`.
    */
   getBlueprint(id: string): Promise<BlueprintPublicInfo | null>;
 
   /**
    * Download a blueprint as a `.gadget` archive stream. The archive contains only
-   * BlueprintMetadata plus the current blueprint code snapshot, not the full KV record.
+   * BlueprintMetadata plus the current blueprint code snapshot, not the full KV record. Refused
+   * with `PUBLICATION_ERROR_CODES.notPublished` under the same rule as `getBlueprint`.
    */
   downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>>;
 }
@@ -567,6 +571,49 @@ export const createOperateSessionError = operateSessionErrors.create;
 
 /** Reads the machine-readable code from an `OperateSession.dispatch()` failure. */
 export const getOperateSessionErrorCode = operateSessionErrors.getCode;
+
+/** Machine-readable codes for expected publication failures (see `PublicationRecord`). */
+export const PUBLICATION_ERROR_CODES = {
+  /** `PUBLISH_CLOUDFLAREOS_WIDGET` is off, so nothing of the widget kind can be published. */
+  widgetFlagOff: "PUBLICATION_WIDGET_FLAG_OFF",
+  /** `PUBLISH_CLOUDFLAREOS_APP` is off, so nothing of the app or workflow kind can be published. */
+  appFlagOff: "PUBLICATION_APP_FLAG_OFF",
+  /** The blueprint has no active publication that reaches the caller. */
+  notPublished: "PUBLICATION_NOT_PUBLISHED",
+  /** The approver requested the publication, and `PUBLICATION_SELF_APPROVAL` is off. */
+  selfApprovalOff: "PUBLICATION_SELF_APPROVAL_OFF",
+  /** The blueprint has a newer version than the one the record pins; request it again. */
+  artifactChanged: "PUBLICATION_ARTIFACT_CHANGED",
+  /** No publication record has that id, or none the caller may act on. */
+  recordNotFound: "PUBLICATION_RECORD_NOT_FOUND",
+  /** The record is not in a state that allows the operation (for example, already withdrawn). */
+  invalidState: "PUBLICATION_INVALID_STATE",
+} as const;
+
+/** An expected publication failure code. */
+export type PublicationErrorCode =
+    typeof PUBLICATION_ERROR_CODES[keyof typeof PUBLICATION_ERROR_CODES];
+
+const publicationErrors = codedErrorFamily<PublicationErrorCode>({
+  [PUBLICATION_ERROR_CODES.widgetFlagOff]:
+      "Publishing widgets is turned off on this deployment (PUBLISH_CLOUDFLAREOS_WIDGET).",
+  [PUBLICATION_ERROR_CODES.appFlagOff]:
+      "Publishing apps and workflows is turned off on this deployment (PUBLISH_CLOUDFLAREOS_APP).",
+  [PUBLICATION_ERROR_CODES.notPublished]: "This blueprint is not published.",
+  [PUBLICATION_ERROR_CODES.selfApprovalOff]:
+      "You requested this publication, so another administrator must approve it " +
+      "(PUBLICATION_SELF_APPROVAL is off).",
+  [PUBLICATION_ERROR_CODES.artifactChanged]:
+      "The blueprint has changed since this publication was requested. Request it again.",
+  [PUBLICATION_ERROR_CODES.recordNotFound]: "Publication not found.",
+  [PUBLICATION_ERROR_CODES.invalidState]: "That can't be done to this publication in its current state.",
+});
+
+/** Creates an expected publication failure with a machine-readable code. */
+export const createPublicationError = publicationErrors.create;
+
+/** Reads the machine-readable code from an expected publication failure. */
+export const getPublicationErrorCode = publicationErrors.getCode;
 
 /**
  * One user as listed in the deployment-wide user directory (see
@@ -986,6 +1033,35 @@ export interface AuthenticatedApi extends RpcTarget {
   importBlueprint(archive: ReadableStream<Uint8Array>): Promise<string>;
 
   /**
+   * Blueprint metadata as a signed-in person of this deployment reads it: any blueprint whose id
+   * they hold, published or not, since `newGadgetFromBlueprint` installs by id inside the
+   * deployment. Returns null if it doesn't exist. Reaching beyond the deployment is
+   * `PublicApi.getBlueprint`'s rule, not this one.
+   */
+  getBlueprintInfo(blueprintId: string): Promise<BlueprintPublicInfo | null>;
+
+  // --- Publication (docs/design/feature-capabilities.md, "Publication destinations") ---
+
+  /**
+   * Ask a deployment admin to publish the current version of one of the caller's own published
+   * blueprints to `destination`. Appends a requested record pinning that version, and returns it.
+   * Refused with `PUBLICATION_ERROR_CODES.widgetFlagOff` / `appFlagOff` while the version's kind
+   * has its flag off. Nothing becomes reachable until an admin approves it.
+   */
+  requestPublication(blueprintId: string, destination: PublicationDestination)
+      : Promise<PublicationRecord>;
+
+  /** The caller's own publication records, requested, active, suspended and withdrawn, newest first. */
+  listOwnPublications(): Promise<PublicationRecord[]>;
+
+  /**
+   * Withdraw one of the caller's own publication records, or cancel their request. Stops new reach
+   * at once; it cannot uninstall copies or recall downloaded archives. Withdrawing a record that is
+   * already withdrawn changes nothing. Refused while the kind's flag is off.
+   */
+  withdrawPublication(recordId: string, reason: string): Promise<PublicationRecord>;
+
+  /**
    * Re-authenticate a connected account whose credentials have expired (or may be about to
    * expire). Returns a flow to open as a disowned popup (as for connectAccount()). Once the OAuth
    * flow completes and the popup's /connect/handoff page redeems the handoff via
@@ -1351,8 +1427,38 @@ export interface AdminApi {
    */
   isBlueprintFeatured(blueprintId: string): Promise<boolean | null>;
 
-  /** Mark or unmark a blueprint as featured on the deployment. */
+  /**
+   * Mark or unmark a blueprint as featured on the deployment. Featuring is refused with
+   * `PUBLICATION_ERROR_CODES.notPublished` unless the blueprint's current version has an active
+   * `deployment` publication; unfeaturing is always allowed.
+   */
   setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void>;
+
+  // --- Publication review ---
+
+  /** Every publication record on the deployment, newest first, as mirrored for review. */
+  listPublications(): Promise<PublicationRecord[]>;
+
+  /**
+   * Approve a requested publication, making it active. Refused while the kind's flag is off, when
+   * the blueprint has moved past the pinned version (`artifactChanged`), and when the approver
+   * requested it themselves unless `PUBLICATION_SELF_APPROVAL` is on (the record then says
+   * `selfApproved`). Approving replaces, by withdrawing, the blueprint's earlier active record for
+   * the same destination. A `deployment` approval also features the blueprint.
+   */
+  approvePublication(recordId: string): Promise<PublicationRecord>;
+
+  /**
+   * Re-confirm an approved record that its flag suspended (status `unconfirmed`), so it reaches
+   * its audience again. The same checks as `approvePublication` apply.
+   */
+  confirmPublication(recordId: string): Promise<PublicationRecord>;
+
+  /**
+   * Withdraw a publication, or refuse a request. Stops new reach at once; it cannot uninstall
+   * copies or recall downloaded archives. Refused while the kind's flag is off.
+   */
+  withdrawPublication(recordId: string, reason: string): Promise<PublicationRecord>;
 
   // --- Standard output formats ---
   //
@@ -1428,6 +1534,14 @@ export type ServerConfig = {
      * Absent on older deployments, which offer every kind and nothing else.
      */
     catalog?: CanvasCatalog;
+  };
+  /**
+   * Which publication flags are on (env-driven, never admin-configured), and whether an admin may
+   * approve their own request. Absent on older deployments, which means every flag is off.
+   */
+  publication?: {
+    flags: Record<PublicationFlag, boolean>;
+    selfApproval: boolean;
   };
   /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
   defaultTheme?: DefaultThemeMode;
@@ -4846,6 +4960,77 @@ export type BlueprintPublicInfo = {
 
   /** If present, browser-loadable URL for the public screenshot. */
   screenshotUrl?: string;
+};
+
+/**
+ * Where a publication makes an artifact reachable: `deployment` lists it for this deployment's
+ * signed-in people (the featured listing), `export` lets anyone holding the link read it and
+ * download its `.gadget` archive.
+ */
+export type PublicationDestination = "deployment" | "export";
+
+/** Every `PublicationDestination`. */
+export const PUBLICATION_DESTINATIONS: readonly PublicationDestination[] = ["deployment", "export"];
+
+/** The deployer's env switches for publication, by the workspace kind they cover. Off unless "true". */
+export const PUBLICATION_FLAGS = {
+  widget: "PUBLISH_CLOUDFLAREOS_WIDGET",
+  app: "PUBLISH_CLOUDFLAREOS_APP",
+} as const;
+
+/** One of `PUBLICATION_FLAGS`. */
+export type PublicationFlag = typeof PUBLICATION_FLAGS[keyof typeof PUBLICATION_FLAGS];
+
+/** The flag covering a kind: the widget flag for widgets, the app flag for apps and workflows. */
+export function publicationFlagFor(kind: WorkspaceKind): PublicationFlag {
+  return kind === "widget" ? PUBLICATION_FLAGS.widget : PUBLICATION_FLAGS.app;
+}
+
+/** Exactly what a publication sends out: one pinned blueprint version. */
+export type PublicationArtifact = {
+  blueprintId: string;
+  version: number;
+  /** `sha256:<hex>` of the version's stored code snapshot, when it could be read. */
+  digest?: string;
+  /** The kind the version was published as, which picks its flag. */
+  kind: WorkspaceKind;
+  /** The blueprint's title when the publication was requested, as the reviewer saw it. */
+  title: string;
+};
+
+/**
+ * Where a publication record stands. `requested`: waiting for an admin. `active`: reaches its
+ * audience while the blueprint stays at the pinned version. `suspended`: approved, but its flag is
+ * off. `unconfirmed`: its flag was off and is on again, so an admin must re-confirm it.
+ * `withdrawn`: withdrawn or refused; final.
+ */
+export type PublicationStatus = "requested" | "active" | "suspended" | "unconfirmed" | "withdrawn";
+
+/**
+ * One publication: what was published, where, to whom, by and for whom. Append-only: each field is
+ * written once (the approval, each re-confirmation, the withdrawal), and a record is never deleted.
+ * People are identified by user id (username or email).
+ */
+export type PublicationRecord = {
+  id: string;
+  artifact: PublicationArtifact;
+  destination: PublicationDestination;
+  /** What the destination reaches, in the words the reviewer saw. */
+  audience: string;
+  publishedBy: string;
+  requestedAt: Date;
+  approvedBy?: string;
+  /** Set when the approver was the requester, which only `PUBLICATION_SELF_APPROVAL` permits. */
+  selfApproved?: true;
+  /** When the approval took effect. */
+  at?: Date;
+  /** Re-confirmations after the flag was turned off and on again, oldest first. */
+  confirmations?: { by: string; at: Date; selfApproved?: true }[];
+  withdrawnBy?: string;
+  withdrawnAt?: Date;
+  reason?: string;
+  /** Derived when the record is read; never stored. */
+  status: PublicationStatus;
 };
 
 /** Gadget-side summary (returned by Overseer.listBlueprints). */

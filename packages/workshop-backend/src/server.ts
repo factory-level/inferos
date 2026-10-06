@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch } from '@gadgets/workshop-shared/operate-console';
 import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -39,6 +39,7 @@ import { isOpenAiPluginEnabled } from '@gadgets/assistant-plugin-openai/protocol
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import { checkedReason, isBundledBlueprint, isPublishedAt, readPublicationSnapshot } from "./publication.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -551,6 +552,24 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.deleteOwnedBlueprint(blueprintId);
   }
 
+  async getBlueprintInfo(blueprintId: string): Promise<BlueprintPublicInfo | null> {
+    let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
+    return kvRecord ? publicBlueprintInfo(blueprintId, kvRecord.metadata) : null;
+  }
+
+  requestPublication(blueprintId: string, destination: PublicationDestination)
+      : Promise<PublicationRecord> {
+    return this.#user.requestPublication(blueprintId, destination);
+  }
+
+  listOwnPublications(): Promise<PublicationRecord[]> {
+    return retryOnDoReset(() => this.#user.listPublications());
+  }
+
+  async withdrawPublication(recordId: string, reason: string): Promise<PublicationRecord> {
+    return this.#user.withdrawOwnPublication(recordId, checkedReason(reason));
+  }
+
   // --- Gatekeeper management apps ---
 
   // The management apps available to the current user: their connected accounts that declare a
@@ -929,16 +948,28 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     return `${username}:${token}`;
   }
 
+  // Reaching beyond the deployment takes a bundled blueprint or an active `export` publication of
+  // the current version (see publication.ts). Anything else reads as missing.
+  async #readExported(id: string): Promise<BlueprintKvRecord | null> {
+    let [kvRecord, publications] =
+        await Promise.all([readBlueprintKvRecord(this.env, id), readPublicationSnapshot(this.env)]);
+    if (!kvRecord || isBundledBlueprint(id) || isPublishedAt(publications.records, this.env,
+        publications.offSeenAt, id, kvRecord.metadata.version, "export")) {
+      return kvRecord;
+    }
+    return null;
+  }
+
   async getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
-    let kvRecord = await readBlueprintKvRecord(this.env, id);
+    let kvRecord = await this.#readExported(id);
     if (!kvRecord) return null;
 
     return publicBlueprintInfo(id, kvRecord.metadata);
   }
 
   async downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>> {
-    let kvRecord = await readBlueprintKvRecord(this.env, id);
-    if (!kvRecord) throw new Error("Blueprint not found.");
+    let kvRecord = await this.#readExported(id);
+    if (!kvRecord) throw createPublicationError(PUBLICATION_ERROR_CODES.notPublished);
 
     let r2Object = await this.env.BLUEPRINT_CONTENT.get(`${id}/${kvRecord.metadata.version}`);
     if (!r2Object) throw new Error("Blueprint content not found in R2.");

@@ -84,6 +84,13 @@ declare global {
       // on to avoid locking everyone out).
       DISABLE_PASSWORD_AUTH?: string;
 
+      // Publication (publication.ts): "true" lets widgets, or apps and workflows, be published
+      // after an admin approves. Off by default; turning one off suspends its publications.
+      PUBLISH_CLOUDFLAREOS_WIDGET?: string;
+      PUBLISH_CLOUDFLAREOS_APP?: string;
+      // "true" lets an admin approve their own publication request (auth/config.ts). Off by default.
+      PUBLICATION_SELF_APPROVAL?: string;
+
       // Enables the Cloudflare free-tier limits + top-up flow when set to "true".
       ENABLE_CLOUDFLARE_LIMITS?: string;
 

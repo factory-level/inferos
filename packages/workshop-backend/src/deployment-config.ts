@@ -2,14 +2,15 @@
 // AI Gateway billing (ai-gateway-billing/), and the admin-configured branding (admin-config.ts).
 // Contains no secrets.
 
-import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
+import { AuthVendorInfo, PUBLICATION_FLAGS, ServerConfig } from "@gadgets/workshop-shared/api";
 import { createWorkshopLogger } from "./observability";
-import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
+import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled, isPublicationSelfApprovalAllowed } from "./auth/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
 import { siteLogoImage } from "./site-logo.js";
 import { readCanvasCatalog } from "./canvas-catalog";
+import { isPublicationFlagOn } from "./publication.js";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
@@ -53,6 +54,13 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
       composableViews: env.COMPOSABLE_VIEWS === "true",
       durableViews: env.COMPOSABLE_VIEWS === "true" && env.DURABLE_VIEWS === "true",
       catalog: readCanvasCatalog(env),
+    },
+    publication: {
+      flags: {
+        [PUBLICATION_FLAGS.widget]: isPublicationFlagOn(env, PUBLICATION_FLAGS.widget),
+        [PUBLICATION_FLAGS.app]: isPublicationFlagOn(env, PUBLICATION_FLAGS.app),
+      },
+      selfApproval: isPublicationSelfApprovalAllowed(env),
     },
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),

@@ -4,7 +4,8 @@ import type { Overseer, TreeNode, WorkpieceId } from "@gadgets/workshop-shared/a
 import { diffFiles, type CodeContent } from "@gadgets/workshop-shared/code-change";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import {
-  startTestGatekeeperHarness, TEST_VENDOR_ID, testActionState, type Harness,
+  ADMIN_USERNAME, startHarness, TEST_GATEKEEPER_BINDING, TEST_GATEKEEPER_DIR, TEST_VENDOR_ID,
+  testActionState, type Harness,
 } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
@@ -17,7 +18,14 @@ const network = new NetworkInterceptor();
 
 beforeAll(async () => {
   network.install();
-  harness = await startTestGatekeeperHarness({ enableGadgetExecution: true });
+  harness = await startHarness({
+    gatekeepers: [{ binding: TEST_GATEKEEPER_BINDING, dir: TEST_GATEKEEPER_DIR }],
+    enableGadgetExecution: true,
+    // An archive leaves the deployment only through an approved `export` publication.
+    patchWorkshop(config) {
+      config.vars = { ...config.vars, PUBLISH_CLOUDFLAREOS_APP: "true" };
+    },
+  });
 });
 
 afterAll(async () => {
@@ -205,7 +213,7 @@ it.concurrent("republishing a blueprint changes future installs, not existing on
 
   const blueprint = await app.createBlueprint("Republished", "Versioned starter");
   const { version } = (await waitFor("the published blueprint", () =>
-    publicApi.getBlueprint(blueprint.id))).metadata;
+    authenticated.getBlueprintInfo(blueprint.id))).metadata;
 
   async function install() {
     const workspace = await authenticated.newGadgetFromBlueprint(blueprint.id, {});
@@ -215,14 +223,14 @@ it.concurrent("republishing a blueprint changes future installs, not existing on
   }
 
   await commitText(source, workpieces, gadgetId, v1Head, "app.txt", "v1\n", "v2\n");
-  expect((await publicApi.getBlueprint(blueprint.id))?.metadata.version).toBe(version);
+  expect((await authenticated.getBlueprintInfo(blueprint.id))?.metadata.version).toBe(version);
   const copyA = await install();
   expect(await committedText(copyA.workspace, copyA.gadgetId, "app.txt"))
       .toEqual({ kind: "text", text: "v1\n" });
 
   await source.updateBlueprint(blueprint.id, { updateCode: true });
   await waitFor("the republished blueprint version", async () =>
-    (await publicApi.getBlueprint(blueprint.id))?.metadata.version === version + 1 || null);
+    (await authenticated.getBlueprintInfo(blueprint.id))?.metadata.version === version + 1 || null);
 
   const copyB = await install();
   expect(await committedText(copyB.workspace, copyB.gadgetId, "app.txt"))
@@ -281,11 +289,20 @@ it.concurrent("a blueprint archive keeps DATA's annotation, and installs bind th
   const blueprint = await sourceGadget.createBlueprint(
       "Bound", "Blueprint with a DATA binding");
 
+  await waitFor("the blueprint in its owner's list", async () =>
+    (await publisherApi.listOwnBlueprints()).some(entry => entry.id === blueprint.id) || null);
+  const exported = await publisherApi.requestPublication(blueprint.id, "export");
+  using adminPublic = connect(requireHarness().url);
+  using adminUser = await signUp(adminPublic, ADMIN_USERNAME);
+  using admin = await adminUser.getAdminApi();
+  if (!admin) throw new Error("The deployment admin API was unavailable");
+  await admin.approvePublication(exported.id);
+
   using installerPublic = connect(requireHarness().url);
   using installerApi = await signUp(installerPublic, installer);
   const importedId = await installerApi.importBlueprint(
       await publisherPublic.downloadBlueprint(blueprint.id));
-  expect((await installerPublic.getBlueprint(importedId))?.metadata.bindings).toEqual({
+  expect((await installerApi.getBlueprintInfo(importedId))?.metadata.bindings).toEqual({
     DATA: {
       title: "Source data",
       description: "Connect the source test thing.",

@@ -35,6 +35,15 @@ export function isPasswordAuthEnabled(env: Cloudflare.Env): boolean {
 }
 
 /**
+ * Whether a deployment admin may approve a publication they requested themselves. Off unless
+ * PUBLICATION_SELF_APPROVAL is "true". Authorization config, so it is env-driven like the rest of
+ * this file and never part of AdminConfig.
+ */
+export function isPublicationSelfApprovalAllowed(env: Cloudflare.Env): boolean {
+  return env.PUBLICATION_SELF_APPROVAL === "true";
+}
+
+/**
  * Checks that the sign-in allowlist can be honoured: every vendor in AUTH_GATEKEEPERS must be bound
  * (`GATEKEEPER_<NAME>`) and must advertise `providesAuth`. A listed vendor that is not configured
  * for sign-in (for example the InferOps gatekeeper without its InferLab origin) would otherwise

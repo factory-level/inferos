@@ -43,6 +43,9 @@ const COUNTER_UI = `document.body.textContent = "Total: " + await gadget.total()
 
 let harness: Harness;
 let publicApi: RpcStub<PublicApi>;
+// Reads blueprints the way any signed-in person does: by id, published or not (see
+// AuthenticatedApi.getBlueprintInfo). PublicApi.getBlueprint now serves published ones only.
+let reader: RpcStub<AuthenticatedApi>;
 const network = new NetworkInterceptor();
 
 beforeAll(async () => {
@@ -55,10 +58,12 @@ beforeAll(async () => {
     },
   });
   publicApi = connect(harness.url);
+  reader = await signUp(publicApi, nextUsernames("reader")[0]!);
 });
 
 afterAll(async () => {
   try {
+    reader?.[Symbol.dispose]();
     publicApi?.[Symbol.dispose]();
     await harness?.server.close();
     expect(network.getUnmockedCalls()).toEqual([]);
@@ -110,7 +115,7 @@ const DATA_CONTRACT = 1;
 async function publish(gadget: Awaited<ReturnType<typeof build>>["gadget"], title: string) {
   const blueprint = await gadget.createBlueprint(title, `${title} for Operate`, undefined,
       { dataContract: DATA_CONTRACT });
-  await waitFor("the published blueprint", () => publicApi.getBlueprint(blueprint.id));
+  await waitFor("the published blueprint", () => reader.getBlueprintInfo(blueprint.id));
   return blueprint.id;
 }
 
@@ -118,7 +123,7 @@ async function publish(gadget: Awaited<ReturnType<typeof build>>["gadget"], titl
 async function republish(built: Awaited<ReturnType<typeof build>>, blueprintId: string, version: number) {
   await built.workspace.updateBlueprint(blueprintId, { updateCode: true, dataContract: DATA_CONTRACT });
   await waitFor(`version ${version} of the blueprint`, async () =>
-    (await publicApi.getBlueprint(blueprintId))?.metadata.version === version || null);
+    (await reader.getBlueprintInfo(blueprintId))?.metadata.version === version || null);
 }
 
 /** Installs a blueprint as the operator's own workspace. */
@@ -376,7 +381,7 @@ describe.each<WorkspaceKind>(["app", "widget", "workflow"])("a published %s", ki
     using operator = await signUp(publicApi, operatorName);
     const built = await build(author, kind, filesOf(kind, "v1"));
     const blueprintId = await publish(built.gadget, `Pinned ${kind}`);
-    expect((await publicApi.getBlueprint(blueprintId))?.metadata.kind).toBe(kind);
+    expect((await reader.getBlueprintInfo(blueprintId))?.metadata.kind).toBe(kind);
 
     // The install carries the kind it was built as, and records what it runs.
     const live = await install(operator, blueprintId);
@@ -435,7 +440,7 @@ describe("an install's upgrade", () => {
     await built.workspace.setKind("app");
     await built.commit({ "version.txt": "v2" });
     await republish(built, blueprintId, 2);
-    expect((await publicApi.getBlueprint(blueprintId))?.metadata.kind).toBe("app");
+    expect((await reader.getBlueprintInfo(blueprintId))?.metadata.kind).toBe("app");
 
     await expect(installed.workspace.upgradeInstall(2)).rejects.toThrow(/cannot change/);
     expect(await installed.workspace.getMetadata())
@@ -512,7 +517,7 @@ describe("an install's bindings", () => {
     await bindThing(built.workspace, built.gadget, "EXTRA", authorAccount.id, "growing-extra");
     await built.commit({ "version.txt": "v2" });
     await republish(built, blueprintId, 2);
-    expect(Object.keys((await publicApi.getBlueprint(blueprintId))!.metadata.bindings).toSorted())
+    expect(Object.keys((await reader.getBlueprintInfo(blueprintId))!.metadata.bindings).toSorted())
       .toEqual(["DATA", "EXTRA"]);
 
     using operator = await user("versionbindoperator");
