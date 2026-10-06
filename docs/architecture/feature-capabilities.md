@@ -7,7 +7,7 @@ covers:
   - custom-gatekeepers/gatekeeper-inferops/src/enablement.ts
   - custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts
   - custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts
-updated: 2026-10-03
+updated: 2026-10-05
 ---
 
 # Customer feature capabilities
@@ -52,6 +52,7 @@ A version 2 file resolves each capability from its default (off), then its profi
 
 - The [design](../design/feature-capabilities.md) still says current code accepts only the legacy flags. Since #84 the eight names are accepted in version 2; that sentence describes the state before #84.
 - The design requires each capability to be enforced at server operations, declared tools, the CLI and the UI, with a named owner, default and disable policy. Only `INFEROPS_ENABLED` has all of these recorded. `INFEROPS_AUTH` has startup and sign-in enforcement only. `CODING_WORKBENCH_ENABLED` is enforced by the gatekeeper and has a default (off), but no declared-tool, CLI or UI surface yet. None has a cloud deployment path: the release manifest sets neither `INFEROPS_ENABLED` (so cloud installs are always on) nor `CODING_WORKBENCH_ENABLED` (always off).
+- The design requires a publication operation to be denied while its flag is off. Neither publication flag has code, but the upstream blueprint paths publish anyway, whatever the flags say: `PublicApi.getBlueprint` and `downloadBlueprint` serve any blueprint's metadata and `.gadget` archive to whoever holds its id, without sign-in, and an admin can feature any gadget-backed blueprint. The [publication destinations](../design/feature-capabilities.md#publication-destinations) ([ADR 0008](../adr/0008-publication-destinations.md), accepted by the owner 2026-10-05) address this and are not implemented yet. When implemented, existing blueprint links become unpublished (no grandfathering), and self-approval needs the `PUBLICATION_SELF_APPROVAL` env setting, which does not exist in code yet.
 
 ## Open Questions
 
