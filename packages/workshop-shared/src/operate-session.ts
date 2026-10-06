@@ -3,7 +3,7 @@
 // operate agent use the same function, so every party derives the same page from the same log.
 // See docs/design/operate-mode.md ("Sessions").
 
-import type { ConsoleFullChat } from "./operate-console.js";
+import type { ConsoleFullChat, ConsoleSource } from "./operate-console.js";
 
 /** Longest workspace or screen id an operate reference may carry. */
 export const MAX_OPERATE_ID_LENGTH = 128;
@@ -85,6 +85,10 @@ export type OperateConsoleRun = {
   workspaceId: string;
   consoleId: string;
   title: string;
+  /** Whether the published console is open, or its draft as a builder's preview. */
+  source: ConsoleSource;
+  /** The revision opened: the published revision, or the draft's when previewing. */
+  revision: string;
   /** The console's full chat setting when it was opened. */
   fullChat: ConsoleFullChat;
   /** The id of the view shown from the console's menu. */
@@ -216,12 +220,13 @@ export type OperateEvent =
    */
   | { type: "approvalResolved"; approval: OperateApprovalRef; outcome: OperateApprovalOutcome }
   /**
-   * Open a console at one of its views, replacing any console already open. The presentation
-   * becomes `chat` when the console's full chat is `default` or `only`, and `canvas` otherwise.
+   * Open a console at one of its views, replacing any console already open: its published
+   * revision, or (with build access, as a preview) its draft. The presentation becomes `chat` when
+   * the console's full chat is `default` or `only`, and `canvas` otherwise.
    */
   | {
     type: "openConsole"; workspaceId: string; consoleId: string; title: string;
-    fullChat: ConsoleFullChat; viewId: string;
+    source: ConsoleSource; revision: string; fullChat: ConsoleFullChat; viewId: string;
   }
   /** Show another view of the open console. */
   | { type: "openView"; viewId: string }
@@ -358,6 +363,8 @@ function requireConsole(state: OperatePageState): OperateConsoleRun {
 }
 
 const FULL_CHAT_MODES: readonly string[] = ["off", "available", "default", "only"];
+const CONSOLE_SOURCES: readonly string[] = ["published", "draft"];
+const REVISION = /^(0|[1-9][0-9]{0,63})$/;
 
 function sameApproval(a: OperateApprovalRef, b: OperateApprovalRef): boolean {
   return a.workspaceId === b.workspaceId && a.actionId === b.actionId;
@@ -459,9 +466,15 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
       };
     }
     case "openConsole": {
-      let { workspaceId, consoleId, title, fullChat, viewId } = event;
+      let { workspaceId, consoleId, title, source, revision, fullChat, viewId } = event;
       checkIds([workspaceId, consoleId, viewId]);
       checkTitle(title);
+      if (!CONSOLE_SOURCES.includes(source)) {
+        throw new OperateEventError("A console opens as published or as a draft.");
+      }
+      if (typeof revision !== "string" || !REVISION.test(revision)) {
+        throw new OperateEventError("A console revision must be a decimal string.");
+      }
       if (!FULL_CHAT_MODES.includes(fullChat)) {
         throw new OperateEventError("A console's full chat must be off, available, default or only.");
       }
@@ -469,7 +482,7 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
           fullChat === "default" || fullChat === "only" ? "chat" : "canvas";
       return {
         ...state, presentation, board: null,
-        console: { workspaceId, consoleId, title, fullChat, viewId, screenId: null },
+        console: { workspaceId, consoleId, title, source, revision, fullChat, viewId, screenId: null },
       };
     }
     case "openView": {

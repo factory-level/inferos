@@ -102,9 +102,11 @@ async function consoleWorkspace(owner: User) {
   if (!connection) throw new Error("The owner could not connect ENG");
   const screen = await ws.createCanvas({ title: "Board", sections: [{ id: "main", title: "Main", columns: 1, widgets: [boardCard] }] });
   const hidden = await ws.createCanvas({ title: "Drafts", sections: [] });
-  const created = await ws.createConsole({
+  const draft = await ws.createConsole({
     title: "Operations lead", fullChat: "off", views: [{ id: "board", title: "Board", type: "screen", screen: screen.id }],
   });
+  // Operators see only published consoles.
+  const created = await ws.publishConsole(draft.id, draft.revision);
   const { id: workspaceId } = await ws.getMetadata();
   return { ws, workspaceId, screen, hidden, console: created };
 }

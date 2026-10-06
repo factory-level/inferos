@@ -185,7 +185,8 @@ describe("the version 3 -> 4 workpiece-type migration", () => {
     await abortAllDurableObjects();
 
     await withImpl(async impl => {
-      expect(impl.storage.version.get()).toBe(4);
+      // 4, then the chained 4 -> 5 published-consoles migration.
+      expect(impl.storage.version.get()).toBe(5);
       expect(impl.storage.gadgets.get(1)!.type).toBe("gadget");
       expect(impl.storage.gadgets.get(2)!.type).toBe("gadget");
       // Pending survives the stamp, and the unique index still resolves both names.

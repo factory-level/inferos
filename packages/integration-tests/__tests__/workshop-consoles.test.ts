@@ -41,7 +41,7 @@ it("stores consoles over the workspace's own screens, with revisions", () => wit
       { id: "board", title: "Board", type: "screen", screen: board.id },
     ],
   });
-  expect(created).toMatchObject({ title: "Operations lead", revision: "0", fullChat: "available" });
+  expect(created).toMatchObject({ title: "Operations lead", revision: "0", fullChat: "available", published: null });
   expect(await workspace.listConsoles()).toEqual([created]);
 
   const replaced = await workspace.replaceConsole(created.id, "0", { ...created, fullChat: "only" });
@@ -67,7 +67,7 @@ const consoleChanged = (caught: unknown) => {
   return true;
 };
 
-it("lets a use-role operator read consoles, and checks console navigation against the current definition", () =>
+it("lets a use-role operator use only the published revision, while a builder previews the draft", () =>
   withHarness(true, async url => {
     using api = connect(url);
     using owner = await signUp(api, "consolesbuilder");
@@ -83,9 +83,9 @@ it("lets a use-role operator read consoles, and checks console navigation agains
         { id: "board", title: "Board", type: "screen", screen: board.id },
       ],
     });
+    expect(created.published).toBeNull();
     const { id: workspaceId } = await workspace.getMetadata();
 
-    // A use-role operator lists the consoles read-only, without Build.
     using operatorApi = await signUp(api, "consolesoperator");
     if (!await workspace.addCollaborator("consolesoperator", "use")) throw new Error("Failed to share");
     // Listed for them as soon as it is shared, before they ever open it: their Operate home finds
@@ -93,30 +93,49 @@ it("lets a use-role operator read consoles, and checks console navigation agains
     expect((await operatorApi.listGadgets()).find(listed => listed.id === workspaceId))
       .toMatchObject({ role: "use", owner: expect.objectContaining({ name: expect.any(String) }) });
     using useWorkspace = await operatorApi.openGadget(workspaceId);
-    expect(await useWorkspace.listConsoles()).toEqual([created]);
+    using session = await operatorApi.getOperateSession();
+    const open = { type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
+      source: "published", revision: "0", fullChat: "available", viewId: "overview" } as const;
+
+    // An unpublished draft is invisible to the operator: not listed, its screens unreadable, and it
+    // can't be opened.
+    expect(await useWorkspace.listConsoles()).toEqual([]);
+    expect(await useWorkspace.getConsole(created.id, "published")).toBeNull();
+    expect(await useWorkspace.listCanvases()).toEqual([]);
+    expect(await useWorkspace.getCanvas(board.id)).toBeNull();
+    await expect(session.dispatch(open, 0)).rejects.toSatisfy(consoleChanged);
+
+    // Publishing makes the draft what operators use, read-only.
     const denied = /Unauthorized: this collaborator only has permission/;
+    await expect(useWorkspace.publishConsole(created.id, "0")).rejects.toThrow(denied);
+    const published = await workspace.publishConsole(created.id, "0");
+    expect(published).toMatchObject({ revision: "0", published: { revision: "0", content: { title: "Operations lead" } } });
+    const operatorView = { ...created, published: published.published };
+    expect(await useWorkspace.listConsoles()).toEqual([operatorView]);
+    expect(await useWorkspace.getConsole(created.id, "published")).toEqual(operatorView);
     await expect(useWorkspace.createConsole(created)).rejects.toThrow(denied);
     await expect(useWorkspace.replaceConsole(created.id, "0", created)).rejects.toThrow(denied);
     await expect(useWorkspace.deleteConsole(created.id, "0")).rejects.toThrow(denied);
 
-    // It reads the screens a console shows, read-only, and no other.
+    // It reads the screens the published console shows, read-only, and no other.
     expect((await useWorkspace.listCanvases()).map(screen => screen.id).toSorted())
       .toEqual([board.id, activity.id].toSorted());
     expect(await useWorkspace.getCanvas(board.id)).toEqual(board);
+    expect(await useWorkspace.getConsoleScreen(created.id, board.id, "published")).toEqual(board);
     expect(await useWorkspace.getCanvas(elsewhere.id)).toBeNull();
     await expect(useWorkspace.editCanvas(board.id, board.revision, [{ type: "rename", title: "Denied" }]))
       .rejects.toThrow(denied);
     await expect(useWorkspace.deleteCanvas(board.id, board.revision)).rejects.toThrow(denied);
 
-    using session = await operatorApi.getOperateSession();
-    const open = { type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
-      fullChat: "available", viewId: "overview" } as const;
-    // A view or full chat setting the console does not have is refused, and nothing changes.
+    // A view, full chat setting or revision the console does not have is refused, and nothing changes.
     await expect(session.dispatch({ ...open, viewId: "missing" }, 0)).rejects.toSatisfy(consoleChanged);
     await expect(session.dispatch({ ...open, fullChat: "only" }, 0)).rejects.toSatisfy(consoleChanged);
+    await expect(session.dispatch({ ...open, revision: "1" }, 0)).rejects.toSatisfy(consoleChanged);
     await expect(session.dispatch({ ...open, consoleId: "missing" }, 0)).rejects.toSatisfy(consoleChanged);
     let page = await session.dispatch(open, 0);
-    expect(page.state.console).toMatchObject({ consoleId: created.id, viewId: "overview", screenId: null });
+    expect(page.state.console).toMatchObject({
+      consoleId: created.id, source: "published", revision: "0", viewId: "overview", screenId: null,
+    });
 
     // Screens must belong to the shown view; null (back to the view) always applies.
     await expect(session.dispatch({ type: "showScreen", screenId: elsewhere.id }, page.seq)).rejects.toSatisfy(consoleChanged);
@@ -125,13 +144,44 @@ it("lets a use-role operator read consoles, and checks console navigation agains
     await expect(session.dispatch({ type: "openView", viewId: "missing" }, page.seq)).rejects.toSatisfy(consoleChanged);
     page = await session.dispatch({ type: "openView", viewId: "board" }, page.seq);
     await expect(session.dispatch({ type: "showScreen", screenId: activity.id }, page.seq)).rejects.toSatisfy(consoleChanged);
+    page = await session.dispatch({ type: "openView", viewId: "overview" }, page.seq);
 
-    // The check reads the definition as it is now, not as the session copied it in.
-    await workspace.replaceConsole(created.id, "0", { ...created, views: [created.views[1]!] });
-    await expect(session.dispatch({ type: "openView", viewId: "overview" }, page.seq)).rejects.toSatisfy(consoleChanged);
-    // A screen the console stopped showing is no longer readable to the operator.
+    // Draft edits, to the console and to a screen it shows, leave the operator's console as published.
+    const draft = await workspace.replaceConsole(created.id, "0", { ...created, views: [created.views[1]!] });
+    const renamed = await workspace.editCanvas(board.id, board.revision, [{ type: "rename", title: "Board v2" }]);
+    expect(draft).toMatchObject({ revision: "1", published: { revision: "0" } });
+    expect(await useWorkspace.listConsoles()).toEqual([operatorView]);
+    expect(await useWorkspace.getCanvas(board.id)).toEqual(board);
+    page = await session.dispatch({ type: "showScreen", screenId: activity.id }, page.seq);
+
+    // The operator can't preview the draft; the builder can, and sees the edits.
+    await expect(useWorkspace.getConsole(created.id, "draft")).rejects.toThrow(denied);
+    await expect(useWorkspace.getConsoleScreen(created.id, board.id, "draft")).rejects.toThrow(denied);
+    await expect(session.dispatch({ ...open, source: "draft", revision: "1", viewId: "board" }, page.seq))
+      .rejects.toSatisfy(consoleChanged);
+    expect(await workspace.getConsole(created.id, "draft")).toEqual(draft);
+    expect(await workspace.getConsoleScreen(created.id, board.id, "draft")).toEqual(renamed);
+    expect(await workspace.getConsoleScreen(created.id, board.id, "published")).toEqual(board);
+    using builderSession = await owner.getOperateSession();
+    let preview = await builderSession.dispatch({ ...open, source: "draft", revision: "1", viewId: "board" }, 0);
+    expect(preview.state.console).toMatchObject({ source: "draft", revision: "1", viewId: "board" });
+
+    // Publishing again: two publishes at the same revision can't both win.
+    const republished = await workspace.publishConsole(created.id, "1");
+    await expect(workspace.publishConsole(created.id, "0")).rejects.toThrow(/reload/);
+    expect(await useWorkspace.getCanvas(board.id)).toEqual(renamed);
     expect(await useWorkspace.getCanvas(activity.id)).toBeNull();
-    expect((await useWorkspace.listCanvases()).map(screen => screen.id)).toEqual([board.id]);
+    expect(await useWorkspace.listConsoles()).toEqual([{ ...draft, published: republished.published }]);
+
+    // The operator's open console moves on at its next navigation: refused once, then reopened.
+    await expect(session.dispatch({ type: "openView", viewId: "board" }, page.seq)).rejects.toSatisfy(consoleChanged);
+    page = await session.dispatch({ ...open, revision: "1", viewId: "board" }, page.seq);
+    expect(page.state.console).toMatchObject({ revision: "1", viewId: "board" });
+
+    // Deleting the console removes its published revision too.
+    await workspace.deleteConsole(created.id, "1");
+    expect(await useWorkspace.listConsoles()).toEqual([]);
+    expect(await useWorkspace.getCanvas(board.id)).toBeNull();
 
     // Someone without access to the console's workspace cannot open it.
     using strangerApi = await signUp(api, "consolesstranger");

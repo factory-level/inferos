@@ -170,13 +170,13 @@ describe("operate page state machine", () => {
 
   describe("consoles", () => {
     const openConsole = (fullChat: "off" | "available" | "default" | "only" = "available"): OperateEvent =>
-      ({ type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations lead", fullChat, viewId: "overview" });
+      ({ type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations lead", source: "published", revision: "0", fullChat, viewId: "overview" });
 
     it("opens a console at a view, drills into a screen and back, and switches views", () => {
       let state = replayOperateEvents([openConsole(), { type: "showScreen", screenId: "board" }]);
       expect(state.console).toEqual({
-        workspaceId: "ws1", consoleId: "c1", title: "Operations lead", fullChat: "available",
-        viewId: "overview", screenId: "board",
+        workspaceId: "ws1", consoleId: "c1", title: "Operations lead", source: "published", revision: "0",
+        fullChat: "available", viewId: "overview", screenId: "board",
       });
       expect(state.presentation).toBe("canvas");
 
@@ -224,6 +224,16 @@ describe("operate page state machine", () => {
       expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { ...openConsole(), viewId: "" } as OperateEvent)).toThrow(OperateEventError);
       expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
           { ...openConsole(), fullChat: "sometimes" } as unknown as OperateEvent)).toThrow(OperateEventError);
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE,
+          { ...openConsole(), source: "staged" } as unknown as OperateEvent)).toThrow(OperateEventError);
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { ...openConsole(), revision: "01" })).toThrow(OperateEventError);
+    });
+
+    it("records whether the published console or a draft preview is open, and at which revision", () => {
+      expect(applyOperateEvent(INITIAL_OPERATE_PAGE, openConsole()).console)
+        .toMatchObject({ source: "published", revision: "0" });
+      expect(applyOperateEvent(INITIAL_OPERATE_PAGE, { ...openConsole(), source: "draft", revision: "4" } as OperateEvent).console)
+        .toMatchObject({ source: "draft", revision: "4" });
     });
 
     it("applies to a page stored before consoles existed once it is filled from the initial page", () => {
@@ -240,7 +250,7 @@ describe("boards", () => {
   const ENG = { workspaceId: "session", boardRef: "inferops://acme.operations/project/board/ENG" };
   const WEB = { workspaceId: "session", boardRef: "inferops://acme.operations/project/board/WEB" };
   const openConsole: OperateEvent =
-    { type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations", fullChat: "available", viewId: "board" };
+    { type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations", source: "published", revision: "0", fullChat: "available", viewId: "board" };
 
   it("shows one board at a time, by reference, and closes it", () => {
     let state = replayOperateEvents([{ type: "openBoard", board: ENG }, { type: "openBoard", board: WEB }]);
@@ -388,7 +398,7 @@ describe("handovers", () => {
 it("returns home without losing the working set or approval context, including from a flow", () => {
   const events: OperateEvent[] = [
     { type: "open", ref: screen("a") },
-    { type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations", fullChat: "default", viewId: "a" },
+    { type: "openConsole", workspaceId: "ws1", consoleId: "c1", title: "Operations", source: "published", revision: "0", fullChat: "default", viewId: "a" },
     { type: "reviewApproval", approval: approval(7) },
     { type: "startFlow", workspaceId: "ws1", flowId: "f1", title: "Intake", steps: ["a"] },
     { type: "showHome" },
