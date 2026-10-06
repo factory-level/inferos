@@ -19,7 +19,10 @@ covers:
   - packages/integration-tests
   - scripts/preview/smoke.ts
   - scripts/preview/smoke.test.ts
-updated: 2026-10-03
+  - scripts/views
+  - packages/workshop-frontend/views.json
+  - packages/workshop-frontend/src/demo
+updated: 2026-10-05
 ---
 
 # Cloudflare-like local development
@@ -46,6 +49,8 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `packages/router` | Public routing and frontend assets/backend fallback. |
 | `packages/integration-tests` | Real Workers and RPC test harness with external network interception; optionally boots the production router as the primary Worker. |
 | `scripts/preview/smoke.ts` | Opt-in, read-only smoke check of a deployed instance's public origin (app shell, `/api` handshake, gatekeeper routes, OAuth redirect origins). |
+| `scripts/views/views.ts`, `packages/workshop-frontend/views.json` | `pnpm views`: the registry of every Workshop frontend view and subview, and the commands that list, show, locate, open and check them (see [frontend view registry and demo mode](#frontend-view-registry-and-demo-mode)). |
+| `packages/workshop-frontend/src/demo` | Demo mode: in-page fixture targets that serve the frontend's RPC with no Workers, sign-in or setup, plus per-view scenarios and the demo screen picker. |
 
 ## Data and Control Flow
 
@@ -112,6 +117,21 @@ The connection is found through the native action log rather than a file: every 
 
 `scripts/preview/smoke.ts` is the cloud half: given a deployed base URL and an optional Access service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`), it checks the app shell and SPA fallback, a `/api` WebSocket handshake (upgraded or auth-challenged, never 404 or 5xx), each gatekeeper route answering from a gatekeeper rather than the shell, and, for connect URLs passed with `--connect-url`, the provider `redirect_uri` origin. It only sends GETs and closes the handshake at once, prints a JSON report and exits 0, 1 or 2. Its checks are pure classifiers over a response, which `smoke.test.ts` drives against a local fake server under `node --test`. The [parity wiki](../wiki/local-cloud-parity.md) holds the matrix, the recorded runtime versions and the recipe.
 
+## Frontend view registry and demo mode
+
+`packages/workshop-frontend/views.json` lists every screen of the Workshop frontend as a tree of views: routes, regions, tabs, steps, modals, menus, popovers, cards, toasts, banners, states and app-wide styling. Each entry records its route, how to make it visible locally (`reach`), its source files with the primary file first, the components and styling it is built from, a stable DOM selector when the code has one, and the flags it depends on. The file is data only; `pnpm views` (`scripts/views/views.ts`) reads it:
+
+- `list [query]`, `show <id>` and `files <id> [--deep]` find a view and its source files, and `--json` gives agents the same output in machine-readable form.
+- `url <id>` and `open <id>` resolve a view's route against `--base`, `$VIEWS_BASE_URL` or `http://localhost:8787`. Route parameters come from `--param name=value`.
+- `check` fails when the registry has drifted from the code. It reports a route declared under `src/routes` with no view of kind `route`, a view that names a missing file, route or parent, a parent loop, and a non-test `.tsx` file that no view, `nonViewFiles` or `unusedFiles` entry accounts for. It also reports an `unusedFiles` entry that something now imports. It is not yet part of `pnpm lint` or CI.
+
+`pnpm views demo [--port <n>]` serves the frontend alone on Vite, by default on port 3100, with `VITE_DEMO=true`. In that mode `main.tsx` does not open the backend WebSocket. It loads `src/demo/boot.ts`, which runs Cap'n Web over a `MessageChannel` to fixture `RpcTarget`s in the same page. The build-time constant compiles this branch and `src/demo` out of every other build. `VITE_DEMO` is a declared `cache.env` input of the frontend build (`scripts/env-passthrough.test.ts`).
+
+- `src/demo/world.ts` is the shared fixture world: the signed-in user, server config, UI flags (the `dev` values) and workspaces. It is rebuilt on every page load.
+- `src/demo/registry.ts` holds one method table per RPC interface. The modules under `src/demo/areas/` fill those tables with `provide()`. A call to a method that no area provides rejects with a "not implemented in demo" error and a console warning, so a screen that still needs fixtures fails visibly instead of hanging.
+- `src/demo/scenarios.ts` maps view ids to scenarios. `?demo=<view-id>` selects one for the tab. A scenario may adjust the world, choose the path to open, seed browser storage, and run UI steps (click, hover, type, press, wait) to reach menus, dialogs and tabs that a route alone does not show. A view with no scenario opens its route with the default world. `pnpm views open <id> --demo` builds that URL.
+- `src/demo/DemoPicker.tsx` is an overlay listing every registered view (Ctrl/Cmd+Shift+K) that reloads the page into the chosen one.
+
 ## Configuration
 
 cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.jsonc. The default frontend and backend ports are 3000 and 8787. A root `.dev.vars`, then a root `.env`, fill variables the shell has not set. Remote Workers AI requires account access. See the [settings](../wiki/configuration-reference.md) and [parity](../wiki/local-cloud-parity.md) wiki pages.
@@ -131,11 +151,13 @@ The dev server resolves these before it writes the per-Worker dev configs:
 - The cloud smoke recipe has not been run against a Cloudflare deployment, and no CI job runs it; Cloudflare Access, real OAuth provider registration and deployed bindings remain unproven. A wrapper's own gatekeeper is not booted by the router-parity suite (it needs a generated wrapper and its build); its routing rests on the same `GATEKEEPER_<NAME>` rule and on `scripts/consumer/gatekeepers.test.ts`.
 - Offline interception of external traffic is enforced in the integration harness, where Worker subrequests pass through Node. `pnpm local verify` against a running Wrangler cannot intercept the Workers' own traffic; it reports the configured mode instead.
 - `seed` creates the demo canvas screen only when `inferos.canvas.json` declares one; the synthetic board itself comes from the InferOps gatekeeper's mock data, which is the "mock business operations" the MVP note on #10 excludes from the final walkthrough.
+- The frontend view registry and demo mode are local development tooling that the design does not describe. Demo mode serves fixtures, not the authenticated RPC and fixture board read the design defines as readiness, so a screen that renders in demo mode says nothing about a running stack. Fixture coverage is partial: views whose RPC methods no area provides render their error state. Operate mode has no fixtures yet: `AuthenticatedApi.getOperateSession` is unimplemented, so every page that mounts the app shell logs a failed operate-session subscription, and the `operate.*` views do not render their content. Nothing checks that every view id named by a demo scenario still exists in `views.json`, although a comment in `scenarios.ts` says `pnpm views check` does.
 
 ## Open Questions
 
 - Choose the wrapper configuration schema after comparing the upstream starter contract with this fork.
 - Whether wrapper gatekeepers should stay behind `features.customCloudflareCode`, which the design describes only for the extension manifest, or get their own switch.
+- Whether `pnpm views check` should join `pnpm lint` and CI, so that a frontend change has to update `views.json` with it.
 - Cloud auth and real binding parity still need proof: whether the smoke recipe should become a gated CI job against disposable previews.
 
 ## Evidence
