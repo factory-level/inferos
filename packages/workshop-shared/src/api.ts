@@ -1040,6 +1040,14 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getBlueprintInfo(blueprintId: string): Promise<BlueprintPublicInfo | null>;
 
+  /**
+   * A blueprint's screenshot, for the same audience as `getBlueprintInfo`: any blueprint whose id
+   * the signed-in person holds. Null if the blueprint or its screenshot doesn't exist. The
+   * `screenshotUrl` route serves only what reaches beyond the deployment (see
+   * `BlueprintPublicInfo.screenshotUrl`), so signed-in surfaces read screenshots through this.
+   */
+  getBlueprintScreenshot(blueprintId: string): Promise<BlueprintScreenshotUpload | null>;
+
   // --- Publication (docs/design/feature-capabilities.md, "Publication destinations") ---
 
   /**
@@ -4958,7 +4966,11 @@ export type BlueprintPublicInfo = {
   id: string;
   metadata: BlueprintMetadata;
 
-  /** If present, browser-loadable URL for the public screenshot. */
+  /**
+   * If present, the screenshot's URL. Loadable without signing in only for a bundled blueprint or
+   * one with an active `export` publication (or behind Cloudflare Access); signed-in surfaces use
+   * `AuthenticatedApi.getBlueprintScreenshot`.
+   */
   screenshotUrl?: string;
 };
 

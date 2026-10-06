@@ -14,8 +14,19 @@ import { connect, logIn, nextUsernames, settled, signUp, waitFor } from "../src/
 
 const WORKSHOP_WORKER = "workshop-backend";
 
+// The Cloudflare Access team the last case signs requests for, and the key it signs them with.
+const ACCESS_ISS = "https://publication-team.cloudflareaccess.example";
+const ACCESS_AUD = "publication-test-aud";
+const accessKey = crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    true, ["sign", "verify"]) as Promise<CryptoKeyPair>;
+
 let harness: Harness;
-const network = new NetworkInterceptor();
+const network = new NetworkInterceptor({ handlers: [async url => {
+  if (url.href !== `${ACCESS_ISS}/cdn-cgi/access/certs`) return null;
+  const jwk = await crypto.subtle.exportKey("jwk", (await accessKey).publicKey);
+  return Response.json({ keys: [{ ...jwk, kid: "test", alg: "RS256", use: "sig" }] });
+}] });
 const [aliceName, bobName] = nextUsernames("publisher", "installer");
 
 type Session = { publicApi: RpcStub<PublicApi>; alice: RpcStub<AuthenticatedApi>;
@@ -88,6 +99,9 @@ async function codeOf(promise: Promise<unknown>): Promise<PublicationErrorCode |
   throw new Error("Expected a refusal");
 }
 
+// A screenshot's bytes. Only the declared type is checked, so any bytes will do.
+const SCREENSHOT = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
 /** Publishes a blueprint of the bundled document format as `owner`, once it reached their list. */
 async function publishBlueprint(owner: RpcStub<AuthenticatedApi>, title: string): Promise<string> {
   const formats = await waitFor("bundled output formats", async () => {
@@ -100,7 +114,8 @@ async function publishBlueprint(owner: RpcStub<AuthenticatedApi>, title: string)
   const { defaultGadgetId } = await workspace.getMetadata();
   if (defaultGadgetId === undefined) throw new Error("No default gadget");
   using gadget = await workspace.getGadget(defaultGadgetId);
-  const { id } = await gadget.createBlueprint(title, `${title} for publication`);
+  const { id } = await gadget.createBlueprint(title, `${title} for publication`,
+      { mimeType: "image/png", content: SCREENSHOT });
   await waitFor("the blueprint in its owner's list", async () =>
     (await owner.listOwnBlueprints()).some(entry => entry.id === id) || null);
   return id;
@@ -108,6 +123,13 @@ async function publishBlueprint(owner: RpcStub<AuthenticatedApi>, title: string)
 
 async function download(publicApi: RpcStub<PublicApi>, id: string): Promise<number> {
   return (await new Response(await publicApi.downloadBlueprint(id)).arrayBuffer()).byteLength;
+}
+
+/** The status of an unauthenticated load of the blueprint's screenshot, as an `<img>` makes it. */
+async function screenshotStatus(id: string, headers: Record<string, string> = {}): Promise<number> {
+  const response = await fetch(new URL(`/blueprint-screenshot/${id}`, harness.url), { headers });
+  await response.arrayBuffer();
+  return response.status;
 }
 
 const reachable = async (id: string) => (await (await current()).publicApi.getBlueprint(id)) !== null;
@@ -128,8 +150,13 @@ it("with the flags off, an existing blueprint link is refused; bundled formats a
   expect(await codeOf(alice.requestPublication(existing, "deployment"))).toBe(PUBLICATION_ERROR_CODES.appFlagOff);
   expect(await (await admin()).listPublications()).toEqual([]);
 
+  expect(await screenshotStatus(existing)).toBe(404);
+
   // Inside the deployment, signed-in people still read it and install it by id (Operate installs).
   expect((await bob.getBlueprintInfo(existing))?.metadata.title).toBe("Existing");
+  const screenshot = await bob.getBlueprintScreenshot(existing);
+  expect(screenshot?.mimeType).toBe("image/png");
+  expect(Array.from(screenshot!.content)).toEqual(Array.from(SCREENSHOT));
   using install = await bob.newGadgetFromBlueprint(existing, {});
   expect((await install.getMetadata()).installedFrom?.blueprintId).toBe(existing);
 
@@ -169,6 +196,7 @@ it("request, approve, reach, withdraw: an approved export reaches link holders u
   expect(await codeOf(adminApi.approvePublication(requested.id))).toBe(PUBLICATION_ERROR_CODES.invalidState);
   await waitReach(exported, true);
   expect(await download(publicApi, exported)).toBeGreaterThan(0);
+  expect(await screenshotStatus(exported)).toBe(200);
   expect(await reachable(existing)).toBe(false);
 
   // The owner withdraws it: link reads and downloads stop, and the record is kept.
@@ -176,6 +204,7 @@ it("request, approve, reach, withdraw: an approved export reaches link holders u
   expect(withdrawn).toMatchObject({ status: "withdrawn", withdrawnBy: aliceName, reason: "No longer shared" });
   await waitReach(exported, false);
   expect(await codeOf(download(publicApi, exported))).toBe(PUBLICATION_ERROR_CODES.notPublished);
+  expect(await screenshotStatus(exported)).toBe(404);
   expect((await alice.withdrawPublication(requested.id, "again")).reason).toBe("No longer shared");
   expect((await adminApi.listPublications()).find(record => record.id === requested.id))
       .toMatchObject({ status: "withdrawn", approvedBy: ADMIN_USERNAME });
@@ -194,6 +223,8 @@ it("a deployment approval lists the blueprint; featuring needs one, and a newer 
   await waitFor("the listed blueprint", async () =>
     (await bob.listFeaturedBlueprints()).some(entry => entry.id === listed) || null);
   expect(await reachable(listed)).toBe(false);  // `deployment` never reaches outside it.
+  expect(await screenshotStatus(listed)).toBe(404);
+  expect(Array.from((await bob.getBlueprintScreenshot(listed))!.content)).toEqual(Array.from(SCREENSHOT));
 
   await alice.withdrawPublication(request.id, "Done");
   await waitFor("the unlisted blueprint", async () =>
@@ -243,4 +274,42 @@ it("turning the flag off suspends reach and refuses every operation; on again ne
   // Installs inside the deployment never depended on any of this.
   using install = await (await current()).bob.newGadgetFromBlueprint(existing, {});
   expect((await install.getMetadata()).installedFrom?.blueprintId).toBe(existing);
+});
+
+/** A Cloudflare Access assertion for this team, signed with `accessKey`. */
+async function accessAssertion(): Promise<string> {
+  const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const signed = `${encode({ alg: "RS256", kid: "test", typ: "JWT" })}.${encode({
+    iss: ACCESS_ISS, aud: ACCESS_AUD, email: "viewer@example.com", sub: "viewer", iat: now, exp: now + 300,
+  })}`;
+  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", (await accessKey).privateKey,
+      new TextEncoder().encode(signed));
+  return `${signed}.${Buffer.from(signature).toString("base64url")}`;
+}
+
+it("behind Cloudflare Access, a signed-in request loads any screenshot; others still need publication", async () => {
+  disposeSession();
+  await harness.server.update(options => ({
+    ...options,
+    workers: options.workers.map(worker => {
+      if (!("config" in worker)) throw new Error("Expected inline harness config");
+      if (worker.config.name !== WORKSHOP_WORKER) return worker;
+      return { ...worker, config: { ...worker.config,
+        vars: { ...worker.config.vars, CF_ACCESS_AUD: ACCESS_AUD, CF_ACCESS_ISS: ACCESS_ISS } } };
+    }),
+  }));
+  harness.url = (await harness.server.listen()).url;
+  // The RPC endpoint now wants Access too, so wait on the screenshot route instead.
+  await waitFor("the reloaded Workshop", async () => {
+    try {
+      return (await screenshotStatus(existing)) === 404 || null;
+    } catch {
+      return null;
+    }
+  });
+
+  expect(await screenshotStatus(existing, { "cf-access-jwt-assertion": await accessAssertion() })).toBe(200);
+  expect(await screenshotStatus(existing, { "cf-access-jwt-assertion": "not-a-token" })).toBe(404);
+  expect(await screenshotStatus(exported)).toBe(200);
 });
