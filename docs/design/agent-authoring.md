@@ -45,7 +45,7 @@ Each authoring operation, mapped onto what exists today (see the [architecture i
 | Import | `AuthenticatedApi.importBlueprint()` | Verification of a version 2 archive. No new method |
 | Rebind | `newGadgetFromBlueprint()` with `BlueprintBindingAssignment` | `bindArtifactRevision(ref, bindings)`, the same call keyed by exact revision |
 
-The smallest authoring API is therefore six methods on `Overseer`, requiring workspace build access: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Their signatures are `ArtifactAuthoringProposal` in the shared module. Export and import keep their existing methods and gain format version 2. Each method lands in its own kernel PR. This resolves the first open question (decided by the owner on 2026-10-05).
+The smallest authoring API is therefore six methods on `Overseer`, requiring workspace build access: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Their signatures were proposed as `ArtifactAuthoringProposal` in the shared module and now live on `Overseer` in `packages/workshop-shared/src/api.ts`. Export and import keep their existing methods and gain format version 2. Each method lands in its own kernel PR. This resolves the first open question (decided by the owner on 2026-10-05).
 
 ### Identity, digest and canonicalisation
 

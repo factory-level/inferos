@@ -26,6 +26,11 @@
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
+import type {
+  ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
+  ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
+  ArtifactRevision,
+} from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
@@ -2449,6 +2454,58 @@ export interface Overseer extends RpcTarget {
   replaceConsole(id: string, expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole>;
   /** Delete a console at its expected revision. */
   deleteConsole(id: string, expectedRevision: string): Promise<void>;
+
+  // --- Agent artifact revisions (see `@gadgets/workshop-shared/agent-artifact`) ---
+  //
+  // Build access only. A draft is a permanent gadget's committed files; a published revision is
+  // immutable, stored in this workspace under `<kind>/<name>@<N>`, and keeps the exact commit it
+  // was published from. Every call on this capability is a signed-in person's: agents draft and
+  // qualify through their own tools and never hold it.
+
+  /**
+   * Build the manifest for a gadget's committed code under `kind`, compute its digest and report
+   * every refusal publishing it now would meet (pins, secrets), without storing anything.
+   * Malformed input (an unsorted or duplicated pin list, a bad model requirement, a provisional or
+   * code-less gadget) throws instead.
+   */
+  validateArtifact(gadgetId: WorkpieceId, kind: ArtifactKind, pins: ArtifactPin[],
+      model: ArtifactModelRequirement | null): Promise<
+      {manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}>;
+
+  /**
+   * Compare two published revisions of one kind and name by manifest: added, removed and modified
+   * files, pin, model and binding changes. Throws `inexact_reference` for a non-exact reference
+   * and a plain error for a missing revision or two different names.
+   */
+  diffArtifactRevisions(from: ArtifactRef, to: ArtifactRef): Promise<ArtifactChange[]>;
+
+  /**
+   * Publish an immutable revision from a gadget's committed code, recorded as published by the
+   * calling person. The receiver rebuilds the manifest, recomputes the digest, checks the
+   * qualification (bound to that digest, complete) and every pin, and only then stores it. An
+   * identical republish of an existing name and number reports `created: false`. Publishing never
+   * activates, schedules or binds anything.
+   */
+  publishArtifactRevision(gadgetId: WorkpieceId, kind: ArtifactKind, name: string, number: number,
+      pins: ArtifactPin[], model: ArtifactModelRequirement | null,
+      qualification: ArtifactQualification): Promise<ArtifactPublishResult>;
+
+  /** Every published revision of one name, lowest number first, including superseded ones. */
+  listArtifactRevisions(kind: ArtifactKind, name: string): Promise<ArtifactRevision[]>;
+
+  /** One exact published revision, or null. Throws `inexact_reference` for a non-exact reference. */
+  getArtifactRevision(ref: ArtifactRef): Promise<ArtifactRevision | null>;
+
+  /**
+   * Instantiate an exact revision as a new permanent gadget in this workspace, at the commit it
+   * was published from, binding each requirement to a destination resource chosen now (the
+   * assignment shape newGadgetFromBlueprint() takes). Every requirement must be assigned and no
+   * other name may be; a mismatched type, vendor or exact model throws
+   * `incompatible_requirement`. Nothing from the source environment is carried. Returns the new
+   * gadget's id.
+   */
+  bindArtifactRevision(ref: ArtifactRef,
+      bindings: Record<string, BlueprintBindingAssignment>): Promise<WorkpieceId>;
 
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
