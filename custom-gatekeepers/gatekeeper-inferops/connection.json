@@ -4,7 +4,7 @@
   "id": "inferops",
   "package": "@inferos/gatekeeper-inferops",
   "status": "reference",
-  "summary": "InferOps project boards, coding dispatch and the InferMind Wiki, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
+  "summary": "InferOps project boards, coding dispatch and the InferMind Wiki (its structure, page bodies and sections), reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
   "entrypoints": {
     "main": "src/inferops.ts",
     "vendor": "GatekeeperVendor",
@@ -66,10 +66,12 @@
       "observers": "admission",
       "reads": [
         { "method": "listDocuments" },
-        { "method": "readDocument" },
-        { "method": "readDocumentText" }
+        { "method": "readStructure", "notes": "The company root, the pillars with their Masters and filed pages, and the unfiled pages; only pages listDocuments shows." },
+        { "method": "readDocument", "notes": "The page's body (document-level), its lens-gated sections and its references, with pending edits overlaid." },
+        { "method": "readDocumentText", "notes": "InferOps' page-text contract: the body, else the visible sections, then a Master's generated structure block. A page with a body never merges its sections." }
       ],
       "writes": [
+        { "method": "updateDocumentBody", "concurrency": "expected-version", "idempotency": "provider-key", "revert": "conditional", "notes": "InferOps' page PATCH is a strict compare-and-swap on the page version: apply sends the proposed version and is refused STALE_REVISION by any change since, even one that left the same body; InferOps replays only a retry of the same write under the same key. Reverted by a fresh write expecting the version the edit produced, under its own key." },
         { "method": "updateSection", "concurrency": "expected-version", "idempotency": "read-before-write", "revert": "conditional", "notes": "InferOps' section PATCH takes no expected version and does not replay a key, so apply re-reads the section: at the proposed version it writes; already showing this body it counts as applied; otherwise it refuses as STALE_REVISION. Reverted while the section still shows the applied body at the applied version." }
       ]
     }
@@ -81,8 +83,8 @@
     "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op."
   },
   "providerErrors": [
-    { "code": "NOT_FOUND", "meaning": "The project, issue, run or section does not exist or is outside the binding's scope; the two are indistinguishable.", "retryable": false },
-    { "code": "STALE_REVISION", "meaning": "The target changed after the write was proposed (an expected revision or section version no longer matches).", "retryable": false },
+    { "code": "NOT_FOUND", "meaning": "The project, issue, run, page or section does not exist or is outside the binding's scope; the two are indistinguishable.", "retryable": false },
+    { "code": "STALE_REVISION", "meaning": "The target changed after the write was proposed (an expected revision, section version or page version no longer matches; InferOps' page STALE_VERSION).", "retryable": false },
     { "code": "WORKFLOW_MISMATCH", "meaning": "The target state belongs to the other workflow.", "retryable": false },
     { "code": "INVALID_STATE", "meaning": "The target state is not part of the bound project.", "retryable": false },
     { "code": "IDEMPOTENCY_CONFLICT", "meaning": "A key was reused for a different change, or the stored request no longer matches its fingerprint.", "retryable": false },
@@ -95,7 +97,7 @@
     { "code": "DISABLED", "meaning": "The deployment has the integration (or coding dispatch) turned off; the action stays pending until it is turned back on.", "retryable": true }
   ],
   "simulation": {
-    "summary": "Pending actions are stored beside the binding and overlaid on every read until applied or rejected: a move shows the issue in its target state, an update its new title and priority, a create a provisional card, a dispatch a pending run, a cancel a run marked pending, a section edit its new body.",
+    "summary": "Pending actions are stored beside the binding and overlaid on every read until applied or rejected: a move shows the issue in its target state, an update its new title and priority, a create a provisional card, a dispatch a pending run, a cancel a run marked pending, a section edit its new body, a page body edit its new body (marked pendingBody).",
     "limits": [
       "A pending change keeps the revision InferOps reported: InferOps revisions are positions in a shared ledger, so the revision a change will produce cannot be computed. An issue therefore carries at most one live pending change, and a second is refused with CONFLICT.",
       "A pending create is a provisional card (id pending-<action id>, identifier <KEY>-new, revision \"0\") that openIssue does not accept.",
@@ -120,7 +122,7 @@
       "repository": "https://github.com/factory-level/inferops",
       "revision": "29b01a024c377b9c37b8754e7001b290e15d1509",
       "apiVersion": null,
-      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract."
+      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin."
     },
     "inferos": { "gatekeeperApi": [1] },
     "contracts": [
@@ -152,7 +154,7 @@
       {
         "kind": "knowledge/wiki",
         "cases": ["resource-scope", "observation", "sharing", "approval", "apply-once", "stale-revision", "lost-response-retry"],
-        "reason": "No shared-suite adapter yet. Its write is guarded by a read before the write rather than a provider idempotency key, so a retry after a lost response is answered by that re-read. Its own suite covers these cases.",
+        "reason": "No shared-suite adapter yet. Its section write is guarded by a read before the write, so a retry after a lost response is answered by that re-read; its page body write by InferOps' compare-and-swap and same-key replay. Its own suite covers these cases.",
         "coveredBy": ["__tests__/wiki.test.ts"]
       },
       {

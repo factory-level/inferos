@@ -728,6 +728,18 @@ describe("the InferMind Wiki over HTTP", () => {
   const OTHER_DOC = "60000000-0000-4000-8000-000000000002";
   const SECTION = "61000000-0000-4000-8000-000000000001";
   const MISSING = "61000000-0000-4000-8000-0000000000ff";
+  const ROOT = "60000000-0000-4000-8000-000000000010";
+  const UNFILED = "60000000-0000-4000-8000-000000000011";
+  /** InferOps' `GET /knowledge/wiki/structure` answer, bare, with extra fields it may add. */
+  const STRUCTURE = {
+    root: { documentId: ROOT, slug: "company", title: "Acme", parentId: null },
+    pillars: [{
+      key: "engineering", title: "Engineering", position: 0, retiredAt: null,
+      master: { documentId: DOC.toUpperCase(), slug: "handbook", title: "Handbook", parentId: ROOT },
+      members: [{ documentId: OTHER_DOC, slug: "ops/runbook", title: "Runbook", parentId: DOC, source: "intake", position: 3 }],
+    }, { key: "sales", title: "Sales", position: 1, master: null, members: [] }],
+    unfiled: [{ documentId: UNFILED, slug: "notes", title: "Notes", parentId: null }],
+  };
 
   type WikiCall = { method: string; path: string; headers: Headers; body: unknown };
 
@@ -738,6 +750,7 @@ describe("the InferMind Wiki over HTTP", () => {
   function fakeWiki(override?: (call: WikiCall) => Response | undefined) {
     const calls: WikiCall[] = [];
     const section = { id: SECTION, documentId: DOC, tag: "purpose", body: "Old body.", version: 4 };
+    const page = { body: "The page body.", version: 7, lastKey: null as string | null };
     const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       const call: WikiCall = {
@@ -756,8 +769,32 @@ describe("the InferMind Wiki over HTTP", () => {
       if (call.path === `/knowledge/documents/${DOC}`) {
         return Response.json({
           id: DOC, workspaceId: CONNECTION.workspaceId, slug: "handbook", title: "Handbook",
-          summary: null, pathway: null, parentId: null, siblingOrder: 2, body: "read-only page body",
+          summary: null, pathway: null, parentId: null, siblingOrder: 2, body: page.body,
+          version: page.version, masterRole: "pillar",
         });
+      }
+      if (call.path === "/knowledge/wiki/structure") return Response.json(STRUCTURE);
+      if (call.path === `/knowledge/wiki/pages/${DOC}` && call.method === "PATCH") {
+        // InferOps' strict compare-and-swap: only this key's own write, one version on, replays.
+        const { body, expectedVersion } = call.body as { body: string; expectedVersion: number };
+        const key = call.headers.get("x-idempotency-key");
+        if (page.version !== expectedVersion) {
+          if (!(page.lastKey === key && page.version === expectedVersion + 1)) {
+            return Response.json({ success: false, error: { code: "STALE_VERSION", message: "The page changed" } },
+              { status: 409 });
+          }
+        } else {
+          page.body = body;
+          page.version += 1;
+          page.lastKey = key;
+        }
+        return Response.json({ document: {
+          id: DOC, workspaceId: CONNECTION.workspaceId, slug: "handbook", title: "Handbook", summary: null,
+          pathway: null, parentId: null, siblingOrder: 2, version: page.version, masterRole: "pillar",
+        } });
+      }
+      if (call.path.startsWith("/knowledge/wiki/pages/")) {
+        return Response.json({ success: false, error: { code: "NOT_FOUND", message: "Page not found" } }, { status: 404 });
       }
       if (call.path.startsWith("/knowledge/documents/")) return Response.json(null);
       if (call.path === `/knowledge/sections?documentId=${DOC}`) return Response.json([section]);
@@ -782,9 +819,11 @@ describe("the InferMind Wiki over HTTP", () => {
     expect(calls[0]!.headers.get("x-workspace-id")).toBe(CONNECTION.workspaceId);
   });
 
-  it("reads a page without its read-only body, and answers a missing one NOT_FOUND", async () => {
+  it("reads a page with its body, version and Master role, and answers a missing one NOT_FOUND", async () => {
     const { client, calls } = fakeWiki();
-    expect(await client.readDocument(DOC)).toEqual({ id: DOC, slug: "handbook", title: "Handbook" });
+    expect(await client.readDocument(DOC)).toEqual({
+      id: DOC, slug: "handbook", title: "Handbook", body: "The page body.", version: 7, masterRole: "pillar",
+    });
     const missing = await client.readDocument(OTHER_DOC).catch(e => e);
     expect(inferOpsErrorCode(missing)).toBe("NOT_FOUND");
     const before = calls.length;
@@ -836,6 +875,84 @@ describe("the InferMind Wiki over HTTP", () => {
       expect(inferOpsErrorCode(error)).toBe("FORBIDDEN");
       expect(error.message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
     }
+  });
+
+  it("reads a page InferOps reports without a Master role as no Master, and refuses a malformed one", async () => {
+    const detail = (extra: Record<string, unknown>) => fakeWiki(call => call.path === `/knowledge/documents/${DOC}`
+      ? Response.json({ id: DOC, slug: "handbook", title: "Handbook", parentId: null, siblingOrder: 0, ...extra })
+      : undefined).client;
+    expect((await detail({ body: "", version: 1 }).readDocument(DOC)).masterRole).toBeNull();
+    for (const extra of [
+      { body: "", version: 1, masterRole: "admin" }, { version: 1 }, { body: "", version: "1" }, { body: null, version: 1 },
+    ]) {
+      expect(inferOpsErrorCode(await detail(extra).readDocument(DOC).catch(e => e)), JSON.stringify(extra))
+        .toBe("UNAVAILABLE");
+    }
+  });
+
+  it("reads the structure field by field, lowercasing ids and keeping only the named fields", async () => {
+    const { client, calls } = fakeWiki();
+    expect(await client.readStructure()).toEqual({
+      root: { id: ROOT, slug: "company", title: "Acme", parentId: null },
+      pillars: [{
+        key: "engineering", title: "Engineering", position: 0,
+        master: { id: DOC, slug: "handbook", title: "Handbook", parentId: ROOT },
+        members: [{ id: OTHER_DOC, slug: "ops/runbook", title: "Runbook", parentId: DOC, source: "intake" }],
+      }, { key: "sales", title: "Sales", position: 1, master: null, members: [] }],
+      unfiled: [{ id: UNFILED, slug: "notes", title: "Notes", parentId: null }],
+    });
+    expect(calls.at(-1)!.path).toBe("/knowledge/wiki/structure");
+    expect(calls.at(-1)!.headers.get("x-workspace-id")).toBe(CONNECTION.workspaceId);
+  });
+
+  it.each([
+    ["an enveloped body", () => ({ structure: STRUCTURE })],
+    ["a root that is not a page", () => ({ ...STRUCTURE, root: "company" })],
+    ["a page id that is not a UUID", () => ({ ...STRUCTURE, unfiled: [{ documentId: "notes", slug: "n", title: "N", parentId: null }] })],
+    ["an unknown member source", () => ({ ...STRUCTURE, pillars: [{ ...STRUCTURE.pillars[0]!,
+      members: [{ ...STRUCTURE.pillars[0]!.members[0]!, source: "robot" }] }] })],
+    ["a pillar key that is not a slug", () => ({ ...STRUCTURE, pillars: [{ ...STRUCTURE.pillars[1]!, key: "Sales Team" }] })],
+    ["a fractional position", () => ({ ...STRUCTURE, pillars: [{ ...STRUCTURE.pillars[1]!, position: 1.5 }] })],
+    ["a missing unfiled list", () => ({ root: null, pillars: [] })],
+  ])("refuses a structure with %s as UNAVAILABLE", async (_, malformed) => {
+    const { client } = fakeWiki(call => call.path === "/knowledge/wiki/structure" ? Response.json(malformed()) : undefined);
+    expect(inferOpsErrorCode(await client.readStructure().catch(e => e))).toBe("UNAVAILABLE");
+  });
+
+  it("edits a page body with its expected version and key, and maps InferOps' stale answer", async () => {
+    const { client, calls } = fakeWiki();
+    expect(await client.updateDocument(DOC, { body: "New page body." }, 7, "inst:3")).toEqual({ id: DOC, version: 8 });
+    const patch = calls.at(-1)!;
+    expect(patch).toMatchObject({ method: "PATCH", path: `/knowledge/wiki/pages/${DOC}`,
+                                  body: { body: "New page body.", expectedVersion: 7 } });
+    expect(patch.headers.get("x-idempotency-key")).toBe("inst:3");
+    expect(patch.headers.get("content-type")).toBe("application/json");
+    // One request: InferOps compares the version, so nothing is read first.
+    expect(calls).toHaveLength(1);
+
+    // The same key one version on is InferOps' replay; another key is stale.
+    expect(await client.updateDocument(DOC, { body: "New page body." }, 7, "inst:3")).toEqual({ id: DOC, version: 8 });
+    const stale = await client.updateDocument(DOC, { body: "New page body." }, 7, "inst:4").catch(e => e) as Error;
+    expect(inferOpsErrorCode(stale)).toBe("STALE_REVISION");
+    expect(stale.message).toBe("STALE_REVISION: The page changed in InferOps. Read it again.");
+
+    expect(inferOpsErrorCode(await client.updateDocument(OTHER_DOC, { body: "x" }, 1, "k").catch(e => e))).toBe("NOT_FOUND");
+    const before = calls.length;
+    for (const [id, version, key] of [["../x", 1, "k"], [DOC, 0, "k"], [DOC, 1.5, "k"], [DOC, 1, ""]] as const) {
+      expect(await client.updateDocument(id, { body: "x" }, version, key).catch(e => inferOpsErrorCode(e)))
+        .toBe(id === DOC ? "INVALID_REQUEST" : "NOT_FOUND");
+    }
+    expect(calls.length).toBe(before);
+  });
+
+  it("maps a refused page edit to the one Wiki message, and a mismatched answer to UNAVAILABLE", async () => {
+    const { client } = fakeWiki(call => call.method === "PATCH"
+      ? Response.json({ error: { code: "FORBIDDEN", message: "Missing permission: knowledge:write" } }, { status: 403 })
+      : undefined);
+    expect(String(await client.updateDocument(DOC, { body: "x" }, 7, "k").catch(e => e))).toContain(WIKI_FORBIDDEN);
+    const { client: other } = fakeWiki(call => call.method === "PATCH"
+      ? Response.json({ document: { id: OTHER_DOC, version: 8 } }) : undefined);
+    expect(inferOpsErrorCode(await other.updateDocument(DOC, { body: "x" }, 7, "k").catch(e => e))).toBe("UNAVAILABLE");
   });
 
   it("treats a response that does not match the contract as UNAVAILABLE", async () => {

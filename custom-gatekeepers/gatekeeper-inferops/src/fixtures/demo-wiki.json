@@ -1,33 +1,95 @@
 {
-  "$comment": "Seed Wiki for the mock InferOps data source (mock-inferops.ts): InferMind documents (list shape) and sections (WikiSectionSchema) as InferOps' knowledge routes return them. UUIDs are synthetic; Drafts has no readable section.",
+  "$comment": "Seed Wiki for the mock InferOps data source (mock-inferops.ts): InferMind documents (detail shape: body, version, masterRole), sections (WikiSectionSchema) and pillars (a pathway_type pillar with its Master and wiki_pillar_member rows) as InferOps' knowledge routes return them. UUIDs are synthetic. Drafts has nothing to read; Onboarding has a body and a section; Incident response is a body-only SOP; Demo Company is the root (no body); Engineering is a section-less, body-less Master; Release process and the slash-slugged Dispatch a crew SOP (whose body opens with a heading other than its title) are filed in both pillars.",
   "documents": [
     {
       "id": "60000000-0000-4000-8000-000000000001",
       "slug": "handbook",
       "title": "Team handbook",
       "parentId": null,
-      "siblingOrder": 0
+      "siblingOrder": 0,
+      "body": "",
+      "version": 1,
+      "masterRole": null
     },
     {
       "id": "60000000-0000-4000-8000-000000000002",
       "slug": "release-process",
       "title": "Release process",
       "parentId": "60000000-0000-4000-8000-000000000001",
-      "siblingOrder": 1
+      "siblingOrder": 1,
+      "body": "",
+      "version": 2,
+      "masterRole": null
     },
     {
       "id": "60000000-0000-4000-8000-000000000003",
       "slug": "onboarding",
       "title": "Onboarding",
       "parentId": "60000000-0000-4000-8000-000000000001",
-      "siblingOrder": 0
+      "siblingOrder": 0,
+      "body": "Welcome to the demo team. Your first week is about pairing, and about reading [[handbook#purpose]].",
+      "version": 3,
+      "masterRole": null
     },
     {
       "id": "60000000-0000-4000-8000-000000000004",
       "slug": "drafts",
       "title": "Drafts",
       "parentId": null,
-      "siblingOrder": 1
+      "siblingOrder": 1,
+      "body": "",
+      "version": 1,
+      "masterRole": null
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000005",
+      "slug": "company",
+      "title": "Demo Company",
+      "parentId": null,
+      "siblingOrder": 2,
+      "body": "",
+      "version": 1,
+      "masterRole": "root"
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000006",
+      "slug": "engineering",
+      "title": "Engineering",
+      "parentId": "60000000-0000-4000-8000-000000000005",
+      "siblingOrder": 0,
+      "body": "",
+      "version": 1,
+      "masterRole": "pillar"
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000007",
+      "slug": "operations",
+      "title": "Operations",
+      "parentId": "60000000-0000-4000-8000-000000000005",
+      "siblingOrder": 1,
+      "body": "How the demo team runs day to day.",
+      "version": 2,
+      "masterRole": "pillar"
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000008",
+      "slug": "incident-response",
+      "title": "Incident response",
+      "parentId": "60000000-0000-4000-8000-000000000007",
+      "siblingOrder": 0,
+      "body": "# Incident response\n\n1. Page the on-call engineer.\n2. Open an incident issue on the board.\n3. Write the timeline while it is fresh.\n\n[DEMO board](inferops://demo.local/project/board/DEMO)",
+      "version": 4,
+      "masterRole": null
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000009",
+      "slug": "dispatch/dispatch-a-crew",
+      "title": "Dispatch a crew",
+      "parentId": "60000000-0000-4000-8000-000000000007",
+      "siblingOrder": 1,
+      "body": "# Before you start\n\nCheck the crew roster on the board.\n\n## Steps\n\n1. Pick the nearest free crew.\n2. Move the job card to Dispatched.",
+      "version": 1,
+      "masterRole": null
     }
   ],
   "sections": [
@@ -58,6 +120,44 @@
       "tag": "first-week",
       "body": "In your first week, pair with a teammate on one small issue and read [[handbook#purpose]].",
       "version": 1
+    }
+  ],
+  "pillars": [
+    {
+      "key": "engineering",
+      "title": "Engineering",
+      "position": 0,
+      "masterId": "60000000-0000-4000-8000-000000000006",
+      "members": [
+        {
+          "documentId": "60000000-0000-4000-8000-000000000002",
+          "source": "intake"
+        },
+        {
+          "documentId": "60000000-0000-4000-8000-000000000009",
+          "source": "human"
+        }
+      ]
+    },
+    {
+      "key": "operations",
+      "title": "Operations",
+      "position": 1,
+      "masterId": "60000000-0000-4000-8000-000000000007",
+      "members": [
+        {
+          "documentId": "60000000-0000-4000-8000-000000000008",
+          "source": "intake"
+        },
+        {
+          "documentId": "60000000-0000-4000-8000-000000000002",
+          "source": "human"
+        },
+        {
+          "documentId": "60000000-0000-4000-8000-000000000009",
+          "source": "intake"
+        }
+      ]
     }
   ]
 }

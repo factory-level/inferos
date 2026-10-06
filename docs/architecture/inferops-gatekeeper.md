@@ -47,9 +47,10 @@ through approved actions. It is a separate grant from the board, offered and ser
 [local coding workflows](local-coding-workflows.md).
 
 A third kind, `inferops://<tenant>.<workspace>/knowledge/wiki`, binds one workspace's InferMind Wiki
-to an `InferOpsWikiGatekeeper` whose `InferOpsWikiSession` (`listDocuments`, `readDocument`,
-`readDocumentText`, `updateSection`) reads pages as observations and proposes section edits as
-approved actions ([#87](https://github.com/factory-level/inferos/issues/87)). Its workspace slug
+to an `InferOpsWikiGatekeeper` whose `InferOpsWikiSession` (`listDocuments`, `readStructure`,
+`readDocument`, `readDocumentText`, `updateDocumentBody`, `updateSection`) reads the Wiki's
+structure and pages as observations and proposes page body and section edits as approved actions
+([#87](https://github.com/factory-level/inferos/issues/87)). Its workspace slug
 resolves only among the person's InferMind workspaces. A page is referenced as
 `…/knowledge/document/<slug>`, which `parseWikiDocumentUrl` parses for the canvas; a reference is
 never bound.
@@ -66,13 +67,13 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and the InferOps and InferMind workspaces InferLab reported with each one's slug (an InferMind one marked `product: "infermind"`), slug resolution per product (`resolveWorkspace(slug, product)`, InferOps by default), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, and the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`). |
-| `custom-gatekeepers/gatekeeper-inferops/src/wiki.ts` | The Wiki's pure read projections, ported from InferOps: `[[target#tag]]` wikilinks, the standalone-paragraph `inferops://` references, and the agent text (`# <title>` and the section bodies). |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure` and `updateDocument`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/wiki.ts` | The Wiki's pure read projections, ported from InferOps: `[[target#tag]]` wikilinks, the standalone-paragraph `inferops://` references, and InferOps' page-text contract (`domains/knowledge/shared/document-text.ts`, mirrored exactly): `composeDocumentText` gives `# <title>`, a blank line, then the body without a leading H1 equal to the title (`bodyWithoutTitle`; any other heading stays), or the visible section bodies when the body is blank, then a Master's generated block (`masterStructureText`: `<!-- generated: wiki structure -->`, then `## Pillars` with a `/wiki/<encoded master slug>` link per pillar for the root, or `## Pages in <pillar>` with one per member for a pillar Master, `(none yet)` when empty), joined by blank lines, and null when nothing is left. `documentText` (title and sections) stays for the canvas test double. |
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | The `CODING_WORKBENCH_ENABLED` switch and `CODING_WORKBENCH_REPOS` allowlist for dispatch bindings ([local coding workflows](local-coding-workflows.md)). |
-| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). Also two demo repositories and a run ledger with InferOps' dispatch guards and replay, and `setRunStatus` standing in for the runner. A synthetic Wiki (`src/fixtures/demo-wiki.json`: four pages, one without sections) with InferOps' section semantics (a write advances the version by one, takes no expected version and replays nothing), and `setInferMindEnabled` to make the demo workspace one without InferMind. `forget` (an account's `revoke`) deletes the account's data and leaves a tombstone, so every later call is refused `UNAUTHORIZED` rather than re-seeding demo data under a binding that outlived its account. Development only ([#28](https://github.com/factory-level/inferos/issues/28)): `MOCK_INFEROPS_SYNTHETIC_ISSUES=<n>` (1 to 2000, passed through by the dev server from the shell or `.dev.vars`) adds a deterministic synthetic project `PERF` of n issues over six states when an account's data is first seeded, for measuring the Kanban against a large board; unset or out of range it adds nothing (`__tests__/synthetic.test.ts`). |
-| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. Its coding calls read `GET /project/repos` (dropping `gitUrl`), `GET /project/runs` (filtered to the bound project's issues), `GET /project/runs/<id>`, and send `POST /project/issues/<id>/dispatch` and `POST /project/runs/<id>/cancel`, each after the issue's or run's scope check. Its Wiki calls read `GET /knowledge/documents`, `/knowledge/documents/<id>`, `/knowledge/sections?documentId=<id>` (after finding the page) and `/knowledge/sections/<id>`, and send `PATCH /knowledge/sections/<id>` with `{body}` only (after finding the section), parsing InferOps' bare responses, answering `null` or an empty body as `NOT_FOUND`, and mapping every 403 to one `FORBIDDEN` message (`WIKI_FORBIDDEN`). The only module that talks InferOps HTTP. A run's result keeps `patch`, `tests` (the runner's test commands, counts and artifact paths) and `reasonCode` only when well formed, leaving out a malformed or unknown one whole (`parsePatch`, `parseTests`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). Also two demo repositories and a run ledger with InferOps' dispatch guards and replay, and `setRunStatus` standing in for the runner. A synthetic Wiki (`src/fixtures/demo-wiki.json`, stored under `wiki:v2`: a company root without a body, two pillars with Masters (Engineering has neither body nor sections), a body-only SOP whose body opens with its title, a slash-slugged SOP `dispatch/dispatch-a-crew` filed in both pillars whose body opens with another heading, a page with both a body and a section, and one with nothing to read) with InferOps' section semantics (a write advances the version by one, takes no expected version and replays nothing), its page semantics (`updateDocument` is a strict compare-and-swap on the page version that replays only the same key with the same expected version and body one version on, a receipt standing in for InferOps' key, principal, expected version, operation and payload) and its structure read (pillars by position, members by title, the unfiled pages), and `setInferMindEnabled` to make the demo workspace one without InferMind. `forget` (an account's `revoke`) deletes the account's data and leaves a tombstone, so every later call is refused `UNAUTHORIZED` rather than re-seeding demo data under a binding that outlived its account. Development only ([#28](https://github.com/factory-level/inferos/issues/28)): `MOCK_INFEROPS_SYNTHETIC_ISSUES=<n>` (1 to 2000, passed through by the dev server from the shell or `.dev.vars`) adds a deterministic synthetic project `PERF` of n issues over six states when an account's data is first seeded, for measuring the Kanban against a large board; unset or out of range it adds nothing (`__tests__/synthetic.test.ts`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/http-inferops.ts` | `openHttpInferOpsClient`: `InferOpsClient` over `fetch` for a fixed connection or an endpoint whose authority (token and workspace) is fetched per request, with field-by-field response parsing, the project-scope check and the error mapping. `listWorkspaceSlugs` reads `GET /workspaces` for the connect flow. `endpointFromEnv` reads the API base URL and `connectionFromEnv` the stopgap connection from worker vars. Its coding calls read `GET /project/repos` (dropping `gitUrl`), `GET /project/runs` (filtered to the bound project's issues), `GET /project/runs/<id>`, and send `POST /project/issues/<id>/dispatch` and `POST /project/runs/<id>/cancel`, each after the issue's or run's scope check. Its Wiki calls read `GET /knowledge/documents`, `/knowledge/documents/<id>` (with `body`, `version` and `masterRole`, an absent role read as none), `/knowledge/wiki/structure` (each page's `documentId`, slug, title and parent, a pillar's key, title, position, Master and members with their `source`, all checked field by field), `/knowledge/sections?documentId=<id>` (after finding the page) and `/knowledge/sections/<id>`, and send `PATCH /knowledge/sections/<id>` with `{body}` only (after finding the section) and `PATCH /knowledge/wiki/pages/<id>` with `{body, expectedVersion}` and the key, unread first (its 409 `STALE_VERSION` maps to `STALE_REVISION`, its 404 to `NOT_FOUND`), parsing InferOps' bare responses, answering `null` or an empty body as `NOT_FOUND`, and mapping every 403 to one `FORBIDDEN` message (`WIKI_FORBIDDEN`). The only module that talks InferOps HTTP. A run's result keeps `patch`, `tests` (the runner's test commands, counts and artifact paths) and `reasonCode` only when well formed, leaving out a malformed or unknown one whole (`parsePatch`, `parseTests`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/resources.ts` | Resource grammar `inferops://<tenant>.<workspace>/project/<kind>/<KEY>` with `<kind>` `board` or `dispatch`, and `inferops://<tenant>.<workspace>/knowledge/wiki` (two lowercase slug labels; `demo.local` is the demo data), the three `SupportedResource`s (the Wiki's with `excludeFromOperateChat`), `resourceKind`, `projectResourceKind`, `parseHost`, `isSlug`; the page reference `…/knowledge/document/<slug>` (`parseWikiDocumentUrl`, `wikiDocumentUrl`, slugs of URL-unreserved characters). |
-| `custom-gatekeepers/gatekeeper-inferops/src/actions.ts` | The stored action records, a tagged union (`kind`: `transition`, `create`, `update` on a board binding; `dispatch`, `cancel` on a dispatch binding; `section-update` on a Wiki binding) each carrying the exact request it sends; `readAction` reads a record without `kind` (written before creates and updates) as a transition; `fingerprintOf`/`matchesFingerprint` hash the normalized request with the binding's scope, its project key or `knowledge/wiki` (SHA-256 over canonical JSON). |
+| `custom-gatekeepers/gatekeeper-inferops/src/actions.ts` | The stored action records, a tagged union (`kind`: `transition`, `create`, `update` on a board binding; `dispatch`, `cancel` on a dispatch binding; `section-update` and `document-update` on a Wiki binding) each carrying the exact request it sends; `readAction` reads a record without `kind` (written before creates and updates) as a transition; `fingerprintOf`/`matchesFingerprint` hash the normalized request with the binding's scope, its project key or `knowledge/wiki` (SHA-256 over canonical JSON). |
 | `custom-gatekeepers/gatekeeper-inferops/src/simulation.ts` | Board ordering and read-time overlay of pending actions: an issue's live pending transition or update (`pending` `transition` or `update`), and pending creates as provisional cards (`pending: "create"`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/wiki-ui.tsx` | The Wiki picker: organization and workspace only, building `…/knowledge/wiki`; the account lists only the person's InferMind workspaces for it (and only InferOps ones for the project pickers). |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx` | The same picker for a dispatch binding, building `…/project/dispatch/<KEY>`; offered only while coding dispatch is on. |
@@ -277,11 +278,30 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   no data source serves fail with `No InferMind Wiki is available on <host>.`; InferOps' 403 is
   passed on as `FORBIDDEN`. The data source is `clientFor`'s, so `INFEROPS_ENABLED` guards every
   call. The facet shares the action store (`ActionBinding`) with the project facets.
-  `readDocument(slugOrId)` resolves a slug through the page list, reads the page and its sections,
-  overlays a pending edit on a section still at the version it was proposed at, and adds the
-  wikilinks and references (wiki.ts); `readDocumentText` joins the same sections and answers a
-  page without sections `NOT_FOUND`. Each read is an observation; `listDocuments` returns the tree
-  fields only. `updateSection` checks the version (decimal integer, `INVALID_REQUEST` otherwise),
+  `readDocument(slugOrId)` resolves a slug (one or more `/`-separated segments, compared only with
+  the listed slugs) through the page list, reads the page with its body, version and Master role
+  and its sections, overlays a pending body edit on a page still at the version it was proposed at
+  (`pendingBody: true`) and a pending edit on a section still at its version, and adds the
+  wikilinks and the references of what the page reads as (its body, else its sections) (wiki.ts).
+  `readDocumentText` composes InferOps' page text from the same shown body and sections and, for a
+  Master only, the structure read for its generated block, and answers a page with nothing to read
+  `NOT_FOUND`. `readStructure` returns the root, pillars and unfiled pages as InferOps lists them,
+  which is only pages its document list shows. Each read is an observation; `listDocuments` returns
+  the tree fields only. Access boundary, as InferOps draws it: the body is document-level
+  (workspace scope and `knowledge:read`), sections are lens-gated, and a page with a body reads as
+  its body without its sections merged in, so no section text reaches a reader through a body.
+  `updateDocumentBody(slugOrId, body, expectedVersion)` checks the version (positive integer), the
+  body length (at most 200000, InferOps' bound), the page's current version (`STALE_REVISION`), a
+  body equal to the shown one (no-op) and a live pending body edit (`CONFLICT`), stages a
+  `document-update` with the previous body, and submits it with action kind
+  `inferops.wiki-page-update`, showing page, expected version and the current and new text.
+  `applyAction` sends it under `<instance>:<action>` expecting the proposed version, without
+  reading first: InferOps' compare-and-swap refuses any change since (`STALE_REVISION`, the action
+  stays pending), including another writer's write of the same body, which is never counted as in
+  effect; a retried apply whose write committed is replayed by InferOps. `revertAction` is a fresh
+  compare-and-swap write of the previous body expecting the version the edit produced, under
+  `<instance>:<action>:revert` (a distinct key, since InferOps binds a key to its payload); a page
+  changed since in any way (body, title or tree) is reported and keeps its content. `updateSection` checks the version (decimal integer, `INVALID_REQUEST` otherwise),
   the body length (at most 100000), the section's current version (`STALE_REVISION`), a body equal
   to the shown one (no-op) and a live pending edit (`CONFLICT`), reads the page title, stages a
   `section-update` with the previous body, and submits it with action kind
@@ -397,6 +417,8 @@ missing a button.
   next refresh, and a provisional create card is draggable like any other (a move of it fails
   `NOT_FOUND`). The canvas Kanban reads it (see [InferOps canvas](inferops-canvas.md#kanban-board)).
 - The mock starts a created issue at revision 1 and numbers it after the highest existing key.
+- A Wiki page body edit is stale after any write to the page (a title change or move too), since
+  InferOps has one page version; it is then discarded and proposed again.
 - A Wiki section edit's version check and its write are two requests (InferOps' `PATCH` takes no
   expected version), so an edit made in InferMind between them is overwritten; and a section that
   someone else set to exactly the approved body counts as the edit applied.
@@ -414,6 +436,21 @@ missing a button.
   the board read at proposal).
 - The content-only default state for a create (a board without software states) has no test: the
   demo fixture has no such project.
+- A page slug may contain `/` (`dispatch/dispatch-a-crew`). A `…/knowledge/document/<slug>` reference
+  carries it as one percent-encoded segment (`dispatch%2Fdispatch-a-crew`): `wikiDocumentUrl` encodes
+  it and `parseWikiDocumentUrl` decodes `%2F` once, then validates each segment. Raw extra segments,
+  any other escape (so no double encoding), empty, `.` or `..` segments, a query or a fragment do not
+  parse.
+- One pending edit per page body and per section is enforced where the edit is staged: the check
+  runs in the same synchronous step as the write, after the fingerprint, so two concurrent proposals
+  cannot both stage. A concurrent proposal of the same body joins as a no-op; a different one is
+  CONFLICT. The section race reproduces without that step in the workerd suite; the body path has no
+  await between check and write there, so its race test passes either way and guards the outcome.
+- The structure read and page body edit follow InferOps' factory-level/inferops#2345, merged as
+  c536b637 (page text, strict compare-and-swap, a receipt bound to principal, expected version and
+  payload). They are tested against fakes of it, not yet against a live InferOps. `connection.json`
+  keeps its board-schema pin and notes c536b637 as the minimum for these knowledge endpoints.
+
 - The Wiki client has not been run against a live InferOps knowledge API. That a missing page or
   section is answered `200 null` is read from InferOps' route code (`getDocument`/`getSection`
   return null), and the client accepts an empty body the same way.
@@ -464,13 +501,24 @@ malformed and section-less pages, an edit queued and shown pending and written o
 stale, unknown and malformed edits refused at proposal, an unchanged body and a second pending
 edit, an edit made stale in InferOps refused at apply, an edit already in effect counted as
 applied without a second write, a tampered or unsigned record refused by its fingerprint,
-rejection, revert and its refusal, `INFEROPS_ENABLED` off and on, and observer admission.
+rejection, revert and its refusal, `INFEROPS_ENABLED` off and on, and observer admission. For
+pages and structure it covers the structure read as an observation, a page's body, version and
+Master role, the page text of a body-only SOP (title H1 dropped, another heading kept), of a page
+with a body and a section (body only), of the section-less root and pillar Masters (generated
+blocks, slash slugs encoded) and of a page with nothing to read (`NOT_FOUND`), and body edits:
+shown as `pendingBody`, applied once, refused stale at proposal and at apply (content left),
+refused stale when another writer wrote the same body, replayed on a retried apply, fingerprint
+tampering, rejection, a second pending edit (`CONFLICT`), the revert only at the produced
+version, and the Wiki refused (`FORBIDDEN`) at proposal and apply.
 `account.test.ts` adds a connected person's InferMind workspace bound by slug with their own token
 there, one of their InferOps workspaces refused as having no Wiki and an InferMind one refused as
 a board (both before any request), an unheld workspace refused like a missing Wiki, a tampered
 tenant label, InferOps' product or permission refusal as one `FORBIDDEN`, and Wiki observer
 admission; `http-inferops.test.ts` the knowledge requests, `null` and empty answers, the 403
-message, a section of another page, and malformed responses; `resources.test.ts` the Wiki
+message, a section of another page, malformed responses, the page detail's body, version and
+Master role, the structure parsed field by field and refused when malformed, and the page PATCH
+(body and expected version only, the key, no read first, same-key replay, `STALE_VERSION` as
+`STALE_REVISION`); `resources.test.ts` the Wiki
 picker's copy of the grammar.
 `__tests__/resources.test.ts` covers the grammar (two lowercase slug labels, no port, user info,
 or third label) and keeps the configurator's copy in step, and `http-inferops.test.ts` the

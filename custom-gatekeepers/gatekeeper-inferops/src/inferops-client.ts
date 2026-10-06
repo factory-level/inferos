@@ -5,6 +5,7 @@
 
 import type {
   Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, WikiDocumentNode,
+  WikiStructure,
 } from "./types";
 
 /** Error codes a data source reports. Callers branch on these, never on message text. */
@@ -92,8 +93,26 @@ export type DispatchRequest = { repoId: string; baseRef?: string; expectedRevisi
 /** A Wiki page as listed: its place in the tree, without content. */
 export type WikiDocumentRecord = WikiDocumentNode;
 
-/** A Wiki page's identity, as read on its own. InferOps' read-only page `body` is not kept. */
-export type WikiDocumentHead = Pick<WikiDocumentNode, "id" | "slug" | "title">;
+/**
+ * A Wiki page as read on its own: its identity, its authored body (empty when it has none), the
+ * version a body edit must name, and its Master role. The body is document-level in InferOps
+ * (workspace scope and `knowledge:read`); sections, read apart, are lens-gated.
+ */
+export type WikiDocumentHead = Pick<WikiDocumentNode, "id" | "slug" | "title"> & {
+  body: string;
+  /** InferOps' page version, bumped by every body, title or tree write. */
+  version: number;
+  masterRole: "root" | "pillar" | null;
+};
+
+/** The Wiki's structure as InferOps reports it, with page ids lowercased. */
+export type WikiStructureRecord = WikiStructure;
+
+/** What a body edit sends: the page's new markdown. */
+export type WikiPageChanges = { body: string };
+
+/** A page after a write: the version InferOps reports for it. */
+export type WikiPageWrite = { id: string; version: number };
 
 /** One section as InferOps stores it: its page, tag, markdown and version. */
 export type WikiSectionRecord = {
@@ -193,6 +212,22 @@ export interface InferOpsClient {
 
   /** One Wiki page by UUID; NOT_FOUND for one this workspace does not have (or not a UUID). */
   readDocument(documentId: string): Promise<WikiDocumentHead>;
+
+  /**
+   * The Wiki's root, pillars (with Masters and filed pages) and unfiled pages, listing only pages
+   * `listDocuments` shows.
+   */
+  readStructure(): Promise<WikiStructureRecord>;
+
+  /**
+   * Replace a page's body (InferMind `knowledge:write`), compare-and-swap on the page version: a
+   * page not at `expectedVersion` fails with STALE_REVISION, even when it already holds this body,
+   * except that a retry under the same `idempotencyKey` is replayed when the page is exactly one
+   * version later and that key made its last write. NOT_FOUND for an unknown page.
+   */
+  updateDocument(
+    documentId: string, changes: WikiPageChanges, expectedVersion: number, idempotencyKey: string,
+  ): Promise<WikiPageWrite>;
 
   /** The page's sections the account can read, in page order; NOT_FOUND for an unknown page. */
   listSections(documentId: string): Promise<WikiSectionRecord[]>;

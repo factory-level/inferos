@@ -28,12 +28,14 @@
 // - The InferMind Wiki is a third kind, `inferops://<tenant>.<workspace>/knowledge/wiki`, bound into an
 //   `InferOpsWikiGatekeeper` facet whose props fix the account, host and InferMind workspace id. The
 //   workspace slug resolves only among the person's InferMind workspaces; one of their InferOps
-//   workspaces is refused as having no Wiki. `InferOpsWikiSession` lists pages and reads one with
-//   its sections, its `[[target#tag]]` links and its embedded `inferops://` references, or as
-//   agent text (wiki.ts); references are never resolved. Section edits are approved actions,
-//   checked at apply against the section's current version, since InferOps' PATCH has no
-//   expected version (see `InferOpsWikiGatekeeper.applyAction`). InferOps' product gate and
-//   `knowledge:*` permissions apply to the person's token.
+//   workspaces is refused as having no Wiki. `InferOpsWikiSession` lists pages, reads the Wiki's
+//   structure (root, pillars, Masters), and reads one page with its body, its sections, its
+//   `[[target#tag]]` links and its embedded `inferops://` references, or as text by InferOps'
+//   page-text contract (wiki.ts); references are never resolved. Section edits and page body edits
+//   are approved actions. A section edit is checked at apply against the section's current version,
+//   since InferOps' section PATCH has no expected version; a body edit is InferOps' own strict
+//   compare-and-swap on the page version (see `InferOpsWikiGatekeeper.applyAction`). InferOps'
+//   product gate and `knowledge:*` permissions apply to the person's token.
 // - Every returned read is authorized as an observation. Every write is checked against the
 //   simulated board, recorded with the exact request it will send and that request's fingerprint
 //   (actions.ts), and submitted as an action; none is auto-approvable. Until it is decided, reads
@@ -77,6 +79,7 @@ import {
 } from "@gadgets/gatekeeper-kit/credentials";
 import {
   InferOpsError, inferOpsErrorCode, type InferOpsClient, type ProjectSummary, type RunRecord,
+  type WikiDocumentHead,
 } from "./inferops-client";
 import {
   WIKI_FORBIDDEN, connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority,
@@ -94,7 +97,7 @@ import {
 } from "./inferlab-login";
 import {
   DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE,
-  isDocumentSlug, parseHost, parseProjectBoardUrl, parseProjectDispatchUrl, parseWikiUrl,
+  parseHost, parseProjectBoardUrl, parseProjectDispatchUrl, parseWikiUrl,
   projectBoardUrl, projectDispatchUrl, resourceKind, wikiUrl,
 } from "./resources";
 import {
@@ -103,9 +106,12 @@ import {
 import {
   fingerprintOf, isCodingAction, isIssueChange, isWikiAction, matchesFingerprint, readAction,
   type ActionRecord, type CancelRunAction, type CreateAction, type DispatchAction,
-  type SectionUpdateAction, type StagedAction, type UpdateAction,
+  type DocumentUpdateAction, type SectionUpdateAction, type StagedAction, type UpdateAction,
+  type WikiAction,
 } from "./actions";
-import { documentText, embeddedReferences, wikilinksOf } from "./wiki";
+import {
+  authoredContent, composeDocumentText, embeddedReferences, masterStructureText, wikilinksOf,
+} from "./wiki";
 import {
   MAX_DISCOVERY_QUERY_LENGTH, MAX_DISCOVERY_SCANNED_PROJECTS, rankBoards, type DiscoveryProject,
   type DiscoveryWorkspace,
@@ -114,7 +120,7 @@ import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-conf
 import type {
   Board, BoardCandidate, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession,
   InferOpsWikiSession, Issue, IssueChanges, NewIssue, Repo, Revision, Run, WikiDocument,
-  WikiDocumentNode, WikiSection,
+  WikiDocumentNode, WikiSection, WikiStructure,
 } from "./types";
 import type { NewIssueRequest, WikiSectionRecord } from "./inferops-client";
 import TYPES_CODE from "./types.txt";
@@ -732,18 +738,21 @@ class ActionBinding<P> {
    * Record a pending action, with the fingerprint of the request it will send, before it is
    * submitted, so an immediate apply can find it.
    */
-  async stage(staged: StagedAction): Promise<number> {
-    return (await this.stageOnce(staged, false)).actionId;
+  async stage(staged: StagedAction, guard?: () => void): Promise<number> {
+    return (await this.stageOnce(staged, false, guard)).actionId;
   }
 
   /**
    * Like `stage`, but when `join` is set, a pending action whose request has the same fingerprint
    * is returned instead (`joined`), and nothing new is staged. The lookup and the write happen in
    * one synchronous step after the fingerprint is computed, so two concurrent proposals of one
-   * request (two tabs) cannot both stage it.
+   * request (two tabs) cannot both stage it. `guard`, when given, runs in that same synchronous
+   * step, before anything is written, so a check of other pending actions (one edit per target)
+   * cannot be overtaken by a concurrent proposal; it throws to refuse.
    */
-  async stageOnce(staged: StagedAction, join = true): Promise<{ actionId: number; joined: boolean }> {
+  async stageOnce(staged: StagedAction, join = true, guard?: () => void): Promise<{ actionId: number; joined: boolean }> {
     const fingerprint = await fingerprintOf(this.scope, staged);
+    guard?.();
     if (join) {
       for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
         const record = readAction(raw);
@@ -1070,6 +1079,8 @@ function actionLabel(record: ActionRecord): string {
       return `Cancelling the run of ${record.identifier}`;
     case "section-update":
       return `The edit of section ${plainInline(record.tag, 60)} of "${plainInline(record.documentTitle, 60)}"`;
+    case "document-update":
+      return `The edit of page "${plainInline(record.documentTitle, 60)}"`;
   }
 }
 
@@ -1115,14 +1126,15 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
   }
 }
 
-/** Why a Wiki section edit was not applied. */
-function wikiFailureMessage(record: SectionUpdateAction, what: string, code: string | null): string {
+/** Why a Wiki section or page body edit was not applied. */
+function wikiFailureMessage(record: WikiAction, what: string, code: string | null): string {
+  const target = record.kind === "section-update" ? "section" : "page";
   switch (code) {
     case "STALE_REVISION":
-      return `${what} was not applied: the section changed in InferOps after this edit was ` +
+      return `${what} was not applied: the ${target} changed in InferOps after this edit was ` +
         `proposed (expected version ${record.expectedVersion}). Discard this edit and read the page again.`;
     case "NOT_FOUND":
-      return `${what} was not applied: the section is no longer in this Wiki.`;
+      return `${what} was not applied: the ${target} is no longer in this Wiki.`;
     case "IDEMPOTENCY_CONFLICT":
       return `${what} was not applied: the stored request no longer matches the one proposed. ` +
         `Discard it and propose it again.`;
@@ -1842,9 +1854,17 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
 // ---------------------------------------------------------------------------
 // Wiki gatekeeper (a facet of the Overseer, one per Wiki binding)
 
+/**
+ * A page slug as the session looks it up: InferOps slugs may have `/`-separated segments (such as
+ * dispatch/dispatch-a-crew). It is only compared with the listed slugs, never put in a request path.
+ */
+const PAGE_SLUG = /^(?=.{1,512}$)[A-Za-z0-9][A-Za-z0-9._~-]*(?:\/[A-Za-z0-9][A-Za-z0-9._~-]*)*$/;
+
 /** The fingerprint scope of every Wiki binding: its facet is one workspace's Wiki. */
 const WIKI_SCOPE = "knowledge/wiki";
 const MAX_SECTION_BODY = 100_000;
+/** InferOps' bound on a page body (`EditPageRequestSchema`). */
+const MAX_PAGE_BODY = 200_000;
 
 /** A Wiki binding: its action store, data source and the edits still waiting for a decision. */
 class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
@@ -1856,9 +1876,9 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
     return this.ctx.props.host;
   }
 
-  /** Pending section edits, oldest first. */
-  pendingEdits(): SectionUpdateAction[] {
-    const edits: SectionUpdateAction[] = [];
+  /** Pending section and page body edits, oldest first. */
+  pendingEdits(): WikiAction[] {
+    const edits: WikiAction[] = [];
     for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
       const record = readAction(raw);
       if (record?.status === "pending" && isWikiAction(record)) edits.push(record);
@@ -1871,7 +1891,17 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
    * version. An edit made stale by a change in InferOps is no longer shown and blocks nothing.
    */
   liveEdit(section: WikiSectionRecord, edits = this.pendingEdits()): SectionUpdateAction | undefined {
-    return edits.findLast(e => e.sectionId === section.id && e.expectedVersion === section.version);
+    return edits.findLast((e): e is SectionUpdateAction =>
+      e.kind === "section-update" && e.sectionId === section.id && e.expectedVersion === section.version);
+  }
+
+  /**
+   * The pending body edit that still applies to `page`: the newest one proposed at its current
+   * version. One made stale by any change of the page in InferOps is no longer shown.
+   */
+  liveBodyEdit(page: WikiDocumentHead, edits = this.pendingEdits()): DocumentUpdateAction | undefined {
+    return edits.findLast((e): e is DocumentUpdateAction =>
+      e.kind === "document-update" && e.documentId === page.id && e.expectedVersion === page.version);
   }
 
   /** A section as the caller sees it: with its live pending edit, and its links. */
@@ -1884,6 +1914,19 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
     };
   }
 }
+
+/** Thrown from a staging guard when the same edit is already pending: the proposal is a no-op. */
+class AlreadyProposed extends Error {}
+
+const failBodyConflict = (slug: string): never =>
+  fail("CONFLICT",
+    `Page ${slug} already has a body edit that has not taken effect yet. Wait for it, then read the ` +
+    `page again.`);
+
+const failSectionConflict = (tag: string): never =>
+  fail("CONFLICT",
+    `Section ${tag} already has an edit that has not taken effect yet. Wait for it, then read the ` +
+    `page again.`);
 
 /** Rethrow a data-source "not found" for a page without saying which way it was not found. */
 function hideDocumentExistence(error: unknown): never {
@@ -1940,18 +1983,8 @@ export class InferOpsWikiGatekeeper
   async removeObserver(_id: string): Promise<void> {}
 
   /**
-   * Apply a section edit. InferOps' section PATCH takes no expected version and ignores the
-   * idempotency key, so the check is made here, by reading the section first:
-   *
-   * - at the version the edit was proposed at: send the body (under the action's key, for when
-   *   InferOps honors it), and record the version InferOps reports;
-   * - already showing exactly this body at a later version: the edit took effect (a retried apply
-   *   whose first response was lost, or the same text written elsewhere), so it counts as applied
-   *   and nothing is sent again;
-   * - anything else: refused as stale, nothing sent.
-   *
-   * The read and the write are two requests, so an edit made in between is overwritten (see the
-   * design's Open Questions). The fingerprint is required: every Wiki record has one.
+   * Apply a section edit or a page body edit; see `#applySectionEdit` and `#applyBodyEdit`. The
+   * fingerprint is required: every Wiki record has one.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
     const binding = this.#binding();
@@ -1967,6 +2000,54 @@ export class InferOpsWikiGatekeeper
       });
       throw new Error(applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
     }
+    if (record.kind === "document-update") return this.#applyBodyEdit(binding, record);
+    return this.#applySectionEdit(binding, record);
+  }
+
+  /**
+   * A page body edit is sent as it was approved: the body, the version it was proposed at, and a
+   * key fixed per action (`<instance>:<action>`). InferOps compares the version itself, so the page
+   * is not read first, and its text decides nothing: a page already holding this body at a later
+   * version fails STALE_REVISION like any other change, since matching text does not show this
+   * action wrote it. A retried apply whose first response was lost is replayed by InferOps, which
+   * recognizes the key of the page's last write one version on. Records the version reported.
+   */
+  async #applyBodyEdit(binding: WikiBinding, record: DocumentUpdateAction): Promise<void> {
+    const fields = { host: binding.host, action: record.actionId };
+    let appliedVersion: number;
+    try {
+      const written = await binding.client.updateDocument(
+        record.documentId, { body: record.body }, record.expectedVersion,
+        binding.idempotencyKey(record.actionId));
+      appliedVersion = written.version;
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      logger.warn("document-update failed", {
+        event: "document-update.apply.failed", ...fields, code: code ?? "UNKNOWN", error,
+      });
+      throw new Error(applyFailureMessage(record, code), { cause: error });
+    }
+    binding.putAction({ ...record, status: "applied", appliedVersion });
+    logger.info("document-update applied", { event: "document-update.applied", ...fields });
+  }
+
+  /**
+   * Apply a section edit. InferOps' section PATCH takes no expected version and ignores the
+   * idempotency key, so the check is made here, by reading the section first:
+   *
+   * - at the version the edit was proposed at: send the body (under the action's key, for when
+   *   InferOps honors it), and record the version InferOps reports;
+   * - already showing exactly this body at a later version: the edit took effect (a retried apply
+   *   whose first response was lost, or the same text written elsewhere), so it counts as applied
+   *   and nothing is sent again;
+   * - anything else: refused as stale, nothing sent.
+   *
+   * The read and the write are two requests, so an edit made in between is overwritten (see the
+   * design's Open Questions).
+   */
+  async #applySectionEdit(binding: WikiBinding, record: SectionUpdateAction): Promise<void> {
+    const actionId = record.actionId;
+    const fields = { host: binding.host, action: actionId };
     let appliedVersion: number;
     try {
       const current = await binding.client.readSection(record.sectionId);
@@ -1998,8 +2079,12 @@ export class InferOpsWikiGatekeeper
   }
 
   /**
-   * Restore the body an applied edit replaced, provided the section is still exactly what the edit
-   * left (its version and body); otherwise explain instead of clobbering a later edit.
+   * Restore the body an applied edit replaced, provided the section or page is still exactly what
+   * the edit left; otherwise explain instead of clobbering a later edit. A section is checked by
+   * reading it (its version and body); a page by InferOps' compare-and-swap, sent expecting the
+   * version the edit produced under `<instance>:<action>:revert`, so a page changed since in any way
+   * fails STALE_REVISION and keeps its content, and a retried revert whose response was lost is
+   * replayed under its key.
    */
   async revertAction(actionId: number):
       Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
@@ -2009,6 +2094,7 @@ export class InferOpsWikiGatekeeper
       return { message: "This change was never applied, so there is nothing to revert." };
     }
     if (!isWikiAction(record)) return { message: "This is not a Wiki action." };
+    if (record.kind === "document-update") return this.#revertBodyEdit(binding, record);
     let current: WikiSectionRecord;
     try {
       current = await binding.client.readSection(record.sectionId);
@@ -2025,6 +2111,35 @@ export class InferOpsWikiGatekeeper
     await binding.client.updateSection(
       record.sectionId, record.previousBody, binding.idempotencyKey(actionId, ":revert"));
     binding.putAction({ ...record, status: "reverted" });
+  }
+
+  async #revertBodyEdit(binding: WikiBinding, record: DocumentUpdateAction):
+      Promise<void | { message?: string }> {
+    const page = `Page "${plainInline(record.documentTitle, 60)}"`;
+    if (record.appliedVersion === undefined) {
+      return { message: `${page} has no recorded version for this edit, so its previous text was not restored.` };
+    }
+    try {
+      await binding.client.updateDocument(
+        record.documentId, { body: record.previousBody }, record.appliedVersion,
+        binding.idempotencyKey(record.actionId, ":revert"));
+    } catch (error) {
+      switch (inferOpsErrorCode(error)) {
+        case "STALE_REVISION":
+          return {
+            message: `${page} has changed again since this edit, so its previous text was not ` +
+              `restored. Edit it in InferMind if needed.`,
+          };
+        case "NOT_FOUND":
+          return { message: `${page} is no longer in this Wiki.` };
+        default:
+          throw error;
+      }
+    }
+    binding.putAction({ ...record, status: "reverted" });
+    logger.info("document-update reverted", {
+      event: "document-update.reverted", host: binding.host, action: record.actionId,
+    });
   }
 }
 
@@ -2056,7 +2171,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
   /** A page's UUID from a slug or UUID; the list is read only for a slug. Not an observation. */
   async #documentId(slugOrId: string): Promise<string> {
     if (UUID.test(slugOrId)) return slugOrId.toLowerCase();
-    if (!isDocumentSlug(slugOrId)) {
+    if (!PAGE_SLUG.test(slugOrId)) {
       fail("INVALID_REQUEST", "slugOrId must be a page slug, such as handbook, or a page UUID.");
     }
     const found = (await this.#binding.client.listDocuments()).find(d => d.slug === slugOrId);
@@ -2064,44 +2179,124 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     return found.id;
   }
 
-  /** The page and its sections as shown (with pending edits), for both reads. */
-  async #page(slugOrId: string) {
+  async readStructure(): Promise<WikiStructure> {
+    const structure = await this.#binding.client.readStructure();
+    const filed = new Set(structure.pillars.flatMap(p => p.members.map(m => m.id)));
+    await this.#queue.authorizeObservation({
+      title: "Read InferMind Wiki structure",
+      description: `Read how the InferMind Wiki of ${this.#binding.host} is organized: ` +
+        `${structure.root ? "a company root page" : "no company root page"}, ` +
+        `${structure.pillars.length} pillars filing ${filed.size} pages, and ${structure.unfiled.length} unfiled pages.`,
+    });
+    return structure;
+  }
+
+  /**
+   * The page as shown (its pending body edit and section edits overlaid) and, for a Master, the
+   * structure its generated block lists. Only a Master's read costs the structure request.
+   */
+  async #page(slugOrId: string, withStructure: boolean) {
     const binding = this.#binding;
     const documentId = await this.#documentId(slugOrId);
     const head = await binding.client.readDocument(documentId).catch(hideDocumentExistence);
     const records = await binding.client.listSections(head.id).catch(hideDocumentExistence);
     const edits = binding.pendingEdits();
-    return { head, sections: records.map(section => binding.shown(section, edits)) };
+    const bodyEdit = binding.liveBodyEdit(head, edits);
+    const structure = withStructure && head.masterRole !== null
+      ? await binding.client.readStructure() : null;
+    return {
+      head, body: bodyEdit?.body ?? head.body, pendingBody: bodyEdit !== undefined, structure,
+      sections: records.map(section => binding.shown(section, edits)),
+    };
   }
 
   async readDocument(slugOrId: string): Promise<WikiDocument> {
-    const { head, sections } = await this.#page(slugOrId);
+    const { head, body, pendingBody, sections } = await this.#page(slugOrId, false);
     const page: WikiDocument = {
-      id: head.id, slug: head.slug, title: head.title, sections,
-      references: embeddedReferences(sections.map(s => s.body)),
+      id: head.id, slug: head.slug, title: head.title, body, version: head.version,
+      masterRole: head.masterRole, ...(pendingBody ? { pendingBody: true as const } : {}), sections,
+      references: embeddedReferences(authoredContent(head.title, { body, visibleSections: sections.map(s => s.body) })),
     };
     await this.#queue.authorizeObservation({
       title: `Read Wiki page ${plainInline(head.slug, 80)}`,
       description: `Read page "${plainInline(head.title, 120)}" of the InferMind Wiki of ` +
-        `${this.#binding.host}: ${sections.length} sections, ${page.references.length} embedded references.`,
+        `${this.#binding.host}: ${body.trim() ? "its body, " : ""}${sections.length} sections, ` +
+        `${page.references.length} embedded references.`,
     });
     return page;
   }
 
   /**
-   * InferOps answers a page with no readable section as not readable (its section lens), so this
-   * does too rather than return a bare title.
+   * InferOps' page-text contract (wiki.ts): the body, else the visible sections, then a Master's
+   * generated block. A page with none of them is answered as not readable, as InferOps answers it,
+   * rather than as a bare title.
    */
   async readDocumentText(slugOrId: string): Promise<string> {
-    const { head, sections } = await this.#page(slugOrId);
-    if (sections.length === 0) fail("NOT_FOUND", "No section of this page is readable.");
-    const text = documentText(head.title, sections.map(s => s.body));
+    const { head, body, sections, structure } = await this.#page(slugOrId, true);
+    const text = composeDocumentText(head.title, {
+      body, visibleSections: sections.map(s => s.body),
+      generated: structure ? masterStructureText(head, structure) : null,
+    });
+    if (text === null) fail("NOT_FOUND", "Nothing on this page is readable.");
     await this.#queue.authorizeObservation({
       title: `Read Wiki page ${plainInline(head.slug, 80)} as text`,
       description: `Read page "${plainInline(head.title, 120)}" of the InferMind Wiki of ` +
-        `${this.#binding.host} as text: ${sections.length} sections.`,
+        `${this.#binding.host} as text: ` +
+        `${body.trim() ? "its body" : `${sections.length} sections`}` +
+        `${structure ? " and its generated structure list" : ""}.`,
     });
     return text;
+  }
+
+  /**
+   * Checked against the page as InferOps has it now: its version (STALE_REVISION), a body equal to
+   * the one shown (nothing to do) and a live pending body edit (CONFLICT). Not an observation: the
+   * approval shows what was read.
+   */
+  async updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<void> {
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+      fail("INVALID_REQUEST", "expectedVersion must be the version readDocument() returned.");
+    }
+    if (body.length > MAX_PAGE_BODY) {
+      fail("INVALID_REQUEST", `A page body must be at most ${MAX_PAGE_BODY} characters.`);
+    }
+    const binding = this.#binding;
+    const documentId = await this.#documentId(slugOrId);
+    const head = await binding.client.readDocument(documentId).catch(hideDocumentExistence);
+    if (head.version !== expectedVersion) {
+      fail("STALE_REVISION",
+        `Page ${head.slug} is at version ${head.version}, not ${expectedVersion}. Read it again.`);
+    }
+    const live = binding.liveBodyEdit(head);
+    if ((live?.body ?? head.body) === body) return;
+    if (live) failBodyConflict(head.slug);
+    const actionId = await binding.stage({
+      kind: "document-update", documentId: head.id, documentTitle: head.title, body, expectedVersion,
+      previousBody: head.body,
+    }, () => {
+      // Re-checked with the write, after the fingerprint: a concurrent proposal may have staged since.
+      const now = binding.liveBodyEdit(head);
+      if (now?.body === body) throw new AlreadyProposed();
+      if (now) failBodyConflict(head.slug);
+    }).catch(error => {
+      if (error instanceof AlreadyProposed) return null;
+      throw error;
+    });
+    if (actionId === null) return;
+    const description = buildDescription(
+      `Replace the body of one page of the InferMind Wiki of ${binding.host}. InferOps applies it ` +
+      `only if the page is still at the version below when approved. Its sections are not changed.`)
+      .inline("Page", head.title)
+      .inline("Expected version", String(expectedVersion))
+      .verbatim("Current text", head.body)
+      .verbatim("New text", body)
+      .finish();
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Edit Wiki page ${head.title}`),
+      ...description,
+      implementsRevert: true,
+      actionKind: { tag: "inferops.wiki-page-update", label: "Edit a Wiki page" },
+    });
   }
 
   /**
@@ -2125,16 +2320,21 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     }
     const live = binding.liveEdit(stored);
     if ((live?.body ?? stored.body) === body) return;
-    if (live) {
-      fail("CONFLICT",
-        `Section ${stored.tag} already has an edit that has not taken effect yet. Wait for it, ` +
-        `then read the page again.`);
-    }
+    if (live) failSectionConflict(stored.tag);
     const head = await binding.client.readDocument(stored.documentId).catch(hideDocumentExistence);
     const actionId = await binding.stage({
       kind: "section-update", sectionId: stored.id, documentTitle: head.title, tag: stored.tag, body,
       expectedVersion, previousBody: stored.body,
+    }, () => {
+      // Re-checked with the write, after the awaits above: a concurrent proposal may have staged since.
+      const now = binding.liveEdit(stored);
+      if (now?.body === body) throw new AlreadyProposed();
+      if (now) failSectionConflict(stored.tag);
+    }).catch(error => {
+      if (error instanceof AlreadyProposed) return null;
+      throw error;
     });
+    if (actionId === null) return;
     const description = buildDescription(
       `Replace the markdown of one section of the InferMind Wiki of ${binding.host}. It is applied ` +
       `only if the section is still at the version below when approved.`)

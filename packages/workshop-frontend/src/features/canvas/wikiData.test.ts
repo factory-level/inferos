@@ -74,7 +74,7 @@ it('lands only the newest read of a page', async () => {
   let release!: () => void
   wiki.session.readDocument.mockImplementationOnce(async () => {
     await new Promise<void>(resolve => { release = resolve })
-    return { id: 'd1', slug: 'handbook', title: 'Old title', sections: [], references: [] }
+    return { id: 'd1', slug: 'handbook', title: 'Old title', body: '', version: 1, masterRole: null, sections: [], references: [] }
   })
   data.openPage('handbook')
   await flush()

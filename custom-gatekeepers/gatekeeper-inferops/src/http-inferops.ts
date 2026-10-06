@@ -22,6 +22,9 @@
 //   a missing page or section is answered `200 null` (or an empty body), and a 403 means either
 //   that the workspace is not an InferMind workspace or that the person lacks `knowledge:*`;
 //   InferOps says which only in its message text, which is not read, so both get one message.
+//   A page body edit (`PATCH /knowledge/wiki/pages/<id>`) is InferOps' strict compare-and-swap on
+//   the page version: its 409 `STALE_VERSION` is reported as `STALE_REVISION`, and InferOps alone
+//   decides when a retry under the same key is replayed.
 // - Nothing here logs a token, a header or a body, and InferOps' own error text is never passed on:
 //   failures are reported by operation name, status and code.
 //
@@ -37,12 +40,12 @@ import {
   InferOpsError, type DispatchRequest, type InferOpsClient, type InferOpsErrorCode,
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
   type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
-  type WikiSectionRecord,
+  type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord, type WikiStructureRecord,
 } from "./inferops-client";
 import { isSlug } from "./resources";
 import type {
   Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
-  State, StateGroup, Workflow,
+  State, StateGroup, WikiPillar, WikiPillarMember, WikiStructurePage, Workflow,
 } from "./types";
 
 type LogFields = { vendorId: string; operation: string; status: number; code: string };
@@ -137,6 +140,10 @@ const WORKFLOWS: readonly Workflow[] = ["content", "software"];
 const PRIORITIES: readonly Issue["priority"][] = ["urgent", "high", "medium", "low", "none"];
 const RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "succeeded", "failed", "cancelled", "unknown"];
 const RUN_REASON_CODES: readonly RunReasonCode[] = ["AUTH_BLOCKED", "QUOTA_BLOCKED", "TESTS_FAILED"];
+const MASTER_ROLES: readonly NonNullable<WikiDocumentHead["masterRole"]>[] = ["root", "pillar"];
+const MEMBER_SOURCES: readonly WikiPillarMember["source"][] = ["intake", "human"];
+/** InferOps' pillar key rule (`PillarKeySchema`). */
+const PILLAR_KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** InferOps' own bound on the test commands one run reports. */
 const RUN_TEST_COMMANDS_MAX = 100;
 /** How many of the workspace's newest runs `listRuns` reads before keeping the project's. */
@@ -151,6 +158,11 @@ function issueNotFound(): InferOpsError {
 export const WIKI_FORBIDDEN =
   "InferOps refused the Wiki for this connection: the workspace is not an InferMind workspace, or " +
   "your access lacks knowledge permission (knowledge:read to read, knowledge:write to edit).";
+
+/** The code of a data-source failure this client raised, or null. */
+function inferOpsCode(error: unknown): InferOpsErrorCode | null {
+  return error instanceof InferOpsError ? error.code : null;
+}
 
 function documentNotFound(): InferOpsError {
   return new InferOpsError("NOT_FOUND", "No such page in this Wiki.");
@@ -257,6 +269,57 @@ function parseDocument(value: unknown): WikiDocumentRecord {
     title: text(document.title, "document.title"),
     parentId: nullable(document.parentId, "document.parentId", UUID)?.toLowerCase() ?? null,
     siblingOrder: int(document.siblingOrder, "document.siblingOrder"),
+  };
+}
+
+/**
+ * A page as read on its own: the listed fields, its authored body and version, and its Master role
+ * (absent on a page InferOps reports without one, which is no Master).
+ */
+function parseDocumentHead(value: unknown): WikiDocumentHead {
+  const { id, slug, title } = parseDocument(value);
+  const document = record(value, "document");
+  return {
+    id, slug, title,
+    body: text(document.body, "document.body"),
+    version: int(document.version, "document.version"),
+    masterRole: document.masterRole === undefined || document.masterRole === null
+      ? null : oneOf(document.masterRole, MASTER_ROLES, "document.masterRole"),
+  };
+}
+
+/** A page a structure read names; nothing else of InferOps' is on it. */
+function parseStructurePage(value: unknown, what: string): WikiStructurePage {
+  const page = record(value, what);
+  return {
+    id: text(page.documentId, `${what}.documentId`, UUID).toLowerCase(),
+    slug: text(page.slug, `${what}.slug`),
+    title: text(page.title, `${what}.title`),
+    parentId: nullable(page.parentId, `${what}.parentId`, UUID)?.toLowerCase() ?? null,
+  };
+}
+
+function parsePillar(value: unknown): WikiPillar {
+  const pillar = record(value, "pillar");
+  return {
+    key: text(pillar.key, "pillar.key", PILLAR_KEY),
+    title: text(pillar.title, "pillar.title"),
+    position: int(pillar.position, "pillar.position"),
+    master: pillar.master === null ? null : parseStructurePage(pillar.master, "pillar.master"),
+    members: list(pillar.members, "pillar.members").map(member => ({
+      ...parseStructurePage(member, "pillar.member"),
+      source: oneOf(record(member, "pillar.member").source, MEMBER_SOURCES, "pillar.member.source"),
+    })),
+  };
+}
+
+/** `GET /knowledge/wiki/structure`, bare: the root, the pillars in order and the unfiled pages. */
+function parseStructure(value: unknown): WikiStructureRecord {
+  const structure = record(value, "structure");
+  return {
+    root: structure.root === null ? null : parseStructurePage(structure.root, "structure.root"),
+    pillars: list(structure.pillars, "structure.pillars").map(parsePillar),
+    unfiled: list(structure.unfiled, "structure.unfiled").map(page => parseStructurePage(page, "structure.unfiled")),
   };
 }
 
@@ -438,6 +501,8 @@ function failureCode(status: number, code: string | null): InferOpsErrorCode {
   if (status === 403) return "FORBIDDEN";
   if (status === 404) return "NOT_FOUND";
   if (status === 409) {
+    // `STALE_VERSION` is the Wiki's name for it (a page's version, rather than an issue's revision).
+    if (code === "STALE_VERSION") return "STALE_REVISION";
     return code === "STALE_REVISION" || code === "WORKFLOW_MISMATCH" || code === "RUN_ACTIVE"
       ? code : "CONFLICT";
   }
@@ -605,9 +670,9 @@ export function openHttpInferOpsClient(
     });
     if (body === null) throw documentNotFound();
     return parsed("wiki.document.get", body, raw => {
-      const { id, slug, title } = parseDocument(raw);
-      if (id !== documentId.toLowerCase()) throw new Malformed("another document was returned");
-      return { id, slug, title };
+      const head = parseDocumentHead(raw);
+      if (head.id !== documentId.toLowerCase()) throw new Malformed("another document was returned");
+      return head;
     });
   }
 
@@ -895,6 +960,45 @@ export function openHttpInferOpsClient(
     },
 
     readDocument,
+
+    async readStructure(): Promise<WikiStructureRecord> {
+      const body = await knowledge("wiki.structure.get", { method: "GET", path: "/knowledge/wiki/structure" });
+      return parsed("wiki.structure.get", body, parseStructure);
+    },
+
+    async updateDocument(
+      documentId: string, changes: WikiPageChanges, expectedVersion: number, idempotencyKey: string,
+    ): Promise<WikiPageWrite> {
+      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+      if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        throw new InferOpsError("INVALID_REQUEST", "The expected version must be a positive integer.");
+      }
+      // Also keeps anything that is not an id out of the request path.
+      if (!UUID.test(documentId)) throw documentNotFound();
+      let response: unknown;
+      try {
+        response = await knowledge("wiki.page.update", {
+          method: "PATCH",
+          path: `/knowledge/wiki/pages/${documentId}`,
+          // Only the body and the version: the title and the page's place stay as they are.
+          body: { body: changes.body, expectedVersion },
+          idempotencyKey,
+        });
+      } catch (error) {
+        const code = inferOpsCode(error);
+        if (code === "NOT_FOUND") throw documentNotFound();
+        if (code === "STALE_REVISION") {
+          throw new InferOpsError("STALE_REVISION", "The page changed in InferOps. Read it again.");
+        }
+        throw error;
+      }
+      return parsed("wiki.page.update", response, raw => {
+        const document = record(record(raw, "response").document, "document");
+        const id = text(document.id, "document.id", UUID).toLowerCase();
+        if (id !== documentId.toLowerCase()) throw new Malformed("another document was returned");
+        return { id, version: int(document.version, "document.version") };
+      });
+    },
 
     async listSections(documentId: string): Promise<WikiSectionRecord[]> {
       // The page first: InferOps answers sections of an unknown page with an empty list.

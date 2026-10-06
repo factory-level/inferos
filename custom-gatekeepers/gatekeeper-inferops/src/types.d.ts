@@ -369,7 +369,60 @@ export interface WikiSection {
   pending?: "update";
 }
 
-/** One page with its sections. */
+/** A page as a structure read names it: where it sits in the page tree. */
+export interface WikiStructurePage {
+  /** Stable page UUID. */
+  id: string;
+  /** The page's short name. */
+  slug: string;
+  /** Page title. */
+  title: string;
+  /** The parent page's UUID, or null for a top-level page. Filing a page in a pillar never moves it. */
+  parentId: string | null;
+}
+
+/** A page filed in a pillar, and who filed it. */
+export interface WikiPillarMember extends WikiStructurePage {
+  /** "intake" when the company intake filed it, "human" when a person did. */
+  source: "intake" | "human";
+}
+
+/** One business pillar of the Wiki: a lane of pages with its own Master page. */
+export interface WikiPillar {
+  /** The pillar's key, a lowercase slug such as engineering. */
+  key: string;
+  /** Pillar title. */
+  title: string;
+  /** Order among the pillars, ascending. */
+  position: number;
+  /** The pillar's Master page, or null when it has none you can open. */
+  master: WikiStructurePage | null;
+  /** The pages filed in the pillar, by title. One page may be filed in several pillars. */
+  members: WikiPillarMember[];
+}
+
+/**
+ * How the Wiki is organized: the company root page, the business pillars with their Masters and
+ * filed pages, and the pages no pillar files. It lists only pages listDocuments() shows. Pillars
+ * organize pages; they never decide who can read one.
+ */
+export interface WikiStructure {
+  /** The company root page, or null when there is none you can open. */
+  root: WikiStructurePage | null;
+  /** The pillars, by position. */
+  pillars: WikiPillar[];
+  /** The pages that are neither a Master nor filed in a pillar. */
+  unfiled: WikiStructurePage[];
+}
+
+/**
+ * One page: its authored body and its sections.
+ *
+ * The body is the page's own markdown, readable by anyone who can open the page. Sections are the
+ * separate units that are linked, indexed and edited one at a time; you see only the sections your
+ * InferMind access shows, so a page may show fewer sections than it has. A page with a body reads
+ * as its body, and its sections are never merged into it.
+ */
 export interface WikiDocument {
   /** Stable page UUID. */
   id: string;
@@ -377,12 +430,24 @@ export interface WikiDocument {
   slug: string;
   /** Page title. */
   title: string;
+  /** The page's own markdown; empty when it has none. */
+  body: string;
+  /** Version to supply when editing the body. It changes with every change of the page. */
+  version: number;
+  /** "root" for the company root page, "pillar" for a pillar's Master page, null for any other page. */
+  masterRole: "root" | "pillar" | null;
+  /**
+   * Set while a body edit requested through this connection has not taken effect yet; absent
+   * otherwise. The body shown already includes the edit, at the page's unchanged version.
+   */
+  pendingBody?: true;
   /** The sections you can read, in page order. May be empty. */
   sections: WikiSection[];
   /**
-   * The inferops:// references embedded in the sections: links that stand alone as a paragraph,
-   * such as [ENG board](inferops://acme.operations/project/board/ENG), each once, in order. A
-   * reference names something and grants nothing; reading it needs its own connection.
+   * The inferops:// references embedded in what the page reads as (its body, or its sections when
+   * it has no body): links that stand alone as a paragraph, such as
+   * [ENG board](inferops://acme.operations/project/board/ENG), each once, in order. A reference
+   * names something and grants nothing; reading it needs its own connection.
    */
   references: string[];
 }
@@ -395,14 +460,26 @@ export interface WikiDocument {
 export interface InferOpsWikiSession {
   /** Every page you can open, ordered by siblingOrder, then title; parentId places each in the tree. */
   listDocuments(): Promise<WikiDocumentNode[]>;
-  /** One page by its slug or UUID, with its sections and embedded references. */
+  /** The company root, the business pillars with their Masters and filed pages, and the unfiled pages. */
+  readStructure(): Promise<WikiStructure>;
+  /** One page by its slug or UUID, with its body, its sections and its embedded references. */
   readDocument(slugOrId: string): Promise<WikiDocument>;
   /**
-   * One page as plain text: "# <title>", then each section's markdown, separated by blank lines.
-   * Embedded references stay as the links they are written as. Fails with NOT_FOUND for a page
-   * with no section you can read.
+   * One page as plain text: "# <title>", a blank line, then the page's body without a leading
+   * "# ..." title line (or, for a page with no body, each section's markdown, separated by blank
+   * lines). A Master page then adds a generated list of the pillars (the root) or of the pillar's
+   * pages, marked by an "<!-- generated: wiki structure -->" line. Embedded references stay as the
+   * links they are written as. Fails with NOT_FOUND for a page with nothing you can read.
    */
   readDocumentText(slugOrId: string): Promise<string>;
+  /**
+   * Replace a page's body. Supply the version readDocument() returned; a page changed since (its
+   * body, title or place in the tree) fails with STALE_REVISION. Reads show the new body at once,
+   * marked pendingBody. A body equal to the current one does nothing. While an earlier body edit of
+   * the page has not taken effect, another fails with CONFLICT. A body over 200000 characters fails
+   * with INVALID_REQUEST. Sections are not changed; edit them with updateSection().
+   */
+  updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<void>;
   /**
    * Replace a section's markdown. Supply the version you read it at; a section edited since fails
    * with STALE_REVISION. Reads show the new body at once, marked pending "update". A body equal to

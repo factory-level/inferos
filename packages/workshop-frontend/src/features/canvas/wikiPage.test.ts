@@ -51,7 +51,7 @@ it('says what each reference names, and names nothing it cannot show', () => {
   }
 })
 
-const page = (section: Partial<WikiDocument['sections'][number]> | null): WikiDocument => ({ id: 'd', slug: 'd', title: 'D', references: [],
+const page = (section: Partial<WikiDocument['sections'][number]> | null): WikiDocument => ({ id: 'd', slug: 'd', title: 'D', body: '', version: 1, masterRole: null, references: [],
   sections: section ? [{ id: 's', tag: 't', body: 'old', version: 3, wikilinks: [], ...section }] : [] })
 
 it('decides an awaiting edit only from the page: pending, applied, rejected or stale', () => {

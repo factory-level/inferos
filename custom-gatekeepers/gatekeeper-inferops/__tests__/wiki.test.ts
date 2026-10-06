@@ -1,17 +1,37 @@
 // The InferMind Wiki (#87): a third resource kind, one workspace's Wiki, whose reads are
 // observations and whose section edits are approved actions checked at apply against the section's
-// current version (InferOps' PATCH takes no expected version). Over the mock's demo Wiki.
+// current version (InferOps' PATCH takes no expected version), and whose page body edits are
+// approved actions InferOps applies by a strict compare-and-swap on the page version. Pages read by
+// InferOps' page-text contract, with Masters listing the structure. Over the mock's demo Wiki.
 
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   parseWikiDocumentUrl, parseWikiUrl, resourceKind, wikiDocumentUrl, wikiUrl,
 } from "../src/resources";
-import { documentText, embeddedReferences, wikilinksOf } from "../src/wiki";
+import {
+  bodyWithoutTitle, composeDocumentText, documentText, embeddedReferences, masterStructureText, wikilinksOf,
+} from "../src/wiki";
 import type { WikiProps } from "./worker";
 
 const WIKI_URL = "inferops://demo.local/knowledge/wiki";
 const HANDBOOK = "60000000-0000-4000-8000-000000000001";
+const RELEASE = "60000000-0000-4000-8000-000000000002";
+const ONBOARDING = "60000000-0000-4000-8000-000000000003";
+const COMPANY = "60000000-0000-4000-8000-000000000005";
+const ENGINEERING = "60000000-0000-4000-8000-000000000006";
+const OPERATIONS = "60000000-0000-4000-8000-000000000007";
+const INCIDENT = "60000000-0000-4000-8000-000000000008";
+const DISPATCH = "60000000-0000-4000-8000-000000000009";
+const GENERATED = "<!-- generated: wiki structure -->";
+
+/** A page as a structure read names it. */
+const structurePage = (id: string, slug: string, title: string, parentId: string | null) => ({ id, slug, title, parentId });
+/** A page's content for the text composer. */
+const content = (body: string, visibleSections: string[] = [], generated: string | null = null) =>
+  ({ body, visibleSections, generated });
+/** A Master page named by its id. */
+const master = (id: string) => ({ id, slug: id, title: id.toUpperCase(), parentId: null });
 const PURPOSE = "61000000-0000-4000-8000-000000000001";
 const CURRENT_WORK = "61000000-0000-4000-8000-000000000002";
 const STEPS = "61000000-0000-4000-8000-000000000003";
@@ -64,10 +84,20 @@ describe("the Wiki resource kind", () => {
     });
     expect(wikiDocumentUrl({ host: "acme.knowledge", slug: "release-process" })).toBe(ref);
     expect(resourceKind(ref)).toBeNull();
+    // A slug with `/` is one encoded segment, decoded once.
+    const shared = "inferops://acme.knowledge/knowledge/document/dispatch%2Fdispatch-a-crew";
+    expect(wikiDocumentUrl({ host: "acme.knowledge", slug: "dispatch/dispatch-a-crew" })).toBe(shared);
+    expect(parseWikiDocumentUrl(shared)?.slug).toBe("dispatch/dispatch-a-crew");
+    expect(parseWikiDocumentUrl(shared.replace("%2F", "%2f"))?.slug).toBe("dispatch/dispatch-a-crew");
     for (const bad of [
       "inferops://acme.knowledge/knowledge/document/", "inferops://acme.knowledge/knowledge/document/a/b",
       "inferops://acme.knowledge/knowledge/document/a?b=1", "inferops://acme/knowledge/document/a",
       "inferops://acme.knowledge/knowledge/document/%2e%2e", "https://acme.knowledge/knowledge/document/a",
+      // Encoded dot segments, double encoding, other escapes, empty segments and a fragment.
+      "inferops://acme.knowledge/knowledge/document/a%2F..", "inferops://acme.knowledge/knowledge/document/a%2F.",
+      "inferops://acme.knowledge/knowledge/document/a%252Fb", "inferops://acme.knowledge/knowledge/document/a%20b",
+      "inferops://acme.knowledge/knowledge/document/a%2F%2Fb", "inferops://acme.knowledge/knowledge/document/%2Fa",
+      "inferops://acme.knowledge/knowledge/document/a%2Fb#c",
     ]) {
       expect(parseWikiDocumentUrl(bad), bad).toBeNull();
     }
@@ -80,7 +110,10 @@ describe("the Wiki resource kind", () => {
       url: WIKI_URL, tsType: "InferOpsWikiSession", suggestedBindingName: "INFEROPS_WIKI",
     });
     const pages = await hooks.startBoundWikiSession("wiki").listDocuments();
-    expect(pages.map(p => p.slug)).toEqual(["onboarding", "handbook", "drafts", "release-process"]);
+    expect(pages.map(p => p.slug)).toEqual([
+      "engineering", "incident-response", "onboarding", "handbook", "dispatch/dispatch-a-crew", "drafts",
+      "operations", "release-process", "company",
+    ]);
   });
 
   it("refuses another workspace or tenant like a missing Wiki", async () => {
@@ -127,7 +160,10 @@ describe("reading", () => {
     const { hooks, session } = setup();
     const bySlug = await session.readDocument("handbook");
     expect(await session.readDocument(HANDBOOK)).toEqual(bySlug);
-    expect(bySlug).toMatchObject({ id: HANDBOOK, slug: "handbook", title: "Team handbook" });
+    expect(bySlug).toMatchObject({
+      id: HANDBOOK, slug: "handbook", title: "Team handbook", body: "", version: 1, masterRole: null,
+    });
+    expect(bySlug.pendingBody).toBeUndefined();
     expect(bySlug.sections.map(s => [s.tag, s.version])).toEqual([["purpose", 1], ["current-work", 3]]);
     expect(bySlug.sections[0]!.wikilinks).toEqual([
       { target: "onboarding", tag: "first-week" }, { target: "release-process", tag: "steps" },
@@ -157,6 +193,264 @@ describe("reading", () => {
     expect((await session.readDocument("drafts")).sections).toEqual([]);
     expect(await failure(session.readDocumentText("drafts"))).toContain("NOT_FOUND");
     expect((await hooks.log()).observations).toEqual(["Read Wiki page drafts"]);
+  });
+});
+
+describe("the structure and page text", () => {
+  it("reads the root, the pillars with their Masters and filed pages, and the unfiled pages, as an observation", async () => {
+    const { hooks, session } = setup();
+    const dispatch = structurePage(DISPATCH, "dispatch/dispatch-a-crew", "Dispatch a crew", OPERATIONS);
+    const release = structurePage(RELEASE, "release-process", "Release process", HANDBOOK);
+    expect(await session.readStructure()).toEqual({
+      root: structurePage(COMPANY, "company", "Demo Company", null),
+      pillars: [{
+        key: "engineering", title: "Engineering", position: 0,
+        master: structurePage(ENGINEERING, "engineering", "Engineering", COMPANY),
+        members: [{ ...dispatch, source: "human" }, { ...release, source: "intake" }],
+      }, {
+        key: "operations", title: "Operations", position: 1,
+        master: structurePage(OPERATIONS, "operations", "Operations", COMPANY),
+        members: [
+          { ...dispatch, source: "intake" }, { ...structurePage(INCIDENT, "incident-response", "Incident response", OPERATIONS), source: "intake" },
+          { ...release, source: "human" },
+        ],
+      }],
+      unfiled: [
+        structurePage(HANDBOOK, "handbook", "Team handbook", null), structurePage(ONBOARDING, "onboarding", "Onboarding", HANDBOOK),
+        structurePage("60000000-0000-4000-8000-000000000004", "drafts", "Drafts", null),
+      ],
+    });
+    expect((await hooks.log()).observations).toEqual(["Read InferMind Wiki structure"]);
+  });
+
+  it("reads a page's body, version and Master role, and takes references from the body", async () => {
+    const { session } = setup();
+    expect(await session.readDocument("incident-response")).toMatchObject({
+      id: INCIDENT, version: 4, masterRole: null, sections: [], references: [BOARD_REF],
+    });
+    expect((await session.readDocument("incident-response")).body).toMatch(/^# Incident response\n\n1\. Page/);
+    expect(await session.readDocument("company")).toMatchObject({ masterRole: "root", body: "", sections: [] });
+    expect((await session.readDocument(ENGINEERING)).masterRole).toBe("pillar");
+    // A slug of several segments is looked up as listed.
+    expect((await session.readDocument("dispatch/dispatch-a-crew")).id).toBe(DISPATCH);
+  });
+
+  it("reads a body-only page as its title and body, dropping only a leading heading equal to the title", async () => {
+    const { session } = setup();
+    expect(await session.readDocumentText("incident-response")).toBe(
+      "# Incident response\n\n1. Page the on-call engineer.\n2. Open an incident issue on the board.\n" +
+      `3. Write the timeline while it is fresh.\n\n[DEMO board](${BOARD_REF})`);
+    expect(await session.readDocumentText(DISPATCH)).toBe(
+      "# Dispatch a crew\n\n# Before you start\n\nCheck the crew roster on the board.\n\n## Steps\n\n" +
+      "1. Pick the nearest free crew.\n2. Move the job card to Dispatched.");
+  });
+
+  it("reads a page with a body as its body only, never merging its sections", async () => {
+    const { session } = setup();
+    const page = await session.readDocument("onboarding");
+    expect(page.sections.map(s => s.tag)).toEqual(["first-week"]);
+    expect(await session.readDocumentText("onboarding")).toBe(`# Onboarding\n\n${page.body}`);
+    expect(await session.readDocumentText("onboarding")).not.toContain("pair with a teammate");
+  });
+
+  it("adds a Master's generated structure block, encoding each slug as one route segment", async () => {
+    const { hooks, session } = setup();
+    expect(await session.readDocumentText("engineering")).toBe([
+      "# Engineering", "", GENERATED, "## Pages in Engineering",
+      "- [Dispatch a crew](/wiki/dispatch%2Fdispatch-a-crew)", "- [Release process](/wiki/release-process)",
+    ].join("\n"));
+    expect(await session.readDocumentText("operations")).toBe([
+      "# Operations", "", "How the demo team runs day to day.", "", GENERATED, "## Pages in Operations",
+      "- [Dispatch a crew](/wiki/dispatch%2Fdispatch-a-crew)", "- [Incident response](/wiki/incident-response)",
+      "- [Release process](/wiki/release-process)",
+    ].join("\n"));
+    expect(await session.readDocumentText("company")).toBe([
+      "# Demo Company", "", GENERATED, "## Pillars", "- [Engineering](/wiki/engineering)", "- [Operations](/wiki/operations)",
+    ].join("\n"));
+    expect((await hooks.log()).observations).toEqual([
+      "Read Wiki page engineering as text", "Read Wiki page operations as text", "Read Wiki page company as text",
+    ]);
+  });
+});
+
+describe("page body edits", () => {
+  it("queue an approval, show at once as pendingBody, and write only on approval", async () => {
+    const { props, hooks, mock, session } = setup();
+    const before = (await mock.readDocument(INCIDENT)).body;
+    await session.updateDocumentBody("incident-response", "# Incident response\n\nCall the on-call first.", 4);
+
+    const [action] = (await hooks.log()).actions;
+    expect(action).toMatchObject({
+      title: "Edit Wiki page Incident response", kind: "inferops.wiki-page-update", implementsRevert: true,
+    });
+    expect(action!.fields).toMatchObject({
+      Page: "Incident response", "Expected version": "4", "Current text": before,
+      "New text": "# Incident response\n\nCall the on-call first.",
+    });
+    expect((await mock.readDocument(INCIDENT)).body).toBe(before);
+
+    const shown = await session.readDocument("incident-response");
+    expect(shown).toMatchObject({ body: "# Incident response\n\nCall the on-call first.", version: 4, pendingBody: true,
+                                  references: [] });
+    expect(await session.readDocumentText("incident-response")).toBe("# Incident response\n\nCall the on-call first.");
+
+    expect(await hooks.applyWiki(props, action!.id)).toBeNull();
+    expect(await mock.readDocument(INCIDENT)).toMatchObject({ body: "# Incident response\n\nCall the on-call first.", version: 5 });
+    expect(await hooks.getWikiRaw(props, `action:${action!.id}`)).toMatchObject({ status: "applied", appliedVersion: 5 });
+    expect(await hooks.applyWiki(props, action!.id)).toBeNull();
+    expect((await mock.readDocument(INCIDENT)).version).toBe(5);
+    expect((await session.readDocument("incident-response")).pendingBody).toBeUndefined();
+  });
+
+  it("gives a body to a Master that had none; its sections and generated block are untouched", async () => {
+    const { props, hooks, session } = setup();
+    await session.updateDocumentBody("engineering", "How we build things.", 1);
+    expect(await hooks.applyWiki(props, 1)).toBeNull();
+    expect(await session.readDocumentText("engineering"))
+      .toContain(`# Engineering\n\nHow we build things.\n\n${GENERATED}\n## Pages in Engineering\n`);
+  });
+
+  it("refuses a stale version, an unknown page and bad arguments at proposal, queueing nothing", async () => {
+    const { hooks, session } = setup();
+    expect(await failure(session.updateDocumentBody("incident-response", "x", 3)))
+      .toContain("STALE_REVISION: Page incident-response is at version 4, not 3.");
+    expect(await failure(session.updateDocumentBody("no-such-page", "x", 1))).toContain("NOT_FOUND");
+    expect(await failure(session.updateDocumentBody("60000000-0000-4000-8000-0000000000ff", "x", 1))).toContain("NOT_FOUND");
+    expect(await failure(session.updateDocumentBody("../handbook", "x", 1))).toContain("INVALID_REQUEST");
+    expect(await failure(session.updateDocumentBody("handbook", "x", 0))).toContain("INVALID_REQUEST");
+    expect(await failure(session.updateDocumentBody("handbook", "x", 1.5))).toContain("INVALID_REQUEST");
+    expect(await failure(session.updateDocumentBody("handbook", "x".repeat(200_001), 1))).toContain("INVALID_REQUEST");
+    expect((await hooks.log()).actions).toEqual([]);
+  });
+
+  it("does nothing for an unchanged body, and refuses a second edit while one is pending", async () => {
+    const { hooks, mock, session } = setup();
+    await session.updateDocumentBody(INCIDENT, (await mock.readDocument(INCIDENT)).body, 4);
+    expect((await hooks.log()).actions).toEqual([]);
+
+    await session.updateDocumentBody(INCIDENT, "First edit.", 4);
+    await session.updateDocumentBody(INCIDENT, "First edit.", 4);
+    expect(await failure(session.updateDocumentBody(INCIDENT, "Second edit.", 4))).toContain("CONFLICT");
+    expect((await hooks.log()).actions).toHaveLength(1);
+    // A section edit of the same page is a separate change.
+    await session.updateSection("61000000-0000-4000-8000-000000000004", "Edited section.", 1);
+    expect(await failure(session.updateDocumentBody("onboarding", "x", 3))).toBe("");
+  });
+
+  it("stages one edit when proposals race: the same body joins, a different one is CONFLICT", async () => {
+    const { hooks, session } = setup();
+    const same = await Promise.allSettled([
+      session.updateDocumentBody(INCIDENT, "Raced edit.", 4),
+      session.updateDocumentBody(INCIDENT, "Raced edit.", 4),
+    ]);
+    expect(same.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect((await hooks.log()).actions).toHaveLength(1);
+
+    const second = setup();
+    const different = await Promise.allSettled([
+      second.session.updateDocumentBody(INCIDENT, "Edit A.", 4),
+      second.session.updateDocumentBody(INCIDENT, "Edit B.", 4),
+    ]);
+    expect(different.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const refused = different.find(result => result.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason)).toContain("CONFLICT");
+    const actions = (await second.hooks.log()).actions;
+    expect(actions).toHaveLength(1);
+    // The overlay shows exactly the one staged edit.
+    const shown = await second.session.readDocument(INCIDENT);
+    expect(shown.pendingBody).toBe(true);
+    expect(["Edit A.", "Edit B."]).toContain(shown.body);
+  });
+
+  it("is refused at apply when the page changed since, and leaves its content", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.updateDocumentBody(INCIDENT, "My edit.", 4);
+    await mock.updateDocument(INCIDENT, { body: "Someone else's edit." }, 4, "elsewhere");
+
+    expect(await session.readDocument(INCIDENT)).toMatchObject({ body: "Someone else's edit.", version: 5 });
+    expect((await session.readDocument(INCIDENT)).pendingBody).toBeUndefined();
+    expect(await hooks.applyWiki(props, 1))
+      .toContain("the page changed in InferOps after this edit was proposed (expected version 4)");
+    expect(await mock.readDocument(INCIDENT)).toMatchObject({ body: "Someone else's edit.", version: 5 });
+    expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "pending" });
+  });
+
+  it("fails as stale, never in effect, when another writer already wrote the same body", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.updateDocumentBody(INCIDENT, "Same text.", 4);
+    await mock.updateDocument(INCIDENT, { body: "Same text." }, 4, "another-writer");
+
+    expect(await hooks.applyWiki(props, 1)).toContain("the page changed in InferOps after this edit was proposed");
+    expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "pending" });
+    expect((await mock.readDocument(INCIDENT)).version).toBe(5);
+  });
+
+  it("is replayed by InferOps when an apply is retried after its write committed", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.updateDocumentBody(INCIDENT, "Written once.", 4);
+    expect(await hooks.applyWiki(props, 1)).toBeNull();
+    // The write committed but its response was lost, so the action is still pending here.
+    const applied = await hooks.getWikiRaw(props, "action:1") as Record<string, unknown>;
+    const { appliedVersion: _, ...pending } = applied;
+    await hooks.putWikiRaw(props, "action:1", { ...pending, status: "pending" });
+
+    expect(await hooks.applyWiki(props, 1)).toBeNull();
+    expect(await mock.readDocument(INCIDENT)).toMatchObject({ body: "Written once.", version: 5 });
+    expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "applied", appliedVersion: 5 });
+
+    // The replay is bound to the whole write: the same key with another body or version is stale.
+    const key = `${await hooks.getWikiRaw(props, "instanceId") as string}:1`;
+    expect(await failure(mock.updateDocument(INCIDENT, { body: "Another body." }, 4, key))).toContain("STALE_REVISION");
+    expect(await failure(mock.updateDocument(INCIDENT, { body: "Written once." }, 3, key))).toContain("STALE_REVISION");
+    expect(await mock.updateDocument(INCIDENT, { body: "Written once." }, 4, key)).toEqual({ id: INCIDENT, version: 5 });
+  });
+
+  it("never sends a request that differs from the approved one", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.updateDocumentBody(INCIDENT, "Approved text.", 4);
+    const stored = await hooks.getWikiRaw(props, "action:1") as Record<string, unknown>;
+    await hooks.putWikiRaw(props, "action:1", { ...stored, body: "Swapped text." });
+    expect(await hooks.applyWiki(props, 1)).toContain("the stored request no longer matches");
+    await hooks.putWikiRaw(props, "action:1", { ...stored, expectedVersion: 5 });
+    expect(await hooks.applyWiki(props, 1)).toContain("the stored request no longer matches");
+    expect((await mock.readDocument(INCIDENT)).version).toBe(4);
+  });
+
+  it("is forgotten when rejected", async () => {
+    const { props, hooks, session } = setup();
+    await session.updateDocumentBody(INCIDENT, "Rejected text.", 4);
+    await hooks.rejectWiki(props, 1);
+    expect((await session.readDocument(INCIDENT)).pendingBody).toBeUndefined();
+    await session.updateDocumentBody(INCIDENT, "Another text.", 4);
+  });
+
+  it("reverts only while the page is still at the version the edit produced", async () => {
+    const { props, hooks, mock, session } = setup();
+    const before = (await mock.readDocument(INCIDENT)).body;
+    await session.updateDocumentBody(INCIDENT, "Edit to revert.", 4);
+    expect(await hooks.applyWiki(props, 1)).toBeNull();
+    expect(await hooks.revertWiki(props, 1)).toBeNull();
+    expect(await mock.readDocument(INCIDENT)).toMatchObject({ body: before, version: 6 });
+    expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "reverted" });
+
+    await session.updateDocumentBody(INCIDENT, "Edit changed later.", 6);
+    expect(await hooks.applyWiki(props, 2)).toBeNull();
+    // Even a write that leaves the same text moves the page on, so the revert refuses.
+    await mock.updateDocument(INCIDENT, { body: "Edit changed later." }, 7, "elsewhere");
+    expect(await hooks.revertWiki(props, 2)).toContain("has changed again since this edit");
+    expect(await mock.readDocument(INCIDENT)).toMatchObject({ body: "Edit changed later.", version: 8 });
+  });
+
+  it("is refused at proposal and at apply when the person lacks the Wiki", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.updateDocumentBody(INCIDENT, "Queued while allowed.", 4);
+    await mock.setInferMindEnabled(false);
+    expect(await failure(session.updateDocumentBody(HANDBOOK, "x", 1))).toContain("FORBIDDEN");
+    expect(await failure(session.readStructure())).toContain("FORBIDDEN");
+    expect(await hooks.applyWiki(props, 1)).toContain("was not applied: InferOps refused the Wiki");
+    await mock.setInferMindEnabled(true);
+    expect((await mock.readDocument(INCIDENT)).version).toBe(4);
+    expect(await hooks.applyWiki(props, 1)).toBeNull();
   });
 });
 
@@ -209,6 +503,16 @@ describe("section edits", () => {
     await session.updateSection(STEPS, "First edit.", 2);
     await session.updateSection(STEPS, "First edit.", 2);
     expect(await failure(session.updateSection(STEPS, "Second edit.", 2))).toContain("CONFLICT");
+    expect((await hooks.log()).actions).toHaveLength(1);
+  });
+
+  it("stages one edit when section proposals race with different bodies", async () => {
+    const { hooks, session } = setup();
+    const results = await Promise.allSettled([
+      session.updateSection(STEPS, "Edit A.", 2),
+      session.updateSection(STEPS, "Edit B.", 2),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
     expect((await hooks.log()).actions).toHaveLength(1);
   });
 
@@ -317,5 +621,31 @@ describe("the read projections", () => {
 
   it("join title and sections as InferOps' renderDocumentAsText does", () => {
     expect(documentText("Title", ["one", "two"])).toBe("# Title\n\none\n\ntwo");
+  });
+
+  it("compose page text by InferOps' contract", () => {
+    expect(composeDocumentText("T", content("  # T  \r\n\r\nBody."))).toBe("# T\n\nBody.");
+    expect(composeDocumentText("T", content("# Other\nBody."))).toBe("# T\n\n# Other\nBody.");
+    expect(composeDocumentText("T", content("# T"))).toBeNull();
+    expect(composeDocumentText("T", content("Body.", ["section"]))).toBe("# T\n\nBody.");
+    expect(composeDocumentText("T", content("  ", ["one", " ", "two"]))).toBe("# T\n\none\n\ntwo");
+    expect(composeDocumentText("T", content("", [], "G"))).toBe("# T\n\nG");
+    expect(composeDocumentText("T", content("", []))).toBeNull();
+    expect(bodyWithoutTitle("#T\nx", "T")).toBe("#T\nx");
+  });
+
+  it("list the pillars, or a pillar's pages, as a Master's generated block", () => {
+    const structure = { root: null, unfiled: [], pillars: [
+      { key: "a", title: "Alpha", position: 0, master: master("a"), members: [{ ...master("x/y"), source: "human" as const }] },
+      { key: "b", title: "Beta", position: 1, master: null, members: [] },
+    ] };
+    expect(masterStructureText({ id: "r", masterRole: "root" }, structure))
+      .toBe(`${GENERATED}\n## Pillars\n- [Alpha](/wiki/a)\n- Beta`);
+    expect(masterStructureText({ id: "a", masterRole: "pillar" }, structure))
+      .toBe(`${GENERATED}\n## Pages in Alpha\n- [X/Y](/wiki/x%2Fy)`);
+    expect(masterStructureText({ id: "zz", masterRole: "pillar" }, structure)).toBeNull();
+    expect(masterStructureText({ id: "r", masterRole: "root" }, { ...structure, pillars: [] }))
+      .toBe(`${GENERATED}\n## Pillars\n(none yet)`);
+    expect(masterStructureText({ id: "a", masterRole: null }, structure)).toBeNull();
   });
 });
