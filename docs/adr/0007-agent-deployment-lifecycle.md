@@ -1,10 +1,12 @@
 ---
 title: Agent deployment lifecycle and flag-off semantics
-status: proposed
-date: 2026-10-03
+status: accepted
+date: 2026-10-05
 ---
 
 # 0007. Agent deployment lifecycle and flag-off semantics
+
+Proposed 2026-10-03. Accepted as proposed by the owner on 2026-10-05 ([#76](https://github.com/factory-level/inferos/issues/76)), with deployment operators being the deployment admins (`ADMINS`).
 
 ## Context
 
@@ -26,6 +28,7 @@ Four native facts constrain it:
 5. **Every delivery has an occurrence key.** `(deployment, trigger, occurrence)` is unique, so duplicates map to the existing run. `succeeded` is set only by the run's completion callback.
 6. **Flag off:** a per-call guard refuses activation and invocation everywhere. It passes only diagnostic reads and the capability-reducing actions (pause, retire, cancel run). In-flight runs are cancelled at their next guarded step, not drained. No state changes. Re-enabling replays and restores nothing; active deployments accept new deliveries again. The guard's file becomes `AGENT_DEPLOYMENTS`' `capabilitySources` entry. `HARNESS_HG_ENABLED` is not consulted.
 7. **Isolation:** each deployment has its own principal and its own workspace.
+8. **Operators are the deployment admins (`ADMINS`).** The operator capability is minted only for them, like `getAdminApi()`.
 
 ## Consequences
 

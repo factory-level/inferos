@@ -1,12 +1,12 @@
 ---
 title: Native agent deployments
 status: draft
-updated: 2026-10-03
+updated: 2026-10-05
 ---
 
 # Native agent deployments
 
-Tracking epic: [#53](https://github.com/factory-level/inferos/issues/53); roadmap: [#1](https://github.com/factory-level/inferos/issues/1). Decision records: [ADR 0003](../adr/0003-distinct-agent-capabilities.md), [ADR 0007](../adr/0007-agent-deployment-lifecycle.md) (proposed).
+Tracking epic: [#53](https://github.com/factory-level/inferos/issues/53); roadmap: [#1](https://github.com/factory-level/inferos/issues/1). Decision records: [ADR 0003](../adr/0003-distinct-agent-capabilities.md), [ADR 0007](../adr/0007-agent-deployment-lifecycle.md) (accepted).
 
 ## Purpose
 
@@ -52,9 +52,9 @@ With `AGENT_DEPLOYMENTS` off (see [feature capabilities](feature-capabilities.md
 
 The customer's operational inventory and InferMind Master coverage include the deployment's role, scope and SOP obligations, not secret payloads.
 
-## Proposed contract
+## Contract
 
-Added 2026-10-03. The owner asked for contract PRs for #76, #77 and #78 in this wave. Everything in this section is a **proposal pending owner review** and is not implemented. The types are in `packages/workshop-shared/src/agent-deployment.ts`, which builds on the [artifact contract](agent-authoring.md#proposed-contract). The rationale is in [ADR 0007](../adr/0007-agent-deployment-lifecycle.md) (proposed).
+Proposed 2026-10-03 for #76, #77 and #78. **Decided by the owner on 2026-10-05: accepted as proposed** ([#76 decision](https://github.com/factory-level/inferos/issues/76)). Deployment operators are the deployment admins (`ADMINS`). It is not implemented yet; implementation is resuming in the order #76, #77, #78. The types are in `packages/workshop-shared/src/agent-deployment.ts`, which builds on the [artifact contract](agent-authoring.md#contract). The rationale is in [ADR 0007](../adr/0007-agent-deployment-lifecycle.md) (accepted).
 
 ### Definition, deployment, run
 
@@ -83,10 +83,10 @@ planned --retire--> retired            paused --retire--> retired
 
 `AgentTrigger` is a `schedule`, `event` or `call`, each with an `id` unique within its deployment. Every delivery carries an occurrence key: the Scheduler's `runId`, the hook's delivery identity, or a key the caller supplies. `(deployment, trigger, occurrence)` is unique, so a retried or duplicate delivery maps to the run it already started instead of starting another.
 
-The Scheduler conflicts with this. Registration creates a disabled hook that the user enables in Connections, and every registration creates a distinct hook. The proposal:
+The Scheduler conflicts with this. Registration creates a disabled hook that the user enables in Connections, and every registration creates a distinct hook. The decision (owner, 2026-10-05):
 
 - **Reviewed activation is the user's enablement.** The operator reviews the plan, including each trigger, and activates. That one act registers each trigger and enables its hook, with the same person's authority the Connections toggle uses (`Overseer.enableHook`). The deployment's hooks are not offered for separate enablement in Connections. Pause and resume disable and enable the same hooks.
-- **Registration is keyed by `(deployment, trigger id)`.** The deployment stores each registered schedule ID before enabling it, and a retried activation reuses a stored ID instead of registering again. This still leaves one gap: a crash between registration and storing the ID orphans a disabled hook. Closing it needs the Scheduler to accept a registration key and return the existing schedule ID for a repeated key. That is listed below as a decision.
+- **Registration is keyed by `(deployment, trigger id)`.** The deployment stores each registered schedule ID before enabling it, and a retried activation reuses a stored ID instead of registering again. This still leaves one gap: a crash between registration and storing the ID orphans a disabled hook. Closing it needs the Scheduler to accept a registration key and return the existing schedule ID for a repeated key. That Scheduler change was accepted with this contract on 2026-10-05.
 
 ### Flag off
 
@@ -104,7 +104,7 @@ Each deployment gets its own principal and its own workspace: separate storage, 
 
 ### Operator surface
 
-`AgentDeploymentApiProposal` lists the operations: plan, create, activate, pause, resume, update, retire, list, get, list runs and cancel run. It would be minted by a new `AuthenticatedApi` method that returns null for anyone who is not a deployment operator, the same way `getAdminApi()` works. Who counts as an operator is a decision below. The capability is not wired into any RPC interface in this proposal.
+`AgentDeploymentApiProposal` lists the operations: plan, create, activate, pause, resume, update, retire, list, get, list runs and cancel run. It is minted by a new `AuthenticatedApi` method that returns null for anyone who is not a deployment operator, the same way `getAdminApi()` works. **Deployment operators are the deployment admins (`ADMINS`)**, decided by the owner on 2026-10-05; ordinary workspace build access never makes someone an operator. The capability is not yet wired into any RPC interface.
 
 ## Non-Goals
 
@@ -124,10 +124,10 @@ Each deployment gets its own principal and its own workspace: separate storage, 
 
 ## Open Questions
 
-- Proposed (above, pending owner review): the API and schema for definitions, deployments and runs, and the drain, cancel and re-enable policy when the flag is off.
-- Who is a deployment operator: deployment admins only, or a separately configured role. It must not be ordinary workspace build access.
+- Decided by the owner on 2026-10-05 (above): the API and schema for definitions, deployments and runs, and the drain, cancel and re-enable policy when the flag is off.
+- Decided by the owner on 2026-10-05: deployment operators are the deployment admins (`ADMINS`), not a separately configured role and never ordinary workspace build access.
 - How a deployment's principal is authenticated to InferOps and other gatekeepers. Today a binding acts with the authority of the person whose connected account it references, which is the spawner creator's authority. Whether a deployment needs its own service identity is open, including in relation to [ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md).
-- Whether a deployment workspace is a new workspace (proposed) or a facet of the operator's workspace.
+- Decided by the owner on 2026-10-05: each deployment gets a new workspace, not a facet of the operator's workspace.
 - Event triggers: hook deliveries carry no delivery identity today, so duplicate events cannot yet be told apart (ai-trader #82 tracks the same gap). Which gatekeepers deliver events is also open.
 - Run cancellation needs a native way to stop an agent chat's in-progress turn. Which existing mechanism serves is unconfirmed.
 - Whether re-enabling the flag should instead require each active deployment to be re-activated.

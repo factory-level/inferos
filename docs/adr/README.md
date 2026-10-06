@@ -14,4 +14,4 @@ Create records from [`0000-template.md`](0000-template.md).
 | [0004. InferOps gatekeeper acts with each person's own authority](0004-inferops-gatekeeper-user-authority.md) | proposed | 2026-10-02 |
 | [0005. InferOps board URLs use InferOps' own tenant.workspace authority](0005-inferops-uri-authority.md) | proposed | 2026-10-02 |
 | [0006. Agent artifact revisions are identified by a canonical manifest digest](0006-agent-artifact-revisions.md) | accepted | 2026-10-05 |
-| [0007. Agent deployment lifecycle and flag-off semantics](0007-agent-deployment-lifecycle.md) | proposed | 2026-10-03 |
+| [0007. Agent deployment lifecycle and flag-off semantics](0007-agent-deployment-lifecycle.md) | accepted | 2026-10-05 |

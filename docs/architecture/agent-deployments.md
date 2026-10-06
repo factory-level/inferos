@@ -2,20 +2,20 @@
 title: Native agent deployments
 covers:
   - packages/workshop-shared/src/agent-deployment.ts
-updated: 2026-10-03
+updated: 2026-10-05
 ---
 
 # Native agent deployments
 
 ## Overview
 
-Nothing in the [design](../design/agent-deployments.md) is implemented. `packages/workshop-shared/src/agent-deployment.ts` holds the proposed contract and nothing else: the types for definitions, deployments, runs and triggers, the operator interface `AgentDeploymentApiProposal`, and two pure rules with tests (`agentDeploymentTransition` over `AGENT_DEPLOYMENT_TRANSITIONS`, and `carryForwardGrants`). No backend code imports it, and no RPC interface exposes it.
+Nothing in the [design](../design/agent-deployments.md) is implemented. `packages/workshop-shared/src/agent-deployment.ts` holds the accepted contract (owner decision 2026-10-05) and nothing else: the types for definitions, deployments, runs and triggers, the operator interface `AgentDeploymentApiProposal`, and two pure rules with tests (`agentDeploymentTransition` over `AGENT_DEPLOYMENT_TRANSITIONS`, and `carryForwardGrants`). No backend code imports it, and no RPC interface exposes it.
 
 ## Components
 
 | Path | Responsibility |
 | --- | --- |
-| `packages/workshop-shared/src/agent-deployment.ts` | Proposed contract types, lifecycle transition table and grant carry-forward rule. Not wired. |
+| `packages/workshop-shared/src/agent-deployment.ts` | Accepted contract types, lifecycle transition table and grant carry-forward rule. Not wired. |
 
 ## Data and Control Flow
 
@@ -27,7 +27,7 @@ None. No deployment, trigger or run can be created. Agents run today only as cha
 
 ## Divergences from Design
 
-The whole proposed contract is unimplemented: storage, the operator capability, triggers, the per-call flag guard and run records.
+The whole accepted contract is unimplemented: storage, the operator capability, triggers, the per-call flag guard and run records.
 
 ## Open Questions
 
