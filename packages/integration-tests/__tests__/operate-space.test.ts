@@ -289,7 +289,7 @@ describe("Publish to Operate", () => {
       .rejects.toThrow(/only with a new version/);
   });
 
-  it("refuses a wrong kind and a revoked binding before creating anything", async () => {
+  it("refuses a wrong kind, a revoked binding and an unreadable source before creating anything", async () => {
     const author = await person("refuseauthor");
     const authorAccount = await testAccount(author.api);
     const source = await build(author.api, "widget",
@@ -313,6 +313,10 @@ describe("Publish to Operate", () => {
     await s.installer.api.disconnectAccount(installerAccount.id);
     await expect(s.built.installBlueprint(blueprintId, assign(installerAccount.id)))
       .rejects.toThrow(/No such account/);
+    // A source the installer can no longer read (its owner deleted it) installs nothing either.
+    await source.workspace.deleteBlueprint(blueprintId);
+    await waitFor("the deleted blueprint", async () => (await publicApi.getBlueprint(blueprintId)) === null || null);
+    await expect(s.built.installBlueprint(blueprintId, {})).rejects.toThrow(/Blueprint not found/);
     expect(s.watched.gadgetCount()).toBe(before);
   });
 
