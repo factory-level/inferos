@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor, createPublicationError, PUBLICATION_ERROR_CODES, publicationFlagFor, PublicationRecord } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -13,6 +13,8 @@ import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { bundledBlueprintsManifestVersion, installBundledBlueprints } from './bundled-blueprints.js';
 import { BUNDLED_BLUEPRINTS } from './generated/bundled-blueprints.js';
+import { isPublicationSelfApprovalAllowed } from './auth/config.js';
+import { assertPublicationFlagOn, byRequestedDesc, checkedReason, isPublishedAt, lastConfirmedAt, PUBLICATIONS_KEY, publicationFlagsOff, publicationStatus, serializePublicationSnapshot, withPublicationStatus, type PublicationFlagsOffSeenAt, type StoredPublicationRecord } from './publication.js';
 import type { DefaultThemeMode, DeploymentProfile, DisplayDensity } from '@gadgets/workshop-shared/api';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
@@ -23,6 +25,11 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // Mirror of the currently-featured blueprint public records. The user DO owns the
       // authoritative featured bit; this DO keeps the publishable deployment-wide copy.
       featuredBlueprints: collection<BlueprintPublicInfo>()({
+        primaryKey: 'id',
+      }),
+      // Mirror of every publication record, for review. Each owner's User DO holds the
+      // authoritative copy; the approved, unwithdrawn ones are written on to KV (PUBLICATIONS_KEY).
+      publications: collection<StoredPublicationRecord>()({
         primaryKey: 'id',
       }),
     },
@@ -41,6 +48,9 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // exactly once per blueprint: an admin who then removes a format keeps it removed, while a
       // deployment that installed before curation existed still gets promoted.
       promotedFormatBlueprints: <string[]>[],
+
+      // When this DO last saw each publication flag off (see publication.ts).
+      publicationFlagsOffSeenAt: <PublicationFlagsOffSeenAt>{},
     },
   });
 }
@@ -74,6 +84,32 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
+
+    // A deploy restarts this object with its new env, and every isolate's first /api request wakes
+    // it (ensureBundledBlueprintsInstalled), so a flag that is off is seen here. Recording it is
+    // what keeps turning the flag on again from resuming the publications it suspended.
+    if (this.#observePublicationFlagsOff()) {
+      ctx.blockConcurrencyWhile(() => this.#writePublicationSnapshot());
+    }
+  }
+
+  // Records "seen off now" for each flag that is off, unless the time already stored still
+  // predates every approval and re-confirmation of that flag's records, which then says the same.
+  // Returns whether anything changed.
+  #observePublicationFlagsOff(): boolean {
+    let seen = { ...this.storage.publicationFlagsOffSeenAt.get() };
+    let changed = false;
+    for (let flag of publicationFlagsOff(this.env)) {
+      let previous = seen[flag]?.valueOf();
+      let stale = previous === undefined || [...this.storage.publications.list()].some(record =>
+          publicationFlagFor(record.artifact.kind) === flag && lastConfirmedAt(record) > previous);
+      if (stale) {
+        seen[flag] = new Date();
+        changed = true;
+      }
+    }
+    if (changed) this.storage.publicationFlagsOffSeenAt.put(seen);
+    return changed;
   }
 
   /**
@@ -240,6 +276,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     if (!featureable || !owner) {
       throw new Error('Blueprint not featureable.');
     }
+    // The featured listing is the `deployment` destination, so featuring needs its active record.
+    if (featured && !isPublishedAt(this.storage.publications.list(), this.env,
+        this.storage.publicationFlagsOffSeenAt.get(), blueprintId, publicInfo.metadata.version,
+        "deployment")) {
+      throw createPublicationError(PUBLICATION_ERROR_CODES.notPublished);
+    }
 
     await owner.setBlueprintFeatured(blueprintId, featured);
     await this.#syncFeaturedMirror(publicInfo, featured);
@@ -256,6 +298,84 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       this.storage.featuredBlueprints.delete(blueprintId);
       await this.#writeFeaturedSnapshot();
     }
+  }
+
+  // --- Publication review (see publication.ts) ---
+
+  async #writePublicationSnapshot(): Promise<void> {
+    let records = [...this.storage.publications.list()].filter(r => r.at && !r.withdrawnAt);
+    await this.env.BLUEPRINTS.put(PUBLICATIONS_KEY, serializePublicationSnapshot(
+        {offSeenAt: this.storage.publicationFlagsOffSeenAt.get(), records}));
+  }
+
+  /** Mirror one record after its owner's User DO changed it. Idempotent. */
+  async mirrorPublication(record: StoredPublicationRecord): Promise<void> {
+    this.storage.publications.put(record);
+    await this.#writePublicationSnapshot();
+  }
+
+  #withStatus(record: StoredPublicationRecord): PublicationRecord {
+    return withPublicationStatus(record, this.env, this.storage.publicationFlagsOffSeenAt.get());
+  }
+
+  listPublications(): PublicationRecord[] {
+    return [...this.storage.publications.list()].toSorted(byRequestedDesc)
+        .map(record => this.#withStatus(record));
+  }
+
+  // The mirrored record and its owner's User DO, refusing while the record's flag is off.
+  async #reviewTarget(recordId: string) {
+    let record = this.storage.publications.get(recordId);
+    if (!record) throw createPublicationError(PUBLICATION_ERROR_CODES.recordNotFound);
+    assertPublicationFlagOn(this.env, record.artifact.kind);
+    let { owner, publicInfo } = await this.#getOwnerBlueprint(record.artifact.blueprintId);
+    if (!owner) throw createPublicationError(PUBLICATION_ERROR_CODES.recordNotFound);
+    return { record, owner, publicInfo };
+  }
+
+  /** Approve a request, or re-confirm a suspended approval (`confirm`). See AdminApi. */
+  async approvePublication(recordId: string, adminUserId: string, confirm: boolean)
+      : Promise<PublicationRecord> {
+    let { record, owner, publicInfo } = await this.#reviewTarget(recordId);
+    let status = publicationStatus(record, this.env, this.storage.publicationFlagsOffSeenAt.get());
+    if (status !== (confirm ? "unconfirmed" : "requested")) {
+      throw createPublicationError(PUBLICATION_ERROR_CODES.invalidState);
+    }
+    if (publicInfo.metadata.version !== record.artifact.version) {
+      throw createPublicationError(PUBLICATION_ERROR_CODES.artifactChanged);
+    }
+    let selfApproved = record.publishedBy === adminUserId;
+    if (selfApproved && !isPublicationSelfApprovalAllowed(this.env)) {
+      throw createPublicationError(PUBLICATION_ERROR_CODES.selfApprovalOff);
+    }
+
+    let approved = await owner.decidePublication(recordId,
+        {type: confirm ? "confirm" : "approve", by: adminUserId, selfApproved});
+    this.storage.publications.put(approved);
+    if (!confirm) {
+      // One active record per blueprint and destination: the new approval replaces the old one.
+      for (let earlier of this.storage.publications.list()) {
+        if (earlier.id !== recordId && earlier.at && !earlier.withdrawnAt &&
+            earlier.artifact.blueprintId === record.artifact.blueprintId &&
+            earlier.destination === record.destination) {
+          this.storage.publications.put(await owner.decidePublication(earlier.id,
+              {type: "withdraw", by: adminUserId, reason: `Replaced by publication ${recordId}.`}));
+        }
+      }
+    }
+    await this.#writePublicationSnapshot();
+    if (record.destination === "deployment") await this.setBlueprintFeatured(publicInfo.id, true);
+    return this.#withStatus(approved);
+  }
+
+  /** Withdraw a publication or refuse a request. Idempotent, so a retry re-mirrors. */
+  async withdrawPublication(recordId: string, adminUserId: string, reason: string)
+      : Promise<PublicationRecord> {
+    let { owner } = await this.#reviewTarget(recordId);
+    let withdrawn = await owner.decidePublication(recordId,
+        {type: "withdraw", by: adminUserId, reason});
+    await this.mirrorPublication(withdrawn);
+    return this.#withStatus(withdrawn);
   }
 
   // --- Deployment admin config ---
@@ -688,6 +808,22 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
     return this.admin.setBlueprintFeatured(blueprintId, featured);
+  }
+
+  listPublications(): Promise<PublicationRecord[]> {
+    return this.admin.listPublications();
+  }
+
+  approvePublication(recordId: string): Promise<PublicationRecord> {
+    return this.admin.approvePublication(recordId, this.adminUserId, false);
+  }
+
+  confirmPublication(recordId: string): Promise<PublicationRecord> {
+    return this.admin.approvePublication(recordId, this.adminUserId, true);
+  }
+
+  withdrawPublication(recordId: string, reason: string): Promise<PublicationRecord> {
+    return this.admin.withdrawPublication(recordId, this.adminUserId, checkedReason(reason));
   }
 
   promoteFormat(blueprintId: string): Promise<void> {

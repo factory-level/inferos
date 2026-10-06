@@ -81,7 +81,7 @@ Library entries come in two forms:
 
 ## Export / Import Format
 
-Blueprints can be downloaded from `/blueprint/<id>` as `.gadget` files and uploaded from the home blueprints tab into another Workshop instance.
+Blueprints can be downloaded from `/blueprint/<id>` as `.gadget` files and uploaded from the home blueprints tab into another Workshop instance. In this fork a download needs an active `export` publication record approved by a deployment admin (bundled blueprints excepted); see [publication records](architecture/feature-capabilities.md#publication-records).
 
 The `.gadget` format is a simple internal binary container:
 
@@ -113,6 +113,8 @@ Featured blueprint state is split across two stores:
 
 - The authoritative `featured` bit lives in the owning user's `blueprints` record inside their User DO.
 - The `AdminSettings` durable object is a singleton (`getByName("")`) that mirrors the current public metadata for featured blueprints and writes a KV snapshot consumed by `AuthenticatedApi.listFeaturedBlueprints()`.
+
+In this fork featuring a user's blueprint needs an active `deployment` publication record for its current version, and the listing leaves out featured blueprints without one (approving a `deployment` record features the blueprint). Bundled blueprints are always listed.
 
 ## Output Formats and Bundled Blueprints
 
@@ -147,7 +149,7 @@ On the backend, the Overseer handles blueprint lifecycle through `createBlueprin
 
 When someone opens a blueprint link (`/blueprint/<id>`), they see the **Blueprint Landing Page**:
 
-1. The page fetches metadata via `PublicApi.getBlueprint()` (unauthenticated -- knowing the ID is sufficient since a blueprint is just data).
+1. The page fetches metadata via `PublicApi.getBlueprint()` (unauthenticated). In this fork that serves only bundled blueprints and those with an active `export` publication; a signed-in person reads any blueprint by id through `AuthenticatedApi.getBlueprintInfo()`.
 2. It displays the title, description, optional screenshot, author, version, and a summary of required bindings.
 3. If the user is not logged in, they see a "Log in to create a gadget" button.
 4. Once authenticated, the user enters **configure mode**, where they assign each required binding:

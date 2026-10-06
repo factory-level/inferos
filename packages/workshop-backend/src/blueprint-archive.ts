@@ -6,6 +6,7 @@
 
 import * as Y from "yjs";
 import { BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, DEFAULT_WORKSPACE_KIND, isOutputIcon, WORKSPACE_KINDS, WorkspaceKind } from '@gadgets/workshop-shared/api';
+import { isBundledBlueprint, isPublishedAt, PUBLICATIONS_KEY, readPublicationSnapshot, type PublicationEnv } from './publication.js';
 
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
 
@@ -36,7 +37,7 @@ export type BlueprintKvRecord = {
 };
 
 export function isReservedBlueprintKey(id: string): boolean {
-  return id === FEATURED_BLUEPRINTS_KEY || id === ADMIN_CONFIG_KEY;
+  return id === FEATURED_BLUEPRINTS_KEY || id === ADMIN_CONFIG_KEY || id === PUBLICATIONS_KEY;
 }
 
 export function reviveBlueprintMetadata(metadata: BlueprintMetadata): BlueprintMetadata {
@@ -112,15 +113,24 @@ export async function readBlueprintKvRecord(
   return parseBlueprintKvRecord(raw);
 }
 
+/**
+ * The featured listing as the deployment's people see it: the bundled blueprints, and each featured
+ * blueprint whose current version has an active `deployment` publication. A featured blueprint
+ * without one (featured before publication records, withdrawn, suspended, or republished since) is
+ * left out, while its featured bit is kept.
+ */
 export async function listFeaturedBlueprintsFromKv(
-  env: BlueprintKvEnv,
+  env: BlueprintKvEnv & PublicationEnv,
 ): Promise<BlueprintPublicInfo[]> {
-  let raw = await env.BLUEPRINTS.get(FEATURED_BLUEPRINTS_KEY);
+  let [raw, publications] =
+      await Promise.all([env.BLUEPRINTS.get(FEATURED_BLUEPRINTS_KEY), readPublicationSnapshot(env)]);
   if (!raw) {
     return [];
   }
 
-  return parseFeaturedBlueprints(raw);
+  return parseFeaturedBlueprints(raw).filter(entry => isBundledBlueprint(entry.id) ||
+      isPublishedAt(publications.records, env, publications.offSeenAt, entry.id,
+          entry.metadata.version, "deployment"));
 }
 
 /** A blueprint kind from untrusted metadata (an uploaded archive), or undefined if it is none. */

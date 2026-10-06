@@ -14,6 +14,7 @@ import {
   isInferLabAuthOrigin,
   resolveCodingWorkbenchEnabled,
   resolveInferOpsEnabled,
+  resolvePublicationFlag,
 } from "./dev-server-config.ts";
 
 describe("run-local asset topology", () => {
@@ -203,5 +204,22 @@ describe("resolveCodingWorkbenchEnabled", () => {
       assert.throws(() => resolveCodingWorkbenchEnabled({ ...options, inferOpsEnabled: "false" }),
         /CODING_WORKBENCH_ENABLED is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
     }
+  });
+});
+
+describe("resolvePublicationFlag", () => {
+  it("keeps a version 1 wrapper and the plain checkout off unless the shell turns it on", () => {
+    for (const name of ["PUBLISH_CLOUDFLAREOS_WIDGET", "PUBLISH_CLOUDFLAREOS_APP"] as const) {
+      assert.equal(resolvePublicationFlag(name, { capability: null, shell: undefined }), "false");
+      assert.equal(resolvePublicationFlag(name, { capability: null, shell: "false" }), "false");
+      assert.equal(resolvePublicationFlag(name, { capability: null, shell: "true" }), "true");
+      assert.throws(() => resolvePublicationFlag(name, { capability: null, shell: "yes" }),
+        new RegExp(`${name} must be "true" or "false"`));
+    }
+  });
+
+  it("switches a version 2 wrapper with its capability, whatever the shell says", () => {
+    assert.equal(resolvePublicationFlag("PUBLISH_CLOUDFLAREOS_APP", { capability: true, shell: "false" }), "true");
+    assert.equal(resolvePublicationFlag("PUBLISH_CLOUDFLAREOS_APP", { capability: false, shell: "true" }), "false");
   });
 });

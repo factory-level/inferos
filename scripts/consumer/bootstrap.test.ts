@@ -204,6 +204,14 @@ test("INFEROPS_ENABLED and CODING_WORKBENCH_ENABLED are supported by this revisi
   const coding = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { INFEROPS_ENABLED: true, CODING_WORKBENCH_ENABLED: true } });
   assert.deepEqual(unsupportedCapabilities(coding.config, repository), []);
   assert.deepEqual(reportCapabilities(coding, repository).CODING_WORKBENCH_ENABLED, { state: "enabled", requested: true, source: "override" });
+  // Both publication flags are enforced by the backend's publication records (#68).
+  for (const name of ["PUBLISH_CLOUDFLAREOS_WIDGET", "PUBLISH_CLOUDFLAREOS_APP"] as const) {
+    assert.equal(capabilitySources[name], "packages/workshop-backend/src/publication.ts");
+    assert.ok(existsSync(join(repository, capabilitySources[name]!)));
+    const publishing = resolveConsumerConfig({ ...base, schemaVersion: 2, capabilities: { [name]: true } });
+    assert.deepEqual(unsupportedCapabilities(publishing.config, repository), []);
+    assert.deepEqual(reportCapabilities(legacy, repository)[name], { state: "supported", requested: false, source: "default" });
+  }
 });
 
 const runtime = (target: string, command: string) => spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), command], { encoding: "utf8" });

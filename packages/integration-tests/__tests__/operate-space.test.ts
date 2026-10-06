@@ -37,6 +37,9 @@ const COUNTER_UI = `document.body.textContent = "Total: " + await gadget.total()
 
 let harness: Harness;
 let publicApi: RpcStub<PublicApi>;
+// Reads blueprints the way any signed-in person does: by id, published or not (see
+// AuthenticatedApi.getBlueprintInfo). PublicApi.getBlueprint now serves published ones only.
+let reader: RpcStub<AuthenticatedApi>;
 const network = new NetworkInterceptor();
 
 beforeAll(async () => {
@@ -49,10 +52,12 @@ beforeAll(async () => {
     },
   });
   publicApi = connect(harness.url);
+  reader = await signUp(publicApi, nextUsernames("reader")[0]!);
 });
 
 afterAll(async () => {
   try {
+    reader?.[Symbol.dispose]();
     publicApi?.[Symbol.dispose]();
     await harness?.server.close();
     expect(network.getUnmockedCalls()).toEqual([]);
@@ -132,7 +137,7 @@ async function build(author: RpcStub<AuthenticatedApi>, kind: WorkspaceKind, fil
 async function publish(gadget: RpcStub<GadgetClient>, title: string, dataContract?: number) {
   const blueprint = await gadget.createBlueprint(title, `${title} for Operate`, undefined,
       dataContract === undefined ? undefined : { dataContract });
-  await waitFor("the published blueprint", () => publicApi.getBlueprint(blueprint.id));
+  await waitFor("the published blueprint", () => reader.getBlueprintInfo(blueprint.id));
   return blueprint.id;
 }
 
@@ -142,7 +147,7 @@ async function republish(workspace: RpcStub<Overseer>, blueprintId: string, vers
   await workspace.updateBlueprint(blueprintId,
       dataContract === undefined ? { updateCode: true } : { updateCode: true, dataContract });
   await waitFor(`version ${version} of the blueprint`, async () =>
-    (await publicApi.getBlueprint(blueprintId))?.metadata.version === version || null);
+    (await reader.getBlueprintInfo(blueprintId))?.metadata.version === version || null);
 }
 
 const appFiles = (version: string) =>
@@ -212,7 +217,7 @@ describe("Publish to Operate", () => {
     await source.gadget.bind("DATA", await data.getId());
     await source.gadget.setBlueprintAnnotation("DATA", { title: "Data", description: "" });
     const blueprintId = await publish(source.gadget, "Counter", 1);
-    expect((await publicApi.getBlueprint(blueprintId))?.metadata).toMatchObject({ version: 1, dataContract: 1 });
+    expect((await reader.getBlueprintInfo(blueprintId))?.metadata).toMatchObject({ version: 1, dataContract: 1 });
 
     const s = await space("pin", blueprintId);
     const installerAccount = await testAccount(s.installer.api);
@@ -273,7 +278,7 @@ describe("Publish to Operate", () => {
     await expect(s.built.upgradeInstall(3, gadgetId)).rejects.toThrow(/needs migration/);
     await source.commit({ "version.txt": "v4" });
     await republish(source.workspace, blueprintId, 4);
-    expect((await publicApi.getBlueprint(blueprintId))?.metadata.dataContract).toBeUndefined();
+    expect((await reader.getBlueprintInfo(blueprintId))?.metadata.dataContract).toBeUndefined();
     await expect(s.built.upgradeInstall(4, gadgetId)).rejects.toThrow(/declares no data contract/);
     expect(await s.watched.text(gadgetId, "version.txt")).toBe("v2");
     expect(s.watched.gadget(gadgetId).installedFrom?.version).toBe(2);
@@ -315,7 +320,7 @@ describe("Publish to Operate", () => {
       .rejects.toThrow(/No such account/);
     // A source the installer can no longer read (its owner deleted it) installs nothing either.
     await source.workspace.deleteBlueprint(blueprintId);
-    await waitFor("the deleted blueprint", async () => (await publicApi.getBlueprint(blueprintId)) === null || null);
+    await waitFor("the deleted blueprint", async () => (await reader.getBlueprintInfo(blueprintId)) === null || null);
     await expect(s.built.installBlueprint(blueprintId, {})).rejects.toThrow(/Blueprint not found/);
     expect(s.watched.gadgetCount()).toBe(before);
   });

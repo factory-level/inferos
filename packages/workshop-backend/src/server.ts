@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch } from '@gadgets/workshop-shared/operate-console';
 import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -39,6 +39,7 @@ import { isOpenAiPluginEnabled } from '@gadgets/assistant-plugin-openai/protocol
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import { checkedReason, isBundledBlueprint, isPublishedAt, readPublicationSnapshot } from "./publication.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -551,6 +552,32 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.deleteOwnedBlueprint(blueprintId);
   }
 
+  async getBlueprintInfo(blueprintId: string): Promise<BlueprintPublicInfo | null> {
+    let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
+    return kvRecord ? publicBlueprintInfo(blueprintId, kvRecord.metadata) : null;
+  }
+
+  async getBlueprintScreenshot(blueprintId: string): Promise<BlueprintScreenshotUpload | null> {
+    let screenshot = await readBlueprintKvRecord(this.env, blueprintId)
+        ? await readBlueprintScreenshot(this.env, blueprintId) : null;
+    if (!screenshot) return null;
+    return { mimeType: screenshot.mimeType,
+      content: new Uint8Array(await new Response(screenshot.body).arrayBuffer()) };
+  }
+
+  requestPublication(blueprintId: string, destination: PublicationDestination)
+      : Promise<PublicationRecord> {
+    return this.#user.requestPublication(blueprintId, destination);
+  }
+
+  listOwnPublications(): Promise<PublicationRecord[]> {
+    return retryOnDoReset(() => this.#user.listPublications());
+  }
+
+  async withdrawPublication(recordId: string, reason: string): Promise<PublicationRecord> {
+    return this.#user.withdrawOwnPublication(recordId, checkedReason(reason));
+  }
+
   // --- Gatekeeper management apps ---
 
   // The management apps available to the current user: their connected accounts that declare a
@@ -743,21 +770,45 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
   }
 }
 
-async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<Response> {
+// A blueprint's stored screenshot, with a content type a browser may render, or null if it has none.
+async function readBlueprintScreenshot(env: Env, blueprintId: string)
+    : Promise<{ body: ReadableStream<Uint8Array>; mimeType: BlueprintScreenshotUpload["mimeType"] } | null> {
   let object = await env.BLUEPRINT_CONTENT.get(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${blueprintId}`);
-  if (!object) return new Response("Not Found", {status: 404});
+  if (!object) return null;
 
   let contentType = object.httpMetadata?.contentType;
-  if (contentType !== "image/jpeg" && contentType !== "image/png") {
-    contentType = "image/jpeg";
-  }
+  return { body: object.body, mimeType: contentType === "image/png" ? "image/png" : "image/jpeg" };
+}
 
-  return new Response(object.body, {
+// The screenshot route has no session (the session token travels in-band over RPC), so it serves
+// only what reaches beyond the deployment, as PublicApi does, or a request Cloudflare Access has
+// signed in. Signed-in surfaces otherwise read through AuthenticatedApi.getBlueprintScreenshot.
+async function serveBlueprintScreenshot(req: Request, env: Env, blueprintId: string): Promise<Response> {
+  let reachable = await readExportedBlueprint(env, blueprintId) !== null ||
+      (!!env.CF_ACCESS_AUD && await verifyCfAccessJwt(req, env) !== null);
+  let screenshot = reachable ? await readBlueprintScreenshot(env, blueprintId) : null;
+  if (!screenshot) return new Response("Not Found", {status: 404});
+
+  return new Response(screenshot.body, {
     headers: {
-      "Content-Type": contentType,
-      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": screenshot.mimeType,
+      // Only a bundled screenshot may sit in shared caches: anything else must stop at withdrawal.
+      "Cache-Control": isBundledBlueprint(blueprintId)
+        ? "public, max-age=31536000, immutable" : "private, no-store",
     },
   });
+}
+
+// Reaching beyond the deployment takes a bundled blueprint or an active `export` publication of
+// the current version (see publication.ts). Anything else reads as missing.
+async function readExportedBlueprint(env: Env, id: string): Promise<BlueprintKvRecord | null> {
+  let [kvRecord, publications] =
+      await Promise.all([readBlueprintKvRecord(env, id), readPublicationSnapshot(env)]);
+  if (!kvRecord || isBundledBlueprint(id) || isPublishedAt(publications.records, env,
+      publications.offSeenAt, id, kvRecord.metadata.version, "export")) {
+    return kvRecord;
+  }
+  return null;
 }
 
 // Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client redeems the login
@@ -930,15 +981,15 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
-    let kvRecord = await readBlueprintKvRecord(this.env, id);
+    let kvRecord = await readExportedBlueprint(this.env, id);
     if (!kvRecord) return null;
 
     return publicBlueprintInfo(id, kvRecord.metadata);
   }
 
   async downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>> {
-    let kvRecord = await readBlueprintKvRecord(this.env, id);
-    if (!kvRecord) throw new Error("Blueprint not found.");
+    let kvRecord = await readExportedBlueprint(this.env, id);
+    if (!kvRecord) throw createPublicationError(PUBLICATION_ERROR_CODES.notPublished);
 
     let r2Object = await this.env.BLUEPRINT_CONTENT.get(`${id}/${kvRecord.metadata.version}`);
     if (!r2Object) throw new Error("Blueprint content not found in R2.");
@@ -960,7 +1011,7 @@ export default {
 
     if (url.pathname.startsWith(BLUEPRINT_SCREENSHOT_PATH_PREFIX)) {
       let blueprintId = url.pathname.slice(BLUEPRINT_SCREENSHOT_PATH_PREFIX.length);
-      return serveBlueprintScreenshot(env, blueprintId);
+      return serveBlueprintScreenshot(req, env, blueprintId);
     }
 
     // Sign-in via authentication gatekeepers happens entirely within each gatekeeper Worker (the

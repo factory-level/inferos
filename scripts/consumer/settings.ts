@@ -45,7 +45,7 @@ export interface SettingEntry {
   /** The variable or configuration field, as the person sets it. */
   name: string;
   /** The scope area the row belongs to. */
-  group: "Identity" | "InferOps target" | "Host and runtime" | "Custom components" | "Coding adapter";
+  group: "Identity" | "InferOps target" | "Host and runtime" | "Custom components" | "Coding adapter" | "Publication";
   /** What the setting does. */
   description: string;
   kind: SettingKind;
@@ -110,6 +110,14 @@ function codingRepoIds(input: SettingsInput): { ids: string[]; ignored: number }
     : (input.env.CODING_WORKBENCH_REPOS ?? "").split(",").map(entry => entry.trim()).filter(Boolean);
   const ids = entries.filter(id => UUID.test(id));
   return { ids, ignored: entries.length - ids.length };
+}
+
+/** The publication flags, which the dev server resolves like `CODING_WORKBENCH_ENABLED`. */
+const PUBLICATION_FLAG_NAMES = ["PUBLISH_CLOUDFLAREOS_WIDGET", "PUBLISH_CLOUDFLAREOS_APP"] as const;
+
+/** Whether a publication flag is on: a version 2 wrapper's capability, else the shell's `true`. */
+export function publicationRequested({ config, env }: SettingsInput, name: typeof PUBLICATION_FLAG_NAMES[number]): boolean {
+  return config.schemaVersion === 2 ? config.capabilities[name] : env[name] === "true";
 }
 
 const never = { test: () => false, text: "Optional." };
@@ -292,6 +300,27 @@ export const SETTINGS: readonly SettingEntry[] = [
     readAt: "`CODEX_HOME`, through `codex login status` in the InferOps runner preflight (factory-level/inferos#71)",
     present: () => null,
   },
+  {
+    name: "PUBLISH_CLOUDFLAREOS_WIDGET", group: "Publication", kind: "value", owner: "deployer", default: "off", source: "local",
+    description: "Lets widget-kind blueprints be published (`deployment` or `export`) once a deployment admin approves each one. Off refuses every publication operation and suspends widget publications; on again needs each one re-confirmed. Never publishes by itself.",
+    requiredWhen: never,
+    readAt: "`inferos.config.json` `capabilities.PUBLISH_CLOUDFLAREOS_WIDGET` (version 2), else the shell; the backend's `publication.ts`",
+    present: input => publicationRequested(input, "PUBLISH_CLOUDFLAREOS_WIDGET"),
+  },
+  {
+    name: "PUBLISH_CLOUDFLAREOS_APP", group: "Publication", kind: "value", owner: "deployer", default: "off", source: "local",
+    description: "The same switch for app- and workflow-kind blueprints.",
+    requiredWhen: never,
+    readAt: "`inferos.config.json` `capabilities.PUBLISH_CLOUDFLAREOS_APP` (version 2), else the shell; the backend's `publication.ts`",
+    present: input => publicationRequested(input, "PUBLISH_CLOUDFLAREOS_APP"),
+  },
+  {
+    name: "PUBLICATION_SELF_APPROVAL", group: "Publication", kind: "value", owner: "deployer", default: "off", source: "both",
+    description: "`true` lets a deployment admin approve a publication they requested; the record says so. Authorization config: env only, never an admin setting.",
+    requiredWhen: never,
+    readAt: "Shell, then the backend's `auth/config.ts`",
+    present: ({ env }) => env.PUBLICATION_SELF_APPROVAL === "true",
+  },
 ];
 
 /** One problem with the settings. Messages name settings and problems only, never values. */
@@ -390,6 +419,20 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
     }
   } else if (env.CODING_WORKBENCH_ENABLED !== undefined && !["true", "false"].includes(env.CODING_WORKBENCH_ENABLED)) {
     add("CODING_WORKBENCH_ENABLED", "error", "invalid", 'CODING_WORKBENCH_ENABLED must be "true" or "false"');
+  }
+
+  // Publication. A version 2 wrapper's capabilities win over the shell, as for coding dispatch.
+  for (const name of PUBLICATION_FLAG_NAMES) {
+    if (config.schemaVersion === 2) {
+      if (env[name] !== undefined && env[name] !== String(config.capabilities[name])) {
+        add(name, "warning", "contradictory", `The shell's ${name} differs from the wrapper capability, which wins; unset it`);
+      }
+    } else if (env[name] !== undefined && !["true", "false"].includes(env[name]!)) {
+      add(name, "error", "invalid", `${name} must be "true" or "false"`);
+    }
+  }
+  if (env.PUBLICATION_SELF_APPROVAL !== undefined && !["true", "false"].includes(env.PUBLICATION_SELF_APPROVAL)) {
+    add("PUBLICATION_SELF_APPROVAL", "error", "invalid", 'PUBLICATION_SELF_APPROVAL must be "true" or "false"');
   }
 
   // The coding adapter.

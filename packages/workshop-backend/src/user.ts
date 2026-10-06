@@ -2,7 +2,7 @@ import { RpcStub } from "capnweb";
 import { openAiCommand } from './openai-plugin.js';
 import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
 import { localApiModels } from './local-api-models.js';
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -14,7 +14,8 @@ import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig, type AiGatewayConfig } from "./ai-gateway.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
-import { blueprintVersionKeys, isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
+import { blueprintVersionKeys, isReservedBlueprintKey, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
+import { assertPublicationFlagOn, byRequestedDesc, PUBLICATION_AUDIENCES, readPublicationSnapshot, withPublicationStatus, type StoredPublicationRecord } from "./publication.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
@@ -259,6 +260,11 @@ function makeUserStorage(storage: DurableObjectStorage) {
         primaryKey: "id",
       }),
       libraryBlueprints: collection<LibraryBlueprintRecord>()({
+        primaryKey: "id",
+      }),
+      // This person's publication records, the authoritative copy (see publication.ts).
+      // AdminSettings mirrors each one after every change.
+      publications: collection<StoredPublicationRecord>()({
         primaryKey: "id",
       }),
       // Outputs of every workspace in `gadgets`, mirrored here by each workspace's Overseer so the
@@ -1487,6 +1493,96 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     result.sort((a, b) => b.addedAt.valueOf() - a.addedAt.valueOf());
     return result;
+  }
+
+  // --- Publication records (see publication.ts). This DO holds the authoritative copy. ---
+
+  /**
+   * Append a requested record pinning the current version of one of this person's published
+   * blueprints. Asking again for the same version and destination while a request or approval
+   * stands returns that record rather than another one.
+   */
+  async requestPublication(blueprintId: string, destination: PublicationDestination)
+      : Promise<PublicationRecord> {
+    let kvRecord = this.storage.blueprints.get(blueprintId)
+        ? await readBlueprintKvRecord(this.env, blueprintId) : null;
+    if (!kvRecord) throw new Error("No such blueprint.");
+    let version = kvRecord.metadata.version;
+    let content = await readBlueprintContent(this.env, blueprintId, version);
+    if (!content) throw new Error(`Blueprint version ${version} not found.`);
+    assertPublicationFlagOn(this.env, content.kind);
+
+    let record = [...this.storage.publications.list()].find(existing =>
+        existing.artifact.blueprintId === blueprintId && existing.artifact.version === version &&
+        existing.destination === destination && !existing.withdrawnAt);
+    if (!record) {
+      let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", content.code));
+      record = {
+        id: crypto.randomUUID(),
+        artifact: {
+          blueprintId, version, digest: `sha256:${digest.toHex()}`, kind: content.kind,
+          title: kvRecord.metadata.title,
+        },
+        destination,
+        audience: PUBLICATION_AUDIENCES[destination],
+        publishedBy: this.storage.profile.get().id,
+        requestedAt: new Date(),
+      };
+      this.storage.publications.put(record);
+    }
+    await this.adminSettings.getByName("").mirrorPublication(record);
+    return this.#withStatus(record);
+  }
+
+  async listPublications(): Promise<PublicationRecord[]> {
+    let { offSeenAt } = await readPublicationSnapshot(this.env);
+    return [...this.storage.publications.list()].toSorted(byRequestedDesc)
+        .map(record => withPublicationStatus(record, this.env, offSeenAt));
+  }
+
+  /** The owner withdraws a record or cancels a request. Idempotent, so a retry re-mirrors. */
+  async withdrawOwnPublication(recordId: string, reason: string): Promise<PublicationRecord> {
+    let record = this.storage.publications.get(recordId);
+    if (!record) throw createPublicationError(PUBLICATION_ERROR_CODES.recordNotFound);
+    assertPublicationFlagOn(this.env, record.artifact.kind);
+    record = this.decidePublication(recordId,
+        { type: "withdraw", by: this.storage.profile.get().id, reason });
+    await this.adminSettings.getByName("").mirrorPublication(record);
+    return this.#withStatus(record);
+  }
+
+  /**
+   * Write one decision onto a record. Called by AdminSettings, which checks the flag, the
+   * approver and the artifact first and mirrors the result; each field is written only once.
+   */
+  decidePublication(recordId: string, decision:
+      | { type: "approve" | "confirm"; by: string; selfApproved: boolean }
+      | { type: "withdraw"; by: string; reason: string }): StoredPublicationRecord {
+    let record = this.storage.publications.get(recordId);
+    if (!record) throw createPublicationError(PUBLICATION_ERROR_CODES.recordNotFound);
+    if (record.withdrawnAt) {
+      if (decision.type === "withdraw") return record;
+      throw createPublicationError(PUBLICATION_ERROR_CODES.invalidState);
+    }
+    let at = new Date();
+    if (decision.type === "withdraw") {
+      record = { ...record, withdrawnBy: decision.by, withdrawnAt: at, reason: decision.reason };
+    } else {
+      let self = decision.selfApproved ? { selfApproved: true as const } : {};
+      if (decision.type === "approve") {
+        if (record.at) throw createPublicationError(PUBLICATION_ERROR_CODES.invalidState);
+        record = { ...record, approvedBy: decision.by, ...self, at };
+      } else {
+        if (!record.at) throw createPublicationError(PUBLICATION_ERROR_CODES.invalidState);
+        record = { ...record, confirmations: [...record.confirmations ?? [], { by: decision.by, at, ...self }] };
+      }
+    }
+    this.storage.publications.put(record);
+    return record;
+  }
+
+  async #withStatus(record: StoredPublicationRecord): Promise<PublicationRecord> {
+    return withPublicationStatus(record, this.env, (await readPublicationSnapshot(this.env)).offSeenAt);
   }
 
   async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
