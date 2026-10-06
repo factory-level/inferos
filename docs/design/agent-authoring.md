@@ -1,7 +1,7 @@
 ---
 title: Reusable native agent authoring
 status: draft
-updated: 2026-10-03
+updated: 2026-10-05
 ---
 
 # Reusable native agent authoring
@@ -24,9 +24,9 @@ Bring AI Trader’s reusable authoring discipline into InferOS while keeping exe
 
 An author edits a draft, validates its native contract, inspects the diff, runs deterministic fixture proofs and publishes a named immutable revision. Changes to instructions, skills, model constraints or bindings invalidate the prior qualification. Import verifies the artifact, presents required bindings and obtains destination authority; it never imports source credentials or live execution state. Native callable agents and scheduler callbacks supply execution. Proofs cover enqueue-versus-completion semantics and idempotent retries before they are advertised as reliable workflow building blocks.
 
-## Proposed contract
+## Contract
 
-Added 2026-10-03. The owner asked for contract PRs for #15, #16 and #17 in this wave. Everything in this section is a **proposal pending owner review**. It is not implemented. The types are in `packages/workshop-shared/src/agent-artifact.ts`, and the rationale is in [ADR 0006](../adr/0006-agent-artifact-revisions.md) (proposed).
+Proposed 2026-10-03 for #15, #16 and #17. **Decided by the owner on 2026-10-05: accepted as proposed** ([#15 decision](https://github.com/factory-level/inferos/issues/15)). That covers the six `Overseer` methods, the kinds `skill`, `agent` and `gadget`, a canonical-JSON SHA-256 digest with name and number outside it, `.gadget` format version 2, a deterministic qualification gate, and the rule that agents may draft but a person publishes. It is not implemented yet; implementation is resuming. The types are in `packages/workshop-shared/src/agent-artifact.ts`, and the rationale is in [ADR 0006](../adr/0006-agent-artifact-revisions.md) (accepted).
 
 ### Operation mapping
 
@@ -45,7 +45,7 @@ Each authoring operation, mapped onto what exists today (see the [architecture i
 | Import | `AuthenticatedApi.importBlueprint()` | Verification of a version 2 archive. No new method |
 | Rebind | `newGadgetFromBlueprint()` with `BlueprintBindingAssignment` | `bindArtifactRevision(ref, bindings)`, the same call keyed by exact revision |
 
-The smallest authoring API is therefore six methods on `Overseer`, requiring workspace build access: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Their signatures are `ArtifactAuthoringProposal` in the shared module. Export and import keep their existing methods and gain format version 2. Each method lands in its own kernel PR after review. This resolves the first open question.
+The smallest authoring API is therefore six methods on `Overseer`, requiring workspace build access: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Their signatures are `ArtifactAuthoringProposal` in the shared module. Export and import keep their existing methods and gain format version 2. Each method lands in its own kernel PR. This resolves the first open question (decided by the owner on 2026-10-05).
 
 ### Identity, digest and canonicalisation
 
@@ -57,7 +57,7 @@ The smallest authoring API is therefore six methods on `Overseer`, requiring wor
 
 ### Compatibility
 
-This resolves the second open question.
+This resolves the second open question (decided by the owner on 2026-10-05).
 
 - `ArtifactManifest.format` is `inferos-artifact/1`. A reader refuses a format it does not know with `unsupported_format` and never guesses. Any change to what the digest covers is a new format, and revisions under the old format keep their digests.
 - `.gadget` archives move to format version 2: the same 24-byte prefix with version `2`, and the metadata JSON gains a revision block (name, number, digest, manifest, qualification). Version 1 readers already refuse version 2, so an old Workshop rejects a revision archive instead of importing it without verification. Import of version 1 stays unchanged.
@@ -111,7 +111,7 @@ Tracking issue: [#17](https://github.com/factory-level/inferos/issues/17) (`auth
 
 ## Open Questions
 
-- Proposed (above, pending owner review): the smallest native authoring API, and digest canonicalisation and compatibility. These were the two baseline questions.
+- Decided by the owner on 2026-10-05 (above): the smallest native authoring API, and digest canonicalisation and compatibility. These were the two baseline questions.
 - Where revision records live. The proposal is a revision record beside the Blueprint record in the owner's User DO and KV, with content in the existing `<blueprintId>/<version>` R2 objects. Whether an `agent` or `skill` revision, which instantiates no gadget, should be a Blueprint at all is still open.
 - How a `skill` revision is served. Context Library readers always get current content. A pinned skill needs its revision's exact bytes to stay readable, either kept by the Context Library or carried as files of the pinning artifact.
 - Whether qualification should later run server-side, so that a deterministic result is reproduced rather than attested by the author's harness.
@@ -120,7 +120,7 @@ Tracking issue: [#17](https://github.com/factory-level/inferos/issues/17) (`auth
 ## Related
 
 - [Current architecture](../architecture/agent-authoring.md)
-- [ADR 0006: agent artifact revisions](../adr/0006-agent-artifact-revisions.md) (proposed)
+- [ADR 0006: agent artifact revisions](../adr/0006-agent-artifact-revisions.md) (accepted)
 - [Pillars](platform-pillars.md)
 - [Roadmap and issues](../wiki/implementation-roadmap.md)
 - [Research evidence](../wiki/research-sources.md)

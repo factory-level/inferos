@@ -8,14 +8,14 @@ covers:
   - packages/gatekeeper-scheduler
   - packages/gatekeeper-context/src/agent-skill.ts
   - docs/blueprints.md
-updated: 2026-10-03
+updated: 2026-10-05
 ---
 
 # Reusable native agent authoring
 
 ## Overview
 
-Current-state inventory for [#15](https://github.com/factory-level/inferos/issues/15), inspected at InferOS `c340758` and AI Trader `c1301c8`. Nothing in the [design](../design/agent-authoring.md) is implemented. The one new file, `packages/workshop-shared/src/agent-artifact.ts`, holds the proposed contract as types plus three pure helpers (`canonicalArtifactJson`, `artifactDigest`, `isQualified`) and their tests. No backend code imports it, and no RPC interface exposes it.
+Current-state inventory for [#15](https://github.com/factory-level/inferos/issues/15), inspected at InferOS `c340758` and AI Trader `c1301c8`. Nothing in the [design](../design/agent-authoring.md) is implemented. The one new file, `packages/workshop-shared/src/agent-artifact.ts`, holds the accepted contract as types plus three pure helpers (`canonicalArtifactJson`, `artifactDigest`, `isQualified`) and their tests. No backend code imports it, and no RPC interface exposes it.
 
 ## Components
 
@@ -78,7 +78,7 @@ Everything the design specifies is unimplemented except the shared types and hel
 
 ## Open Questions
 
-- See the [design's open questions](../design/agent-authoring.md#open-questions). The two baseline questions now have proposals pending owner review in the design and [ADR 0006](../adr/0006-agent-artifact-revisions.md).
+- See the [design's open questions](../design/agent-authoring.md#open-questions). The two baseline questions were decided by the owner on 2026-10-05: the design's contract and [ADR 0006](../adr/0006-agent-artifact-revisions.md) are accepted as proposed, and implementation is resuming.
 
 ## Evidence
 
