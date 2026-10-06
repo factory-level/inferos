@@ -4,6 +4,7 @@ import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG } from '@gadgets/workshop-shared/canvas'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { WorkshopButton } from '../../components/WorkshopControls'
+import { TestSpaceBadge } from '../../components/TestSpaceBadge'
 import { CanvasWorkspacePane } from '../canvas/CanvasWorkspacePane'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { useServerConfig } from '../../ServerConfigContext'
@@ -59,7 +60,7 @@ export const SessionScreen = ({ workspaceId, screenId, onShowScreen, onClose }: 
   if (!overseer || !metadata || !ready || !canvasFeatures || exists === null) return (
     <p role="status" className="p-6 text-sm text-kumo-subtle">Loading screen…</p>
   )
-  return (
+  const pane = (
     <CanvasWorkspacePane key={workspaceId} overseer={overseer.stub} gadgets={gadgets}
       catalog={canvasFeatures.catalog ?? DEFAULT_CANVAS_CATALOG} viewId={screenId}
       openWidgetId={openWidgetId} onOpenWidgetChange={setOpenWidgetId}
@@ -71,4 +72,12 @@ export const SessionScreen = ({ workspaceId, screenId, onShowScreen, onClose }: 
       }}
       storage={canvasFeatures.durableViews ? { kind: 'durable', api: overseer.stub } : { kind: 'temporary' }} />
   )
+  // A screen of a test-only space says so, since what it shows may be mock data.
+  if (!metadata.testOnly) return pane
+  return <div className="flex h-full min-h-0 flex-col">
+    <div className="flex flex-shrink-0 items-center gap-2 border-b border-kumo-line px-3 py-1 text-xs text-kumo-subtle">
+      <TestSpaceBadge /><span>{metadata.title} may use mock data and models.</span>
+    </div>
+    <div className="min-h-0 flex-1">{pane}</div>
+  </div>
 }

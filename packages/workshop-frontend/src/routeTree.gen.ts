@@ -27,6 +27,7 @@ import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
 import { Route as WorkspaceIdInferopsCanvasRouteImport } from './routes/workspace_.$id.inferops-canvas'
+import { Route as WorkspaceIdPublishRouteImport } from './routes/workspace_.$id.publish'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -119,6 +120,11 @@ const WorkspaceIdInferopsCanvasRoute =
     path: '/workspace/$id/inferops-canvas',
     getParentRoute: () => rootRouteImport,
   } as any)
+const WorkspaceIdPublishRoute = WorkspaceIdPublishRouteImport.update({
+  id: '/workspace_/$id/publish',
+  path: '/workspace/$id/publish',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -139,6 +145,7 @@ export interface FileRoutesByFullPath {
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/workspace/$id/inferops-canvas': typeof WorkspaceIdInferopsCanvasRoute
+  '/workspace/$id/publish': typeof WorkspaceIdPublishRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -159,6 +166,7 @@ export interface FileRoutesByTo {
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/workspace/$id/inferops-canvas': typeof WorkspaceIdInferopsCanvasRoute
+  '/workspace/$id/publish': typeof WorkspaceIdPublishRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -180,6 +188,7 @@ export interface FileRoutesById {
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/workspace_/$id/inferops-canvas': typeof WorkspaceIdInferopsCanvasRoute
+  '/workspace_/$id/publish': typeof WorkspaceIdPublishRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -202,6 +211,7 @@ export interface FileRouteTypes {
     | '/gatekeepers/$appId'
     | '/workspace/$id'
     | '/workspace/$id/inferops-canvas'
+    | '/workspace/$id/publish'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -222,6 +232,7 @@ export interface FileRouteTypes {
     | '/gatekeepers/$appId'
     | '/workspace/$id'
     | '/workspace/$id/inferops-canvas'
+    | '/workspace/$id/publish'
   id:
     | '__root__'
     | '/'
@@ -242,6 +253,7 @@ export interface FileRouteTypes {
     | '/gatekeepers_/$appId'
     | '/workspace/$id'
     | '/workspace_/$id/inferops-canvas'
+    | '/workspace_/$id/publish'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -263,6 +275,7 @@ export interface RootRouteChildren {
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
   WorkspaceIdInferopsCanvasRoute: typeof WorkspaceIdInferopsCanvasRoute
+  WorkspaceIdPublishRoute: typeof WorkspaceIdPublishRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -393,6 +406,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceIdInferopsCanvasRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/workspace_/$id/publish': {
+      id: '/workspace_/$id/publish'
+      path: '/workspace/$id/publish'
+      fullPath: '/workspace/$id/publish'
+      preLoaderRoute: typeof WorkspaceIdPublishRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -415,6 +435,7 @@ const rootRouteChildren: RootRouteChildren = {
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
   WorkspaceIdInferopsCanvasRoute: WorkspaceIdInferopsCanvasRoute,
+  WorkspaceIdPublishRoute: WorkspaceIdPublishRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

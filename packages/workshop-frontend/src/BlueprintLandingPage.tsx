@@ -1,6 +1,6 @@
 import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
-import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
+import { useNavigate, useParams, useRouter, useSearch } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, getPublicationErrorCode, PUBLICATION_ERROR_CODES } from '@gadgets/workshop-shared/api'
 import { SupportedResource, VendorDescription, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
@@ -8,6 +8,8 @@ import { Button, Dialog, DropdownMenu, Select, Tooltip, useKumoToastManager } fr
 import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, Lightning, Plus, Robot, Sparkle, Star, Trash, X } from '@phosphor-icons/react'
 
 import { useAuth } from './useAuth'
+import { useObserverPrompt } from './hooks/useObserverPrompt'
+import ObserverConfigModal from './ObserverConfigModal'
 import LoginPage from './LoginPage'
 import { normalizeResourceUrl } from './resourceMatching'
 import {
@@ -36,6 +38,15 @@ const NO_AGENT_MODEL_ID = 'gadgets:sentinel:no-agent-model'
 export default function BlueprintLandingPage({ rpcStub }: Props) {
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id ?? ''
+  // Set when the publication review sent the person here to choose connections for an install into
+  // an operate space (a workspace they build in), rather than to create a workspace of their own.
+  const { space } = useSearch({ strict: false }) as { space?: string }
+  // Opening the space as a build collaborator asks them to verify its connections with accounts of
+  // their own, exactly as opening it in Build would.
+  const observerPrompt = useObserverPrompt()
+  // The request key of the person's intent to install this version into `space`: reused on a
+  // retry, so a request the kernel already ran is not installed twice (SpaceInstallOptions).
+  const installIntent = useRef<{ space: string; version: number; key: string } | null>(null)
   const navigate = useNavigate()
   const router = useRouter()
   const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth(rpcStub)
@@ -574,6 +585,27 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
     setCreating(true)
     setError(null)
+    if (space) {
+      // Pinned to the version reviewed here, of its kind, under the person's own connections.
+      try {
+        using callback = observerPrompt.newCallback()
+        using target = await authenticatedApi.openGadget(space, undefined, callback)
+        const version = blueprint.metadata.version
+        const intent = installIntent.current
+        const requestKey = intent && intent.space === space && intent.version === version
+          ? intent.key : crypto.randomUUID()
+        installIntent.current = { space, version, key: requestKey }
+        await target.installBlueprint(id, draftAssignments,
+            { version, kind: blueprint.metadata.kind ?? 'app', requestKey })
+        installIntent.current = null
+        void navigate({ to: '/workspace/$id', params: { id: space } })
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to install into the space.')
+      } finally {
+        setCreating(false)
+      }
+      return
+    }
     const overseer = authenticatedApi.newGadgetFromBlueprint(id, draftAssignments)
     try {
       let metadata = await overseer.getMetadata()
@@ -777,7 +809,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       ? `Configure ${remainingCount} remaining ${remainingCount === 1 ? 'connection' : 'connections'}`
       : 'Configure connections'
   } else {
-    primaryActionLabel = 'Create Gadget'
+    primaryActionLabel = space ? `Install version ${blueprint?.metadata.version ?? ''} into the space` : 'Create Gadget'
   }
   let createDisabled = creating
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
@@ -787,6 +819,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
   return (
     <div className="min-h-full bg-kumo-base">
+      {observerPrompt.prompt && authenticatedApi && <ObserverConfigModal needs={observerPrompt.prompt.needs}
+        authenticatedApi={authenticatedApi} onConfirm={observerPrompt.prompt.resolve} onCancel={observerPrompt.cancel} />}
       <div className="mx-auto w-full max-w-5xl px-6 pb-16 pt-6 sm:px-10">
         <button
           type="button"
