@@ -190,3 +190,43 @@ it("refuses an incompatible model before creating anything, and binds a compatib
   const [sourceModel] = await source.listBindings();
   expect([rebound, bindings[0]!.target]).toEqual([sourceModel!.target + 1, sourceModel!.target + 2]);
 });
+
+it("queues a publish request for a person's approval and records the approver as publisher", async () => {
+  using env = await authoringWorkspace("artifactapprover");
+  const ws: RpcStub<Overseer> = env.workspace;
+  const skill = await env.gadget("Triage skill", "TRIAGE");
+  await env.commit(skill, "SKILL.md", undefined, "Route bugs.\n");
+
+  using publisher = await ws.newArtifactPublisherGatekeeper();
+  expect(await publisher.getCreationSpec()).toEqual({ type: "artifactPublisher" });
+  // The session an agent's binding gets: validate, then ask for publication.
+  using binding = await publisher.openSession() as unknown as RpcStub<{
+    validate(gadgetId: number, kind: string, pins: unknown[], model: unknown): Promise<{ digest: ArtifactDigest; refusals: string[] }>;
+    requestPublish(request: object): Promise<void>;
+  }>;
+  const { digest, refusals } = await binding.validate(skill, "skill", [], null);
+  expect(refusals).toEqual([]);
+  const request = { gadgetId: skill, kind: "skill", name: "triage", number: 1, pins: [], model: null };
+  await binding.requestPublish({ ...request, qualification: qualified(digest) });
+
+  const [pending] = (await ws.listActions({ filter: "pending" })).entries;
+  expect(pending).toMatchObject({ type: "action", description: { title: "Publish skill/triage@1", autoApprovable: false } });
+  expect(await ws.getArtifactRevision("skill/triage@1")).toBeNull();
+  expect(await ws.listPreApprovableActions()).toEqual([]);
+
+  await ws.approveAction(pending!.id);
+  const me = await env.owner.whoami();
+  expect(await ws.getArtifactRevision("skill/triage@1"))
+      .toMatchObject({ digest, publishedBy: { type: "user", id: me.id } });
+
+  // A request whose proof no longer matches stays pending with the refusal, until rejected.
+  await binding.requestPublish({ ...request, number: 2, qualification: qualified(`sha256:${"0".repeat(64)}`) });
+  const [stale] = (await ws.listActions({ filter: "pending" })).entries;
+  await expect(ws.approveAction(stale!.id)).rejects.toThrow(/qualification_stale/);
+  expect((await ws.listActions({ filter: "pending" })).entries.map(entry => entry.id)).toEqual([stale!.id]);
+  await ws.rejectAction(stale!.id);
+  expect(await ws.getArtifactRevision("skill/triage@2")).toBeNull();
+  // Malformed requests fail in the requester's call, before anything is queued.
+  await expect(binding.requestPublish({ ...request, name: "Bad Name", qualification: qualified(digest) }))
+      .rejects.toThrow(/Invalid artifact name/);
+});

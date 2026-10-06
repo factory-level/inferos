@@ -2507,6 +2507,15 @@ export interface Overseer extends RpcTarget {
   bindArtifactRevision(ref: ArtifactRef,
       bindings: Record<string, BlueprintBindingAssignment>): Promise<WorkpieceId>;
 
+  /**
+   * Create this workspace's artifact publisher connection: a built-in gatekeeper an agent uses to
+   * validate a gadget as an artifact revision and to ask for it to be published. Every publish it
+   * requests is queued as an action that a person must approve (never auto-approvable), and is
+   * recorded as published by that person. Bind it into a gadget or an agent spawner's env like any
+   * connection. Build access only.
+   */
+  newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>>;
+
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
 
@@ -4878,6 +4887,14 @@ export type GatekeeperCreationSpec = {
   type: "ambient";
   vendorId: string;        // the singleton gatekeeper's id (GATEKEEPER_<ID> suffix, lowercased)
   accountId: number;       // the owner's connected-account id for this singleton (in their user DO)
+
+} | {
+  /**
+   * The workspace's artifact publisher (see Overseer.newArtifactPublisherGatekeeper()): lets an
+   * agent ask a person to publish an artifact revision through the approval queue. Workspace-local
+   * authority, so excluded from blueprints.
+   */
+  type: "artifactPublisher";
 };
 
 /**

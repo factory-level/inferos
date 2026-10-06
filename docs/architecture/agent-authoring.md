@@ -6,6 +6,8 @@ covers:
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/workshop-backend/src/artifact-store.ts
+  - packages/workshop-backend/src/artifact-publisher.ts
+  - packages/workshop-backend/src/artifact-publisher-binding.d.ts
   - packages/gatekeeper-scheduler
   - packages/gatekeeper-context/src/agent-skill.ts
   - docs/blueprints.md
@@ -16,7 +18,7 @@ updated: 2026-10-06
 
 ## Overview
 
-Current state after the revision-storage slice of [#16](https://github.com/factory-level/inferos/issues/16), built on the inventory of [#15](https://github.com/factory-level/inferos/issues/15) (InferOS `c340758`, AI Trader `c1301c8`). The six authoring methods of the [design](../design/agent-authoring.md) are members of `Overseer` and are implemented by each workspace's Overseer: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Revisions are stored per workspace. `.gadget` format version 2 (#17), an agent-facing publish request through the approval queue, and Context Library skill revisions are not implemented yet (see [Divergences from Design](#divergences-from-design)).
+Current state after the revision-storage slice of [#16](https://github.com/factory-level/inferos/issues/16), built on the inventory of [#15](https://github.com/factory-level/inferos/issues/15) (InferOS `c340758`, AI Trader `c1301c8`). The six authoring methods of the [design](../design/agent-authoring.md) are members of `Overseer` and are implemented by each workspace's Overseer: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Revisions are stored per workspace. An agent asks for a publish through a built-in artifact publisher gatekeeper, and a person approves it in the approval queue. `.gadget` format version 2 (#17) and Context Library skill revisions are not implemented yet (see [Divergences from Design](#divergences-from-design)).
 
 ## Components
 
@@ -25,6 +27,7 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 | `packages/workshop-shared/src/api.ts` | Native Gadget, Blueprint, binding and agent APIs. |
 | `packages/workshop-shared/src/agent-artifact.ts` | Artifact contract: types, canonical JSON digest, qualification predicate, exact reference parsing, refusal codes. |
 | `packages/workshop-backend/src/artifact-store.ts` | Revision storage and every publish rule: manifest building, pin resolution, qualification and secret findings, manifest diff, immutable publish. |
+| `packages/workshop-backend/src/artifact-publisher.ts` | `ArtifactPublisherGatekeeper`, the built-in gatekeeper behind an agent's `ArtifactPublisherBinding` (agent-facing types in `artifact-publisher-binding.d.ts`): `validate()` and `requestPublish()`, which queues an approval. |
 | `packages/workshop-backend/src/overseer.ts` | The six `Overseer` methods (build sessions only; use and operate sessions deny them) and the `artifactRevisions` collection. |
 | `packages/workshop-backend/src/agent-spawner-binding.d.ts` | Callable agents and completion callback contract. |
 | `packages/workshop-backend/src/blueprint-archive.ts` | `.gadget` archive format v1 encode and decode. |
@@ -78,6 +81,8 @@ InferOS already provides native Gadgets, Blueprint import/export, bindings and c
 - `secret_present` matches only well-known credential formats with a distinctive prefix or frame: PEM, OpenSSH and PGP private-key blocks, AWS access key ids, GitHub, GitLab and Slack tokens, OpenAI and Anthropic `sk-` keys of 32 or more characters, Google `AIza` keys, Stripe live keys and signed JWTs. It reports the file path or qualification field, never the matched text. Generic high-entropy strings and `password = ...` assignments are not matched, so a credential in that form is a false negative. The list is fixed in code and is not configurable per deployment (owner decision, 2026-10-06).
 - The qualification is evidence from the author's harness. Publish checks only that it names the recomputed digest and has at least one deterministic check with every deterministic check passing; `liveModel` checks are stored and never consulted.
 - `publishArtifactRevision` records the calling person as `publishedBy`. Every call on `OverseerClientInterface` belongs to a signed-in person's build session; agents never hold an `Overseer`, and use and operate sessions deny all six methods.
+- Agents publish only through the approval queue. A person creates the workspace's publisher connection with `Overseer.newArtifactPublisherGatekeeper()` (creation spec `artifactPublisher`, build role only, excluded from blueprints) and binds it where an agent should reach it. The binding's `validate()` returns the draft digest and refusals. `requestPublish()` checks the request's shape, stores it in the gatekeeper's own storage under a new action number, and calls `ApprovalQueue.submitAction()` with `awaitDecision` and `autoApprovable: false`, so the agent's turn waits for the decision. The gatekeeper offers no auto-approvable action kind, so no rule can apply it.
+- On manual approval, `OverseerImpl.applyPendingAction` records the approving person under `<gatekeeperId>:<action>` in an in-memory map for the duration of the gatekeeper's `applyAction()`, and only for an `artifactPublisher` connection that was not auto-approved. The gatekeeper calls `OverseerDurableObject.publishApprovedArtifact(action, request)`, which publishes through the same `publishArtifact` path as a build session, with that person as `publishedBy`. It refuses unless exactly one publisher is applying that action number. This keeps approver identity out of the `Gatekeeper` interface. The manifest and qualification are rebuilt at approval, so a gadget changed since qualification is refused. A refusal throws from `applyAction`, which leaves the action pending with the reason until a person rejects it. Rejection deletes the stored request. A published revision cannot be reverted.
 - Storage is the Overseer's `artifactRevisions` collection, keyed `<kind>/<name>@<keyString(number)>` so one name lists in number order. A record is the wire `ArtifactRevision` plus `commitId` (the commit its files were read from; git objects are never collected, so the record keeps them) and `bindingTemplates` (titles, `spawnerOnly` and spawner env, with source `resourceUrl` and `suggestedModel` dropped). Neither extra field crosses RPC. Revisions are never edited or deleted. The author-chosen number plays the part of the canvas and console stores' expected revision: `WorkspaceArtifactStore.publish()` checks it against the stored name and number and writes in one `transactionSync`, so two racing publishes cannot both land. An identical republish returns the stored revision with `created: false`.
 - `bindArtifactRevision` runs every compatibility check before it creates anything, so a refusal leaves nothing behind. The assignments must name exactly the revision's binding requirements with matching types. Each chosen account is resolved through `getGatekeeperClassFor` (the admin-policy chokepoint, which creates no state) and must be of the requirement's `gatekeeperName` vendor. Every assigned model must meet an `exact` model requirement, checked through the person's model configuration, and every spawner env entry must name an assigned connection. Only then does it create a permanent gadget at the revision's commit and bind in `newGadgetFromBlueprint()`'s two phases. Connections are created from the already-resolved accounts (`newGatekeeper`'s second half), and through `newAiModelGatekeeper` and `newAgentSpawnerGatekeeper`. Rolling back is binding an earlier exact revision. Blueprint install behaviour is unchanged.
 
@@ -88,7 +93,6 @@ Model and gatekeeper bindings are installed in the destination workspace. Schedu
 
 ## Divergences from Design
 
-- The design has an agent's publish request queued in the approval queue. No agent-facing surface reaches the authoring methods yet: they are `Overseer` methods, and agents never hold an `Overseer`. Agents can draft, and run qualification fixtures as gadget code or `executeCode`; a person publishes from a build session.
 - Revisions live in the publishing workspace's Overseer, with content in its git store, rather than beside Blueprint records in the owner's User DO, KV and R2 (the design's open question on where records live). `bindArtifactRevision` therefore instantiates only within that workspace until `.gadget` v2 export and import exist.
 - The design lands each method in its own kernel PR. The owner's implementation plan for #16 delivered all six in one PR, together with their storage.
 - Still unimplemented: `.gadget` format version 2 and its import verification, skill revisions served from the Context Library, and server-run qualification.
@@ -96,7 +100,7 @@ Model and gatekeeper bindings are installed in the destination workspace. Schedu
 ## Open Questions
 
 - See the [design's open questions](../design/agent-authoring.md#open-questions). The two baseline questions were decided by the owner on 2026-10-05: the design's contract and [ADR 0006](../adr/0006-agent-artifact-revisions.md) are accepted as proposed.
-- An agent's publish request will reach the approval queue through a built-in gatekeeper binding, modelled on the agent spawner (owner decision, 2026-10-06). That is a separate PR.
+- The agent route uses a built-in gatekeeper binding modelled on the agent spawner (owner decision, 2026-10-06). The Workshop has no UI yet for creating the publisher connection.
 
 ## Evidence
 
