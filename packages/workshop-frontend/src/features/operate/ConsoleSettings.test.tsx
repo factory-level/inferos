@@ -19,7 +19,7 @@ vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWo
 import { ConsoleSettings } from './ConsoleSettings'
 
 const entry: ConsoleEntry = { workspace: { id: 'w1', title: 'Operations', created: new Date(), lastActive: new Date() }, screens: [], console: {
-  id: 'c1', revision: '3', title: 'Operations', fullChat: 'default',
+  id: 'c1', revision: '3', published: null, title: 'Operations', fullChat: 'default',
   views: [{ id: 'v1', type: 'screen', title: 'Board', screen: 's1' }],
 } }
 let container: HTMLDivElement

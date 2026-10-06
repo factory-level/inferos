@@ -23,7 +23,7 @@ import { OperateSidebar } from './OperateSidebar'
 const ENG = { id: 'eng', title: 'ENG board', type: 'screen', screen: 's-eng' } as const
 const CODE = { id: 'code', title: 'CODE board', type: 'screen', screen: 's-code' } as const
 const consoleWith = (views: OperateConsole['views'], revision: string): OperateConsole =>
-  ({ id: 'c1', revision, title: 'Live operations lead', fullChat: 'off', views })
+  ({ id: 'c1', revision, published: null, title: 'Live operations lead', fullChat: 'off', views })
 
 let root: Root
 let container: HTMLDivElement
@@ -41,7 +41,7 @@ it('re-reads the console when the session refuses a view the builder removed, an
   let saved = consoleWith([ENG, CODE], '0')
   const dispatch = vi.fn<(event: unknown, seq: number) => Promise<never>>(async () => { throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.consoleChanged) })
   const update: OperateSessionUpdate = { seq: 2, state: { ...INITIAL_OPERATE_PAGE, console: {
-    workspaceId: 'ws1', consoleId: 'c1', title: 'Live operations lead', fullChat: 'off', viewId: 'eng', screenId: null,
+    workspaceId: 'ws1', consoleId: 'c1', title: 'Live operations lead', source: 'draft', revision: '0', fullChat: 'off', viewId: 'eng', screenId: null,
   } } }
   harness.api = {
     listGadgets: async () => [{ id: 'ws1', title: 'Live ENG ops', lastActive: new Date() }],

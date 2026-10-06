@@ -71,7 +71,7 @@ import { resetBuildLocationForTests } from '../../features/operate/operateMode'
 
 const screen = (id: string, title: string) => ({ id, title, sections: [] })
 const CONSOLE: OperateConsole = {
-  id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',
+  id: 'c1', revision: '0', published: null, title: 'Operations lead', fullChat: 'available',
   views: [
     { id: 'overview', title: 'Overview', type: 'rollup', screens: ['s1', 's2'] },
     { id: 'board', title: 'Board', type: 'screen', screen: 's1' },
@@ -84,7 +84,7 @@ const withConsole = (saved: OperateConsole = CONSOLE) => ({
 })
 const inConsole = (viewId: string, extra: Partial<OperatePageState> = {}, saved: OperateConsole = CONSOLE): OperatePageState => ({
   ...INITIAL_OPERATE_PAGE, ...extra,
-  console: { workspaceId: 'w1', consoleId: saved.id, title: saved.title, fullChat: saved.fullChat, viewId, screenId: null },
+  console: { workspaceId: 'w1', consoleId: saved.id, title: saved.title, source: 'draft', revision: saved.revision, fullChat: saved.fullChat, viewId, screenId: null },
 })
 
 describe('Sidebar modes', () => {
