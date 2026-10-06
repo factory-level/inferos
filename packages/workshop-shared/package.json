@@ -62,12 +62,17 @@
     "./operate-session": {
       "types": "./src/operate-session.ts",
       "import": "./src/operate-session.ts"
+    },
+    "./agent-artifact": {
+      "types": "./src/agent-artifact.ts",
+      "import": "./src/agent-artifact.ts"
     }
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test:run": "vitest run"
   },
   "dependencies": {
     "@cloudflare/workers-types": "catalog:",
@@ -76,6 +81,8 @@
     "fast-diff": "^1.3.0"
   },
   "devDependencies": {
-    "typescript": "catalog:"
+    "@gadgets/scripts": "workspace:*",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }
