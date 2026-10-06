@@ -19,7 +19,7 @@ covers:
   - packages/integration-tests/__tests__/operate-chat-boards.test.ts
   - packages/integration-tests/__tests__/operate-board-recovery.test.ts
   - packages/integration-tests/__tests__/operate-chat-no-wiki.test.ts
-updated: 2026-10-04
+updated: 2026-10-05
 ---
 
 # Operate mode
@@ -151,4 +151,4 @@ Against [the design](../design/operate-mode.md):
 
 ## Wave 5 design boundary
 
-The [publication review](../design/operate-publication.md) and [approval/provider policy](../design/operate-policy.md) are proposed review artifacts, not new runtime behavior. #136/#149 already implement pinned installs, version-specific binding snapshots and explicit upgrades. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.
+The [publication review](../design/operate-publication.md) design was accepted by the owner on 2026-10-05 but is not implemented: there is no test-only space flag, per-version `dataContract`, mock-dependency refusal or publication review page yet. The [approval/provider policy](../design/operate-policy.md) is a proposed review artifact, not new runtime behavior. #136/#149 already implement pinned installs, version-specific binding snapshots and explicit upgrades. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.
