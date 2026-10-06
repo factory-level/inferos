@@ -102,6 +102,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   getArtifactRevision: ws => ws.getArtifactRevision("skill/a@1"),
   bindArtifactRevision: ws => ws.bindArtifactRevision("skill/a@1", {}),
   newArtifactPublisherGatekeeper: ws => ws.newArtifactPublisherGatekeeper(),
+  exportArtifactRevision: ws => ws.exportArtifactRevision("skill/a@1"),
+  importArtifactRevision: ws => ws.importArtifactRevision(new Response(new Uint8Array(24)).body!),
   setTitle: ws => ws.setTitle("Title"),
   setKind: ws => ws.setKind("workflow"),
   upgradeInstall: ws => ws.upgradeInstall(2),

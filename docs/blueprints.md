@@ -98,6 +98,8 @@ Only `BlueprintMetadata` is included in the file, not the full KV record. In par
 
 The trailing content bytes are the same gzip-compressed Yjs snapshot that is already stored in R2 for the blueprint's current version. Import/export streams these bytes directly to and from R2 using `pipeTo()` rather than buffering the whole archive in memory on the server.
 
+Format version `2` is the same container for one exact **agent artifact revision** (see [agent authoring](architecture/agent-authoring.md)). Its metadata JSON also carries a `revision` block (`ArtifactArchiveRevision`: name, number, digest, manifest, qualification), and its `bindings` hold display text and spawner env only. It is written by `Overseer.exportArtifactRevision()` and read only by `Overseer.importArtifactRevision()`, which rebuilds the manifest from the decoded files and refuses any mismatch. `importBlueprint()` and the bundled-blueprint installer keep reading version `1` only, so they refuse a version `2` archive, as an older Workshop does.
+
 ## Admin Features and Featured Blueprints
 
 Deployments can optionally configure a set of admin usernames through the backend worker's `ADMINS` binding as an array of usernames.
