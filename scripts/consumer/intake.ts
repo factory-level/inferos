@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { parseCanvasDefinition, type CanvasSection } from "../../packages/workshop-shared/src/canvas.ts";
 import { canvasInventory, CANVAS_CONFIG_FILE, DEFAULT_CANVAS_CONFIG, resolveCanvasConfig, type CanvasConfig } from "./canvas.ts";
 import { CAPABILITY_REQUIREMENTS, migrateConsumerConfig, parseConsumerConfig, type CapabilityName } from "./config.ts";
+import { applyIntakeToInferOps, inferOpsBindingFromEnv, inferOpsComplete, proveInferOpsBinding, type FetchSeam, type InferOpsApplyResult, type InferOpsBinding } from "./intake-inferops.ts";
 import { capabilitySources, featureSources, inferOpsGatekeeperSelected, unsupportedCapabilities } from "./runtime.ts";
 
 /** The only intake format version this revision reads. */
@@ -305,7 +306,23 @@ export interface FieldChange {
   action: "set" | "unchanged" | "customized" | "conflict" | "released";
 }
 
-interface ManagedRecord { version: 1; intakeSha256: string; fields: Record<string, Json>; filedIssues: Record<string, string> }
+/** What the last `--inferops` run left in InferOps: references only, never a copy of InferOps data. */
+interface InferOpsRecord {
+  /** The provider's canonical hash; distinct from the raw-bytes `intakeSha256` and never compared with it. */
+  intakeSha256: string | null;
+  intake: InferOpsApplyResult["intake"];
+  pillars: InferOpsApplyResult["pillars"];
+  readback: InferOpsApplyResult["readback"];
+  rootDocumentId: string | null;
+  masters: Record<string, string | null>;
+  /**
+   * Pillars that may still be live in InferOps: what the last readback found, or, when it did not run,
+   * every pillar ever applied. A later run with fewer pillars sends the selection so InferOps retires the rest.
+   */
+  livePillars?: string[];
+}
+
+interface ManagedRecord { version: 1; intakeSha256: string; fields: Record<string, Json>; filedIssues: Record<string, string>; inferops?: InferOpsRecord }
 
 function readManagedRecord(root: string): ManagedRecord {
   const path = join(root, MANAGED_RECORD_FILE);
@@ -464,7 +481,9 @@ export function applyIntake(root: string, intakePath: string, options: ApplyInta
   if (changed(`${CANVAS_CONFIG_FILE}:`)) writes.set(canvasPath, json(canvas));
   if (changed(CUSTOMER_VIEW_FILE)) writes.set(viewPath, json(view));
   const recordPath = join(root, MANAGED_RECORD_FILE);
-  const nextRecord: ManagedRecord = { version: 1, intakeSha256: sha256, fields, filedIssues: { ...record.filedIssues } };
+  const nextRecord: ManagedRecord = {
+    version: 1, intakeSha256: sha256, fields, filedIssues: { ...record.filedIssues }, ...(record.inferops ? { inferops: record.inferops } : {}),
+  };
   writes.set(recordPath, json(nextRecord));
 
   const backups = new Map<string, Buffer | null>();
@@ -505,9 +524,87 @@ export function applyIntake(root: string, intakePath: string, options: ApplyInta
   }
 
   const report = buildReport({ root, intakePath, intake, sha256, startVersion, resolved, capabilities, changes, requirements });
+  writeReports(root, report);
+  return report;
+}
+
+function writeReports(root: string, report: IntakeReport) {
   writeFileSync(join(root, REPORT_FILES.json), json(report));
   writeFileSync(join(root, REPORT_FILES.markdown), renderReport(report));
+}
+
+/** Options for {@link applyIntakeWithInferOps}: those of {@link applyIntake}, plus the InferOps binding. */
+export interface ApplyIntakeWithInferOpsOptions extends ApplyIntakeOptions {
+  /** Where and as whom to reach InferOps. Defaults to {@link inferOpsBindingFromEnv}. */
+  binding?: InferOpsBinding;
+  /** Replaces `fetch`; tests inject it. */
+  fetch?: FetchSeam;
+}
+
+/**
+ * `intake apply --inferops`: derive the wrapper as {@link applyIntake} does, then apply the intake to
+ * InferOps (operations, then the Wiki's root, pillars and Masters, then a readback) and record the
+ * result in the report and the managed record. The binding is proven before the wrapper is touched;
+ * InferOps is contacted only after `inferos:check` passes, so a wrapper rollback never sits behind a
+ * remote write. A later InferOps failure leaves the wrapper as derived and is reported step by step;
+ * rerunning is safe because both InferOps writes are idempotent.
+ */
+export async function applyIntakeWithInferOps(root: string, intakePath: string, options: ApplyIntakeWithInferOpsOptions = {}) {
+  const binding = options.binding ?? inferOpsBindingFromEnv();
+  const { intake } = readIntakeFile(intakePath);
+  if (intake.review.status !== "reviewed") throw new Error("Intake is a draft; apply only a reviewed intake (review.status \"reviewed\")");
+  await proveInferOpsBinding(intake, binding, options.fetch);
+  const derived = applyIntake(root, intakePath, options);
+  const before = readManagedRecord(root).inferops;
+  const liveBefore = before?.livePillars ?? Object.keys(before?.masters ?? {});
+  const result = await applyIntakeToInferOps(intake, binding, options.fetch, { pillarsAppliedBefore: liveBefore.length > 0 });
+  const read = result.readback === "complete" || result.readback === "incomplete";
+  const livePillars = read
+    ? [...result.masters.filter(master => master.documentId).map(master => master.key), ...result.leftoverPillars]
+    : [...new Set([...liveBefore, ...intake.wiki.pillars.map(pillar => pillar.id)])];
+  const report = withInferOps(derived, result);
+  const recordPath = join(root, MANAGED_RECORD_FILE);
+  const record = readManagedRecord(root);
+  record.inferops = {
+    intakeSha256: result.intakeSha256, intake: result.intake, pillars: result.pillars, readback: result.readback,
+    rootDocumentId: result.rootDocumentId, masters: Object.fromEntries(result.masters.map(master => [master.key, master.documentId])),
+    livePillars: livePillars.toSorted(),
+  };
+  writeFileSync(recordPath, json(record));
+  writeReports(root, report);
   return report;
+}
+
+/** The report after an InferOps run: pillar statuses, the Wiki disposition and the summary follow the run. */
+function withInferOps(report: IntakeReport, result: InferOpsApplyResult): IntakeReport {
+  const complete = inferOpsComplete(result);
+  const masters = new Map(result.masters.map(master => [master.key, master]));
+  const pillars = report.pillars.map(pillar => {
+    const master = masters.get(pillar.id);
+    const status: IntakeReport["pillars"][number]["status"] = result.pillars === "failed" ? "failed"
+      : master?.documentId ? "applied" : result.readback === "failed" ? "unverified" : "pending";
+    return { ...pillar, status, masterDocumentId: master?.documentId ?? null };
+  });
+  const requirements = report.requirements.map(requirement => {
+    if (requirement.category !== "wiki") return requirement;
+    return complete
+      ? { ...requirement, disposition: "supported" as const, reason: "Applied to InferOps: the company root and a Master per selected pillar were read back", draft: null }
+      : { ...requirement, reason: `Applying the Wiki pillars to InferOps did not complete (${result.error ?? "unknown"}); rerun intake apply --inferops` };
+  });
+  const pending = report.pending.filter(item => !(complete && item.startsWith("Wiki pillars are recorded only")));
+  return {
+    ...report,
+    pillars,
+    requirements,
+    inferops: result,
+    pending,
+    summary: {
+      ...report.summary,
+      supported: requirements.filter(requirement => requirement.disposition === "supported").length,
+      unsupported: requirements.filter(requirement => requirement.disposition === "unsupported").length,
+      draftedIssues: requirements.filter(requirement => requirement.draft).length,
+    },
+  };
 }
 
 /** Assemble the JSON report; every intake requirement appears in it exactly once. */
@@ -534,7 +631,12 @@ function buildReport({ root, intakePath, intake, sha256, startVersion, resolved,
       changes,
       conflicts: changes.filter(change => change.action === "conflict").map(change => change.field),
     },
-    pillars: intake.wiki.pillars.map(pillar => ({ ...pillar, status: "pending", tracking: PRODUCT_SUPPORT.wiki.tracking })),
+    pillars: intake.wiki.pillars.map(pillar => ({
+      ...pillar, status: "pending" as "pending" | "applied" | "failed" | "unverified", tracking: PRODUCT_SUPPORT.wiki.tracking,
+      masterDocumentId: null as string | null,
+    })),
+    /** The `--inferops` run, step by step; null when the intake was not applied to InferOps. */
+    inferops: null as InferOpsApplyResult | null,
     operations: intake.operations,
     requirements,
     summary: {
@@ -630,7 +732,18 @@ export function renderReport(report: IntakeReport): string {
       : ["None.", ""]),
     "## Wiki pillars",
     "",
-    ...(report.pillars.length ? report.pillars.map(pillar => `- ${cell(pillar.title)} (\`${pillar.id}\`): pending ${pillar.tracking}`) : ["None selected."]),
+    ...(report.pillars.length ? report.pillars.map(pillar => `- ${cell(pillar.title)} (\`${pillar.id}\`): ${pillar.status === "applied"
+      ? `applied, Master \`${pillar.masterDocumentId}\`` : pillar.status === "pending" ? `pending ${pillar.tracking}` : pillar.status}`) : ["None selected."]),
+    ...(report.inferops ? [
+      "",
+      "## InferOps",
+      "",
+      `Intake ${report.inferops.intake}${report.inferops.alreadyApplied ? " (already applied)" : ""}, provider sha256 \`${report.inferops.intakeSha256 ?? "-"}\`. Pillars ${report.inferops.pillars}. Readback ${report.inferops.readback}${report.inferops.rootDocumentId ? `, company root \`${report.inferops.rootDocumentId}\`` : ""}.`,
+      ...(report.inferops.leftoverPillars.length ? ["", `Pillars no longer selected but still live: ${report.inferops.leftoverPillars.map(key => `\`${key}\``).join(", ")}.`] : []),
+      ...(report.inferops.sharedPages.length ? ["", `Pages filed under several pillars: ${report.inferops.sharedPages.map(page => `\`${page.slug}\` (${page.pillars.join(", ")})`).join("; ")}.`] : []),
+      ...(report.inferops.unlinkedSops.length ? ["", `SOPs not linked to a Wiki page: ${report.inferops.unlinkedSops.map(item => `${item.operation} (${item.reason})`).join("; ")}.`] : []),
+      ...(report.inferops.error ? ["", `Did not complete: ${cell(report.inferops.error)}. Rerun \`pnpm inferos intake apply <file> --inferops\`; both InferOps writes are idempotent.`] : []),
+    ] : []),
     "",
     "## Operational inventory",
     "",
@@ -648,21 +761,28 @@ export function renderReport(report: IntakeReport): string {
   return lines.join("\n");
 }
 
-const USAGE = "Usage: intake.ts apply CONSUMER_ROOT INTAKE_FILE [--file-issues OWNER/REPO]";
+const USAGE = "Usage: intake.ts apply CONSUMER_ROOT INTAKE_FILE [--file-issues OWNER/REPO] [--inferops]";
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     let parsed;
     try {
-      parsed = parseArgs({ allowPositionals: true, options: { "file-issues": { type: "string" } } });
+      parsed = parseArgs({ allowPositionals: true, options: { "file-issues": { type: "string" }, inferops: { type: "boolean" } } });
     } catch { throw new Error(USAGE); }
     const [command, root, file, extra] = parsed.positionals;
     if (command !== "apply" || !root || !file || extra) throw new Error(USAGE);
-    const report = applyIntake(resolve(root), resolve(file), { fileIssues: parsed.values["file-issues"] });
+    const options = { fileIssues: parsed.values["file-issues"] };
+    const report = parsed.values.inferops
+      ? await applyIntakeWithInferOps(resolve(root), resolve(file), options)
+      : applyIntake(resolve(root), resolve(file), options);
+    const inferops = report.inferops;
+    const complete = inferops === null || inferOpsComplete(inferops);
     console.log(json({
-      ok: true, operation: "intake", reports: Object.values(REPORT_FILES), summary: report.summary,
+      ok: complete, operation: "intake", reports: Object.values(REPORT_FILES), summary: report.summary,
       conflicts: report.configuration.conflicts, deployed: false,
+      ...(inferops ? { inferops: { intake: inferops.intake, pillars: inferops.pillars, readback: inferops.readback, error: inferops.error } } : {}),
     }));
+    if (!complete) process.exitCode = 1;
   } catch (error) {
     console.error(error instanceof SyntaxError ? "Invalid JSON in the wrapper configuration" : (error as Error).message);
     process.exitCode = 1;
