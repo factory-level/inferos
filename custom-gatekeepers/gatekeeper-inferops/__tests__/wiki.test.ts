@@ -84,10 +84,20 @@ describe("the Wiki resource kind", () => {
     });
     expect(wikiDocumentUrl({ host: "acme.knowledge", slug: "release-process" })).toBe(ref);
     expect(resourceKind(ref)).toBeNull();
+    // A slug with `/` is one encoded segment, decoded once.
+    const shared = "inferops://acme.knowledge/knowledge/document/dispatch%2Fdispatch-a-crew";
+    expect(wikiDocumentUrl({ host: "acme.knowledge", slug: "dispatch/dispatch-a-crew" })).toBe(shared);
+    expect(parseWikiDocumentUrl(shared)?.slug).toBe("dispatch/dispatch-a-crew");
+    expect(parseWikiDocumentUrl(shared.replace("%2F", "%2f"))?.slug).toBe("dispatch/dispatch-a-crew");
     for (const bad of [
       "inferops://acme.knowledge/knowledge/document/", "inferops://acme.knowledge/knowledge/document/a/b",
       "inferops://acme.knowledge/knowledge/document/a?b=1", "inferops://acme/knowledge/document/a",
       "inferops://acme.knowledge/knowledge/document/%2e%2e", "https://acme.knowledge/knowledge/document/a",
+      // Encoded dot segments, double encoding, other escapes, empty segments and a fragment.
+      "inferops://acme.knowledge/knowledge/document/a%2F..", "inferops://acme.knowledge/knowledge/document/a%2F.",
+      "inferops://acme.knowledge/knowledge/document/a%252Fb", "inferops://acme.knowledge/knowledge/document/a%20b",
+      "inferops://acme.knowledge/knowledge/document/a%2F%2Fb", "inferops://acme.knowledge/knowledge/document/%2Fa",
+      "inferops://acme.knowledge/knowledge/document/a%2Fb#c",
     ]) {
       expect(parseWikiDocumentUrl(bad), bad).toBeNull();
     }
@@ -327,6 +337,31 @@ describe("page body edits", () => {
     expect(await failure(session.updateDocumentBody("onboarding", "x", 3))).toBe("");
   });
 
+  it("stages one edit when proposals race: the same body joins, a different one is CONFLICT", async () => {
+    const { hooks, session } = setup();
+    const same = await Promise.allSettled([
+      session.updateDocumentBody(INCIDENT, "Raced edit.", 4),
+      session.updateDocumentBody(INCIDENT, "Raced edit.", 4),
+    ]);
+    expect(same.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect((await hooks.log()).actions).toHaveLength(1);
+
+    const second = setup();
+    const different = await Promise.allSettled([
+      second.session.updateDocumentBody(INCIDENT, "Edit A.", 4),
+      second.session.updateDocumentBody(INCIDENT, "Edit B.", 4),
+    ]);
+    expect(different.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const refused = different.find(result => result.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason)).toContain("CONFLICT");
+    const actions = (await second.hooks.log()).actions;
+    expect(actions).toHaveLength(1);
+    // The overlay shows exactly the one staged edit.
+    const shown = await second.session.readDocument(INCIDENT);
+    expect(shown.pendingBody).toBe(true);
+    expect(["Edit A.", "Edit B."]).toContain(shown.body);
+  });
+
   it("is refused at apply when the page changed since, and leaves its content", async () => {
     const { props, hooks, mock, session } = setup();
     await session.updateDocumentBody(INCIDENT, "My edit.", 4);
@@ -468,6 +503,16 @@ describe("section edits", () => {
     await session.updateSection(STEPS, "First edit.", 2);
     await session.updateSection(STEPS, "First edit.", 2);
     expect(await failure(session.updateSection(STEPS, "Second edit.", 2))).toContain("CONFLICT");
+    expect((await hooks.log()).actions).toHaveLength(1);
+  });
+
+  it("stages one edit when section proposals race with different bodies", async () => {
+    const { hooks, session } = setup();
+    const results = await Promise.allSettled([
+      session.updateSection(STEPS, "Edit A.", 2),
+      session.updateSection(STEPS, "Edit B.", 2),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
     expect((await hooks.log()).actions).toHaveLength(1);
   });
 

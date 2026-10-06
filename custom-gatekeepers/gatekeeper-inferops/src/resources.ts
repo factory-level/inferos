@@ -152,31 +152,43 @@ export function wikiUrl({ host }: Pick<WikiRef, "host">): string {
 /** A parsed Wiki page reference: the workspace and the page's slug. */
 export type WikiDocumentRef = WikiRef & { slug: string };
 
-// A document slug as it can appear in a reference: URL-unreserved characters only, so it needs no
-// escaping and cannot smuggle a path, query or fragment. InferOps' own slugs are lowercase words
-// joined by hyphens.
+// A document slug: URL-unreserved characters in one or more `/`-separated segments (InferOps slugs
+// such as `dispatch/dispatch-a-crew`). No empty, `.` or `..` segment, so it can never step out of
+// the reference.
 const DOCUMENT_SLUG = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$/;
+const SLUG_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 
-/** Whether `value` can be a Wiki page slug in a reference. */
+/** Whether `value` can be a Wiki page slug: one or more unreserved segments joined by `/`. */
 export function isDocumentSlug(value: string): boolean {
-  return DOCUMENT_SLUG.test(value);
+  if (value.length > 200) return false;
+  if (DOCUMENT_SLUG.test(value)) return true;
+  const segments = value.split("/");
+  return segments.length > 1 && segments.every(segment => SLUG_SEGMENT.test(segment) && segment !== "." && segment !== "..");
 }
 
 /**
  * Parse a Wiki page reference, `inferops://<tenant>.<workspace>/knowledge/document/<slug>`, or
- * return null when `url` is not one. It identifies a page and grants nothing: the page is
- * readable only through a Wiki binding of the same workspace.
+ * return null when `url` is not one. The slug is exactly one path segment; a slug containing `/` is
+ * carried percent-encoded (`dispatch%2Fdispatch-a-crew`) and decoded once here, then validated.
+ * Raw extra segments, other escapes, double encoding, a query or a fragment do not parse. It
+ * identifies a page and grants nothing: the page is readable only through a Wiki binding of the
+ * same workspace.
  */
 export function parseWikiDocumentUrl(url: string): WikiDocumentRef | null {
   const match = /^inferops:\/\/([^/?#]+)\/knowledge\/document\/([^/?#]+)\/?$/.exec(url.trim());
   const labels = match ? parseHost(match[1]!) : null;
-  if (!match || !labels || !isDocumentSlug(match[2]!)) return null;
-  return { host: match[1]!, ...labels, slug: match[2]! };
+  if (!match || !labels) return null;
+  const raw = match[2]!;
+  // The only escape a reference may carry is an encoded `/` (either case); anything else is refused.
+  if (/%(?!2[fF])/.test(raw)) return null;
+  const slug = raw.replace(/%2[fF]/g, "/");
+  if (!isDocumentSlug(slug)) return null;
+  return { host: match[1]!, ...labels, slug };
 }
 
-/** The reference of one Wiki page. Inverse of `parseWikiDocumentUrl`. */
+/** The reference of one Wiki page, its slug as one encoded segment. Inverse of `parseWikiDocumentUrl`. */
 export function wikiDocumentUrl({ host, slug }: Pick<WikiDocumentRef, "host" | "slug">): string {
-  return `inferops://${host}/knowledge/document/${slug}`;
+  return `inferops://${host}/knowledge/document/${slug.replaceAll("/", "%2F")}`;
 }
 
 /** The canonical URL of a project board. Inverse of `parseProjectBoardUrl`. */

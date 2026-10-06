@@ -738,18 +738,21 @@ class ActionBinding<P> {
    * Record a pending action, with the fingerprint of the request it will send, before it is
    * submitted, so an immediate apply can find it.
    */
-  async stage(staged: StagedAction): Promise<number> {
-    return (await this.stageOnce(staged, false)).actionId;
+  async stage(staged: StagedAction, guard?: () => void): Promise<number> {
+    return (await this.stageOnce(staged, false, guard)).actionId;
   }
 
   /**
    * Like `stage`, but when `join` is set, a pending action whose request has the same fingerprint
    * is returned instead (`joined`), and nothing new is staged. The lookup and the write happen in
    * one synchronous step after the fingerprint is computed, so two concurrent proposals of one
-   * request (two tabs) cannot both stage it.
+   * request (two tabs) cannot both stage it. `guard`, when given, runs in that same synchronous
+   * step, before anything is written, so a check of other pending actions (one edit per target)
+   * cannot be overtaken by a concurrent proposal; it throws to refuse.
    */
-  async stageOnce(staged: StagedAction, join = true): Promise<{ actionId: number; joined: boolean }> {
+  async stageOnce(staged: StagedAction, join = true, guard?: () => void): Promise<{ actionId: number; joined: boolean }> {
     const fingerprint = await fingerprintOf(this.scope, staged);
+    guard?.();
     if (join) {
       for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
         const record = readAction(raw);
@@ -1912,6 +1915,19 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
   }
 }
 
+/** Thrown from a staging guard when the same edit is already pending: the proposal is a no-op. */
+class AlreadyProposed extends Error {}
+
+const failBodyConflict = (slug: string): never =>
+  fail("CONFLICT",
+    `Page ${slug} already has a body edit that has not taken effect yet. Wait for it, then read the ` +
+    `page again.`);
+
+const failSectionConflict = (tag: string): never =>
+  fail("CONFLICT",
+    `Section ${tag} already has an edit that has not taken effect yet. Wait for it, then read the ` +
+    `page again.`);
+
 /** Rethrow a data-source "not found" for a page without saying which way it was not found. */
 function hideDocumentExistence(error: unknown): never {
   if (inferOpsErrorCode(error) === "NOT_FOUND") fail("NOT_FOUND", "No such page in this Wiki.");
@@ -2253,15 +2269,20 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     }
     const live = binding.liveBodyEdit(head);
     if ((live?.body ?? head.body) === body) return;
-    if (live) {
-      fail("CONFLICT",
-        `Page ${head.slug} already has a body edit that has not taken effect yet. Wait for it, ` +
-        `then read the page again.`);
-    }
+    if (live) failBodyConflict(head.slug);
     const actionId = await binding.stage({
       kind: "document-update", documentId: head.id, documentTitle: head.title, body, expectedVersion,
       previousBody: head.body,
+    }, () => {
+      // Re-checked with the write, after the fingerprint: a concurrent proposal may have staged since.
+      const now = binding.liveBodyEdit(head);
+      if (now?.body === body) throw new AlreadyProposed();
+      if (now) failBodyConflict(head.slug);
+    }).catch(error => {
+      if (error instanceof AlreadyProposed) return null;
+      throw error;
     });
+    if (actionId === null) return;
     const description = buildDescription(
       `Replace the body of one page of the InferMind Wiki of ${binding.host}. InferOps applies it ` +
       `only if the page is still at the version below when approved. Its sections are not changed.`)
@@ -2299,16 +2320,21 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     }
     const live = binding.liveEdit(stored);
     if ((live?.body ?? stored.body) === body) return;
-    if (live) {
-      fail("CONFLICT",
-        `Section ${stored.tag} already has an edit that has not taken effect yet. Wait for it, ` +
-        `then read the page again.`);
-    }
+    if (live) failSectionConflict(stored.tag);
     const head = await binding.client.readDocument(stored.documentId).catch(hideDocumentExistence);
     const actionId = await binding.stage({
       kind: "section-update", sectionId: stored.id, documentTitle: head.title, tag: stored.tag, body,
       expectedVersion, previousBody: stored.body,
+    }, () => {
+      // Re-checked with the write, after the awaits above: a concurrent proposal may have staged since.
+      const now = binding.liveEdit(stored);
+      if (now?.body === body) throw new AlreadyProposed();
+      if (now) failSectionConflict(stored.tag);
+    }).catch(error => {
+      if (error instanceof AlreadyProposed) return null;
+      throw error;
     });
+    if (actionId === null) return;
     const description = buildDescription(
       `Replace the markdown of one section of the InferMind Wiki of ${binding.host}. It is applied ` +
       `only if the section is still at the version below when approved.`)

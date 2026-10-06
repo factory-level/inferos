@@ -436,13 +436,21 @@ missing a button.
   the board read at proposal).
 - The content-only default state for a create (a board without software states) has no test: the
   demo fixture has no such project.
+- A page slug may contain `/` (`dispatch/dispatch-a-crew`). A `…/knowledge/document/<slug>` reference
+  carries it as one percent-encoded segment (`dispatch%2Fdispatch-a-crew`): `wikiDocumentUrl` encodes
+  it and `parseWikiDocumentUrl` decodes `%2F` once, then validates each segment. Raw extra segments,
+  any other escape (so no double encoding), empty, `.` or `..` segments, a query or a fragment do not
+  parse.
+- One pending edit per page body and per section is enforced where the edit is staged: the check
+  runs in the same synchronous step as the write, after the fingerprint, so two concurrent proposals
+  cannot both stage. A concurrent proposal of the same body joins as a no-op; a different one is
+  CONFLICT. The section race reproduces without that step in the workerd suite; the body path has no
+  await between check and write there, so its race test passes either way and guards the outcome.
 - The structure read and page body edit follow InferOps' factory-level/inferops#2345, merged as
   c536b637 (page text, strict compare-and-swap, a receipt bound to principal, expected version and
   payload). They are tested against fakes of it, not yet against a live InferOps. `connection.json`
   keeps its board-schema pin and notes c536b637 as the minimum for these knowledge endpoints.
-- InferOps page slugs may contain `/`, which the `…/knowledge/document/<slug>` reference grammar
-  (one path segment) cannot carry; the session looks such pages up by slug or id, but a reference
-  to one does not parse.
+
 - The Wiki client has not been run against a live InferOps knowledge API. That a missing page or
   section is answered `200 null` is read from InferOps' route code (`getDocument`/`getSection`
   return null), and the client accepts an empty body the same way.
