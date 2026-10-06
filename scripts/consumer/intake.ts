@@ -315,6 +315,11 @@ interface InferOpsRecord {
   readback: InferOpsApplyResult["readback"];
   rootDocumentId: string | null;
   masters: Record<string, string | null>;
+  /**
+   * Pillars that may still be live in InferOps: what the last readback found, or, when it did not run,
+   * every pillar ever applied. A later run with fewer pillars sends the selection so InferOps retires the rest.
+   */
+  livePillars?: string[];
 }
 
 interface ManagedRecord { version: 1; intakeSha256: string; fields: Record<string, Json>; filedIssues: Record<string, string>; inferops?: InferOpsRecord }
@@ -550,13 +555,20 @@ export async function applyIntakeWithInferOps(root: string, intakePath: string, 
   if (intake.review.status !== "reviewed") throw new Error("Intake is a draft; apply only a reviewed intake (review.status \"reviewed\")");
   await proveInferOpsBinding(intake, binding, options.fetch);
   const derived = applyIntake(root, intakePath, options);
-  const result = await applyIntakeToInferOps(intake, binding, options.fetch);
+  const before = readManagedRecord(root).inferops;
+  const liveBefore = before?.livePillars ?? Object.keys(before?.masters ?? {});
+  const result = await applyIntakeToInferOps(intake, binding, options.fetch, { pillarsAppliedBefore: liveBefore.length > 0 });
+  const read = result.readback === "complete" || result.readback === "incomplete";
+  const livePillars = read
+    ? [...result.masters.filter(master => master.documentId).map(master => master.key), ...result.leftoverPillars]
+    : [...new Set([...liveBefore, ...intake.wiki.pillars.map(pillar => pillar.id)])];
   const report = withInferOps(derived, result);
   const recordPath = join(root, MANAGED_RECORD_FILE);
   const record = readManagedRecord(root);
   record.inferops = {
     intakeSha256: result.intakeSha256, intake: result.intake, pillars: result.pillars, readback: result.readback,
     rootDocumentId: result.rootDocumentId, masters: Object.fromEntries(result.masters.map(master => [master.key, master.documentId])),
+    livePillars: livePillars.toSorted(),
   };
   writeFileSync(recordPath, json(record));
   writeReports(root, report);
@@ -727,6 +739,7 @@ export function renderReport(report: IntakeReport): string {
       "## InferOps",
       "",
       `Intake ${report.inferops.intake}${report.inferops.alreadyApplied ? " (already applied)" : ""}, provider sha256 \`${report.inferops.intakeSha256 ?? "-"}\`. Pillars ${report.inferops.pillars}. Readback ${report.inferops.readback}${report.inferops.rootDocumentId ? `, company root \`${report.inferops.rootDocumentId}\`` : ""}.`,
+      ...(report.inferops.leftoverPillars.length ? ["", `Pillars no longer selected but still live: ${report.inferops.leftoverPillars.map(key => `\`${key}\``).join(", ")}.`] : []),
       ...(report.inferops.sharedPages.length ? ["", `Pages filed under several pillars: ${report.inferops.sharedPages.map(page => `\`${page.slug}\` (${page.pillars.join(", ")})`).join("; ")}.`] : []),
       ...(report.inferops.unlinkedSops.length ? ["", `SOPs not linked to a Wiki page: ${report.inferops.unlinkedSops.map(item => `${item.operation} (${item.reason})`).join("; ")}.`] : []),
       ...(report.inferops.error ? ["", `Did not complete: ${cell(report.inferops.error)}. Rerun \`pnpm inferos intake apply <file> --inferops\`; both InferOps writes are idempotent.`] : []),

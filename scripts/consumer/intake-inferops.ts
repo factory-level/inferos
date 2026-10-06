@@ -105,10 +105,15 @@ export interface InferOpsApplyResult {
   pillars: StepStatus;
   /** Step 2's changes, `kind:key=action`. */
   pillarChanges: string[];
-  /** `complete`: every selected pillar read back with a Master. `incomplete`: read, but something is missing. */
+  /**
+   * `complete`: every selected pillar read back with a Master and no other pillar is live. `incomplete`:
+   * read, but something selected is missing or a pillar the intake no longer selects is still live.
+   */
   readback: "complete" | "incomplete" | "failed" | "not-run";
   rootDocumentId: string | null;
   masters: MasterReadback[];
+  /** Live pillars the intake does not select: left over from an earlier selection. */
+  leftoverPillars: string[];
   /** Pages filed under two or more of the selected pillars: one page, several pillars. */
   sharedPages: { documentId: string; slug: string; pillars: string[] }[];
   unlinkedSops: { operation: string; reason: string }[];
@@ -183,16 +188,18 @@ export async function proveInferOpsBinding(intake: ConsumerIntake, binding: Infe
  * Apply `intake` to InferOps through a binding already proven by {@link proveInferOpsBinding}. Every
  * failure is returned as a step status, never thrown, so a partial result is reported truthfully.
  */
-export async function applyIntakeToInferOps(intake: ConsumerIntake, binding: InferOpsBinding, fetchSeam: FetchSeam = fetch): Promise<InferOpsApplyResult> {
+export async function applyIntakeToInferOps(
+  intake: ConsumerIntake, binding: InferOpsBinding, fetchSeam: FetchSeam = fetch, options: { pillarsAppliedBefore?: boolean } = {},
+): Promise<InferOpsApplyResult> {
   const call = caller(binding, fetchSeam);
 
   const { members, unlinked } = pillarMembers(intake);
   const result: InferOpsApplyResult = {
     intakeSha256: null, intake: "not-run", alreadyApplied: false, intakeChanges: [], pillars: "not-run", pillarChanges: [],
-    readback: "not-run", rootDocumentId: null, masters: [], sharedPages: [], unlinkedSops: unlinked, error: null,
+    readback: "not-run", rootDocumentId: null, masters: [], leftoverPillars: [], sharedPages: [], unlinkedSops: unlinked, error: null,
   };
   // Scoped to tenant, workspace and operation, so one key never replays across scopes or steps.
-  const key = (operation: string, workspace: string, hash: string) =>
+  const idempotencyKey = (operation: string, workspace: string, hash: string) =>
     `inferos-intake:${intake.inferops.tenant}:${workspace}:${operation}:${hash}`;
 
   try {
@@ -208,14 +215,16 @@ export async function applyIntakeToInferOps(intake: ConsumerIntake, binding: Inf
     return result;
   }
 
-  if (intake.wiki.pillars.length) {
+  // An empty selection still goes to InferOps when an earlier run applied pillars: that is how the
+  // provider retires them. With no pillars ever applied it is skipped, so no company root is created.
+  if (intake.wiki.pillars.length || options.pillarsAppliedBefore) {
     try {
       const applied = await call("pillar.apply", binding.knowledgeWorkspaceId, "POST", "/knowledge/wiki/pillars", {
         intakeSha256: result.intakeSha256,
         rootTitle: intake.customer.name,
         pillars: intake.wiki.pillars.map(pillar => ({ key: pillar.id, title: pillar.title })),
         members,
-      }, key("pillar.apply", binding.knowledgeWorkspaceId, result.intakeSha256!));
+      }, idempotencyKey("pillar.apply", binding.knowledgeWorkspaceId, result.intakeSha256!));
       result.pillarChanges = changeList(applied.changes);
       result.pillars = "applied";
     } catch (error) {
@@ -245,10 +254,13 @@ export async function applyIntakeToInferOps(intake: ConsumerIntake, binding: Inf
       }
     }
     result.sharedPages = [...pages.values()].filter(page => page.pillars.length > 1);
-    const complete = intake.wiki.pillars.length === 0
+    const selected = new Set(intake.wiki.pillars.map(pillar => pillar.id));
+    result.leftoverPillars = (structure.pillars ?? []).map(pillar => pillar.key).filter(key => !selected.has(key));
+    const present = intake.wiki.pillars.length === 0
       || (result.rootDocumentId !== null && result.masters.every(master => master.documentId !== null));
-    result.readback = complete ? "complete" : "incomplete";
-    if (!complete) result.error = "readback: the Wiki structure is missing the company root or a selected pillar's Master";
+    result.readback = present && result.leftoverPillars.length === 0 ? "complete" : "incomplete";
+    if (!present) result.error = "readback: the Wiki structure is missing the company root or a selected pillar's Master";
+    else if (result.leftoverPillars.length) result.error = `readback: pillars the intake no longer selects are still live: ${result.leftoverPillars.join(", ")}`;
   } catch (error) {
     result.readback = "failed";
     result.error = (error as Error).message;

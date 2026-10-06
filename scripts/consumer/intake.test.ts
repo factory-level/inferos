@@ -325,13 +325,14 @@ const binding = { baseUrl: "http://localhost:14580", token: TOKEN, operationsWor
 
 const doc = (slug: string) => `00000000-0000-4000-8000-${createHash("sha256").update(slug).digest("hex").slice(0, 12)}`;
 const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-const error = (status: number, code: string) => reply(status, { success: false, error: { code, message: `${code} from the fake` } });
+const providerError = (status: number, code: string) => reply(status, { success: false, error: { code, message: `${code} from the fake` } });
 
 /**
  * An in-memory InferOps with the five calls `--inferops` makes. Ids are stable across calls, like the
  * real provider's idempotent applies; `fail` makes one step answer with an error or an incomplete body.
  */
-function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake" | "pillars" | "readback" | "incomplete", number | true>> = {}) {
+function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake" | "pillars" | "readback" | "incomplete" | "keep", number | true>> = {}) {
+  const requests: RequestInit[] = [];
   const calls: { method: string; path: string; workspace: string | null; idempotencyKey: string | null; authorization: string | null; dryRun: boolean }[] = [];
   let intakeApplied = false;
   let structureBuilt = false;
@@ -341,17 +342,18 @@ function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake
     const { pathname } = new URL(url);
     const headers = new Headers(init.headers);
     const workspace = headers.get("x-workspace-id");
+    requests.push(init);
     const dryRun = typeof init.body === "string" && JSON.parse(init.body).dryRun === true;
     calls.push({ method: init.method ?? "GET", path: pathname, workspace, idempotencyKey: headers.get("x-idempotency-key"), authorization: headers.get("authorization"), dryRun });
-    if (headers.get("authorization") !== `Bearer ${TOKEN}`) return error(401, "UNAUTHORIZED");
-    const step = (name: keyof typeof fail) => fail[name] === undefined ? null : error(fail[name] === true ? 500 : fail[name] as number, "FAKE_FAILURE");
+    if (headers.get("authorization") !== `Bearer ${TOKEN}`) return providerError(401, "UNAUTHORIZED");
+    const step = (name: keyof typeof fail) => fail[name] === undefined ? null : providerError(fail[name] === true ? 500 : fail[name] as number, "FAKE_FAILURE");
     if (pathname === "/project/intake" && JSON.parse(String(init.body)).dryRun === true) {
       // The provider's dry run checks the intake's tenant and workspace against the workspace it runs in.
-      return step("opsRead") ?? (workspace === OPS ? reply(200, { intakeSha256: "c".repeat(64), dryRun: true, alreadyApplied: intakeApplied, changes: [], pillars: [] }) : error(403, "FORBIDDEN"));
+      return step("opsRead") ?? (workspace === OPS ? reply(200, { intakeSha256: "c".repeat(64), dryRun: true, alreadyApplied: intakeApplied, changes: [], pillars: [] }) : providerError(403, "FORBIDDEN"));
     }
-    if (pathname === "/knowledge/wiki/structure" && !structureBuilt) return step("knowledgeRead") ?? (workspace === KNOWLEDGE ? reply(200, { root: null, pillars: [], unfiled: [] }) : error(403, "FORBIDDEN"));
+    if (pathname === "/knowledge/wiki/structure" && !structureBuilt) return step("knowledgeRead") ?? (workspace === KNOWLEDGE ? reply(200, { root: null, pillars: [], unfiled: [] }) : providerError(403, "FORBIDDEN"));
     if (pathname === "/project/intake") {
-      if (workspace !== OPS) return error(403, "FORBIDDEN");
+      if (workspace !== OPS) return providerError(403, "FORBIDDEN");
       const failed = step("intake");
       if (failed) return failed;
       const already = intakeApplied;
@@ -359,12 +361,13 @@ function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake
       return reply(200, { intakeSha256: "c".repeat(64), dryRun: false, alreadyApplied: already, changes: [{ kind: "project", key: "OPS", action: already ? "unchanged" : "create" }], pillars: [] });
     }
     if (pathname === "/knowledge/wiki/pillars") {
-      if (workspace !== KNOWLEDGE) return error(403, "FORBIDDEN");
+      if (workspace !== KNOWLEDGE) return providerError(403, "FORBIDDEN");
       const failed = step("pillars");
       if (failed) return failed;
       const body = JSON.parse(String(init.body));
-      pillars.splice(0, pillars.length, ...body.pillars);
-      members.splice(0, members.length, ...body.members, { pillar: "field-service", documentSlug: "dispatch/dispatch-a-crew" });
+      pillars.splice(0, pillars.length, ...body.pillars, ...(fail.keep ? [{ key: "dispatch", title: "Dispatch" }] : []));
+      members.splice(0, members.length, ...body.members, ...(body.pillars.some((pillar: { key: string }) => pillar.key === "field-service")
+        ? [{ pillar: "field-service", documentSlug: "dispatch/dispatch-a-crew" }] : []));
       const changes = structureBuilt ? [] : body.pillars.map((pillar: { key: string }) => ({ kind: "master", key: pillar.key, action: "create" }));
       structureBuilt = true;
       return reply(200, { dryRun: false, intakeSha256: body.intakeSha256, changes });
@@ -382,9 +385,9 @@ function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake
         unfiled: [],
       });
     }
-    return error(404, "NOT_FOUND");
+    return providerError(404, "NOT_FOUND");
   };
-  return { fetch, calls };
+  return { fetch, calls, requests };
 }
 
 const writes = (calls: ReturnType<typeof fakeInferOps>["calls"]) => calls.filter(call => call.method !== "GET" && !call.dryRun).map(call => call.path);
@@ -517,4 +520,58 @@ test("only wiki:<slug> SOPs with a pillar become memberships; every other SOP is
   const { members, unlinked } = pillarMembers(intake);
   assert.deepEqual(members, [{ pillar: "dispatch", documentSlug: "dispatch/dispatch-a-crew" }, { pillar: "safety", documentSlug: "safety/pre-job-check" }]);
   assert.deepEqual(unlinked.map(item => item.operation), ["url-sop", "no-pillar"]);
+});
+
+test("a selection that drops every pillar is still sent, so InferOps retires them; leftovers read back as incomplete", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-inferops-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = wrapper(dir);
+  const fake = fakeInferOps();
+  await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.deepEqual(readJson(join(target, MANAGED_RECORD_FILE)).inferops.livePillars, ["dispatch", "field-service", "safety"]);
+
+  // Nonempty → empty: the empty selection is sent, and the readback confirms nothing is left live.
+  const emptied = sample();
+  emptied.wiki.pillars = [];
+  emptied.operations = emptied.operations.map((operation: { pillar: string | null }) => ({ ...operation, pillar: null }));
+  emptied.requirements = emptied.requirements.filter((requirement: { category: string }) => requirement.category !== "wiki");
+  writeFileSync(intakePath, JSON.stringify(emptied));
+  const before = writes(fake.calls).length;
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.deepEqual(writes(fake.calls).slice(before), ["/project/intake", "/knowledge/wiki/pillars"]);
+  const sent = JSON.parse(String(fake.requests.findLast(request => String(request.body ?? "").includes('"pillars":[]'))?.body));
+  assert.deepEqual(sent.pillars, []);
+  assert.equal(report.inferops?.readback, "complete");
+  assert.deepEqual(report.inferops?.leftoverPillars, []);
+  assert.deepEqual(readJson(join(target, MANAGED_RECORD_FILE)).inferops.livePillars, []);
+
+  // A third run with no pillars and nothing live skips the Wiki entirely: no company root is created.
+  const third = writes(fake.calls).length;
+  await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.deepEqual(writes(fake.calls).slice(third), ["/project/intake"]);
+});
+
+test("a pillar InferOps still holds outside the selection reads back as incomplete, and a failed retirement is retried", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-inferops-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = wrapper(dir);
+  await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fakeInferOps().fetch });
+  const emptied = sample();
+  emptied.wiki.pillars = [];
+  emptied.operations = emptied.operations.map((operation: { pillar: string | null }) => ({ ...operation, pillar: null }));
+  emptied.requirements = emptied.requirements.filter((requirement: { category: string }) => requirement.category !== "wiki");
+  writeFileSync(intakePath, JSON.stringify(emptied));
+
+  // The retirement fails: the record keeps the pillars that may still be live, so the next run retries.
+  const failed = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fakeInferOps({ pillars: 503 }).fetch });
+  assert.equal(failed.inferops?.pillars, "failed");
+  assert.deepEqual(readJson(join(target, MANAGED_RECORD_FILE)).inferops.livePillars, ["dispatch", "field-service", "safety"]);
+
+  // A provider that leaves a pillar live is caught by the readback.
+  const stale = fakeInferOps({ keep: true });
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: stale.fetch });
+  assert.deepEqual(writes(stale.calls), ["/project/intake", "/knowledge/wiki/pillars"]);
+  assert.equal(report.inferops?.readback, "incomplete");
+  assert.deepEqual(report.inferops?.leftoverPillars, ["dispatch"]);
+  assert.match(report.inferops?.error ?? "", /no longer selects are still live: dispatch/);
 });
