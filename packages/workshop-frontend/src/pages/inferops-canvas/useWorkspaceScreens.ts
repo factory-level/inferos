@@ -2,7 +2,8 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
 import { parseCanvasDefinition, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
+import type { Overseer } from '@gadgets/workshop-shared/api'
+import { consoleScreens, type OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import type { OperateFlow } from '@gadgets/workshop-shared/operate-flow'
 
 /** At most this many recently active workspaces are opened to list their screens. */
@@ -13,15 +14,19 @@ export const MAX_USE_CONSOLE_WORKSPACES = 24
 
 /**
  * A listed workspace, with its saved screens (null when they could not be read) and the flows and
- * consoles authored over them. A workspace the user can build in lists all three; one shared with
- * them for use only is listed only when it holds consoles, read-only, with just the screens those
- * consoles show and no flows, which is all the use role can read (see `canBuild`).
+ * consoles authored over them. A workspace the user can build in lists all three, its consoles as
+ * drafts; one shared with them for use only is listed only when it holds published consoles,
+ * read-only, with just the screens those consoles show and no flows, which is all the use role can
+ * read (see `canBuild`). Each published console's screens, as published, are kept apart from the
+ * workspace's screens, which a builder may have edited since.
  */
 export type WorkspaceScreens = {
   workspace: GadgetMetadataWithTimestamps
   screens: CanvasDefinition[] | null
   flows: OperateFlow[]
   consoles: OperateConsole[]
+  /** The screens each published console shows as it published them, by console id. */
+  publishedScreens: Record<string, CanvasDefinition[]>
 }
 
 /** The screen lists as loaded so far. */
@@ -48,6 +53,16 @@ export const invalidateWorkspaceScreens = () => {
   for (const listener of revisionListeners) listener()
 }
 
+// Each published console's screens as published, read on the still-open stub so the calls batch.
+const readPublishedScreens = async (overseer: RpcStub<Overseer>, consoles: OperateConsole[])
+    : Promise<Record<string, CanvasDefinition[]>> =>
+  Object.fromEntries(await Promise.all(consoles.flatMap(({ id, published }) => published ? [{ id, published }] : [])
+    .map(async ({ id, published }) => {
+      const read = await Promise.all(consoleScreens(published.content)
+        .map(screenId => overseer.getConsoleScreen(id, screenId, 'published')))
+      return [id, read.flatMap(screen => screen ? [parseCanvasDefinition(screen)] : [])] as const
+    })))
+
 const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: boolean) => {
   let byMode = inFlight.get(api)
   if (!byMode) inFlight.set(api, byMode = new Map())
@@ -64,7 +79,9 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
       const overseer = api.openGadget(workspace.id)
       try {
         const [consoles, screens] = await Promise.all([overseer.listConsoles(), overseer.listCanvases()])
-        return consoles.length === 0 ? null : { workspace, screens: screens.map(parseCanvasDefinition), flows: [], consoles }
+        if (consoles.length === 0) return null
+        return { workspace, screens: screens.map(parseCanvasDefinition), flows: [], consoles,
+          publishedScreens: await readPublishedScreens(overseer, consoles) }
       } catch {
         return null
       } finally {
@@ -72,7 +89,7 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
       }
     }))
     const built = Promise.all(builds.map(async (workspace): Promise<WorkspaceScreens> => {
-      if (!durableViews) return { workspace, screens: [], flows: [], consoles: [] }
+      if (!durableViews) return { workspace, screens: [], flows: [], consoles: [], publishedScreens: {} }
       // No observer callback: a workspace that first needs observer setup is skipped here and
       // set up when the user opens it.
       const overseer = api.openGadget(workspace.id)
@@ -80,9 +97,10 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
         // All three reads ride one batch on the pipelined stub.
         const [screens, flows, consoles] =
           await Promise.all([overseer.listCanvases(), overseer.listFlows(), overseer.listConsoles()])
-        return { workspace, screens: screens.map(parseCanvasDefinition), flows, consoles }
+        return { workspace, screens: screens.map(parseCanvasDefinition), flows, consoles,
+          publishedScreens: await readPublishedScreens(overseer, consoles) }
       } catch {
-        return { workspace, screens: null, flows: [], consoles: [] }
+        return { workspace, screens: null, flows: [], consoles: [], publishedScreens: {} }
       } finally {
         overseer[Symbol.dispose]()
       }

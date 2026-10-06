@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button, useKumoToastManager } from '@cloudflare/kumo'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { PlusIcon, SlidersHorizontalIcon } from '@phosphor-icons/react'
+import type { ConsoleSource } from '@gadgets/workshop-shared/operate-console'
 import type { OperateEvent, OperateRef } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { canBuild, useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
@@ -16,6 +17,7 @@ import { ConsoleBuilder } from './ConsoleBuilder'
 import { ConsoleSettings } from './ConsoleSettings'
 import { ConsoleWorkspaceShell } from './ConsoleWorkspaceShell'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
+import { ConsolePublishDialog } from './ConsolePublishDialog'
 import { ConsoleWidgetView } from './ConsoleWidgetView'
 import { viewScreens } from './consoles'
 import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from './consoles'
@@ -39,6 +41,7 @@ export const OperateSessionPage = () => {
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
   const sessionWorkspace = useSessionWorkspace(operate?.session ?? null)
   const [savedEntry, setSavedEntry] = useState<ConsoleEntry | null>(null)
+  const [publishing, setPublishing] = useState<ConsoleEntry | null>(null)
 
   const [widgetTarget, setWidgetTarget] = useState<ConsoleWidgetTarget | null>(null)
   const consoleId = operate?.snapshot?.state.console?.consoleId
@@ -47,6 +50,10 @@ export const OperateSessionPage = () => {
     toasts.add({ title: refusalMessage(caught), variant: 'error' })
   }
   const send = (event: OperateEvent) => { operate?.dispatch(event).catch(notifyRefused) }
+  const openConsole = (item: ConsoleEntry, source: ConsoleSource) => {
+    const event = openConsoleEvent(item, source)
+    if (event) send(event)
+  }
   useBoardHistory(operate?.snapshot?.state.board ?? null, search,
     (boardSearch: BoardSearch, replace) => void navigate({ to: '/inferops-canvas', search: previous => ({ ...previous, ...boardSearch }), replace }),
     event => (operate ? operate.dispatch(event) : Promise.reject(new Error('No operate session'))).catch(caught => { notifyRefused(caught); throw caught }))
@@ -137,9 +144,9 @@ export const OperateSessionPage = () => {
                   onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
           : tools ? <InferOpsCanvasHome />
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} />
-          : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
+          : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
           : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} board={state.board}
-              sessionWorkspace={sessionWorkspace} onEvent={send} />
+              sessionWorkspace={sessionWorkspace} onEvent={send} onPublish={setPublishing} />
           : state.board
             ? sessionWorkspace?.id === state.board.workspaceId
               ? <div className="h-full p-5"><SessionBoard board={state.board} overseer={sessionWorkspace.stub} backLabel="consoles" onEvent={send} /></div>
@@ -154,10 +161,12 @@ export const OperateSessionPage = () => {
             : state.focus ? <p className="p-6 text-sm text-kumo-subtle">Workspaces open in a session come next.</p>
             : <>
                 {savedEntry && <div role="status" className="mb-4 flex items-center gap-3 text-sm text-kumo-subtle">
-                  <span>{savedEntry.console.title} saved.</span><Button size="sm" onClick={() => send(openConsoleEvent(savedEntry))}>Open console</Button>
+                  <span>{savedEntry.console.title} saved as a draft. Operators see it once you publish.</span>
+                  <Button size="sm" onClick={() => openConsole(savedEntry, 'draft')}>Preview</Button>
+                  <Button size="sm" variant="primary" onClick={() => setPublishing(savedEntry)}>Publish</Button>
                 </div>}
                 <ConsoleMosaic key={savedEntry?.console.id} screens={screens} highlighted={savedEntry?.console.id}
-                  onOpen={item => send(openConsoleEvent(item))} onEdit={edit} />
+                  onOpen={openConsole} onEdit={edit} onPublish={setPublishing} />
                 {state.workingSet.length > 0 && <nav aria-label="Open in this session" className="mt-4 flex flex-wrap gap-2">
                   {state.workingSet.map(ref => <Button key={ref.type === 'screen' ? `${ref.workspaceId}/${ref.screenId}` : ref.workspaceId}
                     size="sm" onClick={() => send({ type: 'focus', ref })}>{titleOf(ref)}</Button>)}
@@ -168,7 +177,8 @@ export const OperateSessionPage = () => {
         onClose={() => send({ type: 'setChatOpen', open: false })}
         consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target) } : undefined} />
     </div>
-    {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
+    {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
+    {publishing && <ConsolePublishDialog entry={publishing} onClose={() => { setPublishing(null); setSavedEntry(null) }} />}
   </div>
   </ConsoleWorkspaceShell>
 }

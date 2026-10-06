@@ -32,7 +32,7 @@ vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFe
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
   canBuild: (entry: { workspace: { role?: string } }) => entry.workspace.role !== 'use',
   useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
-    { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], consoles: [
+    { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], publishedScreens: {}, consoles: [
       { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',
         views: [{ id: 'overview', title: 'Overview', type: 'rollup', screens: ['board'] }] },
     ] },
@@ -125,7 +125,7 @@ describe('OperateSessionPage', () => {
 
   it('gives the page to the open console, found among the saved ones', () => {
     render({ ...OPEN, presentation: 'chat', console: {
-      workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', source: 'published', revision: '0', fullChat: 'available', viewId: 'overview', screenId: null,
+      workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', source: 'draft', revision: '0', fullChat: 'available', viewId: 'overview', screenId: null,
     } })
     expect(container.querySelector('[data-testid="chat"]')?.getAttribute('data-layout')).toBe('full')
     expect(container.querySelector('[role="tablist"]')).toBeNull()
@@ -150,7 +150,7 @@ it('keeps one conversation mounted as home changes to a console, a screen, and s
   const draft = container.querySelector<HTMLInputElement>('input')!
   draft.value = 'Keep this draft'
   const consoleState: OperatePageState = { ...INITIAL_OPERATE_PAGE, presentation: 'chat', console: {
-    workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', source: 'published', revision: '0', fullChat: 'default', viewId: 'overview', screenId: null,
+    workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', source: 'draft', revision: '0', fullChat: 'default', viewId: 'overview', screenId: null,
   } }
   render(consoleState)
   expect(container.querySelector('[data-testid="chat"]')).toBe(chat)

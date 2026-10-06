@@ -80,7 +80,7 @@ const CONSOLE: OperateConsole = {
 }
 const withConsole = (saved: OperateConsole = CONSOLE) => ({
   status: 'ready',
-  workspaces: [{ workspace: { id: 'w1' }, screens: [screen('s1', 'Board'), screen('s2', 'Activity')], flows: [], consoles: [saved] }],
+  workspaces: [{ workspace: { id: 'w1' }, screens: [screen('s1', 'Board'), screen('s2', 'Activity')], flows: [], consoles: [saved], publishedScreens: {} }],
 })
 const inConsole = (viewId: string, extra: Partial<OperatePageState> = {}, saved: OperateConsole = CONSOLE): OperatePageState => ({
   ...INITIAL_OPERATE_PAGE, ...extra,

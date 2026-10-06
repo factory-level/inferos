@@ -1,16 +1,28 @@
 import { useState } from 'react'
-import { Button } from '@cloudflare/kumo'
-import { ArrowRightIcon, ChatsCircleIcon, LayoutIcon, PencilSimpleIcon } from '@phosphor-icons/react'
+import { Badge, Button } from '@cloudflare/kumo'
+import { ArrowRightIcon, ChatsCircleIcon, EyeIcon, LayoutIcon, PencilSimpleIcon, UploadSimpleIcon } from '@phosphor-icons/react'
+import type { ConsoleSource } from '@gadgets/workshop-shared/operate-console'
 import type { WorkspaceScreensState } from '../../pages/inferops-canvas/useWorkspaceScreens'
-import { consoleEntries, type ConsoleEntry } from './consoles'
+import { consoleEntries, publicationStatus, type ConsoleEntry } from './consoles'
 
 const PAGE_SIZE = 8
 
-/** The console launcher: eight real consoles per page, with separate open and edit actions (edit only where the viewer can build). */
-export const ConsoleMosaic = ({ screens, onOpen, onEdit, highlighted }: {
+const STATUS = {
+  unpublished: { label: 'Draft', variant: 'secondary' },
+  changed: { label: 'Unpublished changes', variant: 'warning' },
+  published: { label: 'Published', variant: 'success' },
+} as const
+
+/**
+ * The console launcher: eight real consoles per page. Opening a tile opens the published console
+ * operators use. Where the viewer can build, each tile also shows its publication status and offers
+ * edit, a preview of the draft and publish.
+ */
+export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, highlighted }: {
   screens: WorkspaceScreensState
-  onOpen: (entry: ConsoleEntry) => void
+  onOpen: (entry: ConsoleEntry, source: ConsoleSource) => void
   onEdit: (entry: ConsoleEntry) => void
+  onPublish: (entry: ConsoleEntry) => void
   highlighted?: string
 }) => {
   const [requestedPage, setPage] = useState<number | null>(null)
@@ -31,9 +43,13 @@ export const ConsoleMosaic = ({ screens, onOpen, onEdit, highlighted }: {
             const saved = entry.console
             const first = saved.fullChat === 'default' || saved.fullChat === 'only'
             const Icon = first ? ChatsCircleIcon : LayoutIcon
+            const building = entry.workspace.role !== 'use'
+            const status = building ? publicationStatus(entry) : 'published'
+            // A console never published has only its draft, which only a builder previews.
+            const source: ConsoleSource = status === 'unpublished' ? 'draft' : 'published'
             return <li key={`${entry.workspace.id}/${saved.id}`}
               className={`group relative rounded-xl border bg-kumo-base transition-colors hover:border-kumo-ring ${saved.id === highlighted ? 'border-kumo-ring' : 'border-kumo-line'}`}>
-              <button type="button" onClick={() => onOpen(entry)} aria-label={`Open ${saved.title}`}
+              <button type="button" onClick={() => onOpen(entry, source)} aria-label={`${source === 'draft' ? 'Preview' : 'Open'} ${saved.title}`}
                 className="flex min-h-40 w-full flex-col p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring rounded-xl">
                 <Icon size={22} aria-hidden className="mb-5 text-kumo-subtle" />
                 <span className="line-clamp-2 pr-4 text-sm font-medium text-kumo-default">{saved.title}</span>
@@ -43,9 +59,22 @@ export const ConsoleMosaic = ({ screens, onOpen, onEdit, highlighted }: {
                   <ArrowRightIcon size={14} aria-hidden className="ml-auto shrink-0" />
                 </span>
               </button>
-              {entry.workspace.role !== 'use' && <Button variant="ghost" size="sm" aria-label={`Edit ${saved.title}`} onClick={() => onEdit(entry)} className="!absolute right-2 top-2">
-                <PencilSimpleIcon size={14} aria-hidden />
-              </Button>}
+              {building && <>
+                <Button variant="ghost" size="sm" aria-label={`Edit ${saved.title}`} onClick={() => onEdit(entry)} className="!absolute right-2 top-2">
+                  <PencilSimpleIcon size={14} aria-hidden />
+                </Button>
+                <div className="flex flex-wrap items-center gap-2 border-t border-kumo-line px-4 py-2">
+                  <Badge variant={STATUS[status].variant}>{STATUS[status].label}</Badge>
+                  {status !== 'published' && <span className="ml-auto flex gap-1">
+                    {status === 'changed' && <Button variant="ghost" size="sm" aria-label={`Preview the draft of ${saved.title}`} onClick={() => onOpen(entry, 'draft')}>
+                      <EyeIcon size={14} aria-hidden />Preview
+                    </Button>}
+                    <Button variant="ghost" size="sm" aria-label={`Publish ${saved.title}`} onClick={() => onPublish(entry)}>
+                      <UploadSimpleIcon size={14} aria-hidden />Publish
+                    </Button>
+                  </span>}
+                </div>
+              </>}
             </li>
           })}
         </ul>}

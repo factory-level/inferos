@@ -67,7 +67,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
         ? await overseer.stub.replaceConsole(initial.console.id, initial.console.revision, content)
         : await overseer.stub.createConsole(content)
       invalidateWorkspaceScreens()
-      onSaved({ workspace: entry!.workspace, console: saved, screens })
+      onSaved({ workspace: entry!.workspace, console: saved, screens, publishedScreens: initial?.publishedScreens ?? [] })
     } catch (caught) {
       console.error('Console save failed:', caught)
       setError('Could not save this console. Check your access and fields. If it changed elsewhere, reopen it to review the latest version. Your draft is still here.')
@@ -146,7 +146,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
       <Button disabled={step === 0 || saving} onClick={() => { setStep(step - 1); setError(null) }}>Back</Button>
       {step < STEPS.length - 1
         ? <Button variant="primary" disabled={!title.trim() || !workspaceId || !available || limitReached || (step === 1 && views.length === 0)} onClick={next}>Continue</Button>
-        : <Button variant="primary" disabled={saving || !available} onClick={() => void save()}>{saving ? 'Saving…' : initial ? 'Save console' : 'Create console'}</Button>}
+        : <Button variant="primary" disabled={saving || !available} onClick={() => void save()}>{saving ? 'Saving…' : initial ? 'Save draft' : 'Create draft'}</Button>}
     </footer>}
   </div>
 }

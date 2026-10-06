@@ -3,6 +3,7 @@ import { Button, Dialog } from '@cloudflare/kumo'
 import { XIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
+import type { ConsoleSource } from '@gadgets/workshop-shared/operate-console'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
@@ -15,9 +16,14 @@ import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 
 const ignore = () => {}
 
-/** Resolves the latest screen through its workspace capability; a widget reference grants no access. */
-export const ConsoleWidgetView = ({ workspaceId, target, onClose }: {
+/**
+ * Resolves the screen, as the open revision of its console shows it, through its workspace
+ * capability; a widget reference grants no access.
+ */
+export const ConsoleWidgetView = ({ workspaceId, source, target, onClose }: {
   workspaceId: string
+  /** The revision of the console the session opened. */
+  source: ConsoleSource
   target: ConsoleWidgetTarget
   onClose: () => void
 }) => {
@@ -32,10 +38,11 @@ export const ConsoleWidgetView = ({ workspaceId, target, onClose }: {
     if (!overseer) return
     let cancelled = false
     setScreen(undefined)
-    overseer.stub.getCanvas(target.screenId).then(value => { if (!cancelled) setScreen(value ?? null) })
+    overseer.stub.getConsoleScreen(target.consoleId, target.screenId, source)
+      .then(value => { if (!cancelled) setScreen(value ?? null) })
       .catch(() => { if (!cancelled) setScreen(null) })
     return () => { cancelled = true }
-  }, [overseer, target.screenId])
+  }, [overseer, target.consoleId, target.screenId, source])
   const widget = screen?.sections.flatMap(section => section.widgets).find(item => item.id === target.widgetId)
   const gadgets = new Map<WorkpieceId, GadgetSummary>()
   for (const piece of workpieces.values()) if (piece.type === 'gadget') gadgets.set(piece.id, piece)

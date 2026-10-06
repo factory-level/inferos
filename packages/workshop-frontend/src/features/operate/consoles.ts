@@ -1,38 +1,66 @@
 import type { GadgetMetadataWithTimestamps, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import { publishedConsole, type ConsoleView, type OperateConsole } from '@gadgets/workshop-shared/operate-console'
+import { publishedConsole, type ConsoleSource, type ConsoleView, type OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import type { OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
 import type { WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { gadgetIdOf } from '../canvas/canvasLayout'
 
-/** A console together with the workspace it lives in and that workspace's screens. */
+/**
+ * A console together with the workspace it lives in. `console` and `screens` are the revision
+ * shown: as listed, a builder's draft over the workspace's current screens (an operator lists only
+ * the published revision); see `consoleRevision` for the published one. `publishedScreens` are the
+ * screens as the console last published them.
+ */
 export type ConsoleEntry = {
   workspace: GadgetMetadataWithTimestamps
   console: OperateConsole
   screens: readonly CanvasDefinition[]
+  publishedScreens: readonly CanvasDefinition[]
 }
 
 /** Every console across the listed workspaces, in workspace order. */
 export const consoleEntries = (workspaces: readonly WorkspaceScreens[]): ConsoleEntry[] =>
-  workspaces.flatMap(({ workspace, screens, consoles }) =>
-    consoles.map(saved => ({ workspace, console: saved, screens: screens ?? [] })))
-
-/** The listed console a session has open, if it is still there. */
-export const findConsole = (workspaces: readonly WorkspaceScreens[], run: OperateConsoleRun): ConsoleEntry | undefined =>
-  consoleEntries(workspaces).find(entry =>
-    entry.workspace.id === run.workspaceId && entry.console.id === run.consoleId)
+  workspaces.flatMap(({ workspace, screens, consoles, publishedScreens }) =>
+    consoles.map(saved => ({ workspace, console: saved, screens: screens ?? [], publishedScreens: publishedScreens[saved.id] ?? [] })))
 
 /**
- * The event that opens a console at its first view: its published revision, or (for a builder, if
- * it has never been published) its draft.
+ * A listed console as one of its revisions: its draft as listed, or its published revision with
+ * the screens as published. Undefined if it has never been published.
  */
-export const openConsoleEvent = ({ workspace, console: saved }: ConsoleEntry): OperateEvent => {
-  const published = publishedConsole(saved)
-  const shown = published ?? saved
-  return {
-    type: 'openConsole', workspaceId: workspace.id, consoleId: shown.id, title: shown.title,
-    source: published ? 'published' : 'draft', revision: shown.revision,
-    fullChat: shown.fullChat, viewId: shown.views[0].id,
+export const consoleRevision = (entry: ConsoleEntry, source: ConsoleSource): ConsoleEntry | undefined => {
+  if (source === 'draft') return entry
+  const published = publishedConsole(entry.console)
+  return published ? { ...entry, console: published, screens: entry.publishedScreens } : undefined
+}
+
+/** The listed console a session has open, as the revision it opened, if it is still there. */
+export const findConsole = (workspaces: readonly WorkspaceScreens[], run: OperateConsoleRun): ConsoleEntry | undefined => {
+  const entry = consoleEntries(workspaces).find(candidate =>
+    candidate.workspace.id === run.workspaceId && candidate.console.id === run.consoleId)
+  return entry && consoleRevision(entry, run.source)
+}
+
+/**
+ * Whether a builder's listed console is unpublished, has changes since it was published (to the
+ * console, or to a screen it published), or is published as it stands.
+ */
+export const publicationStatus = ({ console: saved, screens, publishedScreens }: ConsoleEntry)
+    : 'unpublished' | 'changed' | 'published' => {
+  if (!saved.published) return 'unpublished'
+  if (saved.published.revision !== saved.revision) return 'changed'
+  const current = new Map(screens.map(screen => [screen.id, screen.revision]))
+  return publishedScreens.some(screen => current.get(screen.id) !== screen.revision) ? 'changed' : 'published'
+}
+
+/**
+ * The event that opens a listed console at its first view: its published revision, or (a builder's
+ * preview) its draft. Undefined if that revision doesn't exist.
+ */
+export const openConsoleEvent = (entry: ConsoleEntry, source: ConsoleSource): OperateEvent | undefined => {
+  const shown = consoleRevision(entry, source)?.console
+  return shown && {
+    type: 'openConsole', workspaceId: entry.workspace.id, consoleId: shown.id, title: shown.title,
+    source, revision: shown.revision, fullChat: shown.fullChat, viewId: shown.views[0].id,
   }
 }
 
