@@ -109,7 +109,10 @@ function activityStatus(
       : { label: 'Pending', dotClass: 'bg-kumo-brand', textClass: 'text-kumo-strong' }
   }
   if (record.state === 'rejected') {
-    return { label: 'Denied', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
+    // A denial does not undo an attempt that may already have applied.
+    return record.lastAttempt?.outcome === 'unknown'
+      ? { label: 'Denied, may have applied', dotClass: 'bg-kumo-warning', textClass: 'text-kumo-warning' }
+      : { label: 'Denied', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
   }
   if (record.state === 'failed') {
     return { label: 'Failed', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
@@ -241,8 +244,9 @@ export default function Activity({
           <div className="min-h-0 flex-1 overflow-auto">
             {pendingActions.map(record => {
               const autoApproveTarget =
-                // Never auto-approved while restricted, so no rule is offered.
-                !restricted &&
+                // Never auto-approved while restricted, so no rule is offered; nor for an action
+                // that cannot be approved again, which a rule would not apply either.
+                !restricted && canApproveAgain(record) &&
                 record.type === 'action' && record.gatekeeperId !== undefined &&
                 record.description.actionKind !== undefined &&
                 record.description.autoApprovable === true

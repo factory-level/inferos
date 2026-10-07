@@ -198,6 +198,41 @@ function approveDescribedBy(): string | null {
   }).join('\n')
 }
 
+describe('apply attempts on the card', () => {
+  const approve = () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Approve')
+
+  it('offers neither Approve nor Always approve once an attempt was not explicitly retryable', async () => {
+    await renderPendingCard(entry(1, {
+      gatekeeperId: 7,
+      description: { title: 'Move', description: '', implementsRevert: false, autoApprovable: true,
+        actionKind: { tag: 'move', label: 'Move' } },
+      lastAttempt: { outcome: 'unknown', message: 'Lost after sending.', at: new Date() },
+    }))
+    expect(approve()?.disabled).toBe(true)
+    expect(document.body.textContent).not.toContain('Always approve')
+    expect(document.body.textContent).toContain('It cannot be sent again: check it at the provider, then deny it.')
+  })
+
+  it('keeps Approve after an explicitly retryable attempt', async () => {
+    await renderPendingCard(entry(1, {
+      lastAttempt: { outcome: 'unknown', message: 'Lost after sending.', retryable: true, at: new Date() },
+    }))
+    expect(approve()?.disabled).toBe(false)
+  })
+
+  it('keeps a denied card\'s uncertainty and says approval is closed', async () => {
+    await renderPendingCard(entry(1, {
+      state: 'rejected', resolvedBy: { type: 'user', id: 'u', name: 'U' },
+      lastAttempt: { outcome: 'unknown', message: 'Lost after sending.', retryable: false, at: new Date() },
+    }))
+    expect(document.body.textContent).toContain('Denied, may have applied')
+    const toggle = [...document.querySelectorAll('button')].find(b => b.getAttribute('aria-expanded') === 'false')
+    act(() => toggle!.click())
+    expect(document.body.textContent).toContain('local approval is closed')
+    expect(document.body.textContent).not.toContain('deny it')
+  })
+})
+
 describe('restricted approval', () => {
   it('shows the notice and the full request on a pending card while restricted', async () => {
     await renderPendingCard(pendingLog(), { restricted: true })

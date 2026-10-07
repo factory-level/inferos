@@ -24,16 +24,34 @@ describe('attemptNotice', () => {
     expect(canApproveAgain(record)).toBe(false)
   })
 
-  it('repeats an unknown attempt only when the gatekeeper explicitly said it can', () => {
+  it('approves an attempted action again only when the gatekeeper explicitly said so, for either outcome', () => {
     expect(canApproveAgain(action({}))).toBe(true)
-    expect(canApproveAgain(action({ lastAttempt: { outcome: 'unknown', message: 'x', retryable: true, at: new Date() } }))).toBe(true)
-    // An attempt recorded without the flag, or a recovered interruption, says nothing of the kind.
-    expect(canApproveAgain(action({ lastAttempt: { outcome: 'unknown', message: 'x', at: new Date() } }))).toBe(false)
-    expect(canApproveAgain(action({ lastAttempt: { outcome: 'notApplied', message: 'x', retryable: true, at: new Date() } }))).toBe(true)
+    for (const outcome of ['unknown', 'notApplied'] as const) {
+      const attempted = (retryable?: boolean) => action({
+        lastAttempt: { outcome, message: 'x', at: new Date(), ...(retryable === undefined ? {} : { retryable }) },
+      })
+      expect(canApproveAgain(attempted())).toBe(false)
+      expect(canApproveAgain(attempted(false))).toBe(false)
+      expect(canApproveAgain(attempted(true))).toBe(true)
+    }
+  })
+
+  it('tells a pending refusal that cannot be retried to deny it', () => {
+    expect(attemptNotice(action({ lastAttempt: { outcome: 'notApplied', message: 'Denied.', at: new Date() } }))?.text)
+      .toBe('The last attempt was not applied: Denied. It cannot be approved again here: deny it.')
+  })
+
+  it('keeps the uncertainty after a denial and says local approval is closed', () => {
+    const text = attemptNotice(action({
+      state: 'rejected', lastAttempt: { outcome: 'unknown', message: 'Lost.', retryable: true, at: new Date() },
+    }))?.text
+    expect(text).toBe('It may already have been applied; the outcome is unknown: Lost. It was denied here, so local ' +
+      'approval is closed; check the provider for whether it took effect.')
+    expect(text).not.toContain('deny it')
   })
 
   it('names a refusal as not applied, for a failed action and for one still pending', () => {
-    const lastAttempt = { outcome: 'notApplied' as const, message: 'Policy denies it.', at: new Date() }
+    const lastAttempt = { outcome: 'notApplied' as const, message: 'Policy denies it.', retryable: true, at: new Date() }
     expect(attemptNotice(action({ state: 'failed', lastAttempt }))?.text).toBe('Not applied: Policy denies it.')
     expect(attemptNotice(action({ lastAttempt }))?.text).toBe('The last attempt was not applied: Policy denies it.')
   })

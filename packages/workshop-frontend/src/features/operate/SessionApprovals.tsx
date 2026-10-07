@@ -27,7 +27,12 @@ type ApprovalSource = { workspaceId: string; label: string; stub: RpcStub<Overse
 type Pending = { source: ApprovalSource; action: Extract<ActionLogEntry, { type: 'action' }> }
 
 /** What this tab last decided, with the message the page state has no room for. */
-type DecisionNotice = ApprovalDecisionResult & { approval: OperateApprovalRef; title: string }
+type DecisionNotice = ApprovalDecisionResult & {
+  approval: OperateApprovalRef
+  title: string
+  /** For a rejection after an attempt whose outcome is unknown: that it may still have applied. */
+  uncertainty?: string
+}
 
 const REQUESTER_LABELS: Record<ActionRequester, string> = {
   agent: 'Requested by the agent',
@@ -43,7 +48,7 @@ const sameApproval = (a: OperateApprovalRef | null, b: OperateApprovalRef) =>
 
 const outcomeText = (title: string, outcome: OperateApprovalOutcome, error?: string) =>
   outcome === 'applied' ? `“${title}” was approved and applied.`
-    : outcome === 'rejected' ? `“${title}” was rejected.`
+    : outcome === 'rejected' ? `“${title}” was rejected.${error ? ` ${error}` : ''}`
       : `“${title}” was approved, but applying it failed${error ? `: ${error}` : '.'}`
 
 // An earlier unsuccessful apply, shown on the pending item so a reload doesn't hide it.
@@ -156,7 +161,10 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
       // board may have changed underneath it (a stale revision, say), so re-read it here.
       if (result.outcome === 'failed' && action.resourceUrl) invalidateBoardInEveryScope(action.resourceUrl)
       if (result.outcome !== null) await report({ type: 'approvalResolved', approval, outcome: result.outcome })
-      setNotice({ ...result, approval, title: action.description.title })
+      // A rejection keeps the attempt it followed, so its uncertainty is known from the pending entry.
+      const uncertainty = result.outcome === 'rejected' && action.type === 'action' && action.lastAttempt?.outcome === 'unknown'
+        ? attemptNotice({ ...action, state: 'rejected' })?.text : undefined
+      setNotice({ ...result, approval, title: action.description.title, uncertainty })
     } finally {
       setProcessing(previous => {
         const next = new Set(previous)
@@ -182,14 +190,20 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
     return () => clearTimeout(timer)
   }, [expiresAt])
   const loggedTitle = logged && logged.type === 'action' ? logged.description.title : null
-  // The reason a failed apply's log entry kept, for its outcome reported elsewhere or restored.
-  const loggedReason = logged && logged.type === 'action' && logged.state === 'failed' ? logged.lastAttempt?.message : undefined
+  // What the log entry kept beyond the decision, for its outcome here, reported elsewhere or
+  // restored: a failed apply's reason, or, for a rejection after an attempt whose outcome is unknown,
+  // that it may still have applied and local approval is closed.
+  const loggedReason = logged && logged.type === 'action'
+    ? logged.state === 'failed' ? logged.lastAttempt?.message
+      : logged.state === 'rejected' && logged.lastAttempt?.outcome === 'unknown' ? attemptNotice(logged)?.text : undefined
+    : undefined
 
   // This tab's own decision carries its message; a newer outcome reported elsewhere wins.
   const own = notice && (lastOutcome === null || notice.outcome === null || sameApproval(lastOutcome, notice.approval)) ? notice : null
   const shown: { text: string; outcome: OperateApprovalOutcome | null } | null = own
     ? {
-        text: own.outcome === null ? `“${own.title}” was not resolved: ${own.error}` : outcomeText(own.title, own.outcome, own.error),
+        text: own.outcome === null ? `“${own.title}” was not resolved: ${own.error}`
+          : outcomeText(own.title, own.outcome, own.outcome === 'rejected' ? own.uncertainty ?? loggedReason : own.error),
         outcome: own.outcome,
       }
     // Reported elsewhere: under the action's own title once read (its id only if it cannot be).

@@ -41,7 +41,8 @@ const MOVE = entry(4, {
 const REF = { workspaceId: 'ops', actionId: 4 }
 
 /** Renders the session's approvals over a session workspace with MOVE pending. */
-async function renderPending(page: Partial<Pick<OperatePageState, 'reviewing' | 'lastApprovalOutcome'>> = {}) {
+async function renderPending(page: Partial<Pick<OperatePageState, 'reviewing' | 'lastApprovalOutcome'>> = {},
+                             pendingEntry: ActionLogEntry = MOVE) {
   const server = makeOverseer()
   const approveAction = vi.fn<(id: number) => Promise<void>>(async () => {})
   const rejectAction = vi.fn<(id: number) => Promise<void>>(async () => {})
@@ -53,7 +54,7 @@ async function renderPending(page: Partial<Pick<OperatePageState, 'reviewing' | 
   )
   await show(page)
   await server.resolveSubscription()
-  await server.resolvePendingQuery({ entries: [MOVE] })
+  await server.resolvePendingQuery({ entries: [pendingEntry] })
   flushFrames()
   return { server, approveAction, rejectAction, onEvent, show }
 }
@@ -132,6 +133,37 @@ describe('SessionApprovals', () => {
     expect(rejectAction).toHaveBeenCalledWith(4)
     expect(onEvent).toHaveBeenLastCalledWith({ type: 'approvalResolved', approval: REF, outcome: 'rejected' })
     expect(status()).toContain('was rejected')
+  })
+
+  it('offers only Deny for an attempt that was not explicitly retryable, and Approve for one that was', async () => {
+    const attempted = (retryable?: boolean) => ({ ...MOVE, lastAttempt: {
+      outcome: 'notApplied', message: 'Denied.', at: new Date(), ...(retryable === undefined ? {} : { retryable }),
+    } }) as ActionLogEntry
+    await renderPending({}, attempted())
+    expect((button('Approve') as HTMLButtonElement).disabled).toBe(true)
+    expect((button('Deny') as HTMLButtonElement).disabled).toBe(false)
+    view.cleanup()
+    await renderPending({}, attempted(true))
+    expect((button('Approve') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps the uncertainty of a rejection after an unknown attempt, here and when restored', async () => {
+    const uncertain = { ...MOVE, lastAttempt: { outcome: 'unknown', message: 'Lost.', retryable: false, at: new Date() } } as ActionLogEntry
+    const { server } = await renderPending({}, uncertain)
+    await act(async () => button('Deny').click())
+    await server.resolvePage({ entries: [{ ...uncertain, state: 'rejected' } as ActionLogEntry] })
+    expect(status()).toContain('was rejected. It may already have been applied')
+    expect(status()).toContain('local approval is closed')
+    view.cleanup()
+
+    const restored = await renderPending({ lastApprovalOutcome: { workspaceId: 'ops', actionId: 2, outcome: 'rejected' } })
+    await restored.server.resolvePage({ entries: [entry(2, {
+      state: 'rejected', appliedAt: new Date(Date.now() - 30_000),
+      lastAttempt: { outcome: 'unknown', message: 'Lost.', retryable: false, at: new Date(Date.now() - 30_000) },
+      description: { title: 'Update DEMO-1: priority', description: '', implementsRevert: false },
+    })] })
+    expect(document.body.textContent).toContain('“Update DEMO-1: priority” was rejected. It may already have been applied')
+    expect(document.body.textContent).toContain('local approval is closed')
   })
 
   it('reports nothing resolved when a rejection is refused', async () => {
