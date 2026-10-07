@@ -3,7 +3,7 @@ import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { CanvasBoardWidget } from './CanvasBoardWidget'
-import { CanvasGadgetWidget } from './CanvasGadgetWidget'
+import { CanvasGadgetWidget, type CanvasConsoleRevision } from './CanvasGadgetWidget'
 import { CanvasWikiWidget } from './CanvasWikiWidget'
 import { gadgetIdOf, sectionGridClass, widgetSpanClass } from './canvasLayout'
 import { useDecidedActionInvalidation } from './useBoardData'
@@ -18,13 +18,15 @@ export type CanvasResourceScope = {
   unboundAction: (targetRef: string, retry: () => void) => ReactNode
 }
 
-export const CanvasView = ({ definition, gadgets, overseer, resourceScope, onOpenWidget, codingDispatch, wikiEditable, scrollRoot }: {
+export const CanvasView = ({ definition, gadgets, overseer, resourceScope, offeredBy, onOpenWidget, codingDispatch, wikiEditable, scrollRoot }: {
   definition: CanvasDefinition
   /** The pane that clips and scrolls this canvas, for widget preloading. */
   scrollRoot?: RefObject<HTMLElement | null>
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
   overseer: RpcStub<Overseer>
   resourceScope?: CanvasResourceScope
+  /** See `CanvasGadgetWidget`'s `offeredBy`. */
+  offeredBy?: CanvasConsoleRevision
   /** Opens a board widget's full view. Without it, cards offer no full view. */
   onOpenWidget?: (widgetId: string) => void
   /** See `CanvasBoardWidgetProps.codingDispatch`. */
@@ -42,7 +44,7 @@ export const CanvasView = ({ definition, gadgets, overseer, resourceScope, onOpe
         : <div className={sectionGridClass(section.columns)}>
           {section.widgets.map(widget => <div key={widget.id} className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}>
             {widget.kind === 'inferos.gadget'
-              ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} />
+              ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} offeredBy={offeredBy} />
               : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget scrollRoot={scrollRoot} widget={widget} overseer={resources} editable={wikiEditable} />
               : <CanvasBoardWidget scrollRoot={scrollRoot} widget={widget} overseer={resources} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch}
                   unboundAction={resourceScope && (retry => resourceScope.unboundAction(widget.targetRef, retry))} />}

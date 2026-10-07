@@ -48,7 +48,8 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const available = !!overseer && ready && metadata?.id === workspaceId && metadata.role !== 'use' && !openError && !observerConfig
   const limitReached = !initial && (entry?.consoles.length ?? 0) >= MAX_WORKSPACE_CONSOLES
   const validate = () => {
-    const content = parseOperateConsoleContent({ title, views, fullChat, customization: initial?.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION } })
+    const content = parseOperateConsoleContent({ title, views, fullChat, customization: initial?.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION },
+      ...(initial?.console.widgets ? { widgets: initial.console.widgets } : {}) })
     if (consoleScreens(content).some(id => !screens.some(screen => screen.id === id))) throw new Error('Choose an available screen for every view.')
     return content
   }

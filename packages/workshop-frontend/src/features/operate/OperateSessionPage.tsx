@@ -144,7 +144,7 @@ export const OperateSessionPage = () => {
                   onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
           : tools ? <InferOpsCanvasHome />
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} />
-          : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
+          : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
           : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} board={state.board}
               sessionWorkspace={sessionWorkspace} onEvent={send} onPublish={setPublishing} />
           : state.board
@@ -177,7 +177,7 @@ export const OperateSessionPage = () => {
         onClose={() => send({ type: 'setChatOpen', open: false })}
         consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target) } : undefined} />
     </div>
-    {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
+    {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
     {publishing && <ConsolePublishDialog entry={publishing} onClose={() => { setPublishing(null); setSavedEntry(null) }} />}
   </div>
   </ConsoleWorkspaceShell>

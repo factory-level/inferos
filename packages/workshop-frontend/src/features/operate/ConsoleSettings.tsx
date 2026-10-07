@@ -3,9 +3,11 @@ import { Button, Checkbox } from '@cloudflare/kumo'
 import { DEFAULT_CONSOLE_CUSTOMIZATION } from '@gadgets/workshop-shared/operate-console'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
+import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { invalidateWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { buildReturnHref } from './operateMode'
 import type { ConsoleEntry } from './consoles'
+import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 
 const ignore = () => {}
 const options = [
@@ -15,7 +17,7 @@ const options = [
   { key: 'skills', title: 'Custom skills', description: 'Allow users to add skills for the assistant.' },
 ] as const
 
-/** Console policy is saved through the existing build capability, with revision conflict checks. */
+/** Console policy and widgets are saved through the existing build capability, with revision conflict checks. */
 export const ConsoleSettings = ({ entry, onClose, onEdit }: {
   entry: ConsoleEntry
   onClose: () => void
@@ -25,6 +27,10 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
   const { overseer, metadata, error: accessError } = useWorkspaceOpen({ id: entry.workspace.id, authenticatedApi,
     onMetadata: ignore, onShareKeyConsumed: ignore, onInvalidShareKey: ignore })
   const [customization, setCustomization] = useState(entry.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION })
+  const [widgets, setWidgets] = useState(entry.console.widgets ?? [])
+  const { workpieces } = useWorkspaceWorkpieces(overseer, entry.workspace.id)
+  const candidates = [...workpieces.values()].flatMap(piece => piece.type === 'gadget' && piece.chatId === undefined &&
+    !piece.frozenFor && piece.installedFrom?.kind === 'widget' ? [piece] : [])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const editable = !!overseer && !!metadata && metadata.role !== 'use' && !accessError
@@ -32,11 +38,12 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
     if (!overseer || !editable || saving) return
     setSaving(true); setError(null)
     try {
-      await overseer.stub.replaceConsole(entry.console.id, entry.console.revision, { title: entry.console.title, views: entry.console.views, fullChat: entry.console.fullChat, customization })
+      await overseer.stub.replaceConsole(entry.console.id, entry.console.revision, { title: entry.console.title, views: entry.console.views, fullChat: entry.console.fullChat, customization,
+        ...(widgets.length > 0 || entry.console.widgets ? { widgets } : {}) })
       invalidateWorkspaceScreens()
       onClose()
     } catch {
-      setError('Could not save settings. Your choices are still here. Check your access, or reopen settings if someone else changed this console.')
+      setError('Could not save settings. Your choices are still here. Check your access, that every widget on the console\'s screens is registered, or reopen settings if someone else changed this console.')
     } finally { setSaving(false) }
   }
   return <section className="mx-auto w-full max-w-2xl space-y-8 px-6 py-10" aria-label="Console settings">
@@ -54,6 +61,8 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       </div>)}
       {!editable && <p role="status" className="text-sm text-kumo-subtle">Console owners and editors manage these settings.</p>}
     </div>
+    <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={candidates}
+      disabled={!editable || saving} onChange={setWidgets} />
     {error && <p role="alert" className="text-sm text-kumo-danger">{error}</p>}
     {editable && <>
       <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save settings'}</Button>

@@ -16,6 +16,7 @@ vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({
   overseer: { stub: { replaceConsole: state.replace } }, metadata: { role: state.denied ? 'use' : 'build' },
 }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWorkspaceScreens: state.invalidate }))
+vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ workpieces: new Map(), ready: true }) }))
 import { ConsoleSettings } from './ConsoleSettings'
 
 const entry: ConsoleEntry = { workspace: { id: 'w1', title: 'Operations', created: new Date(), lastActive: new Date() }, screens: [], publishedScreens: [], console: {
@@ -39,6 +40,7 @@ const save = () => [...container.querySelectorAll('button')].find(button => butt
 it('defaults old consoles to opt-out and persists four independent flags without copying pages', async () => {
   render()
   const checkboxes = [...container.querySelectorAll<HTMLButtonElement>('[role="checkbox"]')]
+    .filter(checkbox => !checkbox.closest('[aria-labelledby="console-widgets-heading"]'))
   expect(checkboxes).toHaveLength(4)
   expect(checkboxes.every(checkbox => checkbox.getAttribute('aria-checked') === 'false')).toBe(true)
   act(() => checkboxes[0].click())
@@ -69,4 +71,11 @@ it('does not offer policy or configuration writes to use-role viewers', () => {
   expect(container.querySelector('a')).toBeNull()
   expect([...container.querySelectorAll<HTMLButtonElement>('[role="checkbox"]')].every(checkbox => checkbox.getAttribute('aria-disabled') === 'true' || checkbox.disabled)).toBe(true)
   expect(state.replace).not.toHaveBeenCalled()
+})
+
+it('keeps the console\'s widget registry when saving its settings', async () => {
+  const widgets = [{ gadgetId: 3, blueprintId: 'bp', version: 2, label: 'Status', state: 'resettable' as const }]
+  act(() => root.render(<ConsoleSettings entry={{ ...entry, console: { ...entry.console, widgets } }} onClose={close} onEdit={edit} />))
+  await act(async () => save().click())
+  expect(state.replace).toHaveBeenCalledWith('c1', '3', expect.objectContaining({ widgets }))
 })

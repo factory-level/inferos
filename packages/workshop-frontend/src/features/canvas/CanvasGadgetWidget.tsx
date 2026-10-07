@@ -5,12 +5,20 @@ import type { CanvasGadgetWidget as Widget } from '@gadgets/workshop-shared/canv
 import GadgetUI from '../../GadgetUI'
 import { useHasBeenOnScreen } from './useHasBeenOnScreen'
 
-export const CanvasGadgetWidget = ({ widget, gadget, overseer, scrollRoot }: {
+/** The published console revision a screen is shown from; its widgets open through it. */
+export type CanvasConsoleRevision = { consoleId: string; revision: string }
+
+export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scrollRoot }: {
   widget: Widget
   scrollRoot?: RefObject<HTMLElement | null>
   /** The live summary of the referenced gadget, or undefined if the workspace has no such gadget. */
   gadget: GadgetSummary | undefined
   overseer: RpcStub<Overseer>
+  /**
+   * Set on a published console's screen: the gadget is the widget that revision offers, opened
+   * through the console (`getConsoleWidget`), which is how the use role reaches it.
+   */
+  offeredBy?: CanvasConsoleRevision
 }) => {
   const ref = useRef<HTMLElement>(null)
   const visible = useHasBeenOnScreen(ref, false, scrollRoot)
@@ -18,12 +26,16 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, scrollRoot }: {
   // A draft belongs to its conversation until accepted, so it is never shown on a shared canvas.
   const gadgetId = gadget && gadget.chatId === undefined ? gadget.id : undefined
 
+  const consoleId = offeredBy?.consoleId
+  const revision = offeredBy?.revision
   useEffect(() => {
     if (gadgetId === undefined) return
-    const stub = overseer.getGadget(gadgetId)
+    const stub = consoleId !== undefined && revision !== undefined
+      ? overseer.getConsoleWidget(consoleId, revision, gadgetId)
+      : overseer.getGadget(gadgetId)
     setClient({ id: gadgetId, stub })
     return () => { stub[Symbol.dispose]() }
-  }, [overseer, gadgetId])
+  }, [overseer, gadgetId, consoleId, revision])
 
   const stub = client && client.id === gadgetId ? client.stub : null
   const title = gadget?.title ?? 'Unavailable gadget'
