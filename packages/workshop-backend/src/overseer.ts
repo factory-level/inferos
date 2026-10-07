@@ -5689,24 +5689,26 @@ class OverseerImpl implements AgentHooks {
       if (record.type !== "action" || record.applyStartedAt === undefined) continue;
       let startedAt = record.applyStartedAt;
       delete record.applyStartedAt;
-      // Stamped now, not at the start: a subscriber whose watermark passed the start (another
-      // action changed since) must still be sent this, and `at` is the change time it resumes by.
-      if (record.lastAttempt?.outcome !== "unknown") {
-        record.lastAttempt = {outcome: "unknown", message: INTERRUPTED_APPLY_MESSAGE, startedAt, at: new Date()};
-      }
+      // Always a new attempt, replacing any earlier one: this dispatch may have reached the
+      // provider whatever the last answer was, and nothing says repeating it is safe. Stamped now,
+      // not at the start: a subscriber whose watermark passed the start (another action changed
+      // since) must still be sent this, and `at` is the change time it resumes by.
+      record.lastAttempt = {
+        outcome: "unknown", message: INTERRUPTED_APPLY_MESSAGE, retryable: false, startedAt, at: new Date(),
+      };
       this.storage.actions.put(record);
     }
   }
 
   async #applyPendingAction(record: ActionRecord & {type: "action"},
                             resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
-    // An attempt that may have applied is sent again only when the gatekeeper's structured answer
-    // said it can replay it (`retryable: true`). A thrown error, an attempt recorded without the
+    // An action already attempted is sent again only when the gatekeeper's structured answer said
+    // another attempt is safe (`retryable: true`). A thrown error, an attempt recorded without the
     // flag and a recovered interruption say nothing of the kind, so nothing is sent and nothing is
     // recorded: the person checks the provider and rejects it.
     let stored = this.storage.actions.get(record.id);
     let last = stored?.type === "action" ? stored.lastAttempt : undefined;
-    if (last?.outcome === "unknown" && last.retryable !== true) {
+    if (last && last.retryable !== true) {
       throw new Error(`${NOT_RETRYABLE_MESSAGE} ${last.message}`);
     }
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);

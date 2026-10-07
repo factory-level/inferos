@@ -39,7 +39,9 @@ const control = <T>(route: string, body: object) => testControl<T>(harness, rout
 const actionState = (label: string) => testActionState(harness, label);
 // `thrown` (the default) is a plain error, which asserts nothing; `retry` is an unknown outcome the
 // adapter explicitly supports sending again (`retryable: true`).
-const failNextApply = (label: string, reason: string, outcome?: "thrown" | "retry" | "refused" | "unknown") =>
+type ApplyFailureOutcome = "thrown" | "retry" | "refused" | "unknown" | "notApplied-retry" | "unknown-unflagged" |
+  "notApplied-unflagged";
+const failNextApply = (label: string, reason: string, outcome?: ApplyFailureOutcome) =>
   control("fail-next-apply", { label, reason, ...(outcome ? { outcome } : {}) });
 const applyAttempts = async (label: string) =>
   (await control<{ attempts: number }>("apply-attempts", { label })).attempts;
@@ -416,9 +418,9 @@ it.concurrent("an unknown attempt the adapter can replay recovers through anothe
   expect(entry?.type === "action" && entry.lastAttempt).toBeFalsy();
 });
 
-// A plain thrown error asserts nothing, so nothing says the gatekeeper can replay its write: the
-// action is never sent again, by a manual approval or by a later auto-approval drain.
-it.concurrent("a generic thrown error is never sent again, manually or by a later auto drain", async () => {
+// A plain thrown error asserts nothing, so nothing says the gatekeeper can replay its write: a manual
+// approval never sends it again (the auto drain is covered below, with its completed signal).
+it.concurrent("a generic thrown error is never sent again by a manual approval", async () => {
   await using session = await openSession(
     models.script([writeValues("3, { autoApprovable: true }"), { text: "Not reached." }]), "agentthrownnoresend");
   const label = labelOf(session);
@@ -430,13 +432,6 @@ it.concurrent("a generic thrown error is never sent again, manually or by a late
     expect((await session.listActions({ filter: "action" })).entries.find(e => e.id === action.id))
       .toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown", retryable: false } });
     await expect(ws.approveAction(action.id)).rejects.toThrow("cannot be approved again");
-    // Turning on auto-approval for its kind drains the queue (after the call returns), which must
-    // not send it either: over the drain's window, no second attempt reaches the gatekeeper.
-    await ws.setAutoApprovedActionKind(action.gatekeeperId!, SET_VALUE);
-    await expect(waitFor("a second apply attempt", async () =>
-      await applyAttempts(label) > 1 || null, 2_000)).rejects.toThrow("Timed out");
-    expect((await session.listActions({ filter: "action" })).entries.find(e => e.id === action.id))
-      .toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown", retryable: false } });
     await ws.rejectAction(action.id);
   });
   expect(await applyAttempts(label)).toBe(1);
@@ -444,7 +439,8 @@ it.concurrent("a generic thrown error is never sent again, manually or by a late
 });
 
 // The same rule holds when the auto drain made the failed attempt: enabling the rule again drains
-// the queue once more, and nothing is sent.
+// the queue once more, and nothing is sent. The failed action is the first in id order, so no
+// earlier action can signal the second drain's completion: this checks absence over a window.
 it.concurrent("an auto-drained attempt that threw is not sent again by the next drain", async () => {
   await using session = await openSession(
     models.script([writeValues("4, { autoApprovable: true }"), { text: "Not reached." }]), "agentdrainnoresend");
@@ -465,6 +461,115 @@ it.concurrent("an auto-drained attempt that threw is not sent again by the next 
     await ws.rejectAction(action.id);
   });
   expect(await applyAttempts(label)).toBe(1);
+});
+
+// Any earlier attempt needs an explicit `retryable: true` before another send, whatever its outcome;
+// an untouched pending action is approvable. A flag left out counts as no.
+it.concurrent.each([
+  ["unknown", "retry", true],
+  ["unknown", "unknown", false],
+  ["unknown", "unknown-unflagged", false],
+  ["notApplied", "notApplied-retry", true],
+  ["notApplied", "refused", false],
+  ["notApplied", "notApplied-unflagged", false],
+] as const)("after a %s attempt (%s), another send is allowed: %s", async (outcome, failure, allowed) => {
+  await using session = await openSession(
+    models.script([writeValues(6), { text: "Done." }]), `agentflag${failure.replaceAll("-", "")}`);
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 6.");
+  const [action] = await waitForPendingActions(session, 1);
+  const entryOf = async () => (await session.listActions({ filter: "action" })).entries.find(e => e.id === action.id);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await failNextApply(label, `The ${failure} attempt.`, failure);
+    await expect(ws.approveAction(action.id)).rejects.toThrow(`The ${failure} attempt.`);
+    const attempted = await entryOf();
+    expect(attempted?.type === "action" && attempted.lastAttempt?.outcome).toBe(outcome);
+    expect(attempted?.type === "action" && attempted.lastAttempt?.retryable)
+      .toBe(failure.endsWith("unflagged") ? undefined : allowed);
+    if (allowed) {
+      await ws.approveAction(action.id);
+      expect(await entryOf()).toMatchObject({ state: "approved" });
+    } else {
+      // Refused before the gatekeeper: a pending action as "cannot be approved again", one a
+      // refusal already ended as failed as "not pending".
+      await expect(ws.approveAction(action.id)).rejects.toThrow(/cannot be approved again|not pending/);
+      if ((await entryOf())?.state === "pending") await ws.rejectAction(action.id);
+    }
+  });
+  expect(await applyAttempts(label)).toBe(allowed ? 2 : 1);
+});
+
+// A second dispatch of an action the adapter said could be retried may itself be cut off by a
+// restart: recovery replaces the earlier attempt with an unknown, non-retryable one stamped at
+// recovery (keeping when that dispatch started), so there is no third send, and a subscriber
+// resuming from a watermark set after it started still receives it.
+it.concurrent("a retried dispatch interrupted by a restart is recovered as non-retryable and never sent a third time", async () => {
+  await using session = await openSession(
+    models.script([writeValues(1, 2), { text: "Not reached." }]), "agentretryinterrupted");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 1, then 2.");
+  const [first, second] = await waitForPendingActions(session, 2);
+  let watermark: Date | undefined;
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await failNextApply(label, "The answer was lost; the write can be replayed.", "retry");
+    await expect(ws.approveAction(first!.id)).rejects.toThrow("can be replayed");
+    await control("hold-next-apply", { label });
+    const approval = ws.approveAction(first!.id);
+    try {
+      await waitFor("the second dispatch", async () => await applyAttempts(label) === 2 || null);
+      // Another action changes after that dispatch started, moving a subscriber's watermark on.
+      await ws.approveAction(second!.id);
+      const decided = (await ws.listActions({ filter: "action" })).entries.find(e => e.id === second!.id);
+      if (!decided) throw new Error("The second action is not in the log");
+      watermark = actionChangeTime(decided);
+      await restartWorkspace(harness.url, ws);
+      // The held apply is released only once the restart has happened, so it cannot finish first.
+      await waitFor("the restart to drop the session", async () => session.connectionDrops > 0 || null);
+    } finally {
+      await control("release-apply", { label });
+      await Promise.allSettled([approval]);
+    }
+  });
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    const replay = new ActionRecorder();
+    using replayStub = stubFor(replay);
+    using _subscription = await ws.subscribeToActions(replayStub, watermark);
+    const recovered = await waitFor("the recovered outcome in the replay", async () =>
+      replay.entries.find(entry => entry.id === first!.id) ?? null);
+    expect(recovered).toMatchObject({ state: "pending", lastAttempt: {
+      outcome: "unknown", retryable: false, message: expect.stringContaining("interrupted after it was sent") } });
+    const attempt = recovered.type === "action" ? recovered.lastAttempt : undefined;
+    expect(attempt?.startedAt).toBeInstanceOf(Date);
+    expect(attempt!.at.getTime()).toBeGreaterThan(attempt!.startedAt!.getTime());
+    await expect(ws.approveAction(first!.id)).rejects.toThrow("cannot be approved again");
+  });
+  // The first apply, the retried one the restart cut off, the second action's: no third send.
+  expect(await applyAttempts(label)).toBe(3);
+});
+
+// The auto drain applies in id order and stops at the first action it cannot apply. An earlier
+// action of the same kind applying is the drain's completed signal that it reached the later one,
+// which a generic thrown error left unretryable: it is refused, so nothing more is sent.
+it.concurrent("the auto drain reaches an unretryable action and does not send it", async () => {
+  await using session = await openSession(models.script([
+    writeValues("1, { autoApprovable: true }", "2, { autoApprovable: true }"), { text: "Not reached." },
+  ]), "agentdrainsignal");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 1, then 2.");
+  const [earlier, later] = await waitForPendingActions(session, 2);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await failNextApply(label, "The later write broke off.");
+    await expect(ws.approveAction(later!.id)).rejects.toThrow("broke off");
+    await ws.setAutoApprovedActionKind(earlier!.gatekeeperId!, SET_VALUE);
+    await waitFor("the drain to apply the earlier action", async () =>
+      (await session.listActions({ filter: "action" })).entries
+        .find(e => e.id === earlier!.id && e.type === "action" && e.state === "approved") ?? null);
+    expect((await session.listActions({ filter: "action" })).entries.find(e => e.id === later!.id))
+      .toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown", retryable: false } });
+    await ws.rejectAction(later!.id);
+  });
+  // The later action's failed attempt and the earlier action's apply: the later was not resent.
+  expect(await applyAttempts(label)).toBe(2);
 });
 
 // An apply a restart interrupts after dispatch may have reached the provider: the action comes back
@@ -491,8 +596,8 @@ it.concurrent("an apply interrupted by a restart comes back with an unknown outc
   const recovered = entries.find(candidate => candidate.id === action.id);
   expect(recovered).toMatchObject({ state: "pending", lastAttempt: {
     outcome: "unknown", message: expect.stringContaining("interrupted after it was sent") } });
-  // Recovery says nothing about replaying it (no flag), so it is never sent again.
-  expect(recovered?.type === "action" && recovered.lastAttempt?.retryable).toBeUndefined();
+  // Recovery says nothing about replaying it safely, so it is recorded non-retryable and never sent again.
+  expect(recovered?.type === "action" && recovered.lastAttempt?.retryable).toBe(false);
   await withOwnerWorkspace(harness.url, session.username, async ws => {
     await expect(ws.approveAction(action.id)).rejects.toThrow("cannot be approved again");
   });

@@ -103,7 +103,18 @@ function newAccountLabel(): string {
 }
 
 /** How the next failed test apply fails (see failNextApply). */
-type ApplyFailureOutcome = "thrown" | "retry" | "refused" | "unknown";
+type ApplyFailureOutcome =
+  | "thrown" | "retry" | "refused" | "unknown"
+  | "notApplied-retry" | "unknown-unflagged" | "notApplied-unflagged";
+
+/** The structured results `failNextApply` can return directly, by outcome name. */
+const STRUCTURED: Partial<Record<ApplyFailureOutcome, { outcome: "unknown" | "notApplied"; retryable?: boolean }>> = {
+  "retry": { outcome: "unknown", retryable: true },
+  "notApplied-retry": { outcome: "notApplied", retryable: true },
+  // A gatekeeper that leaves the flag out (an older one, or one built against an earlier contract).
+  "unknown-unflagged": { outcome: "unknown" },
+  "notApplied-unflagged": { outcome: "notApplied" },
+};
 
 @validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
@@ -183,9 +194,10 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 
   /**
    * The next applyAction() for `label` fails with `reason`: as a plain thrown error by default
-   * (which asserts nothing), as an unknown outcome the adapter supports retrying (`retry`: a
-   * structured `{outcome: "unknown", retryable: true}`), as a known refusal (`ActionApplyError`,
-   * nothing applied), or with an unknown outcome (`ActionOutcomeUnknownError`, possibly applied).
+   * (which asserts nothing), as a known refusal (`ActionApplyError`, nothing applied), with an
+   * unknown outcome (`ActionOutcomeUnknownError`, possibly applied), or as one of the structured
+   * results in `STRUCTURED`: `retry` is an unknown outcome the adapter supports retrying,
+   * `notApplied-retry` a refusal that may pass, and the `-unflagged` ones carry no `retryable`.
    */
   failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "thrown"): void {
     this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome });
@@ -732,7 +744,7 @@ export class TestGatekeeper
 
   /** The kit's terminal failures reach the overseer as its structured result (applyActionOutcome). */
   async applyAction(action: number): Promise<void | { failed: ActionApplyFailure }> {
-    let retry: string | undefined;
+    let structured: { outcome: "unknown" | "notApplied"; retryable?: boolean; message: string } | undefined;
     const outcome = await applyActionOutcome(async () => {
       const state = control(this.ctx.exports);
       const { label } = this.ctx.props;
@@ -742,15 +754,16 @@ export class TestGatekeeper
       const failure = await state.takeApplyFailure(label);
       if (failure?.outcome === "refused") throw new ActionApplyError(failure.reason);
       if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
-      if (failure?.outcome === "retry") {
-        retry = failure.reason;
+      const result = failure && STRUCTURED[failure.outcome];
+      if (failure && result) {
+        structured = { ...result, message: failure.reason };
         return;
       }
       if (failure !== null) throw new Error(failure.reason);
       await state.applyAction(label, action);
     });
-    // An adapter that can replay its write says so explicitly; the kit has no such result.
-    if (retry !== undefined) return { failed: { outcome: "unknown", retryable: true, message: retry } };
+    // Returned as is, so a missing flag reaches the overseer missing, as from an older gatekeeper.
+    if (structured !== undefined) return { failed: structured as ActionApplyFailure };
     return outcome;
   }
 
@@ -955,19 +968,21 @@ export default {
     }
 
     // One-shot: the next applyAction() for `label` throws `reason` without applying.
-    // Body: {"label": "...", "reason": "...", "outcome"?: "thrown" | "retry" | "refused" | "unknown"}
+    // Body: {"label": "...", "reason": "...", "outcome"?: an ApplyFailureOutcome}
     if (url.pathname === "/control/fail-next-apply" && req.method === "POST") {
       const { label, reason, outcome } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
       }
-      if (outcome !== undefined && outcome !== "thrown" && outcome !== "retry" && outcome !== "refused" &&
-          outcome !== "unknown") {
-        return badRequest("`outcome` must be thrown, retry, refused or unknown when present");
+      const outcomes = ["thrown", "retry", "refused", "unknown", "notApplied-retry", "unknown-unflagged",
+        "notApplied-unflagged"];
+      if (outcome !== undefined && (typeof outcome !== "string" || !outcomes.includes(outcome))) {
+        return badRequest(`\`outcome\` must be one of ${outcomes.join(", ")} when present`);
       }
       await control(ctx.exports).failNextApply(
-          label, reason ?? "The test gatekeeper failed to apply this action.", outcome ?? "thrown");
+          label, reason ?? "The test gatekeeper failed to apply this action.",
+          (outcome ?? "thrown") as ApplyFailureOutcome);
       return new Response(null, { status: 204 });
     }
 
