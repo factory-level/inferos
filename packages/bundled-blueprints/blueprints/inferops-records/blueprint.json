@@ -1,0 +1,31 @@
+{
+  "$comment": "The `table` binding is an InferOpsTableSession from the inferops gatekeeper (custom-gatekeepers/gatekeeper-inferops). blueprintId is the install key: never rename it.",
+  "blueprintId": "inferops.records",
+  "title": "InferOps Records",
+  "description": "Use to view the rows of one InferOps custom table, read-only, with the columns its owner did not mark personal. Needs one InferOps custom table connected as the `table` binding. The connection is private to the person who made it, so a gadget using it cannot be shared.",
+  "output": {
+    "id": "records",
+    "noun": "Records table",
+    "plural": "Records tables",
+    "icon": "table"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "revision": 1,
+  "created": "2026-10-07T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-10-07T00:00:00.000Z",
+  "bindings": {
+    "table": {
+      "type": "gatekeeper",
+      "title": "InferOps custom table",
+      "description": "The InferOps custom table this gadget shows, e.g. inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001.",
+      "gatekeeperName": "inferops",
+      "typeUrlPattern": "inferops://*/object/table/*",
+      "resourceUrl": "inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001"
+    }
+  }
+}

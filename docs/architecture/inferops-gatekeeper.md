@@ -3,6 +3,7 @@ title: InferOps gatekeeper
 covers:
   - custom-gatekeepers/gatekeeper-inferops
   - packages/bundled-blueprints/blueprints/inferops-kanban
+  - packages/bundled-blueprints/blueprints/inferops-records
   - packages/gatekeeper-kit
   - packages/workshop-shared/src/gatekeeper.ts
   - packages/workshop-backend/src/user.ts
@@ -83,6 +84,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/project-ui.tsx` | Organization, workspace and project picker built by the shared `build:configurator` task. It builds `inferops://<organization>.<workspace>/project/board/<KEY>` from an organization label, a workspace slug from the account's list and a project; with both left empty it asks the gatekeeper for a default host, which only a demo account has (`demo.local`). It duplicates the URL grammar for prefilling, kept in step by `__tests__/resources.test.ts`. |
 | `scripts/run-dev-server.ts` | Passes `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG` from the shell or root `.dev.vars` into the gatekeeper's generated dev config, resolves `INFERLAB_AUTH_ORIGIN` and `AUTH_GATEKEEPERS` for a wrapper's sign-in flag, and refuses to start when InferOps sign-in is asked for without the gatekeeper or an InferLab origin. |
 | `packages/bundled-blueprints/blueprints/inferops-kanban` | Kanban gadget expecting a `board` binding of type `InferOpsProjectSession`. |
+| `packages/bundled-blueprints/blueprints/inferops-records` | Records gadget (`inferops.records`) expecting a `table` binding of type `InferOpsTableSession`: a read-only table of up to 50 rows. See [custom tables](#custom-tables). |
 | `scripts/release/manifest-lib.ts` | Lists the gatekeeper as taking no default OAuth inputs and as install-once. It ships because its `connection.json` status is `reference`; an unreleased connection package does not. |
 
 ## Data and Control Flow
@@ -410,6 +412,7 @@ A fourth resource kind, `inferops://<tenant>.<workspace>/object/table/<tableId>`
 - **Errors.** InferOps' 403 and 404 both read as one `NOT_FOUND`; a 400 is `INVALID_REQUEST` without InferOps' text; a malformed answer is `UNAVAILABLE`, logged by operation name and field only.
 - **Observers.** Strategy A: `addObserver` always throws (`…private to the person who connected it, so this gadget cannot be shared.`) and `removeObserver` does nothing; the account's verifier is not consulted. Sharing a workspace whose gadget holds a table binding is therefore refused at the collaborator's open. Observations do not set `containsRestrictedData`.
 - **Writes.** None: `applyAction`, `rejectAction` and `revertAction` throw, and no session method proposes an action.
+- **Display.** The bundled `inferops.records` gadget shows a table through the existing `inferos.gadget` canvas kind and the workspace's own gadget view; there is no new kernel widget kind. Its Durable Object has one call, `loadRows()` → `table.listRecords({ limit: 50 })`, and stores nothing; the client draws the rows with the definition returned with them, every label and value as a text node, and relation cells as link counts. Each load clears what was shown and only the latest load's answer is drawn (a generation per load), so a late answer for an earlier binding or account cannot repopulate it; a refusal (`unavailable`: missing, refused or signed out), the switch (`disabled`), an error, no binding and an empty table each have their own notice and show no rows. Because the binding is private, the gadget is the connecting person's own: owner-workspace display, not shared or console access. A published bound widget ([#183](https://github.com/factory-level/inferos/pull/183)'s registry refuses bindings) is outside this slice.
 
 Startup checks: `run-dev-server.ts` refuses to start when `DISABLE_PASSWORD_AUTH=true` leaves no
 gatekeeper allowlisted, or when `AUTH_GATEKEEPERS` names `inferops` (from the shell, or from a
