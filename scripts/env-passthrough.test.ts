@@ -107,6 +107,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "INFEROPS_ENABLED",
       // run-dev-server.ts resolves the coding-dispatch switch and allowlist the same way.
       "CODING_WORKBENCH_ENABLED", "CODING_WORKBENCH_REPOS",
+      // ...and the custom-tables switch.
+      "INFEROPS_TABLES_ENABLED",
       "ANTHROPIC_API_KEY",
       "GITHUB_REPOSITORY", "GITHUB_TOKEN", "PREVIEW_ADMINS", "PREVIEW_GITHUB_CLIENT_ID",
       "PREVIEW_GITHUB_CLIENT_SECRET", "PREVIEW_NAME", "PREVIEW_PR_NUMBER",
