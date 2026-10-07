@@ -103,7 +103,7 @@ function newAccountLabel(): string {
 }
 
 /** How the next failed test apply fails (see failNextApply). */
-type ApplyFailureOutcome = "retryable" | "refused" | "unknown";
+type ApplyFailureOutcome = "thrown" | "retry" | "refused" | "unknown";
 
 @validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
@@ -182,11 +182,12 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * The next applyAction() for `label` fails with `reason`: as a retryable error by default, as a
-   * known refusal (`ActionApplyError`, nothing applied), or with an unknown outcome
-   * (`ActionOutcomeUnknownError`, possibly applied).
+   * The next applyAction() for `label` fails with `reason`: as a plain thrown error by default
+   * (which asserts nothing), as an unknown outcome the adapter supports retrying (`retry`: a
+   * structured `{outcome: "unknown", retryable: true}`), as a known refusal (`ActionApplyError`,
+   * nothing applied), or with an unknown outcome (`ActionOutcomeUnknownError`, possibly applied).
    */
-  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "retryable"): void {
+  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "thrown"): void {
     this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome });
   }
 
@@ -731,7 +732,8 @@ export class TestGatekeeper
 
   /** The kit's terminal failures reach the overseer as its structured result (applyActionOutcome). */
   async applyAction(action: number): Promise<void | { failed: ActionApplyFailure }> {
-    return applyActionOutcome(async () => {
+    let retry: string | undefined;
+    const outcome = await applyActionOutcome(async () => {
       const state = control(this.ctx.exports);
       const { label } = this.ctx.props;
       const held = await state.takeNextApplyHold(label);
@@ -740,9 +742,16 @@ export class TestGatekeeper
       const failure = await state.takeApplyFailure(label);
       if (failure?.outcome === "refused") throw new ActionApplyError(failure.reason);
       if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
+      if (failure?.outcome === "retry") {
+        retry = failure.reason;
+        return;
+      }
       if (failure !== null) throw new Error(failure.reason);
       await state.applyAction(label, action);
     });
+    // An adapter that can replay its write says so explicitly; the kit has no such result.
+    if (retry !== undefined) return { failed: { outcome: "unknown", retryable: true, message: retry } };
+    return outcome;
   }
 
   async rejectAction(action: number): Promise<void> {
@@ -946,18 +955,19 @@ export default {
     }
 
     // One-shot: the next applyAction() for `label` throws `reason` without applying.
-    // Body: {"label": "...", "reason": "..."}
+    // Body: {"label": "...", "reason": "...", "outcome"?: "thrown" | "retry" | "refused" | "unknown"}
     if (url.pathname === "/control/fail-next-apply" && req.method === "POST") {
       const { label, reason, outcome } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
       }
-      if (outcome !== undefined && outcome !== "retryable" && outcome !== "refused" && outcome !== "unknown") {
-        return badRequest("`outcome` must be retryable, refused or unknown when present");
+      if (outcome !== undefined && outcome !== "thrown" && outcome !== "retry" && outcome !== "refused" &&
+          outcome !== "unknown") {
+        return badRequest("`outcome` must be thrown, retry, refused or unknown when present");
       }
       await control(ctx.exports).failNextApply(
-          label, reason ?? "The test gatekeeper failed to apply this action.", outcome ?? "retryable");
+          label, reason ?? "The test gatekeeper failed to apply this action.", outcome ?? "thrown");
       return new Response(null, { status: 204 });
     }
 

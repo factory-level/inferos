@@ -1,11 +1,12 @@
 import type { ActionLogEntry } from '@gadgets/workshop-shared/api'
 
 /**
- * Whether approving again is allowed: false once the gatekeeper said the last attempt cannot be
- * safely repeated, which the overseer enforces too. Such an action can only be denied.
+ * Whether approving again is allowed, by the overseer's rule: an attempt that may have applied is
+ * repeated only when the gatekeeper explicitly said it can replay it. Otherwise the action can
+ * only be denied.
  */
 export const canApproveAgain = (record: ActionLogEntry): boolean =>
-  record.type !== 'action' || record.lastAttempt?.retryable !== false
+  record.type !== 'action' || record.lastAttempt?.outcome !== 'unknown' || record.lastAttempt.retryable === true
 
 /**
  * What a person should know about an action's last unsuccessful apply, or null when there was none.

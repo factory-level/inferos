@@ -5700,11 +5700,14 @@ class OverseerImpl implements AgentHooks {
 
   async #applyPendingAction(record: ActionRecord & {type: "action"},
                             resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
-    // The gatekeeper said a repeat is unsafe or futile (it may have applied and cannot be replayed),
-    // so nothing is sent and nothing is recorded: the person checks the provider and rejects it.
-    let last = this.storage.actions.get(record.id);
-    if (last?.type === "action" && last.lastAttempt?.retryable === false) {
-      throw new Error(`${NOT_RETRYABLE_MESSAGE} ${last.lastAttempt.message}`);
+    // An attempt that may have applied is sent again only when the gatekeeper's structured answer
+    // said it can replay it (`retryable: true`). A thrown error, an attempt recorded without the
+    // flag and a recovered interruption say nothing of the kind, so nothing is sent and nothing is
+    // recorded: the person checks the provider and rejects it.
+    let stored = this.storage.actions.get(record.id);
+    let last = stored?.type === "action" ? stored.lastAttempt : undefined;
+    if (last?.outcome === "unknown" && last.retryable !== true) {
+      throw new Error(`${NOT_RETRYABLE_MESSAGE} ${last.message}`);
     }
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
@@ -5730,9 +5733,10 @@ class OverseerImpl implements AgentHooks {
       result = await gatekeeper.applyAction(record.action,
           new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
     } catch (error) {
-      // A thrown error asserts nothing about the provider, so the outcome is unknown.
+      // A thrown error asserts nothing about the provider, so the outcome is unknown, and nothing
+      // says the gatekeeper can replay it safely.
       this.#recordUnsuccessfulApply(record, {
-        outcome: "unknown", retryable: true,
+        outcome: "unknown", retryable: false,
         message: error instanceof Error ? error.message : String(error),
       }, resolvedBy, autoApproved);
       throw error;

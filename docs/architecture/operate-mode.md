@@ -104,9 +104,9 @@ A session can show an **approval** under review. `reviewApproval` names one pend
 **Approval outcomes.** An action records what its apply actually established. `Gatekeeper.applyAction` may return `{failed: ActionApplyFailure}` instead of throwing, since RPC carries only an error's message. The result's `outcome` is `notApplied` (the provider effect is known absent) or `unknown` (it may exist), and `retryable` says whether applying again may succeed. `OverseerImpl.applyPendingAction` turns the answer into one of three facts:
 - **Applied.** The action becomes `approved`.
 - **Refused and not retryable** (`notApplied`, `retryable: false`). The action becomes `failed`, a terminal `ActionState` that can't be approved again, with `lastAttempt {outcome, message, code?, at}`.
-- **Anything else, including a thrown error, which asserts nothing.** The action stays `pending`, with `lastAttempt` recording the reason, whether the effect may exist, and `retryable` (a thrown error is retryable).
+- **Anything else, including a thrown error, which asserts nothing.** The action stays `pending`, with `lastAttempt` recording the reason, whether the effect may exist, and `retryable` (a thrown error is recorded `false`: it asserts nothing).
 
-`lastAttempt.retryable: false` (an unknown outcome the gatekeeper cannot safely repeat) is enforced: `#applyPendingAction` refuses another approval, manual or by the auto-approval drain, before reaching the gatekeeper and without recording anything, so the action can only be rejected. An attempt recorded before `retryable` was kept, and a recovered interrupted apply, have none and may be approved again; the gatekeeper decides what a repeat sends. The Workshop disables Approve for such an action in Activity, the chat card and the Operate approvals panel (`canApproveAgain` in `actionAttempt.ts`), and `attemptNotice` tells the person to check the provider and deny it. Activity's review card shows the last attempt's notice too.
+An attempt whose outcome is `unknown` is sent again only when the gatekeeper's structured result said `retryable: true` (an adapter that can replay its write, such as InferOps' board writes under their idempotency key). Otherwise (a thrown error, an attempt recorded before `retryable` was kept, a recovered interrupted apply, or `false`) `#applyPendingAction` refuses another approval, manual or by the auto-approval drain, before reaching the gatekeeper and without recording anything, so the action can only be rejected. A pending `notApplied` attempt (known absent, and retryable, since a non-retryable one ends `failed`) may be approved again. The Workshop disables Approve for such an action in Activity, the chat card and the Operate approvals panel (`canApproveAgain` in `actionAttempt.ts`), and `attemptNotice` tells the person to check the provider and deny it. Activity's review card shows the last attempt's notice too.
 
 Further details:
 - An unsuccessful apply never sets `appliedAt`. `actionChangeTime` (and so the `byLastChanged` resume index) uses `lastAttempt.at` for it, so reconnecting subscribers see the attempt.
@@ -121,7 +121,8 @@ Further details:
 - `workshop-agent-actions.test.ts` covers:
   - a refused apply that ends failed with its reason, applies nothing, refuses a second approval and resumes its turn;
   - an unknown outcome that stays pending with its warning through a restart and a rejection;
-  - an unknown outcome that cannot be repeated refusing a second approval without reaching the gatekeeper, then rejected, and a retryable failure recorded as such and approved again;
+  - no second send after an unknown outcome that is not explicitly replayable: a kit `ActionOutcomeUnknownError`, a generic thrown error (manual approval, then a later auto-approval drain) and a recovered interrupted apply are all refused before the gatekeeper, and an attempt the auto drain itself made is not sent by the next drain;
+  - an unknown outcome the adapter can replay (`retryable: true`) recovering through another approval;
   - two concurrent approvals that apply once;
   - a refusal after an unknown outcome that keeps the action pending and possibly applied;
   - an apply interrupted by a restart that comes back with an unknown outcome;

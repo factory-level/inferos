@@ -13,7 +13,7 @@ describe('attemptNotice', () => {
   })
 
   it('warns that an unknown outcome may already have been applied', () => {
-    expect(attemptNotice(action({ lastAttempt: { outcome: 'unknown', message: 'Timed out.', at: new Date() } })))
+    expect(attemptNotice(action({ lastAttempt: { outcome: 'unknown', message: 'Timed out.', retryable: true, at: new Date() } })))
       .toEqual({ tone: 'warning', text: 'It may already have been applied; the outcome is unknown: Timed out.' })
   })
 
@@ -24,9 +24,11 @@ describe('attemptNotice', () => {
     expect(canApproveAgain(record)).toBe(false)
   })
 
-  it('allows approving again unless the last attempt said otherwise', () => {
+  it('repeats an unknown attempt only when the gatekeeper explicitly said it can', () => {
     expect(canApproveAgain(action({}))).toBe(true)
-    expect(canApproveAgain(action({ lastAttempt: { outcome: 'unknown', message: 'x', at: new Date() } }))).toBe(true)
+    expect(canApproveAgain(action({ lastAttempt: { outcome: 'unknown', message: 'x', retryable: true, at: new Date() } }))).toBe(true)
+    // An attempt recorded without the flag, or a recovered interruption, says nothing of the kind.
+    expect(canApproveAgain(action({ lastAttempt: { outcome: 'unknown', message: 'x', at: new Date() } }))).toBe(false)
     expect(canApproveAgain(action({ lastAttempt: { outcome: 'notApplied', message: 'x', retryable: true, at: new Date() } }))).toBe(true)
   })
 

@@ -2288,7 +2288,7 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
  * Specifies the state of an action in the action log:
  * * pending: Action has not been applied yet. It is waiting for approval (or, after an
  *   unsuccessful attempt recorded in `lastAttempt`, for another decision: only rejection, when
- *   that attempt is not `retryable`).
+ *   that attempt's outcome is unknown and it is not explicitly `retryable`).
  * * approved: Action was approved and applied.
  * * rejected: Action was rejected by the user.
  * * failed: Action was approved, but the provider refused it and it was not applied; it cannot
@@ -2309,11 +2309,11 @@ export type ActionAttempt = {
   /** The provider's error code, when it gave one. */
   code?: string;
   /**
-   * Whether approving again may succeed and is safe, as the gatekeeper answered
-   * (`ActionApplyFailure.retryable`). When false, the overseer refuses another approval without
-   * reaching the gatekeeper, and the action can only be rejected. Absent on attempts recorded
-   * before it was kept and on a recovered interrupted apply: those may be approved again, and the
-   * gatekeeper decides what a repeat sends.
+   * Whether approving again may succeed and is safe, as the gatekeeper's structured answer said
+   * (`ActionApplyFailure.retryable`); a thrown error is recorded as false. An `unknown` attempt is
+   * sent again only when this is true: otherwise (false, or absent on an attempt recorded before
+   * it was kept or on a recovered interrupted apply) the overseer refuses another approval,
+   * manual or automatic, without reaching the gatekeeper, and the action can only be rejected.
    */
   retryable?: boolean;
   /**
