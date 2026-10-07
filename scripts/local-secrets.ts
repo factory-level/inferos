@@ -38,12 +38,17 @@ export function installDevVarsSecrets(path: string, values: Record<string, strin
   };
 }
 
-// A dotenv value Wrangler reads back exactly: the first quote the value doesn't contain. Single
-// quotes keep `#` and `"` literally; backticks also allow newlines; JSON is the last resort, for a
-// single-line value with both other quotes. A value no quote can hold is refused, not mangled.
-function dotenvQuoted(key: string, value: string): string {
-  if (!/['\r\n]/.test(value)) return `'${value}'`;
+/**
+ * A dotenv value Wrangler's parser (the bundled dotenv) reads back exactly. Single and backtick
+ * quotes are literal and may span lines but cannot contain their own quote; double quotes turn
+ * `\n` and `\r` sequences into line breaks, so they are used only with no `"` and no backslash; and
+ * the parser turns every CR into LF. A value none of these can hold is refused before anything is
+ * written, never mangled.
+ */
+export function dotenvQuoted(key: string, value: string): string {
+  if (value.includes('\r')) throw new Error(`${key} cannot be written to a .dev.vars file: it holds a carriage return.`);
+  if (!value.includes("'")) return `'${value}'`;
   if (!value.includes('`')) return `\`${value}\``;
-  if (!/["\r\n]/.test(value)) return JSON.stringify(value);
-  throw new Error(`${key} cannot be written to a .dev.vars file: it holds every kind of quote.`);
+  if (!/["\\]/.test(value)) return `"${value}"`;
+  throw new Error(`${key} cannot be written to a .dev.vars file: it holds ', \` and " or \\ together.`);
 }

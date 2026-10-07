@@ -40,7 +40,7 @@ import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
 import { startOpenAiCompanion } from './openai-companion.ts';
 import { installDevVarsSecrets, installLocalSecrets } from './local-secrets.ts';
-import { splitGatekeeperSecrets } from './gatekeeper-dev-secrets.ts';
+import { splitGatekeeperSecrets, withoutLocalOverrides } from './gatekeeper-dev-secrets.ts';
 import { recordDevServer } from "./local/stack.ts";
 import { parseEnv } from 'node:util';
 
@@ -633,10 +633,13 @@ for (const gk of gatekeepers) {
 
   // Credentials go to the gatekeeper's `.dev.vars`, which Wrangler lists as hidden, never into the
   // `vars` its startup table prints.
+  // A key the gatekeeper's own `.dev.vars` already sets keeps the developer's value.
   const { vars, secrets } = splitGatekeeperSecrets(config.vars);
   config.vars = vars;
-  if (Object.keys(secrets).length > 0) {
-    cleanupGatekeeperSecrets.push(installDevVarsSecrets(join(gk.dir, ".dev.vars"), secrets));
+  const devVarsPath = join(gk.dir, ".dev.vars");
+  const generated = withoutLocalOverrides(existsSync(devVarsPath) ? readFileSync(devVarsPath, "utf8") : null, secrets);
+  if (Object.keys(generated).length > 0) {
+    cleanupGatekeeperSecrets.push(installDevVarsSecrets(devVarsPath, generated));
   }
 
   const outPath = join(gk.dir, "wrangler.dev.jsonc");
