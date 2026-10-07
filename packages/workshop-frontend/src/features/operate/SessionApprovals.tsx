@@ -1,4 +1,4 @@
-import { attemptNotice } from '../../actionAttempt'
+import { attemptNotice, canApproveAgain } from '../../actionAttempt'
 import { useEffect, useId, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import { actionChangeTime, type ActionLogEntry, type ActionRequester, type Overseer } from '@gadgets/workshop-shared/api'
@@ -246,7 +246,7 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
                   </button>
                   <div className="flex flex-shrink-0 items-center gap-0.5">
                     <ResolveButton tone="deny" disabled={busy} onClick={() => void decide(item, 'reject')} describedBy={isReviewing ? detailsId : undefined} />
-                    <ResolveButton tone="approve" disabled={busy} onClick={() => void decide(item, 'approve')} describedBy={isReviewing ? detailsId : undefined} />
+                    <ResolveButton tone="approve" disabled={busy || !canApproveAgain(action)} onClick={() => void decide(item, 'approve')} describedBy={isReviewing ? detailsId : undefined} />
                   </div>
                 </div>
                 {(isReviewing || source.restricted) && (

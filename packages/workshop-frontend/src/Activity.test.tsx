@@ -86,6 +86,31 @@ describe('Activity review request fields', () => {
   })
 })
 
+describe('Activity review request after an unsuccessful attempt', () => {
+  const approveButton = () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Approve')
+
+  async function renderAttempted(lastAttempt: NonNullable<Parameters<typeof entry>[1]>['lastAttempt']) {
+    const server = makeOverseer()
+    await view.render(<Activity overseer={server.overseer} restricted={false} view="review" onViewChange={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, { lastAttempt })] })
+    flushFrames()
+  }
+
+  it('shows an unknown outcome that cannot be repeated, and offers only Deny', async () => {
+    await renderAttempted({ outcome: 'unknown', message: 'Lost after sending.', retryable: false, at: new Date(1700000200000) })
+    expect(document.body.textContent).toContain('It cannot be sent again: check it at the provider, then deny it.')
+    expect(approveButton()?.disabled).toBe(true)
+    expect([...document.querySelectorAll('button')].find(b => b.textContent === 'Deny')?.disabled).toBe(false)
+  })
+
+  it('keeps Approve for an attempt that may be repeated, with its reason shown', async () => {
+    await renderAttempted({ outcome: 'unknown', message: 'Briefly unreachable.', retryable: true, at: new Date(1700000200000) })
+    expect(document.body.textContent).toContain('Briefly unreachable.')
+    expect(approveButton()?.disabled).toBe(false)
+  })
+})
+
 describe('history', () => {
   it('shows a failed action as failed, and one whose outcome is unknown as unknown, never as approved', async () => {
     const server = makeOverseer()

@@ -1,4 +1,4 @@
-import { attemptNotice } from './actionAttempt'
+import { attemptNotice, canApproveAgain } from './actionAttempt'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Check, Eye, Lightning, ShieldCheck } from '@phosphor-icons/react'
@@ -658,6 +658,7 @@ function ReviewRequest({
   const fieldsId = `${reviewId}-fields`
   const incompleteId = `${reviewId}-incomplete`
   const incomplete = isDescriptionIncomplete(record)
+  const attempt = attemptNotice(record)
   const describedBy = restricted
     ? [
       noticeId,
@@ -707,9 +708,15 @@ function ReviewRequest({
             <AlwaysApproveButton onClick={onAlwaysApprove} disabled={processing} />
           )}
           <ResolveButton tone="deny" onClick={onReject} disabled={processing} describedBy={describedBy} />
-          <ResolveButton tone="approve" onClick={onApprove} disabled={processing} describedBy={describedBy} />
+          <ResolveButton tone="approve" onClick={onApprove} disabled={processing || !canApproveAgain(record)} describedBy={describedBy} />
         </div>
       </div>
+
+      {attempt && (
+        <p className={`m-0 mt-1.5 max-w-2xl text-[12px] leading-4 ${attempt.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>
+          {attempt.text}
+        </p>
+      )}
 
       {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2 max-w-2xl" />}
 

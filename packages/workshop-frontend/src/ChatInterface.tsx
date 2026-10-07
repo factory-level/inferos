@@ -1,4 +1,4 @@
-import { attemptNotice } from "./actionAttempt";
+import { attemptNotice, canApproveAgain } from "./actionAttempt";
 import { logRpcFailure } from "./rpcErrors";
 import {
   useState,
@@ -3388,7 +3388,7 @@ function ChatInterface({
           tone="approve"
           variant={isBlocking ? "filled" : "quiet"}
           onClick={() => void resolveAction(msg.actionId, "approve")}
-          disabled={isProc}
+          disabled={isProc || !canApproveAgain(log)}
           describedBy={describedBy}
         />
       </>
