@@ -115,6 +115,7 @@ Further details:
 - One decision runs per action at a time. `withActionClaim` holds an in-memory claim from the pending check to the outcome for an apply (manual approval and the auto-approval drain alike) or a rejection (`rejectAction`, which keeps the claim through its gatekeeper call, a re-read of the record and the stored rejection). Concurrent approvals reach the gatekeeper once, and a rejection cannot interleave with an apply.
 - A `failed` awaited action counts as decided. Its agent turn resumes with a note naming what was refused and why, and nothing is reported as applied.
 - gatekeeper-kit's `applyActionOutcome` turns `ActionApplyError` into a not-applied refusal and `ActionOutcomeUnknownError` into an unknown, non-retryable outcome. A journal record replayed after a restart rethrows its stored classification. The test gatekeeper, the tickets connector and the connection template (`scripts/connection-template`) use it.
+- The InferOps gatekeeper returns its own outcomes: a board write refused on its first attempt, or anything that failed before sending, is not applied; every other failure, and any coding or Wiki write that may have reached InferOps, is unknown. See [InferOps gatekeeper](inferops-gatekeeper.md) (apply outcomes).
 - `workshop-agent-actions.test.ts` covers:
   - a refused apply that ends failed with its reason, applies nothing, refuses a second approval and resumes its turn;
   - an unknown outcome that stays pending with its warning through a restart and a rejection;

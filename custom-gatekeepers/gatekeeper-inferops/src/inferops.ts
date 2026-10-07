@@ -69,7 +69,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
+  AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -78,9 +78,12 @@ import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired,
 } from "@gadgets/gatekeeper-kit/credentials";
 import {
-  InferOpsError, inferOpsErrorCode, type InferOpsClient, type ProjectSummary, type RunRecord,
-  type WikiDocumentHead,
+  InferOpsError, atStage, inferOpsErrorCode, isPolicyRefusal, writeStage, type InferOpsClient,
+  type ProjectSummary, type RunRecord, type WikiDocumentHead, type WriteStage,
 } from "./inferops-client";
+import {
+  BOARD_WRITES, CheckRefused, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
+} from "./apply-attempts";
 import {
   WIKI_FORBIDDEN, connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority,
   type InferOpsEndpoint,
@@ -106,8 +109,8 @@ import {
 import {
   fingerprintOf, isCodingAction, isIssueChange, isWikiAction, matchesFingerprint, readAction,
   type ActionRecord, type CancelRunAction, type CreateAction, type DispatchAction,
-  type DocumentUpdateAction, type SectionUpdateAction, type StagedAction, type UpdateAction,
-  type WikiAction,
+  type DocumentUpdateAction, type SectionUpdateAction, type StagedAction, type StoredFailure,
+  type UpdateAction, type WikiAction,
 } from "./actions";
 import {
   authoredContent, composeDocumentText, embeddedReferences, masterStructureText, wikilinksOf,
@@ -132,7 +135,11 @@ export { InferLabLogin, InferOpsCredentials, MockInferOps };
 
 const VENDOR_ID = "inferops";
 
-type LogFields = { vendorId: string; projectKey: string; host: string; action: number; code: string };
+type LogFields = {
+  vendorId: string; projectKey: string; host: string; action: number; code: string;
+  /** What a failed apply proves: `notApplied` or `unknown`. */
+  outcome: string;
+};
 const logger = createLogger<LogFields>({ component: "gatekeeper.inferops", vendorId: VENDOR_ID });
 
 // The Phosphor "Kanban" glyph as a self-contained SVG data URI.
@@ -223,7 +230,9 @@ function accountClient(
         return await source.run(operation, { replayable: true });
       } catch (error) {
         if (isCredentialsExpired(error)) {
-          throw new InferOpsError("UNAUTHORIZED", (error as Error).message);
+          // Confirmed dead before InferOps processed anything: no credential to send, or InferOps
+          // refused every send with 401. A changed credential below proves nothing.
+          throw new InferOpsError("UNAUTHORIZED", (error as Error).message, { stage: "refused" });
         }
         if (isCredentialsChanged(error)) {
           throw new InferOpsError("UNAVAILABLE", "This InferOps connection changed. Try again.");
@@ -763,8 +772,93 @@ class ActionBinding<P> {
     }
     const actionId = this.kv.get<number>(NEXT_ACTION_KEY) ?? 1;
     this.kv.put(NEXT_ACTION_KEY, actionId + 1);
-    this.putAction({ ...staged, actionId, status: "pending", fingerprint } as ActionRecord);
+    this.putAction({ ...staged, actionId, status: "pending", fingerprint, attempts: {} } as ActionRecord);
     return { actionId, joined: false };
+  }
+
+  /**
+   * Apply a pending or failed `record` once, keeping what each attempt proves (apply-attempts.ts):
+   *
+   * - a `failed` record replays its stored refusal, and a reconcile-only record that an earlier
+   *   attempt may have sent (or with no attempt history) returns its stored unknown; neither sends;
+   * - otherwise `check` runs (a throw refuses the apply unsent), the record is marked dispatched,
+   *   and `send` makes the write and returns the applied record.
+   *
+   * The applied record is stored outside the failure handling, so a storage error after InferOps
+   * took the write propagates as itself, never as a refusal. Returns the failure to report, or
+   * nothing once applied.
+   */
+  async applyOnce(record: ActionRecord, options: {
+    policy: ApplyPolicy;
+    fields: Partial<LogFields>;
+    check?: () => Promise<void> | void;
+    send: (marked: ActionRecord) => Promise<ActionRecord>;
+  }): Promise<void | { failed: ActionApplyFailure }> {
+    const { policy, fields } = options;
+    if (record.status === "failed") {
+      const stored = record.attempts?.failure;
+      return { failed: {
+        outcome: "notApplied", retryable: false,
+        message: stored?.message ?? applyFailureMessage(record, null),
+        ...(stored?.code !== undefined ? { code: stored.code } : {}),
+      } };
+    }
+    const earlierUncertain = record.attempts === undefined || record.attempts.dispatchedAt !== undefined;
+    if (earlierUncertain && !policy.replayable) {
+      logger.warn(`${record.kind} not sent again`, { event: `${record.kind}.apply.reconcile_only`, ...fields });
+      const stored = record.attempts?.failure;
+      return { failed: {
+        outcome: "unknown", retryable: false,
+        message: stored?.message ?? reconcileOnlyMessage(record),
+        ...(stored?.code !== undefined ? { code: stored.code } : {}),
+      } };
+    }
+    let marked: ActionRecord | undefined;
+    let applied: ActionRecord;
+    try {
+      await options.check?.();
+      marked = this.markDispatched(record);
+      applied = await options.send(marked);
+    } catch (error) {
+      return { failed: this.#settle(marked ?? record, marked ? error : atStage(error, "unsent"),
+                                    earlierUncertain, options) };
+    }
+    this.putAction(applied);
+    logger.info(`${record.kind} applied`, { event: `${record.kind}.applied`, ...fields });
+  }
+
+  /** Store that `record`'s write is about to be sent, before it is (see `ApplyAttempts`). */
+  markDispatched(record: ActionRecord): ActionRecord {
+    const dispatchedAt = record.attempts?.dispatchedAt ?? new Date().toISOString();
+    const marked = { ...record, attempts: { ...record.attempts, dispatchedAt } };
+    this.putAction(marked);
+    return marked;
+  }
+
+  /** Store and return what a failed attempt of `record` proves; see `applyOnce`. */
+  #settle(record: ActionRecord, error: unknown, earlierUncertain: boolean,
+          options: { policy: ApplyPolicy; fields: Partial<LogFields> }): ActionApplyFailure {
+    const code = inferOpsErrorCode(error);
+    const stage = writeStage(error);
+    const { outcome, retryable } = classifyAttempt(
+      { code, stage, policy: isPolicyRefusal(error) }, earlierUncertain, options.policy);
+    const message = outcome === "notApplied"
+      ? error instanceof CheckRefused ? error.reason : applyFailureMessage(record, code)
+      : uncertainMessage(record, code, stage, earlierUncertain, retryable && options.policy.replayable);
+    const failure: StoredFailure = { outcome, message, ...(code !== null ? { code } : {}) };
+    if (outcome === "notApplied") {
+      // No earlier attempt may have been sent, so any mark is this attempt's, and it proved unsent.
+      this.putAction(retryable
+        ? { ...record, attempts: {} }
+        : { ...record, status: "failed", attempts: { failure } });
+    } else {
+      const dispatchedAt = record.attempts?.dispatchedAt ?? new Date().toISOString();
+      this.putAction({ ...record, attempts: { dispatchedAt, failure } });
+    }
+    logger.warn(`${record.kind} failed`, {
+      event: `${record.kind}.apply.failed`, ...options.fields, code: code ?? "UNKNOWN", outcome, error,
+    });
+    return { ...failure, retryable };
   }
 
   /** Submit a staged action; if it was not submitted, forget it so it is no longer simulated. */
@@ -912,55 +1006,45 @@ export class InferOpsProjectGatekeeper
   /**
    * Send the recorded request under the action's idempotency key, so a repeated apply (or one
    * whose response was lost) is answered by InferOps without writing twice. The fingerprint staged
-   * with the action must still match the request, or nothing is sent. `cache` is unused: no git
-   * objects are involved.
+   * with the action must still match the request, or nothing is sent. A failure is returned with
+   * what it proves (apply-attempts.ts): a first attempt InferOps refused, or one that failed before
+   * sending, is known not applied, and a refusal that will stand ends the action `failed` and
+   * no longer simulated; anything after an attempt that may have reached InferOps is unknown.
+   * `cache` is unused: no git objects are involved.
    */
-  async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>):
+      Promise<void | { failed: ActionApplyFailure }> {
     const binding = this.#binding();
     const record = binding.action(actionId);
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
     if (record.status === "applied") return;
-    if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
+    if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
     if (isCodingAction(record) || isWikiAction(record)) {
       throw new Error(`InferOps action ${actionId} is not a board action.`);
     }
     const fields = { projectKey: binding.projectKey, action: actionId };
-    if (!(await matchesFingerprint(binding.projectKey, record))) {
-      logger.error("action no longer matches its fingerprint", {
-        event: "action.fingerprint.mismatch", ...fields, code: "IDEMPOTENCY_CONFLICT",
-      });
-      throw new Error(applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
-    }
     const key = binding.idempotencyKey(actionId);
-    let applied: ActionRecord;
-    try {
-      switch (record.kind) {
-        case "transition":
-          await binding.client.transition(
-            binding.projectKey, record.issueId, record.toStateId, record.expectedRevision, key);
-          applied = { ...record, status: "applied" };
-          break;
-        case "create": {
-          const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
-          applied = { ...record, status: "applied", createdIdentifier: created.identifier };
-          break;
+    return binding.applyOnce(record, {
+      policy: BOARD_WRITES, fields,
+      check: () => assertFingerprint(binding.projectKey, record, fields),
+      async send(marked) {
+        switch (record.kind) {
+          case "transition":
+            await binding.client.transition(
+              binding.projectKey, record.issueId, record.toStateId, record.expectedRevision, key);
+            return { ...marked, status: "applied" };
+          case "create": {
+            const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
+            return { ...marked, status: "applied", createdIdentifier: created.identifier } as ActionRecord;
+          }
+          case "update": {
+            const updated = await binding.client.updateIssue(
+              binding.projectKey, record.issueId, record.changes, record.expectedRevision, key);
+            return { ...marked, status: "applied", appliedRevision: updated.revision } as ActionRecord;
+          }
         }
-        case "update": {
-          const updated = await binding.client.updateIssue(
-            binding.projectKey, record.issueId, record.changes, record.expectedRevision, key);
-          applied = { ...record, status: "applied", appliedRevision: updated.revision };
-          break;
-        }
-      }
-    } catch (error) {
-      const code = inferOpsErrorCode(error);
-      logger.warn(`${record.kind} failed`, {
-        event: `${record.kind}.apply.failed`, ...fields, code: code ?? "UNKNOWN", error,
-      });
-      throw new Error(applyFailureMessage(record, code), { cause: error });
-    }
-    binding.putAction(applied);
-    logger.info(`${record.kind} applied`, { event: `${record.kind}.applied`, ...fields });
+      },
+    });
   }
 
   /** Forget the pending action; reads stop simulating it at once, so no restart is needed. */
@@ -1082,6 +1166,60 @@ function actionLabel(record: ActionRecord): string {
     case "document-update":
       return `The edit of page "${plainInline(record.documentTitle, 60)}"`;
   }
+}
+
+/**
+ * Refuse, unsent, an apply whose request no longer matches the fingerprint staged with it. A
+ * legacy record without one passes, unless `required`.
+ */
+async function assertFingerprint(scope: string, record: ActionRecord, fields: Partial<LogFields>,
+                                 { required = false } = {}): Promise<void> {
+  if (!(required && record.fingerprint === undefined) && await matchesFingerprint(scope, record)) return;
+  logger.error("action no longer matches its fingerprint", {
+    event: "action.fingerprint.mismatch", ...fields, code: "IDEMPOTENCY_CONFLICT",
+  });
+  throw new CheckRefused("IDEMPOTENCY_CONFLICT", applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
+}
+
+/**
+ * Why an apply's outcome is unknown, and what to do. `canResend` is whether approving it again
+ * sends it under the same key.
+ */
+function uncertainMessage(record: ActionRecord, code: string | null, stage: WriteStage | undefined,
+                          earlierUncertain: boolean, canResend: boolean): string {
+  const what = actionLabel(record);
+  const next = canResend
+    ? "Approving it again resends it under the same idempotency key, which InferOps applies at most once."
+    : isBoardAction(record)
+      ? "Check it in InferOps before deciding again."
+      : "It is not sent again from here: check it in InferOps, then reject it.";
+  if (earlierUncertain && stage !== undefined) {
+    const now = stage === "unsent" ? "this attempt was not sent" : `InferOps now refuses it (${code})`;
+    return `${what} may already have been applied by an earlier attempt, whose outcome is unknown; ` +
+      `${now}. ${next}`;
+  }
+  if (stage === "refused") {
+    return `${what} may or may not have been applied: InferOps refused it (${code}), which is not ` +
+      `yet taken as proof for this kind of change. ${next}`;
+  }
+  return `${what} may or may not have been applied: InferOps did not confirm the outcome` +
+    `${code ? ` (${code})` : ""}. ${next}`;
+}
+
+/** Why a reconcile-only action an earlier attempt may have sent is not sent again. */
+function reconcileOnlyMessage(record: ActionRecord): string {
+  const what = actionLabel(record);
+  const why = record.attempts === undefined
+    ? "it was proposed before apply attempts were recorded, so an earlier approval may already " +
+      "have reached InferOps"
+    : "an earlier attempt was interrupted before InferOps answered";
+  return `${what} may or may not have been applied: ${why}. It is not sent again from here: check ` +
+    `it in InferOps, then reject it.`;
+}
+
+/** Whether an action belongs to a board binding. */
+function isBoardAction(record: ActionRecord): boolean {
+  return !isCodingAction(record) && !isWikiAction(record);
 }
 
 function applyFailureMessage(record: ActionRecord, code: string | null): string {
@@ -1588,57 +1726,46 @@ export class InferOpsDispatchGatekeeper
    * request still matches its fingerprint; InferOps rechecks the person's `issue:delegate`, the
    * project scope (through the client), the issue's condition and revision. A cancel answered
    * CONFLICT for a run that has already stopped counts as applied: there is nothing left to stop.
+   *
+   * Both are reconcile-only (apply-attempts.ts): a failure before sending is known not applied, but
+   * any answer from InferOps that is not a success leaves the outcome unknown, and once an attempt
+   * may have reached InferOps no later apply sends it again.
    */
-  async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>):
+      Promise<void | { failed: ActionApplyFailure }> {
     const binding = this.#binding();
     const record = binding.action(actionId);
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
     if (record.status === "applied") return;
-    if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
+    if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
     if (!isCodingAction(record)) throw new Error(`InferOps action ${actionId} is not a coding action.`);
     const fields = { projectKey: binding.projectKey, action: actionId };
-    if (!(await matchesFingerprint(binding.projectKey, record))) {
-      logger.error("action no longer matches its fingerprint", {
-        event: "action.fingerprint.mismatch", ...fields, code: "IDEMPOTENCY_CONFLICT",
-      });
-      throw new Error(applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
-    }
-    const refusal = (error: unknown): Error => {
-      const code = inferOpsErrorCode(error);
-      logger.warn(`${record.kind} failed`, {
-        event: `${record.kind}.apply.failed`, ...fields, code: code ?? "UNKNOWN", error,
-      });
-      return new Error(applyFailureMessage(record, code), { cause: error });
-    };
-    try {
-      assertCodingWorkbenchEnabled(this.env);
-    } catch (error) {
-      throw refusal(error);
-    }
-    if (record.kind === "dispatch" && !codingRepoAllowlist(this.env).has(record.repoId.toLowerCase())) {
-      logger.warn("dispatch refused: repository not allowlisted", {
-        event: "dispatch.apply.not_allowlisted", ...fields, code: "FORBIDDEN",
-      });
-      throw new Error(`${actionLabel(record)} was not applied: the repository is no longer on ` +
-        `this deployment's coding allowlist.`);
-    }
     const key = binding.idempotencyKey(actionId);
-    let applied: ActionRecord;
-    try {
-      if (record.kind === "dispatch") {
-        const run = await binding.client.dispatchIssue(binding.projectKey, record.issueId, {
-          repoId: record.repoId, baseRef: record.baseRef, expectedRevision: record.expectedRevision,
-        }, key);
-        applied = { ...record, status: "applied", runId: run.id };
-      } else {
+    const env = this.env;
+    return binding.applyOnce(record, {
+      policy: RECONCILE_ONLY, fields,
+      async check() {
+        await assertFingerprint(binding.projectKey, record, fields);
+        assertCodingWorkbenchEnabled(env);
+        if (record.kind === "dispatch" && !codingRepoAllowlist(env).has(record.repoId.toLowerCase())) {
+          logger.warn("dispatch refused: repository not allowlisted", {
+            event: "dispatch.apply.not_allowlisted", ...fields, code: "FORBIDDEN",
+          });
+          throw new CheckRefused("FORBIDDEN", `${actionLabel(record)} was not applied: the repository ` +
+            `is no longer on this deployment's coding allowlist.`);
+        }
+      },
+      async send(marked) {
+        if (record.kind === "dispatch") {
+          const run = await binding.client.dispatchIssue(binding.projectKey, record.issueId, {
+            repoId: record.repoId, baseRef: record.baseRef, expectedRevision: record.expectedRevision,
+          }, key);
+          return { ...marked, status: "applied", runId: run.id } as ActionRecord;
+        }
         await cancelOrConfirmStopped(binding, record.runId, key);
-        applied = { ...record, status: "applied" };
-      }
-    } catch (error) {
-      throw refusal(error);
-    }
-    binding.putAction(applied);
-    logger.info(`${record.kind} applied`, { event: `${record.kind}.applied`, ...fields });
+        return { ...marked, status: "applied" };
+      },
+    });
   }
 
   /** Forget the pending action; reads stop simulating it at once. */
@@ -1983,25 +2110,28 @@ export class InferOpsWikiGatekeeper
   async removeObserver(_id: string): Promise<void> {}
 
   /**
-   * Apply a section edit or a page body edit; see `#applySectionEdit` and `#applyBodyEdit`. The
-   * fingerprint is required: every Wiki record has one.
+   * Apply a section edit or a page body edit; see `#sendSectionEdit` and `#sendBodyEdit`. The
+   * fingerprint is required: every Wiki record has one. Both are reconcile-only
+   * (apply-attempts.ts): a failure before sending is known not applied, any other failure leaves
+   * the outcome unknown, and once an attempt may have reached InferOps no later apply sends it
+   * again, even when the page now shows the edit.
    */
-  async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>):
+      Promise<void | { failed: ActionApplyFailure }> {
     const binding = this.#binding();
     const record = binding.action(actionId);
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
     if (record.status === "applied") return;
-    if (record.status !== "pending") throw new Error(`InferOps action ${actionId} was reverted.`);
+    if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
     if (!isWikiAction(record)) throw new Error(`InferOps action ${actionId} is not a Wiki action.`);
     const fields = { host: binding.host, action: actionId };
-    if (record.fingerprint === undefined || !(await matchesFingerprint(WIKI_SCOPE, record))) {
-      logger.error("action no longer matches its fingerprint", {
-        event: "action.fingerprint.mismatch", ...fields, code: "IDEMPOTENCY_CONFLICT",
-      });
-      throw new Error(applyFailureMessage(record, "IDEMPOTENCY_CONFLICT"));
-    }
-    if (record.kind === "document-update") return this.#applyBodyEdit(binding, record);
-    return this.#applySectionEdit(binding, record);
+    return binding.applyOnce(record, {
+      policy: RECONCILE_ONLY, fields,
+      check: () => assertFingerprint(WIKI_SCOPE, record, fields, { required: true }),
+      send: marked => record.kind === "document-update"
+        ? this.#sendBodyEdit(binding, marked as DocumentUpdateAction)
+        : this.#sendSectionEdit(binding, marked as SectionUpdateAction),
+    });
   }
 
   /**
@@ -2009,67 +2139,48 @@ export class InferOpsWikiGatekeeper
    * key fixed per action (`<instance>:<action>`). InferOps compares the version itself, so the page
    * is not read first, and its text decides nothing: a page already holding this body at a later
    * version fails STALE_REVISION like any other change, since matching text does not show this
-   * action wrote it. A retried apply whose first response was lost is replayed by InferOps, which
-   * recognizes the key of the page's last write one version on. Records the version reported.
+   * action wrote it. Returns the record with the version reported.
    */
-  async #applyBodyEdit(binding: WikiBinding, record: DocumentUpdateAction): Promise<void> {
-    const fields = { host: binding.host, action: record.actionId };
-    let appliedVersion: number;
-    try {
-      const written = await binding.client.updateDocument(
-        record.documentId, { body: record.body }, record.expectedVersion,
-        binding.idempotencyKey(record.actionId));
-      appliedVersion = written.version;
-    } catch (error) {
-      const code = inferOpsErrorCode(error);
-      logger.warn("document-update failed", {
-        event: "document-update.apply.failed", ...fields, code: code ?? "UNKNOWN", error,
-      });
-      throw new Error(applyFailureMessage(record, code), { cause: error });
-    }
-    binding.putAction({ ...record, status: "applied", appliedVersion });
-    logger.info("document-update applied", { event: "document-update.applied", ...fields });
+  async #sendBodyEdit(binding: WikiBinding, record: DocumentUpdateAction): Promise<ActionRecord> {
+    const written = await binding.client.updateDocument(
+      record.documentId, { body: record.body }, record.expectedVersion,
+      binding.idempotencyKey(record.actionId));
+    return { ...record, status: "applied", appliedVersion: written.version };
   }
 
   /**
-   * Apply a section edit. InferOps' section PATCH takes no expected version and ignores the
+   * Send a section edit. InferOps' section PATCH takes no expected version and ignores the
    * idempotency key, so the check is made here, by reading the section first:
    *
    * - at the version the edit was proposed at: send the body (under the action's key, for when
    *   InferOps honors it), and record the version InferOps reports;
-   * - already showing exactly this body at a later version: the edit took effect (a retried apply
-   *   whose first response was lost, or the same text written elsewhere), so it counts as applied
-   *   and nothing is sent again;
+   * - already showing exactly this body at a later version, on a first attempt: the same text was
+   *   written elsewhere, so it counts as applied and nothing is sent;
    * - anything else: refused as stale, nothing sent.
    *
    * The read and the write are two requests, so an edit made in between is overwritten (see the
    * design's Open Questions).
    */
-  async #applySectionEdit(binding: WikiBinding, record: SectionUpdateAction): Promise<void> {
-    const actionId = record.actionId;
-    const fields = { host: binding.host, action: actionId };
-    let appliedVersion: number;
+  async #sendSectionEdit(binding: WikiBinding, record: SectionUpdateAction): Promise<ActionRecord> {
+    let current: WikiSectionRecord;
     try {
-      const current = await binding.client.readSection(record.sectionId);
-      if (current.version === record.expectedVersion) {
-        const updated = await binding.client.updateSection(
-          record.sectionId, record.body, binding.idempotencyKey(actionId));
-        appliedVersion = updated.version;
-      } else if (current.body === record.body) {
-        logger.info("section edit already in effect", { event: "section-update.apply.in_effect", ...fields });
-        appliedVersion = current.version;
-      } else {
-        throw new InferOpsError("STALE_REVISION", "The section changed since the edit was proposed.");
-      }
+      current = await binding.client.readSection(record.sectionId);
     } catch (error) {
-      const code = inferOpsErrorCode(error);
-      logger.warn("section-update failed", {
-        event: "section-update.apply.failed", ...fields, code: code ?? "UNKNOWN", error,
-      });
-      throw new Error(applyFailureMessage(record, code), { cause: error });
+      throw atStage(error, "unsent");
     }
-    binding.putAction({ ...record, status: "applied", appliedVersion });
-    logger.info("section-update applied", { event: "section-update.applied", ...fields });
+    if (current.version === record.expectedVersion) {
+      const updated = await binding.client.updateSection(
+        record.sectionId, record.body, binding.idempotencyKey(record.actionId));
+      return { ...record, status: "applied", appliedVersion: updated.version };
+    }
+    if (current.body === record.body) {
+      logger.info("section edit already in effect", {
+        event: "section-update.apply.in_effect", host: binding.host, action: record.actionId,
+      });
+      return { ...record, status: "applied", appliedVersion: current.version };
+    }
+    throw new InferOpsError("STALE_REVISION", "The section changed since the edit was proposed.",
+                            { stage: "unsent" });
   }
 
   /** Forget the pending edit; reads stop showing it at once. */

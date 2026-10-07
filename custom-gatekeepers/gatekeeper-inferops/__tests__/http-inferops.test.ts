@@ -7,7 +7,7 @@ import {
   WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
-import { inferOpsErrorCode } from "../src/inferops-client";
+import { inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
 
 const TOKEN = "iex_test-secret-token";
 const CONNECTION: InferOpsConnection = {
@@ -488,6 +488,65 @@ describe("credential and provider failures", () => {
 
     expect((await failure(numericRevision.client.readProject("DEMO"))).code).toBe("UNAVAILABLE");
     expect((await failure(otherProject.client.readProject("DEMO"))).code).toBe("UNAVAILABLE");
+  });
+});
+
+describe("write stages", () => {
+  /** How far a failed write got, as the gatekeeper reads it. */
+  async function stageOf(call: Promise<unknown>) {
+    try {
+      await call;
+      return null;
+    } catch (error) {
+      return { code: inferOpsErrorCode(error), stage: writeStage(error), policy: isPolicyRefusal(error) };
+    }
+  }
+  const answer = (status: number, body: unknown) => (call: Call) =>
+    call.method !== "GET" ? Response.json(body, { status }) : undefined;
+
+  it("marks InferOps' refusal of the write itself as refused, with a policy denial named", async () => {
+    for (const [status, code] of [[400, "BAD"], [401, "UNAUTHORIZED"], [403, "FORBIDDEN"], [404, "NOT_FOUND"],
+                                  [409, "STALE_REVISION"]] as const) {
+      const { client } = fakeInferOps(answer(status, { error: { code, message: "x" } }));
+      expect(await stageOf(client.transition("DEMO", DEMO_1, WORKING, "1041", "k")))
+        .toMatchObject({ stage: "refused", policy: false });
+    }
+    const { client } = fakeInferOps(answer(403, {
+      error: { code: "FORBIDDEN", message: "denied", details: { decision: { allowed: false } } },
+    }));
+    expect(await stageOf(client.createIssue("DEMO", { title: "x", stateId: READY }, "k")))
+      .toEqual({ code: "FORBIDDEN", stage: "refused", policy: true });
+  });
+
+  it("proves nothing for a 5xx, another 4xx, a lost response or an unusable success", async () => {
+    for (const status of [429, 500, 502]) {
+      const { client } = fakeInferOps(answer(status, { error: { code: "X", message: "x" } }));
+      expect((await stageOf(client.transition("DEMO", DEMO_1, WORKING, "1041", "k")))?.stage).toBeUndefined();
+    }
+    const malformed = fakeInferOps(answer(200, { issue: { id: "not an issue" } }));
+    expect(await stageOf(malformed.client.transition("DEMO", DEMO_1, WORKING, "1041", "k")))
+      .toMatchObject({ code: "UNAVAILABLE", stage: undefined });
+    const lost = fakeInferOps(call => {
+      if (call.method === "PATCH") throw new TypeError("connection reset");
+      return undefined;
+    });
+    expect(await stageOf(lost.client.updateIssue("DEMO", DEMO_1, { title: "t" }, "1041", "k")))
+      .toMatchObject({ code: "UNAVAILABLE", stage: undefined });
+  });
+
+  it("marks a failed check or scope read before the write as unsent, whatever the read answered", async () => {
+    const { client, calls } = fakeInferOps();
+    expect(await stageOf(client.transition("DEMO", DEMO_1, WORKING, "next", "k")))
+      .toMatchObject({ code: "INVALID_REQUEST", stage: "unsent" });
+    expect(await stageOf(client.transition("DEMO", ENG_41, WORKING, "977", "k")))
+      .toMatchObject({ code: "NOT_FOUND", stage: "unsent" });
+    expect(calls.filter(c => c.method !== "GET")).toEqual([]);
+
+    // The scope read itself failing (here a 500) still sent no write.
+    const down = fakeInferOps(call => call.method === "GET" ? Response.json({}, { status: 500 }) : undefined);
+    expect(await stageOf(down.client.updateIssue("DEMO", DEMO_1, { title: "t" }, "1041", "k")))
+      .toMatchObject({ code: "UNAVAILABLE", stage: "unsent" });
+    expect(down.calls.filter(c => c.method !== "GET")).toEqual([]);
   });
 });
 

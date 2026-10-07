@@ -11,18 +11,50 @@
 //   recomputes it from the request it is about to send and refuses a mismatch. InferOps does not
 //   fingerprint idempotency keys (a reused key with another body returns the first result), so
 //   this is the check that one action's key is only ever sent with the one request approved for it.
+// - `attempts` is what apply knows about its earlier tries (apply-attempts.ts): whether a write may
+//   have reached InferOps, and the outcome a later apply replays. Records from before it was kept
+//   have none, so their history is unknown.
 
 import type { NewIssueRequest, IssueChanges } from "./inferops-client";
 import type { Revision } from "./types";
 
-/** Where a recorded action stands. */
-export type ActionStatus = "pending" | "applied" | "reverted";
+/**
+ * Where a recorded action stands. `failed` is an apply known not to have taken effect and refused
+ * for good; it is no longer simulated, and a later apply replays the refusal.
+ */
+export type ActionStatus = "pending" | "applied" | "reverted" | "failed";
+
+/** The outcome of an unsuccessful apply, kept so a later apply reports the same. */
+export type StoredFailure = {
+  /** `notApplied` for a refusal known not to have taken effect; `unknown` when it may have. */
+  outcome: "notApplied" | "unknown";
+  /** The reason, for the person deciding. */
+  message: string;
+  /** The data-source code, when there was one. */
+  code?: string;
+};
+
+/**
+ * What apply knows about an action's earlier attempts. Absent on records staged before attempts
+ * were tracked: any of their applies may have reached InferOps.
+ */
+export type ApplyAttempts = {
+  /**
+   * When a write was first about to be sent (ISO). Written before sending, and cleared only when
+   * the attempt is proven not to have taken effect, so once set the effect may exist.
+   */
+  dispatchedAt?: string;
+  /** The last unsuccessful outcome: the refusal of a `failed` action, or an unknown one. */
+  failure?: StoredFailure;
+};
 
 type ActionBase = {
   actionId: number;
   status: ActionStatus;
   /** Fingerprint of the request staged with the action; absent on records from before creates. */
   fingerprint?: string;
+  /** Earlier apply attempts; absent on records from before they were tracked. */
+  attempts?: ApplyAttempts;
 };
 
 /** A proposed move of an issue to another state. */
@@ -135,7 +167,7 @@ export type WikiAction = SectionUpdateAction | DocumentUpdateAction;
 /** A pending change to an existing issue: what simulation overlays and what blocks another. */
 export type PendingIssueChange = TransitionAction | UpdateAction;
 
-/** What the caller supplies to stage an action; the binding assigns the id and status. */
+/** What the caller supplies to stage an action; the binding assigns the id, status and attempts. */
 export type StagedAction =
   | Omit<TransitionAction, "actionId" | "status">
   | Omit<CreateAction, "actionId" | "status">

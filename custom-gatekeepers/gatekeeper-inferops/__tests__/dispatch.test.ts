@@ -253,17 +253,22 @@ describe("dispatch", () => {
     expect(await mock.listRuns("DEMO")).toEqual([]);
   });
 
-  it("refuses at apply when the issue changed after the dispatch was proposed", async () => {
+  it("leaves a dispatch InferOps refused unknown and reconcile-only: refusals are not yet proof for it", async () => {
     const { props, hooks, mock, session } = setup();
     await session.dispatch("DEMO-1", { repoId: DEMO_APP }, "1");
     const [action] = (await hooks.log()).actions;
     await mock.transition("DEMO", DEMO_1, WORKING, "1", "elsewhere:1");
 
-    const refused = await hooks.applyDispatch(props, action!.id);
+    const refused = await hooks.applyOutcome(props, action!.id, "dispatch");
 
-    expect(refused).toContain("the issue changed in InferOps after this dispatch was proposed");
+    expect(refused).toMatchObject({ outcome: "unknown", retryable: false, code: "STALE_REVISION" });
     expect(await mock.listRuns("DEMO")).toEqual([]);
-    expect(await hooks.getDispatchRaw(props, `action:${action!.id}`)).toMatchObject({ status: "pending" });
+    expect(await hooks.getDispatchRaw(props, `action:${action!.id}`)).toMatchObject({
+      status: "pending", attempts: { dispatchedAt: expect.any(String), failure: { outcome: "unknown" } },
+    });
+    // A later apply replays the stored outcome and sends nothing.
+    expect(await hooks.applyOutcome(props, action!.id, "dispatch")).toEqual(refused);
+    expect(await mock.listRuns("DEMO")).toEqual([]);
   });
 
   it("refuses at apply a repository taken off the allowlist since the proposal", async () => {

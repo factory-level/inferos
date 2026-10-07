@@ -362,15 +362,15 @@ describe("page body edits", () => {
     expect(["Edit A.", "Edit B."]).toContain(shown.body);
   });
 
-  it("is refused at apply when the page changed since, and leaves its content", async () => {
+  it("leaves an edit refused as stale unknown and reconcile-only, and leaves the content", async () => {
     const { props, hooks, mock, session } = setup();
     await session.updateDocumentBody(INCIDENT, "My edit.", 4);
     await mock.updateDocument(INCIDENT, { body: "Someone else's edit." }, 4, "elsewhere");
 
     expect(await session.readDocument(INCIDENT)).toMatchObject({ body: "Someone else's edit.", version: 5 });
     expect((await session.readDocument(INCIDENT)).pendingBody).toBeUndefined();
-    expect(await hooks.applyWiki(props, 1))
-      .toContain("the page changed in InferOps after this edit was proposed (expected version 4)");
+    expect(await hooks.applyOutcome(props, 1, "wiki"))
+      .toMatchObject({ outcome: "unknown", retryable: false, code: "STALE_REVISION" });
     expect(await mock.readDocument(INCIDENT)).toMatchObject({ body: "Someone else's edit.", version: 5 });
     expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "pending" });
   });
@@ -380,12 +380,12 @@ describe("page body edits", () => {
     await session.updateDocumentBody(INCIDENT, "Same text.", 4);
     await mock.updateDocument(INCIDENT, { body: "Same text." }, 4, "another-writer");
 
-    expect(await hooks.applyWiki(props, 1)).toContain("the page changed in InferOps after this edit was proposed");
+    expect(await hooks.applyWiki(props, 1)).toContain("InferOps refused it (STALE_REVISION)");
     expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "pending" });
     expect((await mock.readDocument(INCIDENT)).version).toBe(5);
   });
 
-  it("is replayed by InferOps when an apply is retried after its write committed", async () => {
+  it("is not sent again once an attempt may have reached InferOps, even if it committed", async () => {
     const { props, hooks, mock, session } = setup();
     await session.updateDocumentBody(INCIDENT, "Written once.", 4);
     expect(await hooks.applyWiki(props, 1)).toBeNull();
@@ -394,11 +394,12 @@ describe("page body edits", () => {
     const { appliedVersion: _, ...pending } = applied;
     await hooks.putWikiRaw(props, "action:1", { ...pending, status: "pending" });
 
-    expect(await hooks.applyWiki(props, 1)).toBeNull();
+    // No same-key replay contract is verified for page bodies yet, so it is reconcile-only.
+    expect(await hooks.applyWiki(props, 1)).toContain("an earlier attempt was interrupted before InferOps answered");
     expect(await mock.readDocument(INCIDENT)).toMatchObject({ body: "Written once.", version: 5 });
-    expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "applied", appliedVersion: 5 });
+    expect(await hooks.getWikiRaw(props, "action:1")).toMatchObject({ status: "pending" });
 
-    // The replay is bound to the whole write: the same key with another body or version is stale.
+    // InferOps' own replay is bound to the whole write: the same key with another body or version is stale.
     const key = `${await hooks.getWikiRaw(props, "instanceId") as string}:1`;
     expect(await failure(mock.updateDocument(INCIDENT, { body: "Another body." }, 4, key))).toContain("STALE_REVISION");
     expect(await failure(mock.updateDocument(INCIDENT, { body: "Written once." }, 3, key))).toContain("STALE_REVISION");
@@ -447,10 +448,12 @@ describe("page body edits", () => {
     await mock.setInferMindEnabled(false);
     expect(await failure(session.updateDocumentBody(HANDBOOK, "x", 1))).toContain("FORBIDDEN");
     expect(await failure(session.readStructure())).toContain("FORBIDDEN");
-    expect(await hooks.applyWiki(props, 1)).toContain("was not applied: InferOps refused the Wiki");
+    // InferOps refused the write itself, which is not yet proof for a page body: reconcile-only.
+    expect(await hooks.applyWiki(props, 1)).toContain("InferOps refused it (FORBIDDEN)");
     await mock.setInferMindEnabled(true);
     expect((await mock.readDocument(INCIDENT)).version).toBe(4);
-    expect(await hooks.applyWiki(props, 1)).toBeNull();
+    expect(await hooks.applyWiki(props, 1)).toContain("InferOps refused it (FORBIDDEN)");
+    expect((await mock.readDocument(INCIDENT)).version).toBe(4);
   });
 });
 

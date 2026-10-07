@@ -43,7 +43,8 @@ import { createLogger } from "@gadgets/observability/logger";
 import SEED from "./fixtures/demo-board.json";
 import WIKI_SEED from "./fixtures/demo-wiki.json";
 import {
-  InferOpsError, type DispatchRequest, type InferOpsClient, type IssueChanges, type NewIssueRequest,
+  InferOpsError, atStage, inferOpsErrorCode, type DispatchRequest, type InferOpsClient,
+  type IssueChanges, type NewIssueRequest,
   type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord, type WikiDocumentHead,
   type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord,
   type WikiStructureRecord,
@@ -587,31 +588,40 @@ export function openInferOpsClient(
     throw new InferOpsError("NOT_FOUND", `Unknown InferOps host: ${account.host}.`);
   }
   const stub = namespace.getByName(`${account.host}/${account.accountId}`);
+  // The mock checks and commits a write in one call, so a refusal of one was made before anything
+  // changed. The stage is restored here because RPC carries only the message. UNAVAILABLE, which
+  // the mock itself never raises, proves nothing, and neither does an error without a code.
+  const refused = <T>(write: Promise<T>): Promise<T> =>
+    write.catch(error => {
+      throw inferOpsErrorCode(error) === "UNAVAILABLE" ? error : atStage(error, "refused");
+    });
   return {
     listProjects: () => stub.listProjects(),
     readProject: projectKey => stub.readProject(projectKey),
     readIssue: (projectKey, issueId) => stub.readIssue(projectKey, issueId),
     transition: (projectKey, issueId, toStateId, expectedRevision, idempotencyKey) =>
-      stub.transition(projectKey, issueId, toStateId, expectedRevision, idempotencyKey),
+      refused(stub.transition(projectKey, issueId, toStateId, expectedRevision, idempotencyKey)),
     createIssue: (projectKey, issue, idempotencyKey) =>
-      stub.createIssue(projectKey, issue, idempotencyKey),
+      refused(stub.createIssue(projectKey, issue, idempotencyKey)),
     updateIssue: (projectKey, issueId, changes, expectedRevision, idempotencyKey) =>
-      stub.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey),
+      refused(stub.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey)),
     hasProject: projectKey => stub.hasProject(projectKey),
     listRepos: () => stub.listRepos(),
     listRuns: (projectKey, issueId) => stub.listRuns(projectKey, issueId),
     readRun: (projectKey, runId) => stub.readRun(projectKey, runId),
     dispatchIssue: (projectKey, issueId, request, idempotencyKey) =>
-      stub.dispatchIssue(projectKey, issueId, request, idempotencyKey),
-    cancelRun: (projectKey, runId, idempotencyKey) => stub.cancelRun(projectKey, runId, idempotencyKey),
+      refused(stub.dispatchIssue(projectKey, issueId, request, idempotencyKey)),
+    cancelRun: (projectKey, runId, idempotencyKey) =>
+      refused(stub.cancelRun(projectKey, runId, idempotencyKey)),
     listDocuments: () => stub.listDocuments(),
     readDocument: documentId => stub.readDocument(documentId),
     readStructure: () => stub.readStructure(),
     updateDocument: (documentId, changes, expectedVersion, idempotencyKey) =>
-      stub.updateDocument(documentId, changes, expectedVersion, idempotencyKey),
+      refused(stub.updateDocument(documentId, changes, expectedVersion, idempotencyKey)),
     listSections: documentId => stub.listSections(documentId),
     readSection: sectionId => stub.readSection(sectionId),
-    updateSection: (sectionId, body, idempotencyKey) => stub.updateSection(sectionId, body, idempotencyKey),
+    updateSection: (sectionId, body, idempotencyKey) =>
+      refused(stub.updateSection(sectionId, body, idempotencyKey)),
     forget: () => stub.forget(),
   };
 }

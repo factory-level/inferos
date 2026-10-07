@@ -37,7 +37,7 @@
 
 import { createLogger } from "@gadgets/observability/logger";
 import {
-  InferOpsError, type DispatchRequest, type InferOpsClient, type InferOpsErrorCode,
+  InferOpsError, atStage, type DispatchRequest, type InferOpsClient, type InferOpsErrorCode,
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
   type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
   type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord, type WikiStructureRecord,
@@ -468,7 +468,7 @@ function wireCode(body: unknown): string | null {
 }
 
 /** Whether a 403 body is a workflow-policy refusal (`details.decision`) rather than a permission. */
-function isPolicyRefusal(body: unknown): boolean {
+function isPolicyRefusalBody(body: unknown): boolean {
   try {
     const details = record(record(record(body, "response").error, "error").details, "details");
     return "decision" in details;
@@ -494,6 +494,26 @@ const FAILURE_DETAIL: Record<InferOpsErrorCode, string> = {
   // Never mapped from a response: the gatekeeper raises it itself (enablement.ts).
   DISABLED: "InferOps is turned off for this deployment.",
 };
+
+/** The statuses with which InferOps refuses a write before it takes effect (see `WriteStage`). */
+const REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 401, 403, 404, 409]);
+
+/**
+ * Run what a write does before sending it (its checks, and the reads that scope it); whatever that
+ * throws failed before anything was sent.
+ */
+async function beforeSending<T>(checks: () => Promise<T>): Promise<T> {
+  try {
+    return await checks();
+  } catch (error) {
+    throw atStage(error, "unsent");
+  }
+}
+
+/** `error` with another code and detail, keeping what it proves (see `InferOpsErrorFacts`). */
+function restated(error: InferOpsError, code: InferOpsErrorCode, detail: string): InferOpsError {
+  return new InferOpsError(code, detail, error.facts);
+}
 
 /** The gatekeeper code for a failed response, from its status and InferOps error code. */
 function failureCode(status: number, code: string | null): InferOpsErrorCode {
@@ -640,8 +660,11 @@ export function openHttpInferOpsClient(
       logger.warn("InferOps request failed", {
         event: "http.request.failed", operation, status: response.status, code: wire ?? code,
       });
-      const policy = code === "FORBIDDEN" && isPolicyRefusal(body);
-      throw new InferOpsError(code, policy ? POLICY_REFUSED : FAILURE_DETAIL[code]);
+      const policy = code === "FORBIDDEN" && isPolicyRefusalBody(body);
+      // A write InferOps answered with one of these was refused before it took effect. Anything
+      // else (5xx, a gateway's 4xx, a redirect) proves nothing about it.
+      const stage = send.method !== "GET" && REFUSAL_STATUSES.has(response.status) ? "refused" : undefined;
+      throw new InferOpsError(code, policy ? POLICY_REFUSED : FAILURE_DETAIL[code], { stage, policy });
     }
     if (body === undefined) {
       if (send.maybeEmpty) return null;
@@ -656,7 +679,7 @@ export function openHttpInferOpsClient(
       return await request(operation, send);
     } catch (error) {
       if (error instanceof InferOpsError && error.code === "FORBIDDEN") {
-        throw new InferOpsError("FORBIDDEN", WIKI_FORBIDDEN);
+        throw restated(error, "FORBIDDEN", WIKI_FORBIDDEN);
       }
       throw error;
     }
@@ -774,13 +797,15 @@ export function openHttpInferOpsClient(
       projectKey: string, issueId: string, toStateId: string, expectedRevision: Revision,
       idempotencyKey: string,
     ): Promise<Issue> {
-      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
-      if (!REVISION.test(expectedRevision)) {
-        throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
-      }
-      if (!UUID.test(toStateId)) throw new InferOpsError("INVALID_STATE", FAILURE_DETAIL.INVALID_STATE);
-      // InferOps would move an issue of any project in the workspace; refuse it here first.
-      await readIssue(projectKey, issueId);
+      await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        if (!REVISION.test(expectedRevision)) {
+          throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
+        }
+        if (!UUID.test(toStateId)) throw new InferOpsError("INVALID_STATE", FAILURE_DETAIL.INVALID_STATE);
+        // InferOps would move an issue of any project in the workspace; refuse it here first.
+        await readIssue(projectKey, issueId);
+      });
       let body: unknown;
       try {
         body = await request("issue.transition", {
@@ -792,8 +817,7 @@ export function openHttpInferOpsClient(
       } catch (error) {
         // InferOps answers a deleted issue and a state outside the issue's project alike.
         if (error instanceof InferOpsError && error.code === "NOT_FOUND") {
-          throw new InferOpsError(
-            "NOT_FOUND", "The issue or the target state is no longer in this project.");
+          throw restated(error, "NOT_FOUND", "The issue or the target state is no longer in this project.");
         }
         throw error;
       }
@@ -808,9 +832,11 @@ export function openHttpInferOpsClient(
 
     async createIssue(projectKey: string, issue: NewIssueRequest, idempotencyKey: string):
         Promise<Issue> {
-      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
-      if (!UUID.test(issue.stateId)) throw new InferOpsError("INVALID_STATE", FAILURE_DETAIL.INVALID_STATE);
-      const bound = await project(projectKey);
+      const bound = await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        if (!UUID.test(issue.stateId)) throw new InferOpsError("INVALID_STATE", FAILURE_DETAIL.INVALID_STATE);
+        return project(projectKey);
+      });
       let body: unknown;
       try {
         body = await request("issue.create", {
@@ -825,7 +851,7 @@ export function openHttpInferOpsClient(
         });
       } catch (error) {
         if (error instanceof InferOpsError && error.code === "NOT_FOUND") {
-          throw new InferOpsError("NOT_FOUND", "The project or the target state is no longer available.");
+          throw restated(error, "NOT_FOUND", "The project or the target state is no longer available.");
         }
         throw error;
       }
@@ -836,16 +862,18 @@ export function openHttpInferOpsClient(
       projectKey: string, issueId: string, changes: IssueChanges, expectedRevision: Revision,
       idempotencyKey: string,
     ): Promise<Issue> {
-      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
-      if (!REVISION.test(expectedRevision)) {
-        throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
-      }
       const { title, description, priority } = changes;
-      if (title === undefined && description === undefined && priority === undefined) {
-        throw new InferOpsError("INVALID_REQUEST", "An update must change at least one field.");
-      }
-      // InferOps would update an issue of any project in the workspace; refuse it here first.
-      await readIssue(projectKey, issueId);
+      await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        if (!REVISION.test(expectedRevision)) {
+          throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
+        }
+        if (title === undefined && description === undefined && priority === undefined) {
+          throw new InferOpsError("INVALID_REQUEST", "An update must change at least one field.");
+        }
+        // InferOps would update an issue of any project in the workspace; refuse it here first.
+        await readIssue(projectKey, issueId);
+      });
       let body: unknown;
       try {
         body = await request("issue.update", {
@@ -855,7 +883,9 @@ export function openHttpInferOpsClient(
           idempotencyKey,
         });
       } catch (error) {
-        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw issueNotFound();
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") {
+          throw restated(error, "NOT_FOUND", issueNotFound().detail);
+        }
         throw error;
       }
       return parsed("issue.update", body, raw => {
@@ -902,15 +932,17 @@ export function openHttpInferOpsClient(
     async dispatchIssue(
       projectKey: string, issueId: string, dispatch: DispatchRequest, idempotencyKey: string,
     ): Promise<RunRecord> {
-      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
-      if (!REVISION.test(dispatch.expectedRevision)) {
-        throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
-      }
-      if (!UUID.test(dispatch.repoId)) {
-        throw new InferOpsError("INVALID_REQUEST", "The repository id must be a UUID.");
-      }
-      // InferOps would dispatch an issue of any project in the workspace; refuse it here first.
-      const issue = await readIssue(projectKey, issueId);
+      const issue = await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        if (!REVISION.test(dispatch.expectedRevision)) {
+          throw new InferOpsError("INVALID_REQUEST", "The expected revision must be a decimal string.");
+        }
+        if (!UUID.test(dispatch.repoId)) {
+          throw new InferOpsError("INVALID_REQUEST", "The repository id must be a UUID.");
+        }
+        // InferOps would dispatch an issue of any project in the workspace; refuse it here first.
+        return readIssue(projectKey, issueId);
+      });
       let body: unknown;
       try {
         body = await request("issue.dispatch", {
@@ -924,7 +956,9 @@ export function openHttpInferOpsClient(
           idempotencyKey,
         });
       } catch (error) {
-        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw issueNotFound();
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") {
+          throw restated(error, "NOT_FOUND", issueNotFound().detail);
+        }
         throw error;
       }
       return parsed("issue.dispatch", body, raw => {
@@ -935,16 +969,20 @@ export function openHttpInferOpsClient(
     },
 
     async cancelRun(projectKey: string, runId: string, idempotencyKey: string): Promise<RunRecord> {
-      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
-      // The run must be one of this project's before InferOps is asked to stop it.
-      const current = await readRun(projectKey, runId);
+      const current = await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        // The run must be one of this project's before InferOps is asked to stop it.
+        return readRun(projectKey, runId);
+      });
       let body: unknown;
       try {
         body = await request("run.cancel", {
           method: "POST", path: `/project/runs/${runId}/cancel`, body: {}, idempotencyKey,
         });
       } catch (error) {
-        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw runNotFound();
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") {
+          throw restated(error, "NOT_FOUND", runNotFound().detail);
+        }
         throw error;
       }
       return parsed("run.cancel", body, raw => {
@@ -969,12 +1007,14 @@ export function openHttpInferOpsClient(
     async updateDocument(
       documentId: string, changes: WikiPageChanges, expectedVersion: number, idempotencyKey: string,
     ): Promise<WikiPageWrite> {
-      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
-      if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
-        throw new InferOpsError("INVALID_REQUEST", "The expected version must be a positive integer.");
-      }
-      // Also keeps anything that is not an id out of the request path.
-      if (!UUID.test(documentId)) throw documentNotFound();
+      await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+          throw new InferOpsError("INVALID_REQUEST", "The expected version must be a positive integer.");
+        }
+        // Also keeps anything that is not an id out of the request path.
+        if (!UUID.test(documentId)) throw documentNotFound();
+      });
       let response: unknown;
       try {
         response = await knowledge("wiki.page.update", {
@@ -986,9 +1026,9 @@ export function openHttpInferOpsClient(
         });
       } catch (error) {
         const code = inferOpsCode(error);
-        if (code === "NOT_FOUND") throw documentNotFound();
+        if (code === "NOT_FOUND") throw restated(error as InferOpsError, "NOT_FOUND", documentNotFound().detail);
         if (code === "STALE_REVISION") {
-          throw new InferOpsError("STALE_REVISION", "The page changed in InferOps. Read it again.");
+          throw restated(error as InferOpsError, "STALE_REVISION", "The page changed in InferOps. Read it again.");
         }
         throw error;
       }
@@ -1017,9 +1057,11 @@ export function openHttpInferOpsClient(
 
     async updateSection(sectionId: string, body: string, idempotencyKey: string):
         Promise<WikiSectionRecord> {
-      if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
-      // A section this workspace does not have is refused here: InferOps answers its PATCH with 500.
-      await readSection(sectionId);
+      await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        // A section this workspace does not have is refused here: InferOps answers its PATCH with 500.
+        await readSection(sectionId);
+      });
       const response = await knowledge("wiki.section.update", {
         method: "PATCH",
         path: `/knowledge/sections/${sectionId}`,

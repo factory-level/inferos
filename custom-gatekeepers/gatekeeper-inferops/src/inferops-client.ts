@@ -41,15 +41,57 @@ const ERROR_CODES: ReadonlySet<string> = new Set<InferOpsErrorCode>([
 ]);
 
 /**
+ * How far a failed write got, which is what its failure proves about its effect. A failure without
+ * a stage proves nothing: the write may have been applied.
+ * - `unsent`: it failed before the write request was sent (a check, or a read made first).
+ * - `refused`: InferOps answered the write request itself with a refusal (400, 401, 403, 404 or
+ *   409), or the credential was confirmed dead before it was processed.
+ */
+export type WriteStage = "unsent" | "refused";
+
+/** What else a failure proves, beyond its code. */
+export type InferOpsErrorFacts = {
+  /** How far a failed write got; see `WriteStage`. */
+  stage?: WriteStage;
+  /** A FORBIDDEN that is InferOps' workflow policy refusing the change, not a missing permission. */
+  policy?: boolean;
+};
+
+/**
  * A data-source failure. The code leads the message (`STALE_REVISION: ...`) because Workers RPC
  * carries an error's message across a Durable Object boundary but not its custom properties, so
- * `inferOpsErrorCode()` recovers it on the far side.
+ * `inferOpsErrorCode()` recovers it on the far side. The `facts` are such properties: they hold
+ * only within the isolate that raised the error (the gatekeeper's, for the HTTP client), and
+ * `atStage` restores a stage on the near side of the mock's boundary.
  */
 export class InferOpsError extends Error {
-  constructor(readonly code: InferOpsErrorCode, detail: string) {
+  constructor(readonly code: InferOpsErrorCode, readonly detail: string,
+              readonly facts: InferOpsErrorFacts = {}) {
     super(`${code}: ${detail}`);
     this.name = "InferOpsError";
   }
+}
+
+/** The write stage a caught error proves, if any; see `WriteStage`. */
+export function writeStage(error: unknown): WriteStage | undefined {
+  return error instanceof InferOpsError ? error.facts.stage : undefined;
+}
+
+/** Whether a caught error is InferOps' workflow policy refusing the change. */
+export function isPolicyRefusal(error: unknown): boolean {
+  return error instanceof InferOpsError && error.facts.policy === true;
+}
+
+/**
+ * `error` as an `InferOpsError` known to have failed at `stage`, keeping its code, detail and other
+ * facts; an error without a data-source code is returned unchanged, proving nothing.
+ */
+export function atStage(error: unknown, stage: WriteStage): unknown {
+  const code = inferOpsErrorCode(error);
+  if (code === null) return error;
+  if (error instanceof InferOpsError && error.facts.stage === stage) return error;
+  if (error instanceof InferOpsError) return new InferOpsError(code, error.detail, { ...error.facts, stage });
+  return new InferOpsError(code, (error as Error).message.slice(code.length + 2), { stage });
 }
 
 /** The data-source code a caught error carries, or null for any other failure. */
