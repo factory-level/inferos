@@ -17,6 +17,7 @@ type Versioned = Tally & {
   tally(): Promise<RpcStub<Tally>>;
   holder(): Promise<{ tally: RpcStub<Tally> }>;
   tallies(): Promise<RpcStub<Tally>[]>;
+  bumper(): Promise<RpcStub<() => Promise<number>>>;
 };
 
 const widgetFiles = (version: string): Record<string, string> => ({
@@ -35,6 +36,7 @@ export class Gadget extends DurableObject {
   tally() { return new Tally(this); }
   holder() { return { tally: new Tally(this) }; }
   tallies() { return [new Tally(this)]; }
+  bumper() { return () => this.bump(); }
 }
 `,
   "client.js": `document.body.textContent = ${JSON.stringify(version)};\n`,
@@ -194,6 +196,7 @@ describe("a console's widget registry", () => {
     const tally = await server.tally();
     const { tally: held } = await server.holder();
     const [listed] = await server.tallies();
+    const bumper = await server.bumper();
     expect(await server.version()).toBe("v1");
     expect(await server.bump()).toBe(1);
     expect(await tally.bump()).toBe(2);
@@ -212,6 +215,7 @@ describe("a console's widget registry", () => {
     // Capabilities returned inside an object or an array are guarded too.
     await expect(held.bump()).rejects.toThrow(/not open/);
     await expect(listed!.bump()).rejects.toThrow(/not open/);
+    await expect(bumper()).rejects.toThrow(/not open/);
     await expect(used.getConsoleWidget(created.id, published.revision, frozen.gadgetId)).rejects.toThrow(/not open/);
     seq = await openConsole(session, s.spaceId, published, seq);
     expect(await handle.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
@@ -219,6 +223,7 @@ describe("a console's widget registry", () => {
     expect(await tally.bump()).toBe(4);
     expect(await held.bump()).toBe(5);
     expect(await listed!.bump()).toBe(6);
+    expect(await bumper()).toBe(7);
 
     // Nothing changes the frozen install: not its title, removal, an upgrade or a chat's edit.
     {
@@ -265,7 +270,8 @@ describe("a console's widget registry", () => {
     await expect(tally.bump()).rejects.toThrow(/changed/);
     await expect(held.bump()).rejects.toThrow(/changed/);
     await expect(listed!.bump()).rejects.toThrow(/changed/);
-    for (const kept of [tally, held, listed!, server]) kept[Symbol.dispose]();
+    await expect(bumper()).rejects.toThrow(/changed/);
+    for (const kept of [tally, held, listed!, bumper, server]) kept[Symbol.dispose]();
     await waitFor("the old frozen install's removal", async () =>
       s.watched.workpieces.summaries.has(frozen.gadgetId) ? null : true);
     seq = await openConsole(session, s.spaceId, republished, seq);

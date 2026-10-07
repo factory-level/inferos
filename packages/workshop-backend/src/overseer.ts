@@ -541,6 +541,12 @@ function guardedResult(value: unknown, guard: () => Promise<void>): unknown {
           .then(() => Reflect.apply(member, target, args))
           .then(result => guardedResult(result, guard));
     },
+    // A returned function is a callable stub: calling it is guarded like calling a method.
+    apply(target, _thisArg, args) {
+      return guard()
+          .then(() => Reflect.apply(target as (...args: unknown[]) => unknown, undefined, args))
+          .then(result => guardedResult(result, guard));
+    },
     getPrototypeOf() {
       return RpcTarget.prototype;
     },
