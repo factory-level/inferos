@@ -96,6 +96,10 @@ class FakeInferLab {
   refreshes: string[] = [];
   exchanges = 0;
   apiCalls: ApiCall[] = [];
+  /** While set, `object.embed` answers wait for it, after reading their answer: a request in flight. */
+  embedGate: Promise<void> | null = null;
+  /** Embed requests that have reached the gate. */
+  embedsHeld = 0;
   #serial = 0;
 
   /** The access token of the session `refreshToken` names. */
@@ -203,7 +207,12 @@ class FakeInferLab {
         return Response.json({ success: false, error: { code: "NOT_FOUND", message: "no such widget target" } }, { status: 404 });
       }
       if (widget === "table-view" && id === TABLE) {
-        return Response.json({ widget: "table-view", type: TABLE_TYPE, records: [TABLE_RECORD] });
+        const answer = Response.json({ widget: "table-view", type: TABLE_TYPE, records: [TABLE_RECORD] });
+        if (this.embedGate) {
+          this.embedsHeld++;
+          await this.embedGate;
+        }
+        return answer;
       }
       if (widget === "record-card" && id === TABLE_ROW) {
         return Response.json({ widget: "record-card", type: TABLE_TYPE, record: TABLE_RECORD });
@@ -772,6 +781,58 @@ describe("custom tables as the person", () => {
     await session.listRecords();
     expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-2"));
     expect(inferlab.logouts).toEqual(["refresh-1"]);
+  });
+
+  /** Starts a table read whose InferOps answer is held until `release()`; the read's outcome. */
+  async function heldRead(name: string) {
+    let release!: () => void;
+    inferlab.embedGate = new Promise<void>(resolve => { release = resolve; });
+    const before = inferlab.embedsHeld;
+    const outcome = failure(hooks().startBoundTableSession(name).listRecords());
+    await vi.waitFor(() => expect(inferlab.embedsHeld).toBe(before + 1));
+    return {
+      settle: async () => {
+        inferlab.embedGate = null;
+        release();
+        return outcome;
+      },
+    };
+  }
+
+  const tableObservations = async () =>
+    (await hooks().log()).observations.filter(title => title === "List InferOps custom table rows").length;
+
+  it("discards an answer that arrives after a reconnect committed while it was in flight", async () => {
+    const account = await connect("table-fence-reconnect");
+    expect(await hooks().bindAccount("t-fence-reconnect", account, TABLE_URL)).toBeNull();
+    const observed = await tableObservations();
+    const read = await heldRead("t-fence-reconnect");
+
+    expect((await finish(await hooks().reconnectAccount(account))).status).toBe(200);
+    const stageId = reconnects.find(r => r.label === "table-fence-reconnect")!.stageId;
+    expect(await hooks().commitReconnect(account, stageId)).toBeNull();
+
+    // InferOps answered the old session's request successfully; the answer is still discarded.
+    expect(await read.settle()).toBe("InferOpsError: UNAVAILABLE: This InferOps connection changed. Try again.");
+    expect(await tableObservations()).toBe(observed);
+    // The next read runs under the new session.
+    expect((await hooks().startBoundTableSession("t-fence-reconnect").listRecords()).records).toHaveLength(1);
+    expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-2"));
+  });
+
+  it("discards an answer that arrives after the account was revoked while it was in flight", async () => {
+    const account = await connect("table-fence-revoke");
+    expect(await hooks().bindAccount("t-fence-revoke", account, TABLE_URL)).toBeNull();
+    const observed = await tableObservations();
+    const read = await heldRead("t-fence-revoke");
+
+    await hooks().revokeAccount(account);
+
+    const outcome = await read.settle();
+    expect(outcome).toMatch(/^InferOpsError: (UNAVAILABLE|UNAUTHORIZED): /);
+    expect(outcome).not.toContain("SN-1");
+    expect(await tableObservations()).toBe(observed);
+    expect(await failure(hooks().startBoundTableSession("t-fence-revoke").listRecords())).not.toBe("");
   });
 
   it("never admits a collaborator, even one who holds the workspace", async () => {

@@ -149,7 +149,7 @@ describe("custom tables over HTTP", () => {
     expect(always.calls).toHaveLength(2);
   });
 
-  it("refuses malformed answers as UNAVAILABLE rather than trusting them", async () => {
+  it("refuses malformed or ambiguous answers as UNAVAILABLE rather than trusting them", async () => {
     const answers: Array<[string, unknown]> = [
       ["another widget", { widget: "record-card", type: type(), record: row() }],
       ["another table", { widget: "table-view", type: type({ id: OTHER_TABLE }), records: [] }],
@@ -161,12 +161,40 @@ describe("custom tables over HTTP", () => {
       ["an unknown relation kind", { widget: "table-view",
         type: type({ relations: [{ name: "x", toKind: "project/secret" }] }), records: [] }],
       ["no body shape at all", ["not", "an", "object"]],
+      // Ambiguous metadata, refused before any projection: a name both personal and not personal.
+      ["a column name twice, once personal", { widget: "table-view", records: [row({ values: { serial: "SN-1", owner_email: "a@x.test" } })],
+        type: type({ columns: [
+          { key: "c1", name: "serial", label: "Serial", type: "text", required: true, personal: false },
+          { key: "c2", name: "owner_email", label: "Owner email", type: "text", required: false, personal: true },
+          { key: "c3", name: "owner_email", label: "Contact", type: "text", required: false, personal: false },
+        ] }) }],
+      ["a column key twice", { widget: "table-view", records: [],
+        type: type({ columns: [
+          { key: "c1", name: "serial", label: "Serial", type: "text", required: true, personal: false },
+          { key: "c1", name: "site", label: "Site", type: "text", required: false, personal: false },
+        ] }) }],
+      ["a relation named like a column", { widget: "table-view", records: [],
+        type: type({ relations: [{ name: "serial", toKind: "project/issue" }] }) }],
+      ["a relation name twice", { widget: "table-view", records: [],
+        type: type({ relations: [{ name: "work_items", toKind: "project/issue" }, { name: "work_items", toKind: "object/record" }] }) }],
     ];
     for (const [what, body] of answers) {
       const { client } = fake(() => ok(body));
       expect(inferOpsErrorCode(await client.readTable(HOST, TABLE, { limit: 50 }).catch(e => e)), what)
         .toBe("UNAVAILABLE");
     }
+  });
+
+  it("refuses an answer with more rows than asked for", async () => {
+    const rows = (n: number) => Array.from({ length: n }, (_, i) =>
+      row({ id: `71000000-0000-4000-8000-${String(i).padStart(12, "0")}` }));
+    for (const [limit, count] of [[50, 51], [1, 2]] as const) {
+      const { client } = fake(() => ok({ widget: "table-view", type: type(), records: rows(count) }));
+      expect(inferOpsErrorCode(await client.readTable(HOST, TABLE, { limit }).catch(e => e)), `${count} for ${limit}`)
+        .toBe("UNAVAILABLE");
+    }
+    const { client } = fake(() => ok({ widget: "table-view", type: type(), records: rows(50) }));
+    expect((await client.readTable(HOST, TABLE, { limit: 50 })).rows).toHaveLength(50);
   });
 
   it("lists the workspace's tables for the picker, ids and labels only", async () => {

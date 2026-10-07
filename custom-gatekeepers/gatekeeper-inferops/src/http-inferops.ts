@@ -478,8 +478,24 @@ function bool(value: unknown, what: string): boolean {
   return value;
 }
 
-/** A custom table's definition; storage details (slots, keys of moved values) are dropped. */
+/**
+ * A custom table's definition; storage details (slots, keys of moved values) are dropped. An
+ * ambiguous one is refused before anything is projected from it: a column name or key that
+ * appears twice, or a relation sharing a name with a column or another relation, could otherwise
+ * let a value through under a non-personal twin of a personal column.
+ */
 function parseTableSchema(value: unknown): TableRecordSchema {
+  const parsed = parseTableSchemaFields(value);
+  const unique = (names: string[]) => new Set(names).size === names.length;
+  const columnNames = parsed.columns.map(c => c.name);
+  if (!unique(columnNames) || !unique(parsed.columns.map(c => c.key)) ||
+      !unique([...columnNames, ...parsed.relations.map(r => r.name)])) {
+    throw new Malformed("type has duplicate or colliding names");
+  }
+  return parsed;
+}
+
+function parseTableSchemaFields(value: unknown): TableRecordSchema {
   const table = record(value, "type");
   const version = int(table.version, "type.version");
   if (version < 1) throw new Malformed("type.version is not valid");
@@ -843,7 +859,7 @@ export function openHttpInferOpsClient(
       }
       return parsed(operation, body, raw => {
         const read = parseTableRead(raw, widget);
-        if (!isAsked(read)) throw new Malformed("another table or record was returned");
+        if (!isAsked(read)) throw new Malformed("not the table, record or row count asked for");
         return read;
       });
     }
@@ -1226,9 +1242,10 @@ export function openHttpInferOpsClient(
       if (!UUID.test(tableId)) throw tableNotFound();
       const query = new URLSearchParams({ limit: String(options.limit) });
       if (options.relatedTo !== undefined) query.set("relatedTo", options.relatedTo);
+      // An answer about another table, or with more rows than asked for, is not trusted.
       return embed("object.table.read",
         `inferops://${host}/object/table-view/${tableId.toLowerCase()}?${query}`, "table-view",
-        read => read.table.id === tableId.toLowerCase());
+        read => read.table.id === tableId.toLowerCase() && read.rows.length <= options.limit);
     },
 
     async readTableRow(host: string, recordId: string): Promise<TableRead> {

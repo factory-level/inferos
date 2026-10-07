@@ -28,8 +28,8 @@ collaborators. Without the binding the gadget shows a "No InferOps table connect
   `disabled` (custom tables turned off) or `error`. It stores nothing.
 - **client.js** draws the rows with the definition they came with: one column per visible column,
   then one per relation showing how many links a row has. Labels and values are text, never markup.
-  Each load clears what was shown, and only the answer to the latest load is drawn, so a slow
-  answer for an earlier binding can never replace a newer one. A refusal clears the rows.
+  Each load clears what was shown, and only the answer to the latest load is drawn, so of two loads in flight,
+  the earlier one's late answer is never drawn. A refusal clears the rows.
 - Columns the table's owner marked personal never reach this gadget.
 - Print and PDF exports hide the controls.
 

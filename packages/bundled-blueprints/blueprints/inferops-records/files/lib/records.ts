@@ -26,8 +26,9 @@ export function startLoad(state: State): State {
 }
 
 /**
- * Finish the load of `generation`. An answer to any earlier load is ignored, so a slow answer for a
- * previous binding or account can never replace a newer one. A failure replaces the rows.
+ * Finish the load of `generation`. An answer to any earlier load is ignored, so of two loads in flight
+ * the earlier one's late answer is never drawn. (That an account change discards an answer is
+ * the gatekeeper's job, not this rule's.) A failure replaces the rows.
  */
 export function finishLoad(state: State, generation: number, result: LoadRowsResult): State {
   if (generation !== state.generation) return state;

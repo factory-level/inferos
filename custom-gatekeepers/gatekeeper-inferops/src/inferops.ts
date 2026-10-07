@@ -84,7 +84,7 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
-  CredentialSource, isCredentialsChanged, isCredentialsExpired,
+  CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
 } from "@gadgets/gatekeeper-kit/credentials";
 import {
   InferOpsError, atStage, inferOpsErrorCode, isPolicyRefusal, writeStage, type InferOpsClient,
@@ -228,6 +228,7 @@ function credentialsOf(exports: ExportsWithStores, accountId: string) {
  */
 function accountClient(
   exports: ExportsWithStores, endpoint: InferOpsEndpoint, accountId: string, workspaceId: string,
+  options: { fenceSuccess?: boolean } = {},
 ): InferOpsClient {
   const source = new CredentialSource<InferOpsAuthority>({
     account: () => {
@@ -248,9 +249,11 @@ function accountClient(
       try {
         // Every InferOps call here is safe to repeat: reads, or a write under its own
         // idempotency key.
-        return await source.run(authority => {
+        return await source.run(async (authority, read) => {
           sent = true;
-          return operation(authority);
+          const result = await operation(authority);
+          if (options.fenceSuccess) await assertConnectionUnchanged(source, read);
+          return result;
         }, { replayable: true });
       } catch (error) {
         if (isCredentialsExpired(error)) {
@@ -267,6 +270,32 @@ function accountClient(
       }
     },
   });
+}
+
+/** What a fenced read says when the connection moved while it was in flight. */
+const CONNECTION_CHANGED = "This InferOps connection changed. Try again.";
+
+/**
+ * The completion fence of a read: a successful answer counts only if the account still holds the
+ * connection (identity and generation) the request was sent under. A reconnect or a revoke that
+ * completed while the request was in flight discards the answer before anything uses it. A
+ * session confirmed dead is `UNAUTHORIZED`; any other failure to vouch is `UNAVAILABLE`, and the
+ * next read reports the account's real state.
+ */
+async function assertConnectionUnchanged(
+  source: CredentialSource<InferOpsAuthority>, sent: CredentialRead,
+): Promise<void> {
+  let now: CredentialRead;
+  try {
+    now = await source.read();
+  } catch (error) {
+    // Only the code crosses RPC; what the account said stays out of the answer.
+    throw new InferOpsError(isCredentialsExpired(error) ? "UNAUTHORIZED" : "UNAVAILABLE",
+      isCredentialsExpired(error) ? EXPIRED_MESSAGE : CONNECTION_CHANGED);
+  }
+  if (now.identity !== sent.identity || now.generation !== sent.generation) {
+    throw new InferOpsError("UNAVAILABLE", CONNECTION_CHANGED);
+  }
 }
 
 /**
@@ -336,7 +365,8 @@ function tableClientFor(
     }
     const endpoint = account.connected ? inferOpsApiEndpoint(env) : null;
     if (!endpoint || !workspaceId) throw tableNotFound();
-    return accountClient(exports, endpoint, account.accountId, workspaceId);
+    // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
+    return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
   });
 }
 
