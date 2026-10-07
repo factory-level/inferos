@@ -22,7 +22,8 @@ export const ConsoleScreenEditor = ({ overseer, gadgets, catalog, onSaved, onCan
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [template, setTemplate] = useState(':blank')
-  const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined)
+  // A frozen install belongs to the console publication that made it, so it is never placed by hand.
+  const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined && !gadget.frozenFor)
   const edit = async (operations: CanvasOperation[]) => {
     try {
       setScreen(applyCanvasOperations(screen, screen.revision, operations))

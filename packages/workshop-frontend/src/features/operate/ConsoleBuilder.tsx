@@ -11,6 +11,7 @@ import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { invalidateWorkspaceScreens, type WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { ConsoleScreenEditor } from './ConsoleScreenEditor'
 import { ConsoleViewEditor } from './ConsoleViewEditor'
+import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 import { consoleScreens } from '@gadgets/workshop-shared/operate-console'
 import type { ConsoleEntry } from './consoles'
 
@@ -31,6 +32,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const [title, setTitle] = useState(initial?.console.title ?? '')
   const [views, setViews] = useState<ConsoleView[]>(() => structuredClone(initial?.console.views ?? []))
   const [fullChat, setFullChat] = useState<ConsoleFullChat>(initial?.console.fullChat ?? 'default')
+  const [widgets, setWidgets] = useState(initial?.console.widgets ?? [])
   const [step, setStep] = useState(0)
   const [creatingScreen, setCreatingScreen] = useState(false)
   const [addedScreens, setAddedScreens] = useState<CanvasDefinition[]>([])
@@ -44,12 +46,13 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const { workpieces, ready } = useWorkspaceWorkpieces(overseer, workspaceId)
   const gadgets = new Map<WorkpieceId, GadgetSummary>()
   for (const workpiece of workpieces.values()) if (workpiece.type === 'gadget') gadgets.set(workpiece.id, workpiece)
+  const widgetInstalls = [...gadgets.values()].filter(gadget => gadget.chatId === undefined && !gadget.frozenFor && gadget.installedFrom?.kind === 'widget')
   const screens = [...new Map([...(entry?.screens ?? []), ...addedScreens].map(screen => [screen.id, screen])).values()]
   const available = !!overseer && ready && metadata?.id === workspaceId && metadata.role !== 'use' && !openError && !observerConfig
   const limitReached = !initial && (entry?.consoles.length ?? 0) >= MAX_WORKSPACE_CONSOLES
   const validate = () => {
     const content = parseOperateConsoleContent({ title, views, fullChat, customization: initial?.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION },
-      ...(initial?.console.widgets ? { widgets: initial.console.widgets } : {}) })
+      ...(widgets.length > 0 || initial?.console.widgets ? { widgets } : {}) })
     if (consoleScreens(content).some(id => !screens.some(screen => screen.id === id))) throw new Error('Choose an available screen for every view.')
     return content
   }
@@ -111,6 +114,9 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
         : <>
             <ConsoleViewEditor views={views} screens={screens} onChange={setViews} />
             <Button disabled={!available || views.length >= MAX_CONSOLE_VIEWS} onClick={() => setCreatingScreen(true)}>Create a new screen</Button>
+            {/* An installed widget a screen shows must be registered before the console can be saved. */}
+            {widgetInstalls.length > 0 && <ConsoleWidgetRegistry widgets={widgets} published={initial?.console.published?.content.widgets}
+              candidates={widgetInstalls} disabled={!available} onChange={setWidgets} />}
           </>}
     </div>}
     {step === 2 && <div className="space-y-5">

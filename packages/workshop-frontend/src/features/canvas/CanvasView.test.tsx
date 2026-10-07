@@ -169,12 +169,15 @@ it('keeps a board card that scrolled away subscribed, so a decided action still 
   expect(boardCards().map(issueCount)).toEqual([2, 3])
 })
 
-it('opens a published console\'s widgets through that console revision, never as plain gadgets', async () => {
-  await act(async () => root.render(<CanvasView definition={definition([gadgetWidget('g', 'gadget:9')])}
-    gadgets={summaries({ id: 9, type: 'gadget', title: 'Status', commitId: 'c9' })} overseer={overseer}
-    offeredBy={{ consoleId: 'floor', revision: '4' }} />))
+it('opens a published console\'s registered widgets through that console revision, and other gadgets as before', async () => {
+  const frozenFor = { consoleId: 'floor', revision: '4', sourceGadgetId: 2 }
+  await act(async () => root.render(<CanvasView definition={definition([gadgetWidget('w', 'gadget:9'), gadgetWidget('a', 'gadget:3')])}
+    gadgets={summaries({ id: 9, type: 'gadget', title: 'Status', commitId: 'c9', frozenFor }, { id: 3, type: 'gadget', title: 'Counter app', commitId: 'c3' })}
+    overseer={overseer} offeredBy={{ consoleId: 'floor', revision: '4' }} />))
   expect(overseer.getConsoleWidget).toHaveBeenCalledWith('floor', '4', 9)
-  expect(overseer.getGadget).not.toHaveBeenCalled()
+  expect(overseer.getConsoleWidget).toHaveBeenCalledTimes(1)
+  expect(overseer.getGadget).toHaveBeenCalledWith(3)
+  expect(overseer.getGadget).not.toHaveBeenCalledWith(9)
   await act(async () => root.render(<CanvasView definition={definition([])} gadgets={summaries()} overseer={overseer} />))
-  expect(disposed).toEqual(['console 9'])
+  expect(disposed.toSorted()).toEqual([3, 'console 9'].toSorted())
 })

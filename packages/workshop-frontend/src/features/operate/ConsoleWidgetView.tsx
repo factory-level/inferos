@@ -44,7 +44,8 @@ export const ConsoleWidgetView = ({ workspaceId, source, revision, target, onClo
       .then(value => { if (!cancelled) setScreen(value ?? null) })
       .catch(() => { if (!cancelled) setScreen(null) })
     return () => { cancelled = true }
-  }, [overseer, target.consoleId, target.screenId, source])
+    // A new revision publishes new frozen installs, so the screen is read again for it.
+  }, [overseer, target.consoleId, target.screenId, source, revision])
   const widget = screen?.sections.flatMap(section => section.widgets).find(item => item.id === target.widgetId)
   const gadgets = new Map<WorkpieceId, GadgetSummary>()
   for (const piece of workpieces.values()) if (piece.type === 'gadget') gadgets.set(piece.id, piece)

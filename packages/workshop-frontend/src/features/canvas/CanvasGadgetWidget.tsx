@@ -15,8 +15,9 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
   gadget: GadgetSummary | undefined
   overseer: RpcStub<Overseer>
   /**
-   * Set on a published console's screen: the gadget is the widget that revision offers, opened
-   * through the console (`getConsoleWidget`), which is how the use role reaches it.
+   * Set on a published console's screen. A frozen install there is the widget that revision
+   * offers, opened through the console (`getConsoleWidget`), which is how the use role reaches it;
+   * any other gadget (an app, say) opens as before.
    */
   offeredBy?: CanvasConsoleRevision
 }) => {
@@ -26,8 +27,9 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
   // A draft belongs to its conversation until accepted, so it is never shown on a shared canvas.
   const gadgetId = gadget && gadget.chatId === undefined ? gadget.id : undefined
 
-  const consoleId = offeredBy?.consoleId
-  const revision = offeredBy?.revision
+  const offered = offeredBy && gadget?.frozenFor ? offeredBy : undefined
+  const consoleId = offered?.consoleId
+  const revision = offered?.revision
   useEffect(() => {
     if (gadgetId === undefined) return
     const stub = consoleId !== undefined && revision !== undefined
