@@ -1165,6 +1165,9 @@ function stampBindHookAction(storage: OverseerStorage, actionId: number, enabled
 }
 
 // Recorded for an apply a restart interrupted after it was dispatched (see applyStartedAt).
+// Why an action whose last attempt is not retryable is refused another approval.
+const NOT_RETRYABLE_MESSAGE = "This action cannot be approved again: its last attempt cannot be " +
+    "safely repeated. Check it at the provider, then reject it.";
 const INTERRUPTED_APPLY_MESSAGE = "An apply of this action was interrupted after it was sent, so its " +
     "outcome is unknown: check the provider before approving it again.";
 // Appended to a later attempt's refusal while an earlier attempt's outcome is still unknown.
@@ -5697,6 +5700,12 @@ class OverseerImpl implements AgentHooks {
 
   async #applyPendingAction(record: ActionRecord & {type: "action"},
                             resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
+    // The gatekeeper said a repeat is unsafe or futile (it may have applied and cannot be replayed),
+    // so nothing is sent and nothing is recorded: the person checks the provider and rejects it.
+    let last = this.storage.actions.get(record.id);
+    if (last?.type === "action" && last.lastAttempt?.retryable === false) {
+      throw new Error(`${NOT_RETRYABLE_MESSAGE} ${last.lastAttempt.message}`);
+    }
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
     // auto-approval never publishes, since no person approved it.
@@ -5772,7 +5781,8 @@ class OverseerImpl implements AgentHooks {
       outcome: earlierUnknown ? "unknown" : failure.outcome,
       message: earlierUnknown && failure.outcome === "notApplied"
           ? `${failure.message} ${EARLIER_ATTEMPT_UNKNOWN_NOTE}` : failure.message,
-      ...(failure.code !== undefined ? {code: failure.code} : {}), at: new Date(),
+      ...(failure.code !== undefined ? {code: failure.code} : {}),
+      retryable: failure.retryable, at: new Date(),
     };
     if (!earlierUnknown && failure.outcome === "notApplied" && !failure.retryable) {
       current.state = "failed";

@@ -351,13 +351,14 @@ it.concurrent("an unknown apply outcome stays pending with its warning, through 
 
 // Once an attempt's outcome is unknown, a later attempt's refusal answers only for itself: the
 // action stays pending, still flagged as possibly applied, rather than failed with "nothing changed".
+// The first failure is a thrown error, an unknown outcome that may be approved again.
 it.concurrent("a refusal after an unknown outcome keeps the action pending and possibly applied", async () => {
   await using session = await openSession(models.script([writeValues(4), { text: "Not reached." }]), "agentunknownthenrefused");
   const label = labelOf(session);
   await session.runTurn("Set the test value to 4.");
   const [action] = await waitForPendingActions(session, 1);
   await withOwnerWorkspace(harness.url, session.username, async ws => {
-    await failNextApply(label, "The request timed out after it was sent.", "unknown");
+    await failNextApply(label, "The request timed out after it was sent.");
     await expect(ws.approveAction(action.id)).rejects.toThrow("timed out");
     await failNextApply(label, "The provider refused the retry.", "refused");
     await expect(ws.approveAction(action.id)).rejects.toThrow("refused the retry");
@@ -366,6 +367,48 @@ it.concurrent("a refusal after an unknown outcome keeps the action pending and p
   const entry = entries.find(candidate => candidate.id === action.id);
   expect(entry).toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown" } });
   expect(entry?.type === "action" && entry.lastAttempt?.message).toContain("An earlier attempt may still have applied it");
+});
+
+// An unknown outcome the gatekeeper says cannot be safely repeated is kept with `retryable: false`,
+// and another approval is refused before reaching the gatekeeper; rejecting it still works. A
+// retryable failure records `retryable: true` and can be approved again.
+it.concurrent("an attempt that cannot be repeated is never sent again; a retryable one is", async () => {
+  await using session = await openSession(
+    models.script([writeValues(2), { text: "Understood." }]), "agentnotretryable");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 2.");
+  const [first] = await waitForPendingActions(session, 1);
+  const entryOf = async (id: number) => (await session.listActions({ filter: "action" })).entries
+    .find(candidate => candidate.id === id);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await failNextApply(label, "The provider may have taken it; it cannot be resent.", "unknown");
+    await expect(ws.approveAction(first.id)).rejects.toThrow("cannot be resent");
+    expect(await entryOf(first.id)).toMatchObject({
+      state: "pending", lastAttempt: { outcome: "unknown", retryable: false },
+    });
+    await expect(ws.approveAction(first.id)).rejects.toThrow("cannot be approved again");
+    expect(await applyAttempts(label)).toBe(1);
+    await ws.rejectAction(first.id);
+  });
+  expect(await entryOf(first.id)).toMatchObject({ state: "rejected", lastAttempt: { retryable: false } });
+});
+
+it.concurrent("a retryable failure records it and may be approved again", async () => {
+  await using session = await openSession(
+    models.script([writeValues(5), { text: "Done." }]), "agentretryable");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 5.");
+  const [action] = await waitForPendingActions(session, 1);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await failNextApply(label, "The provider was briefly unreachable.");
+    await expect(ws.approveAction(action.id)).rejects.toThrow("briefly unreachable");
+    expect((await session.listActions({ filter: "action" })).entries.find(e => e.id === action.id))
+      .toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown", retryable: true } });
+    await ws.approveAction(action.id);
+  });
+  expect(await applyAttempts(label)).toBe(2);
+  expect((await session.listActions({ filter: "action" })).entries.find(e => e.id === action.id))
+    .toMatchObject({ state: "approved" });
 });
 
 // An apply a restart interrupts after dispatch may have reached the provider: the action comes back
