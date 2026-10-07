@@ -12,7 +12,12 @@ import { connect, nextUsernames, signUp, stubFor, waitFor, WorkpieceRecorder } f
 // operators run, whatever later happens to the registered install, until the next publication.
 
 type Tally = { bump(): Promise<number> };
-type Versioned = Tally & { version(): Promise<string>; tally(): Promise<RpcStub<Tally>> };
+type Versioned = Tally & {
+  version(): Promise<string>;
+  tally(): Promise<RpcStub<Tally>>;
+  holder(): Promise<{ tally: RpcStub<Tally> }>;
+  tallies(): Promise<RpcStub<Tally>[]>;
+};
 
 const widgetFiles = (version: string): Record<string, string> => ({
   "server.js": `import { DurableObject, RpcTarget } from "cloudflare:workers";
@@ -28,6 +33,8 @@ export class Gadget extends DurableObject {
     return n;
   }
   tally() { return new Tally(this); }
+  holder() { return { tally: new Tally(this) }; }
+  tallies() { return [new Tally(this)]; }
 }
 `,
   "client.js": `document.body.textContent = ${JSON.stringify(version)};\n`,
@@ -185,6 +192,8 @@ describe("a console's widget registry", () => {
     // returns, are kept across the session changes below.
     const server = await handle.connectToGadget() as unknown as RpcStub<Versioned>;
     const tally = await server.tally();
+    const { tally: held } = await server.holder();
+    const [listed] = await server.tallies();
     expect(await server.version()).toBe("v1");
     expect(await server.bump()).toBe(1);
     expect(await tally.bump()).toBe(2);
@@ -200,11 +209,16 @@ describe("a console's widget registry", () => {
     await expect(handle.getUiBundle()).rejects.toThrow(/not open/);
     await expect(server.bump()).rejects.toThrow(/not open/);
     await expect(tally.bump()).rejects.toThrow(/not open/);
+    // Capabilities returned inside an object or an array are guarded too.
+    await expect(held.bump()).rejects.toThrow(/not open/);
+    await expect(listed!.bump()).rejects.toThrow(/not open/);
     await expect(used.getConsoleWidget(created.id, published.revision, frozen.gadgetId)).rejects.toThrow(/not open/);
     seq = await openConsole(session, s.spaceId, published, seq);
     expect(await handle.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
     expect(await server.bump()).toBe(3);
     expect(await tally.bump()).toBe(4);
+    expect(await held.bump()).toBe(5);
+    expect(await listed!.bump()).toBe(6);
 
     // Nothing changes the frozen install: not its title, removal, an upgrade or a chat's edit.
     {
@@ -249,7 +263,9 @@ describe("a console's widget registry", () => {
     await expect(handle.getUiBundle()).rejects.toThrow(/changed/);
     await expect(server.bump()).rejects.toThrow(/changed/);
     await expect(tally.bump()).rejects.toThrow(/changed/);
-    tally[Symbol.dispose](); server[Symbol.dispose]();
+    await expect(held.bump()).rejects.toThrow(/changed/);
+    await expect(listed!.bump()).rejects.toThrow(/changed/);
+    for (const kept of [tally, held, listed!, server]) kept[Symbol.dispose]();
     await waitFor("the old frozen install's removal", async () =>
       s.watched.workpieces.summaries.has(frozen.gadgetId) ? null : true);
     seq = await openConsole(session, s.spaceId, republished, seq);

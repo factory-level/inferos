@@ -523,8 +523,15 @@ export type WorkpieceRecord = GadgetRecord | WorktreeRecord;
 // quick model is unavailable or failed. Deliberately fed suggested binding names or generic
 // bases, never titles -- title-to-identifier transformation is the quick model's job.
 // A capability that a guarded facet call returns (see OverseerImpl.getGadgetFacet) is guarded the
-// same way, so keeping a nested stub doesn't escape `guard`; plain data passes through.
+// same way, so keeping a nested stub doesn't escape `guard`. Arrays and plain objects are walked
+// for the capabilities they hold; other data passes through.
 function guardedResult(value: unknown, guard: () => Promise<void>): unknown {
+  if (Array.isArray(value)) return value.map(item => guardedResult(item, guard));
+  if (value !== null && typeof value === "object" && !(value instanceof NativeRpcStub)) {
+    let prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, guardedResult(item, guard)]));
+  }
   if (!(value instanceof NativeRpcStub)) return value;
   let proxy = new Proxy(value as object, {
     get(target, prop) {
