@@ -34,6 +34,22 @@ const DEMO = { id: "10000000-0000-4000-8000-000000000001", identifier: "DEMO", n
 const READY = "20000000-0000-4000-8000-000000000001";
 const DEMO_1 = "30000000-0000-4000-8000-000000000001";
 
+const TABLE = "70000000-0000-4000-8000-000000000001";
+const TABLE_ROW = "71000000-0000-4000-8000-000000000001";
+const TABLE_URL = `inferops://acme.operations/object/table/${TABLE}`;
+/** The InferOps definition of the fake's one table: every column, the personal one included. */
+const TABLE_TYPE = {
+  id: TABLE, name: "assets", label: "Assets", version: 2, starter: null, relations: [],
+  columns: [
+    { key: "c1", name: "serial", label: "Serial", type: "text", required: true, indexed: true, personal: false },
+    { key: "c2", name: "custodian", label: "Custodian", type: "text", required: false, indexed: false, personal: true },
+  ],
+};
+const TABLE_RECORD = {
+  id: TABLE_ROW, typeId: TABLE, typeVersion: 2, headSeq: "7", relations: [],
+  values: { serial: "SN-1", custodian: "Ada Lovelace" },
+};
+
 const HOUR = 60 * 60 * 1000;
 
 /** An unsigned JWT whose only claim is `exp`; nothing here verifies signatures. */
@@ -176,6 +192,25 @@ class FakeInferLab {
         return Response.json({ document: { id: HANDBOOK, version: this.page.version } });
       }
     }
+    if (url.pathname === "/object/embed") {
+      // InferOps' principal-lane read: the reference names its own tenant and workspace, and both
+      // must be the reader's (the person is in tenant `acme`); anything else is one NOT_FOUND.
+      const ref = new URL((url.searchParams.get("ref") ?? "").replace(/^inferops:/, "https:"));
+      const [tenant, workspace] = ref.hostname.split(".");
+      const held = [...this.slugs].find(([id, slug]) => slug === workspace && this.memberships.has(id));
+      const [, widget, id] = ref.pathname.split("/").filter(Boolean);
+      if (tenant !== "acme" || !held) {
+        return Response.json({ success: false, error: { code: "NOT_FOUND", message: "no such widget target" } }, { status: 404 });
+      }
+      if (widget === "table-view" && id === TABLE) {
+        return Response.json({ widget: "table-view", type: TABLE_TYPE, records: [TABLE_RECORD] });
+      }
+      if (widget === "record-card" && id === TABLE_ROW) {
+        return Response.json({ widget: "record-card", type: TABLE_TYPE, record: TABLE_RECORD });
+      }
+      return Response.json({ success: false, error: { code: "NOT_FOUND", message: "no such widget target" } }, { status: 404 });
+    }
+    if (url.pathname === "/object/types") return Response.json({ types: [TABLE_TYPE] });
     if (url.pathname === "/project/projects") return Response.json({ projects: [DEMO] });
     if (url.pathname === "/project/board") {
       return Response.json({
@@ -660,5 +695,89 @@ describe("the InferMind Wiki of a connected person", () => {
     const outsider = await connect("wikioutsider");
     expect(await hooks().addWikiObserverFrom("shared-wiki", outsider))
       .toContain("cannot read the InferMind Wiki of acme.mind");
+  });
+});
+
+describe("custom tables as the person", () => {
+  const tables = env as unknown as { INFEROPS_TABLES_ENABLED?: string };
+  beforeEach(() => { tables.INFEROPS_TABLES_ENABLED = "true"; });
+  afterEach(() => { delete tables.INFEROPS_TABLES_ENABLED; });
+
+  it("reads with the person's own token, through object.embed for the whole tenant.workspace, GET only", async () => {
+    const account = await connect("table");
+    expect(await hooks().bindAccount("table", account, TABLE_URL)).toBeNull();
+    const { table, records } = await hooks().startBoundTableSession("table").listRecords();
+    expect(table.columns.map(c => c.name)).toEqual(["serial"]);
+    expect(records).toEqual([{ id: TABLE_ROW, tableVersion: 2, values: { serial: "SN-1" }, links: [] }]);
+    expect(JSON.stringify({ table, records })).not.toContain("Ada");
+    const embeds = inferlab.apiCalls.filter(c => c.path.startsWith("/object/embed"));
+    expect(embeds.length).toBeGreaterThanOrEqual(2);
+    for (const call of embeds) {
+      expect(new URLSearchParams(call.path.split("?")[1]).get("ref"))
+        .toMatch(new RegExp(`^inferops://acme\\.operations/object/table-view/${TABLE}\\?limit=`));
+      expect(call.workspaceId).toBe(OPS);
+      expect(call.token).toBe(inferlab.accessOf("refresh-1"));
+    }
+    expect(await hooks().listPickerTables(account, "acme.operations")).toEqual([
+      expect.objectContaining({ value: TABLE, title: "Assets" }),
+    ]);
+  });
+
+  it("refuses a colliding tenant label: InferOps checks the whole tenant.workspace on every read", async () => {
+    const account = await connect("table-collide");
+    // `operations` is the person's workspace slug, but `globex` is not their tenant. Unlike a board,
+    // the label reaches InferOps in the reference, which refuses it, so the binding is refused.
+    expect(await hooks().bindAccount("collide", account, `inferops://globex.operations/object/table/${TABLE}`))
+      .toBe("No such InferOps custom table is available to you on globex.operations.");
+    const probe = inferlab.apiCalls.find(c => c.path.startsWith("/object/embed"))!;
+    expect(new URLSearchParams(probe.path.split("?")[1]).get("ref")).toContain("inferops://globex.operations/");
+  });
+
+  it("refuses a workspace the person does not hold, before any request, as it refuses a missing table", async () => {
+    const account = await connect("table-outside");
+    const outside = await hooks().bindAccount("t-outside", account, `inferops://acme.knowledge/object/table/${TABLE}`);
+    const missing = await hooks().bindAccount("t-missing", account,
+      "inferops://acme.operations/object/table/70000000-0000-4000-8000-0000000000ff");
+    expect(outside).toBe("No such InferOps custom table is available to you on acme.knowledge.");
+    expect(missing).toBe("No such InferOps custom table is available to you on acme.operations.");
+    expect(inferlab.apiCalls.every(c => c.workspaceId === OPS)).toBe(true);
+  });
+
+  it("refuses reads once the session has ended, and once the account is revoked", async () => {
+    const ended = await connect("table-ended");
+    expect(await hooks().bindAccount("t-ended", ended, TABLE_URL)).toBeNull();
+    inferlab.endSession("refresh-1");
+    expect(await failure(hooks().startBoundTableSession("t-ended").listRecords())).toContain("UNAUTHORIZED");
+
+    const revoked = await connect("table-revoked");
+    expect(await hooks().bindAccount("t-revoked", revoked, TABLE_URL)).toBeNull();
+    const session = hooks().startBoundTableSession("t-revoked");
+    await session.describeTable();
+    await hooks().revokeAccount(revoked);
+    expect(await failure(session.listRecords())).toContain("not connected");
+  });
+
+  it("reads with the reconnected session once the Workshop commits it", async () => {
+    const account = await connect("table-reconnect");
+    expect(await hooks().bindAccount("t-reconnect", account, TABLE_URL)).toBeNull();
+    const session = hooks().startBoundTableSession("t-reconnect");
+    await session.listRecords();
+    const first = inferlab.accessOf("refresh-1");
+    expect((await finish(await hooks().reconnectAccount(account))).status).toBe(200);
+    const stageId = reconnects.find(r => r.label === "table-reconnect")!.stageId;
+    // Staged, not live: reads still use the first session.
+    await session.listRecords();
+    expect(lastApiCall().token).toBe(first);
+    expect(await hooks().commitReconnect(account, stageId)).toBeNull();
+    await session.listRecords();
+    expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-2"));
+    expect(inferlab.logouts).toEqual(["refresh-1"]);
+  });
+
+  it("never admits a collaborator, even one who holds the workspace", async () => {
+    const owner = await connect("table-owner");
+    expect(await hooks().bindAccount("t-shared", owner, TABLE_URL)).toBeNull();
+    const member = await connect("table-member");
+    expect(await hooks().addTableObserverFrom("t-shared", member)).toContain("cannot be shared");
   });
 });

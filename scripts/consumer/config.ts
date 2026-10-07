@@ -2,6 +2,7 @@
 export const CAPABILITY_NAMES = [
   "INFEROPS_ENABLED", "INFEROPS_CANVAS_STATE_MACHINE", "HARNESS_HG_ENABLED", "INFEROPS_AUTH",
   "PUBLISH_CLOUDFLAREOS_WIDGET", "PUBLISH_CLOUDFLAREOS_APP", "AGENT_DEPLOYMENTS", "CODING_WORKBENCH_ENABLED",
+  "INFEROPS_TABLES_ENABLED",
 ] as const;
 
 /** One customer capability flag name. */
@@ -117,6 +118,8 @@ export const CAPABILITY_REQUIREMENTS: Partial<Record<CapabilityName, readonly Ca
   INFEROPS_CANVAS_STATE_MACHINE: ["INFEROPS_ENABLED"],
   // Coding dispatch goes through the InferOps gatekeeper, which refuses everything while it is off.
   CODING_WORKBENCH_ENABLED: ["INFEROPS_ENABLED"],
+  // Custom-table bindings go through the InferOps gatekeeper too.
+  INFEROPS_TABLES_ENABLED: ["INFEROPS_ENABLED"],
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

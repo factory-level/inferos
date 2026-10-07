@@ -1,7 +1,7 @@
 ---
 title: Customer feature capabilities
 status: draft
-updated: 2026-10-05
+updated: 2026-10-07
 ---
 
 # Customer feature capabilities
@@ -28,6 +28,7 @@ This is a draft target. Current code accepts only the legacy flags `composableVi
 | `PUBLISH_CLOUDFLAREOS_APP` | Enable an explicit application publication path, separate from agent activation and from business data sharing. |
 | `AGENT_DEPLOYMENTS` | Enable the reviewed native persona/skill [agent deployment](agent-deployments.md) lifecycle and scoped capability bindings. |
 | `CODING_WORKBENCH_ENABLED` | Enable [local coding workflow](local-coding-workflows.md) invocation by authorized humans and agents using a supported signed-in coding tool, without an LLM API key. No hosted workbench and no required push or PR. |
+| `INFEROPS_TABLES_ENABLED` | Enable read-only, private-only InferOps custom-table bindings through the [InferOps gatekeeper](inferops-gatekeeper.md#custom-tables) (MVP-20). It grants nothing: each read is the person's own InferOps access. Added after [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md)'s eight names; see Open Questions. |
 
 Provider and runtime adapter versions, resource references, policies, publication destinations and secret references are separate configuration fields. Do not add a boolean for every provider.
 
@@ -53,6 +54,7 @@ Provider and runtime adapter versions, resource references, policies, publicatio
 - Native deployments do not require HG.
 - Local coding requires neither HG nor native ChatGPT subscription inference.
 - `CODING_WORKBENCH_ENABLED` requires `INFEROPS_ENABLED`: coding dispatch reaches the runner only through the InferOps gatekeeper.
+- `INFEROPS_TABLES_ENABLED` requires `INFEROPS_ENABLED`: custom tables are read only through the InferOps gatekeeper.
 - Validate each dependency explicitly. Never turn on another flag silently.
 
 ### Enforcement

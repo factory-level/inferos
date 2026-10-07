@@ -14,6 +14,7 @@ import {
   isInferLabAuthOrigin,
   resolveCodingWorkbenchEnabled,
   resolveInferOpsEnabled,
+  resolveInferOpsTablesEnabled,
   resolvePublicationFlag,
 } from "./dev-server-config.ts";
 
@@ -181,6 +182,19 @@ describe("resolveInferOpsEnabled", () => {
     assert.equal(resolveInferOpsEnabled({ capability: false, canvasSelected: false, shell: undefined }), "false");
     assert.throws(() => resolveInferOpsEnabled({ capability: true, canvasSelected: false, shell: undefined }),
       /INFEROPS_ENABLED is on, but inferos.canvas.json leaves gatekeeper-inferops out/);
+  });
+});
+
+describe("resolveInferOpsTablesEnabled", () => {
+  it("is off by default, follows a version 2 capability over the shell, and needs InferOps on", () => {
+    assert.equal(resolveInferOpsTablesEnabled({ capability: null, inferOpsEnabled: "true", shell: undefined }), "false");
+    assert.equal(resolveInferOpsTablesEnabled({ capability: null, inferOpsEnabled: "true", shell: "true" }), "true");
+    assert.equal(resolveInferOpsTablesEnabled({ capability: true, inferOpsEnabled: "true", shell: "false" }), "true");
+    assert.equal(resolveInferOpsTablesEnabled({ capability: false, inferOpsEnabled: "true", shell: "true" }), "false");
+    assert.throws(() => resolveInferOpsTablesEnabled({ capability: null, inferOpsEnabled: "true", shell: "yes" }),
+      /INFEROPS_TABLES_ENABLED must be "true" or "false"/);
+    assert.throws(() => resolveInferOpsTablesEnabled({ capability: true, inferOpsEnabled: "false", shell: undefined }),
+      /INFEROPS_TABLES_ENABLED is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
   });
 });
 

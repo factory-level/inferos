@@ -40,6 +40,11 @@ declare namespace Cloudflare {
      */
     CODING_WORKBENCH_ENABLED?: string;
     /**
+     * `"true"` or `"false"`: whether custom-table bindings are on (capability
+     * `INFEROPS_TABLES_ENABLED`). Unset counts as off (see table.ts); it also needs `INFEROPS_ENABLED`.
+     */
+    INFEROPS_TABLES_ENABLED?: string;
+    /**
      * The InferOps repository ids the wrapper's `codingWorkbench.repos` allowlists, comma-separated.
      * Ids only, never local paths. Unset allows no repository.
      */

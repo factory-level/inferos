@@ -40,12 +40,14 @@ import {
   InferOpsError, atStage, type DispatchRequest, type InferOpsClient, type InferOpsErrorCode,
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
   type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
-  type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord, type WikiStructureRecord,
+  type TableColumnRecord, type TableRead, type TableReadOptions, type TableRecordSchema,
+  type TableRowRecord, type TableSummary, type WikiPageChanges, type WikiPageWrite,
+  type WikiSectionRecord, type WikiStructureRecord,
 } from "./inferops-client";
 import { isSlug } from "./resources";
 import type {
   Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
-  State, StateGroup, WikiPillar, WikiPillarMember, WikiStructurePage, Workflow,
+  State, StateGroup, TableTargetKind, WikiPillar, WikiPillarMember, WikiStructurePage, Workflow,
 } from "./types";
 
 type LogFields = { vendorId: string; operation: string; status: number; code: string };
@@ -162,6 +164,11 @@ export const WIKI_FORBIDDEN =
 /** The code of a data-source failure this client raised, or null. */
 function inferOpsCode(error: unknown): InferOpsErrorCode | null {
   return error instanceof InferOpsError ? error.code : null;
+}
+
+/** One message for a table or row that is missing, refused, or outside the bound table. */
+export function tableNotFound(): InferOpsError {
+  return new InferOpsError("NOT_FOUND", "No such table or row is available to you.");
 }
 
 function documentNotFound(): InferOpsError {
@@ -459,6 +466,97 @@ function parseBoard(body: unknown, project: Project): ProjectSnapshot {
 }
 
 /** The InferOps error code of an error body, when it has a well-formed one. */
+const COLUMN_NAME = /^[a-z][a-z0-9_]{0,62}$/;
+const COLUMN_KEY = /^c[1-9][0-9]*$/;
+const COLUMN_TYPES: readonly TableColumnRecord["type"][] =
+  ["text", "number", "integer", "boolean", "date", "timestamp"];
+const TABLE_TARGET_KINDS: readonly TableTargetKind[] = ["project/issue", "project/project", "object/record"];
+const INFEROPS_REF = /^inferops:\/\/[^\s]{1,1990}$/;
+
+function bool(value: unknown, what: string): boolean {
+  if (typeof value !== "boolean") throw new Malformed(`${what} is not valid`);
+  return value;
+}
+
+/** A custom table's definition; storage details (slots, keys of moved values) are dropped. */
+function parseTableSchema(value: unknown): TableRecordSchema {
+  const table = record(value, "type");
+  const version = int(table.version, "type.version");
+  if (version < 1) throw new Malformed("type.version is not valid");
+  return {
+    id: text(table.id, "type.id", UUID).toLowerCase(),
+    label: text(table.label, "type.label"),
+    version,
+    columns: list(table.columns, "type.columns").map(raw => {
+      const column = record(raw, "column");
+      const enumValues = column.enum === undefined
+        ? undefined : list(column.enum, "column.enum").map(v => text(v, "column.enum"));
+      return {
+        key: text(column.key, "column.key", COLUMN_KEY),
+        name: text(column.name, "column.name", COLUMN_NAME),
+        label: text(column.label, "column.label"),
+        type: oneOf(column.type, COLUMN_TYPES, "column.type"),
+        required: bool(column.required, "column.required"),
+        personal: bool(column.personal, "column.personal"),
+        ...(enumValues ? { enum: enumValues } : {}),
+      };
+    }),
+    relations: list(table.relations, "type.relations").map(raw => {
+      const relation = record(raw, "relation");
+      return {
+        name: text(relation.name, "relation.name", COLUMN_NAME),
+        toKind: oneOf(relation.toKind, TABLE_TARGET_KINDS, "relation.toKind"),
+      };
+    }),
+  };
+}
+
+/** One row; each link keeps its relation, kind and reference only (its label and href are dropped). */
+function parseTableRow(value: unknown): TableRowRecord {
+  const row = record(value, "record");
+  const values: TableRowRecord["values"] = {};
+  for (const [name, cell] of Object.entries(record(row.values, "record.values"))) {
+    if (!COLUMN_NAME.test(name)) throw new Malformed("record.values is not valid");
+    if (cell === null || typeof cell === "string" || typeof cell === "boolean" ||
+        (typeof cell === "number" && Number.isFinite(cell))) {
+      values[name] = cell;
+    } else {
+      throw new Malformed("record.values is not valid");
+    }
+  }
+  return {
+    id: text(row.id, "record.id", UUID).toLowerCase(),
+    typeId: text(row.typeId, "record.typeId", UUID).toLowerCase(),
+    typeVersion: int(row.typeVersion, "record.typeVersion"),
+    values,
+    links: list(row.relations, "record.relations").map(raw => {
+      const link = record(raw, "relation");
+      return {
+        relation: text(link.relation, "relation.relation", COLUMN_NAME),
+        toKind: oneOf(link.toKind, TABLE_TARGET_KINDS, "relation.toKind"),
+        ref: text(link.ref, "relation.ref", INFEROPS_REF),
+      };
+    }),
+  };
+}
+
+/**
+ * An `object.embed` answer for `widget`: the definition and its rows, each row of that table and
+ * that version (InferOps checks this too; a mismatch is not trusted either way).
+ */
+function parseTableRead(body: unknown, widget: "table-view" | "record-card"): TableRead {
+  const answer = record(body, "response");
+  if (answer.widget !== widget) throw new Malformed("another widget was returned");
+  const table = parseTableSchema(answer.type);
+  const rows = widget === "table-view"
+    ? list(answer.records, "records").map(parseTableRow)
+    : [parseTableRow(answer.record)];
+  if (rows.some(r => r.typeId !== table.id || r.typeVersion !== table.version)) {
+    throw new Malformed("a record of another table or version was returned");
+  }
+  return { table, rows };
+}
+
 function wireCode(body: unknown): string | null {
   try {
     return text(record(record(body, "response").error, "error").code, "error.code", WIRE_CODE);
@@ -715,6 +813,40 @@ export function openHttpInferOpsClient(
       if (section.id !== sectionId.toLowerCase()) throw new Malformed("another section was returned");
       return section;
     });
+  }
+
+  /**
+   * One `object.embed` read. Its refusals (missing, another tenant or workspace, no grant, tables
+   * turned off in InferOps) all read as one NOT_FOUND; a definition that changed during the read
+   * (409) is read once more. The reference is logged by operation name only, never its text.
+   */
+  async function embed(
+    operation: string, ref: string, widget: "table-view" | "record-card",
+    isAsked: (read: TableRead) => boolean,
+  ): Promise<TableRead> {
+    const path = `/object/embed?${new URLSearchParams({ ref })}`;
+    for (let attempt = 0; ; attempt++) {
+      let body: unknown;
+      try {
+        body = await request(operation, { method: "GET", path });
+      } catch (error) {
+        const code = inferOpsCode(error);
+        if (code === "NOT_FOUND" || code === "FORBIDDEN") throw tableNotFound();
+        if (code === "INVALID_REQUEST") {
+          throw new InferOpsError("INVALID_REQUEST", "InferOps cannot read the table with these options.");
+        }
+        if ((code === "STALE_REVISION" || code === "CONFLICT") && attempt === 0) continue;
+        if (code === "STALE_REVISION" || code === "CONFLICT") {
+          throw new InferOpsError("UNAVAILABLE", "The table changed while it was read. Try again.");
+        }
+        throw error;
+      }
+      return parsed(operation, body, raw => {
+        const read = parseTableRead(raw, widget);
+        if (!isAsked(read)) throw new Malformed("another table or record was returned");
+        return read;
+      });
+    }
   }
 
   async function projects(): Promise<Project[]> {
@@ -1079,6 +1211,31 @@ export function openHttpInferOpsClient(
         if (updated.id !== sectionId.toLowerCase()) throw new Malformed("another section was returned");
         return updated;
       });
+    },
+
+    async listTables(): Promise<TableSummary[]> {
+      const body = await request("object.type.list", { method: "GET", path: "/object/types" });
+      return parsed("object.type.list", body, raw =>
+        list(record(raw, "response").types, "types").map(value => {
+          const table = record(value, "type");
+          return { id: text(table.id, "type.id", UUID).toLowerCase(), label: text(table.label, "type.label") };
+        }));
+    },
+
+    async readTable(host: string, tableId: string, options: TableReadOptions): Promise<TableRead> {
+      if (!UUID.test(tableId)) throw tableNotFound();
+      const query = new URLSearchParams({ limit: String(options.limit) });
+      if (options.relatedTo !== undefined) query.set("relatedTo", options.relatedTo);
+      return embed("object.table.read",
+        `inferops://${host}/object/table-view/${tableId.toLowerCase()}?${query}`, "table-view",
+        read => read.table.id === tableId.toLowerCase());
+    },
+
+    async readTableRow(host: string, recordId: string): Promise<TableRead> {
+      if (!UUID.test(recordId)) throw tableNotFound();
+      return embed("object.row.read",
+        `inferops://${host}/object/record-card/${recordId.toLowerCase()}`, "record-card",
+        read => read.rows[0]?.id === recordId.toLowerCase());
     },
 
     /** Nothing is held for a remote service. */

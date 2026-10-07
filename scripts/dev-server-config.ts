@@ -268,21 +268,40 @@ export function resolvePublicationFlag(name: PublicationFlagName, options: {
  * - It is never on while the InferOps integration is off: the gatekeeper would refuse everything
  *   anyway, so asking for it then is a configuration error rather than a silent no-op.
  */
-export function resolveCodingWorkbenchEnabled(options: {
+export function resolveCodingWorkbenchEnabled(options: InferOpsSwitchOptions): "true" | "false" {
+  return resolveInferOpsSwitch("CODING_WORKBENCH_ENABLED", options);
+}
+
+/**
+ * The `INFEROPS_TABLES_ENABLED` var the InferOps gatekeeper gets, which it checks on every
+ * custom-table binding and call (`table.ts`). Resolved exactly as `CODING_WORKBENCH_ENABLED`: the
+ * version 2 capability wins, otherwise the shell's `INFEROPS_TABLES_ENABLED=true`; off by default,
+ * and never on while the InferOps integration is off.
+ */
+export function resolveInferOpsTablesEnabled(options: InferOpsSwitchOptions): "true" | "false" {
+  return resolveInferOpsSwitch("INFEROPS_TABLES_ENABLED", options);
+}
+
+/** What resolves one switch that lives inside the InferOps integration. */
+export type InferOpsSwitchOptions = {
   /** The wrapper's version 2 capability, or null for a version 1 wrapper or no wrapper. */
   capability: boolean | null;
   /** The resolved `INFEROPS_ENABLED`. */
   inferOpsEnabled: "true" | "false";
-  /** The shell's `CODING_WORKBENCH_ENABLED`, used only without a version 2 wrapper. */
+  /** The shell's value of the switch, used only without a version 2 wrapper. */
   shell: string | undefined;
-}): "true" | "false" {
+};
+
+function resolveInferOpsSwitch(
+  name: "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED", options: InferOpsSwitchOptions,
+): "true" | "false" {
   const { capability, inferOpsEnabled, shell } = options;
   if (capability === null && shell !== undefined && shell !== "true" && shell !== "false") {
-    throw new Error('CODING_WORKBENCH_ENABLED must be "true" or "false"');
+    throw new Error(`${name} must be "true" or "false"`);
   }
   const on = capability ?? shell === "true";
   if (on && inferOpsEnabled !== "true") {
-    throw new Error("CODING_WORKBENCH_ENABLED is on, but the InferOps integration (INFEROPS_ENABLED) is off");
+    throw new Error(`${name} is on, but the InferOps integration (INFEROPS_ENABLED) is off`);
   }
   return on ? "true" : "false";
 }

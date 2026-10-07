@@ -1,0 +1,42 @@
+{
+  "tables": [
+    {
+      "id": "70000000-0000-4000-8000-000000000001",
+      "label": "Assets",
+      "version": 3,
+      "columns": [
+        { "key": "c1", "name": "serial", "label": "Serial", "type": "text", "required": true, "personal": false },
+        { "key": "c2", "name": "site", "label": "Site", "type": "text", "required": false, "personal": false },
+        { "key": "c3", "name": "status", "label": "Status", "type": "text", "required": false, "personal": false, "enum": ["in service", "repair", "retired"] },
+        { "key": "c4", "name": "custodian_email", "label": "Custodian email", "type": "text", "required": false, "personal": true, "enum": ["ana@example.test", "li@example.test"] },
+        { "key": "c5", "name": "hours", "label": "Run hours", "type": "integer", "required": false, "personal": false },
+        { "key": "c6", "name": "commissioned", "label": "Commissioned", "type": "date", "required": false, "personal": false }
+      ],
+      "relations": [
+        { "name": "work_items", "toKind": "project/issue" }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "id": "71000000-0000-4000-8000-000000000003",
+      "typeId": "70000000-0000-4000-8000-000000000001",
+      "values": { "serial": "SN-1003", "site": "north bay", "status": "repair", "custodian_email": "li@example.test", "hours": 8120, "commissioned": "2023-04-02" },
+      "links": [
+        { "relation": "work_items", "toKind": "project/issue", "ref": "inferops://demo.local/project/issue-link/30000000-0000-4000-8000-000000000001" }
+      ]
+    },
+    {
+      "id": "71000000-0000-4000-8000-000000000002",
+      "typeId": "70000000-0000-4000-8000-000000000001",
+      "values": { "serial": "SN-1002", "site": "south yard", "status": "in service", "custodian_email": "ana@example.test", "hours": 1404, "commissioned": null },
+      "links": []
+    },
+    {
+      "id": "71000000-0000-4000-8000-000000000001",
+      "typeId": "70000000-0000-4000-8000-000000000001",
+      "values": { "serial": "SN-1001", "site": "north bay", "status": "retired", "custodian_email": null, "hours": null, "commissioned": "2019-11-20" },
+      "links": []
+    }
+  ]
+}

@@ -31,6 +31,11 @@
 // turns the demo workspace into one without InferMind, so every Wiki call fails FORBIDDEN as
 // InferOps' product gate does.
 //
+// Custom tables: one synthetic table (`src/fixtures/demo-table.json`) with a personal column and a
+// relation, read as InferOps' `object.embed` answers: the definition with every column, personal
+// ones included, and the rows newest first, each at the table's version. Projection is the
+// gatekeeper's job (table.ts), exactly as for the HTTP client. There are no table writes.
+//
 // Large boards (#28, development only): `MOCK_INFEROPS_SYNTHETIC_ISSUES=<n>` (the dev server passes
 // it through from the shell or `.dev.vars`) adds a synthetic project `PERF` with n issues over six
 // states when an account's data is first seeded, for measuring the Kanban against a board of a
@@ -42,10 +47,13 @@ import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/observability/logger";
 import SEED from "./fixtures/demo-board.json";
 import WIKI_SEED from "./fixtures/demo-wiki.json";
+import TABLE_SEED from "./fixtures/demo-table.json";
 import {
   InferOpsError, atStage, inferOpsErrorCode, type DispatchRequest, type InferOpsClient,
   type IssueChanges, type NewIssueRequest,
-  type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord, type WikiDocumentHead,
+  type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord, type TableRead,
+  type TableReadOptions, type TableRecordSchema, type TableRowRecord, type TableSummary,
+  type WikiDocumentHead,
   type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord,
   type WikiStructureRecord,
 } from "./inferops-client";
@@ -60,6 +68,7 @@ const IDEMPOTENCY_PREFIX = "idem:";
 // v2 added page bodies, versions, Master roles and pillars; a v1 copy is left unread.
 const WIKI_KEY = "wiki:v2";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
+const TABLES_KEY = "tables:v1";
 const REVOKED_KEY = "revoked";
 
 /** A demo page: its listed fields, its body, version and Master role, and its last write's receipt. */
@@ -75,6 +84,14 @@ type MockPillar = {
 
 /** The demo Wiki: its pages, their sections and its pillars. */
 type MockWiki = { documents: MockDocument[]; sections: WikiSectionRecord[]; pillars: MockPillar[] };
+
+/** The demo tables: definitions with every column, and rows stored without their version. */
+export type MockTables = { tables: TableRecordSchema[]; rows: Omit<TableRowRecord, "typeVersion">[] };
+
+/** The one answer for a table or row the demo account cannot read. */
+function tableNotFound(): InferOpsError {
+  return new InferOpsError("NOT_FOUND", "No such table or row is available to you.");
+}
 
 /** The demo workspace's repositories. Only ids reach a dispatch; there is nothing to clone. */
 export const MOCK_REPOS: readonly RepoRecord[] = [
@@ -567,6 +584,42 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return issue;
   }
 
+  /** The demo tables, seeded on first use; `tables:v1` is what tests rewrite to change one. */
+  #tables(): MockTables {
+    this.#assertLive();
+    let tables = this.ctx.storage.kv.get<MockTables>(TABLES_KEY);
+    if (!tables) {
+      tables = structuredClone(TABLE_SEED) as unknown as MockTables;
+      this.ctx.storage.kv.put(TABLES_KEY, tables);
+    }
+    return tables;
+  }
+
+  #tableRead(table: TableRecordSchema, rows: MockTables["rows"]): TableRead {
+    return { table, rows: rows.map(row => ({ ...row, typeVersion: table.version })) };
+  }
+
+  async listTables(): Promise<TableSummary[]> {
+    return this.#tables().tables.map(({ id, label }) => ({ id, label }));
+  }
+
+  async readTable(tableId: string, options: TableReadOptions): Promise<TableRead> {
+    const { tables, rows } = this.#tables();
+    const table = tables.find(t => t.id === tableId);
+    if (!table) throw tableNotFound();
+    const own = rows.filter(r => r.typeId === table.id && (options.relatedTo === undefined ||
+      r.links.some(link => link.ref === options.relatedTo)));
+    return this.#tableRead(table, own.slice(0, options.limit));
+  }
+
+  async readTableRow(recordId: string): Promise<TableRead> {
+    const { tables, rows } = this.#tables();
+    const row = rows.find(r => r.id === recordId);
+    const table = row && tables.find(t => t.id === row.typeId);
+    if (!row || !table) throw tableNotFound();
+    return this.#tableRead(table, [row]);
+  }
+
   /** Deletes the account's data and refuses every later call (see the header). */
   async forget(): Promise<void> {
     await this.ctx.storage.deleteAll();
@@ -622,6 +675,11 @@ export function openInferOpsClient(
     readSection: sectionId => stub.readSection(sectionId),
     updateSection: (sectionId, body, idempotencyKey) =>
       refused(stub.updateSection(sectionId, body, idempotencyKey)),
+    listTables: () => stub.listTables(),
+    readTable: (host, tableId, options) => host === account.host
+      ? stub.readTable(tableId, options) : Promise.reject(tableNotFound()),
+    readTableRow: (host, recordId) => host === account.host
+      ? stub.readTableRow(recordId) : Promise.reject(tableNotFound()),
     forget: () => stub.forget(),
   };
 }

@@ -54,6 +54,12 @@
       "new_sqlite_classes": [
         "InferOpsWikiGatekeeper"
       ]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": [
+        "InferOpsTableGatekeeper"
+      ]
     }
   ]
 }

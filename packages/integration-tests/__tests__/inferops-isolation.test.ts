@@ -22,12 +22,13 @@ import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, Overseer } from "@gadgets/workshop-shared/api";
 import type {
-  InferOpsDispatchSession, InferOpsProjectSession, InferOpsWikiSession,
+  InferOpsDispatchSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession,
 } from "../../../custom-gatekeepers/gatekeeper-inferops/src/types.js";
 import { startHarness, type Harness } from "../src/harness.js";
 import {
   DOCUMENTS, HANDBOOK_EMBED, INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, REPOS,
-  SEEDED_ISSUES, WORKSPACES, boardUrl, secretDescription, secretSectionBody, wikiUrl,
+  SEEDED_ISSUES, TABLES, WORKSPACES, boardUrl, secretCustodian, secretDescription, secretSectionBody,
+  tableUrl, wikiUrl,
   type FakePerson, type WorkspaceSlug,
 } from "../src/inferops-fake.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
@@ -80,6 +81,8 @@ beforeAll(async () => {
           // Coding dispatch on, with web-app the only allowlisted repository.
           CODING_WORKBENCH_ENABLED: "true",
           CODING_WORKBENCH_REPOS: REPOS.webApp.id,
+          // Custom tables on (off by default).
+          INFEROPS_TABLES_ENABLED: "true",
         };
       },
     }],
@@ -556,7 +559,9 @@ describe("account and scope changes", () => {
 });
 
 /** Reload the gatekeeper with a deployment var set, keeping its storage and the fake's data. */
-async function setVar(name: "INFEROPS_ENABLED" | "CODING_WORKBENCH_ENABLED", enabled: boolean): Promise<void> {
+async function setVar(
+  name: "INFEROPS_ENABLED" | "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED", enabled: boolean,
+): Promise<void> {
   earlierLogs.push(...harness.server.getLogs());
   await harness.server.update(options => ({
     ...options,
@@ -893,6 +898,93 @@ describe("the InferMind Wiki", () => {
   });
 });
 
+describe("custom tables", () => {
+  const ASSETS = tableUrl("operations", TABLES.operations.id);
+
+  /** A table binding of the user's, and a session on it. */
+  async function bindTable(user: User, url = ASSETS) {
+    const ws = await user.api.newGadget();
+    const connection = await ws.newGatekeeper(user.account.id, url);
+    if (!connection) throw new Error(`No connection for ${url}`);
+    const session = await connection.openSession() as RpcStub<InferOpsTableSession>;
+    return { ws, connection, session };
+  }
+
+  it("reads rows with the person's own token, without the personal column, as observations", async () => {
+    const tess = await newUser("tablereader", ["operations"]);
+    const { ws, session } = await bindTable(tess);
+    const { table, records } = await session.listRecords();
+    expect(table.columns.map(c => c.name)).toEqual(["serial"]);
+    expect(records.map(r => r.values)).toEqual([{ serial: "Assets-1" }]);
+    const row = await session.getRecord(records[0]!.id);
+    const seen = JSON.stringify([table, records, row]);
+    for (const trace of ["custodian", "Custodian", secretCustodian("Assets")]) expect(seen).not.toContain(trace);
+
+    const titles = (await ws.listActions({ filter: "observation" })).entries.map(e => e.description.title);
+    expect(titles).toEqual(expect.arrayContaining(["List InferOps custom table rows", "Read InferOps custom table row"]));
+    const embeds = requestsBy(tess.person).filter(r => r.path.startsWith("/object/embed"));
+    expect(embeds.length).toBeGreaterThan(0);
+    for (const request of embeds) {
+      expect(request.method).toBe("GET");
+      expect(new URLSearchParams(request.path.split("?")[1]).get("ref")).toMatch(/^inferops:\/\/acme\.operations\/object\//);
+    }
+    expect(requestsBy(tess.person).every(r => r.method === "GET")).toBe(true);
+  });
+
+  it("attack: another workspace's table, a tenant label that is not the person's, and a row of another table are refused", async () => {
+    const tom = await newUser("tableattack", ["operations"]);
+    const refused = `No such InferOps custom table is available to you on`;
+    // The knowledge table, named in the person's own workspace and in the workspace they lack.
+    expect(await bindRefusal(tom, tableUrl("operations", TABLES.knowledge.id))).toContain(`${refused} acme.operations`);
+    expect(await bindRefusal(tom, tableUrl("knowledge", TABLES.knowledge.id))).toContain(`${refused} acme.knowledge`);
+    // `operations` is the person's workspace slug, but `globex` is not their tenant.
+    expect(await bindRefusal(tom, tableUrl("operations", TABLES.operations.id, "globex")))
+      .toContain(`${refused} globex.operations`);
+
+    const { session } = await bindTable(tom);
+    const knowledgeRow = TABLES.knowledge.id.replace(/^7a/, "7b");
+    expect(await failure(session.getRecord(knowledgeRow))).toContain("NOT_FOUND");
+  });
+
+  it("attack: a gadget that read a table cannot be shared, even with a collaborator who holds the workspace", async () => {
+    const tia = await newUser("tableowner", ["operations"]);
+    const { ws, session } = await bindTable(tia);
+    await session.listRecords();
+    const { id: gadgetId } = await ws.getMetadata();
+
+    const ted = await newUser("tablecollab", ["operations"]);
+    expect(await ws.addCollaborator(ted.username, "build")).toBeTruthy();
+    const asked = new ObserverConfigRecorder().alwaysChoose(ted.account.id, MAX_OBSERVER_PROMPTS);
+    using callback = stubFor(asked);
+    expect(await failure(ted.api.openGadget(gadgetId, undefined, callback))).toMatch(/could not confirm/i);
+    expect(requestsBy(ted.person).filter(r => r.path.startsWith("/object/"))).toEqual([]);
+  });
+
+  it("failure: with INFEROPS_TABLES_ENABLED off, table sessions and bindings are refused without a request; boards stay", async () => {
+    const tod = await newUser("tableoff", ["operations"]);
+    const { ws, connection } = await bindTable(tod);
+    const { id: gadgetId } = await ws.getMetadata();
+    const connectionId = await connection.getId();
+
+    await setVar("INFEROPS_TABLES_ENABLED", false);
+    try {
+      await overFreshConnection(() => harness.url, async () => {
+        const api = await logIn(connect(harness.url), tod.username);
+        const reopened = await api.openGadget(gadgetId);
+        const stale = await (await reopened.getGatekeeperById(connectionId)).openSession() as
+          RpcStub<InferOpsTableSession>;
+        const before = fake.requests.length;
+        expect(await failure(stale.listRecords())).toContain("DISABLED: InferOps custom tables are turned off");
+        expect(await failure(reopened.newGatekeeper(tod.account.id, ASSETS))).toContain("custom tables are turned off");
+        expect(fake.requests.slice(before)).toEqual([]);
+        expect(await (await api.newGadget()).newGatekeeper(tod.account.id, ENG_BOARD)).toBeTruthy();
+      });
+    } finally {
+      await setVar("INFEROPS_TABLES_ENABLED", true);
+    }
+  });
+});
+
 describe("leakage", () => {
   // Must stay last: it inspects what every earlier test logged and failed with.
   it("no log line or error message carries a token, a refresh token, an issue description or a section body", async () => {
@@ -907,6 +999,7 @@ describe("leakage", () => {
       ...fake.issuedTokens(),
       ...SEEDED_ISSUES.map(secretDescription),
       ...fake.seededSectionBodies(),
+      ...Object.values(TABLES).map(t => secretCustodian(t.label)),
     ];
     for (const secret of secrets) {
       expect(printed.includes(secret), `the logs contain ${secret.slice(0, 18)}…`).toBe(false);

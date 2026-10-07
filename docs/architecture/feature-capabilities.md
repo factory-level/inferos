@@ -6,6 +6,7 @@ covers:
   - scripts/dev-server-config.ts
   - custom-gatekeepers/gatekeeper-inferops/src/enablement.ts
   - custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts
+  - custom-gatekeepers/gatekeeper-inferops/src/table.ts
   - custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts
   - packages/workshop-backend/src/publication.ts
   - packages/workshop-backend/__tests__/publication.test.ts
@@ -18,14 +19,14 @@ covers:
   - packages/workshop-frontend/src/hooks/useBlueprintScreenshotSrc.ts
   - packages/workshop-frontend/src/components/BlueprintPreviewImage.tsx
   - packages/workshop-frontend/src/BlueprintsPage.tsx
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 
 # Customer feature capabilities
 
 ## Overview
 
-The eight-name capability vocabulary of [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md) is accepted by `inferos.config.json` schema version 2 ([#84](https://github.com/factory-level/inferos/pull/84), closing [#67](https://github.com/factory-level/inferos/issues/67)). Five capabilities have runtime code: `INFEROPS_ENABLED` ([#103](https://github.com/factory-level/inferos/pull/103)), `INFEROPS_AUTH` ([#94](https://github.com/factory-level/inferos/pull/94)), `CODING_WORKBENCH_ENABLED` (coding dispatch through the InferOps gatekeeper, [#69](https://github.com/factory-level/inferos/issues/69)/[#70](https://github.com/factory-level/inferos/issues/70)), and `PUBLISH_CLOUDFLAREOS_WIDGET` and `PUBLISH_CLOUDFLAREOS_APP` (publication records, [#68](https://github.com/factory-level/inferos/issues/68)). The other three are accepted as configuration, reported `unsupported`, and refused when switched on. Resolution across the CLI, deployment, server, tools and UI ([#33](https://github.com/factory-level/inferos/issues/33)) is unfinished.
+The eight-name capability vocabulary of [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md), plus `INFEROPS_TABLES_ENABLED` (read-only custom tables, MVP-20), is accepted by `inferos.config.json` schema version 2 ([#84](https://github.com/factory-level/inferos/pull/84), closing [#67](https://github.com/factory-level/inferos/issues/67)). Six capabilities have runtime code: `INFEROPS_ENABLED` ([#103](https://github.com/factory-level/inferos/pull/103)), `INFEROPS_AUTH` ([#94](https://github.com/factory-level/inferos/pull/94)), `CODING_WORKBENCH_ENABLED` (coding dispatch through the InferOps gatekeeper, [#69](https://github.com/factory-level/inferos/issues/69)/[#70](https://github.com/factory-level/inferos/issues/70)), `PUBLISH_CLOUDFLAREOS_WIDGET` and `PUBLISH_CLOUDFLAREOS_APP` (publication records, [#68](https://github.com/factory-level/inferos/issues/68)), and `INFEROPS_TABLES_ENABLED` (read-only custom-table bindings through the InferOps gatekeeper, see [custom tables](inferops-gatekeeper.md#custom-tables)). The other three are accepted as configuration, reported `unsupported`, and refused when switched on. Resolution across the CLI, deployment, server, tools and UI ([#33](https://github.com/factory-level/inferos/issues/33)) is unfinished.
 
 The detailed current state lives in [consumer configuration](consumer-configuration.md), which owns the same files; this page is the capability-shaped view of it.
 
@@ -35,16 +36,17 @@ The detailed current state lives in [consumer configuration](consumer-configurat
 | --- | --- |
 | `scripts/consumer/config.ts` | `CAPABILITY_NAMES`, the version 2 parser, `CAPABILITY_REQUIREMENTS`, `LEGACY_FLAG_COMPATIBILITY`, `migrateConsumerConfig` and `inferOpsAuthRequested`. |
 | `scripts/consumer/runtime.ts` | `capabilitySources` (the pinned file that makes an installation honour each capability), `unsupportedCapabilities`, the `inferos:check` capability report and `migrateWrapperConfig` (`pnpm inferos config migrate`). |
-| `scripts/dev-server-config.ts` | `resolveInferOpsEnabled`, `resolveCodingWorkbenchEnabled`, `resolvePublicationFlag` and the InferLab sign-in variables, used by `run-dev-server.ts`. |
+| `scripts/dev-server-config.ts` | `resolveInferOpsEnabled`, `resolveCodingWorkbenchEnabled`, `resolveInferOpsTablesEnabled`, `resolvePublicationFlag` and the InferLab sign-in variables, used by `run-dev-server.ts`. |
 | `packages/workshop-frontend/src/features/publication` | The publication UI: `PublicationReview` (Build's request step), `AdminPublicationsPanel` (the admin review list), and the shared record summary and withdraw form. See [publication records](#publication-records). |
 | `packages/workshop-backend/src/publication.ts` | Server enforcement of both publication flags: the flag checks, each record's derived status, the reach check and the KV snapshot it reads. See [publication records](#publication-records). |
 | `custom-gatekeepers/gatekeeper-inferops/src/enablement.ts` | Server enforcement of `INFEROPS_ENABLED`: every data-source call is refused with `DISABLED` while it is off. |
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | Server enforcement of `CODING_WORKBENCH_ENABLED` and the wrapper's repository allowlist: the dispatch resource kind is refused, and every call of a dispatch binding fails `DISABLED`, while it is off. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | The InferLab sign-in and per-person connect flows that `INFEROPS_AUTH` turns on. |
+| `custom-gatekeepers/gatekeeper-inferops/src/table.ts` | Server enforcement of `INFEROPS_TABLES_ENABLED`: the custom-table resource kind is withheld and refused, and every call of a table binding fails `DISABLED`, while it is off. |
 
 ## Data and Control Flow
 
-A version 2 file resolves each capability from its default (off), then its profile (none sets one), then an explicit override, with per-field provenance. The parser validates that `INFEROPS_CANVAS_STATE_MACHINE` and `CODING_WORKBENCH_ENABLED` each require `INFEROPS_ENABLED`, and never turns a flag on by itself. `inferos:check`, `doctor`, the wrapper `dev` command and `run-dev-server.ts --consumer-root` all refuse a switched-on capability whose `capabilitySources` file is absent from the pin. See [capability flags and schema version 2](consumer-configuration.md#capability-flags-and-schema-version-2).
+A version 2 file resolves each capability from its default (off), then its profile (none sets one), then an explicit override, with per-field provenance. The parser validates that `INFEROPS_CANVAS_STATE_MACHINE`, `CODING_WORKBENCH_ENABLED` and `INFEROPS_TABLES_ENABLED` each require `INFEROPS_ENABLED`, and never turns a flag on by itself. `inferos:check`, `doctor`, the wrapper `dev` command and `run-dev-server.ts --consumer-root` all refuse a switched-on capability whose `capabilitySources` file is absent from the pin. See [capability flags and schema version 2](consumer-configuration.md#capability-flags-and-schema-version-2).
 
 | Capability | State at `main` | Where it is enforced |
 | --- | --- | --- |
@@ -56,6 +58,7 @@ A version 2 file resolves each capability from its default (off), then its profi
 | `PUBLISH_CLOUDFLAREOS_APP` | Supported | The same, for app- and workflow-kind blueprints. |
 | `AGENT_DEPLOYMENTS` | Unsupported | None. |
 | `CODING_WORKBENCH_ENABLED` | Supported | The gatekeeper refuses dispatch bindings and every call through existing ones, and dispatches only allowlisted repositories; see [local coding workflows](local-coding-workflows.md). |
+| `INFEROPS_TABLES_ENABLED` | Supported | The gatekeeper withholds the custom-table resource kind and its picker, refuses table bindings and every call through existing ones; see [custom tables](inferops-gatekeeper.md#custom-tables). |
 
 ## Publication records
 

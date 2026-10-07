@@ -9,13 +9,14 @@ import type {
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper, InferOpsWikiGatekeeper,
+  InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper,
   MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
 import { InferOpsError, type IssueChanges, type NewIssueRequest } from "../src/inferops-client.js";
+import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
 import type {
-  InferOpsDispatchSession, InferOpsProjectSession, InferOpsWikiSession,
+  InferOpsDispatchSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession,
 } from "../src/types.js";
 
 export { default } from "../src/inferops.js";
@@ -24,7 +25,7 @@ export * from "../src/inferops.js";
 // ctx.exports are named explicitly.
 export {
   GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsDispatchGatekeeper,
-  InferOpsProjectGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
+  InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
 } from "../src/inferops.js";
 
 /** A fault the next issue write meets: refused before commit, or committed with its reply lost. */
@@ -37,6 +38,16 @@ const FAULT_KEY = "test:fault";
  * name, so `ctx.exports.MockInferOps` -- what every binding's client opens -- is this class.
  */
 export class MockInferOps extends BaseMockInferOps {
+  /** Replaces this account's demo tables, to change one behind the gatekeeper's back. */
+  async setTables(tables: MockTables): Promise<void> {
+    this.ctx.storage.kv.put("tables:v1", tables);
+  }
+
+  /** This account's demo tables as stored (seeded by the first table read). */
+  async getTables(): Promise<MockTables | undefined> {
+    return this.ctx.storage.kv.get<MockTables>("tables:v1");
+  }
+
   /** Arms `fault` for the next transition, create or update. */
   async failNextWrite(fault: WriteFault): Promise<void> {
     this.ctx.storage.kv.put(FAULT_KEY, fault);
@@ -105,6 +116,11 @@ export class TestWikiGatekeeper extends InferOpsWikiGatekeeper {
   }
 }
 
+/** The props the Workshop bakes into one custom-table binding. */
+export type TableProps = {
+  accountId: string; host: string; tableId: string; connected?: boolean; workspaceId?: string;
+};
+
 /** The props the Workshop bakes into one Wiki binding. */
 export type WikiProps = { accountId: string; host: string; connected?: boolean; workspaceId?: string };
 
@@ -116,6 +132,8 @@ export type BindingProps = {
 /** What the recording approval queue was told, in order. */
 export type QueueLog = {
   observations: string[];
+  /** Each observation's description, parallel to `observations`. */
+  observationTexts: string[];
   /** Each observation's collaborator exclusions, parallel to `observations`. */
   excluded: string[][];
   actions: Array<{
@@ -134,6 +152,7 @@ class TestApprovalQueue extends RpcTarget {
 
   async authorizeObservation(description: ObservationDescription): Promise<void> {
     this.log.observations.push(description.title);
+    this.log.observationTexts.push(description.description ?? "");
     this.log.excluded.push([...(description.excludeObservers ?? [])]);
   }
 
@@ -232,6 +251,7 @@ type TestExports = {
   InferOpsAccount(options: { props: AccountProps }): Fetcher<GatekeeperUser>;
   TestDispatchGatekeeper(options: { props: BindingProps }): DurableObjectClass<TestDispatchGatekeeper>;
   TestWikiGatekeeper(options: { props: WikiProps }): DurableObjectClass<TestWikiGatekeeper>;
+  InferOpsTableGatekeeper(options: { props: TableProps }): DurableObjectClass<InferOpsTableGatekeeper>;
 };
 
 /** The project configurator's capability, as the picker iframe receives it. */
@@ -246,7 +266,7 @@ function messageOf(error: unknown): string {
 }
 
 export class TestHooks extends DurableObject<Cloudflare.Env> {
-  #log: QueueLog = { observations: [], excluded: [], actions: [] };
+  #log: QueueLog = { observations: [], observationTexts: [], excluded: [], actions: [] };
   // Classes the accounts minted, by binding name: a facet is re-initialized from its class on
   // every `facets.get`.
   #minted = new Map<string, DurableObjectClass<InferOpsProjectGatekeeper>>();
@@ -342,6 +362,66 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     if (!cls) throw new Error(`No binding named ${name}.`);
     return this.ctx.facets.get<InferOpsWikiGatekeeper>(`minted/${name}`, () => ({ class: cls }))
       .startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** A table session over a custom-table binding `bindAccount` made under `name`. */
+  async startBoundTableSession(name: string): Promise<InferOpsTableSession> {
+    return this.#boundTable(name).startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  #boundTable(name: string) {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsTableGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsTableGatekeeper>(`minted/${name}`, () => ({ class: cls }));
+  }
+
+  /** Admission of a collaborator to a bound table binding; the failure message, or null. */
+  async addTableObserverFrom(name: string, observer: AccountProps): Promise<string | null> {
+    try {
+      await this.#boundTable(name).addObserver("observer-2", await this.#account(observer).getVerifier());
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  #tableGatekeeper(props: TableProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<InferOpsTableGatekeeper>(
+      `${props.accountId}/table/${props.host}/${props.tableId}`,
+      () => ({ class: exports.InferOpsTableGatekeeper({ props }) }));
+  }
+
+  /** A table session over a custom-table binding with these props. */
+  async startTableSession(props: TableProps): Promise<InferOpsTableSession> {
+    return this.#tableGatekeeper(props).startSession(
+      new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Admission of a collaborator who could read the table; the failure message, or null. */
+  async addTableObserver(props: TableProps): Promise<string | null> {
+    try {
+      await this.#tableGatekeeper(props).addObserver("observer-1",
+        new RpcStub(new TestVerifier(true)) as unknown as Fetcher<GatekeeperUserVerifier>);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** An action call on a table binding; the failure message, or null. */
+  async applyTable(props: TableProps): Promise<string | null> {
+    try {
+      await this.#tableGatekeeper(props).applyAction(1, new RpcStub(new TestGitCache()));
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** The resource description of a table binding. */
+  async describeTable(props: TableProps) {
+    return this.#tableGatekeeper(props).describe();
   }
 
   /** What `bindAccount` minted under `name`, by the resource description it gives. */
@@ -500,6 +580,14 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   /** The workspaces the Wiki picker lists for this account. */
+  /** The tables the table picker lists for this account on `host`. */
+  async listPickerTables(props: AccountProps, host: string) {
+    const frame = await this.#account(props).startResourceConfigurator("inferops://*/object/table/*");
+    return (frame.ui as unknown as ConfiguratorRpc & {
+      listTables(query: string, host: string): Promise<Array<{ value: string; title: string }>>;
+    }).listTables("", host);
+  }
+
   async listWikiWorkspaces(props: AccountProps) {
     const frame = await this.#account(props).startResourceConfigurator("inferops://*/knowledge/wiki");
     return (frame.ui as unknown as ConfiguratorRpc).listWorkspaces();

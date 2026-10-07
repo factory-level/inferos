@@ -134,6 +134,42 @@ export function boardUrl(workspace: string, projectKey: string, tenant = TENANT)
   return `inferops://${tenant}.${workspace}/project/board/${projectKey}`;
 }
 
+/**
+ * One custom table per InferOps workspace, each with a column its owner marked personal. `object.embed`
+ * answers with every column, as InferOps does; the gatekeeper must leave the personal one out.
+ */
+export const TABLES = {
+  operations: { id: "7a000000-0000-4000-8000-000000000001", label: "Assets", workspace: "operations" as WorkspaceSlug },
+  knowledge: { id: "7a000000-0000-4000-8000-000000000002", label: "Contracts", workspace: "knowledge" as WorkspaceSlug },
+} as const;
+
+/** The value of every table's personal column: it must never leave InferOps through InferOS. */
+export function secretCustodian(table: string): string {
+  return `CONFIDENTIAL custodian of ${table}`;
+}
+
+/** A custom table URL as InferOS binds it. */
+export function tableUrl(workspace: string, tableId: string, tenant = TENANT): string {
+  return `inferops://${tenant}.${workspace}/object/table/${tableId}`;
+}
+
+function tableType(table: (typeof TABLES)[keyof typeof TABLES]) {
+  return {
+    id: table.id, name: table.label.toLowerCase(), label: table.label, version: 1, starter: null, relations: [],
+    columns: [
+      { key: "c1", name: "serial", label: "Serial", type: "text", required: true, indexed: true, personal: false },
+      { key: "c2", name: "custodian", label: "Custodian", type: "text", required: false, indexed: false, personal: true },
+    ],
+  };
+}
+
+function tableRecord(table: (typeof TABLES)[keyof typeof TABLES]) {
+  return {
+    id: table.id.replace(/^7a/, "7b"), typeId: table.id, typeVersion: 1, headSeq: "1", relations: [],
+    values: { serial: `${table.label}-1`, custodian: secretCustodian(table.label) },
+  };
+}
+
 /** The description every seeded issue carries: it must never leave InferOps through InferOS. */
 export function secretDescription(identifier: string): string {
   return `CONFIDENTIAL description of ${identifier}: not for logs`;
@@ -570,12 +606,17 @@ export class InferOpsFake {
       })));
     }
 
+    if (url.pathname === "/object/embed" && method === "GET") return this.#embed(url, person);
+
     const slug = (Object.keys(WORKSPACES) as WorkspaceSlug[])
       .find(s => WORKSPACES[s].id === workspaceId);
     if (!slug || !person.workspaces.has(slug)) {
       return failure(403, "FORBIDDEN", "not a member of this workspace");
     }
     if (url.pathname.startsWith("/knowledge/")) return this.#knowledge(url, method, request, record, slug, person);
+    if (url.pathname === "/object/types" && method === "GET") {
+      return json({ types: Object.values(TABLES).filter(t => t.workspace === slug).map(tableType) });
+    }
     const projects = Object.values(PROJECTS).filter(p => p.workspace === slug);
     const issueIn = (id: string) => {
       const issue = this.#issues.get(id);
@@ -732,6 +773,34 @@ export class InferOpsFake {
     this.#runs.set(run.id, run);
     issue.revision = String(Number(issue.revision) + 1);
     return { status: 201, body: { run: this.#wireRun(run) } };
+  }
+
+  /**
+   * InferOps' `object.embed`, a principal-lane read: the reference names its own tenant and
+   * workspace, both must be the reader's, and the table or row must be in that workspace. Anything
+   * else is one NOT_FOUND, whichever part failed.
+   */
+  #embed(url: URL, person: FakePerson): Response {
+    const notFound = failure(404, "NOT_FOUND", "no such widget target");
+    let ref: URL;
+    try {
+      ref = new URL((url.searchParams.get("ref") ?? "").replace(/^inferops:/, "https:"));
+    } catch {
+      return notFound;
+    }
+    const [tenant, workspace] = ref.hostname.split(".") as [string, WorkspaceSlug];
+    if (tenant !== TENANT || !person.workspaces.has(workspace)) return notFound;
+    const [domain, widget, id] = ref.pathname.split("/").filter(Boolean);
+    const here = Object.values(TABLES).filter(t => t.workspace === workspace);
+    if (domain === "object" && widget === "table-view") {
+      const table = here.find(t => t.id === id);
+      return table ? json({ widget, type: tableType(table), records: [tableRecord(table)] }) : notFound;
+    }
+    if (domain === "object" && widget === "record-card") {
+      const table = here.find(t => tableRecord(t).id === id);
+      return table ? json({ widget, type: tableType(table), record: tableRecord(table) }) : notFound;
+    }
+    return notFound;
   }
 
   /** InferOps' knowledge routes, for one request already authorized into workspace `slug`. */

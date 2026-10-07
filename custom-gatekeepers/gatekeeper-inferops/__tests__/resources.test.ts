@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import dispatchUi from "../src/configurator/dispatch-ui";
 import wikiUi from "../src/configurator/wiki-ui";
 import projectUi from "../src/configurator/project-ui";
+import tableUi from "../src/configurator/table-ui";
 import type { InferOpsProjectConfiguratorRpc } from "../src/configurator/project-configurator-types";
 import {
-  parseProjectBoardUrl, parseProjectDispatchUrl, parseWikiUrl, projectBoardUrl,
+  parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl, parseWikiUrl, projectBoardUrl,
 } from "../src/resources";
 
 const URL = "inferops://acme.operations/project/board/ENG";
@@ -122,5 +123,34 @@ describe("Wiki URLs", () => {
     expect(await wikiUi.resourceUrl({ values: wikiUi.initial, ui: uiWith("demo.local") })).toBe(DEMO_WIKI);
     await expect(wikiUi.resourceUrl({ values: wikiUi.initial, ui: uiWith(null) }))
       .rejects.toThrow("choose an InferMind workspace");
+  });
+});
+
+describe("custom table URLs", () => {
+  const TABLE = "inferops://acme.operations/object/table/70000000-0000-4000-8000-00000000000a";
+  const DEMO_TABLE = "inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001";
+  const PATTERN = "inferops://*/object/table/*";
+
+  // The table picker duplicates the grammar too; keep it in step.
+  it.each([TABLE, DEMO_TABLE])("round-trips %s through the table picker", async url => {
+    const values = await tableUi.initialValuesFromResourceUrl({
+      resourceUrl: url, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    });
+    const { tenant, workspace, tableId } = parseTableUrl(url);
+    expect(values).toEqual({ tenant, workspace, tableId });
+    const built = await tableUi.resourceUrl({ values: { ...tableUi.initial, ...values }, ui: uiWith(null) });
+    expect(parseTableUrl(built)).toEqual(parseTableUrl(url));
+    // A board URL does not prefill the table picker.
+    expect(await tableUi.initialValuesFromResourceUrl({
+      resourceUrl: URL, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    })).toEqual({});
+  });
+
+  it("needs a table, and names the demo host only when the account offers it", async () => {
+    const demo = { ...tableUi.initial, tableId: "70000000-0000-4000-8000-000000000001" };
+    expect(await tableUi.resourceUrl({ values: demo, ui: uiWith("demo.local") })).toBe(DEMO_TABLE);
+    await expect(tableUi.resourceUrl({ values: demo, ui: uiWith(null) })).rejects.toThrow("choose a workspace and a table");
+    await expect(tableUi.resourceUrl({ values: tableUi.initial, ui: uiWith("demo.local") }))
+      .rejects.toThrow("choose a workspace and a table");
   });
 });

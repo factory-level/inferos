@@ -488,3 +488,77 @@ export interface InferOpsWikiSession {
    */
   updateSection(sectionId: string, body: string, expectedVersion: number): Promise<void>;
 }
+
+/** What a relation of a custom table links to: an issue, a project, or a row of a custom table. */
+export type TableTargetKind = "project/issue" | "project/project" | "object/record";
+
+/** One column of the bound table that you may see. A personal column never appears. */
+export interface TableColumn {
+  /** Stable column key ("c3"); survives renames. */
+  key: string;
+  /** Current name; the key of this column's value in `TableRecord.values`. */
+  name: string;
+  label: string;
+  type: "text" | "number" | "integer" | "boolean" | "date" | "timestamp";
+  required: boolean;
+  /** The only values the column accepts, when it is limited to a list; absent otherwise. */
+  enumValues?: string[];
+}
+
+/** One relation column of the bound table: its name and the kind of thing it links to. */
+export interface TableRelation {
+  name: string;
+  toKind: TableTargetKind;
+}
+
+/** The bound table's current definition, without personal columns. */
+export interface TableDescription {
+  label: string;
+  /** Increases on every column change. */
+  version: number;
+  columns: TableColumn[];
+  relations: TableRelation[];
+}
+
+/**
+ * One link in a relation cell. Only endpoints you can read appear. Labels and titles are never
+ * returned: a column's personal flag does not cover the thing a relation points at.
+ */
+export interface TableLink {
+  relation: string;
+  toKind: TableTargetKind;
+  /** The endpoint's inferops:// reference. */
+  ref: string;
+}
+
+/** One row, holding only the values of columns in `TableDescription.columns`, keyed by name. */
+export interface TableRecord {
+  id: string;
+  /** The table version these names belong to: always the `version` returned with it. */
+  tableVersion: number;
+  values: Record<string, string | number | boolean | null>;
+  links: TableLink[];
+}
+
+export interface ListRecordsOptions {
+  /** Only rows linked to this inferops:// endpoint; one you can't read gives an empty list. */
+  relatedTo?: string;
+  /** 1 to 50; defaults to 50. */
+  limit?: number;
+}
+
+/**
+ * Read-only access to one InferOps custom table, fixed when this capability was created. Every
+ * method reads that table only and takes no account, host, workspace or table argument. Rows are
+ * newest first. `listRecords` and `getRecord` return the table's description from the same read
+ * as the rows, so render rows with that description, not with an earlier `describeTable()`. Fails
+ * with NOT_FOUND when the table or row is not available to you (missing, outside this table, or
+ * refused), with INVALID_REQUEST for options it can't use, with DISABLED while tables are turned
+ * off, with UNAUTHORIZED when your InferOps sign-in has ended, and with UNAVAILABLE when InferOps
+ * could not answer (try again).
+ */
+export interface InferOpsTableSession {
+  describeTable(): Promise<TableDescription>;
+  listRecords(options?: ListRecordsOptions): Promise<{ table: TableDescription; records: TableRecord[] }>;
+  getRecord(id: string): Promise<{ table: TableDescription; record: TableRecord }>;
+}

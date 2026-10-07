@@ -50,6 +50,18 @@ export const KNOWLEDGE_WIKI_RESOURCE: SupportedResource = {
   excludeFromOperateChat: true,
 };
 
+/**
+ * One InferOps custom table, read-only: its definition and rows, without personal columns. Offered
+ * only while the deployment has `INFEROPS_TABLES_ENABLED` on. Never shared: a gadget that read it
+ * admits no collaborator.
+ */
+export const OBJECT_TABLE_RESOURCE: SupportedResource = {
+  urlPattern: "inferops://*/object/table/*",
+  title: "InferOps custom table",
+  description: "Read the rows of one InferOps custom table. Personal columns are left out.",
+  excludeFromOperateChat: true,
+};
+
 /** The project-scoped resource kinds, by the path segment that names them. */
 export type ProjectResourceKind = "board" | "dispatch";
 
@@ -120,12 +132,41 @@ export function projectResourceKind(url: string): ProjectResourceKind | null {
 }
 
 /** Every resource kind, by what its URL's path names. */
-export type ResourceKind = ProjectResourceKind | "wiki";
+export type ResourceKind = ProjectResourceKind | "wiki" | "table";
 
 /** The kind a resource URL names, or null when it names none (the parsers explain why). */
 export function resourceKind(url: string): ResourceKind | null {
   if (/^inferops:\/\/[^/?#]+\/knowledge\/wiki\/?$/.test(url.trim())) return "wiki";
+  if (/^inferops:\/\/[^/?#]+\/object\/table\//.test(url.trim())) return "table";
   return projectResourceKind(url);
+}
+
+/** A parsed custom-table resource URL: the workspace's host and labels, and the table's id. */
+export type TableRef = { host: string; tenant: string; workspace: string; tableId: string };
+
+const TABLE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Parse a custom-table URL, `inferops://<tenant>.<workspace>/object/table/<tableId>`, or throw a
+ * message naming the expected form. Syntax only, lowercase id. Unlike a board, the tenant label is
+ * not inert here: every read sends the whole host to InferOps, which refuses one that is not the
+ * reader's own tenant and workspace.
+ */
+export function parseTableUrl(url: string): TableRef {
+  const match = /^inferops:\/\/([^/?#]+)\/object\/table\/([^/?#]+)\/?$/.exec(url.trim());
+  const labels = match ? parseHost(match[1]!) : null;
+  if (!match || !labels || !TABLE_ID.test(match[2]!)) {
+    throw new Error(
+      "Not an InferOps custom table URL: expected inferops://<tenant>.<workspace>/object/table/<tableId>, " +
+      "with the table's id in lowercase, for example " +
+      `inferops://acme.operations/object/table/5f0c6d0e-8a52-4c43-9d4e-0d6c1f1b2a3c, or a table on ${DEMO_HOST}.`);
+  }
+  return { host: match[1]!, ...labels, tableId: match[2]! };
+}
+
+/** The canonical URL of a custom table. Inverse of `parseTableUrl`. */
+export function tableUrl({ host, tableId }: Pick<TableRef, "host" | "tableId">): string {
+  return `inferops://${host}/object/table/${tableId}`;
 }
 
 /** A parsed Wiki resource URL: the workspace's `<tenant>.<workspace>` host and its labels. */
