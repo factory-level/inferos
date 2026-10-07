@@ -3,14 +3,18 @@ import {
   consoleEventMismatch,
   consoleScreens,
   MAX_CONSOLE_VIEWS,
+  MAX_CONSOLE_WIDGETS,
   MAX_ROLLUP_SCREENS,
   parseOperateConsoleContent,
   publishedConsole,
   type ConsoleView,
+  type ConsoleWidgetEntry,
   type OperateConsole,
   type OperateConsoleContent,
 } from "@gadgets/workshop-shared/operate-console";
 import type { OperateConsoleRun } from "@gadgets/workshop-shared/operate-session";
+import { consoleWidgetRefusal } from "../src/console-store";
+import type { GadgetRecord } from "../src/overseer";
 
 const content = (views: ConsoleView[], extra: Partial<OperateConsoleContent> = {}): OperateConsoleContent =>
   ({ title: "Operations lead", views, fullChat: "available", ...extra });
@@ -105,5 +109,56 @@ describe("console navigation against the current definition", () => {
   it("ignores events that are not console navigation", () => {
     expect(consoleEventMismatch(saved, run("overview"), { type: "closeConsole" })).toBeNull();
     expect(consoleEventMismatch(saved, run("overview"), { type: "showHome" })).toBeNull();
+  });
+});
+
+describe("console widget registry", () => {
+  const entry: ConsoleWidgetEntry = { gadgetId: 7, blueprintId: "bp", version: 2, label: " Status ", state: "resettable" };
+
+  it("trims labels and drops a client's frozen origin, which only publication sets", () => {
+    let parsed = parseOperateConsoleContent(content([board], {
+      widgets: [{ ...entry, frozen: { sourceGadgetId: 1, commitId: "forged" } }],
+    }));
+    expect(parsed.widgets).toEqual([{ gadgetId: 7, blueprintId: "bp", version: 2, label: "Status", state: "resettable" }]);
+    expect(parseOperateConsoleContent(content([board])).widgets).toBeUndefined();
+  });
+
+  it("rejects duplicate gadgets, too many entries, bad versions and other state declarations", () => {
+    expect(() => parseOperateConsoleContent(content([board], { widgets: [entry, entry] }))).toThrow(/twice/);
+    let many = Array.from({ length: MAX_CONSOLE_WIDGETS + 1 }, (_, i) => ({ ...entry, gadgetId: i }));
+    expect(() => parseOperateConsoleContent(content([board], { widgets: many }))).toThrow(/at most/);
+    expect(() => parseOperateConsoleContent(content([board], { widgets: [{ ...entry, version: 0 }] }))).toThrow(/version/);
+    expect(() => parseOperateConsoleContent(content([board],
+        { widgets: [{ ...entry, state: "kept" as ConsoleWidgetEntry["state"] }] }))).toThrow(/resettable/);
+  });
+});
+
+describe("which gadgets a console may offer", () => {
+  const install = { blueprintId: "bp", version: 2, kind: "widget" as const };
+  const widget = (record: Partial<GadgetRecord>): GadgetRecord => ({
+    type: "gadget", id: 7, title: "Status", created: new Date(0), bindingName: "STATUS", bindings: {},
+    commitId: "c0", installedFrom: install, ...record,
+  });
+  const refusal = (record: GadgetRecord | undefined) => consoleWidgetRefusal(
+      { gadgets: { get: (id: number) => id === 7 ? record : undefined } } as never,
+      { gadgetId: 7, blueprintId: "bp", version: 2, label: "Status", state: "resettable" });
+
+  it("offers a widget install at the registered version with no bindings", () => {
+    expect(refusal(widget({}))).toBeNull();
+  });
+
+  it("refuses what is not that widget install", () => {
+    expect(refusal(undefined)).toMatch(/not a gadget/);
+    expect(refusal(widget({ pending: { chatId: 1 } }))).toMatch(/not a gadget/);
+    expect(refusal(widget({ installedFrom: undefined }))).toMatch(/not a blueprint install/);
+    expect(refusal(widget({ installedFrom: { ...install, kind: "app" } }))).toMatch(/app install, not a widget/);
+    expect(refusal(widget({ installedFrom: { ...install, version: 1 } }))).toMatch(/version 1, not bp version 2/);
+    expect(refusal(widget({ frozenFor: { consoleId: "c", revision: "1", sourceGadgetId: 3 } }))).toMatch(/frozen install/);
+  });
+
+  it("refuses durable state and any binding, including one added after install", () => {
+    expect(refusal(widget({ installedFrom: { ...install, dataContract: 1 } }))).toMatch(/data contract/);
+    expect(refusal(widget({ bindings: { DATA: { target: 9 } } }))).toMatch(/has bindings/);
+    expect(refusal(widget({ bindings: { DATA: { target: 9, pending: { chatId: 2 } } } }))).toMatch(/has bindings/);
   });
 });

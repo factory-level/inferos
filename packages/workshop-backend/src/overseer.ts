@@ -2,7 +2,8 @@ import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/
 import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
-import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot } from "./console-store";
+import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls } from "./console-store";
+import { checkWorkspaceKind } from "@gadgets/workshop-shared/workspace-kind";
 import { WorkspaceFlowStore } from "./flow-store";
 import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
 import {
@@ -18,7 +19,7 @@ import { consoleScreens, type ConsoleSource, type OperateConsole, type OperateCo
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -418,6 +419,13 @@ export type GadgetRecord = {
    * a repeat of it returns this gadget rather than installing again.
    */
   installRequest?: InstallRequest;
+
+  /**
+   * Set on a frozen install: the copy of a registered widget that one published console revision
+   * runs (see ConsoleWidgetEntry). Its head, bindings (none), title and install never change; only
+   * publication creates and removes it (see FrozenInstalls).
+   */
+  frozenFor?: ConsoleWidgetFrozenFor;
 };
 
 /** An install request named by a key: the blueprint and the version option it asked for. */
@@ -514,6 +522,39 @@ export type WorkpieceRecord = GadgetRecord | WorktreeRecord;
 // until it passes validateBindingName and isn't taken. Used wherever a name is needed and the
 // quick model is unavailable or failed. Deliberately fed suggested binding names or generic
 // bases, never titles -- title-to-identifier transformation is the quick model's job.
+// A capability that a guarded facet call returns (see OverseerImpl.getGadgetFacet) is guarded the
+// same way, so keeping a nested stub doesn't escape `guard`. Arrays and plain objects are walked
+// for the capabilities they hold; other data passes through.
+function guardedResult(value: unknown, guard: () => Promise<void>): unknown {
+  if (Array.isArray(value)) return value.map(item => guardedResult(item, guard));
+  if (value !== null && typeof value === "object" && !(value instanceof NativeRpcStub)) {
+    let prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, guardedResult(item, guard)]));
+  }
+  if (!(value instanceof NativeRpcStub)) return value;
+  let proxy = new Proxy(value as object, {
+    get(target, prop) {
+      let member = Reflect.get(target, prop, target);
+      if (typeof member !== "function" || typeof prop === "symbol") return member;
+      return (...args: any[]) => guard()
+          .then(() => Reflect.apply(member, target, args))
+          .then(result => guardedResult(result, guard));
+    },
+    // A returned function is a callable stub: calling it is guarded like calling a method.
+    apply(target, _thisArg, args) {
+      return guard()
+          .then(() => Reflect.apply(target as (...args: unknown[]) => unknown, undefined, args))
+          .then(result => guardedResult(result, guard));
+    },
+    getPrototypeOf() {
+      return RpcTarget.prototype;
+    },
+  });
+  // @ts-expect-error NativeRpcStub still has infinite recursion problems, fixed in Cap'n Web.
+  return new NativeRpcStub(proxy);
+}
+
 function fallbackBindingName(base: string, isTaken: (name: string) => boolean): string {
   let sanitized = base.toUpperCase().replace(/[^A-Z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
   if (!/^[A-Z_]/.test(sanitized)) sanitized = sanitized ? `X_${sanitized}` : "RESOURCE";
@@ -2728,6 +2769,7 @@ class OverseerImpl implements AgentHooks {
   bindWorkpiece(gadgetId: WorkpieceId, name: string, target: WorkpieceId,
                 chatId?: number): void {
     validateBindingName(name);
+    this.assertNotFrozen(gadgetId);
     if (name === "GADGET" || name === GIT_BINDING_NAME) {
       throw new Error(`The binding name \`${name}\` is reserved.`);
     }
@@ -2783,6 +2825,7 @@ class OverseerImpl implements AgentHooks {
   // possibly no longer bound by any gadget. `forChatId` scopes visibility: an edge pending in
   // some other chat is treated as nonexistent (it isn't this caller's to remove).
   unbindWorkpiece(gadgetId: WorkpieceId, name: string, forChatId?: number): void {
+    this.assertNotFrozen(gadgetId);
     let gadget = this.getGadgetRecord(gadgetId);
     let edge = gadget.bindings[name];
     if (!edge || (edge.pending && edge.pending.chatId !== forChatId &&
@@ -2796,6 +2839,7 @@ class OverseerImpl implements AgentHooks {
 
   // Rename a binding edge atomically, preserving edge metadata and restarting the gadget once.
   renameBinding(gadgetId: WorkpieceId, oldName: string, newName: string): void {
+    this.assertNotFrozen(gadgetId);
     let gadget = this.getGadgetRecord(gadgetId);
     let edge = gadget.bindings[oldName];
     if (!edge) {
@@ -2829,6 +2873,7 @@ class OverseerImpl implements AgentHooks {
     if (!record) {
       throw new Error(`No such workpiece: ${id}`);
     }
+    this.assertNotFrozen(id);
 
     // Disable and delete hooks that wake this gadget.
     let def = this.defaultGadgetId;
@@ -2847,6 +2892,53 @@ class OverseerImpl implements AgentHooks {
     this.#runningChatIds.delete(id);
     this.ctx.facets.delete(facetName);
     for (let meta of proposingChats) this.storage.chatMeta.put(meta);
+  }
+
+  // Refuse to change a frozen install (see GadgetRecord.frozenFor): only publication creates and
+  // removes one, so what a published console runs stays what it published.
+  assertNotFrozen(id: WorkpieceId): void {
+    let record = this.storage.gadgets.get(id);
+    let frozenFor = record?.type === "gadget" ? record.frozenFor : undefined;
+    if (frozenFor) {
+      throw new Error(`Gadget ${id} is the frozen install console ${frozenFor.consoleId} published; ` +
+          `change gadget ${frozenFor.sourceGadgetId} and publish the console again instead.`);
+    }
+  }
+
+  // Creating and removing the frozen installs a console publication runs (see FrozenInstalls),
+  // synchronously, inside the publication's transaction. A frozen install shares its source's
+  // commit (one object store) and gets no bindings; it can have no hooks either, which need one.
+  frozenInstalls(): FrozenInstalls {
+    return {
+      create: (source, frozenFor) => {
+        let taken = new Set([...this.storage.gadgets.list()].flatMap(
+            workpiece => workpiece.type === "gadget" ? [workpiece.bindingName] : []));
+        let record = this.createGadget(source.title,
+            fallbackBindingName(`${source.bindingName}_PUBLISHED`, name => taken.has(name)),
+            undefined, source.output, source.commitId);
+        if (source.installedFrom) record.installedFrom = source.installedFrom;
+        record.frozenFor = frozenFor;
+        this.storage.gadgets.put(record);
+        return record;
+      },
+      remove: id => {
+        let facetName = this.gadgetFacetName(id);
+        this.storage.gadgets.delete(id);
+        this.#runningChatIds.delete(id);
+        this.ctx.facets.delete(facetName);
+      },
+    };
+  }
+
+  // Refuse publishing a blueprint version whose files don't fit the workspace's kind, for a
+  // widget: what a console registers as a widget must have the widget's UI and server.
+  async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string): Promise<void> {
+    if (kind !== "widget") return;
+    let violations = checkWorkspaceKind(kind, (await this.gitStore.readCommitFiles(commitId)).keys());
+    if (violations.length > 0) {
+      throw new Error(`This gadget cannot be published as a widget: ` +
+          violations.map(violation => violation.message).join(" "));
+    }
   }
 
   // Chat deletion's workpiece cleanup: remove the gadgets and worktrees still provisional to the
@@ -2970,6 +3062,9 @@ class OverseerImpl implements AgentHooks {
       }
       if (record.installedFrom) {
         summary.installedFrom = record.installedFrom;
+      }
+      if (record.frozenFor) {
+        summary.frozenFor = record.frozenFor;
       }
       return summary;
     };
@@ -4039,6 +4134,7 @@ class OverseerImpl implements AgentHooks {
       : Promise<{generation: number, revision: number}> {
     this.getChatMetaOrThrow(chatId);  // fail fast
     this.#validateSubmissionShape(submission);
+    for (let id of changedGadgets(submission.change)) this.assertNotFrozen(id);
     let digest = await submissionDigest(submission);
 
     // Dedupe by (user, clientId, seq) before anything that can reject the base: a retry of an
@@ -4630,6 +4726,7 @@ class OverseerImpl implements AgentHooks {
       // never be inferred from content equality: an empty gadget compares equal to the empty
       // base, which is how creations used to be dropped from accepts.
       if (filesEqual(files, baseFiles) && !record.pending) continue;
+      this.assertNotFrozen(record.id);
 
       // Accepting is only ever a fast-forward: the chat must have already merged the gadget's
       // current head. A stale chat is expected control flow (someone else's accept can land at
@@ -5297,7 +5394,12 @@ class OverseerImpl implements AgentHooks {
   //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
-  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind)
+  //
+  // `guard`, when given, runs before every call through the stub, and through any capability a
+  // call returns, so a capability can be withdrawn while the client still holds it (see
+  // UseOverseerInterface.getConsoleWidget).
+  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
+                       guard?: () => Promise<void>)
       : Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
@@ -5335,7 +5437,9 @@ class OverseerImpl implements AgentHooks {
         //   possibly a runtime bug which needs investigation.
         // TODO: Fix exception reporting it tail workers so we can remove this hack.
         return (...args: any[]) => {
-          let result: Promise<any> = Reflect.apply(method, target, args);
+          let result: Promise<any> = guard
+              ? guard().then(() => Reflect.apply(method, target, args)).then(value => guardedResult(value, guard))
+              : Reflect.apply(method, target, args);
           return result.catch((err: any) => {
             let msg = err;
             if (err instanceof Error) {
@@ -11138,7 +11242,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
-    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
+    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env,
+        this.impl.frozenInstalls());
   }
 
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
@@ -11155,6 +11260,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     return this.#consoleStore().screen(consoleId, screenId, source);
+  }
+  async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
+    // Build access may already open any gadget, so its capability is the ordinary one.
+    return this.getGadget(gadgetId);
   }
 
   #artifactRevision(ref: ArtifactRef): ArtifactRevisionRecord | null {
@@ -11502,6 +11612,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async upgradeInstall(version: number, gadgetId?: WorkpieceId): Promise<void> {
+    if (gadgetId !== undefined) this.impl.assertNotFrozen(gadgetId);
     // The install being moved: an installed gadget's own, or the workspace's (its default gadget).
     let readInstall = () => gadgetId !== undefined
         ? this.impl.getGadgetRecord(gadgetId).installedFrom
@@ -12917,6 +13028,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       if (options.updateCode) {
         let commitId = await this.impl.assertPublishableCommit(
             this.impl.getGadgetRecord(gadgetId).commitId);
+        await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
         record.commitId = commitId;
         delete record.codeVersion;
         record.metadata.version++;
@@ -13190,7 +13302,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
-    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
+    return new WorkspaceConsoleStore(this.impl.ctx.storage, this.impl.storage, this.impl.env,
+        this.impl.frozenInstalls());
   }
 
   constructor(private impl: OverseerImpl,
@@ -13340,13 +13453,42 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return this.#subscriptionLease(this.impl.subscribeToWorkpieces(subscriber, false));
   }
 
+  // A widget install, registered or frozen, is offered only by a published console (see
+  // getConsoleWidget), never by membership in the workspace. Apps shared for use are unchanged.
   async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
-    if (this.impl.getGadgetRecord(id).pending) {  // also validates it exists
+    let record = this.impl.getGadgetRecord(id);  // also validates it exists
+    if (record.pending) {
       throw new Error(`No such gadget: ${id}`);
+    }
+    // A whole-workspace install records its provenance on the workspace, for its default gadget.
+    let installed = record.installedFrom ??
+        (id === this.impl.defaultGadgetId ? this.impl.storage.installedFrom.get() : undefined);
+    if (record.frozenFor || installed?.kind === "widget") {
+      throw new Error(`Gadget ${id} is a widget; open it through the console that offers it.`);
     }
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new UseGadgetClientInterface(this.impl, id, this.clientUserId);
+  }
+
+  // The capability checks the console context again on every call: the console must still offer
+  // the widget at that published revision, and the caller's own operate session must still have
+  // that console and revision open. So one kept from an older publication, from a console since
+  // unpublished or deleted, or from a console the person has since left stops working.
+  async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let workspaceId = this.impl.ctx.id.toString();
+    let check = async () => {
+      this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
+      let open = (await this.#clientUser.getOperatePage()).state.console;
+      if (open?.workspaceId !== workspaceId || open.consoleId !== consoleId ||
+          open.source !== "published" || open.revision !== revision) {
+        throw new Error(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
+      }
+    };
+    await check();
+    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
+    //     type system doesn't know this.
+    return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
   }
 
   // --- Denied methods (build-only) ---
@@ -13677,6 +13819,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> { this.#deny(); }
   async listTree(_commitId: string): Promise<TreeNode[]> { this.#deny(); }
@@ -13768,6 +13912,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   }
 
   async setTitle(title: string): Promise<void> {
+    this.impl.assertNotFrozen(this.id);
     let record = this.impl.getGadgetRecord(this.id);
     record.title = title;
     this.impl.storage.gadgets.put(record);
@@ -13777,11 +13922,14 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     return this.impl.removeWorkpiece(this.id);
   }
 
+  // A frozen install never runs a chat's proposed code (see GadgetRecord.frozenFor).
   async getUiBundle(chatId?: number): Promise<UiBundle | null> {
+    if (chatId !== undefined) this.impl.assertNotFrozen(this.id);
     return this.impl.getGadgetUiBundle(this.id, chatId);
   }
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
+    if (chatId !== undefined) this.impl.assertNotFrozen(this.id);
     this.impl.recordGadgetAnalytics({
       event_name: "gadget_interaction",
       user_id: this.#clientUser.id.toString(),
@@ -13902,6 +14050,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
 
   async setBlueprintAnnotation(name: string, annotation: BlueprintBindingAnnotation)
       : Promise<void> {
+    this.impl.assertNotFrozen(this.id);
     let {record, edge} = this.#getBindingEdge(name);
     let gatekeeper = this.impl.storage.gatekeepers.get(edge.target);
     edge.blueprintAnnotation = {
@@ -13924,6 +14073,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     //   We may in the future create different collaborator permission levels, in which case we'd
     //   need an auth check here and the following methods.
 
+    this.impl.assertNotFrozen(this.id);
     let gadget = this.impl.getGadgetRecord(this.id);
     if (gadget.pending) {
       // A provisional gadget's files live only in its chat's proposed changes; snapshotting its
@@ -13949,6 +14099,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     // would be useless, so refuse rather than publish an empty archive.
     let commitId = await this.impl.assertPublishableCommit(
         this.impl.getGadgetRecord(this.id).commitId);
+    await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
     let now = new Date();
 
     let metadata: BlueprintMetadata = {
@@ -14015,8 +14166,10 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   // capability that escaped the count would let a scope widening find no session to sever.
   #leaveSession: () => void;
 
+  // `check`, for a widget opened through a console, throws once that console no longer offers it
+  // or the caller no longer has it open; it runs before every call that reaches the gadget.
   constructor(private impl: OverseerImpl, private id: WorkpieceId,
-      private clientUserId: string) {
+      private clientUserId: string, private check?: () => Promise<void>) {
     super();
     this.#leaveSession = impl.joinSession("use");
   }
@@ -14043,6 +14196,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   }
 
   async getTitle(): Promise<string> {
+    await this.check?.();
     return this.impl.getGadgetRecord(this.id).title;
   }
 
@@ -14050,6 +14204,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (chatId !== undefined) {
       this.#deny();
     }
+    await this.check?.();
     return this.impl.getGadgetUiBundle(this.id);
   }
 
@@ -14057,6 +14212,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (chatId !== undefined) {
       this.#deny();
     }
+    await this.check?.();
 
     this.impl.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -14065,16 +14221,19 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
     // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, "use");
+    // For a console widget it also keeps checking the console, like this interface.
+    return this.impl.getGadgetFacet(this.id, undefined, "use", this.check);
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
     if (chatId !== undefined) this.#deny();
+    await this.check?.();
     return this.impl.getGadgetExportFormats(this.id);
   }
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
+    await this.check?.();
     return this.impl.exportGadget(this.id, id);
   }
 

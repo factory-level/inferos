@@ -1,6 +1,90 @@
-import { CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type ConsoleSource, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
-import type { OverseerStorage } from "./overseer";
+import type { ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
+import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
+import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type ConsoleSource, type ConsoleWidgetEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import type { GadgetRecord, OverseerStorage } from "./overseer";
+
+type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens" | "gadgets">;
+
+/**
+ * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called
+ * inside the publication's storage transaction.
+ */
+export type FrozenInstalls = {
+  /** Creates the frozen install of `source`, at its current commit and with no bindings. */
+  create(source: GadgetRecord, frozenFor: ConsoleWidgetFrozenFor): GadgetRecord;
+  /** Removes a frozen install that no published console revision runs any more. */
+  remove(id: WorkpieceId): void;
+};
+
+/**
+ * Why a console of this workspace cannot offer `entry`, or null if it can: the entry must name a
+ * permanent, unfrozen gadget installed from a widget blueprint at the entry's blueprint and
+ * version, declaring no data contract, and with no bindings at all. Bindings are checked on the
+ * gadget itself, since they can be added after install; they run under the binder's own accounts,
+ * so a frozen copy would lend them to every operator.
+ */
+export function consoleWidgetRefusal(storage: Pick<ConsoleStorage, "gadgets">, entry: ConsoleWidgetEntry): string | null {
+  let record = storage.gadgets.get(entry.gadgetId);
+  if (record?.type !== "gadget" || record.pending) return `Gadget ${entry.gadgetId} is not a gadget of this workspace.`;
+  if (record.frozenFor) return `Gadget ${entry.gadgetId} is a frozen install; register the install it was made from.`;
+  let installed = record.installedFrom;
+  if (!installed) return `Gadget ${entry.gadgetId} is not a blueprint install.`;
+  if (installed.kind !== "widget") return `Gadget ${entry.gadgetId} is a ${installed.kind ?? "gadget"} install, not a widget.`;
+  if (installed.blueprintId !== entry.blueprintId || installed.version !== entry.version) {
+    return `Gadget ${entry.gadgetId} runs blueprint ${installed.blueprintId} version ${installed.version}, ` +
+        `not ${entry.blueprintId} version ${entry.version}.`;
+  }
+  if (installed.dataContract !== undefined) {
+    return `Gadget ${entry.gadgetId} declares a data contract, so its state is not resettable.`;
+  }
+  if (Object.keys(record.bindings).length > 0) {
+    return `Gadget ${entry.gadgetId} has bindings; a console offers only widgets with none.`;
+  }
+  return null;
+}
+
+/** The gadget ids `screen`'s `inferos.gadget` widgets reference. */
+function placedGadgets(screen: CanvasDefinition): WorkpieceId[] {
+  return screen.sections.flatMap(section => section.widgets.flatMap(widget => {
+    let match = widget.kind === "inferos.gadget" ? CANVAS_GADGET_REF.exec(widget.targetRef) : null;
+    return match ? [Number(match[1])] : [];
+  }));
+}
+
+/** `screen` with each placed gadget the map names replaced by its frozen install. */
+function withFrozenGadgets(screen: CanvasDefinition, frozen: Map<WorkpieceId, WorkpieceId>): CanvasDefinition {
+  return { ...screen, sections: screen.sections.map(section => ({ ...section, widgets: section.widgets.map(widget => {
+    let match = widget.kind === "inferos.gadget" ? CANVAS_GADGET_REF.exec(widget.targetRef) : null;
+    let replacement = match ? frozen.get(Number(match[1])) : undefined;
+    return replacement === undefined ? widget : { ...widget, targetRef: `gadget:${replacement}` };
+  }) })) };
+}
+
+/**
+ * Checks `content`'s widget registry and placements in this workspace, throwing the first problem:
+ * each entry must pass `consoleWidgetRefusal`, and every widget install (or frozen install) placed
+ * on a screen the console shows must be registered. Other gadgets, such as installed apps, are
+ * placed as before.
+ */
+function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets">, content: OperateConsoleContent): void {
+  let registered = new Set<WorkpieceId>();
+  for (let entry of content.widgets ?? []) {
+    let refusal = consoleWidgetRefusal(storage, entry);
+    if (refusal) throw new Error(`Console widget "${entry.label}": ${refusal}`);
+    registered.add(entry.gadgetId);
+  }
+  let isWidget = (id: WorkpieceId) => {
+    let record = storage.gadgets.get(id);
+    return record?.type === "gadget" && (!!record.frozenFor || record.installedFrom?.kind === "widget");
+  };
+  for (let screenId of consoleScreens(content)) {
+    let screen = storage.canvases.get(screenId);
+    let unregistered = screen && placedGadgets(screen).find(id => isWidget(id) && !registered.has(id));
+    if (unregistered !== undefined && unregistered !== null) {
+      throw new Error(`Screen ${screenId} shows widget ${unregistered}, which the console's widget registry does not offer.`);
+    }
+  }
+}
 
 /**
  * A screen as a console published it: a copy of the canvas taken when the console was published,
@@ -19,21 +103,47 @@ function dropPublishedScreens(storage: Pick<OverseerStorage, "consoleScreens">, 
   }
 }
 
+/** Removes every frozen install of console `consoleId` that `keep` doesn't list. */
+function dropFrozenInstalls(storage: Pick<ConsoleStorage, "gadgets">, frozen: FrozenInstalls,
+    consoleId: string, keep: Set<WorkpieceId> = new Set()): void {
+  for (let record of Array.from(storage.gadgets.list())) {
+    if (record.type === "gadget" && record.frozenFor?.consoleId === consoleId && !keep.has(record.id)) {
+      frozen.remove(record.id);
+    }
+  }
+}
+
 /**
  * Makes `stored`'s draft its published revision, copying in the canvases its views reference.
- * Call inside a storage transaction. Shared by publishing and the storage migration that
- * publishes consoles saved before publication existed.
+ * Each registered widget gets a frozen install made through `frozen`, which the published
+ * registry and screen copies reference instead of the registered gadget, and the frozen installs
+ * of the console's previous publication are removed. Everything is checked before anything is
+ * created. Call inside a storage transaction. Shared by publishing and the storage migration that
+ * publishes consoles saved before publication existed, which have no widgets.
  */
-export function publishConsoleRecord(storage: Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens">,
-    stored: OperateConsole, publishedAt: string): OperateConsole {
+export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateConsole, publishedAt: string,
+    frozen?: FrozenInstalls): OperateConsole {
   let { id, revision, published: _, ...content } = stored;
+  checkConsoleWidgets(storage, content);
+  let entries = content.widgets ?? [];
+  if (entries.length > 0 && !frozen) throw new Error("This console's widgets cannot be published here.");
+
+  let frozenIds = new Map<WorkpieceId, WorkpieceId>();
+  let widgets = entries.map((entry): ConsoleWidgetEntry => {
+    let source = storage.gadgets.get(entry.gadgetId) as GadgetRecord;
+    let made = frozen!.create(source, { consoleId: id, revision, sourceGadgetId: source.id });
+    frozenIds.set(source.id, made.id);
+    return { ...entry, gadgetId: made.id, frozen: { sourceGadgetId: source.id, commitId: made.commitId! } };
+  });
   dropPublishedScreens(storage, id);
   for (let screenId of consoleScreens(content)) {
     let screen = storage.canvases.get(screenId);
-    if (screen) storage.consoleScreens.put({ consoleId: id, screenId, screen });
+    if (screen) storage.consoleScreens.put({ consoleId: id, screenId, screen: withFrozenGadgets(screen, frozenIds) });
   }
-  let result: OperateConsole = { ...stored, published: { revision, publishedAt, content } };
+  let publishedContent = content.widgets === undefined ? content : { ...content, widgets };
+  let result: OperateConsole = { ...stored, published: { revision, publishedAt, content: publishedContent } };
   storage.consoles.put(result);
+  if (frozen) dropFrozenInstalls(storage, frozen, id, new Set(frozenIds.values()));
   return result;
 }
 
@@ -44,9 +154,9 @@ export function publishConsoleRecord(storage: Pick<OverseerStorage, "consoles" |
  * use (see `OperateConsole`).
  */
 export class WorkspaceConsoleStore {
-  constructor(private durableStorage: DurableObjectStorage,
-      private storage: Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens">,
-      private env: Pick<Cloudflare.Env, "COMPOSABLE_VIEWS" | "DURABLE_VIEWS">) {}
+  constructor(private durableStorage: DurableObjectStorage, private storage: ConsoleStorage,
+      private env: Pick<Cloudflare.Env, "COMPOSABLE_VIEWS" | "DURABLE_VIEWS">,
+      private frozen?: FrozenInstalls) {}
 
   #requireEnabled(): void {
     if (this.env.COMPOSABLE_VIEWS !== "true" || this.env.DURABLE_VIEWS !== "true") {
@@ -55,10 +165,12 @@ export class WorkspaceConsoleStore {
   }
 
   // A console may only be saved over screens that exist; one deleted later shows as unavailable.
+  // Its widgets are checked now and again at publication, since screens and gadgets change.
   #parse(content: OperateConsoleContent): OperateConsoleContent {
     let parsed = parseOperateConsoleContent(content);
     let missing = consoleScreens(parsed).find(screen => !this.storage.canvases.get(screen));
     if (missing) throw new Error(`Console screen ${missing} is not a screen in this workspace`);
+    checkConsoleWidgets(this.storage, parsed);
     return parsed;
   }
 
@@ -105,6 +217,24 @@ export class WorkspaceConsoleStore {
   }
 
   /**
+   * The widget `gadgetId` as console `consoleId`'s published revision `revision` offers it: that
+   * revision's registry entry for its frozen install. Throws if the console is no longer published
+   * at `revision`, like a stale console move, or does not offer the widget.
+   */
+  offeredWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): ConsoleWidgetEntry {
+    let shown = this.get(consoleId, "published");
+    if (!shown) throw new Error(`Console ${consoleId} is not published.`);
+    if (shown.revision !== revision) throw new Error(`Console ${consoleId} has changed since it was opened.`);
+    let entry = shown.widgets?.find(widget => widget.gadgetId === gadgetId);
+    let record = this.storage.gadgets.get(gadgetId);
+    if (!entry || record?.type !== "gadget" || record.frozenFor?.consoleId !== consoleId ||
+        record.frozenFor.revision !== revision) {
+      throw new Error(`Console ${consoleId} does not offer widget ${gadgetId}.`);
+    }
+    return entry;
+  }
+
+  /**
    * Publishes the draft at `expectedRevision`: operators move to it, with each screen as it is
    * now, and later edits to the console or its screens stay draft until the next publish. Each
    * publish raises the revision, like a replace, so of two publishes at one revision only the
@@ -116,7 +246,7 @@ export class WorkspaceConsoleStore {
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
       let raised = { ...current, revision: String(BigInt(current.revision) + 1n) };
-      return publishConsoleRecord(this.storage, raised, new Date().toISOString());
+      return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen);
     });
   }
 
@@ -154,6 +284,7 @@ export class WorkspaceConsoleStore {
       this.#current(id, expectedRevision);
       this.storage.consoles.delete(id);
       dropPublishedScreens(this.storage, id);
+      if (this.frozen) dropFrozenInstalls(this.storage, this.frozen, id);
     });
   }
 

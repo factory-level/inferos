@@ -1,3 +1,4 @@
+import type { WorkpieceId } from "./api.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
 
 // An authored console: everything one operator role works in, as a menu of views over one
@@ -21,6 +22,9 @@ export const MAX_ROLLUP_SCREENS = 12;
 
 /** Longest console or view title. */
 export const MAX_CONSOLE_TITLE_LENGTH = 120;
+
+/** Most widgets one console's registry offers. */
+export const MAX_CONSOLE_WIDGETS = 16;
 
 /**
  * Whether a console offers the full chat presentation: `off` (never; the default), `available`
@@ -56,6 +60,44 @@ export const DEFAULT_CONSOLE_CUSTOMIZATION: Readonly<ConsoleCustomization> = {
   screens: false, widgets: false, tools: false, skills: false,
 };
 
+/**
+ * What a registered widget's local state may do across publications. Only `resettable` exists: the
+ * builder declares that the widget may start with empty state whenever its console is published,
+ * since each published revision runs its own frozen install (see `ConsoleWidgetEntry`).
+ */
+export type ConsoleWidgetState = "resettable";
+
+/** Where a published registry entry's frozen install came from. */
+export type ConsoleWidgetFreeze = {
+  /** The registered gadget the frozen install was made from. */
+  sourceGadgetId: WorkpieceId;
+  /** The commit, of the registered gadget at publication, that the frozen install runs. */
+  commitId: string;
+};
+
+/**
+ * One widget a console offers its operators: a gadget of the console's workspace, installed from a
+ * widget blueprint at a pinned version, with no bindings. In a draft, `gadgetId` is the registered
+ * install. Publishing gives each entry a frozen install, a separate gadget that runs the registered
+ * gadget's code as it was then and that nothing can edit, bind or upgrade; in the published
+ * content, `gadgetId` is that frozen install and `frozen` says where it came from. Registration
+ * offers the widget only; it grants no data or action.
+ */
+export type ConsoleWidgetEntry = {
+  /** The registered install (draft) or its frozen install (published). */
+  gadgetId: WorkpieceId;
+  /** The blueprint the install came from; must match its `installedFrom`. */
+  blueprintId: string;
+  /** The blueprint version the install runs; must match its `installedFrom`. */
+  version: number;
+  /** The name operators see. 1 to `MAX_CONSOLE_TITLE_LENGTH` characters. */
+  label: string;
+  /** The builder's declaration about the widget's local state. */
+  state: ConsoleWidgetState;
+  /** Set by publication only; a client-supplied value is dropped. */
+  frozen?: ConsoleWidgetFreeze;
+};
+
 /** The authored part of a console. */
 export type OperateConsoleContent = {
   /** The console's name, shown on its tile and in the Operate sidebar. 1 to `MAX_CONSOLE_TITLE_LENGTH` characters. */
@@ -66,6 +108,11 @@ export type OperateConsoleContent = {
   fullChat: ConsoleFullChat;
   /** Optional for older consoles; omitted flags default to disabled. */
   customization?: ConsoleCustomization;
+  /**
+   * The widgets this console offers, at most `MAX_CONSOLE_WIDGETS` with unique gadgets. Absent
+   * means none. Every widget install placed on the console's screens must be registered here.
+   */
+  widgets?: ConsoleWidgetEntry[];
 };
 
 /**
@@ -160,6 +207,7 @@ export function parseOperateConsoleContent(content: OperateConsoleContent): Oper
     }
     return { id: view.id, title: viewTitle, type: "rollup", screens: view.screens.map(screenId) };
   });
+  let widgets = content.widgets === undefined ? undefined : parseWidgets(content.widgets);
   let customization = content.customization;
   if (customization !== undefined) {
     let flags = customization;
@@ -170,7 +218,32 @@ export function parseOperateConsoleContent(content: OperateConsoleContent): Oper
     customization = { screens: flags.screens, widgets: flags.widgets, tools: flags.tools, skills: flags.skills };
   }
   return { title: title(content.title, "console"), views: parsed, fullChat: content.fullChat,
-    ...(customization === undefined ? {} : { customization }) };
+    ...(customization === undefined ? {} : { customization }),
+    ...(widgets === undefined ? {} : { widgets }) };
+}
+
+function parseWidgets(entries: ConsoleWidgetEntry[]): ConsoleWidgetEntry[] {
+  if (entries.length > MAX_CONSOLE_WIDGETS) {
+    throw new TypeError(`A console offers at most ${MAX_CONSOLE_WIDGETS} widgets.`);
+  }
+  let gadgets = new Set<WorkpieceId>();
+  return entries.map(entry => {
+    if (!Number.isSafeInteger(entry.gadgetId) || entry.gadgetId < 0) {
+      throw new TypeError("A console widget must name a gadget id.");
+    }
+    if (gadgets.has(entry.gadgetId)) throw new TypeError(`Gadget ${entry.gadgetId} is registered twice.`);
+    gadgets.add(entry.gadgetId);
+    if (!Number.isSafeInteger(entry.version) || entry.version < 1) {
+      throw new TypeError("A console widget's version must be a blueprint version number.");
+    }
+    if (entry.state !== "resettable") {
+      throw new TypeError("A console widget must declare its state resettable: each publication " +
+          "starts it with empty local state.");
+    }
+    // `frozen` is publication's to set, so a client's is dropped rather than trusted.
+    return { gadgetId: entry.gadgetId, blueprintId: entry.blueprintId, version: entry.version,
+      label: title(entry.label, "widget"), state: entry.state };
+  });
 }
 
 const CONSOLE_CUSTOMIZATION_KEYS = Object.keys(DEFAULT_CONSOLE_CUSTOMIZATION) as (keyof ConsoleCustomization)[];
