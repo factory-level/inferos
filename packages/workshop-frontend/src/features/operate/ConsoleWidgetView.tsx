@@ -20,10 +20,12 @@ const ignore = () => {}
  * Resolves the screen, as the open revision of its console shows it, through its workspace
  * capability; a widget reference grants no access.
  */
-export const ConsoleWidgetView = ({ workspaceId, source, target, onClose }: {
+export const ConsoleWidgetView = ({ workspaceId, source, revision, target, onClose }: {
   workspaceId: string
-  /** The revision of the console the session opened. */
+  /** Which of the console's revisions the session opened. */
   source: ConsoleSource
+  /** The revision the session opened. */
+  revision: string
   target: ConsoleWidgetTarget
   onClose: () => void
 }) => {
@@ -42,7 +44,8 @@ export const ConsoleWidgetView = ({ workspaceId, source, target, onClose }: {
       .then(value => { if (!cancelled) setScreen(value ?? null) })
       .catch(() => { if (!cancelled) setScreen(null) })
     return () => { cancelled = true }
-  }, [overseer, target.consoleId, target.screenId, source])
+    // A new revision publishes new frozen installs, so the screen is read again for it.
+  }, [overseer, target.consoleId, target.screenId, source, revision])
   const widget = screen?.sections.flatMap(section => section.widgets).find(item => item.id === target.widgetId)
   const gadgets = new Map<WorkpieceId, GadgetSummary>()
   for (const piece of workpieces.values()) if (piece.type === 'gadget') gadgets.set(piece.id, piece)
@@ -50,7 +53,8 @@ export const ConsoleWidgetView = ({ workspaceId, source, target, onClose }: {
     ? <p role="alert" className="p-5 text-sm text-kumo-danger">This widget is unavailable. It may have been removed, or you may no longer have access.</p>
     : !overseer || !screen || !widget || !ready ? <p role="status" className="p-5 text-sm text-kumo-subtle">Opening widget…</p>
     : widget.kind === 'inferos.gadget'
-      ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={{ ...widget, size: 'full' }} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer.stub} />
+      ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={{ ...widget, size: 'full' }} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer.stub}
+        offeredBy={source === 'published' ? { consoleId: target.consoleId, revision } : undefined} />
       // Wiki is operated read-only, as on session screens (no `editable`).
       : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget scrollRoot={scrollRoot} widget={widget} overseer={overseer.stub} />
       : <CanvasBoardWidget widget={widget} overseer={overseer.stub} presentation="full" />

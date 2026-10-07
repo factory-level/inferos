@@ -15,15 +15,16 @@ const testState = vi.hoisted(() => ({
   createCanvas: vi.fn<(content: CanvasContent) => Promise<unknown>>(),
   invalidate: vi.fn<() => void>(),
   denied: false,
+  workpieces: new Map<number, object>(),
 }))
 vi.mock('@cloudflare/kumo', async importOriginal => withKumoPopupDoubles(await importOriginal<typeof import('@cloudflare/kumo')>()))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { catalog: { widgetKinds: [], blueprints: [], screens: [] } } }) }))
-vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({
+vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: ({ id }: { id?: string }) => ({
   overseer: { stub: { createConsole: testState.createConsole, replaceConsole: testState.replaceConsole, createCanvas: testState.createCanvas } },
-  metadata: { id: 'w1', role: testState.denied ? 'use' : 'build' }, error: null,
+  metadata: { id: id ?? 'w1', role: testState.denied ? 'use' : 'build' }, error: null,
 }) }))
-vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ ready: true, workpieces: new Map() }) }))
+vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ ready: true, workpieces: testState.workpieces }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWorkspaceScreens: testState.invalidate }))
 
 import { ConsoleBuilder } from './ConsoleBuilder'
@@ -45,6 +46,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
   testState.denied = false
+  testState.workpieces = new Map()
   testState.createConsole.mockReset().mockImplementation(async content => ({ ...content, id: 'new', revision: '0' }))
   testState.replaceConsole.mockReset().mockImplementation(async (id, revision, content) => ({ ...content, id, revision: String(Number(revision) + 1) }))
   testState.createCanvas.mockReset().mockImplementation(async content => ({ ...content, schemaVersion: 1, id: 'created-screen', revision: '0' }))
@@ -120,4 +122,43 @@ it('does not advance with missing screens or without build access', async () => 
   render(initial)
   expect(button('Continue').disabled).toBe(true)
   expect(testState.createConsole).not.toHaveBeenCalled()
+})
+
+it('registers an installed widget before the console is first saved', async () => {
+  testState.workpieces = new Map([[7, { id: 7, type: 'gadget', title: 'Status', commitId: 'c7',
+    installedFrom: { blueprintId: 'bp', version: 2, kind: 'widget' } }]])
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  render()
+  fill('Console name', 'Floor')
+  await click('Continue')
+  fill('Add an existing screen', 's1')
+  fill('Widget install', '7')
+  fill('Name operators see', 'Shift status')
+  await act(async () => container.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click())
+  await click('Register widget')
+  expect(container.querySelector('[aria-label="Registered widgets"]')?.textContent).toContain('Shift status')
+  await click('Continue'); await click('Continue'); await click('Create draft')
+  expect(testState.createConsole).toHaveBeenCalledWith(expect.objectContaining({ widgets: [
+    { gadgetId: 7, blueprintId: 'bp', version: 2, label: 'Shift status', state: 'resettable' },
+  ] }))
+})
+
+it('forgets widgets registered in one workspace when the console moves to another', async () => {
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  const other: WorkspaceScreens = { ...workspaces[0], workspace: { ...workspace, id: 'w2', title: 'Support' } }
+  testState.workpieces = new Map([[7, { id: 7, type: 'gadget', title: 'Status', commitId: 'c7',
+    installedFrom: { blueprintId: 'bp', version: 2, kind: 'widget' } }]])
+  act(() => root.render(<ConsoleBuilder workspaces={[...workspaces, other]} onSaved={onSaved} onCancel={onCancel} />))
+  fill('Console name', 'Floor')
+  fill('Workspace', 'w1')
+  await click('Continue')
+  fill('Widget install', '7')
+  await act(async () => container.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click())
+  await click('Register widget')
+  expect(container.querySelector('[aria-label="Registered widgets"]')).not.toBeNull()
+  await click('Back')
+  fill('Workspace', 'w2')
+  await click('Continue')
+  expect(container.querySelector('[aria-label="Registered widgets"]')).toBeNull()
+  expect(container.textContent).toContain('No widgets are registered.')
 })

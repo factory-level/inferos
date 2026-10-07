@@ -59,7 +59,8 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   useEffect(() => {
     if (openWidgetId !== null && !openWidget && !canvas.busy) onOpenWidgetChange(null)
   }, [openWidgetId, openWidget, canvas.busy, onOpenWidgetChange])
-  const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined).toSorted((a, b) => a.id - b.id)
+  // A frozen install belongs to the console publication that made it, so it is never placed by hand.
+  const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined && !gadget.frozenFor).toSorted((a, b) => a.id - b.id)
 
   const createForm = <div className="flex flex-wrap items-end gap-3">
     <form className="flex flex-wrap items-end gap-2" onSubmit={event => {
