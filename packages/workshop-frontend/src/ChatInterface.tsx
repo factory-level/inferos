@@ -1,4 +1,4 @@
-import { attemptNotice } from "./actionAttempt";
+import { attemptNotice, canApproveAgain } from "./actionAttempt";
 import { logRpcFailure } from "./rpcErrors";
 import {
   useState,
@@ -3321,7 +3321,8 @@ function ChatInterface({
     const stateLabel = isApproved
       ? "Approved"
       : isRejected
-        ? "Denied"
+        // A denial does not undo an attempt that may already have applied.
+        ? log.lastAttempt?.outcome === "unknown" ? "Denied, may have applied" : "Denied"
         : isFailed
           ? "Failed, not applied"
           : null;
@@ -3334,7 +3335,7 @@ function ChatInterface({
     // auto-approvable action with an existing rule wouldn't still be pending.) Not offered while
     // restricted.
     const autoApproveTarget =
-      !restricted &&
+      !restricted && canApproveAgain(log) &&
       log.gatekeeperId !== undefined && log.description.actionKind !== undefined &&
       log.description.autoApprovable === true
         ? {
@@ -3388,7 +3389,7 @@ function ChatInterface({
           tone="approve"
           variant={isBlocking ? "filled" : "quiet"}
           onClick={() => void resolveAction(msg.actionId, "approve")}
-          disabled={isProc}
+          disabled={isProc || !canApproveAgain(log)}
           describedBy={describedBy}
         />
       </>
@@ -3518,6 +3519,11 @@ function ChatInterface({
               </div>
             )}
             {incomplete && <IncompleteDescriptionNotice id={incompleteId} />}
+            {notice && (
+              <p className={`m-0 ${notice.tone === "warning" ? "text-kumo-warning" : "text-kumo-danger"}`}>
+                {notice.text}
+              </p>
+            )}
             {resourceMeta}
           </div>
         )}

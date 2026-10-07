@@ -1,4 +1,4 @@
-import { attemptNotice } from './actionAttempt'
+import { attemptNotice, canApproveAgain } from './actionAttempt'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Check, Eye, Lightning, ShieldCheck } from '@phosphor-icons/react'
@@ -109,7 +109,10 @@ function activityStatus(
       : { label: 'Pending', dotClass: 'bg-kumo-brand', textClass: 'text-kumo-strong' }
   }
   if (record.state === 'rejected') {
-    return { label: 'Denied', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
+    // A denial does not undo an attempt that may already have applied.
+    return record.lastAttempt?.outcome === 'unknown'
+      ? { label: 'Denied, may have applied', dotClass: 'bg-kumo-warning', textClass: 'text-kumo-warning' }
+      : { label: 'Denied', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
   }
   if (record.state === 'failed') {
     return { label: 'Failed', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
@@ -241,8 +244,9 @@ export default function Activity({
           <div className="min-h-0 flex-1 overflow-auto">
             {pendingActions.map(record => {
               const autoApproveTarget =
-                // Never auto-approved while restricted, so no rule is offered.
-                !restricted &&
+                // Never auto-approved while restricted, so no rule is offered; nor for an action
+                // that cannot be approved again, which a rule would not apply either.
+                !restricted && canApproveAgain(record) &&
                 record.type === 'action' && record.gatekeeperId !== undefined &&
                 record.description.actionKind !== undefined &&
                 record.description.autoApprovable === true
@@ -658,6 +662,7 @@ function ReviewRequest({
   const fieldsId = `${reviewId}-fields`
   const incompleteId = `${reviewId}-incomplete`
   const incomplete = isDescriptionIncomplete(record)
+  const attempt = attemptNotice(record)
   const describedBy = restricted
     ? [
       noticeId,
@@ -707,9 +712,15 @@ function ReviewRequest({
             <AlwaysApproveButton onClick={onAlwaysApprove} disabled={processing} />
           )}
           <ResolveButton tone="deny" onClick={onReject} disabled={processing} describedBy={describedBy} />
-          <ResolveButton tone="approve" onClick={onApprove} disabled={processing} describedBy={describedBy} />
+          <ResolveButton tone="approve" onClick={onApprove} disabled={processing || !canApproveAgain(record)} describedBy={describedBy} />
         </div>
       </div>
+
+      {attempt && (
+        <p className={`m-0 mt-1.5 max-w-2xl text-[12px] leading-4 ${attempt.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>
+          {attempt.text}
+        </p>
+      )}
 
       {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2 max-w-2xl" />}
 
