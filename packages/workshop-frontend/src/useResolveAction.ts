@@ -22,7 +22,8 @@ export function useResolveAction(
       onResolvedRef.current?.(actionId, decision === 'approve' ? 'approved' : 'rejected')
     } catch (error) {
       console.error(`Failed to ${decision} action:`, error)
-      toasts.add({ title: `Failed to ${decision} action`, variant: 'error' })
+      // The reason is the action's recorded outcome too (see attemptNotice), so it is shown, not dropped.
+      toasts.add({ title: `Failed to ${decision} action`, description: error instanceof Error ? error.message : String(error), variant: 'error' })
     } finally {
       setProcessing(previous => {
         const next = new Set(previous)

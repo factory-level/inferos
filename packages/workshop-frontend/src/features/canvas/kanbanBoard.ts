@@ -44,7 +44,7 @@ export type TrackedChange =
   | { kind: 'create'; title: string }
 
 /** How a tracked change ended, as its action's record in the action log says. */
-export type ChangeDecision = { change: TrackedChange; outcome: 'applied' | 'rejected'; actionId: number }
+export type ChangeDecision = { change: TrackedChange; outcome: 'applied' | 'rejected' | 'failed'; actionId: number }
 
 /**
  * What `advanceDecisions` carries between board renders: the changes shown pending last time, the
@@ -105,7 +105,7 @@ export const advanceDecisions = (
   const seen = new Set(tracker.seen)
   const decisions: ChangeDecision[] = []
   const decide = (change: TrackedChange, item: BoardActivityItem) =>
-    decisions.push({ change, outcome: item.kind === 'applied' ? 'applied' : 'rejected', actionId: item.id })
+    decisions.push({ change, outcome: item.kind === 'applied' ? 'applied' : item.kind === 'failed' ? 'failed' : 'rejected', actionId: item.id })
 
   for (const change of dropped) {
     const key = changeKey(change)
@@ -116,7 +116,7 @@ export const advanceDecisions = (
     else early.delete(key)
   }
   for (const item of decided) {
-    if (seen.has(item.id) || (item.kind !== 'applied' && item.kind !== 'rejected')) continue
+    if (seen.has(item.id) || (item.kind !== 'applied' && item.kind !== 'rejected' && item.kind !== 'failed')) continue
     seen.add(item.id)
     const key = decisionKey(item)
     if (key === null) continue

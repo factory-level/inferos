@@ -6,6 +6,7 @@ const KIND: Record<BoardActivityKind, { label: string; variant: 'warning' | 'neu
   read: { label: 'Read', variant: 'neutral' },
   applied: { label: 'Applied', variant: 'success' },
   rejected: { label: 'Rejected', variant: 'error' },
+  failed: { label: 'Not applied', variant: 'error' },
 }
 
 const ActivityRow = ({ item, now }: { item: BoardActivityItem; now: number }) =>

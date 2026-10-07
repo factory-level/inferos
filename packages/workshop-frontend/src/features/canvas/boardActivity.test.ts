@@ -100,3 +100,10 @@ it("combines a board's activity with its coding dispatch's actions, keeping each
   expect(shown.active.map(item => item.id)).toEqual([6, 2])
   expect(shown.recent.map(item => item.id)).toEqual([3])
 })
+
+it('keeps a failed decision distinct from a rejection, as approved but not applied', () => {
+  const activity = foldBoardActivity([move(2, 'pending'), move(2, 'failed', { lastAttempt: { outcome: 'notApplied', message: 'Policy denies it.', at: at(40) } })],
+    BOARD, T0 + 41_000, true)
+  expect(activity.recent.map(item => [item.id, item.kind])).toEqual([[2, 'failed']])
+  expect(describeActivity(activity.recent[0]!, T0 + 41_000)).toContain('approved but not applied')
+})

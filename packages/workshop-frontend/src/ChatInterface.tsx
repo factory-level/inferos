@@ -1,3 +1,4 @@
+import { attemptNotice } from "./actionAttempt";
 import { logRpcFailure } from "./rpcErrors";
 import {
   useState,
@@ -3307,6 +3308,8 @@ function ChatInterface({
     const isPending = state === "pending";
     const isApproved = state === "approved";
     const isRejected = state === "rejected";
+    const isFailed = state === "failed";
+    const notice = attemptNotice(log);
     // A blocking (awaitDecision) pending action suspends the agent turn and blocks the composer, so
     // present it as a prominent callout with its details expanded by default.
     const isBlocking = isPending && log.description.awaitDecision === true;
@@ -3319,8 +3322,10 @@ function ChatInterface({
       ? "Approved"
       : isRejected
         ? "Denied"
-        : null;
-    const stateLabelCls = isRejected
+        : isFailed
+          ? "Failed, not applied"
+          : null;
+    const stateLabelCls = isRejected || isFailed
       ? "text-kumo-danger"
       : "text-kumo-inactive";
     // Auto-approval target: offer "Always approve this type" only when enabling a rule would
@@ -3441,6 +3446,11 @@ function ChatInterface({
                   </div>
                 )}
                 {incomplete && <IncompleteDescriptionNotice id={incompleteId} className="mt-2" />}
+                {notice && (
+                  <p className={`mt-2 text-[12.5px] leading-[18px] ${notice.tone === "warning" ? "text-kumo-warning" : "text-kumo-danger"}`}>
+                    {notice.text}
+                  </p>
+                )}
               </div>
               <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
                 {actionControls}

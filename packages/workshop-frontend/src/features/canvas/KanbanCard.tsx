@@ -130,10 +130,10 @@ export const KanbanCard = ({ issue, position, onDialogOpenChange, state, targets
     </div>
     {issue.blockedReason && <p className="rounded bg-kumo-danger-tint px-2 py-1 text-xs text-kumo-danger">Blocked: {issue.blockedReason}</p>}
     {waiting && <Badge variant="warning" icon={pending ? ArrowRight : undefined}>{waiting}</Badge>}
-    {decision && !waiting && <Badge variant={decision.outcome === 'rejected' ? 'error' : 'success'}>
+    {decision && !waiting && <Badge variant={decision.outcome === 'applied' ? 'success' : 'error'}>
       Move to {decision.toState?.name ?? 'another state'} {decision.outcome}
     </Badge>}
-    {editDecision && !waiting && <Badge variant={editDecision === 'rejected' ? 'error' : 'success'}>Edit {editDecision}</Badge>}
+    {editDecision && !waiting && <Badge variant={editDecision === 'applied' ? 'success' : 'error'}>Edit {editDecision}</Badge>}
     {coding?.run && <CodingRunBadge run={coding.run} />}
     {chosen && <p className="text-xs text-kumo-brand">Move to {chosen.name}? Enter to propose, Escape to cancel.</p>}
   </li>

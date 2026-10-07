@@ -12,7 +12,7 @@ export const RECENT_ACTIVITY_MS = 2 * 60_000
 export const RECENT_ACTIVITY_LIMIT = 5
 
 /** `awaiting` is active until decided; the others are recent and fade after `RECENT_ACTIVITY_MS`. */
-export type BoardActivityKind = 'read' | 'awaiting' | 'applied' | 'rejected'
+export type BoardActivityKind = 'read' | 'awaiting' | 'applied' | 'rejected' | 'failed'
 
 export type BoardActivityItem = {
   /** The action log entry's id. */
@@ -69,7 +69,8 @@ const createsOf = (record: ActionLogEntry): string | undefined =>
 const kindOf = (record: ActionLogEntry): BoardActivityKind | null => {
   if (record.type === 'observation') return 'read'
   if (record.type !== 'action') return null
-  return record.state === 'pending' ? 'awaiting' : record.state === 'approved' ? 'applied' : 'rejected'
+  return record.state === 'pending' ? 'awaiting' : record.state === 'approved' ? 'applied'
+    : record.state === 'failed' ? 'failed' : 'rejected'
 }
 
 const newestFirst = (a: BoardActivityItem, b: BoardActivityItem) => b.at.getTime() - a.at.getTime() || b.id - a.id
@@ -105,7 +106,7 @@ export const foldBoardActivity = (
       ...createsOf(record) !== undefined ? { creates: createsOf(record) } : {},
       ...record.type === 'action' && record.description.actionKind ? { tag: record.description.actionKind.tag } : {},
     }
-    if (kind === 'applied' || kind === 'rejected') decided.push(item)
+    if (kind === 'applied' || kind === 'rejected' || kind === 'failed') decided.push(item)
     if (kind === 'awaiting') {
       if (connected) active.push(item)
     } else if (now - item.at.getTime() < RECENT_ACTIVITY_MS) {
@@ -147,6 +148,7 @@ export const describeActivity = (item: BoardActivityItem, now: number): string =
     case 'read': return `${actor}: ${item.title}, ${formatActivityAge(item.at, now)}`
     case 'applied': return `${actor}: ${item.title}, applied ${formatActivityAge(item.at, now)}`
     case 'rejected': return `${actor}: ${item.title}, rejected ${formatActivityAge(item.at, now)}`
+    case 'failed': return `${actor}: ${item.title}, approved but not applied ${formatActivityAge(item.at, now)}`
   }
 }
 
