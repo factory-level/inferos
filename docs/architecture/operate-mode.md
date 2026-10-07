@@ -110,13 +110,18 @@ Further details:
 - An unsuccessful apply never sets `appliedAt`. `actionChangeTime` (and so the `byLastChanged` resume index) uses `lastAttempt.at` for it, so reconnecting subscribers see the attempt.
 - `failed` is not `pending`, so the pending and history indexes and `matchesActionHistoryFilter` treat it like any resolved action, and the auto-approval drain skips it.
 - A rejection keeps an earlier `lastAttempt`, so an action whose outcome was unknown never reads as safely undone.
-- One apply runs per action at a time. `applyPendingAction` holds an in-memory claim from the pending check to the outcome, shared by manual approval and the auto-approval drain, and `rejectAction` refuses while it is held, so concurrent approvals reach the gatekeeper once.
+- Once an attempt's outcome is unknown, it stays unknown until a success, the authoritative receipt, settles it. A later attempt's refusal is recorded against it with a note and never ends the action as `failed`.
+- `applyStartedAt` is written durably before dispatch and cleared with the outcome. At startup `#recoverInterruptedApplies` turns any pending action still carrying it into an unknown outcome, since a restart may have cut off an apply the provider received.
+- One decision runs per action at a time. `withActionClaim` holds an in-memory claim from the pending check to the outcome for an apply (manual approval and the auto-approval drain alike) or a rejection (`rejectAction`, which re-reads the record after its gatekeeper call). Concurrent approvals reach the gatekeeper once, and a rejection cannot interleave with an apply.
 - A `failed` awaited action counts as decided. Its agent turn resumes with a note naming what was refused and why, and nothing is reported as applied.
-- gatekeeper-kit's `applyActionOutcome` turns `ActionApplyError` into a not-applied refusal and `ActionOutcomeUnknownError` into an unknown, non-retryable outcome. The test gatekeeper uses it.
+- gatekeeper-kit's `applyActionOutcome` turns `ActionApplyError` into a not-applied refusal and `ActionOutcomeUnknownError` into an unknown, non-retryable outcome. A journal record replayed after a restart rethrows its stored classification. The test gatekeeper uses it.
 - `workshop-agent-actions.test.ts` covers:
   - a refused apply that ends failed with its reason, applies nothing, refuses a second approval and resumes its turn;
   - an unknown outcome that stays pending with its warning through a restart and a rejection;
-  - two concurrent approvals that apply once.
+  - two concurrent approvals that apply once;
+  - a refusal after an unknown outcome that keeps the action pending and possibly applied;
+  - an apply interrupted by a restart that comes back with an unknown outcome;
+  - a rejection refused while an apply is under way.
 
 
 A stored snapshot may predate a page-state field. The user DO fills missing fields from `INITIAL_OPERATE_PAGE` whenever it reads the snapshot, so such a session reads as if it always had the field (a session stored before approvals reads `reviewing` and `lastApprovalOutcome` as null).

@@ -5,6 +5,7 @@ import {
   ActionApplyError,
   type FencePolicy,
   ActionOutcomeUnknownError,
+  applyActionOutcome,
   ActionJournal,
   APPLY_OUTCOME_UNKNOWN_MESSAGE,
   defineActions,
@@ -1675,6 +1676,21 @@ describe("defineActions", () => {
       } finally {
         logged.mockRestore();
       }
+    });
+
+  it.each([
+    ["a refusal", () => new ActionApplyError("the provider refused"), "notApplied"],
+    ["an unknown outcome", () => new ActionOutcomeUnknownError("the request timed out"), "unknown"],
+  ] as const)("reports %s the same way when a later attempt replays the stored failure",
+    async (_name, failure, outcome) => {
+      // A restart forgets the error class; the journal does not, and neither may the overseer's view.
+      const { actions } = bind({ claimBeforeApply: true, apply: async () => { throw failure(); } });
+      const id = await actions.submit(fakeQueue(), "execute", { sql: "one" });
+
+      const first = await applyActionOutcome(() => actions.apply(id));
+      const replayed = await applyActionOutcome(() => actions.apply(id));
+      expect(first).toEqual({ failed: { outcome, retryable: false, message: failure().message } });
+      expect(replayed).toEqual(first);
     });
 
   it("stays quiet when the definition claimed before dispatch", async () => {

@@ -584,8 +584,14 @@ export function defineActions<Host, M extends Record<string, unknown>>(
         // A callback naming the id proves the overseer holds it: promote a record stranded
         // "staged" by a lost reply, so it projects into reads and no rollback can take it.
         journal.markSubmitted(id);
-        // A terminal failure answers every later attempt with the same message, no provider call.
-        if (record.state === "failed") throw new Error(record.error);
+        // A terminal failure answers every later attempt with the same message and the same
+        // classification, no provider call, so applyActionOutcome still tells the overseer whether
+        // the effect may exist after a restart.
+        if (record.state === "failed") {
+          throw record.outcome === "unknown"
+            ? new ActionOutcomeUnknownError(record.error)
+            : new ActionApplyError(record.error);
+        }
         if (record.state === "claimed" && !claimedHere.has(id)) {
           return failOrphanedClaim(id);
         }

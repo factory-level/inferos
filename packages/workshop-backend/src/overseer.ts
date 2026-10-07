@@ -781,6 +781,9 @@ export type ActionRecord = {
   resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected/failed); absent while pending (or legacy)
   autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
   lastAttempt?: ActionAttempt;    // the most recent unsuccessful apply (see ActionLogEntry.lastAttempt)
+  // Written, durably, before an apply is dispatched and cleared with its outcome, so an apply a
+  // restart interrupted is recovered as an unknown outcome (see #recoverInterruptedApplies).
+  applyStartedAt?: Date;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1160,6 +1163,13 @@ function stampBindHookAction(storage: OverseerStorage, actionId: number, enabled
   actionRecord.appliedAt = new Date();
   storage.actions.put(actionRecord);
 }
+
+// Recorded for an apply a restart interrupted after it was dispatched (see applyStartedAt).
+const INTERRUPTED_APPLY_MESSAGE = "An apply of this action was interrupted after it was sent, so its " +
+    "outcome is unknown: check the provider before approving it again.";
+// Appended to a later attempt's refusal while an earlier attempt's outcome is still unknown.
+const EARLIER_ATTEMPT_UNKNOWN_NOTE = "An earlier attempt may still have applied it: check the " +
+    "provider before deciding again.";
 
 // Key of the actions `byLastChanged` index: last state-change time, id-disambiguated because the
 // frozen clock makes same-instant records routine. Every mutation path stamps appliedAt (apply,
@@ -2132,6 +2142,7 @@ class OverseerImpl implements AgentHooks {
     // This migration is fully synchronous, so nothing can observe pre-migration state; the
     // git-storage migration below is the asynchronous one, shielded by blockConcurrencyWhile.
     this.#migrateStorage();
+    this.#recoverInterruptedApplies();
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
@@ -5640,27 +5651,47 @@ class OverseerImpl implements AgentHooks {
   //
   // One apply runs per action at a time, whichever path started it, so two approvals (two tabs, a
   // retry after a dropped connection, an approval racing the auto-approval drain) cannot both
-  // reach the gatekeeper; a reject waits its turn the same way (see isApplying). An apply that
+  // reach the gatekeeper; a reject waits its turn the same way (see withActionClaim). An apply that
   // does not succeed is recorded before it throws (see #recordUnsuccessfulApply).
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
-    if (this.#applyingActions.has(record.id) || this.storage.actions.get(record.id)?.state !== "pending") {
-      throw new Error(`Action is not pending: ${record.id}`);
+    await this.withActionClaim(record.id,
+        () => this.#applyPendingAction(record, resolvedBy, autoApproved));
+  }
+
+  // Runs `decide` as the one decision under way for a pending action: an apply (applyPendingAction)
+  // or a rejection (rejectAction). Another decision of the same action is refused meanwhile, so
+  // concurrent approvals reach the gatekeeper once and a rejection cannot interleave with an apply
+  // and overwrite its outcome. The claim lives in memory; an apply also writes applyStartedAt
+  // before dispatch, which survives a restart that drops the claim.
+  async withActionClaim<T>(id: number, decide: () => Promise<T>): Promise<T> {
+    if (this.#claimedActions.has(id) || this.storage.actions.get(id)?.state !== "pending") {
+      throw new Error(`Action is not pending: ${id}`);
     }
-    this.#applyingActions.add(record.id);
+    this.#claimedActions.add(id);
     try {
-      await this.#applyPendingAction(record, resolvedBy, autoApproved);
+      return await decide();
     } finally {
-      this.#applyingActions.delete(record.id);
+      this.#claimedActions.delete(id);
     }
   }
 
-  // Whether an apply of the action is under way (see applyPendingAction).
-  isApplying(actionId: number): boolean {
-    return this.#applyingActions.has(actionId);
-  }
+  #claimedActions = new Set<number>();
 
-  #applyingActions = new Set<number>();
+  // An apply a restart interrupted after dispatch may have reached the provider, so it is recorded
+  // as an unknown outcome, for the person to check before deciding again. Runs once, at startup,
+  // before any decision can start.
+  #recoverInterruptedApplies(): void {
+    for (let record of Array.from(this.storage.actions.byHistoryFilter.get("pending"))) {
+      if (record.type !== "action" || record.applyStartedAt === undefined) continue;
+      let startedAt = record.applyStartedAt;
+      delete record.applyStartedAt;
+      if (record.lastAttempt?.outcome !== "unknown") {
+        record.lastAttempt = {outcome: "unknown", message: INTERRUPTED_APPLY_MESSAGE, at: startedAt};
+      }
+      this.storage.actions.put(record);
+    }
+  }
 
   async #applyPendingAction(record: ActionRecord & {type: "action"},
                             resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
@@ -5676,6 +5707,13 @@ class OverseerImpl implements AgentHooks {
     // The apply-time cache stub is scoped to the gatekeeper AND to this action (approval can
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
     // binding that makes buildPack() serve exactly this action's pending-push closure.
+    // Durably before dispatch: a restart from here until the outcome is recorded leaves the action
+    // pending with an unknown outcome (see #recoverInterruptedApplies), never quietly re-approvable.
+    let started = this.storage.actions.get(record.id);
+    if (started?.type === "action") {
+      started.applyStartedAt = new Date();
+      this.storage.actions.put(started);
+    }
     let result: void | {failed: ActionApplyFailure};
     try {
       result = await gatekeeper.applyAction(record.action,
@@ -5694,6 +5732,11 @@ class OverseerImpl implements AgentHooks {
       this.#recordUnsuccessfulApply(record, result.failed, resolvedBy, autoApproved);
       throw new Error(result.failed.message);
     }
+    // Success is the authoritative receipt: it also resolves an earlier attempt's unknown outcome.
+    let applied = this.storage.actions.get(record.id);
+    if (applied?.type === "action") Object.assign(record, applied);
+    delete record.applyStartedAt;
+    delete record.lastAttempt;
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -5718,11 +5761,18 @@ class OverseerImpl implements AgentHooks {
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): void {
     let current = this.storage.actions.get(record.id);
     if (current?.type !== "action" || current.state !== "pending") return;
+    delete current.applyStartedAt;
+    // An earlier attempt whose outcome is unknown stays unknown: this attempt's answer is about
+    // itself, and only a success (the authoritative receipt) settles the earlier one. So a later
+    // refusal neither ends the action as failed nor lets it read as "nothing changed".
+    let earlierUnknown = current.lastAttempt?.outcome === "unknown";
     current.lastAttempt = {
-      outcome: failure.outcome, message: failure.message,
+      outcome: earlierUnknown ? "unknown" : failure.outcome,
+      message: earlierUnknown && failure.outcome === "notApplied"
+          ? `${failure.message} ${EARLIER_ATTEMPT_UNKNOWN_NOTE}` : failure.message,
       ...(failure.code !== undefined ? {code: failure.code} : {}), at: new Date(),
     };
-    if (failure.outcome === "notApplied" && !failure.retryable) {
+    if (!earlierUnknown && failure.outcome === "notApplied" && !failure.retryable) {
       current.state = "failed";
       current.resolvedBy = resolvedBy;
       current.autoApproved = autoApproved;
@@ -12399,11 +12449,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
-    if (this.impl.isApplying(id) || this.impl.storage.actions.get(id)?.state !== "pending") {
-      throw new Error(`Action is not pending: ${id}`);
-    }
-
-    await gatekeeper.rejectAction(action.action);
+    await this.impl.withActionClaim(id, async () => {
+      await gatekeeper.rejectAction(action.action);
+      // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
+      let current = this.impl.storage.actions.get(id);
+      if (current?.type === "action") Object.assign(action, current);
+    });
 
     action.state = "rejected";
     action.appliedAt = new Date();
