@@ -166,6 +166,35 @@ describe('SessionApprovals', () => {
     expect(document.body.textContent).toContain('local approval is closed')
   })
 
+  it('shows the newer rejection elsewhere with its uncertainty, after a refusal and an unknown retry here', async () => {
+    const attempted = (outcome: 'notApplied' | 'unknown', message: string, state = 'pending') => ({
+      ...MOVE, state, lastAttempt: { outcome, message, retryable: true, at: new Date() },
+    }) as ActionLogEntry
+    const { server, approveAction, show } = await renderPending({ reviewing: REF })
+
+    // The first attempt is refused for now (it may pass), so Operate reads and keeps that entry.
+    approveAction.mockRejectedValueOnce(new Error('Not yet.'))
+    await act(async () => button('Approve').click())
+    await server.resolvePage({ entries: [attempted('notApplied', 'Not yet.')] })
+    await show({ reviewing: REF, lastApprovalOutcome: { ...REF, outcome: 'failed' } })
+    await server.resolvePage({ entries: [attempted('notApplied', 'Not yet.')] })
+
+    // The retry's outcome is unknown.
+    approveAction.mockRejectedValueOnce(new Error('Lost after sending.'))
+    await act(async () => button('Approve').click())
+    await server.resolvePage({ entries: [attempted('unknown', 'Lost after sending.')] })
+    await show({ reviewing: REF, lastApprovalOutcome: { ...REF, outcome: 'failed' } })
+    expect(status()).toContain('Lost after sending.')
+
+    // Another tab rejects it: the newer outcome wins over this tab's notice, read afresh.
+    await show({ reviewing: REF, lastApprovalOutcome: { ...REF, outcome: 'rejected' } })
+    await server.resolvePage({ entries: [attempted('unknown', 'Lost after sending.', 'rejected')] })
+    expect(status()).toContain('“Move DEMO-1 to Done” was rejected.')
+    expect(status()).toContain('It may already have been applied')
+    expect(status()).toContain('local approval is closed')
+    expect(status()).not.toContain('Not yet.')
+  })
+
   it('reports nothing resolved when a rejection is refused', async () => {
     const { server, rejectAction, onEvent } = await renderPending()
     rejectAction.mockRejectedValueOnce(new Error('Unauthorized'))
