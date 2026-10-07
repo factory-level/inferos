@@ -360,10 +360,16 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
   async function approveOrRefusal(id: number): Promise<string> {
     const message = await ws.approveAction(id).then(() => "", (error: unknown) =>
       error instanceof Error ? error.message : String(error));
-    if (message) await ws.rejectAction(id);
+    // A refusal InferOps answered is decided (failed); anything else is still pending.
+    if (message && (await actionEntry(id))?.state === "pending") await ws.rejectAction(id);
     return message;
   }
 
+
+  /** The action log entry of `id`, whatever its state. */
+  async function actionEntry(id: number) {
+    return (await ws.listActions({ filter: "all" })).entries.find(a => a.id === id);
+  }
 
   /** The one action the next proposal queues. */
   async function proposed(propose: () => Promise<unknown>) {
@@ -468,7 +474,8 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       refusedAt = "apply";
       await ws.approveAction(action.id).then(() => {}, async error => {
         message = error instanceof Error ? error.message : String(error);
-        await ws.rejectAction(action.id);
+        // A refusal InferOps answered is decided (failed); anything else is still pending.
+        if ((await actionEntry(action.id))?.state === "pending") await ws.rejectAction(action.id);
       });
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
@@ -479,6 +486,32 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     expect(after.title).toBe(before.title);
     note(`e. update at stale revision ${staleRevision} refused at ${refusedAt} (STALE_REVISION); ` +
       `revision stayed ${after.revision}`);
+  });
+
+  it("e2. an update made stale after it was proposed ends failed, known not applied, and is never resent", async () => {
+    const before = await liveIssue(created.id);
+    const action = await proposed(async () =>
+      (await session.openIssue(created.id)).update({ title: "Overtaken edit" }, before.revision));
+    // Someone changes the issue in InferOps itself before the approval.
+    await inferOps(`/project/issues/${created.id}`, {
+      method: "PATCH", body: { priority: before.priority === "low" ? "medium" : "low", expectedRevision: before.revision },
+    });
+    const moved = await liveIssue(created.id);
+    expect(moved.revision).not.toBe(before.revision);
+
+    const message = await failure(ws.approveAction(action.id));
+    expect(message).toContain("changed in InferOps after this update was proposed");
+    const entry = await actionEntry(action.id);
+    expect(entry).toMatchObject({
+      state: "failed", lastAttempt: { outcome: "notApplied", code: "STALE_REVISION", retryable: false },
+    });
+    expect(await failure(ws.approveAction(action.id))).toMatch(/not pending/);
+    const after = await liveIssue(created.id);
+    expect(after.revision).toBe(moved.revision);
+    expect(after.title).toBe(before.title);
+    note(`e2. update proposed at revision ${before.revision}, overtaken in InferOps (now ${moved.revision}), ` +
+      `approved: InferOps answered 409 STALE_REVISION; the action ended failed (notApplied, not retryable), ` +
+      `a second approval was refused, and the issue stayed at ${after.revision} with its title`);
   });
 
   it("f. approving an applied action again writes nothing", async () => {
@@ -531,6 +564,7 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     let issue = await liveIssue(made!.id);
     expect(issue).toMatchObject({ workflow: "content", stateId: idea!.id });
 
+    let lastMove = 0;
     /** Propose moving the issue, approve it, and answer the apply error ("" when it applied). */
     const move = async (to: State) => {
       const action = await proposed(async () =>
@@ -539,7 +573,8 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       expect((await liveIssue(issue.id)).stateId).toBe(issue.stateId);
       const message = await ws.approveAction(action.id).then(() => "", (error: unknown) =>
         error instanceof Error ? error.message : String(error));
-      if (message) await ws.rejectAction(action.id);
+      lastMove = action.id;
+      if (message && (await actionEntry(action.id))?.state === "pending") await ws.rejectAction(action.id);
       return message;
     };
 
@@ -553,6 +588,10 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     // Draft -> Published is denied by the edge rule: approved in InferOS, refused by InferOps.
     const refused = await move(published!);
     expect(refused).toMatch(/does not permit it for this connection .*workflow policy/);
+    // The policy's refusal is known not applied and stands: the action ends failed.
+    expect(await actionEntry(lastMove)).toMatchObject({
+      state: "failed", lastAttempt: { outcome: "notApplied", code: "FORBIDDEN", retryable: false },
+    });
     const afterRefusal = await liveIssue(issue.id);
     expect(afterRefusal).toMatchObject({ stateId: draft!.id, revision: inDraft.revision });
     // The same move made directly is InferOps' policy refusal: 403 FORBIDDEN naming the edge rule.
