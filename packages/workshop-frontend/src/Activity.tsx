@@ -1,3 +1,4 @@
+import { attemptNotice } from './actionAttempt'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Check, Eye, Lightning, ShieldCheck } from '@phosphor-icons/react'
@@ -102,10 +103,16 @@ function activityStatus(
       : { label: 'Disabled', dotClass: 'bg-kumo-inactive', textClass: 'text-kumo-subtle' }
   }
   if (record.state === 'pending') {
-    return { label: 'Pending', dotClass: 'bg-kumo-brand', textClass: 'text-kumo-strong' }
+    // An earlier apply may have reached the provider: never shown as a fresh, untouched request.
+    return record.lastAttempt?.outcome === 'unknown'
+      ? { label: 'Outcome unknown', dotClass: 'bg-kumo-warning', textClass: 'text-kumo-warning' }
+      : { label: 'Pending', dotClass: 'bg-kumo-brand', textClass: 'text-kumo-strong' }
   }
   if (record.state === 'rejected') {
     return { label: 'Denied', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
+  }
+  if (record.state === 'failed') {
+    return { label: 'Failed', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
   }
   return { label: 'Approved', dotClass: 'bg-kumo-success', textClass: 'text-kumo-subtle' }
 }
@@ -745,6 +752,7 @@ function HistoryRow({
   const autoApproved = record.type === 'action' && record.autoApproved === true
   const at = actionChangeTime(record)
   const status = activityStatus(record)
+  const notice = attemptNotice(record)
 
   return (
     <div className={expanded ? 'bg-kumo-elevated/30' : ''}>
@@ -784,6 +792,11 @@ function HistoryRow({
             </p>
           )}
           <ActionFields fields={entryFields(record)} className="mt-2 max-w-2xl" />
+          {notice && (
+            <p className={`m-0 mt-2 whitespace-pre-wrap text-[12.5px] leading-[18px] ${notice.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>
+              {notice.text}
+            </p>
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] text-kumo-inactive">
             <span>{formatFullDate(at)}</span>
             <span className="text-kumo-subtle">{record.resourceTitle}</span>

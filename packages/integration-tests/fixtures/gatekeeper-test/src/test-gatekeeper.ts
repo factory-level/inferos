@@ -24,8 +24,9 @@ import {
 } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
+import { ActionApplyError, ActionOutcomeUnknownError, applyActionOutcome } from "@gadgets/gatekeeper-kit/actions";
 import type {
-  AccountDescription, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
+  AccountDescription, ActionApplyFailure, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
   HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, SupportedResource,
   VendorDescription,
@@ -100,6 +101,9 @@ function outcomeKey(label: string, resourceUrl?: string): string {
 function newAccountLabel(): string {
   return `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}@${VENDOR_HOST}`;
 }
+
+/** How the next failed test apply fails (see failNextApply). */
+type ApplyFailureOutcome = "retryable" | "refused" | "unknown";
 
 @validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
@@ -177,17 +181,22 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.kv.put(`actions:${label}`, state);
   }
 
-  failNextApply(label: string, reason: string): void {
-    this.ctx.storage.kv.put(`fail-next-apply:${label}`, reason);
+  /**
+   * The next applyAction() for `label` fails with `reason`: as a retryable error by default, as a
+   * known refusal (`ActionApplyError`, nothing applied), or with an unknown outcome
+   * (`ActionOutcomeUnknownError`, possibly applied).
+   */
+  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "retryable"): void {
+    this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome });
   }
 
   /** Returns rather than throws, so consuming the failure commits. */
-  takeApplyFailure(label: string): string | null {
+  takeApplyFailure(label: string): { reason: string; outcome: ApplyFailureOutcome } | null {
     const key = `fail-next-apply:${label}`;
-    const reason = this.ctx.storage.kv.get<string>(key);
-    if (reason === undefined) return null;
+    const failure = this.ctx.storage.kv.get<{ reason: string; outcome: ApplyFailureOutcome }>(key);
+    if (failure === undefined) return null;
     this.ctx.storage.kv.delete(key);
-    return reason;
+    return failure;
   }
 
   recordApplyAttempt(label: string): void {
@@ -212,6 +221,34 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 
   releaseApply(label: string): void {
     this.ctx.storage.kv.put(`release-apply:${label}`, true);
+  }
+
+  /** Parks the next rejectAction() for `label` until releaseReject(), so a test can race it. */
+  holdNextReject(label: string): void {
+    this.ctx.storage.kv.put(`hold-next-reject:${label}`, true);
+    this.ctx.storage.kv.delete(`release-reject:${label}`);
+  }
+
+  /** One-shot, like takeNextApplyHold(). */
+  takeNextRejectHold(label: string): boolean {
+    return this.ctx.storage.kv.delete(`hold-next-reject:${label}`);
+  }
+
+  releaseReject(label: string): void {
+    this.ctx.storage.kv.put(`release-reject:${label}`, true);
+  }
+
+  isRejectReleased(label: string): boolean {
+    return this.ctx.storage.kv.get<boolean>(`release-reject:${label}`) ?? false;
+  }
+
+  recordRejectAttempt(label: string): void {
+    this.ctx.storage.kv.put(`reject-attempts:${label}`, this.getRejectAttempts(label) + 1);
+  }
+
+  /** Every rejectAction() call. */
+  getRejectAttempts(label: string): number {
+    return this.ctx.storage.kv.get<number>(`reject-attempts:${label}`) ?? 0;
   }
 
   isApplyReleased(label: string): boolean {
@@ -610,6 +647,13 @@ class TestSessionTarget extends RpcTarget implements TestSession {
 const SET_VALUE_ACTION_KIND: ActionKind = { tag: "set-value", label: "Set value" };
 
 /** Polls rather than parks a promise: the release arrives on another request to TestControl. */
+async function waitForRejectRelease(state: DurableObjectStub<TestControl>, label: string) {
+  for (const deadline = Date.now() + 30_000; !await state.isRejectReleased(label);) {
+    if (Date.now() > deadline) throw new Error("The held test reject was never released.");
+    await scheduler.wait(25);
+  }
+}
+
 async function waitForApplyRelease(state: DurableObjectStub<TestControl>, label: string) {
   for (const deadline = Date.now() + 30_000; !await state.isApplyReleased(label);) {
     if (Date.now() > deadline) throw new Error("The held test apply was never released.");
@@ -685,19 +729,29 @@ export class TestGatekeeper
         { resourceUrl: this.ctx.props.resourceUrl, type: "remove", id });
   }
 
-  async applyAction(action: number): Promise<void> {
-    const state = control(this.ctx.exports);
-    const { label } = this.ctx.props;
-    const held = await state.takeNextApplyHold(label);
-    await state.recordApplyAttempt(label);
-    if (held) await waitForApplyRelease(state, label);
-    const failure = await state.takeApplyFailure(label);
-    if (failure !== null) throw new Error(failure);
-    await state.applyAction(label, action);
+  /** The kit's terminal failures reach the overseer as its structured result (applyActionOutcome). */
+  async applyAction(action: number): Promise<void | { failed: ActionApplyFailure }> {
+    return applyActionOutcome(async () => {
+      const state = control(this.ctx.exports);
+      const { label } = this.ctx.props;
+      const held = await state.takeNextApplyHold(label);
+      await state.recordApplyAttempt(label);
+      if (held) await waitForApplyRelease(state, label);
+      const failure = await state.takeApplyFailure(label);
+      if (failure?.outcome === "refused") throw new ActionApplyError(failure.reason);
+      if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
+      if (failure !== null) throw new Error(failure.reason);
+      await state.applyAction(label, action);
+    });
   }
 
   async rejectAction(action: number): Promise<void> {
-    await control(this.ctx.exports).discardAction(this.ctx.props.label, action);
+    const state = control(this.ctx.exports);
+    const { label } = this.ctx.props;
+    const held = await state.takeNextRejectHold(label);
+    await state.recordRejectAttempt(label);
+    if (held) await waitForRejectRelease(state, label);
+    await state.discardAction(label, action);
   }
 
   async revertAction(_action: number): Promise<void> {
@@ -860,6 +914,30 @@ export default {
     }
 
     // Body: {"label": "..."}
+    // One-shot: the next rejectAction() for `label` waits for /control/release-reject.
+    // Body: {"label": "..."}
+    if (url.pathname === "/control/hold-next-reject" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      await control(ctx.exports).holdNextReject(label);
+      return new Response(null, { status: 204 });
+    }
+
+    // Body: {"label": "..."}
+    if (url.pathname === "/control/release-reject" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      await control(ctx.exports).releaseReject(label);
+      return new Response(null, { status: 204 });
+    }
+
+    // Body: {"label": "..."} -> {"attempts": number}
+    if (url.pathname === "/control/reject-attempts" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      return Response.json({ attempts: await control(ctx.exports).getRejectAttempts(label) });
+    }
+
     if (url.pathname === "/control/release-apply" && req.method === "POST") {
       const { label } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
@@ -870,13 +948,16 @@ export default {
     // One-shot: the next applyAction() for `label` throws `reason` without applying.
     // Body: {"label": "...", "reason": "..."}
     if (url.pathname === "/control/fail-next-apply" && req.method === "POST") {
-      const { label, reason } = body as Record<string, unknown>;
+      const { label, reason, outcome } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
       }
+      if (outcome !== undefined && outcome !== "retryable" && outcome !== "refused" && outcome !== "unknown") {
+        return badRequest("`outcome` must be retryable, refused or unknown when present");
+      }
       await control(ctx.exports).failNextApply(
-          label, reason ?? "The test gatekeeper failed to apply this action.");
+          label, reason ?? "The test gatekeeper failed to apply this action.", outcome ?? "retryable");
       return new Response(null, { status: 204 });
     }
 

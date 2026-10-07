@@ -60,15 +60,17 @@ const issueCard = (root: HTMLElement, issueId: string) =>
 type CardDecision = { outcome: ChangeDecision['outcome']; revision: string; toStateId?: string }
 
 const decisionText = (board: Board, { change, outcome }: ChangeDecision): string => {
+  // A failed decision was approved but the provider refused it: nothing changed, like a rejection.
+  const notDone = outcome === 'failed' ? 'was approved but not applied' : 'was rejected'
   switch (change.kind) {
     case 'move': {
       const target = stateOf(board, change.toStateId)?.name ?? 'another state'
-      return outcome === 'applied' ? `${change.identifier} moved to ${target}.` : `Move of ${change.identifier} to ${target} was rejected; it stays where it was.`
+      return outcome === 'applied' ? `${change.identifier} moved to ${target}.` : `Move of ${change.identifier} to ${target} ${notDone}; it stays where it was.`
     }
     case 'update':
-      return outcome === 'applied' ? `Edit of ${change.identifier} applied.` : `Edit of ${change.identifier} was rejected; it keeps its previous values.`
+      return outcome === 'applied' ? `Edit of ${change.identifier} applied.` : `Edit of ${change.identifier} ${notDone}; it keeps its previous values.`
     case 'create':
-      return outcome === 'applied' ? `New issue "${change.title}" created.` : `New issue "${change.title}" was rejected.`
+      return outcome === 'applied' ? `New issue "${change.title}" created.` : `New issue "${change.title}" ${notDone}.`
   }
 }
 
@@ -134,7 +136,7 @@ export const KanbanBoard = ({ board, columns, pending, changes, awaiting, decide
     setEditDecisions(previous => new Map([...previous, ...edits]))
     later([...moves, ...edits].filter(([, mark]) => mark.outcome === 'applied').map(([issueId]) => issueId))
     setAnnouncement({
-      tone: decided.some(decision => decision.outcome === 'rejected') ? 'error' : 'info',
+      tone: decided.some(decision => decision.outcome !== 'applied') ? 'error' : 'info',
       text: decided.map(decision => decisionText(board, decision)).join(' '),
     })
   }, [pending, board, decidedActions])

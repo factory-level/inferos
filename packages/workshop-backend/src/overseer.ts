@@ -19,11 +19,11 @@ import { consoleScreens, type ConsoleSource, type OperateConsole, type OperateCo
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplyFailure } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -762,7 +762,8 @@ export type ActionRecord = {
   /**
    * When the record last changed state: an action's approval/rejection, a hook's enable/disable
    * toggle or deletion. Absent while nothing has happened since creation (and on legacy records
-   * from before it was tracked).
+   * from before it was tracked). Never set by an unsuccessful apply, whose time is
+   * `lastAttempt.at` (a failed action has none).
    */
   appliedAt?: Date;
 
@@ -777,8 +778,12 @@ export type ActionRecord = {
   type: "action";
   action: number;  // action key assigned by the gatekeeper, passed back on apply/reject/revert
   description: ActionDescription;
-  resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected); absent while pending (or legacy)
+  resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected/failed); absent while pending (or legacy)
   autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
+  lastAttempt?: ActionAttempt;    // the most recent unsuccessful apply (see ActionLogEntry.lastAttempt)
+  // Written, durably, before an apply is dispatched and cleared with its outcome, so an apply a
+  // restart interrupted is recovered as an unknown outcome (see #recoverInterruptedApplies).
+  applyStartedAt?: Date;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1120,6 +1125,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         description: record.description,
         resolvedBy: record.resolvedBy,
         autoApproved: record.autoApproved,
+        ...(record.lastAttempt ? {lastAttempt: record.lastAttempt} : {}),
       };
     case "bindHook":
       return {
@@ -1158,11 +1164,20 @@ function stampBindHookAction(storage: OverseerStorage, actionId: number, enabled
   storage.actions.put(actionRecord);
 }
 
+// Recorded for an apply a restart interrupted after it was dispatched (see applyStartedAt).
+const INTERRUPTED_APPLY_MESSAGE = "An apply of this action was interrupted after it was sent, so its " +
+    "outcome is unknown: check the provider before approving it again.";
+// Appended to a later attempt's refusal while an earlier attempt's outcome is still unknown.
+const EARLIER_ATTEMPT_UNKNOWN_NOTE = "An earlier attempt may still have applied it: check the " +
+    "provider before deciding again.";
+
 // Key of the actions `byLastChanged` index: last state-change time, id-disambiguated because the
 // frozen clock makes same-instant records routine. Every mutation path stamps appliedAt (apply,
-// reject, stampBindHookAction); one that doesn't would be missed by the resume replay.
+// reject, stampBindHookAction) or, for an unsuccessful apply, lastAttempt.at; one that doesn't
+// would be missed by the resume replay.
 function actionLastChangedKey(record: ActionRecord): string {
-  return `${keyString(actionChangeTime(record).valueOf())}.${keyString(record.id)}`;
+  return `${keyString(actionChangeTime({...record,
+      ...(record.type === "action" ? {lastAttempt: record.lastAttempt} : {})}).valueOf())}.${keyString(record.id)}`;
 }
 
 /**
@@ -2127,6 +2142,7 @@ class OverseerImpl implements AgentHooks {
     // This migration is fully synchronous, so nothing can observe pre-migration state; the
     // git-storage migration below is the asynchronous one, shielded by blockConcurrencyWhile.
     this.#migrateStorage();
+    this.#recoverInterruptedApplies();
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
@@ -5632,8 +5648,55 @@ class OverseerImpl implements AgentHooks {
   // gate was cleared: this is the single chokepoint where an action transitions to "approved", so
   // requiring them here guarantees the audit log always records the resolving user and whether it
   // was applied automatically. For an auto-approval, `resolvedBy` is the user who enabled the rule.
+  //
+  // One apply runs per action at a time, whichever path started it, so two approvals (two tabs, a
+  // retry after a dropped connection, an approval racing the auto-approval drain) cannot both
+  // reach the gatekeeper; a reject waits its turn the same way (see withActionClaim). An apply that
+  // does not succeed is recorded before it throws (see #recordUnsuccessfulApply).
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
+    await this.withActionClaim(record.id,
+        () => this.#applyPendingAction(record, resolvedBy, autoApproved));
+  }
+
+  // Runs `decide` as the one decision under way for a pending action: an apply (applyPendingAction)
+  // or a rejection (rejectAction). Another decision of the same action is refused meanwhile, so
+  // concurrent approvals reach the gatekeeper once and a rejection cannot interleave with an apply
+  // and overwrite its outcome. The claim lives in memory; an apply also writes applyStartedAt
+  // before dispatch, which survives a restart that drops the claim.
+  async withActionClaim<T>(id: number, decide: () => Promise<T>): Promise<T> {
+    if (this.#claimedActions.has(id) || this.storage.actions.get(id)?.state !== "pending") {
+      throw new Error(`Action is not pending: ${id}`);
+    }
+    this.#claimedActions.add(id);
+    try {
+      return await decide();
+    } finally {
+      this.#claimedActions.delete(id);
+    }
+  }
+
+  #claimedActions = new Set<number>();
+
+  // An apply a restart interrupted after dispatch may have reached the provider, so it is recorded
+  // as an unknown outcome, for the person to check before deciding again. Runs once, at startup,
+  // before any decision can start.
+  #recoverInterruptedApplies(): void {
+    for (let record of Array.from(this.storage.actions.byHistoryFilter.get("pending"))) {
+      if (record.type !== "action" || record.applyStartedAt === undefined) continue;
+      let startedAt = record.applyStartedAt;
+      delete record.applyStartedAt;
+      // Stamped now, not at the start: a subscriber whose watermark passed the start (another
+      // action changed since) must still be sent this, and `at` is the change time it resumes by.
+      if (record.lastAttempt?.outcome !== "unknown") {
+        record.lastAttempt = {outcome: "unknown", message: INTERRUPTED_APPLY_MESSAGE, startedAt, at: new Date()};
+      }
+      this.storage.actions.put(record);
+    }
+  }
+
+  async #applyPendingAction(record: ActionRecord & {type: "action"},
+                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
     // auto-approval never publishes, since no person approved it.
@@ -5646,12 +5709,36 @@ class OverseerImpl implements AgentHooks {
     // The apply-time cache stub is scoped to the gatekeeper AND to this action (approval can
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
     // binding that makes buildPack() serve exactly this action's pending-push closure.
+    // Durably before dispatch: a restart from here until the outcome is recorded leaves the action
+    // pending with an unknown outcome (see #recoverInterruptedApplies), never quietly re-approvable.
+    let started = this.storage.actions.get(record.id);
+    if (started?.type === "action") {
+      started.applyStartedAt = new Date();
+      this.storage.actions.put(started);
+    }
+    let result: void | {failed: ActionApplyFailure};
     try {
-      await gatekeeper.applyAction(record.action,
+      result = await gatekeeper.applyAction(record.action,
           new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
+    } catch (error) {
+      // A thrown error asserts nothing about the provider, so the outcome is unknown.
+      this.#recordUnsuccessfulApply(record, {
+        outcome: "unknown", retryable: true,
+        message: error instanceof Error ? error.message : String(error),
+      }, resolvedBy, autoApproved);
+      throw error;
     } finally {
       this.#approvingPublishers.delete(approvingKey);
     }
+    if (result?.failed) {
+      this.#recordUnsuccessfulApply(record, result.failed, resolvedBy, autoApproved);
+      throw new Error(result.failed.message);
+    }
+    // Success is the authoritative receipt: it also resolves an earlier attempt's unknown outcome.
+    let applied = this.storage.actions.get(record.id);
+    if (applied?.type === "action") Object.assign(record, applied);
+    delete record.applyStartedAt;
+    delete record.lastAttempt;
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -5666,6 +5753,34 @@ class OverseerImpl implements AgentHooks {
     });
     // Also when a rule applies it: a user's "always approve" answers a pending request that way.
     this.traceAgentActionApproval(record, "approved");
+  }
+
+  // Records an apply that did not succeed: a refusal known not applied and not retryable ends the
+  // action as failed; anything else leaves it pending for another decision. Either way the reason,
+  // and whether the effect may exist at the provider, survive a reload. The time is the attempt's,
+  // never appliedAt, which only a resolution sets.
+  #recordUnsuccessfulApply(record: ActionRecord & {type: "action"}, failure: ActionApplyFailure,
+                           resolvedBy: AiChatAuthorInfo, autoApproved: boolean): void {
+    let current = this.storage.actions.get(record.id);
+    if (current?.type !== "action" || current.state !== "pending") return;
+    delete current.applyStartedAt;
+    // An earlier attempt whose outcome is unknown stays unknown: this attempt's answer is about
+    // itself, and only a success (the authoritative receipt) settles the earlier one. So a later
+    // refusal neither ends the action as failed nor lets it read as "nothing changed".
+    let earlierUnknown = current.lastAttempt?.outcome === "unknown";
+    current.lastAttempt = {
+      outcome: earlierUnknown ? "unknown" : failure.outcome,
+      message: earlierUnknown && failure.outcome === "notApplied"
+          ? `${failure.message} ${EARLIER_ATTEMPT_UNKNOWN_NOTE}` : failure.message,
+      ...(failure.code !== undefined ? {code: failure.code} : {}), at: new Date(),
+    };
+    if (!earlierUnknown && failure.outcome === "notApplied" && !failure.retryable) {
+      current.state = "failed";
+      current.resolvedBy = resolvedBy;
+      current.autoApproved = autoApproved;
+    }
+    this.storage.actions.put(current);
+    Object.assign(record, current);
   }
 
   // Traces an approval step for an action an agent turn submitted.
@@ -9180,7 +9295,7 @@ class OverseerImpl implements AgentHooks {
       result.awaitDecision &&= result.actions.some(id => {
         let record = this.storage.actions.get(id);
         return record?.type === "action" && record.description.awaitDecision &&
-            record.state !== "approved";
+            record.state !== "approved" && record.state !== "failed";
       });
     }
     return result;
@@ -12148,10 +12263,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Resolve the approver's identity before applying, so a failed profile fetch can't leave the
     // action applied in the world but still "pending" in storage.
     let profile = await this.#getClientProfile();
-    await this.impl.applyPendingAction(action, profile, false);
+    try {
+      await this.impl.applyPendingAction(action, profile, false);
+    } catch (error) {
+      // A refusal decides the action (failed), which may let its turn move on; any other failure
+      // leaves it pending and the turn suspended.
+      if (this.impl.storage.actions.get(id)?.state === "failed" &&
+          action.caller.from === "agent" && action.description.awaitDecision) {
+        await this.#maybeResumeAfterActionDecision(action.caller.chatId, action.id);
+      }
+      throw error;
+    }
 
     // If this was an awaited agent action, resume only after all awaited actions in the turn are
-    // approved. If applyPendingAction throws, the action stays pending and the turn stays suspended.
+    // decided.
     if (action.caller.from === "agent" && action.description.awaitDecision) {
       await this.#maybeResumeAfterActionDecision(action.caller.chatId, action.id);
     }
@@ -12177,7 +12302,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.drainAutoApprovals(gatekeeperId);
     // No caller awaits a drain, so log each failed resume rather than letting it end the loop.
     for (let [id, chatId] of awaited) {
-      if (this.impl.storage.actions.get(id)?.state !== "approved") continue;
+      let state = this.impl.storage.actions.get(id)?.state;
+      if (state !== "approved" && state !== "failed") continue;
       await this.#maybeResumeAfterActionDecision(chatId, id).catch(error => {
         this.impl.logger.error("failed to resume agent after auto-approval", {
           event: "agent.resume.failed", chatId, error,
@@ -12281,7 +12407,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     awaited.reverse();  // Present titles chronologically.
 
-    // Only resume when every awaited action in the turn has been decided and all were approved.
+    // Only resume when every awaited action in the turn has been decided, none rejected. One the
+    // provider refused (failed) is decided: the turn moves on, told what did not apply and why.
     if (!awaited.some(r => r.id === approvedId)) return;    // Approved an older turn's action.
     if (awaited.some(r => r.state === "pending")) return;   // Still waiting on a decision.
     if (awaited.some(r => r.state === "rejected")) return;  // Denial leaves the turn ended.
@@ -12289,10 +12416,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Persist one note for replay; raw action cards are not surfaced to the LLM. Concurrent
     // approvals could both pass the gate above and append duplicate notes (the DO input gate is
     // open across these awaits), but that's cosmetic — #resumeSuspendedAgent still starts one turn.
-    let titleList = awaited.map(r => `"${r.description.title}"`).join(", ");
-    let summary =
-        `The changes you submitted have been approved and applied: ${titleList}. ` +
-        `Reads now reflect them.`;
+    let titles = (records: typeof awaited) => records.map(r => `"${r.description.title}"`).join(", ");
+    let applied = awaited.filter(r => r.state === "approved");
+    let failed = awaited.filter(r => r.state === "failed");
+    let summary = [
+      applied.length > 0 ?
+          `The changes you submitted have been approved and applied: ${titles(applied)}. ` +
+          `Reads now reflect them.` : "",
+      ...failed.map(r => `"${r.description.title}" was approved, but the provider refused it and ` +
+          `nothing was changed: ${r.lastAttempt?.message ?? "no reason was given"}`),
+    ].filter(part => part !== "").join(" ");
     let author = await this.#getClientProfile();
     this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}]);
 
@@ -12318,17 +12451,22 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
-
-    await gatekeeper.rejectAction(action.action);
-
-    action.state = "rejected";
-    action.appliedAt = new Date();
-    action.resolvedBy = profile;
-    // A rejected push's pending-push marks are removed in the same durable step as the state
-    // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
-    this.impl.storage.transaction(() => {
-      this.impl.gitCache.clearPushMarks(action.id);
-      this.impl.storage.actions.put(action);
+    // The whole decision runs under the claim, through to the stored rejection, so no approval can
+    // start between the gatekeeper's answer and the record saying it was rejected.
+    await this.impl.withActionClaim(id, async () => {
+      await gatekeeper.rejectAction(action.action);
+      // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
+      let current = this.impl.storage.actions.get(id);
+      if (current?.type === "action") Object.assign(action, current);
+      action.state = "rejected";
+      action.appliedAt = new Date();
+      action.resolvedBy = profile;
+      // A rejected push's pending-push marks are removed in the same durable step as the state
+      // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
+      this.impl.storage.transaction(() => {
+        this.impl.gitCache.clearPushMarks(action.id);
+        this.impl.storage.actions.put(action);
+      });
     });
     this.impl.traceAgentActionApproval(action, "denied");
 

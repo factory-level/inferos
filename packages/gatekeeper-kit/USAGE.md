@@ -537,6 +537,11 @@ request, or any failure after the provider was reached. That record is never rep
 pruned, strands no dependent, and holds a slot until the user rejects it, so the "check the
 provider" warning survives.
 
+The overseer cannot see these classes across RPC, so write `applyAction` as
+`return applyActionOutcome(() => this.#actions().apply(id))`: the two terminal errors reach it as
+its structured `{ failed }` result, and the action log records a refusal as failed and an unknown
+outcome as pending with its warning (see `ActionApplyFailure`).
+
 `claimBeforeApply` produces that same unknown outcome when an activation dies mid-dispatch. Neither
 substitutes for a provider idempotency key derived from the stable `ActionContext.id`, which is
 what makes a retry safe in the first place.

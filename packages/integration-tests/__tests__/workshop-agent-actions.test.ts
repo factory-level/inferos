@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
-import type { ActionState, AiChatMessage, Overseer } from "@gadgets/workshop-shared/api";
+import {
+  actionChangeTime, type ActionLogEntry, type ActionState, type ActionsSubscriber, type AiChatMessage, type Overseer,
+} from "@gadgets/workshop-shared/api";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import { openAgentSession, type WorkshopAgentSession } from "../src/agent-session.js";
 import {
@@ -11,7 +13,7 @@ import {
 } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  accountLabel, restartWorkspace, streamGeneration, waitFor, withOwnerWorkspace,
+  accountLabel, restartWorkspace, RpcTarget, streamGeneration, stubFor, waitFor, withOwnerWorkspace,
 } from "../src/rpc-client.js";
 
 let harness: Harness;
@@ -35,8 +37,8 @@ afterAll(async () => {
 const control = <T>(route: string, body: object) => testControl<T>(harness, route, body);
 
 const actionState = (label: string) => testActionState(harness, label);
-const failNextApply = (label: string, reason: string) =>
-  control("fail-next-apply", { label, reason });
+const failNextApply = (label: string, reason: string, outcome?: "refused" | "unknown") =>
+  control("fail-next-apply", { label, reason, ...(outcome ? { outcome } : {}) });
 const applyAttempts = async (label: string) =>
   (await control<{ attempts: number }>("apply-attempts", { label })).attempts;
 
@@ -289,11 +291,214 @@ it.concurrent.each(["retry", "reject"] as const)(
   }
 });
 
-// Known bug, kept as a deterministic repro: Overseer.approveAction checks `pending`, then awaits
-// applyPendingAction before marking the action approved, so two concurrent approvals (separate
-// approval surfaces, tabs, or a retry after a dropped WebSocket) both dispatch the apply, and a
-// non-idempotent gatekeeper writes twice. Drop `.fails` once approval claims the action first.
-it.concurrent.fails("approving one action twice at once applies it once", async () => {
+// A gatekeeper that knows its apply was refused (`ActionApplyError`: nothing applied, a retry
+// won't either) ends the action as failed, with its reason, rather than leaving it pending.
+it.concurrent("a refused apply ends failed with its reason, applies nothing and resumes the turn", async () => {
+  const model = models.script([writeValues(5), { text: "The change was refused." }]);
+  await using session = await openSession(model, "agentrefused");
+  const label = labelOf(session);
+
+  await session.runTurn("Set the test value to 5.");
+  const [action] = await waitForPendingActions(session, 1);
+  await failNextApply(label, "The provider refused this change: policy denies it.", "refused");
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await expect(ws.approveAction(action.id)).rejects.toThrow("policy denies it");
+    // The refusal is the action's recorded outcome, with its reason, read back from the log...
+    const { entries } = await session.listActions({ filter: "action" });
+    const entry = entries.find(candidate => candidate.id === action.id);
+    expect(entry).toMatchObject({ state: "failed", lastAttempt: {
+      outcome: "notApplied", message: "The provider refused this change: policy denies it." } });
+    expect(entry?.appliedAt).toBeUndefined();
+    // ...it cannot be approved again, and the turn that waited on it moves on.
+    await expect(ws.approveAction(action.id)).rejects.toThrow();
+    await waitForResumedTurn(ws, model);
+  });
+  expect(await actionState(label)).toEqual({ pending: [{ id: 1, value: 5 }], applyCount: 0 });
+  expect(await applyAttempts(label)).toBe(1);
+  expect(model.requests).toHaveLength(2);
+});
+
+// An apply whose outcome is unknown (`ActionOutcomeUnknownError`: the provider may have applied it)
+// stays pending with that warning and its reason, through a workspace restart, and rejecting it
+// afterwards keeps the warning, so it never reads as safely undone.
+it.concurrent("an unknown apply outcome stays pending with its warning, through a restart and a rejection", async () => {
+  const model = models.script([writeValues(6), { text: "This must not run." }]);
+  await using session = await openSession(model, "agentunknown");
+  const label = labelOf(session);
+
+  await session.runTurn("Set the test value to 6.");
+  const [action] = await waitForPendingActions(session, 1);
+  await failNextApply(label, "The provider timed out after receiving the change.", "unknown");
+  const entryOf = async () => (await session.listActions({ filter: "action" })).entries
+    .find(candidate => candidate.id === action.id);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await expect(ws.approveAction(action.id)).rejects.toThrow("timed out after receiving");
+    await restartWorkspace(harness.url, ws);
+  });
+  await waitFor("the restart to drop the session", async () => session.connectionDrops > 0 || null);
+  expect(await entryOf()).toMatchObject({ state: "pending", lastAttempt: {
+    outcome: "unknown", message: "The provider timed out after receiving the change." } });
+  expect((await entryOf())?.appliedAt).toBeUndefined();
+
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await ws.rejectAction(action.id);
+    await expectIdle(ws);
+  });
+  expect(await entryOf()).toMatchObject({ state: "rejected", lastAttempt: { outcome: "unknown" } });
+  expect(await applyAttempts(label)).toBe(1);
+  expect(model.requests).toHaveLength(1);
+});
+
+// Once an attempt's outcome is unknown, a later attempt's refusal answers only for itself: the
+// action stays pending, still flagged as possibly applied, rather than failed with "nothing changed".
+it.concurrent("a refusal after an unknown outcome keeps the action pending and possibly applied", async () => {
+  await using session = await openSession(models.script([writeValues(4), { text: "Not reached." }]), "agentunknownthenrefused");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 4.");
+  const [action] = await waitForPendingActions(session, 1);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await failNextApply(label, "The request timed out after it was sent.", "unknown");
+    await expect(ws.approveAction(action.id)).rejects.toThrow("timed out");
+    await failNextApply(label, "The provider refused the retry.", "refused");
+    await expect(ws.approveAction(action.id)).rejects.toThrow("refused the retry");
+  });
+  const { entries } = await session.listActions({ filter: "action" });
+  const entry = entries.find(candidate => candidate.id === action.id);
+  expect(entry).toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown" } });
+  expect(entry?.type === "action" && entry.lastAttempt?.message).toContain("An earlier attempt may still have applied it");
+});
+
+// An apply a restart interrupts after dispatch may have reached the provider: the action comes back
+// pending with an unknown outcome, never as an untouched pending action to approve again blindly.
+it.concurrent("an apply interrupted by a restart comes back with an unknown outcome", async () => {
+  await using session = await openSession(models.script([writeValues(8), { text: "Not reached." }]), "agentinterrupted");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 8.");
+  const [action] = await waitForPendingActions(session, 1);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await control("hold-next-apply", { label });
+    const approval = ws.approveAction(action.id);
+    try {
+      await waitFor("the apply to be dispatched", async () => await applyAttempts(label) === 1 || null);
+      await restartWorkspace(harness.url, ws);
+      // The held apply is released only once the restart has happened, so it cannot finish first.
+      await waitFor("the restart to drop the session", async () => session.connectionDrops > 0 || null);
+    } finally {
+      await control("release-apply", { label });
+      await Promise.allSettled([approval]);
+    }
+  });
+  const { entries } = await session.listActions({ filter: "action" });
+  expect(entries.find(candidate => candidate.id === action.id)).toMatchObject({ state: "pending", lastAttempt: {
+    outcome: "unknown", message: expect.stringContaining("interrupted after it was sent") } });
+});
+
+// Records every action-log entry a subscription sends (an upsert stream).
+class ActionRecorder extends RpcTarget implements ActionsSubscriber {
+  readonly entries: ActionLogEntry[] = [];
+  entry(record: ActionLogEntry) { this.entries.push(record); }
+  ready() {}
+}
+
+// The recovered outcome of an interrupted apply is a change of its own, stamped when recovery finds
+// it: a subscriber resuming from a watermark another action set after that apply started still gets it.
+it.concurrent("an interrupted apply's recovered outcome reaches a subscriber resuming from a newer watermark", async () => {
+  await using session = await openSession(models.script([writeValues(1, 2), { text: "Not reached." }]), "agentrecoverywatermark");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 1, then 2.");
+  const [first, second] = await waitForPendingActions(session, 2);
+  let watermark: Date | undefined;
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await control("hold-next-apply", { label });
+    const approval = ws.approveAction(first!.id);
+    try {
+      await waitFor("the first apply to be dispatched", async () => await applyAttempts(label) === 1 || null);
+      // Another action changes after the first apply started, moving a subscriber's watermark on.
+      await ws.approveAction(second!.id);
+      const { entries } = await ws.listActions({ filter: "action" });
+      const decided = entries.find(candidate => candidate.id === second!.id);
+      if (!decided) throw new Error("The second action is not in the log");
+      watermark = actionChangeTime(decided);
+      await restartWorkspace(harness.url, ws);
+      // The held apply is released only once the restart has happened, so it cannot finish first.
+      await waitFor("the restart to drop the session", async () => session.connectionDrops > 0 || null);
+    } finally {
+      await control("release-apply", { label });
+      await Promise.allSettled([approval]);
+    }
+  });
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    const replay = new ActionRecorder();
+    using replayStub = stubFor(replay);
+    using _subscription = await ws.subscribeToActions(replayStub, watermark);
+    const recovered = await waitFor("the recovered outcome in the replay", async () =>
+      replay.entries.find(entry => entry.id === first!.id) ?? null);
+    expect(recovered).toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown" } });
+    expect(recovered.type === "action" && recovered.lastAttempt?.startedAt).toBeInstanceOf(Date);
+  });
+});
+
+// A rejection holds the action until its outcome is stored: an approval arriving while the gatekeeper
+// is still answering the rejection is refused, and nothing is applied.
+it.concurrent("approving while a rejection is under way is refused, and the rejection stands", async () => {
+  await using session = await openSession(models.script([{ text: "Ready." }]), "agentapproveduringreject");
+  const label = labelOf(session);
+  await session.runTurn("Get ready.");
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    using connection = await ws.newGatekeeper(session.connectedAccount(TEST_VENDOR_ID).id,
+        "https://gadgets-test.example/things/approve-during-reject");
+    if (!connection) throw new Error("Failed to create the test connection");
+    using testSession = await connection.openSession() as RpcStub<TestSession>;
+    expect(await testSession.writeValue(37)).toBe(1);
+    const [action] = await waitForPendingActions(session, 1);
+
+    await control("hold-next-reject", { label });
+    const rejection = ws.rejectAction(action.id);
+    try {
+      await waitFor("the rejection to reach the gatekeeper", async () =>
+        (await control<{ attempts: number }>("reject-attempts", { label })).attempts === 1 || null);
+      await expect(ws.approveAction(action.id)).rejects.toThrow(`Action is not pending: ${action.id}`);
+    } finally {
+      await control("release-reject", { label });
+    }
+    await rejection;
+    expect(await actionStatus(session, action.id)).toMatchObject(decidedBy(session, "rejected"));
+    expect(await applyAttempts(label)).toBe(0);
+    expect(await actionState(label)).toEqual({ pending: [], applyCount: 0 });
+  });
+});
+
+// A rejection is a decision too: it cannot start while an apply of the same action is under way,
+// so it can never overwrite the apply's outcome.
+it.concurrent("rejecting while an apply is under way is refused, and the apply's outcome stands", async () => {
+  await using session = await openSession(models.script([{ text: "Ready." }]), "agentrejectduringapply");
+  const label = labelOf(session);
+  await session.runTurn("Get ready.");
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    using connection = await ws.newGatekeeper(session.connectedAccount(TEST_VENDOR_ID).id,
+        "https://gadgets-test.example/things/reject-during-apply");
+    if (!connection) throw new Error("Failed to create the test connection");
+    using testSession = await connection.openSession() as RpcStub<TestSession>;
+    expect(await testSession.writeValue(31)).toBe(1);
+    const [action] = await waitForPendingActions(session, 1);
+
+    await control("hold-next-apply", { label });
+    const approval = ws.approveAction(action.id);
+    try {
+      await waitFor("the apply to be held", async () => await applyAttempts(label) === 1 || null);
+      await expect(ws.rejectAction(action.id)).rejects.toThrow(`Action is not pending: ${action.id}`);
+    } finally {
+      await control("release-apply", { label });
+    }
+    await approval;
+    expect(await actionStatus(session, action.id)).toMatchObject(decidedBy(session, "approved"));
+    expect(await actionState(label)).toEqual({ pending: [], value: 31, applyCount: 1 });
+  });
+});
+
+// Two concurrent approvals (separate approval surfaces, tabs, or a retry after a dropped
+// WebSocket) must not both dispatch the apply: one apply runs per action at a time.
+it.concurrent("approving one action twice at once applies it once", async () => {
   await using session = await openSession(models.script([{ text: "Ready." }]), "agentdoubleapprove");
   const label = labelOf(session);
   // A workspace is listed, so withOwnerWorkspace can open it, once it has seen activity.

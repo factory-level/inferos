@@ -25,6 +25,24 @@ describe('decideApproval', () => {
     expect(result.outcome).toBeNull()
   })
 
+  it('reports a provider refusal as failed, with the reason the log kept', async () => {
+    const result = await decideApproval(overseer({
+      approve: async () => { throw new Error('refused') },
+      list: async () => ({ entries: [{ ...logged('failed'),
+        lastAttempt: { outcome: 'notApplied', message: 'Policy denies it.', at: new Date() } } as ActionLogEntry] }),
+    }), 4, 'approve')
+    expect(result).toEqual({ outcome: 'failed', error: 'Policy denies it.' })
+  })
+
+  it('reports an unknown outcome as neither applied nor failed, only as a warning', async () => {
+    const result = await decideApproval(overseer({
+      approve: async () => { throw new Error('timed out') },
+      list: async () => ({ entries: [{ ...logged('pending'),
+        lastAttempt: { outcome: 'unknown', message: 'Timed out after sending.', at: new Date() } } as ActionLogEntry] }),
+    }), 4, 'approve')
+    expect(result).toEqual({ outcome: null, error: 'It may already have been applied; the outcome is unknown: Timed out after sending.' })
+  })
+
   it('reports what the log says when someone else decided first', async () => {
     const result = await decideApproval(overseer({
       approve: async () => { throw new Error('Action is not pending: 4') },

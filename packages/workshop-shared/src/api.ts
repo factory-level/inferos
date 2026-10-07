@@ -2286,11 +2286,36 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 
 /**
  * Specifies the state of an action in the action log:
- * * pending: Action has not been applied yet. It is waiting for approval.
+ * * pending: Action has not been applied yet. It is waiting for approval (or, after an
+ *   unsuccessful attempt recorded in `lastAttempt`, for another decision).
  * * approved: Action was approved and applied.
  * * rejected: Action was rejected by the user.
+ * * failed: Action was approved, but the provider refused it and it was not applied; it cannot
+ *   be approved again (see `lastAttempt` for the reason).
  */
-export type ActionState = "pending" | "approved" | "rejected";
+export type ActionState = "pending" | "approved" | "rejected" | "failed";
+
+/**
+ * An action's most recent unsuccessful apply, as the overseer recorded it from the gatekeeper's
+ * answer (see `ActionApplyFailure`). `notApplied` is known absent at the provider; `unknown` may
+ * have happened there, so it is never presented as safely undone.
+ */
+export type ActionAttempt = {
+  /** What is known about the provider effect. */
+  outcome: "notApplied" | "unknown";
+  /** The reason the gatekeeper gave. */
+  message: string;
+  /** The provider's error code, when it gave one. */
+  code?: string;
+  /**
+   * When the attempt was recorded: when it ended, or, for an apply a restart interrupted, when
+   * recovery found it. For a failed action, this is when it failed. It is the record's change time
+   * (see `actionChangeTime`), so a reconnecting subscriber is sent it.
+   */
+  at: Date;
+  /** When an interrupted apply was sent, recorded with it since `at` is when recovery found it. */
+  startedAt?: Date;
+};
 
 /** The kind of caller that asked for an action log entry (see `ActionLogEntry.requestedBy`). */
 export type ActionRequester = "agent" | "person" | "gadget" | "hook";
@@ -2336,6 +2361,12 @@ export type ActionLogEntry = {
    * clicking Approve. Only ever set alongside state "approved" (there is no automatic rejection).
    */
   autoApproved?: boolean;
+
+  /**
+   * The most recent apply that did not succeed: set on a failed action, and kept on one still
+   * pending (or later rejected) so its reason and whether it may have happened survive a reload.
+   */
+  lastAttempt?: ActionAttempt;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -3602,12 +3633,14 @@ export function matchesActionHistoryFilter(
 }
 
 /**
- * A record's last state-change time: appliedAt once a mutation has stamped it, else createdAt.
- * The server's byLastChanged resume index keys on this (actionLastChangedKey in overseer.ts) and
- * the client's resume watermark must reproduce it exactly — derive it only through this helper.
+ * A record's last state-change time: appliedAt once a resolution has stamped it, else the time of
+ * its last unsuccessful apply (a failed action has no appliedAt), else createdAt. The server's
+ * byLastChanged resume index keys on this (actionLastChangedKey in overseer.ts) and the client's
+ * resume watermark must reproduce it exactly — derive it only through this helper.
  */
-export function actionChangeTime(record: Pick<ActionLogEntry, "appliedAt" | "createdAt">): Date {
-  return record.appliedAt ?? record.createdAt;
+export function actionChangeTime(record: Pick<ActionLogEntry, "appliedAt" | "createdAt">
+    & { lastAttempt?: Pick<ActionAttempt, "at"> }): Date {
+  return record.appliedAt ?? record.lastAttempt?.at ?? record.createdAt;
 }
 
 /** One page of action history from listActions(). */

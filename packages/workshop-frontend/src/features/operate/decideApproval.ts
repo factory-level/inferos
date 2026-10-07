@@ -54,6 +54,11 @@ export const decideApproval = async (
   // Someone else may have decided it first; the log is the truth either way.
   if (entry?.state === 'approved') return { outcome: 'applied' }
   if (entry?.state === 'rejected') return { outcome: 'rejected' }
+  if (entry?.type === 'action' && entry.state === 'failed') return { outcome: 'failed', error: entry.lastAttempt?.message ?? refusal }
+  // Possibly applied: neither applied nor failed, so no outcome is reported, only the warning.
+  if (entry?.type === 'action' && entry.lastAttempt?.outcome === 'unknown') {
+    return { outcome: null, error: `It may already have been applied; the outcome is unknown: ${entry.lastAttempt.message}` }
+  }
   if (refusal !== undefined) {
     return decision === 'approve' ? { outcome: 'failed', error: refusal } : { outcome: null, error: refusal }
   }

@@ -3,6 +3,7 @@
 import { createLogger } from "@gadgets/observability/logger";
 import type { RpcStub } from "cloudflare:workers";
 import type {
+  ActionApplyFailure,
   ActionDescription,
   ActionKind,
   ApprovalQueue,
@@ -95,6 +96,28 @@ export class ActionApplyError extends Error {}
  * provider was reached. Use `ActionApplyError` only when the effect is known absent.
  */
 export class ActionOutcomeUnknownError extends Error {}
+
+/**
+ * Runs a gatekeeper's apply and reports the kit's terminal failures to the overseer as its
+ * structured `applyAction` result instead of a thrown error, whose class RPC would lose:
+ * `ActionApplyError` becomes a refusal known not applied, `ActionOutcomeUnknownError` an outcome
+ * that may exist at the provider, and neither is retried. Any other error is rethrown unchanged
+ * and stays retryable. Use it as the body of `applyAction`.
+ */
+export async function applyActionOutcome(apply: () => Promise<void>)
+    : Promise<void | { failed: ActionApplyFailure }> {
+  try {
+    await apply();
+  } catch (error) {
+    if (error instanceof ActionApplyError) {
+      return { failed: { outcome: "notApplied", retryable: false, message: error.message } };
+    }
+    if (error instanceof ActionOutcomeUnknownError) {
+      return { failed: { outcome: "unknown", retryable: false, message: error.message } };
+    }
+    throw error;
+  }
+}
 
 /** Message stored when a dispatched action's outcome is unknown. */
 export const APPLY_OUTCOME_UNKNOWN_MESSAGE = "This action was interrupted after it was dispatched, "
@@ -561,8 +584,14 @@ export function defineActions<Host, M extends Record<string, unknown>>(
         // A callback naming the id proves the overseer holds it: promote a record stranded
         // "staged" by a lost reply, so it projects into reads and no rollback can take it.
         journal.markSubmitted(id);
-        // A terminal failure answers every later attempt with the same message, no provider call.
-        if (record.state === "failed") throw new Error(record.error);
+        // A terminal failure answers every later attempt with the same message and the same
+        // classification, no provider call, so applyActionOutcome still tells the overseer whether
+        // the effect may exist after a restart.
+        if (record.state === "failed") {
+          throw record.outcome === "unknown"
+            ? new ActionOutcomeUnknownError(record.error)
+            : new ActionApplyError(record.error);
+        }
         if (record.state === "claimed" && !claimedHere.has(id)) {
           return failOrphanedClaim(id);
         }

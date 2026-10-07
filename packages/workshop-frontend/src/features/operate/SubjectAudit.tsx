@@ -13,7 +13,7 @@ import { describeAgentEvent } from './AgentActivityNote'
 type AuditItem = { key: string; at: Date; text: string; note?: string }
 
 const STATE_LABELS: Record<ActionLogEntry['state'], string> = {
-  pending: 'awaiting approval', approved: 'approved', rejected: 'rejected',
+  pending: 'awaiting approval', approved: 'approved', rejected: 'rejected', failed: 'refused by the provider, not applied',
 }
 
 const eventItem = (record: OperateEventRecord): AuditItem => {

@@ -85,3 +85,24 @@ describe('Activity review request fields', () => {
     expect(document.querySelector('[aria-expanded="false"]')).not.toBeNull()
   })
 })
+
+describe('history', () => {
+  it('shows a failed action as failed, and one whose outcome is unknown as unknown, never as approved', async () => {
+    const server = makeOverseer()
+    await view.render(<Activity overseer={server.overseer} restricted={false} view="history" onViewChange={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [] })
+    await server.resolvePage({
+      entries: [
+        entry(2, { state: 'failed', resolvedBy: { type: 'user', id: 'u', name: 'U' },
+          lastAttempt: { outcome: 'notApplied', message: 'Policy denies it.', at: new Date(1700000300000) } }),
+        entry(1, { lastAttempt: { outcome: 'unknown', message: 'Timed out after sending.', at: new Date(1700000200000) } }),
+      ],
+    })
+    flushFrames()
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('Failed')
+    expect(text).toContain('Outcome unknown')
+    expect(text).not.toContain('Approved')
+  })
+})

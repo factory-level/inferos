@@ -1,3 +1,4 @@
+import { attemptNotice } from '../../actionAttempt'
 import { useEffect, useId, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import { actionChangeTime, type ActionLogEntry, type ActionRequester, type Overseer } from '@gadgets/workshop-shared/api'
@@ -44,6 +45,12 @@ const outcomeText = (title: string, outcome: OperateApprovalOutcome, error?: str
   outcome === 'applied' ? `“${title}” was approved and applied.`
     : outcome === 'rejected' ? `“${title}” was rejected.`
       : `“${title}” was approved, but applying it failed${error ? `: ${error}` : '.'}`
+
+// An earlier unsuccessful apply, shown on the pending item so a reload doesn't hide it.
+const attemptLine = (action: ActionLogEntry) => {
+  const attempt = attemptNotice(action)
+  return attempt && <span className={`mt-0.5 block text-[11.5px] leading-4 ${attempt.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>{attempt.text}</span>
+}
 
 const sameOutcome = (a: OperatePageState['lastApprovalOutcome'], b: OperatePageState['lastApprovalOutcome']) =>
   a === b || (a !== null && b !== null && sameApproval(a, b) && a.outcome === b.outcome)
@@ -175,6 +182,8 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
     return () => clearTimeout(timer)
   }, [expiresAt])
   const loggedTitle = logged && logged.type === 'action' ? logged.description.title : null
+  // The reason a failed apply's log entry kept, for its outcome reported elsewhere or restored.
+  const loggedReason = logged && logged.type === 'action' && logged.state === 'failed' ? logged.lastAttempt?.message : undefined
 
   // This tab's own decision carries its message; a newer outcome reported elsewhere wins.
   const own = notice && (lastOutcome === null || notice.outcome === null || sameApproval(lastOutcome, notice.approval)) ? notice : null
@@ -185,15 +194,16 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
       }
     // Reported elsewhere: under the action's own title once read (its id only if it cannot be).
     : fresh && logged !== undefined
-      ? { text: outcomeText(loggedTitle ?? `Action ${lastOutcome.actionId}`, lastOutcome.outcome), outcome: lastOutcome.outcome }
+      ? { text: outcomeText(loggedTitle ?? `Action ${lastOutcome.actionId}`, lastOutcome.outcome, loggedReason), outcome: lastOutcome.outcome }
       : null
   const statusText = shown?.text ?? ''
   const statusTone = shown?.outcome === 'applied' ? 'text-kumo-default'
     : shown?.outcome === 'rejected' ? 'text-kumo-subtle' : 'text-kumo-danger'
-  // A restored decision, with when it was made; one whose apply failed is still pending, and listed.
-  const earlier = !own && !fresh && lastOutcome !== null && lastOutcome.outcome !== 'failed' && loggedTitle !== null &&
+  // A restored decision, with when it was made and, for a failed apply, the reason the log kept. A
+  // failed action that is still pending (a retryable or unknown attempt) is listed instead.
+  const earlier = !own && !fresh && lastOutcome !== null && loggedTitle !== null &&
     decidedAt !== null && now - decidedAt < RECENT_ACTIVITY_MS
-    ? `${outcomeText(loggedTitle, lastOutcome.outcome)} · ${formatRelativeTime(new Date(decidedAt))}`
+    ? `${outcomeText(loggedTitle, lastOutcome.outcome, loggedReason)} · ${formatRelativeTime(new Date(decidedAt))}`
     : ''
 
   if (pending.length === 0 && !statusText && !earlier && !failedToLoad) return null
@@ -232,6 +242,7 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
                     className="min-w-0 flex-1 cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">
                     <span className="block truncate text-[13px] font-medium leading-[18px] text-kumo-default">{action.description.title}</span>
                     <span className="mt-0.5 block truncate text-[11.5px] leading-4 text-kumo-inactive">{meta}</span>
+                    {attemptLine(action)}
                   </button>
                   <div className="flex flex-shrink-0 items-center gap-0.5">
                     <ResolveButton tone="deny" disabled={busy} onClick={() => void decide(item, 'reject')} describedBy={isReviewing ? detailsId : undefined} />
