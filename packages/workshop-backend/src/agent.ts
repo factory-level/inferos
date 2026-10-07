@@ -580,6 +580,12 @@ export interface AgentHooks {
   isWorktree(id: WorkpieceId): boolean;
 
   /**
+   * Throws if `id` is a frozen install: the copy of a registered widget that a published console
+   * runs, which no chat may propose changes to.
+   */
+  assertNotFrozen(id: WorkpieceId): void;
+
+  /**
    * Read one file of a commit's tree by path, walking (and fault-pulling) only the objects along
    * the path -- never a whole tree -- the lazy base resolver behind worktree session content and
    * the way every unpinned read is served, gadget or worktree. Returns undefined for an absent
@@ -2008,6 +2014,7 @@ async function runAgentPass(
     if (agentContext.spawnerConfig && !hooks.isWorktree(workpieceId)) {
       throw new Error("You do not have permission to edit this gadget's code.");
     }
+    hooks.assertNotFrozen(workpieceId);
   };
 
   // The workspace's kind decides what its gadgets are built as. It is read once per turn, so a

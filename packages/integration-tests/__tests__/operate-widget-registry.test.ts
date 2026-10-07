@@ -11,10 +11,15 @@ import { connect, nextUsernames, signUp, stubFor, waitFor, WorkpieceRecorder } f
 // registered with a console, and publishing the console gives each entry a frozen install that its
 // operators run, whatever later happens to the registered install, until the next publication.
 
-type Versioned = { version(): Promise<string>; bump(): Promise<number> };
+type Tally = { bump(): Promise<number> };
+type Versioned = Tally & { version(): Promise<string>; tally(): Promise<RpcStub<Tally>> };
 
 const widgetFiles = (version: string): Record<string, string> => ({
-  "server.js": `import { DurableObject } from "cloudflare:workers";
+  "server.js": `import { DurableObject, RpcTarget } from "cloudflare:workers";
+class Tally extends RpcTarget {
+  constructor(gadget) { super(); this.gadget = gadget; }
+  async bump() { return await this.gadget.bump(); }
+}
 export class Gadget extends DurableObject {
   async version() { return ${JSON.stringify(version)}; }
   async bump() {
@@ -22,6 +27,7 @@ export class Gadget extends DurableObject {
     await this.ctx.storage.put("n", n);
     return n;
   }
+  tally() { return new Tally(this); }
 }
 `,
   "client.js": `document.body.textContent = ${JSON.stringify(version)};\n`,
@@ -130,6 +136,11 @@ async function openConsole(session: RpcStub<OperateSession>, workspaceId: string
   return page.seq;
 }
 
+/** The frozen installs `watched` currently lists for console `consoleId`. */
+const frozenOf = (watched: Awaited<ReturnType<typeof watch>>, consoleId: string) =>
+  [...watched.workpieces.summaries.values()].flatMap(summary =>
+    summary.type === "gadget" && summary.frozenFor?.consoleId === consoleId ? [summary.id] : []).toSorted();
+
 describe("a console's widget registry", () => {
   it("runs each published revision's frozen install, through that console only", async () => {
     const author = await signUp(publicApi, nextUsernames("registryauthor")[0]!);
@@ -170,13 +181,13 @@ describe("a console's widget registry", () => {
     await expect(used.getConsoleWidget(created.id, published.revision, installed)).rejects.toThrow(/does not offer/);
     using handle = await used.getConsoleWidget(created.id, published.revision, frozen.gadgetId);
     expect(await handle.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
-    {
-      using api = await handle.connectToGadget() as unknown as RpcStub<Versioned>;
-      expect(await api.version()).toBe("v1");
-      // Runtime state still changes; only authoring is frozen.
-      expect(await api.bump()).toBe(1);
-      expect(await api.bump()).toBe(2);
-    }
+    // Runtime state still changes; only authoring is frozen. The server capability, and one it
+    // returns, are kept across the session changes below.
+    const server = await handle.connectToGadget() as unknown as RpcStub<Versioned>;
+    const tally = await server.tally();
+    expect(await server.version()).toBe("v1");
+    expect(await server.bump()).toBe(1);
+    expect(await tally.bump()).toBe(2);
 
     // Another console doesn't acquire it.
     const other = await s.space.createConsole(consoleOf((await screenWith(s.space, [])).id, []));
@@ -187,9 +198,13 @@ describe("a console's widget registry", () => {
     // refused although A is still published, and it works again when they return to A.
     seq = await openConsole(session, s.spaceId, otherPublished, seq);
     await expect(handle.getUiBundle()).rejects.toThrow(/not open/);
+    await expect(server.bump()).rejects.toThrow(/not open/);
+    await expect(tally.bump()).rejects.toThrow(/not open/);
     await expect(used.getConsoleWidget(created.id, published.revision, frozen.gadgetId)).rejects.toThrow(/not open/);
     seq = await openConsole(session, s.spaceId, published, seq);
     expect(await handle.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
+    expect(await server.bump()).toBe(3);
+    expect(await tally.bump()).toBe(4);
 
     // Nothing changes the frozen install: not its title, removal, an upgrade or a chat's edit.
     {
@@ -199,8 +214,15 @@ describe("a console's widget registry", () => {
       await expect(frozenGadget.createBlueprint("Copy")).rejects.toThrow(/frozen/);
     }
     await expect(s.space.upgradeInstall(1, frozen.gadgetId)).rejects.toThrow(/frozen/);
+    // A chat can't even propose an edit to it, nor run it from a chat.
     await expect(commit(s.space, s.watched, frozen.gadgetId, widgetFiles("v1"), widgetFiles("edited")))
       .rejects.toThrow(/frozen/);
+    {
+      const chatId = await s.space.newChat("Look", null);
+      using frozenGadget = await s.space.getGadget(frozen.gadgetId);
+      await expect(frozenGadget.getUiBundle(chatId)).rejects.toThrow(/frozen/);
+      await expect(frozenGadget.connectToGadget(chatId)).rejects.toThrow(/frozen/);
+    }
 
     // Editing the registered install, or registering a new version beside it in the draft, doesn't
     // reach the operator until the console is published again. (A registered widget declares no
@@ -225,6 +247,9 @@ describe("a console's widget registry", () => {
     const [refrozen, added] = republished.published!.content.widgets!;
     expect(refrozen!.gadgetId).not.toBe(frozen.gadgetId);
     await expect(handle.getUiBundle()).rejects.toThrow(/changed/);
+    await expect(server.bump()).rejects.toThrow(/changed/);
+    await expect(tally.bump()).rejects.toThrow(/changed/);
+    tally[Symbol.dispose](); server[Symbol.dispose]();
     await waitFor("the old frozen install's removal", async () =>
       s.watched.workpieces.summaries.has(frozen.gadgetId) ? null : true);
     seq = await openConsole(session, s.spaceId, republished, seq);
@@ -251,6 +276,62 @@ describe("a console's widget registry", () => {
     await waitFor("the frozen installs' removal", async () =>
       s.watched.workpieces.summaries.has(refrozen!.gadgetId) || s.watched.workpieces.summaries.has(added!.gadgetId)
         ? null : true);
+  });
+
+  it("keeps the live publication when a publish is refused or loses a race", async () => {
+    const author = await signUp(publicApi, nextUsernames("raceauthor")[0]!);
+    const widget = await publishWidget(author);
+    const s = await operationsSpace("race");
+    const installed = await s.space.installBlueprint(widget.blueprintId, {}, { version: 1, kind: "widget" });
+    const entry: ConsoleWidgetEntry = { gadgetId: installed, blueprintId: widget.blueprintId, version: 1, label: "Status", state: "resettable" };
+    const screen = await screenWith(s.space, [installed]);
+    const created = await s.space.createConsole(consoleOf(screen.id, [entry]));
+    const published = await s.space.publishConsole(created.id, created.revision);
+    const live = published.published!.content.widgets![0]!.gadgetId;
+    await waitFor("the frozen install", async () => frozenOf(s.watched, created.id).length === 1 || null);
+
+    // Two publishes of one revision: one wins, and only its frozen install survives.
+    const draft = await s.space.replaceConsole(created.id, published.revision, consoleOf(screen.id, [{ ...entry, label: "Again" }]));
+    const outcomes = await Promise.allSettled([
+      s.space.publishConsole(created.id, draft.revision), s.space.publishConsole(created.id, draft.revision)]);
+    const won = outcomes.flatMap(outcome => outcome.status === "fulfilled" ? [outcome.value] : []);
+    expect(won).toHaveLength(1);
+    const winner = won[0]!.published!.content.widgets![0]!.gadgetId;
+    await waitFor("only the winner's frozen install", async () =>
+      JSON.stringify(frozenOf(s.watched, created.id)) === JSON.stringify([winner]) || null);
+    expect(winner).not.toBe(live);
+
+    // A refused publication (the registered install is gone) creates nothing and keeps what
+    // operators have.
+    const current = won[0]!;
+    const workpiecesBefore = s.watched.workpieces.summaries.size;
+    {
+      using source = await s.space.getGadget(installed);
+      await source.remove();
+    }
+    await waitFor("the install's removal", async () => s.watched.workpieces.summaries.has(installed) ? null : true);
+    await expect(s.space.publishConsole(created.id, current.revision)).rejects.toThrow(/not a gadget/);
+    expect((await s.space.getConsole(created.id, "published"))?.widgets?.map(offered => offered.gadgetId)).toEqual([winner]);
+    expect(frozenOf(s.watched, created.id)).toEqual([winner]);
+    expect(s.watched.workpieces.summaries.size).toBe(workpiecesBefore - 1);
+    using used = await s.operator.openGadget(s.spaceId);
+    using session = await s.operator.getOperateSession();
+    await openConsole(session, s.spaceId, (await used.getConsole(created.id, "published"))!, 0);
+    using kept = await used.getConsoleWidget(created.id, current.revision, winner);
+    expect(await kept.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
+  });
+
+  it("refuses a whole-workspace widget install to the use role outside a console", async () => {
+    const author = await signUp(publicApi, nextUsernames("wholeauthor")[0]!);
+    const widget = await publishWidget(author);
+    const [ownerName, viewerName] = nextUsernames("wholeowner", "wholeviewer");
+    const owner = await signUp(publicApi, ownerName!);
+    const viewer = await signUp(publicApi, viewerName!);
+    const workspace = await owner.newGadgetFromBlueprint(widget.blueprintId, {}, { kind: "widget" });
+    const metadata = await workspace.getMetadata();
+    expect(await workspace.addCollaborator(viewerName!, "use")).toBeTruthy();
+    using shared = await viewer.openGadget(metadata.id);
+    await expect(shared.getGadget(metadata.defaultGadgetId!)).rejects.toThrow(/widget/);
   });
 
   it("refuses a widget that may not be frozen, and a gadget that is not a widget", async () => {

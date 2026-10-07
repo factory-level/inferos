@@ -522,6 +522,26 @@ export type WorkpieceRecord = GadgetRecord | WorktreeRecord;
 // until it passes validateBindingName and isn't taken. Used wherever a name is needed and the
 // quick model is unavailable or failed. Deliberately fed suggested binding names or generic
 // bases, never titles -- title-to-identifier transformation is the quick model's job.
+// A capability that a guarded facet call returns (see OverseerImpl.getGadgetFacet) is guarded the
+// same way, so keeping a nested stub doesn't escape `guard`; plain data passes through.
+function guardedResult(value: unknown, guard: () => Promise<void>): unknown {
+  if (!(value instanceof NativeRpcStub)) return value;
+  let proxy = new Proxy(value as object, {
+    get(target, prop) {
+      let member = Reflect.get(target, prop, target);
+      if (typeof member !== "function" || typeof prop === "symbol") return member;
+      return (...args: any[]) => guard()
+          .then(() => Reflect.apply(member, target, args))
+          .then(result => guardedResult(result, guard));
+    },
+    getPrototypeOf() {
+      return RpcTarget.prototype;
+    },
+  });
+  // @ts-expect-error NativeRpcStub still has infinite recursion problems, fixed in Cap'n Web.
+  return new NativeRpcStub(proxy);
+}
+
 function fallbackBindingName(base: string, isTaken: (name: string) => boolean): string {
   let sanitized = base.toUpperCase().replace(/[^A-Z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
   if (!/^[A-Z_]/.test(sanitized)) sanitized = sanitized ? `X_${sanitized}` : "RESOURCE";
@@ -2840,7 +2860,7 @@ class OverseerImpl implements AgentHooks {
     if (!record) {
       throw new Error(`No such workpiece: ${id}`);
     }
-    if (record.type === "gadget") this.assertNotFrozen(id);
+    this.assertNotFrozen(id);
 
     // Disable and delete hooks that wake this gadget.
     let def = this.defaultGadgetId;
@@ -2864,7 +2884,8 @@ class OverseerImpl implements AgentHooks {
   // Refuse to change a frozen install (see GadgetRecord.frozenFor): only publication creates and
   // removes one, so what a published console runs stays what it published.
   assertNotFrozen(id: WorkpieceId): void {
-    let frozenFor = this.getGadgetRecord(id).frozenFor;
+    let record = this.storage.gadgets.get(id);
+    let frozenFor = record?.type === "gadget" ? record.frozenFor : undefined;
     if (frozenFor) {
       throw new Error(`Gadget ${id} is the frozen install console ${frozenFor.consoleId} published; ` +
           `change gadget ${frozenFor.sourceGadgetId} and publish the console again instead.`);
@@ -4100,6 +4121,7 @@ class OverseerImpl implements AgentHooks {
       : Promise<{generation: number, revision: number}> {
     this.getChatMetaOrThrow(chatId);  // fail fast
     this.#validateSubmissionShape(submission);
+    for (let id of changedGadgets(submission.change)) this.assertNotFrozen(id);
     let digest = await submissionDigest(submission);
 
     // Dedupe by (user, clientId, seq) before anything that can reject the base: a retry of an
@@ -5359,7 +5381,12 @@ class OverseerImpl implements AgentHooks {
   //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
-  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind)
+  //
+  // `guard`, when given, runs before every call through the stub, and through any capability a
+  // call returns, so a capability can be withdrawn while the client still holds it (see
+  // UseOverseerInterface.getConsoleWidget).
+  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
+                       guard?: () => Promise<void>)
       : Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
@@ -5397,7 +5424,9 @@ class OverseerImpl implements AgentHooks {
         //   possibly a runtime bug which needs investigation.
         // TODO: Fix exception reporting it tail workers so we can remove this hack.
         return (...args: any[]) => {
-          let result: Promise<any> = Reflect.apply(method, target, args);
+          let result: Promise<any> = guard
+              ? guard().then(() => Reflect.apply(method, target, args)).then(value => guardedResult(value, guard))
+              : Reflect.apply(method, target, args);
           return result.catch((err: any) => {
             let msg = err;
             if (err instanceof Error) {
@@ -13418,7 +13447,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     if (record.pending) {
       throw new Error(`No such gadget: ${id}`);
     }
-    if (record.frozenFor || record.installedFrom?.kind === "widget") {
+    // A whole-workspace install records its provenance on the workspace, for its default gadget.
+    let installed = record.installedFrom ??
+        (id === this.impl.defaultGadgetId ? this.impl.storage.installedFrom.get() : undefined);
+    if (record.frozenFor || installed?.kind === "widget") {
       throw new Error(`Gadget ${id} is a widget; open it through the console that offers it.`);
     }
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
@@ -13877,11 +13909,14 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     return this.impl.removeWorkpiece(this.id);
   }
 
+  // A frozen install never runs a chat's proposed code (see GadgetRecord.frozenFor).
   async getUiBundle(chatId?: number): Promise<UiBundle | null> {
+    if (chatId !== undefined) this.impl.assertNotFrozen(this.id);
     return this.impl.getGadgetUiBundle(this.id, chatId);
   }
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
+    if (chatId !== undefined) this.impl.assertNotFrozen(this.id);
     this.impl.recordGadgetAnalytics({
       event_name: "gadget_interaction",
       user_id: this.#clientUser.id.toString(),
@@ -14121,7 +14156,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   // `check`, for a widget opened through a console, throws once that console no longer offers it
   // or the caller no longer has it open; it runs before every call that reaches the gadget.
   constructor(private impl: OverseerImpl, private id: WorkpieceId,
-      private clientUserId: string, private check: () => Promise<void> = async () => {}) {
+      private clientUserId: string, private check?: () => Promise<void>) {
     super();
     this.#leaveSession = impl.joinSession("use");
   }
@@ -14148,7 +14183,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   }
 
   async getTitle(): Promise<string> {
-    await this.check();
+    await this.check?.();
     return this.impl.getGadgetRecord(this.id).title;
   }
 
@@ -14156,7 +14191,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (chatId !== undefined) {
       this.#deny();
     }
-    await this.check();
+    await this.check?.();
     return this.impl.getGadgetUiBundle(this.id);
   }
 
@@ -14164,7 +14199,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (chatId !== undefined) {
       this.#deny();
     }
-    await this.check();
+    await this.check?.();
 
     this.impl.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -14173,18 +14208,19 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
     // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, "use");
+    // For a console widget it also keeps checking the console, like this interface.
+    return this.impl.getGadgetFacet(this.id, undefined, "use", this.check);
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
     if (chatId !== undefined) this.#deny();
-    await this.check();
+    await this.check?.();
     return this.impl.getGadgetExportFormats(this.id);
   }
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
-    await this.check();
+    await this.check?.();
     return this.impl.exportGadget(this.id, id);
   }
 
