@@ -24,6 +24,7 @@
     "dev:mock-model": "node scripts/dev/scripted-model.ts",
     "clean": "node scripts/vp/run.ts --filter=!cloudflare-os clean",
     "docs:check": "scripts/check-docs.sh",
+    "check:dev-secrets": "node scripts/check-gatekeeper-dev-secrets.ts",
     "lint:check": "vp lint",
     "lint:fix": "vp lint --fix",
     "types:check": "pnpm run build",
