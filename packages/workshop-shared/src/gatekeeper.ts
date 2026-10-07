@@ -950,11 +950,12 @@ export interface Gatekeeper<Session> extends DurableObject {
   /**
    * Action was approved. This call should apply the action (or schedule it to be applied).
    *
-   * If this throws an exception, the user will be informed that the action failed and given the
-   * opportunity to retry or discard; the overseer records that the outcome is unknown, since a
-   * thrown error asserts nothing about the provider. A gatekeeper that knows more returns
+   * If this throws an exception, the overseer records an unknown outcome that is not retryable,
+   * since a thrown error asserts nothing about the provider: the user is told it may have applied,
+   * and can only reject the action, never approve it again. A gatekeeper that knows more returns
    * `{ failed }` instead (see `ActionApplyFailure`): a known, terminal refusal ends the action as
-   * failed, with its reason, rather than leaving it to be approved again.
+   * failed, with its reason; and only a result with `retryable: true` lets the action be approved
+   * again, so a gatekeeper returns it only when sending the action once more is safe.
    *
    * Depending on policy conditions, an action may be approved and applied automatically. However,
    * the gatekeeper is nevertheless expected to submit all actions for approval; there is no mode
