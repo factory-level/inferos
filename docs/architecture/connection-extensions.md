@@ -64,7 +64,7 @@ working package against a fake provider, not a template to finish before it comp
 
 | File | What it holds |
 | --- | --- |
-| `src/<slug>.ts` | An auto-provisioned `GatekeeperVendor` (no connect flow), the account, a strategy-B verifier and one `<Name>CollectionGatekeeper` facet whose session has two observed reads and one write. The write goes through `gatekeeper-kit/actions` (`defineActions` + `ActionJournal`, fence `none`, `await-decision`), sends `<binding id>:<action id>` as the idempotency key, and classifies provider errors: known-no-effect codes are terminal (`ActionApplyError`), others stay pending. |
+| `src/<slug>.ts` | An auto-provisioned `GatekeeperVendor` (no connect flow), the account, a strategy-B verifier and one `<Name>CollectionGatekeeper` facet whose session has two observed reads and one write. The write goes through `gatekeeper-kit/actions` (`defineActions` + `ActionJournal`, fence `none`, `await-decision`), sends `<binding id>:<action id>` as the idempotency key, and classifies provider errors: known-no-effect codes are terminal (`ActionApplyError`), others stay pending. `applyAction` returns through `applyActionOutcome`, so a terminal failure reaches the overseer as a structured result (known not applied, or possibly applied for `ActionOutcomeUnknownError`) and is replayed with that classification. |
 | `src/client.ts` | The typed client, headed `SCAFFOLD ... not a trusted proxy`: one named method per provider call, classified read or write, and an error-code mapper. It opens the fake provider. |
 | `src/fake-provider.ts` | A Durable Object per account with seed data, revisions, idempotency-key replay and a revocation tombstone. |
 | `src/types.d.ts` | The agent-facing contract, the first thing to review. |

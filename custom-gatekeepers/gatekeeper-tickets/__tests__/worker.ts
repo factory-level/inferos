@@ -5,7 +5,7 @@
 
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type {
-  ActionDescription, GatekeeperUser, ObservationDescription,
+  ActionApplyFailure, ActionDescription, GatekeeperUser, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   TicketsQueueGatekeeper, TicketsFakeProvider as BaseProvider,
@@ -138,10 +138,21 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Applies an action; the failure message, or null on success. */
   async apply(props: BindingProps, actionId: number): Promise<string | null> {
     try {
-      await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new NoGitCache()) as never);
-      return null;
+      const result = await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new NoGitCache()) as never);
+      return result?.failed.message ?? null;
     } catch (error) {
       return messageOf(error);
+    }
+  }
+
+  /** Applies an action; what it reports: null once applied, the returned failure, or a thrown message. */
+  async applyOutcome(props: BindingProps, actionId: number):
+      Promise<ActionApplyFailure | { thrown: string } | null> {
+    try {
+      const result = await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new NoGitCache()) as never);
+      return result?.failed ?? null;
+    } catch (error) {
+      return { thrown: messageOf(error) };
     }
   }
 

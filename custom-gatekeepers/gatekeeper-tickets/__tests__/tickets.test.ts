@@ -48,4 +48,19 @@ describe("status changes", () => {
     expect(await hooks.apply(props, action!.id)).toBeNull();
     expect(await session.readTicket("T-1")).toMatchObject({ status: "closed", revision: "2" });
   });
+
+  it("reports a refusal as known not applied, for good, and leaves a provider failure retryable", async () => {
+    const { props, hooks, session } = open();
+    await session.setStatus("T-1", "pending", "1");
+    await session.setStatus("T-1", "closed", "1");
+    const [first, second] = (await hooks.log()).actions;
+    expect(await hooks.apply(props, first!.id)).toBeNull();
+
+    const stale = await hooks.applyOutcome(props, second!.id);
+    expect(stale).toMatchObject({ outcome: "notApplied", retryable: false });
+    expect((stale as { message: string }).message).toMatch(/STALE_REVISION/);
+    // Replayed with the same classification, without reaching the provider.
+    expect(await hooks.applyOutcome(props, second!.id)).toEqual(stale);
+    expect(await session.readTicket("T-1")).toMatchObject({ status: "pending", revision: "2" });
+  });
 });

@@ -10,12 +10,12 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
-  ActionApplyError, ActionJournal, defineActions, type TaggedAction,
+  ActionApplyError, ActionJournal, applyActionOutcome, defineActions, type TaggedAction,
 } from "@gadgets/gatekeeper-kit/actions";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
-  GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper,
+  GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { errorCode, openClient, type TicketsClient, type ErrorCode } from "./client";
@@ -323,9 +323,15 @@ export class TicketsQueueGatekeeper extends DurableObject<Cloudflare.Env, Bindin
   /** Nothing is tracked per observer under strategy B. */
   async removeObserver(_id: string): Promise<void> {}
 
-  /** Applies once: the kit's journal answers a repeated apply of an applied action as a no-op. */
-  async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
-    await this.#actions().apply(actionId);
+  /**
+   * Applies once: the kit's journal answers a repeated apply of an applied action as a no-op. A
+   * terminal failure reaches the overseer as its structured result (`applyActionOutcome`): known not
+   * applied for `ActionApplyError`, possibly applied for `ActionOutcomeUnknownError`, replayed with
+   * the same classification after a restart. Any other error is rethrown and stays retryable.
+   */
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>):
+      Promise<void | { failed: ActionApplyFailure }> {
+    return applyActionOutcome(() => this.#actions().apply(actionId));
   }
 
   async rejectAction(actionId: number): Promise<void> {
