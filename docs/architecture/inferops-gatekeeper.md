@@ -727,3 +727,40 @@ Findings:
 
 Left in InferOps, none of it deletable through the API: the issues above, repository `live-fork`,
 project CODE, the cancelled runs, and section `gripper` at version 11 with the runs' marker lines.
+
+### Apply-outcome live run (2026-10-07)
+
+Step e2 records a stale update's outcome, and step h records a policy-refused move's outcome as
+`failed` / `notApplied` / not retryable. Step h also refuses a second approval of that move. Step h2
+covers what happens across reloads:
+
+- It restarts the Workers with `INFEROPS_ENABLED=false`, then again with it back on.
+- Across both restarts, the two refused actions keep their state and their `lastAttempt`, and
+  approving either again is refused (`not pending`). Their issues are unchanged in InferOps.
+- An update approved while the integration was off stays `pending` as `notApplied` / `DISABLED` /
+  retryable. Nothing reaches InferOps until it is approved again with the integration on; it then
+  applies once, and a further approval is refused.
+
+The run used InferOS `main` at `c577a68` plus this step, against a fresh InferOps worktree off
+`develop` `83b7d77e`:
+
+- **Database:** its own `inferlab_78`, created and seeded from `db/init-db.sql`, `migrate` and
+  `seed`.
+- **API:** served launcher-free. A local script ran `createApp('stub')` from `apps/_shared-api`
+  with `EVENTS_DRIVER=log` and `COMM_EMAIL_DRIVER=console`, on port 15880. `main.ts` was not run, so
+  there was no boot attestation and no widget-catalog converge, and no secret layer was decrypted.
+  Without `EVENTS_DRIVER=log`, the development config's Pub/Sub event driver stalled every write on
+  the cloud metadata server. The first attempt failed that way, and nothing else was changed.
+- **Connection:** the stopgap connection, with the seeded `owner` persona token.
+
+Ten steps passed and three were skipped (i, j and k: no enrolled repository, and no Wiki workspace
+on the token).
+- e2: ENG-11 was overtaken at revision 190, its update failed with 409 `STALE_REVISION`, and it stayed
+  at 190.
+- h: CPOL-2's move from Draft to Published was refused with 403 `FORBIDDEN` (`EXPLICIT_DENY`), and
+  the issue stayed in Draft.
+- h2: actions 7 and 13 were unchanged across both reloads. Update 15 stayed pending while the
+  integration was off, with InferOps still at 190, then applied once (revision 204).
+
+Not shown: an `unknown` outcome against a real InferOps (a lost response is exercised only against
+the fake), per-person identity, and any deployment.
