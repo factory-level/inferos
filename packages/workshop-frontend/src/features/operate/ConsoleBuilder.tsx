@@ -95,7 +95,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
       <Input label="Console name" placeholder="e.g. Operations" value={title} required maxLength={120} onChange={event => setTitle(event.target.value)} />
       <Select label="Workspace" value={workspaceId} disabled={!!initial} placeholder="Choose a workspace"
         renderValue={value => workspaces.find(item => item.workspace.id === value)?.workspace.title ?? 'Choose a workspace'}
-        onValueChange={value => { setWorkspaceId(String(value)); setViews([]); setAddedScreens([]); setError(null) }}>
+        onValueChange={value => { setWorkspaceId(String(value)); setViews([]); setAddedScreens([]); setWidgets([]); setError(null) }}>
         {workspaces.map(item => <Select.Option key={item.workspace.id} value={item.workspace.id}>{item.workspace.title || 'Untitled workspace'}</Select.Option>)}
       </Select>
       <p className="text-sm text-kumo-subtle">Choose where this console’s screens and widgets live.</p>
