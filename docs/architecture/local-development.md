@@ -2,6 +2,8 @@
 title: Cloudflare-like local development
 covers:
   - scripts/run-dev-server.ts
+  - scripts/gatekeeper-dev-secrets.ts
+  - scripts/check-gatekeeper-dev-secrets.ts
   - scripts/run-local.ts
   - scripts/dev
   - packages/workshop-backend/scripts/dev-setup.ts
@@ -19,7 +21,7 @@ covers:
   - packages/integration-tests
   - scripts/preview/smoke.ts
   - scripts/preview/smoke.test.ts
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 
 # Cloudflare-like local development
@@ -118,8 +120,9 @@ cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.json
 
 The dev server resolves these before it writes the per-Worker dev configs:
 
-- **InferOps integration.** `resolveInferOpsEnabled` (`scripts/dev-server-config.ts`) takes a version 2 wrapper's `INFEROPS_ENABLED` capability, else the shell's `INFEROPS_ENABLED` (default on), and passes `"true"` or `"false"` to the gatekeeper, which enforces it ([#103](https://github.com/factory-level/inferos/pull/103)). A wrapper that turns the capability on while `inferos.canvas.json` leaves the gatekeeper out stops startup. `INFEROPS_BASE_URL`, and the local-development stopgap `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG`, pass through from the shell to the gatekeeper; without a base URL the gatekeeper serves its built-in demo data. `MOCK_INFEROPS_SYNTHETIC_ISSUES` passes through the same way and adds a large synthetic `PERF` board to that demo data for performance runs (see [InferOps gatekeeper](inferops-gatekeeper.md)).
+- **InferOps integration.** `resolveInferOpsEnabled` (`scripts/dev-server-config.ts`) takes a version 2 wrapper's `INFEROPS_ENABLED` capability, else the shell's `INFEROPS_ENABLED` (default on), and passes `"true"` or `"false"` to the gatekeeper, which enforces it ([#103](https://github.com/factory-level/inferos/pull/103)). A wrapper that turns the capability on while `inferos.canvas.json` leaves the gatekeeper out stops startup. `INFEROPS_BASE_URL`, and the local-development stopgap `INFEROPS_API_TOKEN` (as a hidden secret, below), `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG`, pass through from the shell to the gatekeeper; without a base URL the gatekeeper serves its built-in demo data. `MOCK_INFEROPS_SYNTHETIC_ISSUES` passes through the same way and adds a large synthetic `PERF` board to that demo data for performance runs (see [InferOps gatekeeper](inferops-gatekeeper.md)).
 - **Sign in with InferLab.** A wrapper's `INFEROPS_AUTH` (or version 1 `features.inferlabLogin`) adds `inferops` to `AUTH_GATEKEEPERS` and sets `INFERLAB_AUTH_ORIGIN`; in-repo, both come from the shell. An inconsistent combination stops startup. Details are in [consumer configuration](consumer-configuration.md#inferops-backed-sign-in).
+- **Gatekeeper credentials stay out of Wrangler's output.** Wrangler prints a worker's `vars` in full in its startup bindings table, so `run-dev-server.ts` moves `CLIENT_SECRET`, `INFEROPS_API_TOKEN` and `MCP_PORTAL_TOKEN` out of each generated gatekeeper config (`splitGatekeeperSecrets`, `scripts/gatekeeper-dev-secrets.ts`). It writes them instead to that gatekeeper's gitignored `.dev.vars`, which Wrangler loads as secrets and lists as `(hidden)`. `installDevVarsSecrets` (`scripts/local-secrets.ts`) appends to an existing file without overwriting it, protects it (0600), refuses a symlink, picks a quote dotenv reads back exactly, and removes only its own addition on exit or interruption, keeping edits made meanwhile. `gatekeeper-dev-secrets.test.ts` covers the split, quoting and an interrupted run with synthetic sentinels. `pnpm check:dev-secrets` (`scripts/check-gatekeeper-dev-secrets.ts`) starts Wrangler on a minimal two-worker fixture with sentinel values, never a real credential. It checks that the gatekeeper worker receives every secret, that each is listed as hidden, and that no sentinel appears in the output.
 - **ChatGPT plan usage.** `ENABLE_OPENAI_ASSISTANT_PLUGIN=true` starts the local Bun companion and wires it to the backend; `ANTHROPIC_API_KEY` enables managed local API-key models. Both write their secrets to the backend's `.dev.vars` and remove them on exit ([#40](https://github.com/factory-level/inferos/pull/40)). See [ChatGPT connection](chatgpt-connection.md).
 - The backend always runs with `DEV` set, so UI flags resolve to their `dev` values.
 

@@ -39,7 +39,8 @@ import { vpRunEnv } from "./vp/concurrency.ts";
 import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
 import { startOpenAiCompanion } from './openai-companion.ts';
-import { installLocalSecrets } from './local-secrets.ts';
+import { installDevVarsSecrets, installLocalSecrets } from './local-secrets.ts';
+import { splitGatekeeperSecrets } from './gatekeeper-dev-secrets.ts';
 import { recordDevServer } from "./local/stack.ts";
 import { parseEnv } from 'node:util';
 
@@ -210,6 +211,8 @@ let stoppingDevWatchers = false;
 let wranglerChild: ChildProcess | null = null;
 let cleanupOpenAiCompanion: (() => void) | undefined;
 let cleanupLocalApiKeys: (() => void) | undefined;
+// Removes the secrets written beside each gatekeeper's generated config (see below).
+const cleanupGatekeeperSecrets: (() => void)[] = [];
 
 // Resolve once something accepts a TCP connection on `port`, or once `timeoutMs` has elapsed.
 function waitForPort(port: number, timeoutMs: number): Promise<void> {
@@ -254,6 +257,7 @@ function stopDevWatchers(): void {
   for (const watcher of devWatchers) watcher.kill();
   cleanupOpenAiCompanion?.();
   cleanupLocalApiKeys?.();
+  for (const cleanup of cleanupGatekeeperSecrets) cleanup();
 }
 
 process.on("exit", stopDevWatchers);
@@ -625,6 +629,14 @@ for (const gk of gatekeepers) {
   }
   for (const [name, value] of Object.entries(RESOLVED_GATEKEEPER_VARS[gk.name] ?? {})) {
     if (value !== undefined) config.vars[name] = value;
+  }
+
+  // Credentials go to the gatekeeper's `.dev.vars`, which Wrangler lists as hidden, never into the
+  // `vars` its startup table prints.
+  const { vars, secrets } = splitGatekeeperSecrets(config.vars);
+  config.vars = vars;
+  if (Object.keys(secrets).length > 0) {
+    cleanupGatekeeperSecrets.push(installDevVarsSecrets(join(gk.dir, ".dev.vars"), secrets));
   }
 
   const outPath = join(gk.dir, "wrangler.dev.jsonc");
