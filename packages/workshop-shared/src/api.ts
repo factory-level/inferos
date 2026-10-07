@@ -217,6 +217,16 @@ export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
  */
 export type WorkpieceId = number;
 
+/** The published console revision a frozen install serves (see `GadgetSummary.frozenFor`). */
+export type ConsoleWidgetFrozenFor = {
+  /** The console whose published registry offers it. */
+  consoleId: string;
+  /** The published revision it was frozen for. */
+  revision: string;
+  /** The registered gadget it was made from. */
+  sourceGadgetId: WorkpieceId;
+};
+
 // Matches an ASCII JavaScript identifier, excluding `$`. Deliberately conservative: binding
 // names are typed by agents and rendered as `env.NAME`, so full Unicode identifier support buys
 // nothing; and while `$` is technically legal in identifiers, it is conventionally reserved for
@@ -2476,6 +2486,16 @@ export interface Overseer extends RpcTarget {
    * its `draft`, which needs build access. Null if that revision of the console doesn't show it.
    */
   getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null>;
+  /**
+   * Open a widget a console offers, as its published revision `revision` offers it: `gadgetId` is
+   * that revision's frozen install (see `ConsoleWidgetEntry`). This is how the use role reaches a
+   * widget, which `getGadget()` refuses it; the returned capability renders and connects to the
+   * widget only, and every call on it checks again that the console is still published at
+   * `revision` and still offers the widget, so a capability kept from an older revision stops
+   * working. Refused if the console is not published at `revision` or does not offer the widget.
+   * Denied to the operate session.
+   */
+  getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
 
   // --- Agent artifact revisions (see `@gadgets/workshop-shared/agent-artifact`) ---
   //
@@ -4764,6 +4784,13 @@ export type GadgetSummary = {
    * `Overseer.installBlueprint`: what it runs, at which version.
    */
   installedFrom?: BlueprintInstall;
+
+  /**
+   * Set when the gadget is a frozen install: the copy of a registered widget that one published
+   * console revision runs (see `ConsoleWidgetEntry`). Nothing may edit, bind, rename, upgrade or
+   * remove it; publishing the console again replaces it.
+   */
+  frozenFor?: ConsoleWidgetFrozenFor;
 
   /**
    * If present, this workpiece exists only in the context of the given chat. The UI should display
