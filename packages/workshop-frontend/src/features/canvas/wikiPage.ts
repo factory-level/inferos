@@ -196,12 +196,14 @@ export const parseWikiReference = (href: string): WikiReference => {
  * An edit proposed from this canvas, until the person moves on. `proposing` while the call is in
  * flight; `awaiting` once queued for approval, not saved; then how the Wiki shows it was decided:
  * `applied` (saved), `rejected`, or `stale` (the text changed in InferMind first, so the edit was not
- * applied). `refused` is a proposal the gatekeeper turned down, with its reason.
+ * applied). `matched` is a body edit whose page moved on to the proposed text: matching text does not
+ * show that this approval wrote it (another writer may have), so it is never called saved. `refused`
+ * is a proposal the gatekeeper turned down, with its reason.
  */
 export type ProposedEdit = {
   body: string
   expectedVersion: number
-  phase: 'proposing' | 'awaiting' | 'applied' | 'rejected' | 'stale' | 'refused'
+  phase: 'proposing' | 'awaiting' | 'applied' | 'matched' | 'rejected' | 'stale' | 'refused'
   /** The gatekeeper's code for a refused or stale proposal. */
   code?: string
   message?: string
@@ -210,8 +212,18 @@ export type ProposedEdit = {
 /** A section edit (`updateSection`), at the section's version. */
 export type SectionEdit = ProposedEdit & { sectionId: string }
 
-/** A page body edit (`updateDocumentBody`), at the page's version. */
-export type BodyEdit = ProposedEdit & { documentId: string }
+/**
+ * A page body edit (`updateDocumentBody`), at the page's version. `approved` is set when this
+ * session saw the approval it raised decided as approved (see {@link bodyEditActionTitle}).
+ */
+export type BodyEdit = ProposedEdit & { documentId: string; approved?: boolean }
+
+/**
+ * The title the InferOps gatekeeper gives the approval a body edit of the page titled `title`
+ * raises (`updateDocumentBody`: `sanitizeTitle(\`Edit Wiki page ${title}\`)`). The proposal returns
+ * no action id, so this, the Wiki reference and the order the records arrive in correlate the two.
+ */
+export const bodyEditActionTitle = (title: string): string => `Edit Wiki page ${title}`.replace(/[\r\n]+/g, ' ').slice(0, 200)
 
 // Shared by both kinds: the gatekeeper overlays a live pending edit at the unchanged version; once
 // decided, a new version with the edit's body was applied, the same version without the mark was
@@ -234,13 +246,16 @@ export const reconcileEdit = <E extends SectionEdit>(edit: E, document: WikiDocu
 
 /**
  * How an awaiting body edit stands in a read of its page made after it was queued: the page's
- * overlay is `pendingBody`. The page version changes with any change of the page, so a new version
- * still showing the edit's body is applied.
+ * overlay is `pendingBody`. A new version showing the edit's body is `applied` only when the
+ * edit's own approval was seen approved: InferOps' compare-and-swap means a different writer's
+ * same text fails this approval, and the page read alone cannot tell the two apart, so without it
+ * the edit is only `matched`.
  */
 export const reconcileBodyEdit = <E extends BodyEdit>(edit: E, document: WikiDocument): E => {
   if (edit.phase !== 'awaiting') return edit
   if (document.id !== edit.documentId) return { ...edit, phase: 'stale', message: 'The page is no longer in this Wiki.' }
-  return decided(edit, { version: document.version, body: document.body, pending: document.pendingBody === true })
+  const outcome = decided(edit, { version: document.version, body: document.body, pending: document.pendingBody === true })
+  return outcome.phase === 'applied' && !edit.approved ? { ...outcome, phase: 'matched' } : outcome
 }
 
 /** Whether an edit still stands between the person and the text: one in flight or waiting for a decision. */
@@ -252,6 +267,7 @@ export const editStatus = (edit: ProposedEdit | undefined): { label: string; var
     case 'proposing': return { label: 'Sending for approval…', variant: 'neutral' }
     case 'awaiting': return { label: 'Waiting for approval, not saved yet', variant: 'warning' }
     case 'applied': return { label: 'Saved', variant: 'success' }
+    case 'matched': return { label: 'The page now has this text', variant: 'neutral' }
     case 'rejected': return { label: 'Rejected, not saved', variant: 'neutral' }
     default: return null
   }

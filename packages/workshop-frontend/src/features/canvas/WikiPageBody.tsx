@@ -29,7 +29,9 @@ export const WikiPageBody = ({ document, edit, renderEmbed, onOpenPage, onPropos
   const text = authoredBody(document)
   const status = editStatus(edit)
   const errorText = edit && (edit.phase === 'refused' || edit.phase === 'stale') ? editErrorText(edit, 'page') : null
-  if (text === null && !onPropose && !edit) return null
+  // A pending edit that empties the body still shows: an empty proposal is a deletion waiting for approval.
+  const pendingDeletion = document.pendingBody === true && text === null
+  if (text === null && !onPropose && !edit && !pendingDeletion) return null
   const hint = 'Saving proposes this text for approval. It is saved only once approved, and only if the page has not changed meanwhile.' +
     (text === null && document.sections.length > 0
       ? ' Once the page has a body it reads as its body: its sections are kept as separate index text and are no longer shown here.' : '')
@@ -41,6 +43,9 @@ export const WikiPageBody = ({ document, edit, renderEmbed, onOpenPage, onPropos
       {onPropose && !editing && <Button size="sm" variant="ghost" className="ml-auto" disabled={document.pendingBody === true || isOpenEdit(edit)}
         onClick={() => { onDismissEdit(); setEditing(true) }}>{text === null ? 'Add page body' : 'Edit page body'}</Button>}
     </div>
+    {pendingDeletion && !editing && <p className="text-sm text-kumo-subtle">
+      The proposed body is empty: approving it removes this page's body.
+    </p>}
     {errorText && <div className="flex flex-wrap items-center gap-2">
       <p role="alert" className="text-sm text-kumo-danger">{errorText}</p>
       <Button size="sm" variant="ghost" onClick={onDismissEdit}>Dismiss</Button>

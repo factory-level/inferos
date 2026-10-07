@@ -64,9 +64,9 @@ const section = (tag: string) => [...container.querySelectorAll<HTMLElement>('se
 const button = (scope: ParentNode, text: string) => [...scope.querySelectorAll<HTMLButtonElement>('button')]
   .find(element => element.textContent === text || element.getAttribute('aria-label') === text)!
 const click = async (element: HTMLElement) => { await act(async () => element.click()); await settle() }
-const decided = (id: number, state: ActionLogEntry['state']) => act(async () => {
+const decided = (id: number, state: ActionLogEntry['state'], title = 'Edit Wiki section purpose of Team handbook') => act(async () => {
   actions?.entry({ id, type: 'action', state, resourceUrl: WIKI, resourceTitle: 'InferMind Wiki acme.kb', createdAt: new Date(), requestedBy: 'person',
-    description: { title: 'Edit Wiki section purpose of Team handbook', description: '' } } as ActionLogEntry)
+    description: { title, description: '' } } as ActionLogEntry)
 })
 
 beforeEach(() => {
@@ -380,8 +380,9 @@ it('says a decided body edit was saved or rejected in the same session', async (
   organize()
   await render(widget('operations'))
   await proposeBody('Operations run on the board.')
+  await decided(8, 'pending', 'Edit Wiki page Operations')
   wiki.approveBody('m2')
-  await decided(8, 'approved')
+  await decided(8, 'approved', 'Edit Wiki page Operations')
   await settle()
   expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: Saved')
   expect(pageBody().textContent).toContain('Operations run on the board.')
@@ -391,6 +392,43 @@ it('says a decided body edit was saved or rejected in the same session', async (
   await settle()
   expect(pageBody().textContent).toContain('Rejected, not saved')
   expect(pageBody().textContent).toContain('Operations run on the board.')
+})
+
+it('never calls a body edit saved when another writer set the same text, or on an approval it did not raise', async () => {
+  organize()
+  await render(widget('operations'))
+  await proposeBody('Operations run on the board.')
+  await decided(10, 'pending', 'Edit Wiki page Operations')
+  // InferMind gets the same text first; this approval then fails its compare-and-swap.
+  wiki.rejectBody('m2')
+  wiki.writeBodyElsewhere('m2', 'Operations run on the board.')
+  await decided(10, 'rejected', 'Edit Wiki page Operations')
+  await settle()
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: The page now has this text')
+  expect(pageBody().textContent).not.toContain('Saved')
+
+  // An approval of another page's edit, or of one never seen raised here, is not this edit's.
+  await proposeBody('Operations run on the Kanban board.')
+  await decided(11, 'pending', 'Edit Wiki page Incident response')
+  wiki.approveBody('m2')
+  await decided(11, 'approved', 'Edit Wiki page Incident response')
+  await decided(12, 'approved', 'Edit Wiki page Operations')
+  await settle()
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: The page now has this text')
+})
+
+it('keeps a pending body deletion visible after a reload, read-only too', async () => {
+  organize()
+  await render(widget('operations'))
+  await proposeBody('')
+  expect(wiki.session.updateDocumentBody).toHaveBeenCalledWith('m2', '', 3)
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: Waiting for approval, not saved yet')
+
+  await act(async () => root.unmount())
+  root = createRoot(container)
+  await render(widget('operations'), false)
+  expect(pageBody().textContent).toContain('Body edit waiting for approval')
+  expect(pageBody().textContent).toContain("The proposed body is empty: approving it removes this page's body.")
 })
 
 it('says why a body edit was not sent, stale, conflicting or denied, keeping the draft', async () => {

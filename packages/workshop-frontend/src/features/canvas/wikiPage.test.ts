@@ -145,7 +145,8 @@ const at = (changes: Partial<WikiDocument>): WikiDocument => ({ ...page(null), v
 it('decides an awaiting body edit only from the page: pending, applied, rejected or stale', () => {
   const edit: BodyEdit = { documentId: 'd', body: 'new', expectedVersion: 3, phase: 'awaiting' }
   expect(reconcileBodyEdit(edit, at({ body: 'new', pendingBody: true })).phase).toBe('awaiting')
-  expect(reconcileBodyEdit(edit, at({ body: 'new', version: 4 })).phase).toBe('applied')
+  // A new version with the proposed text is only `matched`: another writer may have made it.
+  expect(reconcileBodyEdit(edit, at({ body: 'new', version: 4 })).phase).toBe('matched')
   expect(reconcileBodyEdit(edit, at({})).phase).toBe('rejected')
   expect(reconcileBodyEdit(edit, at({ body: 'someone else', version: 4 })).phase).toBe('stale')
   expect(reconcileBodyEdit(edit, at({ id: 'other' }))).toMatchObject({ phase: 'stale', message: 'The page is no longer in this Wiki.' })

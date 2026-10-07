@@ -6,10 +6,10 @@
 // proposed through the gatekeeper's approval path. What became of an edit is read from the page,
 // never assumed: a proposal is not a save.
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
 import { canonicalBoardRef, codeOf, messageOf, type ProposalResult } from './boardData'
-import { isOpenEdit, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
+import { bodyEditActionTitle, isOpenEdit, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
 
 export type WikiListState =
   | { status: 'loading' }
@@ -67,7 +67,8 @@ const lostAccess = (error: unknown): boolean =>
   ['UNAUTHORIZED', 'FORBIDDEN'].includes(codeOf(error)) || messageOf(error).includes('No such gatekeeper')
 
 type Edit = SectionEdit & { slug: string; queued?: number }
-type PageEdit = BodyEdit & { slug: string; queued?: number }
+// `title` is the page's when proposed; `actionId` is the log id of the approval it raised, once seen.
+type PageEdit = BodyEdit & { slug: string; title: string; queued?: number; actionId?: number }
 
 export class WikiData {
   /** The canonical Wiki reference this instance reads. */
@@ -151,12 +152,12 @@ export class WikiData {
    * edit: pending until a page read made after it was queued shows how it was decided (the
    * `pendingBody` overlay keeps it awaiting); the page is re-read either way.
    */
-  async proposeBodyEdit(document: Pick<WikiDocument, 'id' | 'slug' | 'body' | 'version' | 'pendingBody'>, body: string): Promise<ProposalResult> {
+  async proposeBodyEdit(document: Pick<WikiDocument, 'id' | 'slug' | 'title' | 'body' | 'version' | 'pendingBody'>, body: string): Promise<ProposalResult> {
     if (document.pendingBody || isOpenEdit(this.#bodyEdits.get(document.id))) {
       return { ok: false, code: 'CONFLICT', message: 'This page already has a body edit that has not taken effect yet.' }
     }
     if (body === document.body) return { ok: false, code: 'UNCHANGED', message: 'Nothing changed.' }
-    const edit: PageEdit = { slug: document.slug, documentId: document.id, body, expectedVersion: document.version, phase: 'proposing' }
+    const edit: PageEdit = { slug: document.slug, title: document.title, documentId: document.id, body, expectedVersion: document.version, phase: 'proposing' }
     this.#putBodyEdit(edit)
     try {
       const session = await this.#sessionOf()
@@ -165,7 +166,8 @@ export class WikiData {
         return NOT_CONNECTED
       }
       await session.updateDocumentBody(document.id, body, document.version)
-      this.#putBodyEdit({ ...edit, phase: 'awaiting', queued: ++this.#clock })
+      // Its approval may already have been logged (and correlated) while the proposal was answered.
+      this.#putBodyEdit({ ...edit, actionId: this.#bodyEdits.get(edit.documentId)?.actionId, phase: 'awaiting', queued: ++this.#clock })
       return { ok: true }
     } catch (error) {
       const code = codeOf(error)
@@ -174,6 +176,25 @@ export class WikiData {
       return { ok: false, code, message }
     } finally {
       if (!this.#disposed) void this.#readPage(document.slug)
+    }
+  }
+
+  /**
+   * Correlate an action log record with the body edits proposed here: the first pending approval
+   * for this Wiki titled for a page's edit while it is open is that edit's, and only its approval
+   * lets the page's new text be called saved. Anything else (a decision this session never saw
+   * raised, another page's) changes nothing.
+   */
+  noteAction(record: ActionLogEntry): void {
+    if (this.#disposed || record.type !== 'action' || !record.resourceUrl || canonicalBoardRef(record.resourceUrl) !== this.target) return
+    for (const edit of this.#bodyEdits.values()) {
+      if (record.description.title !== bodyEditActionTitle(edit.title)) continue
+      if (record.state === 'pending' && edit.actionId === undefined && isOpenEdit(edit)) {
+        this.#bodyEdits.set(edit.documentId, { ...edit, actionId: record.id })
+      } else if (record.state === 'approved' && record.id === edit.actionId && !edit.approved) {
+        // A read that landed first left it matched; this approval is what says it was saved.
+        this.#putBodyEdit({ ...edit, approved: true, ...(edit.phase === 'matched' ? { phase: 'applied' as const } : {}) })
+      }
     }
   }
 

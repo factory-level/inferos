@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import { WikiData } from './wikiData'
 import { WIKI, fakeWiki, organizedWiki } from './wikiTestDoubles'
 
@@ -232,7 +232,7 @@ it('lands only the newest structure read', async () => {
   data.dispose()
 })
 
-it('takes a body edit from proposing to awaiting under the page\'s pendingBody, and applied only from a later read', async () => {
+it('takes a body edit from proposing to awaiting under the page\'s pendingBody, and applied only from a later read with its own approval', async () => {
   wiki = fakeWiki(organizedWiki())
   const data = new WikiData(overseer, WIKI)
   data.openPage('ops/incident-response')
@@ -247,6 +247,10 @@ it('takes a body edit from proposing to awaiting under the page\'s pendingBody, 
   await flush()
   expect(data.snapshot.bodyEdits.get('p1')).toMatchObject({ phase: 'proposing', expectedVersion: 4 })
   expect(await data.proposeBodyEdit(page, 'Again')).toMatchObject({ ok: false, code: 'CONFLICT' })
+  // The approval it raised can be logged before the proposal returns.
+  const record = (id: number, state: ActionLogEntry['state'], title = 'Edit Wiki page Incident response') =>
+    ({ id, type: 'action', state, resourceUrl: WIKI, resourceTitle: 'InferMind Wiki', createdAt: new Date(), description: { title, description: '' } }) as ActionLogEntry
+  data.noteAction(record(21, 'pending'))
   release()
   expect(await proposal).toEqual({ ok: true })
   expect(wiki.session.updateDocumentBody).toHaveBeenCalledWith('p1', '# Incident response\n\nCall the on-call engineer.', 4)
@@ -256,8 +260,14 @@ it('takes a body edit from proposing to awaiting under the page\'s pendingBody, 
   // The page's own overlay blocks a second edit, even from another instance.
   expect(await data.proposeBodyEdit(pageOf(data, 'ops/incident-response'), 'Third')).toMatchObject({ ok: false, code: 'CONFLICT' })
   wiki.approveBody('p1')
+  // A read landing before the approval record only matches: the page alone cannot say who wrote it.
   data.refresh()
   await flush()
+  expect(data.snapshot.bodyEdits.get('p1')?.phase).toBe('matched')
+  data.noteAction(record(22, 'approved'))
+  data.noteAction(record(21, 'approved', 'Edit Wiki page Operations'))
+  expect(data.snapshot.bodyEdits.get('p1')?.phase).toBe('matched')
+  data.noteAction(record(21, 'approved'))
   expect(data.snapshot.bodyEdits.get('p1')?.phase).toBe('applied')
   expect(pageOf(data, 'ops/incident-response')).toMatchObject({ version: 5, body: '# Incident response\n\nCall the on-call engineer.' })
   expect(pageOf(data, 'ops/incident-response').pendingBody).toBeUndefined()

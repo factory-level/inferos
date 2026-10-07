@@ -11,7 +11,7 @@ const noSubscription = () => () => {}
  * The Wiki at `targetRef`, read through the workspace whose capability `overseer` is. One instance
  * per widget, disposed with it (its session included). The Wiki is re-read when an action on it
  * leaves `pending` in the action log, by whoever decided it, so an edit's outcome shows from the
- * page itself.
+ * page itself; every record is also offered to the body edits, to tell their own approval apart.
  */
 export const useWikiData = (overseer: RpcStub<Overseer>, targetRef: string): { snapshot: WikiSnapshot; data: WikiData | null } => {
   const [held, setHeld] = useState<{ overseer: RpcStub<Overseer>; data: WikiData } | null>(null)
@@ -25,6 +25,7 @@ export const useWikiData = (overseer: RpcStub<Overseer>, targetRef: string): { s
   const snapshot = useSyncExternalStore(data?.subscribe ?? noSubscription, () => data?.snapshot ?? LOADING_WIKI)
 
   useActionEntries(overseer, record => {
+    data?.noteAction(record)
     if (record.type === 'action' && record.state !== 'pending' && record.resourceUrl && data &&
       canonicalBoardRef(record.resourceUrl) === data.target) data.refresh()
   })
