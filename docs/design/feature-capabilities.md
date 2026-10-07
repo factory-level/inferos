@@ -1,7 +1,7 @@
 ---
 title: Customer feature capabilities
 status: draft
-updated: 2026-10-05
+updated: 2026-10-07
 ---
 
 # Customer feature capabilities
@@ -28,8 +28,20 @@ This is a draft target. Current code accepts only the legacy flags `composableVi
 | `PUBLISH_CLOUDFLAREOS_APP` | Enable an explicit application publication path, separate from agent activation and from business data sharing. |
 | `AGENT_DEPLOYMENTS` | Enable the reviewed native persona/skill [agent deployment](agent-deployments.md) lifecycle and scoped capability bindings. |
 | `CODING_WORKBENCH_ENABLED` | Enable [local coding workflow](local-coding-workflows.md) invocation by authorized humans and agents using a supported signed-in coding tool, without an LLM API key. No hosted workbench and no required push or PR. |
+| `INFEROPS_TABLES_ENABLED` | Enable read-only, private-only InferOps custom-table bindings through the [InferOps gatekeeper](inferops-gatekeeper.md#custom-tables) (MVP-20). It grants nothing: each read is the person's own InferOps access. A proposed extension of [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md)'s eight names; see [below](#proposed-vocabulary-extension-inferops_tables_enabled). |
 
 Provider and runtime adapter versions, resource references, policies, publication destinations and secret references are separate configuration fields. Do not add a boolean for every provider.
+
+### Proposed vocabulary extension: `INFEROPS_TABLES_ENABLED`
+
+**Proposed, not accepted.** [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md) is itself proposed; this extends its vocabulary narrowly for MVP-20's read-only custom tables, and no human has accepted either.
+
+- **Default off.** No profile turns it on, and no other flag implies it.
+- **Prerequisite.** It requires `INFEROPS_ENABLED`, validated explicitly; it never turns that on.
+- **Enforcement points.** The InferOps gatekeeper withholds the custom-table resource kind and its picker, refuses new table bindings, and refuses every call of an existing binding or session with `DISABLED`; the dev server resolves it, and settings validation reports an invalid or contradictory value.
+- **Disable.** Existing bindings are retained and refused, never deleted. Re-enabling resumes exactly those bindings and grants nothing: a grant or sign-in revoked in the meantime stays revoked, since every read is the person's own current InferOps access.
+- **Compatibility.** A version 2 file is parsed with exactly its pinned revision's capability names, so a parser that predates this name rejects a file that contains it. A wrapper must pin a revision that knows the name before writing it.
+- **Open.** Long-term ownership of the flag, and whether it is accepted as a customer capability at all, are not decided.
 
 ### Migration and compatibility
 
@@ -53,6 +65,7 @@ Provider and runtime adapter versions, resource references, policies, publicatio
 - Native deployments do not require HG.
 - Local coding requires neither HG nor native ChatGPT subscription inference.
 - `CODING_WORKBENCH_ENABLED` requires `INFEROPS_ENABLED`: coding dispatch reaches the runner only through the InferOps gatekeeper.
+- `INFEROPS_TABLES_ENABLED` requires `INFEROPS_ENABLED`: custom tables are read only through the InferOps gatekeeper.
 - Validate each dependency explicitly. Never turn on another flag silently.
 
 ### Enforcement
@@ -207,6 +220,8 @@ Tracking issue: [#33](https://github.com/factory-level/inferos/issues/33).
 - Scope revocation remains effective after reload, disabled and re-enabled features, and copied view or artifact import.
 
 ## Open Questions
+
+- Whether `INFEROPS_TABLES_ENABLED` is accepted as a customer capability, and who owns it long term ([proposed extension](#proposed-vocabulary-extension-inferops_tables_enabled)).
 
 - The exact mapping from each legacy flag to the new vocabulary, and which legacy flags are retained because their semantics differ.
 - The named owner and default for each flag.

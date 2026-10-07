@@ -11,6 +11,8 @@ export type InferOpsProjectConfiguratorValues = {
   workspace?: string | null;
   /** Selected project key, such as ENG. */
   projectKey?: string | null;
+  /** Selected custom table id (the table picker only). */
+  tableId?: string | null;
 };
 
 /** The narrow capability the picker iframe receives. */
@@ -24,4 +26,9 @@ export interface InferOpsProjectConfiguratorRpc {
   listProjects(query: string, host: string): Promise<ConfiguratorUIOption[]>;
   /** The workspaces a URL may name for this account, valued by slug; empty for demo data. */
   listWorkspaces(): Promise<ConfiguratorUIOption[]>;
+  /**
+   * Custom tables the connected account can open on `host`, valued by id and filtered by `query`;
+   * empty while custom tables are turned off.
+   */
+  listTables(query: string, host: string): Promise<ConfiguratorUIOption[]>;
 }

@@ -36,6 +36,15 @@
 //   since InferOps' section PATCH has no expected version; a body edit is InferOps' own strict
 //   compare-and-swap on the page version (see `InferOpsWikiGatekeeper.applyAction`). InferOps'
 //   product gate and `knowledge:*` permissions apply to the person's token.
+// - A custom table is a fourth kind, `inferops://<tenant>.<workspace>/object/table/<tableId>`, bound
+//   into an `InferOpsTableGatekeeper` facet whose props fix the account, host, table id and
+//   workspace id, and offered only while `INFEROPS_TABLES_ENABLED` is on (table.ts). It is read-only
+//   and private-only: `InferOpsTableSession` describes the table, lists up to 50 rows and reads one
+//   row, every read through InferOps' `object.embed` with a reference built from the props, so
+//   InferOps checks the exact `<tenant>.<workspace>` on each read (the membership lookup here
+//   matches the workspace slug only). Personal columns are projected out (table.ts). A connected
+//   person's own sign-in or the demo mock only: the stopgap connection never serves a table.
+//   `addObserver` refuses every collaborator.
 // - Every returned read is authorized as an observation. Every write is checked against the
 //   simulated board, recorded with the exact request it will send and that request's fingerprint
 //   (actions.ts), and submitted as an action; none is auto-approvable. Until it is decided, reads
@@ -75,17 +84,17 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
-  CredentialSource, isCredentialsChanged, isCredentialsExpired,
+  CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
 } from "@gadgets/gatekeeper-kit/credentials";
 import {
   InferOpsError, atStage, inferOpsErrorCode, isPolicyRefusal, writeStage, type InferOpsClient,
-  type ProjectSummary, type RunRecord, type WikiDocumentHead, type WriteStage,
+  type ProjectSummary, type RunRecord, type TableRead, type WikiDocumentHead, type WriteStage,
 } from "./inferops-client";
 import {
   BOARD_WRITES, CheckRefused, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
 } from "./apply-attempts";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, openHttpInferOpsClient, type InferOpsAuthority,
+  WIKI_FORBIDDEN, connectionFromEnv, openHttpInferOpsClient, tableNotFound, type InferOpsAuthority,
   type InferOpsEndpoint,
 } from "./http-inferops";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
@@ -96,12 +105,15 @@ import {
 } from "./coding-workbench";
 import { InferOpsCredentials, type InferOpsWorkspace } from "./inferops-credentials";
 import {
+  assertTablesEnabled, describeTable, projectRows, tableReadOptions, tablesEnabled, whileTablesEnabled,
+} from "./table";
+import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
 } from "./inferlab-login";
 import {
-  DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE,
-  parseHost, parseProjectBoardUrl, parseProjectDispatchUrl, parseWikiUrl,
-  projectBoardUrl, projectDispatchUrl, resourceKind, wikiUrl,
+  DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE, PROJECT_BOARD_RESOURCE,
+  PROJECT_DISPATCH_RESOURCE, parseHost, parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl,
+  parseWikiUrl, projectBoardUrl, projectDispatchUrl, resourceKind, tableUrl, wikiUrl,
 } from "./resources";
 import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
@@ -122,7 +134,8 @@ import {
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
   Board, BoardCandidate, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession,
-  InferOpsWikiSession, Issue, IssueChanges, NewIssue, Repo, Revision, Run, WikiDocument,
+  InferOpsTableSession, InferOpsWikiSession, Issue, IssueChanges, ListRecordsOptions, NewIssue, Repo,
+  Revision, Run, TableDescription, TableRecord, WikiDocument,
   WikiDocumentNode, WikiSection, WikiStructure,
 } from "./types";
 import type { NewIssueRequest, WikiSectionRecord } from "./inferops-client";
@@ -130,6 +143,7 @@ import TYPES_CODE from "./types.txt";
 import PROJECT_CONFIGURATOR_HTML from "./generated/project-ui.txt";
 import DISPATCH_CONFIGURATOR_HTML from "./generated/dispatch-ui.txt";
 import WIKI_CONFIGURATOR_HTML from "./generated/wiki-ui.txt";
+import TABLE_CONFIGURATOR_HTML from "./generated/table-ui.txt";
 
 export { InferLabLogin, InferOpsCredentials, MockInferOps };
 
@@ -191,6 +205,12 @@ type ProjectGatekeeperProps = AccountRef & { host: string; projectKey: string; w
  */
 type WikiGatekeeperProps = AccountRef & { host: string; workspaceId?: string };
 
+/**
+ * One custom-table binding, fixed when the Workshop mints it: the workspace's `host`, the table's
+ * id and, for a connected account, the InferOps workspace the host's slug resolved to.
+ */
+type TableGatekeeperProps = AccountRef & { host: string; tableId: string; workspaceId?: string };
+
 type ExportsWithStores = {
   MockInferOps: DurableObjectNamespace<MockInferOps>;
   InferOpsCredentials: DurableObjectNamespace<InferOpsCredentials>;
@@ -208,6 +228,7 @@ function credentialsOf(exports: ExportsWithStores, accountId: string) {
  */
 function accountClient(
   exports: ExportsWithStores, endpoint: InferOpsEndpoint, accountId: string, workspaceId: string,
+  options: { fenceSuccess?: boolean } = {},
 ): InferOpsClient {
   const source = new CredentialSource<InferOpsAuthority>({
     account: () => {
@@ -228,9 +249,11 @@ function accountClient(
       try {
         // Every InferOps call here is safe to repeat: reads, or a write under its own
         // idempotency key.
-        return await source.run(authority => {
+        return await source.run(async (authority, read) => {
           sent = true;
-          return operation(authority);
+          const result = await operation(authority);
+          if (options.fenceSuccess) await assertConnectionUnchanged(source, read);
+          return result;
         }, { replayable: true });
       } catch (error) {
         if (isCredentialsExpired(error)) {
@@ -247,6 +270,32 @@ function accountClient(
       }
     },
   });
+}
+
+/** What a fenced read says when the connection moved while it was in flight. */
+const CONNECTION_CHANGED = "This InferOps connection changed. Try again.";
+
+/**
+ * The completion fence of a read: a successful answer counts only if the account still holds the
+ * connection (identity and generation) the request was sent under. A reconnect or a revoke that
+ * completed while the request was in flight discards the answer before anything uses it. A
+ * session confirmed dead is `UNAUTHORIZED`; any other failure to vouch is `UNAVAILABLE`, and the
+ * next read reports the account's real state.
+ */
+async function assertConnectionUnchanged(
+  source: CredentialSource<InferOpsAuthority>, sent: CredentialRead,
+): Promise<void> {
+  let now: CredentialRead;
+  try {
+    now = await source.read();
+  } catch (error) {
+    // Only the code crosses RPC; what the account said stays out of the answer.
+    throw new InferOpsError(isCredentialsExpired(error) ? "UNAUTHORIZED" : "UNAVAILABLE",
+      isCredentialsExpired(error) ? EXPIRED_MESSAGE : CONNECTION_CHANGED);
+  }
+  if (now.identity !== sent.identity || now.generation !== sent.generation) {
+    throw new InferOpsError("UNAVAILABLE", CONNECTION_CHANGED);
+  }
 }
 
 /**
@@ -301,11 +350,39 @@ function codingClientFor(
   return whileCodingWorkbenchEnabled(env, () => openClientFor(env, exports, account, host, workspaceId));
 }
 
-/** The resource kinds offered now: coding dispatch only while the deployment has it on. */
+/**
+ * The data source for a custom-table binding, refused with `DISABLED` on every call while InferOps
+ * or custom tables are off. The mock for the demo host, or a connected person's own authority in
+ * `workspaceId`; never the stopgap connection. Anything else reads as a missing table.
+ */
+function tableClientFor(
+  env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
+  workspaceId?: string,
+): InferOpsClient {
+  return whileTablesEnabled(env, () => {
+    if (host === DEMO_HOST) {
+      return openInferOpsClient(exports.MockInferOps, { accountId: account.accountId, host });
+    }
+    const endpoint = account.connected ? inferOpsApiEndpoint(env) : null;
+    if (!endpoint || !workspaceId) throw tableNotFound();
+    // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
+    return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
+  });
+}
+
+/** The resource kinds offered now: coding dispatch and custom tables only while each is on. */
 function supportedResources(env: Cloudflare.Env): SupportedResource[] {
-  return codingWorkbenchEnabled(env)
-    ? [PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, KNOWLEDGE_WIKI_RESOURCE]
-    : [PROJECT_BOARD_RESOURCE, KNOWLEDGE_WIKI_RESOURCE];
+  return [
+    PROJECT_BOARD_RESOURCE,
+    ...(codingWorkbenchEnabled(env) ? [PROJECT_DISPATCH_RESOURCE] : []),
+    KNOWLEDGE_WIKI_RESOURCE,
+    ...(tablesEnabled(env) ? [OBJECT_TABLE_RESOURCE] : []),
+  ];
+}
+
+/** The message every refused table binding gets, whatever was missing: workspace, host or table. */
+function unavailableTable(host: string): string {
+  return `No such InferOps custom table is available to you on ${host}.`;
 }
 
 /** The message every refused Wiki binding gets, whatever was missing: workspace or host. */
@@ -488,6 +565,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     assertInferOpsEnabled(this.env);
     const kind = resourceKind(url);
     if (kind === "wiki") return this.#wikiClassFor(url);
+    if (kind === "table") return this.#tableClassFor(url);
     const dispatch = kind === "dispatch";
     if (dispatch) assertCodingWorkbenchEnabled(this.env);
     const { host, projectKey } = dispatch ? parseProjectDispatchUrl(url) : parseProjectBoardUrl(url);
@@ -527,6 +605,37 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     };
   }
 
+  /**
+   * Bind one custom table: custom tables must be on; the URL's workspace slug must be one of the
+   * person's InferOps workspaces; and the table must answer one read through InferOps' scoped
+   * `object.embed` for the URL's whole `<tenant>.<workspace>`, which InferOps checks. A workspace
+   * the person lacks, an account with no sign-in, a tenant label that is not theirs and a missing or
+   * unreadable table are all refused with one message. The probe returns nothing to anyone.
+   */
+  async #tableClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+    mock: boolean;
+  }> {
+    assertTablesEnabled(this.env);
+    const { host, tableId } = parseTableUrl(url);
+    const { accountId, connected } = this.ctx.props;
+    const workspaceId = host === DEMO_HOST ? undefined : await this.#workspaceFor(host);
+    if (workspaceId === null) throw new Error(unavailableTable(host));
+    try {
+      await tableClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId)
+        .readTable(host, tableId, { limit: 1 });
+    } catch (error) {
+      if (inferOpsErrorCode(error) === "NOT_FOUND") throw new Error(unavailableTable(host), { cause: error });
+      throw error;
+    }
+    const props: TableGatekeeperProps = { accountId, connected, host, tableId, workspaceId };
+    return {
+      class: this.ctx.exports.InferOpsTableGatekeeper({ props }), resource: OBJECT_TABLE_RESOURCE,
+      mock: host === DEMO_HOST,
+    };
+  }
+
   @skipRpcValidation()
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     const wiki = resourceUrlPattern === KNOWLEDGE_WIKI_RESOURCE.urlPattern;
@@ -534,7 +643,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
       ? PROJECT_CONFIGURATOR_HTML
       : resourceUrlPattern === PROJECT_DISPATCH_RESOURCE.urlPattern && codingWorkbenchEnabled(this.env)
         ? DISPATCH_CONFIGURATOR_HTML
-        : wiki ? WIKI_CONFIGURATOR_HTML : null;
+        : resourceUrlPattern === OBJECT_TABLE_RESOURCE.urlPattern && tablesEnabled(this.env)
+          ? TABLE_CONFIGURATOR_HTML
+          : wiki ? WIKI_CONFIGURATOR_HTML : null;
     if (!iframeHtml) {
       throw new Error(`Unsupported InferOps resource configurator type: ${resourceUrlPattern}`);
     }
@@ -558,6 +669,19 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
             return await this.#client(host, workspaceId).listProjects();
           } catch (error) {
             if (inferOpsErrorCode(error) === "NOT_FOUND") return [];
+            throw error;
+          }
+        },
+        tables: async host => {
+          if (!tablesEnabled(this.env)) return [];
+          const workspaceId = host === DEMO_HOST ? undefined : await this.#workspaceFor(host);
+          if (workspaceId === null) return [];
+          const { accountId, connected } = this.ctx.props;
+          try {
+            return await tableClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId)
+              .listTables();
+          } catch (error) {
+            if (inferOpsErrorCode(error) === "NOT_FOUND" || inferOpsErrorCode(error) === "FORBIDDEN") return [];
             throw error;
           }
         },
@@ -657,6 +781,8 @@ type ConfiguratorSource = {
   workspaces(): Promise<InferOpsWorkspace[]>;
   /** The projects this account can open on `host`; empty for a workspace it does not hold. */
   projects(host: string): Promise<ProjectSummary[]>;
+  /** The custom tables this account can open on `host`; empty while tables are off. */
+  tables(host: string): Promise<{ id: string; label: string }[]>;
 };
 
 // Keeps the account out of the iframe-facing object's public surface.
@@ -683,6 +809,17 @@ class InferOpsProjectConfiguratorUI extends RpcTarget implements InferOpsProject
     const workspaces = await this.#source().workspaces();
     return workspaces.flatMap(w => w.workspaceSlug
       ? [{ value: w.workspaceSlug, title: w.workspaceName, subtitle: w.workspaceSlug }] : []);
+  }
+
+  async listTables(query: string, host: string): Promise<ConfiguratorUIOption[]> {
+    if (host !== DEMO_HOST && !parseHost(host)) {
+      throw new Error("Enter your organization and choose a workspace first.");
+    }
+    const needle = query.trim().toLowerCase();
+    return (await this.#source().tables(host))
+      .filter(t => !needle || t.label.toLowerCase().includes(needle) || t.id.includes(needle))
+      .slice(0, OPTION_LIMIT)
+      .map(t => ({ value: t.id, title: t.label, subtitle: t.id }));
   }
 
   async listProjects(query: string, host: string): Promise<ConfiguratorUIOption[]> {
@@ -2467,5 +2604,130 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       implementsRevert: true,
       actionKind: { tag: "inferops.wiki-section-update", label: "Edit a Wiki section" },
     });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Custom-table gatekeeper (a facet of the Overseer, one per binding)
+
+/** Why every action call on a table binding is refused: it never submits one. */
+const TABLE_READ_ONLY = "An InferOps custom table binding is read-only and has no actions.";
+
+@validateRpc()
+export class InferOpsTableGatekeeper
+    extends DurableObject<Cloudflare.Env, TableGatekeeperProps>
+    implements Gatekeeper<InferOpsTableSession> {
+  async describe(): Promise<ResourceDescription> {
+    const { host, tableId } = this.ctx.props;
+    return {
+      url: tableUrl({ host, tableId }),
+      title: `InferOps custom table on ${host}`,
+      snippet: `One InferOps custom table on ${host}: read its rows, without personal columns.`,
+      suggestedBindingName: "INFEROPS_TABLE",
+      tsType: "InferOpsTableSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsTableSession> {
+    const { accountId, connected, host, tableId, workspaceId } = this.ctx.props;
+    const client = tableClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId);
+    return new TableSessionImpl({ client, host, tableId }, approvalQueue.dup());
+  }
+
+  /**
+   * Strategy A, private only: no collaborator is admitted to a gadget that holds this binding, so
+   * sharing a workspace whose gadget uses it is refused. The account's verifier is not consulted.
+   */
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    throw new Error(
+      "An InferOps custom table binding is private to the person who connected it, so this " +
+      "gadget cannot be shared.");
+  }
+
+  /** Nothing is tracked: no observer is ever admitted. */
+  async removeObserver(_id: string): Promise<void> {}
+
+  async applyAction(_actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+    throw new Error(TABLE_READ_ONLY);
+  }
+
+  async rejectAction(_actionId: number): Promise<void> {
+    throw new Error(TABLE_READ_ONLY);
+  }
+
+  async revertAction(_actionId: number): Promise<void> {
+    throw new Error(TABLE_READ_ONLY);
+  }
+}
+
+/** What a table session reads with: its data source and the bound host and table. */
+type TableScope = { client: InferOpsClient; host: string; tableId: string };
+
+@validateRpc()
+class TableSessionImpl extends RpcTarget implements InferOpsTableSession {
+  #scope: TableScope;
+  #queue: RpcStub<ApprovalQueue>;
+
+  constructor(scope: TableScope, queue: RpcStub<ApprovalQueue>) {
+    super();
+    this.#scope = scope;
+    this.#queue = queue;
+  }
+
+  [Symbol.dispose]() {
+    this.#queue[Symbol.dispose]();
+  }
+
+  /** The bound table, read once; a read of another table is never possible from here. */
+  #read(limit: number, relatedTo?: string): Promise<TableRead> {
+    const { client, host, tableId } = this.#scope;
+    return client.readTable(host, tableId, relatedTo === undefined ? { limit } : { relatedTo, limit });
+  }
+
+  async describeTable(): Promise<TableDescription> {
+    const table = describeTable(await this.#read(1));
+    await this.#queue.authorizeObservation({
+      title: "Describe InferOps custom table",
+      description: `Read the definition of the custom table ${plainInline(table.label)} on ` +
+        `${this.#scope.host}: ${table.columns.length} columns and ${table.relations.length} relations.`,
+    });
+    return table;
+  }
+
+  async listRecords(options?: ListRecordsOptions): Promise<{ table: TableDescription; records: TableRecord[] }> {
+    const { relatedTo, limit } = tableReadOptions(options);
+    const result = projectRows(await this.#read(limit, relatedTo));
+    await this.#queue.authorizeObservation({
+      title: "List InferOps custom table rows",
+      // The relatedTo reference is caller input: it is not repeated into the log.
+      description: `Read ${result.records.length} rows of the custom table ` +
+        `${plainInline(result.table.label)} on ${this.#scope.host}` +
+        `${relatedTo === undefined ? "" : ", linked to one endpoint"}.`,
+    });
+    return result;
+  }
+
+  async getRecord(id: string): Promise<{ table: TableDescription; record: TableRecord }> {
+    const { client, host, tableId } = this.#scope;
+    if (!UUID.test(id)) throw tableNotFound();
+    const read = await client.readTableRow(host, id);
+    // A row of another table of the same workspace reads exactly as a missing one.
+    if (read.table.id !== tableId) throw tableNotFound();
+    const { table, records } = projectRows(read);
+    const record = records[0];
+    if (!record) throw tableNotFound();
+    await this.#queue.authorizeObservation({
+      title: "Read InferOps custom table row",
+      description: `Read one row of the custom table ${plainInline(table.label)} on ${host}.`,
+    });
+    return { table, record };
   }
 }

@@ -24,6 +24,7 @@ import { resolveBinEntry } from "./bin-entry.ts";
 import {
   INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, gatekeeperBaseUrl, gatekeeperBinding, getDevRouterAssets,
   getDevRouterConfig, getDevServerConfig, getInferLabLoginVars, inferLabLoginStartupError, resolveCodingWorkbenchEnabled, resolveInferOpsEnabled,
+  resolveInferOpsTablesEnabled,
   resolvePublicationFlag,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
@@ -164,6 +165,12 @@ const codingWorkbenchEnabled = resolveCodingWorkbenchEnabled({
   capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.CODING_WORKBENCH_ENABLED : null,
   inferOpsEnabled,
   shell: process.env.CODING_WORKBENCH_ENABLED,
+});
+// Custom tables through the gatekeeper (MVP-20), resolved as coding dispatch is: off by default.
+const inferOpsTablesEnabled = resolveInferOpsTablesEnabled({
+  capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_TABLES_ENABLED : null,
+  inferOpsEnabled,
+  shell: process.env.INFEROPS_TABLES_ENABLED,
 });
 // Publication (#68): a version 2 wrapper's PUBLISH_CLOUDFLAREOS_* capabilities switch it; otherwise
 // off unless the shell turns it on. The backend enforces the resulting vars (publication.ts).
@@ -604,6 +611,7 @@ const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined
     INFEROPS_ENABLED: inferOpsEnabled,
     CODING_WORKBENCH_ENABLED: codingWorkbenchEnabled,
     CODING_WORKBENCH_REPOS: codingWorkbenchRepos,
+    INFEROPS_TABLES_ENABLED: inferOpsTablesEnabled,
   },
 };
 

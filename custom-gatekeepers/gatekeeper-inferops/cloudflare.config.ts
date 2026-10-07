@@ -17,4 +17,5 @@ export const migrations: DurableObjectMigration[] = [
   { tag: "v1", new_sqlite_classes: ["InferLabLogin", "InferOpsCredentials"] },
   { tag: "v2", new_sqlite_classes: ["InferOpsDispatchGatekeeper"] },
   { tag: "v3", new_sqlite_classes: ["InferOpsWikiGatekeeper"] },
+  { tag: "v4", new_sqlite_classes: ["InferOpsTableGatekeeper"] },
 ];

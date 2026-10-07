@@ -4,8 +4,8 @@
 // place that chooses between them.
 
 import type {
-  Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, WikiDocumentNode,
-  WikiStructure,
+  Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
+  WikiDocumentNode, WikiStructure,
 } from "./types";
 
 /** Error codes a data source reports. Callers branch on these, never on message text. */
@@ -167,6 +167,53 @@ export type WikiSectionRecord = {
   version: number;
 };
 
+/**
+ * One column of a custom table as InferOps defines it, personal ones included: the gatekeeper
+ * projects them away (table.ts) before anything reaches a caller.
+ */
+export type TableColumnRecord = {
+  key: string;
+  name: string;
+  label: string;
+  type: "text" | "number" | "integer" | "boolean" | "date" | "timestamp";
+  required: boolean;
+  personal: boolean;
+  enum?: string[];
+};
+
+/** A custom table's definition as InferOps returned it with the rows read beside it. */
+export type TableRecordSchema = {
+  id: string;
+  label: string;
+  version: number;
+  columns: TableColumnRecord[];
+  relations: { name: string; toKind: TableTargetKind }[];
+};
+
+/** One live link of a row, as InferOps returned it; its label and href are dropped on parsing. */
+export type TableLinkRecord = { relation: string; toKind: TableTargetKind; ref: string };
+
+/** One row as InferOps returned it: its values by column name, personal ones included. */
+export type TableRowRecord = {
+  id: string;
+  typeId: string;
+  typeVersion: number;
+  values: Record<string, string | number | boolean | null>;
+  links: TableLinkRecord[];
+};
+
+/**
+ * One read of a custom table: its definition and the rows read with it, from one InferOps answer
+ * (`object.embed`), whose rows InferOps already checked against that definition's version.
+ */
+export type TableRead = { table: TableRecordSchema; rows: TableRowRecord[] };
+
+/** What a table read may narrow by. */
+export type TableReadOptions = { relatedTo?: string; limit: number };
+
+/** One custom table an account can open, as listed for the resource picker. */
+export type TableSummary = { id: string; label: string };
+
 /** One project an account can reach, as listed for the resource picker. */
 export type ProjectSummary = Pick<Project, "identifier" | "name">;
 
@@ -284,6 +331,23 @@ export interface InferOpsClient {
    * section first and decides. The key is sent anyway, for when InferOps honors it.
    */
   updateSection(sectionId: string, body: string, idempotencyKey: string): Promise<WikiSectionRecord>;
+
+  /** The workspace's custom tables the account can open, for the resource picker. */
+  listTables(): Promise<TableSummary[]>;
+
+  /**
+   * One custom table and up to `options.limit` of its rows, newest first, read through InferOps'
+   * scoped `object.embed` with the reference `inferops://<host>/object/table-view/<tableId>`, so
+   * InferOps checks the exact `<tenant>.<workspace>` of `host` against the reader. NOT_FOUND for a
+   * table that is missing or not readable, without saying which.
+   */
+  readTable(host: string, tableId: string, options: TableReadOptions): Promise<TableRead>;
+
+  /**
+   * One row and its table, read the same way through `inferops://<host>/object/record-card/<id>`.
+   * The caller checks that the row belongs to its table; `rows` holds exactly that row.
+   */
+  readTableRow(host: string, recordId: string): Promise<TableRead>;
 
   /** Whether the account can open the project; used to admit observers of a shared gadget. */
   hasProject(projectKey: string): Promise<boolean>;

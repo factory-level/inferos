@@ -90,6 +90,16 @@ test("contradictions are errors, and shell values a version 2 wrapper overrides 
   assert.deepEqual(codes(overridden), ["INFEROPS_ENABLED:contradictory", "CODING_WORKBENCH_ENABLED:contradictory", "codingWorkbench.repos:contradictory"]);
   assert.equal(overridden.ok, true);
 
+  // Custom tables resolve like coding dispatch: an invalid shell value, a v2 override and the dependency.
+  assert.deepEqual(codes(validateSettings(v1(), { INFEROPS_TABLES_ENABLED: "maybe" })), ["INFEROPS_TABLES_ENABLED:invalid"]);
+  assert.deepEqual(codes(validateSettings(v2(["INFEROPS_ENABLED"]), { INFEROPS_TABLES_ENABLED: "true" })),
+    ["INFEROPS_TABLES_ENABLED:contradictory"]);
+  assert.ok(codes(validateSettings(v1(), { INFEROPS_ENABLED: "false", INFEROPS_TABLES_ENABLED: "true" }))
+    .includes("INFEROPS_TABLES_ENABLED:contradictory"));
+  const tablesOn = validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_TABLES_ENABLED"]), {});
+  assert.equal(tablesOn.ok, true);
+  assert.equal(tablesOn.settings.find(setting => setting.name === "INFEROPS_TABLES_ENABLED")?.state, "set");
+
   const slug = validateSettings(v1(), { INFEROPS_API_TOKEN: SECRET, INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_WORKSPACE_ID: "w1", INFEROPS_WORKSPACE_SLUG: "acme" });
   assert.deepEqual(codes(slug), ["INFEROPS_WORKSPACE_SLUG:contradictory"]);
 });

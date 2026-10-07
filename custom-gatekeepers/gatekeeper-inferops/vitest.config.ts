@@ -36,6 +36,8 @@ export default defineConfig({
           // The Wiki gatekeeper, the same way.
           WIKI_GATEKEEPER: { className: "InferOpsWikiGatekeeper", useSQLite: true },
           TEST_WIKI_GATEKEEPER: { className: "TestWikiGatekeeper", useSQLite: true },
+          // The custom-table gatekeeper, the same way.
+          TABLE_GATEKEEPER: { className: "InferOpsTableGatekeeper", useSQLite: true },
           // One sign-in attempt per object; the tests seed its callback from inside the object.
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
           // One per connected account; the tests reach it through the account entrypoints.

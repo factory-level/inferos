@@ -1,7 +1,7 @@
 ---
 title: InferOps gatekeeper
 status: draft
-updated: 2026-10-03
+updated: 2026-10-07
 ---
 
 # InferOps gatekeeper
@@ -193,6 +193,17 @@ The Wiki session (`InferOpsWikiSession` in the [declaration](inferops-gatekeeper
 Access is InferOps': the product gate (`requiresProduct: 'infermind'`), `knowledge:read` for reads and `knowledge:write` for an edit, row-level security on the workspace, and the InferMind lens on sections, all applied to the person's own token. InferOps answers both a missing product and a missing permission with 403 `FORBIDDEN` and says which only in its message text, which InferOS does not read, so the caller gets one `FORBIDDEN` message naming both causes. A Wiki URL naming one of the person's InferOps workspaces is refused before any request, saying that workspace has no Wiki.
 
 InferOps' section `PATCH` takes no expected version and does not replay an idempotency key. InferOS therefore checks the version itself: applying an edit reads the section first and sends the body only while the section is still at the version the edit was proposed at. A section already showing exactly the approved body at a later version counts as applied without a second write (a retried apply whose first response was lost); any other change refuses the edit as stale. The fingerprint and the idempotency key are as for every other action, and the key is sent although InferOps ignores it today. The page's own `body` is read-only in InferOps and is not part of this contract; root, pillar and Master pages and coverage states are InferOps' to build ([factory-level/inferops#2324](https://github.com/factory-level/inferops/issues/2324), [#2325](https://github.com/factory-level/inferops/issues/2325)).
+
+### Custom tables
+
+One InferOps custom table (MVP-20) is a fourth resource kind, `inferops://<tenant>.<workspace>/object/table/<tableId>`, offered only while `INFEROPS_TABLES_ENABLED` is on. The session (`InferOpsTableSession` in the [declaration](inferops-gatekeeper-api.d.ts)) is read-only: `describeTable()`, `listRecords({ relatedTo?, limit? })` with at most 50 rows, and `getRecord(id)`, every one an observation. No method takes an account, host, workspace or table.
+
+- Every read goes through InferOps' scoped `object.embed` with a reference built from the binding, so InferOps checks the whole `<tenant>.<workspace>` on each read. A row of another table reads as missing.
+- Rows are always returned with the table definition from the same read, and are rendered with it.
+- Columns the table's owner marked personal are left out entirely: no name, label, list of values, value or count. Links carry their relation, kind and reference, never a label. This is not a general promise that no personal data is returned.
+- There is no filter on column values until InferOps can return the definition from the same snapshot as the filtered rows, empty results included.
+- The binding is private: a gadget that holds it cannot be shared.
+- A connected person's own sign-in only; the deployment's stopgap connection never serves a table.
 
 ### Companion InferOps changes
 

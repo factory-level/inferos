@@ -89,6 +89,9 @@ export const capabilitySources: Record<CapabilityName, string | null> = {
   // The gatekeeper's coding-dispatch switch and repository allowlist (#69, #70): off refuses new
   // dispatch bindings and every call on existing ones (DISABLED).
   CODING_WORKBENCH_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts",
+  // The gatekeeper's custom-table switch (MVP-20): off withholds the resource kind and refuses new
+  // table bindings and every call on existing ones (DISABLED).
+  INFEROPS_TABLES_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/table.ts",
 };
 
 const installed = (upstream: string, source: string | null) => source !== null && existsSync(join(upstream, source));

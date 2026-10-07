@@ -93,6 +93,11 @@ export function codingRequested({ config, env }: SettingsInput): boolean {
   return config.schemaVersion === 2 ? config.capabilities.CODING_WORKBENCH_ENABLED : env.CODING_WORKBENCH_ENABLED === "true";
 }
 
+/** Whether custom tables are asked for, resolved like coding dispatch. */
+export function tablesRequested({ config, env }: SettingsInput): boolean {
+  return config.schemaVersion === 2 ? config.capabilities.INFEROPS_TABLES_ENABLED : env.INFEROPS_TABLES_ENABLED === "true";
+}
+
 /** The wrapper's `codingWorkbench.repos`, read defensively so pins whose parser predates it still load. */
 function wrapperCodingRepos(config: ConsumerConfig): unknown[] | null {
   if (config.schemaVersion !== 2) return null;
@@ -221,6 +226,13 @@ export const SETTINGS: readonly SettingEntry[] = [
     requiredWhen: never,
     readAt: "`inferos.config.json` `capabilities.INFEROPS_ENABLED` (version 2), else the shell; `resolveInferOpsEnabled`",
     present: inferOpsOn,
+  },
+  {
+    name: "INFEROPS_TABLES_ENABLED", group: "Host and runtime", kind: "value", owner: "deployer", default: "off", source: "local",
+    description: "Turns read-only InferOps custom-table bindings through the InferOps gatekeeper on. Needs `INFEROPS_ENABLED`; a version 2 wrapper's capability wins over the shell.",
+    requiredWhen: never,
+    readAt: "`inferos.config.json` `capabilities.INFEROPS_TABLES_ENABLED` (version 2), else the shell",
+    present: tablesRequested,
   },
   {
     name: "local.port", group: "Host and runtime", kind: "value", owner: "developer", default: "`8787`", source: "local",
@@ -409,7 +421,7 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
     });
   } catch (error) { add("INFEROPS_ENABLED", "error", "contradictory", (error as Error).message); }
   if (config.schemaVersion === 2) {
-    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED"] as const) {
+    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED"] as const) {
       if (env[name] !== undefined && env[name] !== String(config.capabilities[name])) {
         add(name, "warning", "contradictory", `The shell's ${name} differs from the wrapper capability, which wins; unset it`);
       }
@@ -417,8 +429,15 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
     if (env.CODING_WORKBENCH_REPOS !== undefined) {
       add("codingWorkbench.repos", "warning", "contradictory", "The shell's CODING_WORKBENCH_REPOS is ignored; a version 2 wrapper's codingWorkbench.repos is the allowlist");
     }
-  } else if (env.CODING_WORKBENCH_ENABLED !== undefined && !["true", "false"].includes(env.CODING_WORKBENCH_ENABLED)) {
-    add("CODING_WORKBENCH_ENABLED", "error", "invalid", 'CODING_WORKBENCH_ENABLED must be "true" or "false"');
+  } else {
+    for (const name of ["CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED"] as const) {
+      if (env[name] !== undefined && !["true", "false"].includes(env[name]!)) {
+        add(name, "error", "invalid", `${name} must be "true" or "false"`);
+      }
+    }
+  }
+  if (tablesRequested(input) && !inferOpsOn(input)) {
+    add("INFEROPS_TABLES_ENABLED", "error", "contradictory", "INFEROPS_TABLES_ENABLED is on, but the InferOps integration (INFEROPS_ENABLED) is off");
   }
 
   // Publication. A version 2 wrapper's capabilities win over the shell, as for coding dispatch.

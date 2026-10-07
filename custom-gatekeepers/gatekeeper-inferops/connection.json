@@ -4,7 +4,7 @@
   "id": "inferops",
   "package": "@inferos/gatekeeper-inferops",
   "status": "reference",
-  "summary": "InferOps project boards, coding dispatch and the InferMind Wiki (its structure, page bodies and sections), reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
+  "summary": "InferOps project boards, coding dispatch, the InferMind Wiki (its structure, page bodies and sections) and read-only custom tables, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
   "entrypoints": {
     "main": "src/inferops.ts",
     "vendor": "GatekeeperVendor",
@@ -15,6 +15,7 @@
       "InferOpsProjectGatekeeper",
       "InferOpsDispatchGatekeeper",
       "InferOpsWikiGatekeeper",
+      "InferOpsTableGatekeeper",
       "InferLabLogin",
       "InferOpsCredentials"
     ]
@@ -74,6 +75,21 @@
         { "method": "updateDocumentBody", "concurrency": "expected-version", "idempotency": "provider-key", "revert": "conditional", "notes": "InferOps' page PATCH is a strict compare-and-swap on the page version: apply sends the proposed version and is refused STALE_REVISION by any change since, even one that left the same body; InferOps replays only a retry of the same write under the same key. Reverted by a fresh write expecting the version the edit produced, under its own key." },
         { "method": "updateSection", "concurrency": "expected-version", "idempotency": "read-before-write", "revert": "conditional", "notes": "InferOps' section PATCH takes no expected version and does not replay a key, so apply re-reads the section: at the proposed version it writes; already showing this body it counts as applied; otherwise it refuses as STALE_REVISION. Reverted while the section still shows the applied body at the applied version." }
       ]
+    },
+    {
+      "kind": "object/table",
+      "urlPattern": "inferops://*/object/table/*",
+      "gatekeeper": "InferOpsTableGatekeeper",
+      "session": "InferOpsTableSession",
+      "scope": "One custom table, by id, in one InferOps workspace the signed-in person holds; per-person sign-in only (no stopgap connection), or the mock's demo table. Every read goes through InferOps' object.embed with a reference built from the binding's props, so InferOps checks the exact <tenant>.<workspace> against the reader on each read. Read-only: no writes. Personal columns are projected out of every read, without a trace.",
+      "enabledBy": ["INFEROPS_ENABLED", "INFEROPS_TABLES_ENABLED"],
+      "observers": "admission",
+      "reads": [
+        { "method": "describeTable", "notes": "The definition without personal columns." },
+        { "method": "listRecords", "notes": "Up to 50 rows, newest first, with the definition from the same read; relatedTo narrows to rows linked to one endpoint. No filter on column values." },
+        { "method": "getRecord", "notes": "One row of the bound table, with the definition from the same read; a row of another table is NOT_FOUND." }
+      ],
+      "writes": []
     }
   ],
   "approval": {
@@ -114,6 +130,7 @@
     { "name": "INFEROPS_WORKSPACE_SLUG", "kind": "var", "purpose": "The workspace slug a URL must name to use the stopgap connection." },
     { "name": "INFEROPS_ENABLED", "kind": "var", "purpose": "Capability switch for the whole integration, checked on every call.", "default": "Unset counts as on." },
     { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
+    { "name": "INFEROPS_TABLES_ENABLED", "kind": "var", "purpose": "Capability switch for object/table, checked on every call.", "default": "Unset counts as off." },
     { "name": "CODING_WORKBENCH_REPOS", "kind": "var", "purpose": "Comma-separated InferOps repository ids a dispatch may target.", "default": "Unset allows no repository." }
   ],
   "compatibility": {
@@ -166,6 +183,17 @@
         "kind": "knowledge/wiki",
         "cases": ["revocation", "server-error-retry"],
         "reason": "Not tested for this kind. It reads through the same data source and account credentials as project/board, whose revocation and UNAVAILABLE handling the shared suite covers."
+      },
+      {
+        "kind": "object/table",
+        "cases": ["resource-scope", "observation", "sharing", "revocation", "server-error-retry"],
+        "reason": "Read-only and private-only: the shared suite's adapter assumes writes and an admissible collaborator, so this kind has its own suite. Sharing is the private-only refusal (addObserver always throws).",
+        "coveredBy": ["__tests__/table.test.ts", "__tests__/table-http.test.ts", "__tests__/account.test.ts"]
+      },
+      {
+        "kind": "object/table",
+        "cases": ["approval", "apply-once", "stale-revision", "lost-response-retry"],
+        "reason": "Not applicable: the kind proposes no writes, so there is nothing to approve, apply or retry. Its tests assert the mock and the HTTP client see no non-GET request."
       }
     ]
   }
