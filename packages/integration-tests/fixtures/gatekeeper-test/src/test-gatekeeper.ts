@@ -24,9 +24,9 @@ import {
 } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
-import { ActionApplyError, ActionOutcomeUnknownError } from "@gadgets/gatekeeper-kit/actions";
+import { ActionApplyError, ActionOutcomeUnknownError, applyActionOutcome } from "@gadgets/gatekeeper-kit/actions";
 import type {
-  AccountDescription, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
+  AccountDescription, ActionApplyFailure, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
   HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, SupportedResource,
   VendorDescription,
@@ -694,17 +694,20 @@ export class TestGatekeeper
         { resourceUrl: this.ctx.props.resourceUrl, type: "remove", id });
   }
 
-  async applyAction(action: number): Promise<void> {
-    const state = control(this.ctx.exports);
-    const { label } = this.ctx.props;
-    const held = await state.takeNextApplyHold(label);
-    await state.recordApplyAttempt(label);
-    if (held) await waitForApplyRelease(state, label);
-    const failure = await state.takeApplyFailure(label);
-    if (failure?.outcome === "refused") throw new ActionApplyError(failure.reason);
-    if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
-    if (failure !== null) throw new Error(failure.reason);
-    await state.applyAction(label, action);
+  /** The kit's terminal failures reach the overseer as its structured result (applyActionOutcome). */
+  async applyAction(action: number): Promise<void | { failed: ActionApplyFailure }> {
+    return applyActionOutcome(async () => {
+      const state = control(this.ctx.exports);
+      const { label } = this.ctx.props;
+      const held = await state.takeNextApplyHold(label);
+      await state.recordApplyAttempt(label);
+      if (held) await waitForApplyRelease(state, label);
+      const failure = await state.takeApplyFailure(label);
+      if (failure?.outcome === "refused") throw new ActionApplyError(failure.reason);
+      if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
+      if (failure !== null) throw new Error(failure.reason);
+      await state.applyAction(label, action);
+    });
   }
 
   async rejectAction(action: number): Promise<void> {

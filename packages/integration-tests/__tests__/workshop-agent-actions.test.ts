@@ -289,11 +289,9 @@ it.concurrent.each(["retry", "reject"] as const)(
   }
 });
 
-// MVP-12 (truthful approval outcomes), kept as a deterministic repro until it is implemented: a
-// gatekeeper that knows its apply was refused (`ActionApplyError`: nothing applied, a retry won't
-// either) still leaves the action `pending` with no reason, re-approvable, and the awaiting turn
-// suspended. Drop `.fails` once the overseer records the refusal as a terminal, reasoned outcome.
-it.concurrent.fails("a refused apply ends failed with its reason, applies nothing and resumes the turn", async () => {
+// A gatekeeper that knows its apply was refused (`ActionApplyError`: nothing applied, a retry
+// won't either) ends the action as failed, with its reason, rather than leaving it pending.
+it.concurrent("a refused apply ends failed with its reason, applies nothing and resumes the turn", async () => {
   const model = models.script([writeValues(5), { text: "The change was refused." }]);
   await using session = await openSession(model, "agentrefused");
   const label = labelOf(session);
@@ -306,8 +304,9 @@ it.concurrent.fails("a refused apply ends failed with its reason, applies nothin
     // The refusal is the action's recorded outcome, with its reason, read back from the log...
     const { entries } = await session.listActions({ filter: "action" });
     const entry = entries.find(candidate => candidate.id === action.id);
-    expect(entry).toMatchObject({ state: "failed" });
-    expect(JSON.stringify(entry)).toContain("policy denies it");
+    expect(entry).toMatchObject({ state: "failed", lastAttempt: {
+      outcome: "notApplied", message: "The provider refused this change: policy denies it." } });
+    expect(entry?.appliedAt).toBeUndefined();
     // ...it cannot be approved again, and the turn that waited on it moves on.
     await expect(ws.approveAction(action.id)).rejects.toThrow();
     await waitForResumedTurn(ws, model);
@@ -317,11 +316,39 @@ it.concurrent.fails("a refused apply ends failed with its reason, applies nothin
   expect(model.requests).toHaveLength(2);
 });
 
-// Known bug, kept as a deterministic repro: Overseer.approveAction checks `pending`, then awaits
-// applyPendingAction before marking the action approved, so two concurrent approvals (separate
-// approval surfaces, tabs, or a retry after a dropped WebSocket) both dispatch the apply, and a
-// non-idempotent gatekeeper writes twice. Drop `.fails` once approval claims the action first.
-it.concurrent.fails("approving one action twice at once applies it once", async () => {
+// An apply whose outcome is unknown (`ActionOutcomeUnknownError`: the provider may have applied it)
+// stays pending with that warning and its reason, through a workspace restart, and rejecting it
+// afterwards keeps the warning, so it never reads as safely undone.
+it.concurrent("an unknown apply outcome stays pending with its warning, through a restart and a rejection", async () => {
+  const model = models.script([writeValues(6), { text: "This must not run." }]);
+  await using session = await openSession(model, "agentunknown");
+  const label = labelOf(session);
+
+  await session.runTurn("Set the test value to 6.");
+  const [action] = await waitForPendingActions(session, 1);
+  await failNextApply(label, "The provider timed out after receiving the change.", "unknown");
+  const entryOf = async () => (await session.listActions({ filter: "action" })).entries
+    .find(candidate => candidate.id === action.id);
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await expect(ws.approveAction(action.id)).rejects.toThrow("timed out after receiving");
+    await restartWorkspace(harness.url, ws);
+  });
+  expect(await entryOf()).toMatchObject({ state: "pending", lastAttempt: {
+    outcome: "unknown", message: "The provider timed out after receiving the change." } });
+  expect((await entryOf())?.appliedAt).toBeUndefined();
+
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await ws.rejectAction(action.id);
+    await expectIdle(ws);
+  });
+  expect(await entryOf()).toMatchObject({ state: "rejected", lastAttempt: { outcome: "unknown" } });
+  expect(await applyAttempts(label)).toBe(1);
+  expect(model.requests).toHaveLength(1);
+});
+
+// Two concurrent approvals (separate approval surfaces, tabs, or a retry after a dropped
+// WebSocket) must not both dispatch the apply: one apply runs per action at a time.
+it.concurrent("approving one action twice at once applies it once", async () => {
   await using session = await openSession(models.script([{ text: "Ready." }]), "agentdoubleapprove");
   const label = labelOf(session);
   // A workspace is listed, so withOwnerWorkspace can open it, once it has seen activity.

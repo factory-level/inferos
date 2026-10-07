@@ -779,6 +779,29 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
 
 /**
+ * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
+ * says. Returned rather than thrown, because RPC carries only an error's message.
+ */
+export type ActionApplyFailure = {
+  /**
+   * What is known about the provider effect: `notApplied` means it is known absent (the provider
+   * refused, or the request was never sent); `unknown` means it may have happened (a timeout, a
+   * lost response, a failure after the provider was reached).
+   */
+  outcome: "notApplied" | "unknown";
+  /**
+   * Whether applying again may succeed and is safe: false for a refusal that will stand (the
+   * action then ends as failed) or an unknown outcome the operation cannot replay; true, for
+   * example, for a refusal that reconnecting the account can fix.
+   */
+  retryable: boolean;
+  /** The reason, for the person deciding: what happened and what to do. */
+  message: string;
+  /** The provider's error code, when it gave one. */
+  code?: string;
+};
+
+/**
  * Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
  * specific Gadget.
  *
@@ -928,7 +951,10 @@ export interface Gatekeeper<Session> extends DurableObject {
    * Action was approved. This call should apply the action (or schedule it to be applied).
    *
    * If this throws an exception, the user will be informed that the action failed and given the
-   * opportunity to retry or discard.
+   * opportunity to retry or discard; the overseer records that the outcome is unknown, since a
+   * thrown error asserts nothing about the provider. A gatekeeper that knows more returns
+   * `{ failed }` instead (see `ActionApplyFailure`): a known, terminal refusal ends the action as
+   * failed, with its reason, rather than leaving it to be approved again.
    *
    * Depending on policy conditions, an action may be approved and applied automatically. However,
    * the gatekeeper is nevertheless expected to submit all actions for approval; there is no mode
@@ -946,7 +972,7 @@ export interface Gatekeeper<Session> extends DurableObject {
    * ignore this parameter (and can even omit the parameter from their `applyAction()`
    * declaration).
    */
-  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void>;
+  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure }>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
