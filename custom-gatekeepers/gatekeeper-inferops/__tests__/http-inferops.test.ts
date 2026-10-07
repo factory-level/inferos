@@ -518,6 +518,21 @@ describe("write stages", () => {
       .toEqual({ code: "FORBIDDEN", stage: "refused", policy: true });
   });
 
+  it("proves nothing for a refusal status without InferOps' error envelope, except a 401", async () => {
+    for (const status of [400, 403, 404, 409]) {
+      for (const body of [{ message: "gateway says no" }, { error: "flat string" }, { error: { code: 7 } }, "<html>"]) {
+        const { client } = fakeInferOps(answer(status, body));
+        expect((await stageOf(client.transition("DEMO", DEMO_1, WORKING, "1041", "k")))?.stage).toBeUndefined();
+      }
+      const empty = fakeInferOps(call => call.method !== "GET" ? new Response("", { status }) : undefined);
+      expect((await stageOf(empty.client.transition("DEMO", DEMO_1, WORKING, "1041", "k")))?.stage).toBeUndefined();
+    }
+    // The auth layer's 401 turns the request away whatever its body.
+    const turnedAway = fakeInferOps(call => call.method !== "GET" ? new Response("no", { status: 401 }) : undefined);
+    expect(await stageOf(turnedAway.client.transition("DEMO", DEMO_1, WORKING, "1041", "k")))
+      .toMatchObject({ code: "UNAUTHORIZED", stage: "refused" });
+  });
+
   it("proves nothing for a 5xx, another 4xx, a lost response or an unusable success", async () => {
     for (const status of [429, 500, 502]) {
       const { client } = fakeInferOps(answer(status, { error: { code: "X", message: "x" } }));

@@ -67,7 +67,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and the InferOps and InferMind workspaces InferLab reported with each one's slug (an InferMind one marked `product: "infermind"`), slug resolution per product (`resolveWorkspace(slug, product)`, InferOps by default), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure` and `updateDocument`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`), with the facts a failure proves: its `WriteStage` (`unsent`, or `refused` by InferOps in answer to the write) and whether a `FORBIDDEN` is a workflow-policy refusal. They hold only in the isolate that raised the error; `atStage` restores a stage across the mock's RPC boundary. |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure` and `updateDocument`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`), with the facts a failure proves: its `WriteStage` (`unsent`, or `refused` by InferOps in answer to the write: a 401, or a 400, 403, 404 or 409 carrying InferOps' error envelope) and whether a `FORBIDDEN` is a workflow-policy refusal. They hold only in the isolate that raised the error; `atStage` restores a stage across the mock's RPC boundary. |
 | `custom-gatekeepers/gatekeeper-inferops/src/apply-attempts.ts` | What an unsuccessful apply proves (`classifyAttempt`), each kind's `ApplyPolicy` (`BOARD_WRITES`, `RECONCILE_ONLY`), `CheckRefused` for a gatekeeper check that refuses before sending, and which refusals can pass (`canPass`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/wiki.ts` | The Wiki's pure read projections, ported from InferOps: `[[target#tag]]` wikilinks, the standalone-paragraph `inferops://` references, and InferOps' page-text contract (`domains/knowledge/shared/document-text.ts`, mirrored exactly): `composeDocumentText` gives `# <title>`, a blank line, then the body without a leading H1 equal to the title (`bodyWithoutTitle`; any other heading stays), or the visible section bodies when the body is blank, then a Master's generated block (`masterStructureText`: `<!-- generated: wiki structure -->`, then `## Pillars` with a `/wiki/<encoded master slug>` link per pillar for the root, or `## Pages in <pillar>` with one per member for a pillar Master, `(none yet)` when empty), joined by blank lines, and null when nothing is left. `documentText` (title and sections) stays for the canvas test double. |
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | The `CODING_WORKBENCH_ENABLED` switch and `CODING_WORKBENCH_REPOS` allowlist for dispatch bindings ([local coding workflows](local-coding-workflows.md)). |
@@ -227,8 +227,9 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   the overseer as `{ failed: ActionApplyFailure }` with what it proves, never thrown:
   - *Known not applied* only when its stage proves it and no earlier attempt may have reached
     InferOps: a failure before sending (a check, the scope read, the switch, a fingerprint
-    mismatch, a dead credential), or, for board writes only, InferOps answering the write itself
-    with 400, 401, 403, 404 or 409. A refusal that will stand (stale, invalid state, gone, conflict,
+    mismatch, a credential that fails locally before the request is handed one), or, for board
+    writes only, InferOps answering the write itself with a 401, or with a 400, 403, 404 or 409
+    carrying its error envelope (a malformed or foreign body proves nothing). A refusal that will stand (stale, invalid state, gone, conflict,
     invalid, fingerprint mismatch, a workflow-policy `FORBIDDEN`) ends the record `failed` with its
     reason in `attempts.failure`; it is no longer simulated, the issue is free for another proposal,
     and every later apply replays the refusal without sending. One that can pass (`UNAUTHORIZED`,
@@ -516,8 +517,9 @@ whose response was lost retried under the same key into one issue, update replay
 issue of another project, error mapping (400, 404, 409 conflict and workflow mismatch, 5xx, 403
 workflow-policy refusal), rejected credential, 5xx, redirect, non-JSON and
 malformed responses, connection configuration, and write stages: InferOps' 400, 401, 403, 404 and
-409 to the write marked refused (a policy 403 named), 429, 5xx, a lost response and an unusable
-success proving nothing, and a failed check or scope read marked unsent with no write sent. The gatekeeper's own tests never run its
+409 to the write marked refused (a policy 403 named), the same statuses without InferOps' error
+envelope proving nothing except a 401, 429, 5xx, a lost response and an unusable success proving
+nothing, and a failed check or scope read marked unsent with no write sent. The gatekeeper's own tests never run its
 sessions over the HTTP client; the integration suite below does. `__tests__/inferlab-login.test.ts` covers origin validation,
 `providesAuth`, the authorize redirect, the PKCE exchange, the sign-in's logout and handoff,
 single-use links and states, forged states, InferLab errors, rejected exchanges and unverified
@@ -529,7 +531,9 @@ offered by slug, a URL's workspace slug resolving to the person's own workspace 
 several workspaces each bound by its own slug, a workspace the person does not hold refused
 exactly like a missing project before any request, a tampered tenant label granting nothing,
 malformed authorities rejected without a request, `demo.local` staying demo data, a failed
-workspace list failing the connect and signing the session out, InferOps denying a workspace
+workspace list failing the connect and signing the session out, a page edit applied after the
+person's session died sending nothing and reported not applied (not reconcile-only), then applied
+once after a reconnect, InferOps denying a workspace
 without expiring the account, observer admission by the collaborator's own membership, and a
 create and an update proposed before the session ended not applied after it.
 `__tests__/wiki.test.ts` (workerd, over the mock) covers the Wiki: its grammar and the page

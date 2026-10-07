@@ -60,6 +60,9 @@ class FakeInferLab {
   infermind = new Set<string>([MIND]);
   /** Whether the person lacks `knowledge:read`. */
   knowledgeDenied = false;
+  /** The handbook page's body and version, and the page body writes InferOps took. */
+  page = { body: "The handbook.", version: 3 };
+  pageWrites: Array<{ body: string; idempotencyKey: string | null }> = [];
   /** Workspaces InferLab reports at sign-in. */
   workspaces: Array<{ workspaceId: string; workspaceName: string; product: string }> = [
     { workspaceId: OPS, workspaceName: "Ops", product: "inferops" },
@@ -156,11 +159,21 @@ class FakeInferLab {
       if (this.knowledgeDenied) {
         return Response.json({ error: { code: "FORBIDDEN", message: "Missing permission: knowledge:read" } }, { status: 403 });
       }
-      if (url.pathname === "/knowledge/documents") {
-        return Response.json([{
-          id: HANDBOOK, workspaceId, slug: "handbook", title: "Handbook", summary: null, pathway: null,
-          parentId: null, siblingOrder: 0,
-        }]);
+      const handbook = {
+        id: HANDBOOK, workspaceId, slug: "handbook", title: "Handbook", summary: null, pathway: null,
+        parentId: null, siblingOrder: 0,
+      };
+      if (url.pathname === "/knowledge/documents") return Response.json([handbook]);
+      if (url.pathname === `/knowledge/documents/${HANDBOOK}`) {
+        return Response.json({ ...handbook, ...this.page, masterRole: null });
+      }
+      if (url.pathname === `/knowledge/wiki/pages/${HANDBOOK}` && init.method === "PATCH") {
+        if (Number(body.expectedVersion) !== this.page.version) {
+          return Response.json({ error: { code: "STALE_VERSION", message: "stale" } }, { status: 409 });
+        }
+        this.pageWrites.push({ body: body.body!, idempotencyKey: headers.get("x-idempotency-key") });
+        this.page = { body: body.body!, version: this.page.version + 1 };
+        return Response.json({ document: { id: HANDBOOK, version: this.page.version } });
       }
     }
     if (url.pathname === "/project/projects") return Response.json({ projects: [DEMO] });
@@ -604,6 +617,37 @@ describe("the InferMind Wiki of a connected person", () => {
     inferlab.infermind.delete(MIND);
     expect(await failure(hooks().startBoundWikiSession("denied-wiki").listDocuments()))
       .toContain("FORBIDDEN: InferOps refused the Wiki");
+  });
+
+  it("sends nothing for a page edit once the session is dead, and applies the same edit after a reconnect", async () => {
+    const account = await mindPerson("dead-wiki");
+    expect(await hooks().bindAccount("dead-wiki", account, WIKI)).toBeNull();
+    await hooks().startBoundWikiSession("dead-wiki").updateDocumentBody(HANDBOOK, "Rewritten.", 3);
+    const [action] = (await hooks().log()).actions.slice(-1);
+    expect(action!.title).toContain("Handbook");
+
+    // The session dies; the account learns it, so its credentials now fail before any request.
+    inferlab.endSession("refresh-1");
+    expect(await failure(hooks().startBoundWikiSession("dead-wiki").listDocuments())).toContain("UNAUTHORIZED");
+    const callsBefore = inferlab.apiCalls.length;
+
+    // Known not applied, not "possibly applied": nothing was sent, so it is not reconcile-only.
+    const refused = await hooks().applyBound("dead-wiki", action!.id);
+    expect(refused).toContain("was not applied");
+    expect(refused).not.toContain("may or may not");
+    expect(inferlab.apiCalls.slice(callsBefore)).toEqual([]);
+    expect(inferlab.pageWrites).toEqual([]);
+
+    const stageId = await (async () => {
+      const response = await finish(await hooks().reconnectAccount(account));
+      expect(response.status, await response.text()).toBe(200);
+      return reconnects.find(r => r.label === "dead-wiki")!.stageId;
+    })();
+    expect(await hooks().commitReconnect(account, stageId)).toBeNull();
+
+    expect(await hooks().applyBound("dead-wiki", action!.id)).toBeNull();
+    expect(inferlab.pageWrites).toEqual([{ body: "Rewritten.", idempotencyKey: expect.stringMatching(/:\d+$/) }]);
+    expect(inferlab.page.version).toBe(4);
   });
 
   it("admits a Wiki observer only when their own account reads the binding's Wiki", async () => {

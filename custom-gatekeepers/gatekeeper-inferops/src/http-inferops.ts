@@ -495,8 +495,11 @@ const FAILURE_DETAIL: Record<InferOpsErrorCode, string> = {
   DISABLED: "InferOps is turned off for this deployment.",
 };
 
-/** The statuses with which InferOps refuses a write before it takes effect (see `WriteStage`). */
-const REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 401, 403, 404, 409]);
+/**
+ * The statuses with which InferOps refuses a write before it takes effect, when the body is its
+ * error envelope (see `WriteStage`); a 401 needs no envelope.
+ */
+const REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 403, 404, 409]);
 
 /**
  * Run what a write does before sending it (its checks, and the reads that scope it); whatever that
@@ -661,9 +664,11 @@ export function openHttpInferOpsClient(
         event: "http.request.failed", operation, status: response.status, code: wire ?? code,
       });
       const policy = code === "FORBIDDEN" && isPolicyRefusalBody(body);
-      // A write InferOps answered with one of these was refused before it took effect. Anything
-      // else (5xx, a gateway's 4xx, a redirect) proves nothing about it.
-      const stage = send.method !== "GET" && REFUSAL_STATUSES.has(response.status) ? "refused" : undefined;
+      // A write InferOps refused before it took effect: any 401 (the auth layer turns the request
+      // away), or one of the other refusal statuses carrying InferOps' own error envelope. Anything
+      // else (5xx, another status, a malformed or foreign body, a redirect) proves nothing.
+      const refused = response.status === 401 || (REFUSAL_STATUSES.has(response.status) && wire !== null);
+      const stage = send.method !== "GET" && refused ? "refused" : undefined;
       throw new InferOpsError(code, policy ? POLICY_REFUSED : FAILURE_DETAIL[code], { stage, policy });
     }
     if (body === undefined) {

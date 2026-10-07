@@ -44,8 +44,9 @@ const ERROR_CODES: ReadonlySet<string> = new Set<InferOpsErrorCode>([
  * How far a failed write got, which is what its failure proves about its effect. A failure without
  * a stage proves nothing: the write may have been applied.
  * - `unsent`: it failed before the write request was sent (a check, or a read made first).
- * - `refused`: InferOps answered the write request itself with a refusal (400, 401, 403, 404 or
- *   409), or the credential was confirmed dead before it was processed.
+ * - `refused`: InferOps answered the write request itself with a refusal: a 401, or a 400, 403, 404
+ *   or 409 carrying its error envelope. A credential confirmed dead after a request was sent with
+ *   it counts too, since every send was answered 401.
  */
 export type WriteStage = "unsent" | "refused";
 

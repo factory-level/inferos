@@ -224,15 +224,21 @@ function accountClient(
   return openHttpInferOpsClient({
     ...endpoint,
     async authorize(operation) {
+      let sent = false;
       try {
         // Every InferOps call here is safe to repeat: reads, or a write under its own
         // idempotency key.
-        return await source.run(operation, { replayable: true });
+        return await source.run(authority => {
+          sent = true;
+          return operation(authority);
+        }, { replayable: true });
       } catch (error) {
         if (isCredentialsExpired(error)) {
-          // Confirmed dead before InferOps processed anything: no credential to send, or InferOps
-          // refused every send with 401. A changed credential below proves nothing.
-          throw new InferOpsError("UNAUTHORIZED", (error as Error).message, { stage: "refused" });
+          // Confirmed dead before InferOps processed anything: either no credential was ever
+          // handed to the request (unsent), or InferOps answered every send 401 (refused). A
+          // changed credential below proves nothing.
+          throw new InferOpsError("UNAUTHORIZED", (error as Error).message,
+                                  { stage: sent ? "refused" : "unsent" });
         }
         if (isCredentialsChanged(error)) {
           throw new InferOpsError("UNAVAILABLE", "This InferOps connection changed. Try again.");
