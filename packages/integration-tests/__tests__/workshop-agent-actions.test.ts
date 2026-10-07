@@ -35,8 +35,8 @@ afterAll(async () => {
 const control = <T>(route: string, body: object) => testControl<T>(harness, route, body);
 
 const actionState = (label: string) => testActionState(harness, label);
-const failNextApply = (label: string, reason: string) =>
-  control("fail-next-apply", { label, reason });
+const failNextApply = (label: string, reason: string, outcome?: "refused" | "unknown") =>
+  control("fail-next-apply", { label, reason, ...(outcome ? { outcome } : {}) });
 const applyAttempts = async (label: string) =>
   (await control<{ attempts: number }>("apply-attempts", { label })).attempts;
 
@@ -287,6 +287,34 @@ it.concurrent.each(["retry", "reject"] as const)(
     expect(model.requests).toHaveLength(1);
     expect(model.remainingSteps()).toBe(1);
   }
+});
+
+// MVP-12 (truthful approval outcomes), kept as a deterministic repro until it is implemented: a
+// gatekeeper that knows its apply was refused (`ActionApplyError`: nothing applied, a retry won't
+// either) still leaves the action `pending` with no reason, re-approvable, and the awaiting turn
+// suspended. Drop `.fails` once the overseer records the refusal as a terminal, reasoned outcome.
+it.concurrent.fails("a refused apply ends failed with its reason, applies nothing and resumes the turn", async () => {
+  const model = models.script([writeValues(5), { text: "The change was refused." }]);
+  await using session = await openSession(model, "agentrefused");
+  const label = labelOf(session);
+
+  await session.runTurn("Set the test value to 5.");
+  const [action] = await waitForPendingActions(session, 1);
+  await failNextApply(label, "The provider refused this change: policy denies it.", "refused");
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await expect(ws.approveAction(action.id)).rejects.toThrow("policy denies it");
+    // The refusal is the action's recorded outcome, with its reason, read back from the log...
+    const { entries } = await session.listActions({ filter: "action" });
+    const entry = entries.find(candidate => candidate.id === action.id);
+    expect(entry).toMatchObject({ state: "failed" });
+    expect(JSON.stringify(entry)).toContain("policy denies it");
+    // ...it cannot be approved again, and the turn that waited on it moves on.
+    await expect(ws.approveAction(action.id)).rejects.toThrow();
+    await waitForResumedTurn(ws, model);
+  });
+  expect(await actionState(label)).toEqual({ pending: [{ id: 1, value: 5 }], applyCount: 0 });
+  expect(await applyAttempts(label)).toBe(1);
+  expect(model.requests).toHaveLength(2);
 });
 
 // Known bug, kept as a deterministic repro: Overseer.approveAction checks `pending`, then awaits

@@ -24,6 +24,7 @@ import {
 } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
+import { ActionApplyError, ActionOutcomeUnknownError } from "@gadgets/gatekeeper-kit/actions";
 import type {
   AccountDescription, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
@@ -101,6 +102,9 @@ function newAccountLabel(): string {
   return `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}@${VENDOR_HOST}`;
 }
 
+/** How the next failed test apply fails (see failNextApply). */
+type ApplyFailureOutcome = "retryable" | "refused" | "unknown";
+
 @validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
   setVerifyOutcome(label: string, outcome: VerifyOutcome, resourceUrl?: string): void {
@@ -177,17 +181,22 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.kv.put(`actions:${label}`, state);
   }
 
-  failNextApply(label: string, reason: string): void {
-    this.ctx.storage.kv.put(`fail-next-apply:${label}`, reason);
+  /**
+   * The next applyAction() for `label` fails with `reason`: as a retryable error by default, as a
+   * known refusal (`ActionApplyError`, nothing applied), or with an unknown outcome
+   * (`ActionOutcomeUnknownError`, possibly applied).
+   */
+  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "retryable"): void {
+    this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome });
   }
 
   /** Returns rather than throws, so consuming the failure commits. */
-  takeApplyFailure(label: string): string | null {
+  takeApplyFailure(label: string): { reason: string; outcome: ApplyFailureOutcome } | null {
     const key = `fail-next-apply:${label}`;
-    const reason = this.ctx.storage.kv.get<string>(key);
-    if (reason === undefined) return null;
+    const failure = this.ctx.storage.kv.get<{ reason: string; outcome: ApplyFailureOutcome }>(key);
+    if (failure === undefined) return null;
     this.ctx.storage.kv.delete(key);
-    return reason;
+    return failure;
   }
 
   recordApplyAttempt(label: string): void {
@@ -692,7 +701,9 @@ export class TestGatekeeper
     await state.recordApplyAttempt(label);
     if (held) await waitForApplyRelease(state, label);
     const failure = await state.takeApplyFailure(label);
-    if (failure !== null) throw new Error(failure);
+    if (failure?.outcome === "refused") throw new ActionApplyError(failure.reason);
+    if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
+    if (failure !== null) throw new Error(failure.reason);
     await state.applyAction(label, action);
   }
 
@@ -870,13 +881,16 @@ export default {
     // One-shot: the next applyAction() for `label` throws `reason` without applying.
     // Body: {"label": "...", "reason": "..."}
     if (url.pathname === "/control/fail-next-apply" && req.method === "POST") {
-      const { label, reason } = body as Record<string, unknown>;
+      const { label, reason, outcome } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
       }
+      if (outcome !== undefined && outcome !== "retryable" && outcome !== "refused" && outcome !== "unknown") {
+        return badRequest("`outcome` must be retryable, refused or unknown when present");
+      }
       await control(ctx.exports).failNextApply(
-          label, reason ?? "The test gatekeeper failed to apply this action.");
+          label, reason ?? "The test gatekeeper failed to apply this action.", outcome ?? "retryable");
       return new Response(null, { status: 204 });
     }
 
