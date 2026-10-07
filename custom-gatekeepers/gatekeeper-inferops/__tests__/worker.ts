@@ -5,7 +5,7 @@
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplyFailure, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -357,8 +357,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a bound binding; returns the failure message, or null on success. */
   async applyBound(name: string, actionId: number): Promise<string | null> {
     try {
-      await this.#bound(name).applyAction(actionId, new RpcStub(new TestGitCache()));
-      return null;
+      return (await this.#bound(name).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -412,8 +411,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a dispatch binding; returns the failure message, or null on success. */
   async applyDispatch(props: BindingProps, actionId: number): Promise<string | null> {
     try {
-      await this.#dispatchGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache()));
-      return null;
+      return (await this.#dispatchGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -454,8 +452,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a Wiki binding; returns the failure message, or null on success. */
   async applyWiki(props: WikiProps, actionId: number): Promise<string | null> {
     try {
-      await this.#wikiGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache()));
-      return null;
+      return (await this.#wikiGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -521,10 +518,26 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action; returns the failure message, or null on success. */
   async apply(props: BindingProps, actionId: number): Promise<string | null> {
     try {
-      await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache()));
-      return null;
+      return (await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
     } catch (error) {
       return messageOf(error);
+    }
+  }
+
+  /**
+   * Apply an action of any kind of binding and return what it reports: null once applied, the
+   * returned failure, or the message of a thrown error.
+   */
+  async applyOutcome(props: BindingProps | WikiProps, actionId: number,
+                     kind: "board" | "dispatch" | "wiki" = "board"):
+      Promise<ActionApplyFailure | { thrown: string } | null> {
+    const gatekeeper = kind === "wiki" ? this.#wikiGatekeeper(props as WikiProps)
+      : kind === "dispatch" ? this.#dispatchGatekeeper(props as BindingProps)
+      : this.#gatekeeper(props as BindingProps);
+    try {
+      return (await gatekeeper.applyAction(actionId, new RpcStub(new TestGitCache())))?.failed ?? null;
+    } catch (error) {
+      return { thrown: messageOf(error) };
     }
   }
 

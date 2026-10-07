@@ -204,11 +204,12 @@ it("refuses an issue deleted in InferOps while it is open, and its pending edit,
   expect(await failure(issue.read())).toContain("NOT_FOUND");
   expect(await failure(issue.update({ title: "Too late" }, eng2.revision))).toContain("NOT_FOUND");
   expect(await failure(tab.board.openIssue(eng2.id))).toContain("NOT_FOUND");
-  // The pending edit cannot apply: nothing is written, and it stays for the person to deny.
+  // The pending edit cannot apply: nothing is written, and it ends failed (refused before sending).
   const commits = fake.commits.length;
   expect(await failure(tab.own.approveAction(action!.id))).toContain("no longer in this project");
   expect(fake.commits.length).toBe(commits);
-  await tab.own.rejectAction(action!.id);
+  expect((await tab.own.listActions({ filter: "all" })).entries.find(a => a.id === action!.id))
+    .toMatchObject({ state: "failed", lastAttempt: { outcome: "notApplied", code: "NOT_FOUND" } });
   expect(await pending(tab.own)).toEqual([]);
 
   // The page still names the issue (the UI shows it is gone), and closing it returns to the board.

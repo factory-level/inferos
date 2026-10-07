@@ -184,6 +184,10 @@ const requestsBy = (person: FakePerson) =>
 const pending = async (ws: RpcStub<Overseer>) =>
   (await ws.listActions({ filter: "pending" })).entries;
 
+/** The stored log entry of one action, whatever its state. */
+const entryOf = async (ws: RpcStub<Overseer>, id: number) =>
+  (await ws.listActions({ filter: "all" })).entries.find(a => a.id === id);
+
 /** The one action the next proposal queues. */
 async function proposed(ws: RpcStub<Overseer>, propose: () => Promise<unknown>) {
   const before = new Set((await pending(ws)).map(a => a.id));
@@ -403,8 +407,13 @@ describe("writes wait for approval and apply once", () => {
       .toContain("the issue changed in InferOps after this update was proposed");
     expect(fake.commits.length).toBe(commits);
     expect(fake.issue("ENG-1").title).not.toBe("Renamed while stale");
-    expect((await pending(ws)).map(a => a.id)).toEqual([action.id]);
-    await ws.rejectAction(action.id);
+    // InferOps refused the first attempt itself, so it is known not applied, for good.
+    expect(await entryOf(ws, action.id)).toMatchObject({
+      state: "failed", lastAttempt: { outcome: "notApplied", code: "STALE_REVISION" },
+    });
+    expect(await pending(ws)).toEqual([]);
+    expect(await failure(ws.approveAction(action.id))).not.toBe("");
+    expect(fake.commits.length).toBe(commits);
   });
 
   it("failure: a create whose response is lost after commit is retried under the same key into one issue", async () => {
@@ -416,7 +425,7 @@ describe("writes wait for approval and apply once", () => {
     expect(fake.issuesOf("ENG").length).toBe(before);
 
     fake.loseNextWriteResponse = true;
-    expect(await failure(ws.approveAction(action.id))).toContain("could not be applied");
+    expect(await failure(ws.approveAction(action.id))).toContain("may or may not have been applied: InferOps did not confirm the outcome (UNAVAILABLE)");
     // InferOps committed it, but the Workshop never heard back, so the action is still pending.
     expect(fake.issuesOf("ENG").length).toBe(before + 1);
     expect((await pending(ws)).map(a => a.id)).toEqual([action.id]);
@@ -440,7 +449,8 @@ describe("writes wait for approval and apply once", () => {
     const action = await proposed(ws, async () =>
       (await session.openIssue(issue.id)).update({ priority: "urgent" }, issue.revision));
     fake.loseNextWriteResponse = true;
-    expect(await failure(ws.approveAction(action.id))).toContain("could not be applied");
+    expect(await failure(ws.approveAction(action.id))).toContain("may or may not have been applied: InferOps did not confirm the outcome (UNAVAILABLE)");
+    expect(await entryOf(ws, action.id)).toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown" } });
     await ws.approveAction(action.id);
 
     expect(fake.issue("ENG-1")).toMatchObject({
@@ -498,7 +508,8 @@ describe("InferOps unavailable", () => {
       (await session.openIssue(issue.id)).transition(DONE.id, issue.revision));
     const commits = fake.commits.length;
     fake.failNextWrites = 1;
-    expect(await failure(ws.approveAction(action.id))).toContain("could not be applied");
+    // A 5xx proves nothing about the write, so it may have applied; it is replayed under its key.
+    expect(await failure(ws.approveAction(action.id))).toContain("may or may not have been applied: InferOps did not confirm the outcome (UNAVAILABLE)");
     expect(fake.commits.length).toBe(commits);
     expect(fake.issue("ENG-1").revision).toBe(issue.revision);
     expect((await pending(ws)).map(a => a.id)).toEqual([action.id]);
@@ -622,9 +633,15 @@ describe("coding dispatch", () => {
     const action = await proposed(ws, () =>
       session.dispatch(issue.identifier, { repoId: REPOS.webApp.id }, issue.revision));
 
-    expect(await failure(ws.approveAction(action.id)))
-      .toContain("needs dispatch permission (issue:delegate)");
+    // InferOps' refusal of a dispatch is not yet taken as proof: unknown, and never resent.
+    expect(await failure(ws.approveAction(action.id))).toContain("InferOps refused it (FORBIDDEN)");
     expect(fake.runsOf(issue.identifier)).toEqual([]);
+    fake.grantDelegate(erin.person);
+    const before = fake.requests.length;
+    expect(await failure(ws.approveAction(action.id))).toContain("InferOps refused it (FORBIDDEN)");
+    expect(fake.requests.slice(before)).toEqual([]);
+    expect(fake.runsOf(issue.identifier)).toEqual([]);
+    expect(await entryOf(ws, action.id)).toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown" } });
   });
 
   it("attack: a board-only binding cannot dispatch, and a repository off the allowlist is refused before any request", async () => {
@@ -656,7 +673,7 @@ describe("coding dispatch", () => {
       session.dispatch(issue.identifier, { repoId: REPOS.webApp.id }, issue.revision));
     fake.touch(issue.identifier);
 
-    expect(await failure(ws.approveAction(action.id))).toContain("the issue changed in InferOps");
+    expect(await failure(ws.approveAction(action.id))).toContain("InferOps refused it (STALE_REVISION)");
     expect(fake.runsOf(issue.identifier)).toEqual([]);
   });
 
@@ -828,14 +845,18 @@ describe("the InferMind Wiki", () => {
     });
 
     fake.loseNextWriteResponse = true;
-    expect(await failure(ws.approveAction(action.id))).toContain("could not be applied");
+    expect(await failure(ws.approveAction(action.id))).toContain("may or may not have been applied");
     expect(fake.section("runbook", "steps")).toMatchObject({ body: "Step one, then step two.", version: steps.version + 1 });
-    await ws.approveAction(action.id);
+    // Section uncertainty is reconcile-only: approving again sends nothing.
+    expect(await failure(ws.approveAction(action.id))).toContain("It is not sent again from here");
+    expect(await entryOf(ws, action.id)).toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown" } });
     const writes = fake.sectionWrites.filter(w => w.person === ed.username);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.idempotencyKey).toMatch(/^[0-9a-f-]{36}:\d+$/);
     expect(fake.section("runbook", "steps").version).toBe(steps.version + 1);
-    expect(await failure(ws.approveAction(action.id))).toContain("not pending");
+    // Reconciled in InferOps, it is discarded here, still marked as possibly applied.
+    await ws.rejectAction(action.id);
+    expect(await entryOf(ws, action.id)).toMatchObject({ state: "rejected", lastAttempt: { outcome: "unknown" } });
   });
 
   it("failure: an edit made stale before approval is refused and writes nothing", async () => {
@@ -849,7 +870,10 @@ describe("the InferMind Wiki", () => {
       .toContain("the section changed in InferOps after this edit was proposed");
     expect(fake.section("handbook", "purpose").body).toBe("Rewritten in InferMind meanwhile.");
     expect(fake.sectionWrites.filter(w => w.person === sam.username)).toEqual([]);
-    await ws.rejectAction(action.id);
+    // Found stale before anything was sent, so it is known not applied, for good.
+    expect(await entryOf(ws, action.id)).toMatchObject({
+      state: "failed", lastAttempt: { outcome: "notApplied", code: "STALE_REVISION" },
+    });
   });
 
   it("attack: a person with read-only knowledge access is refused the edit by InferOps at apply", async () => {
@@ -859,7 +883,7 @@ describe("the InferMind Wiki", () => {
     const steps = fake.section("runbook", "steps");
     const action = await proposed(ws, () => session.updateSection(steps.id, "Not allowed.", steps.version));
 
-    expect(await failure(ws.approveAction(action.id))).toContain("was not applied: InferOps refused the Wiki");
+    expect(await failure(ws.approveAction(action.id))).toContain("InferOps refused it (FORBIDDEN)");
     expect(fake.section("runbook", "steps").body).not.toBe("Not allowed.");
     expect(fake.sectionWrites.filter(w => w.person === rita.username)).toEqual([]);
 

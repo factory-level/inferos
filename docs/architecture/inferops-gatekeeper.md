@@ -13,7 +13,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 
 # InferOps gatekeeper
@@ -67,7 +67,8 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and the InferOps and InferMind workspaces InferLab reported with each one's slug (an InferMind one marked `product: "infermind"`), slug resolution per product (`resolveWorkspace(slug, product)`, InferOps by default), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure` and `updateDocument`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`). |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure` and `updateDocument`) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`), with the facts a failure proves: its `WriteStage` (`unsent`, or `refused` by InferOps in answer to the write: a 401, or a 400, 403, 404 or 409 carrying InferOps' error envelope) and whether a `FORBIDDEN` is a workflow-policy refusal. They hold only in the isolate that raised the error; `atStage` restores a stage across the mock's RPC boundary. |
+| `custom-gatekeepers/gatekeeper-inferops/src/apply-attempts.ts` | What an unsuccessful apply proves (`classifyAttempt`), each kind's `ApplyPolicy` (`BOARD_WRITES`, `RECONCILE_ONLY`), `CheckRefused` for a gatekeeper check that refuses before sending, and which refusals can pass (`canPass`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/wiki.ts` | The Wiki's pure read projections, ported from InferOps: `[[target#tag]]` wikilinks, the standalone-paragraph `inferops://` references, and InferOps' page-text contract (`domains/knowledge/shared/document-text.ts`, mirrored exactly): `composeDocumentText` gives `# <title>`, a blank line, then the body without a leading H1 equal to the title (`bodyWithoutTitle`; any other heading stays), or the visible section bodies when the body is blank, then a Master's generated block (`masterStructureText`: `<!-- generated: wiki structure -->`, then `## Pillars` with a `/wiki/<encoded master slug>` link per pillar for the root, or `## Pages in <pillar>` with one per member for a pillar Master, `(none yet)` when empty), joined by blank lines, and null when nothing is left. `documentText` (title and sections) stays for the canvas test double. |
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | The `CODING_WORKBENCH_ENABLED` switch and `CODING_WORKBENCH_REPOS` allowlist for dispatch bindings ([local coding workflows](local-coding-workflows.md)). |
 | `custom-gatekeepers/gatekeeper-inferops/src/mock-inferops.ts` | `MockInferOps` Durable Object per (host, account), seeded from `src/fixtures/demo-board.json`; the only module that holds project data. Serves host `demo.local` only. Implements transition, create and update with InferOps' checks and per-key replay, and refuses a key reused for a different request (`IDEMPOTENCY_CONFLICT`). Also two demo repositories and a run ledger with InferOps' dispatch guards and replay, and `setRunStatus` standing in for the runner. A synthetic Wiki (`src/fixtures/demo-wiki.json`, stored under `wiki:v2`: a company root without a body, two pillars with Masters (Engineering has neither body nor sections), a body-only SOP whose body opens with its title, a slash-slugged SOP `dispatch/dispatch-a-crew` filed in both pillars whose body opens with another heading, a page with both a body and a section, and one with nothing to read) with InferOps' section semantics (a write advances the version by one, takes no expected version and replays nothing), its page semantics (`updateDocument` is a strict compare-and-swap on the page version that replays only the same key with the same expected version and body one version on, a receipt standing in for InferOps' key, principal, expected version, operation and payload) and its structure read (pillars by position, members by title, the unfiled pages), and `setInferMindEnabled` to make the demo workspace one without InferMind. `forget` (an account's `revoke`) deletes the account's data and leaves a tombstone, so every later call is refused `UNAUTHORIZED` rather than re-seeding demo data under a binding that outlived its account. Development only ([#28](https://github.com/factory-level/inferos/issues/28)): `MOCK_INFEROPS_SYNTHETIC_ISSUES=<n>` (1 to 2000, passed through by the dev server from the shell or `.dev.vars`) adds a deterministic synthetic project `PERF` of n issues over six states when an account's data is first seeded, for measuring the Kanban against a large board; unset or out of range it adds nothing (`__tests__/synthetic.test.ts`). |
@@ -215,13 +216,31 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   overlaid issue already shows it.
 - **Applying.** `applyAction` reads the record (a record without `kind` is a transition and has no
   fingerprint to check), recomputes the fingerprint of the request it is about to send and refuses
-  a mismatch without sending anything, then calls the data source with idempotency key
-  `<facet instance id>:<action id>`; the data source rechecks scope, state, workflow and revision,
-  and a replayed key returns the original result without writing again, so a create whose
-  response was lost is retried into the same issue. An applied create records the new identifier,
-  an applied update the revision it produced. A failed apply names the action and the reason
-  (stale, invalid state, gone, refused, not permitted, fingerprint mismatch) and keeps the record
-  pending. `rejectAction` deletes the record, which ends the simulation.
+  a mismatch without sending anything, marks the record dispatched (`attempts.dispatchedAt`), then
+  calls the data source with idempotency key `<facet instance id>:<action id>`; the data source
+  rechecks scope, state, workflow and revision, and a replayed key returns the original result
+  without writing again, so a create whose response was lost is retried into the same issue. An
+  applied create records the new identifier, an applied update the revision it produced, stored
+  after the success and outside the failure handling. `rejectAction` deletes the record, which ends
+  the simulation.
+- **Apply outcomes** (MVP-12, `binding.applyOnce`, `apply-attempts.ts`). A failure is returned to
+  the overseer as `{ failed: ActionApplyFailure }` with what it proves, never thrown:
+  - *Known not applied* only when its stage proves it and no earlier attempt may have reached
+    InferOps: a failure before sending (a check, the scope read, the switch, a fingerprint
+    mismatch, a credential that fails locally before the request is handed one), or, for board
+    writes only, InferOps answering the write itself with a 401, or with a 400, 403, 404 or 409
+    carrying its error envelope (a malformed or foreign body proves nothing). A refusal that will stand (stale, invalid state, gone, conflict,
+    invalid, fingerprint mismatch, a workflow-policy `FORBIDDEN`) ends the record `failed` with its
+    reason in `attempts.failure`; it is no longer simulated, the issue is free for another proposal,
+    and every later apply replays the refusal without sending. One that can pass (`UNAUTHORIZED`,
+    `DISABLED`, `UNAVAILABLE` before sending, a missing permission's `FORBIDDEN`) is reported
+    `retryable` and leaves the record pending, simulated and unmarked.
+  - *Unknown* otherwise: a 5xx or other status, a lost response, an unusable success, a changed
+    credential, and any failure after an attempt that may have reached InferOps or of a record
+    from before attempts were kept. A later refusal never clears that: it reports the earlier
+    attempt may have applied. The record stays pending, marked dispatched, with the outcome stored.
+    A board write may be approved again: it is resent under the same key, which InferOps applies
+    at most once (`retryable` unless InferOps answered a refusal that will stand).
 - **Reverting.** A transition moves the issue back only if it is still where the move left it. A
   title or priority update restores the previous values with the then-current revision only if
   the issue is still at the revision the update produced and still shows its values. Creates and
@@ -264,9 +283,13 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   B, but its data source is guarded by `CODING_WORKBENCH_ENABLED` as well as `INFEROPS_ENABLED`.
   `dispatch` and `cancel` are staged and submitted like board writes, with action kinds
   `inferops.code-dispatch` and `inferops.run-cancel`; `applyAction` rechecks the switch, the
-  allowlist and the fingerprint before sending. A 409 `RUN_ACTIVE` maps to `RUN_ACTIVE` (it was
-  `CONFLICT`, which only a dispatch can receive), and a refused apply names the missing
-  `issue:delegate`, an active run, a stale revision or the switch. The full flow is in
+  allowlist and the fingerprint before sending, and a refusal there names the switch, the
+  allowlist or the mismatch and is known not applied. A 409 `RUN_ACTIVE` maps to `RUN_ACTIVE` (it
+  was `CONFLICT`, which only a dispatch can receive). Both kinds are reconcile-only: InferOps
+  refusing the write (a missing `issue:delegate`, an active run, a stale revision) is not yet taken
+  as proof, and no same-key replay is verified for them, so any failure after the record was marked
+  dispatched is unknown, and every later apply returns that stored unknown without sending (a record
+  from before attempts were kept is never sent). The full flow is in
   [local coding workflows](local-coding-workflows.md#data-and-control-flow).
 - **InferMind Wiki.** At connect, InferLab's InferMind memberships are now kept beside the InferOps
   ones (`product: "infermind"`; an identity stored before has none, so its Wiki needs a
@@ -296,9 +319,11 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `document-update` with the previous body, and submits it with action kind
   `inferops.wiki-page-update`, showing page, expected version and the current and new text.
   `applyAction` sends it under `<instance>:<action>` expecting the proposed version, without
-  reading first: InferOps' compare-and-swap refuses any change since (`STALE_REVISION`, the action
-  stays pending), including another writer's write of the same body, which is never counted as in
-  effect; a retried apply whose write committed is replayed by InferOps. `revertAction` is a fresh
+  reading first: InferOps' compare-and-swap refuses any change since (`STALE_REVISION`), including
+  another writer's write of the same body, which is never counted as in effect. Page and section
+  edits are reconcile-only like coding actions: InferOps' refusal of the write is reported unknown,
+  and once an attempt may have reached InferOps no later apply sends it again, even where InferOps
+  would replay it. `revertAction` is a fresh
   compare-and-swap write of the previous body expecting the version the edit produced, under
   `<instance>:<action>:revert` (a distinct key, since InferOps binds a key to its payload); a page
   changed since in any way (body, title or tree) is reported and keeps its content. `updateSection` checks the version (decimal integer, `INVALID_REQUEST` otherwise),
@@ -307,9 +332,10 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `section-update` with the previous body, and submits it with action kind
   `inferops.wiki-section-update`, showing page, section, expected version and the current and new
   text. `applyAction` requires the fingerprint (a record without one is refused), reads the
-  section, PATCHes under `<instance>:<action>` only while it is at the expected version, counts a
-  section already showing the approved body as applied without writing, and otherwise refuses it
-  as stale; it records the version InferOps reported. `revertAction` restores the previous body
+  section (a failed read or a stale version is known not applied, nothing sent), PATCHes under
+  `<instance>:<action>` only while it is at the expected version, counts a section already showing
+  the approved body as applied without writing on a first attempt, and records the version InferOps
+  reported. `revertAction` restores the previous body
   under `<instance>:<action>:revert` only while the section is at that version with that body.
   Observers: strategy B through the verifier's `hasWikiAccess(host, workspaceId)`, a page list with
   the collaborator's own token.
@@ -361,7 +387,7 @@ of these vars, so a deployed instance cannot be given them through the deploy wi
 
 - `InferOpsAccount.getGatekeeperClassFor` refuses before reading the URL, so no new binding is created.
 - `clientFor` returns a client that checks the switch on **every call**, not when a binding or session is made (`whileInferOpsEnabled`). Every call through an existing binding or session (`readBoard`, `openIssue`, `read`, `transition`), observer admission (`addObserver` through the verifier), the project picker and `revertAction` fail with `DISABLED: InferOps is turned off for this deployment.` The proxy guards every client method except `forget`, including methods added later, so an account can still delete its own data (`revoke`).
-- `applyAction` of a queued move fails with a message saying InferOps is turned off; the move is not applied and its record stays pending. `rejectAction` still works, since it only discards.
+- `applyAction` of a queued move returns a failure known not applied and `retryable`, saying InferOps is turned off; nothing is sent and its record stays pending and unmarked. `rejectAction` still works, since it only discards.
 - Nothing is deleted: bindings, queued moves, credentials and accounts are kept. Turning it back on restores exactly those; it creates no binding, grant or account. Sign-in (`connectAccount`), account description and `createAccount` are unaffected: an account is an id with no data until a binding is made, and bindings are refused.
 
 `DISABLED` is an `InferOpsErrorCode` (`inferops-client.ts`) the gatekeeper raises itself; no InferOps response maps to it. The agent-facing types (`src/types.d.ts`, the design's API verbatim) do not list it; the error message names it. The canvas board card shows it as its own state ([canvas](inferops-canvas.md#board-data-adapter)). `__tests__/enablement.test.ts` covers a refused binding, every session call on an existing binding refused and served again once on, a queued move never applied while off and applied once on, revocation while off and observer admission refused.
@@ -422,6 +448,10 @@ missing a button.
 - A Wiki section edit's version check and its write are two requests (InferOps' `PATCH` takes no
   expected version), so an edit made in InferMind between them is overwritten; and a section that
   someone else set to exactly the approved body counts as the edit applied.
+- Only board writes take InferOps' refusal as proof that nothing was applied. A dispatch, cancel,
+  section or page edit InferOps refuses (a stale page version, a missing `issue:delegate`, the Wiki
+  forbidden) is reported unknown and reconcile-only, until each one's refusal and same-key replay
+  are verified.
 - InferOps' 403 on a Wiki call does not say whether the product or the permission refused it, so
   InferOS reports both with one message. Only a connected account's own InferOps workspace is
   told apart before any request; a stopgap or demo binding learns it from InferOps.
@@ -467,6 +497,14 @@ duplicate apply writing once, stale apply, update revert and its refusals, creat
 a legacy record without `kind` applied as a transition, a tampered record refused by its
 fingerprint, and two sessions proposing the same create at once queueing one action (a different
 priority is its own, and an applied one no longer joins).
+`__tests__/apply-outcomes.test.ts` covers apply outcomes: the classification, a first-attempt stale
+refusal ending the record `failed`, unsimulated and replayed without writing, a refusal that can
+pass (`DISABLED`) left pending and unmarked and applied once on, a fingerprint mismatch failed
+unsent, a later refusal after an earlier dispatched attempt staying unknown, a lost response
+replayed under its key into one write, a legacy record's refusal unknown, and a legacy dispatch
+never sent. `dispatch.test.ts` and `wiki.test.ts` cover a refused dispatch and page edit stored
+unknown and not sent again, and a page edit whose write committed with its response lost not sent
+again.
 `__tests__/conformance.test.ts` runs the shared connection conformance suite
 ([connection packages](connection-extensions.md)) on a `DEMO` board binding: scope, observation and
 sharing, approval and apply-once, stale revision at apply, retry after a 503 and after a lost
@@ -478,7 +516,10 @@ mismatch, replay of one idempotency key, create and update request shapes and he
 whose response was lost retried under the same key into one issue, update replay, no PATCH for an
 issue of another project, error mapping (400, 404, 409 conflict and workflow mismatch, 5xx, 403
 workflow-policy refusal), rejected credential, 5xx, redirect, non-JSON and
-malformed responses, and connection configuration. The gatekeeper's own tests never run its
+malformed responses, connection configuration, and write stages: InferOps' 400, 401, 403, 404 and
+409 to the write marked refused (a policy 403 named), the same statuses without InferOps' error
+envelope proving nothing except a 401, 429, 5xx, a lost response and an unusable success proving
+nothing, and a failed check or scope read marked unsent with no write sent. The gatekeeper's own tests never run its
 sessions over the HTTP client; the integration suite below does. `__tests__/inferlab-login.test.ts` covers origin validation,
 `providesAuth`, the authorize redirect, the PKCE exchange, the sign-in's logout and handoff,
 single-use links and states, forged states, InferLab errors, rejected exchanges and unverified
@@ -490,7 +531,9 @@ offered by slug, a URL's workspace slug resolving to the person's own workspace 
 several workspaces each bound by its own slug, a workspace the person does not hold refused
 exactly like a missing project before any request, a tampered tenant label granting nothing,
 malformed authorities rejected without a request, `demo.local` staying demo data, a failed
-workspace list failing the connect and signing the session out, InferOps denying a workspace
+workspace list failing the connect and signing the session out, a page edit applied after the
+person's session died sending nothing and reported not applied (not reconcile-only), then applied
+once after a reconnect, InferOps denying a workspace
 without expiring the account, observer admission by the collaborator's own membership, and a
 create and an update proposed before the session ended not applied after it.
 `__tests__/wiki.test.ts` (workerd, over the mock) covers the Wiki: its grammar and the page
@@ -499,17 +542,19 @@ InferMind refused at binding, on every read and at apply, the page list and page
 observations with versions, wikilinks and only standalone references, the agent text, unknown,
 malformed and section-less pages, an edit queued and shown pending and written once on approval,
 stale, unknown and malformed edits refused at proposal, an unchanged body and a second pending
-edit, an edit made stale in InferOps refused at apply, an edit already in effect counted as
+edit, an edit made stale in InferOps refused at apply (unsent), an edit already in effect counted as
 applied without a second write, a tampered or unsigned record refused by its fingerprint,
 rejection, revert and its refusal, `INFEROPS_ENABLED` off and on, and observer admission. For
 pages and structure it covers the structure read as an observation, a page's body, version and
 Master role, the page text of a body-only SOP (title H1 dropped, another heading kept), of a page
 with a body and a section (body only), of the section-less root and pillar Masters (generated
 blocks, slash slugs encoded) and of a page with nothing to read (`NOT_FOUND`), and body edits:
-shown as `pendingBody`, applied once, refused stale at proposal and at apply (content left),
-refused stale when another writer wrote the same body, replayed on a retried apply, fingerprint
-tampering, rejection, a second pending edit (`CONFLICT`), the revert only at the produced
-version, and the Wiki refused (`FORBIDDEN`) at proposal and apply.
+shown as `pendingBody`, applied once, refused stale at proposal, stored unknown when InferOps
+refuses it stale at apply (content left) or when another writer wrote the same body, not sent
+again after a write whose response was lost (InferOps' own key-bound replay checked on the mock),
+fingerprint tampering, rejection, a second pending edit (`CONFLICT`), the revert only at the
+produced version, and the Wiki refused (`FORBIDDEN`) at proposal and, unknown and not resent, at
+apply.
 `account.test.ts` adds a connected person's InferMind workspace bound by slug with their own token
 there, one of their InferOps workspaces refused as having no Wiki and an InferMind one refused as
 a board (both before any request), an unheld workspace refused like a missing Wiki, a tampered

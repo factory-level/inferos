@@ -7,7 +7,7 @@
 // connected accounts are kept) and turning it on creates nothing: it restores only what still
 // exists. A flag is never a grant.
 
-import { InferOpsError, type InferOpsClient } from "./inferops-client";
+import { InferOpsError, atStage, type InferOpsClient } from "./inferops-client";
 
 /** The message every refused call carries after its `DISABLED: ` code. */
 export const DISABLED_MESSAGE = "InferOps is turned off for this deployment.";
@@ -51,8 +51,14 @@ export function guarded(check: () => void, open: () => InferOpsClient): InferOps
       if (typeof method !== "string" || method === "then") return undefined;
       if (method === "forget") return () => inner().forget();
       return async (...args: unknown[]) => {
-        check();
-        const target = inner() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+        let target: Record<string, (...a: unknown[]) => Promise<unknown>>;
+        try {
+          check();
+          target = inner() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+        } catch (error) {
+          // Refused or unopened: nothing of this call reached InferOps.
+          throw atStage(error, "unsent");
+        }
         const call = target[method];
         if (typeof call !== "function") throw new TypeError(`InferOpsClient has no method ${method}`);
         return call.apply(target, args);
