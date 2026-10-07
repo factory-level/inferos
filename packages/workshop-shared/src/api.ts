@@ -2307,8 +2307,14 @@ export type ActionAttempt = {
   message: string;
   /** The provider's error code, when it gave one. */
   code?: string;
-  /** When the attempt ended. For a failed action, this is when it failed. */
+  /**
+   * When the attempt was recorded: when it ended, or, for an apply a restart interrupted, when
+   * recovery found it. For a failed action, this is when it failed. It is the record's change time
+   * (see `actionChangeTime`), so a reconnecting subscriber is sent it.
+   */
   at: Date;
+  /** When an interrupted apply was sent, recorded with it since `at` is when recovery found it. */
+  startedAt?: Date;
 };
 
 /** The kind of caller that asked for an action log entry (see `ActionLogEntry.requestedBy`). */

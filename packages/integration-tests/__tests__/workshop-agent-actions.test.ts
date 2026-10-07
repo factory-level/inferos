@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
-import type { ActionState, AiChatMessage, Overseer } from "@gadgets/workshop-shared/api";
+import {
+  actionChangeTime, type ActionLogEntry, type ActionState, type ActionsSubscriber, type AiChatMessage, type Overseer,
+} from "@gadgets/workshop-shared/api";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import { openAgentSession, type WorkshopAgentSession } from "../src/agent-session.js";
 import {
@@ -11,7 +13,7 @@ import {
 } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  accountLabel, restartWorkspace, streamGeneration, waitFor, withOwnerWorkspace,
+  accountLabel, restartWorkspace, RpcTarget, streamGeneration, stubFor, waitFor, withOwnerWorkspace,
 } from "../src/rpc-client.js";
 
 let harness: Harness;
@@ -379,15 +381,91 @@ it.concurrent("an apply interrupted by a restart comes back with an unknown outc
     try {
       await waitFor("the apply to be dispatched", async () => await applyAttempts(label) === 1 || null);
       await restartWorkspace(harness.url, ws);
+      // The held apply is released only once the restart has happened, so it cannot finish first.
+      await waitFor("the restart to drop the session", async () => session.connectionDrops > 0 || null);
     } finally {
       await control("release-apply", { label });
       await Promise.allSettled([approval]);
     }
   });
-  await waitFor("the restart to drop the session", async () => session.connectionDrops > 0 || null);
   const { entries } = await session.listActions({ filter: "action" });
   expect(entries.find(candidate => candidate.id === action.id)).toMatchObject({ state: "pending", lastAttempt: {
     outcome: "unknown", message: expect.stringContaining("interrupted after it was sent") } });
+});
+
+// Records every action-log entry a subscription sends (an upsert stream).
+class ActionRecorder extends RpcTarget implements ActionsSubscriber {
+  readonly entries: ActionLogEntry[] = [];
+  entry(record: ActionLogEntry) { this.entries.push(record); }
+  ready() {}
+}
+
+// The recovered outcome of an interrupted apply is a change of its own, stamped when recovery finds
+// it: a subscriber resuming from a watermark another action set after that apply started still gets it.
+it.concurrent("an interrupted apply's recovered outcome reaches a subscriber resuming from a newer watermark", async () => {
+  await using session = await openSession(models.script([writeValues(1, 2), { text: "Not reached." }]), "agentrecoverywatermark");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 1, then 2.");
+  const [first, second] = await waitForPendingActions(session, 2);
+  let watermark: Date | undefined;
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await control("hold-next-apply", { label });
+    const approval = ws.approveAction(first!.id);
+    try {
+      await waitFor("the first apply to be dispatched", async () => await applyAttempts(label) === 1 || null);
+      // Another action changes after the first apply started, moving a subscriber's watermark on.
+      await ws.approveAction(second!.id);
+      const { entries } = await ws.listActions({ filter: "action" });
+      const decided = entries.find(candidate => candidate.id === second!.id);
+      if (!decided) throw new Error("The second action is not in the log");
+      watermark = actionChangeTime(decided);
+      await restartWorkspace(harness.url, ws);
+      // The held apply is released only once the restart has happened, so it cannot finish first.
+      await waitFor("the restart to drop the session", async () => session.connectionDrops > 0 || null);
+    } finally {
+      await control("release-apply", { label });
+      await Promise.allSettled([approval]);
+    }
+  });
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    const replay = new ActionRecorder();
+    using replayStub = stubFor(replay);
+    using _subscription = await ws.subscribeToActions(replayStub, watermark);
+    const recovered = await waitFor("the recovered outcome in the replay", async () =>
+      replay.entries.find(entry => entry.id === first!.id) ?? null);
+    expect(recovered).toMatchObject({ state: "pending", lastAttempt: { outcome: "unknown" } });
+    expect(recovered.type === "action" && recovered.lastAttempt?.startedAt).toBeInstanceOf(Date);
+  });
+});
+
+// A rejection holds the action until its outcome is stored: an approval arriving while the gatekeeper
+// is still answering the rejection is refused, and nothing is applied.
+it.concurrent("approving while a rejection is under way is refused, and the rejection stands", async () => {
+  await using session = await openSession(models.script([{ text: "Ready." }]), "agentapproveduringreject");
+  const label = labelOf(session);
+  await session.runTurn("Get ready.");
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    using connection = await ws.newGatekeeper(session.connectedAccount(TEST_VENDOR_ID).id,
+        "https://gadgets-test.example/things/approve-during-reject");
+    if (!connection) throw new Error("Failed to create the test connection");
+    using testSession = await connection.openSession() as RpcStub<TestSession>;
+    expect(await testSession.writeValue(37)).toBe(1);
+    const [action] = await waitForPendingActions(session, 1);
+
+    await control("hold-next-reject", { label });
+    const rejection = ws.rejectAction(action.id);
+    try {
+      await waitFor("the rejection to reach the gatekeeper", async () =>
+        (await control<{ attempts: number }>("reject-attempts", { label })).attempts === 1 || null);
+      await expect(ws.approveAction(action.id)).rejects.toThrow(`Action is not pending: ${action.id}`);
+    } finally {
+      await control("release-reject", { label });
+    }
+    await rejection;
+    expect(await actionStatus(session, action.id)).toMatchObject(decidedBy(session, "rejected"));
+    expect(await applyAttempts(label)).toBe(0);
+    expect(await actionState(label)).toEqual({ pending: [], applyCount: 0 });
+  });
 });
 
 // A rejection is a decision too: it cannot start while an apply of the same action is under way,

@@ -5686,8 +5686,10 @@ class OverseerImpl implements AgentHooks {
       if (record.type !== "action" || record.applyStartedAt === undefined) continue;
       let startedAt = record.applyStartedAt;
       delete record.applyStartedAt;
+      // Stamped now, not at the start: a subscriber whose watermark passed the start (another
+      // action changed since) must still be sent this, and `at` is the change time it resumes by.
       if (record.lastAttempt?.outcome !== "unknown") {
-        record.lastAttempt = {outcome: "unknown", message: INTERRUPTED_APPLY_MESSAGE, at: startedAt};
+        record.lastAttempt = {outcome: "unknown", message: INTERRUPTED_APPLY_MESSAGE, startedAt, at: new Date()};
       }
       this.storage.actions.put(record);
     }
@@ -12449,21 +12451,22 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
+    // The whole decision runs under the claim, through to the stored rejection, so no approval can
+    // start between the gatekeeper's answer and the record saying it was rejected.
     await this.impl.withActionClaim(id, async () => {
       await gatekeeper.rejectAction(action.action);
       // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
       let current = this.impl.storage.actions.get(id);
       if (current?.type === "action") Object.assign(action, current);
-    });
-
-    action.state = "rejected";
-    action.appliedAt = new Date();
-    action.resolvedBy = profile;
-    // A rejected push's pending-push marks are removed in the same durable step as the state
-    // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
-    this.impl.storage.transaction(() => {
-      this.impl.gitCache.clearPushMarks(action.id);
-      this.impl.storage.actions.put(action);
+      action.state = "rejected";
+      action.appliedAt = new Date();
+      action.resolvedBy = profile;
+      // A rejected push's pending-push marks are removed in the same durable step as the state
+      // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
+      this.impl.storage.transaction(() => {
+        this.impl.gitCache.clearPushMarks(action.id);
+        this.impl.storage.actions.put(action);
+      });
     });
     this.impl.traceAgentActionApproval(action, "denied");
 

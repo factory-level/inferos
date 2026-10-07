@@ -223,6 +223,34 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.kv.put(`release-apply:${label}`, true);
   }
 
+  /** Parks the next rejectAction() for `label` until releaseReject(), so a test can race it. */
+  holdNextReject(label: string): void {
+    this.ctx.storage.kv.put(`hold-next-reject:${label}`, true);
+    this.ctx.storage.kv.delete(`release-reject:${label}`);
+  }
+
+  /** One-shot, like takeNextApplyHold(). */
+  takeNextRejectHold(label: string): boolean {
+    return this.ctx.storage.kv.delete(`hold-next-reject:${label}`);
+  }
+
+  releaseReject(label: string): void {
+    this.ctx.storage.kv.put(`release-reject:${label}`, true);
+  }
+
+  isRejectReleased(label: string): boolean {
+    return this.ctx.storage.kv.get<boolean>(`release-reject:${label}`) ?? false;
+  }
+
+  recordRejectAttempt(label: string): void {
+    this.ctx.storage.kv.put(`reject-attempts:${label}`, this.getRejectAttempts(label) + 1);
+  }
+
+  /** Every rejectAction() call. */
+  getRejectAttempts(label: string): number {
+    return this.ctx.storage.kv.get<number>(`reject-attempts:${label}`) ?? 0;
+  }
+
   isApplyReleased(label: string): boolean {
     return this.ctx.storage.kv.get<boolean>(`release-apply:${label}`) ?? false;
   }
@@ -619,6 +647,13 @@ class TestSessionTarget extends RpcTarget implements TestSession {
 const SET_VALUE_ACTION_KIND: ActionKind = { tag: "set-value", label: "Set value" };
 
 /** Polls rather than parks a promise: the release arrives on another request to TestControl. */
+async function waitForRejectRelease(state: DurableObjectStub<TestControl>, label: string) {
+  for (const deadline = Date.now() + 30_000; !await state.isRejectReleased(label);) {
+    if (Date.now() > deadline) throw new Error("The held test reject was never released.");
+    await scheduler.wait(25);
+  }
+}
+
 async function waitForApplyRelease(state: DurableObjectStub<TestControl>, label: string) {
   for (const deadline = Date.now() + 30_000; !await state.isApplyReleased(label);) {
     if (Date.now() > deadline) throw new Error("The held test apply was never released.");
@@ -711,7 +746,12 @@ export class TestGatekeeper
   }
 
   async rejectAction(action: number): Promise<void> {
-    await control(this.ctx.exports).discardAction(this.ctx.props.label, action);
+    const state = control(this.ctx.exports);
+    const { label } = this.ctx.props;
+    const held = await state.takeNextRejectHold(label);
+    await state.recordRejectAttempt(label);
+    if (held) await waitForRejectRelease(state, label);
+    await state.discardAction(label, action);
   }
 
   async revertAction(_action: number): Promise<void> {
@@ -874,6 +914,30 @@ export default {
     }
 
     // Body: {"label": "..."}
+    // One-shot: the next rejectAction() for `label` waits for /control/release-reject.
+    // Body: {"label": "..."}
+    if (url.pathname === "/control/hold-next-reject" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      await control(ctx.exports).holdNextReject(label);
+      return new Response(null, { status: 204 });
+    }
+
+    // Body: {"label": "..."}
+    if (url.pathname === "/control/release-reject" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      await control(ctx.exports).releaseReject(label);
+      return new Response(null, { status: 204 });
+    }
+
+    // Body: {"label": "..."} -> {"attempts": number}
+    if (url.pathname === "/control/reject-attempts" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      return Response.json({ attempts: await control(ctx.exports).getRejectAttempts(label) });
+    }
+
     if (url.pathname === "/control/release-apply" && req.method === "POST") {
       const { label } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
