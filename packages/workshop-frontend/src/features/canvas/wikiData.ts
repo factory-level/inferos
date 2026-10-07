@@ -2,13 +2,14 @@
 // (`inferops://<tenant>.<workspace>/knowledge/wiki`). Like a board, the reference is resolved only
 // through a connection the workspace already holds (Overseer.getGatekeeperByResourceUrl), so it
 // identifies a Wiki and authorizes nothing. InferMind stays authoritative: this keeps the latest
-// reads, and a section edit is only proposed through the gatekeeper's approval path. What became
-// of an edit is read from the page, never assumed: a proposal is not a save.
+// reads (the page list, the Wiki structure, the pages), and a section or page body edit is only
+// proposed through the gatekeeper's approval path. What became of an edit is read from the page,
+// never assumed: a proposal is not a save.
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSection } from '@inferos/gatekeeper-inferops/src/types'
+import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
+import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
 import { canonicalBoardRef, codeOf, messageOf, type ProposalResult } from './boardData'
-import { isOpenEdit, reconcileEdit, type SectionEdit } from './wikiPage'
+import { bodyEditActionTitle, isOpenEdit, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
 
 export type WikiListState =
   | { status: 'loading' }
@@ -24,6 +25,16 @@ export type WikiListState =
   /** `refreshing` while a newer read is under way; `error` when it failed and these are the previous pages. */
   | { status: 'ready'; documents: readonly WikiDocumentNode[]; refreshing: boolean; error?: string }
 
+/**
+ * How the Wiki is organized, read apart from the page list: a failure here leaves the pages
+ * readable, and is stated rather than shown as an unorganized Wiki.
+ */
+export type WikiStructureState =
+  | { status: 'loading' }
+  | { status: 'error'; code: string; message: string }
+  /** `refreshing` while a newer read is under way; `error` when it failed and this is the previous structure. */
+  | { status: 'ready'; structure: WikiStructure; refreshing: boolean; error?: string }
+
 export type WikiPageState =
   | { status: 'loading' }
   /** The Wiki has no such page, or none of it the person can read (`NOT_FOUND`). */
@@ -34,16 +45,20 @@ export type WikiPageState =
 /** Everything the Wiki widget shows, replaced as a whole on every change. */
 export type WikiSnapshot = {
   list: WikiListState
+  structure: WikiStructureState
   /** Pages read so far, by slug. */
   pages: ReadonlyMap<string, WikiPageState>
   /** Section edits proposed here, by section id. */
   edits: ReadonlyMap<string, SectionEdit>
+  /** Page body edits proposed here, by page id. */
+  bodyEdits: ReadonlyMap<string, BodyEdit>
 }
 
 /** The agent's text of one page, or why it could not be read. */
 export type AgentTextResult = { ok: true; text: string } | { ok: false; code: string; message: string }
 
-const LOADING: WikiSnapshot = { list: { status: 'loading' }, pages: new Map(), edits: new Map() }
+/** Nothing read yet; one object, so snapshots compare equal. */
+export const LOADING_WIKI: WikiSnapshot = { list: { status: 'loading' }, structure: { status: 'loading' }, pages: new Map(), edits: new Map(), bodyEdits: new Map() }
 const NOT_CONNECTED = { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this Wiki any more.' } as const
 
 // Access to the Wiki itself is gone: the credential or the knowledge permission was refused, or the
@@ -52,18 +67,22 @@ const lostAccess = (error: unknown): boolean =>
   ['UNAUTHORIZED', 'FORBIDDEN'].includes(codeOf(error)) || messageOf(error).includes('No such gatekeeper')
 
 type Edit = SectionEdit & { slug: string; queued?: number }
+// `title` is the page's when proposed; `actionId` is the log id of the approval it raised, once seen.
+type PageEdit = BodyEdit & { slug: string; title: string; queued?: number; actionId?: number }
 
 export class WikiData {
   /** The canonical Wiki reference this instance reads. */
   readonly target: string
   readonly #overseer: RpcStub<Overseer>
   readonly #listeners = new Set<() => void>()
-  #snapshot: WikiSnapshot = LOADING
+  #snapshot: WikiSnapshot = LOADING_WIKI
   readonly #edits = new Map<string, Edit>()
+  readonly #bodyEdits = new Map<string, PageEdit>()
   #session?: Promise<RpcStub<InferOpsWikiSession> | null>
   // Orders reads: a result older than the newest read of the same thing never lands.
   #clock = 0
   #listRead = 0
+  #structureRead = 0
   readonly #pageReads = new Map<string, number>()
   #disposed = false
 
@@ -71,6 +90,7 @@ export class WikiData {
     this.#overseer = overseer
     this.target = canonicalBoardRef(targetRef)
     void this.#readList()
+    void this.#readStructure()
   }
 
   get snapshot(): WikiSnapshot {
@@ -88,10 +108,11 @@ export class WikiData {
     void this.#readPage(slug)
   }
 
-  /** Re-read the page list and every page held, keeping what is shown until the reads land. */
+  /** Re-read the page list, the structure and every page held, keeping what is shown until the reads land. */
   refresh = (): void => {
     if (this.#disposed) return
     void this.#readList()
+    void this.#readStructure()
     for (const slug of this.#snapshot.pages.keys()) void this.#readPage(slug)
   }
 
@@ -126,6 +147,65 @@ export class WikiData {
     }
   }
 
+  /**
+   * Propose replacing the page's body at the version the page was read at, decided like a section
+   * edit: pending until a page read made after it was queued shows how it was decided (the
+   * `pendingBody` overlay keeps it awaiting); the page is re-read either way.
+   */
+  async proposeBodyEdit(document: Pick<WikiDocument, 'id' | 'slug' | 'title' | 'body' | 'version' | 'pendingBody'>, body: string): Promise<ProposalResult> {
+    if (document.pendingBody || isOpenEdit(this.#bodyEdits.get(document.id))) {
+      return { ok: false, code: 'CONFLICT', message: 'This page already has a body edit that has not taken effect yet.' }
+    }
+    if (body === document.body) return { ok: false, code: 'UNCHANGED', message: 'Nothing changed.' }
+    const edit: PageEdit = { slug: document.slug, title: document.title, documentId: document.id, body, expectedVersion: document.version, phase: 'proposing' }
+    this.#putBodyEdit(edit)
+    try {
+      const session = await this.#sessionOf()
+      if (!session) {
+        this.#putBodyEdit({ ...edit, phase: 'refused', code: NOT_CONNECTED.code, message: NOT_CONNECTED.message })
+        return NOT_CONNECTED
+      }
+      await session.updateDocumentBody(document.id, body, document.version)
+      // Its approval may already have been logged (and correlated) while the proposal was answered.
+      this.#putBodyEdit({ ...edit, actionId: this.#bodyEdits.get(edit.documentId)?.actionId, phase: 'awaiting', queued: ++this.#clock })
+      return { ok: true }
+    } catch (error) {
+      const code = codeOf(error)
+      const message = messageOf(error)
+      this.#putBodyEdit({ ...edit, phase: 'refused', code, message })
+      return { ok: false, code, message }
+    } finally {
+      if (!this.#disposed) void this.#readPage(document.slug)
+    }
+  }
+
+  /**
+   * Correlate an action log record with the body edits proposed here: the first pending approval
+   * for this Wiki titled for a page's edit while it is open is that edit's, and only its approval
+   * lets the page's new text be called saved. Anything else (a decision this session never saw
+   * raised, another page's) changes nothing.
+   */
+  noteAction(record: ActionLogEntry): void {
+    if (this.#disposed || record.type !== 'action' || !record.resourceUrl || canonicalBoardRef(record.resourceUrl) !== this.target) return
+    for (const edit of this.#bodyEdits.values()) {
+      if (record.description.title !== bodyEditActionTitle(edit.title)) continue
+      if (record.state === 'pending' && edit.actionId === undefined && isOpenEdit(edit)) {
+        this.#bodyEdits.set(edit.documentId, { ...edit, actionId: record.id })
+      } else if (record.state === 'approved' && record.id === edit.actionId && !edit.approved) {
+        // A read that landed first left it matched; this approval is what says it was saved.
+        this.#putBodyEdit({ ...edit, approved: true, ...(edit.phase === 'matched' ? { phase: 'applied' as const } : {}) })
+      }
+    }
+  }
+
+  /** Forget a decided or refused body edit, e.g. when the person starts another. */
+  dismissBodyEdit(documentId: string): void {
+    const edit = this.#bodyEdits.get(documentId)
+    if (!edit || isOpenEdit(edit)) return
+    this.#bodyEdits.delete(documentId)
+    this.#publish({})
+  }
+
   /** Forget a decided or refused edit, e.g. when the person starts another. */
   dismissEdit(sectionId: string): void {
     const edit = this.#edits.get(sectionId)
@@ -154,7 +234,7 @@ export class WikiData {
 
   #publish(update: Partial<WikiSnapshot>): void {
     if (this.#disposed) return
-    this.#snapshot = { ...this.#snapshot, ...update, edits: new Map(this.#edits) }
+    this.#snapshot = { ...this.#snapshot, ...update, edits: new Map(this.#edits), bodyEdits: new Map(this.#bodyEdits) }
     for (const listener of this.#listeners) listener()
   }
 
@@ -163,15 +243,22 @@ export class WikiData {
     this.#publish({})
   }
 
+  #putBodyEdit(edit: PageEdit): void {
+    this.#bodyEdits.set(edit.documentId, edit)
+    this.#publish({})
+  }
+
   #setPage(slug: string, state: WikiPageState): void {
     this.#publish({ pages: new Map(this.#snapshot.pages).set(slug, state) })
   }
 
-  // Access to the whole Wiki changed: what was read under it is dropped, not shown as current.
+  // Access to the whole Wiki changed: what was read under it is dropped, not shown as current, and
+  // no read started before the loss may land after it.
   #lose(list: WikiListState): void {
     this.#forgetSession()
     this.#pageReads.clear()
-    this.#publish({ list, pages: new Map() })
+    this.#listRead = this.#structureRead = ++this.#clock
+    this.#publish({ list, structure: { status: 'loading' }, pages: new Map() })
   }
 
   #failed(error: unknown): boolean {
@@ -215,6 +302,27 @@ export class WikiData {
     }
   }
 
+  async #readStructure(): Promise<void> {
+    const clock = this.#structureRead = ++this.#clock
+    const current = (): boolean => !this.#disposed && clock === this.#structureRead
+    const before = this.#snapshot.structure
+    if (before.status === 'ready') this.#publish({ structure: { ...before, refreshing: true } })
+    try {
+      const session = await this.#sessionOf()
+      // No connection is the list's to report; the structure just stays unread.
+      if (!current() || !session) return
+      const structure = await session.readStructure()
+      if (!current()) return
+      this.#publish({ structure: { status: 'ready', structure, refreshing: false } })
+    } catch (error) {
+      if (!current() || this.#failed(error)) return
+      const shown = this.#snapshot.structure
+      this.#publish({ structure: shown.status === 'ready'
+        ? { ...shown, refreshing: false, error: messageOf(error) }
+        : { status: 'error', code: codeOf(error), message: messageOf(error) } })
+    }
+  }
+
   async #readPage(slug: string): Promise<void> {
     const clock = ++this.#clock
     this.#pageReads.set(slug, clock)
@@ -233,6 +341,9 @@ export class WikiData {
       // Only a read started after an edit was queued can say how it was decided.
       for (const edit of this.#edits.values()) {
         if (edit.slug === slug && edit.queued !== undefined && edit.queued < clock) this.#edits.set(edit.sectionId, reconcileEdit(edit, document))
+      }
+      for (const edit of this.#bodyEdits.values()) {
+        if (edit.slug === slug && edit.queued !== undefined && edit.queued < clock) this.#bodyEdits.set(edit.documentId, reconcileBodyEdit(edit, document))
       }
       this.#setPage(slug, { status: 'ready', document, refreshing: false })
     } catch (error) {

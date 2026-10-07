@@ -28,8 +28,9 @@
 //                                gatekeeper then runs with `CODING_WORKBENCH_ENABLED=true` and that
 //                                id alone on `CODING_WORKBENCH_REPOS`. Step i skips without it.
 //   INFEROPS_LIVE_WIKI_WORKSPACE_ID   optional: an InferMind workspace the token's person belongs
-//   INFEROPS_LIVE_WIKI_WORKSPACE_SLUG to (`knowledge` in the seed) for step j. Step j skips
-//                                     without both.
+//   INFEROPS_LIVE_WIKI_WORKSPACE_SLUG to (`knowledge` in the seed) for steps j and k. Both skip
+//                                     without both. Step k needs a company structure: apply an
+//                                     intake's pillars first (InferOps `pillar.apply`).
 //
 // It writes to InferOps: one new issue per run, titled `InferOS live <timestamp>`, which it then
 // updates and moves. InferOps has no issue delete, so the issue is left in place. Step h also
@@ -38,7 +39,9 @@
 // content issue per run. Step i dispatches that run's issue to the enrolled repository: the run is
 // queued (no runner is needed, none picks it up), then cancelled; the run record and the issue's
 // move to `Queued` stay. Step j appends one marker line per run to one Wiki section, and
-// overwrites the same section once directly to prove an apply-time version check.
+// overwrites the same section once directly to prove an apply-time version check. Step k
+// appends one marker line per run to the body of one page filed under a pillar, and overwrites it
+// once directly to prove InferOps' compare-and-swap refuses the overtaken approval.
 //
 // Run, after `pnpm --filter @gadgets/integration-tests run test:prebuild`:
 //   INFEROPS_LIVE_BASE_URL=... INFEROPS_LIVE_TOKEN=... INFEROPS_LIVE_WORKSPACE_ID=... \
@@ -134,6 +137,16 @@ const liveRunsOf = async (issueId: string) =>
   ((await inferOps(`/project/runs?issueId=${issueId}`)) as { runs: LiveRun[] }).runs;
 
 type LiveSection = { id: string; documentId: string; tag: string; body: string; version: number };
+
+/** A live page as InferOps' page contract composes it: `# title`, then its body, else its sections. */
+async function livePageText(id: string, sections: LiveSection[]): Promise<string> {
+  const doc = await inferOps(`/knowledge/documents/${id}`, undefined, LIVE.wikiWorkspaceId) as
+    { title: string; body: string };
+  const lead = /^\s*#\s+(.*?)\s*(?:\r?\n|$)/.exec(doc.body);
+  const body = lead && lead[1]!.trim() === doc.title.trim() ? doc.body.slice(lead[0].length) : doc.body;
+  const parts = doc.body.trim() ? [body.trim()] : sections.map(section => section.body);
+  return [`# ${doc.title}`, ...parts].join("\n\n");
+}
 
 const liveSection = async (id: string) =>
   await inferOps(`/knowledge/sections/${id}`, undefined, LIVE.wikiWorkspaceId) as LiveSection;
@@ -713,8 +726,8 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       LIVE.wikiWorkspaceId) as LiveSection[];
     expect(page.sections.map(s => ({ id: s.id, body: s.body, version: s.version })))
       .toEqual(liveSections.map(s => ({ id: s.id, body: s.body, version: s.version })));
-    expect(await wiki.readDocumentText(page.slug))
-      .toBe([`# ${page.title}`, ...liveSections.map(s => s.body)].join("\n\n"));
+    // Page text follows InferOps' page contract: the body when the page has one, else its sections.
+    expect(await wiki.readDocumentText(page.slug)).toBe(await livePageText(page.id, liveSections));
 
     // An edit waits for approval: reads show it pending, InferOps still has the old body.
     const section = page.sections[0]!;
@@ -752,11 +765,87 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       `/knowledge/documents in ${LIVE.workspaceSlug}: 403 FORBIDDEN). Bound ` +
       `${wikiUrl(LIVE.wikiWorkspaceSlug)} (${LIVE.wikiWorkspaceId}): ${pages.length} pages; read ` +
       `${page.slug} (${page.id}, ${page.sections.length} sections, ${page.references.length} references); ` +
-      "readDocumentText equals `# title` + section bodies. Edited section " +
+      "readDocumentText equals InferOps' page contract (body, else section bodies). Edited section " +
       `${section.tag} (${section.id}): pending at version ${before.version}, unchanged in InferOps; ` +
       `after approval version ${before.version} -> ${edited.version}. Version ${before.version} refused ` +
       `STALE_REVISION at proposal; an edit at ${edited.version} overtaken by a direct PATCH (version ` +
       `${direct.version}) refused at apply ("${staleApply.slice(0, 120)}"); section left at version ` +
       `${final.version}`);
+  });
+
+  it.skipIf(!WIKI_LIVE)("k. the Wiki's company structure and page bodies: the structure matches InferOps, page text follows the shared contract, an approved body edit is a strict version-checked write (needs INFEROPS_LIVE_WIKI_WORKSPACE_ID and _SLUG)", async () => {
+    const connection = await ws.newGatekeeper(accountId, wikiUrl(LIVE.wikiWorkspaceSlug));
+    if (!connection) throw new Error(`No connection for ${wikiUrl(LIVE.wikiWorkspaceSlug)}`);
+    const wiki = await connection.openSession() as RpcStub<InferOpsWikiSession>;
+
+    // readStructure is InferOps' structure: the root, the pillars in order, Masters and filed pages.
+    const structure = await wiki.readStructure();
+    const live = await inferOps("/knowledge/wiki/structure", undefined, LIVE.wikiWorkspaceId) as {
+      root: { documentId: string } | null;
+      pillars: { key: string; master: { documentId: string } | null; members: { documentId: string; slug: string }[] }[];
+    };
+    expect(structure.root?.id ?? null).toBe(live.root?.documentId ?? null);
+    expect(structure.pillars.map(p => [p.key, p.master?.id ?? null, p.members.map(m => m.id)]))
+      .toEqual(live.pillars.map(p => [p.key, p.master?.documentId ?? null, p.members.map(m => m.documentId)]));
+    if (!structure.root || structure.pillars.length === 0) throw new Error("Apply an intake's pillars first (pillar.apply)");
+
+    // A Master reads as its title, its body if any, then the generated block of its filed pages,
+    // each linked as one encoded /wiki/ segment.
+    const pillar = structure.pillars.find(p => p.master && p.members.length > 0) ?? structure.pillars[0]!;
+    const masterText = await wiki.readDocumentText(pillar.master!.id);
+    expect(masterText).toContain(`## Pages in ${pillar.title}`);
+    for (const member of pillar.members) {
+      expect(masterText).toContain(`- [${member.title}](/wiki/${encodeURIComponent(member.slug)})`);
+    }
+
+    // A filed page with a body reads as its body, matching InferOps' own page.
+    const member = pillar.members[0];
+    if (!member) throw new Error(`Pillar ${pillar.key} files no page`);
+    const page = await wiki.readDocument(member.id);
+    const liveDoc = await inferOps(`/knowledge/documents/${member.id}`, undefined, LIVE.wikiWorkspaceId) as
+      { body: string; version: number };
+    expect({ body: page.body, version: page.version }).toEqual({ body: liveDoc.body, version: liveDoc.version });
+    const liveSections = await inferOps(`/knowledge/sections?documentId=${member.id}`, undefined,
+      LIVE.wikiWorkspaceId) as LiveSection[];
+    expect(await wiki.readDocumentText(member.id)).toBe(await livePageText(member.id, liveSections));
+
+    // A body edit waits for approval, shows as pendingBody, and leaves InferOps unchanged until then.
+    const body = `# ${page.title}\n\n${liveDoc.body.replace(/^\s*#\s+.*(?:\r?\n)+/, "").trim()}\n\nInferOS live body edit ${new Date().toISOString()}`;
+    const edit = await proposed(() => wiki.updateDocumentBody(member.id, body, page.version));
+    expect(await wiki.readDocument(member.id)).toMatchObject({ body, version: page.version, pendingBody: true });
+    expect((await inferOps(`/knowledge/documents/${member.id}`, undefined, LIVE.wikiWorkspaceId) as { version: number }).version)
+      .toBe(page.version);
+    await ws.approveAction(edit.id);
+    const edited = await inferOps(`/knowledge/documents/${member.id}`, undefined, LIVE.wikiWorkspaceId) as
+      { body: string; version: number };
+    expect(edited).toMatchObject({ body, version: page.version + 1 });
+    const shown = await wiki.readDocument(member.id);
+    expect(shown).toMatchObject({ body, version: page.version + 1 });
+    expect(shown.pendingBody).toBeUndefined();
+
+    // A proposal at the old version is refused as stale before anything is queued.
+    expect(await failure(wiki.updateDocumentBody(member.id, `${body} (stale)`, page.version)))
+      .toMatch(/^STALE_REVISION: /);
+
+    // An edit proposed at the current version and overtaken by a direct page edit -- even one that
+    // writes the very same text -- is refused at apply by InferOps' strict compare-and-swap.
+    const overtaken = await proposed(() => wiki.updateDocumentBody(member.id, `${body} (overtaken)`, edited.version));
+    const direct = await inferOps(`/knowledge/wiki/pages/${member.id}`, {
+      method: "PATCH", body: { body: `${body} (overtaken)`, expectedVersion: edited.version },
+    }, LIVE.wikiWorkspaceId) as { document: { version: number } };
+    const staleApply = await approveOrRefusal(overtaken.id);
+    expect(staleApply).not.toBe("");
+    const final = await inferOps(`/knowledge/documents/${member.id}`, undefined, LIVE.wikiWorkspaceId) as
+      { body: string; version: number };
+    expect(final).toMatchObject({ body: `${body} (overtaken)`, version: direct.document.version });
+
+    note(`k. ${wikiUrl(LIVE.wikiWorkspaceSlug)}: readStructure equals InferOps' (root ${structure.root.id}, ` +
+      `${structure.pillars.length} pillars: ${structure.pillars.map(p => `${p.key}=${p.members.length}`).join(", ")}). ` +
+      `Master ${pillar.master!.slug} text lists its filed pages as /wiki/<encoded slug>. Page ${member.slug} ` +
+      `(${member.id}) text equals InferOps' page contract. Body edit pending at version ${page.version}, ` +
+      `unchanged in InferOps; after approval version ${page.version} -> ${edited.version}. Version ` +
+      `${page.version} refused STALE_REVISION at proposal; an edit at ${edited.version} overtaken by a ` +
+      `direct same-text PATCH (version ${direct.document.version}) refused at apply ` +
+      `("${staleApply.slice(0, 120)}"); page left at version ${final.version}`);
   });
 });

@@ -1,8 +1,12 @@
 import { expect, it } from 'vitest'
 import type { WikiDocument, WikiDocumentNode } from '@inferos/gatekeeper-inferops/src/types'
-import { documentText, embeddedReferences } from '@inferos/gatekeeper-inferops/src/wiki'
+import { authoredContent, composeDocumentText, documentText, embeddedReferences, masterStructureText, wikiPagePath } from '@inferos/gatekeeper-inferops/src/wiki'
 import demo from '@inferos/gatekeeper-inferops/src/fixtures/demo-wiki.json'
-import { firstPage, pageReferences, pageText, parseWikiReference, reconcileEdit, sectionBlocks, wikiTree, type SectionEdit } from './wikiPage'
+import {
+  authoredBody, bodyEditable, editErrorText, firstNavigationPage, firstPage, pageReferences, pageText, parseWikiReference, reconcileBodyEdit,
+  reconcileEdit, sectionBlocks, wikiNavigation, wikiPageSlug, wikiTree, type BodyEdit, type SectionEdit,
+} from './wikiPage'
+import { EMPTY_STRUCTURE, organizedWiki, wikiPages } from './wikiTestDoubles'
 
 const node = (slug: string, parentId: string | null, siblingOrder: number, title = slug): WikiDocumentNode =>
   ({ id: slug, slug, title, parentId, siblingOrder })
@@ -34,9 +38,80 @@ it('splits a section into Markdown runs and the references the gatekeeper report
   }
 })
 
-it('builds the agent text from the sections shown exactly as the gatekeeper does', () => {
-  const page = { title: 'Team handbook', sections: demo.sections.filter(s => s.documentId === demo.documents[0]!.id) }
-  expect(pageText(page)).toBe(documentText(page.title, page.sections.map(s => s.body)))
+const demoPage = (slug: string): WikiDocument => {
+  const document = demo.documents.find(page => page.slug === slug)!
+  const sections = demo.sections.filter(s => s.documentId === document.id).map(s => ({ ...s, wikilinks: [] }))
+  return { ...document, masterRole: document.masterRole as WikiDocument['masterRole'], sections, references: [] }
+}
+
+it('builds the agent text from the sections shown, for a page without a body, exactly as the gatekeeper does', () => {
+  const page = demoPage('handbook')
+  expect(pageText(page, null)).toBe(documentText(page.title, page.sections.map(s => s.body)))
+})
+
+it('reads a page as its body when it has one, never with its sections, keeping a heading other than the title', () => {
+  // Every fixture page: what the page renders as its body is exactly the gatekeeper's authored content.
+  for (const { slug } of demo.documents) {
+    const page = demoPage(slug)
+    expect(authoredBody(page)).toBe(page.body.trim() ? authoredContent(page.title, { body: page.body, visibleSections: [] })[0] : null)
+  }
+  expect(authoredBody(demoPage('incident-response'))).toMatch(/^1\. Page the on-call engineer\./)
+  expect(authoredBody(demoPage('dispatch/dispatch-a-crew'))).toMatch(/^# Before you start/)
+  // Onboarding has a body and a section: it reads as its body alone.
+  const onboarding = demoPage('onboarding')
+  expect(onboarding.sections).toHaveLength(1)
+  expect(pageText(onboarding, null)).toBe(`# Onboarding\n\n${onboarding.body}`)
+})
+
+it('composes a Master\'s text with the gatekeeper\'s generated block, and none without the structure', () => {
+  const { structure } = organizedWiki()
+  const root = { id: 'r1', slug: 'company', title: 'Acme', body: 'Acme builds **bridges**.', version: 2, masterRole: 'root' as const, sections: [], references: [] }
+  expect(pageText(root, structure)).toBe(composeDocumentText('Acme', { body: root.body, visibleSections: [], generated: masterStructureText(root, structure) }))
+  expect(pageText(root, structure)).toContain(`- [Engineering](${wikiPagePath('engineering')})`)
+  expect(pageText(root, null)).toBeNull()
+})
+
+it('navigates an organized Wiki by root, Masters in pillar order with their pages, then unfiled pages', () => {
+  const { pages, structure } = organizedWiki()
+  const reversed = { ...structure, pillars: structure.pillars.toReversed() }
+  const navigation = wikiNavigation(pages, reversed)
+  if (navigation.kind !== 'structure') throw new Error('expected the structure')
+  expect(navigation.root?.slug).toBe('company')
+  expect(navigation.pillars.map(pillar => [pillar.master?.slug, pillar.members.map(m => [m.page.slug, m.shared])])).toEqual([
+    ['engineering', [['ops/incident-response', true], ['release-process', false]]],
+    ['operations', [['ops/incident-response', true]]],
+  ])
+  expect(navigation.unfiled.map(page => page.slug)).toEqual(['handbook', 'onboarding', 'drafts'])
+  expect(firstNavigationPage(navigation)).toBe('company')
+})
+
+it('keeps navigation to the pages listed: a structure page not listed is left out, a listed page it does not place is unfiled', () => {
+  const { pages, structure } = organizedWiki()
+  const listed = [...pages.filter(page => page.id !== 'p1' && page.id !== 'r1'), { id: 'n1', slug: 'new', title: 'New page', parentId: null, siblingOrder: 9 }]
+  const navigation = wikiNavigation(listed, structure)
+  if (navigation.kind !== 'structure') throw new Error('expected the structure')
+  expect(navigation.root).toBeNull()
+  expect(navigation.pillars.map(pillar => pillar.members.map(m => [m.page.slug, m.shared]))).toEqual([[['release-process', false]], []])
+  expect(navigation.unfiled.map(page => page.slug)).toEqual(['handbook', 'onboarding', 'drafts', 'new'])
+  expect(firstNavigationPage(navigation)).toBe('engineering')
+})
+
+it('navigates a Wiki with no root and no pillars, or no structure read, by its tree', () => {
+  expect(wikiNavigation(wikiPages(), EMPTY_STRUCTURE)).toEqual({ kind: 'tree', tree: wikiTree(wikiPages()) })
+  expect(wikiNavigation(wikiPages(), { ...EMPTY_STRUCTURE, unfiled: [{ id: 'd1', slug: 'handbook', title: 'Team handbook', parentId: null }] }).kind).toBe('tree')
+  expect(wikiNavigation(wikiPages(), null).kind).toBe('tree')
+  expect(firstNavigationPage(wikiNavigation(wikiPages(), null))).toBe('handbook')
+})
+
+it('reads a Wiki route back to its slug, a slash slug as one page, and nothing else as one', () => {
+  for (const slug of ['handbook', 'dispatch/dispatch-a-crew', 'ops/incident-response']) expect(wikiPageSlug(wikiPagePath(slug))).toBe(slug)
+  for (const href of [undefined, '/wiki/', '/wiki/a/b', '/other/handbook', 'https://example.com/wiki/handbook', '/wiki/%E0%A4%A']) expect(wikiPageSlug(href)).toBeNull()
+})
+
+it('offers a body edit on any page that is not a Master, and on a Master only when it has a body', () => {
+  expect(bodyEditable({ masterRole: null, body: '' })).toBe(true)
+  expect(bodyEditable({ masterRole: 'pillar', body: '' })).toBe(false)
+  expect(bodyEditable({ masterRole: 'root', body: 'Acme.' })).toBe(true)
 })
 
 it('says what each reference names, and names nothing it cannot show', () => {
@@ -45,6 +120,7 @@ it('says what each reference names, and names nothing it cannot show', () => {
   expect(parseWikiReference('inferops://acme.ops/project/issue-card/ENG-12'))
     .toMatchObject({ kind: 'issue', boardRef: 'inferops://acme.ops/project/board/ENG', identifier: 'ENG-12' })
   expect(parseWikiReference('inferops://acme.kb/knowledge/document/handbook')).toMatchObject({ kind: 'page', host: 'acme.kb', slug: 'handbook' })
+  expect(parseWikiReference('inferops://acme.kb/knowledge/document/dispatch%2Fdispatch-a-crew')).toMatchObject({ kind: 'page', host: 'acme.kb', slug: 'dispatch/dispatch-a-crew' })
   for (const href of ['inferops://acme.ops/project/board-summary/ENG', 'inferops://acme.ops/project/issue-card/not-a-key',
     'inferops://acme.ops/project/board/ENG/extra', 'inferops://acme/project/board/ENG', 'https://acme.ops/project/board/ENG', 'not a url']) {
     expect(parseWikiReference(href)).toEqual({ kind: 'unsupported', href })
@@ -62,4 +138,18 @@ it('decides an awaiting edit only from the page: pending, applied, rejected or s
   expect(reconcileEdit(edit, page({ body: 'someone else', version: 4 })).phase).toBe('stale')
   expect(reconcileEdit(edit, page(null))).toMatchObject({ phase: 'stale', message: 'The section is no longer on this page.' })
   expect(reconcileEdit({ ...edit, phase: 'proposing' }, page({})).phase).toBe('proposing')
+})
+
+const at = (changes: Partial<WikiDocument>): WikiDocument => ({ ...page(null), version: 3, body: 'old', ...changes })
+
+it('decides an awaiting body edit only from the page: pending, applied, rejected or stale', () => {
+  const edit: BodyEdit = { documentId: 'd', body: 'new', expectedVersion: 3, phase: 'awaiting' }
+  expect(reconcileBodyEdit(edit, at({ body: 'new', pendingBody: true })).phase).toBe('awaiting')
+  // A new version with the proposed text is only `matched`: another writer may have made it.
+  expect(reconcileBodyEdit(edit, at({ body: 'new', version: 4 })).phase).toBe('matched')
+  expect(reconcileBodyEdit(edit, at({})).phase).toBe('rejected')
+  expect(reconcileBodyEdit(edit, at({ body: 'someone else', version: 4 })).phase).toBe('stale')
+  expect(reconcileBodyEdit(edit, at({ id: 'other' }))).toMatchObject({ phase: 'stale', message: 'The page is no longer in this Wiki.' })
+  expect(editErrorText({ ...edit, phase: 'refused', code: 'STALE_REVISION' }, 'page')).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text.')
+  expect(editErrorText({ ...edit, phase: 'stale' }, 'page')).toContain('the page changed in InferMind')
 })

@@ -7,10 +7,11 @@ import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, ActionsSubscriber, Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition, CanvasWikiWidget } from '@gadgets/workshop-shared/canvas'
 import type { Board, Issue } from '@inferos/gatekeeper-inferops/src/types'
-import { documentText } from '@inferos/gatekeeper-inferops/src/wiki'
+import { composeDocumentText, documentText, masterStructureText } from '@inferos/gatekeeper-inferops/src/wiki'
 import { CanvasView } from './CanvasView'
 import { setFieldValue } from './kumoPopupDoubles'
-import { WIKI, fakeWiki, wikiSections } from './wikiTestDoubles'
+import { wikiDocumentUrl } from '@inferos/gatekeeper-inferops/src/resources'
+import { WIKI, fakeWiki, organizedWiki, wikiSections } from './wikiTestDoubles'
 
 vi.mock('@cloudflare/kumo', async importOriginal =>
   (await import('./kumoPopupDoubles')).withKumoPopupDoubles(await importOriginal<typeof import('@cloudflare/kumo')>()))
@@ -47,15 +48,25 @@ const render = async (w: CanvasWikiWidget, editable = true) => {
   await act(async () => root.render(<CanvasView definition={view(w)} gadgets={new Map()} overseer={overseer} wikiEditable={editable} />))
   await settle()
 }
+const organize = () => {
+  const organized = organizedWiki()
+  wiki = fakeWiki(organized)
+  bindings.set(WIKI, connection(wiki.session))
+  return organized
+}
+const pageNav = () => wikiArticle().querySelector<HTMLElement>('nav[aria-label="Wiki pages"]')!
+const pageBody = () => wikiArticle().querySelector<HTMLElement>('section[aria-label="Page body"]')!
+const generated = () => wikiArticle().querySelector<HTMLElement>('[aria-label="Generated page list"]')
+const current = () => [...pageNav().querySelectorAll('[aria-current="page"]')].map(element => element.getAttribute('aria-label') ?? element.textContent)
 const wikiArticle = () => container.querySelector<HTMLElement>(`[aria-label="InferMind Wiki ${WIKI}"]`)!
 const section = (tag: string) => [...container.querySelectorAll<HTMLElement>('section[aria-labelledby^="wiki-section-"]')]
   .find(element => element.querySelector('h4')?.textContent === `#${tag}`)!
 const button = (scope: ParentNode, text: string) => [...scope.querySelectorAll<HTMLButtonElement>('button')]
   .find(element => element.textContent === text || element.getAttribute('aria-label') === text)!
 const click = async (element: HTMLElement) => { await act(async () => element.click()); await settle() }
-const decided = (id: number, state: ActionLogEntry['state']) => act(async () => {
+const decided = (id: number, state: ActionLogEntry['state'], title = 'Edit Wiki section purpose of Team handbook') => act(async () => {
   actions?.entry({ id, type: 'action', state, resourceUrl: WIKI, resourceTitle: 'InferMind Wiki acme.kb', createdAt: new Date(), requestedBy: 'person',
-    description: { title: 'Edit Wiki section purpose of Team handbook', description: '' } } as ActionLogEntry)
+    description: { title, description: '' } } as ActionLogEntry)
 })
 
 beforeEach(() => {
@@ -236,4 +247,236 @@ it('disposes the Wiki and board sessions with the view', async () => {
   expect(wiki.session.dispose).toHaveBeenCalledTimes(1)
   expect(boardDispose).toHaveBeenCalledTimes(1)
   root = createRoot(container)
+})
+
+it('navigates an organized Wiki by its root, each Master in pillar order with its pages, then the unfiled pages, opening the root first', async () => {
+  organize()
+  await render(widget())
+  const top = [...pageNav().querySelectorAll(':scope > ul > li')].map(item => item.querySelector('button, p')?.textContent)
+  expect(top).toEqual(['Acme', 'Engineering', 'Operations', 'Unfiled pages'])
+  const filed = (pillar: string) => [...pageNav().querySelectorAll(`ul[aria-label="Pages in ${pillar}"] button`)].map(b => b.getAttribute('aria-label') ?? b.textContent)
+  expect(filed('Engineering')).toEqual(['Incident response, filed in several pillars', 'Release process'])
+  expect(filed('Operations')).toEqual(['Incident response, filed in several pillars'])
+  expect([...pageNav().querySelectorAll('ul[aria-label="Unfiled pages"] button')].map(b => b.textContent)).toEqual(['Team handbook', 'Onboarding', 'Drafts'])
+  expect(current()).toEqual(['Acme'])
+  expect(pageBody().textContent).toContain('Acme builds bridges.')
+  // A shared page opens the same page from either pillar, and both entries mark it current.
+  const [fromEngineering, fromOperations] = [...pageNav().querySelectorAll<HTMLButtonElement>('button[aria-label="Incident response, filed in several pillars"]')]
+  await click(fromEngineering!)
+  expect(current()).toEqual(['Incident response, filed in several pillars', 'Incident response, filed in several pillars'])
+  expect(pageBody().textContent).toContain('Page the on-call engineer.')
+  await click(fromOperations!)
+  expect(wiki.session.readDocument.mock.calls.filter(([slug]) => slug === 'ops/incident-response')).toHaveLength(1)
+  expect(pageBody().textContent).toContain('Page the on-call engineer.')
+})
+
+it('renders a page with a body as its body alone, embeds included, and the agent reads the same body', async () => {
+  organize()
+  await render(widget('ops/incident-response'))
+  const body = pageBody()
+  expect(body.querySelector('h1')).toBeNull()
+  expect([...body.querySelectorAll('ol > li')].map(item => item.textContent)).toEqual(['Page the on-call engineer.', 'Write the timeline.'])
+  expect(body.querySelector(`[aria-label="Project board ${ENG}"] h4`)?.textContent).toBe('Engineering (ENG)')
+  // Its section is index text, not part of the page.
+  expect(wikiArticle().textContent).not.toContain('Section text that is never part of the page.')
+  expect(wikiArticle().querySelector('section[aria-labelledby^="wiki-section-"]')).toBeNull()
+  expect(generated()).toBeNull()
+  await click(button(wikiArticle(), 'Agent view'))
+  const panel = wikiArticle().querySelector<HTMLElement>('[aria-label="Agent view"]')!
+  const { pages } = organizedWiki()
+  const stored = pages.find(page => page.id === 'p1')!
+  expect(panel.querySelector('pre')?.textContent).toBe(composeDocumentText(stored.title, { body: stored.body, visibleSections: ['Section text that is never part of the page.'], generated: null }))
+  expect(panel.querySelector('pre')?.textContent).toContain('1. Page the on-call engineer.')
+  expect(panel.textContent).toContain('Same as this page')
+})
+
+it('shows a Master\'s generated page list as generated, not editable, whose links select the page in the widget', async () => {
+  const { structure } = organize()
+  await render(widget('engineering'))
+  const block = generated()!
+  expect(block.textContent).toContain('Generated from the Wiki structure, not editable')
+  expect(block.querySelector('h2')?.textContent).toBe('Pages in Engineering')
+  expect(block.querySelector('a')).toBeNull()
+  // A Master without a body reads only as its generated list: no body to edit, no "no sections" note.
+  expect(wikiArticle().querySelector('section[aria-label="Page body"]')).toBeNull()
+  expect(wikiArticle().textContent).not.toContain('This page has no sections.')
+  await click(button(wikiArticle(), 'Agent view'))
+  const page = { id: 'm1', masterRole: 'pillar' as const }
+  expect(wikiArticle().querySelector('[aria-label="Agent view"] pre')?.textContent).toBe(`# Engineering\n\n${masterStructureText(page, structure)}`)
+  expect(wikiArticle().querySelector('[aria-label="Agent view"]')?.textContent).toContain('Same as this page')
+  await click(button(block, 'Release process'))
+  expect(current()).toEqual(['Release process'])
+  expect(section('steps')).toBeUndefined()
+  expect(wiki.session.readDocument).toHaveBeenLastCalledWith('release-process')
+  // The root lists the pillars, its body editable above them.
+  await click(button(pageNav(), 'Acme'))
+  expect(generated()?.querySelector('h2')?.textContent).toBe('Pillars')
+  expect(button(pageBody(), 'Edit page body')).toBeDefined()
+  await click(button(generated()!, 'Operations'))
+  expect(current()).toEqual(['Operations'])
+})
+
+it('states a failed structure read, shows the page tree meanwhile, and a Master\'s list as unread', async () => {
+  organize()
+  wiki.session.readStructure.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: InferOps did not answer.'))
+  await render(widget('engineering'))
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('Could not read how this Wiki is organized, so its pages are shown as a tree: InferOps did not answer.')
+  expect(pageNav().querySelector('ul[aria-label^="Pages in"]')).toBeNull()
+  expect(button(pageNav(), 'Team handbook')).toBeDefined()
+  expect(wikiArticle().textContent).toContain('Could not read the pages this page lists: InferOps did not answer.')
+  await click(button(wikiArticle(), 'Agent view'))
+  expect(wikiArticle().querySelector('[aria-label="Agent view"]')?.textContent).toContain('Not compared')
+  await click(button(wikiArticle(), 'Refresh Wiki'))
+  expect(pageNav().querySelector('ul[aria-label="Pages in Engineering"]')).not.toBeNull()
+  expect(generated()?.textContent).toContain('Pages in Engineering')
+})
+
+it('shows the structure when a page read fails, and the page when it is read again', async () => {
+  organize()
+  wiki.session.readDocument.mockRejectedValueOnce(new Error('Error: INTERNAL: boom'))
+  await render(widget())
+  expect(pageNav().querySelector('ul[aria-label="Pages in Engineering"]')).not.toBeNull()
+  expect(wikiArticle().textContent).toContain('Could not read the page: boom')
+  await click(button(wikiArticle(), 'Try again'))
+  expect(pageBody().textContent).toContain('Acme builds bridges.')
+})
+
+const proposeBody = async (text: string) => {
+  await click(button(pageBody(), 'Edit page body'))
+  await act(async () => setFieldValue(pageBody().querySelector('textarea')!, text))
+  await act(async () => pageBody().querySelector('form')!.requestSubmit())
+  await settle()
+}
+
+it('proposes a body edit, shows it waiting for approval, saved only once the decided action re-reads the page, and pending after a reload', async () => {
+  organize()
+  await render(widget('ops/incident-response'))
+  await click(button(pageBody(), 'Edit page body'))
+  expect(pageBody().querySelector('textarea')?.value).toBe(organizedWiki().pages.find(page => page.id === 'p1')!.body)
+  await act(async () => setFieldValue(pageBody().querySelector('textarea')!, '# Incident response\n\nCall the on-call engineer.'))
+  await act(async () => pageBody().querySelector('form')!.requestSubmit())
+  await settle()
+  expect(wiki.session.updateDocumentBody).toHaveBeenCalledWith('p1', '# Incident response\n\nCall the on-call engineer.', 4)
+  expect(pageBody().textContent).toContain('Waiting for approval, not saved yet')
+  expect(pageBody().textContent).not.toContain('Saved')
+  expect(button(pageBody(), 'Edit page body').disabled).toBe(true)
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: Waiting for approval, not saved yet')
+
+  // A reload starts from nothing: the pending state comes from the page's own overlay.
+  await act(async () => root.unmount())
+  root = createRoot(container)
+  await render(widget('ops/incident-response'))
+  expect(pageBody().textContent).toContain('Body edit waiting for approval')
+  expect(button(pageBody(), 'Edit page body').disabled).toBe(true)
+  wiki.approveBody('p1')
+  await decided(7, 'approved')
+  await settle()
+  expect(pageBody().textContent).not.toContain('waiting for approval')
+  expect(pageBody().textContent).toContain('Call the on-call engineer.')
+  expect(button(pageBody(), 'Edit page body').disabled).toBe(false)
+})
+
+it('says a decided body edit was saved or rejected in the same session', async () => {
+  organize()
+  await render(widget('operations'))
+  await proposeBody('Operations run on the board.')
+  await decided(8, 'pending', 'Edit Wiki page Operations')
+  wiki.approveBody('m2')
+  await decided(8, 'approved', 'Edit Wiki page Operations')
+  await settle()
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: Saved')
+  expect(pageBody().textContent).toContain('Operations run on the board.')
+  await proposeBody('Rejected text')
+  wiki.rejectBody('m2')
+  await decided(9, 'rejected')
+  await settle()
+  expect(pageBody().textContent).toContain('Rejected, not saved')
+  expect(pageBody().textContent).toContain('Operations run on the board.')
+})
+
+it('never calls a body edit saved when another writer set the same text, or on an approval it did not raise', async () => {
+  organize()
+  await render(widget('operations'))
+  await proposeBody('Operations run on the board.')
+  await decided(10, 'pending', 'Edit Wiki page Operations')
+  // InferMind gets the same text first; this approval then fails its compare-and-swap.
+  wiki.rejectBody('m2')
+  wiki.writeBodyElsewhere('m2', 'Operations run on the board.')
+  await decided(10, 'rejected', 'Edit Wiki page Operations')
+  await settle()
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: The page now has this text')
+  expect(pageBody().textContent).not.toContain('Saved')
+
+  // An approval of another page's edit, or of one never seen raised here, is not this edit's.
+  await proposeBody('Operations run on the Kanban board.')
+  await decided(11, 'pending', 'Edit Wiki page Incident response')
+  wiki.approveBody('m2')
+  await decided(11, 'approved', 'Edit Wiki page Incident response')
+  await decided(12, 'approved', 'Edit Wiki page Operations')
+  await settle()
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: The page now has this text')
+})
+
+it('keeps a pending body deletion visible after a reload, read-only too', async () => {
+  organize()
+  await render(widget('operations'))
+  await proposeBody('')
+  expect(wiki.session.updateDocumentBody).toHaveBeenCalledWith('m2', '', 3)
+  expect(pageBody().querySelector('[role="status"]')?.textContent).toBe('Page body: Waiting for approval, not saved yet')
+
+  await act(async () => root.unmount())
+  root = createRoot(container)
+  await render(widget('operations'), false)
+  expect(pageBody().textContent).toContain('Body edit waiting for approval')
+  expect(pageBody().textContent).toContain("The proposed body is empty: approving it removes this page's body.")
+})
+
+it('says why a body edit was not sent, stale, conflicting or denied, keeping the draft', async () => {
+  organize()
+  await render(widget('operations'))
+  await click(button(pageBody(), 'Edit page body'))
+  wiki.writeBodyElsewhere('m2', 'Changed in InferMind meanwhile.')
+  await act(async () => setFieldValue(pageBody().querySelector('textarea')!, 'Mine'))
+  await act(async () => pageBody().querySelector('form')!.requestSubmit())
+  await settle()
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text.')
+  expect(pageBody().querySelector('textarea')?.value).toBe('Mine')
+  await click(button(pageBody(), 'Cancel'))
+  expect(pageBody().textContent).toContain('Changed in InferMind meanwhile.')
+
+  wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: CONFLICT: Page operations already has a body edit that has not taken effect yet.'))
+  await proposeBody('Second try')
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: Page operations already has a body edit that has not taken effect yet.')
+  await click(button(pageBody(), 'Cancel'))
+  wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: FORBIDDEN: Your InferOps access cannot edit this Wiki.'))
+  await proposeBody('Third try')
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: Your InferOps access cannot edit this Wiki.')
+  expect(pageBody().querySelector('textarea')?.value).toBe('Third try')
+})
+
+it('offers to add a body to a page that reads as its sections, keeping section edits, and no body edit read-only', async () => {
+  await render(widget())
+  expect(button(pageBody(), 'Add page body')).toBeDefined()
+  expect(button(section('purpose'), 'Edit section purpose')).toBeDefined()
+  await click(button(pageBody(), 'Add page body'))
+  expect(pageBody().textContent).toContain('its sections are kept as separate index text and are no longer shown here')
+  await act(async () => root.unmount())
+  root = createRoot(container)
+  organize()
+  await render(widget('ops/incident-response'), false)
+  expect(pageBody().textContent).toContain('Page the on-call engineer.')
+  expect([...pageBody().querySelectorAll('button')].filter(b => /page body/.test(b.textContent ?? ''))).toEqual([])
+})
+
+it('opens a slash-slug page from a page reference of the same Wiki', async () => {
+  const organized = organizedWiki()
+  const href = wikiDocumentUrl({ host: 'acme.kb', slug: 'ops/incident-response' })
+  expect(href).toBe('inferops://acme.kb/knowledge/document/ops%2Fincident-response')
+  wiki = fakeWiki({ ...organized, sections: [...organized.sections, { id: 's8', documentId: 'd3', tag: 'see-also', body: `[Incident response](${href})`, version: 1 }] })
+  bindings.set(WIKI, connection(wiki.session))
+  await render(widget('onboarding'))
+  await click(button(section('see-also'), 'Open page: Incident response'))
+  expect(current()).toEqual(['Incident response, filed in several pillars', 'Incident response, filed in several pillars'])
+  expect(pageBody().textContent).toContain('Page the on-call engineer.')
+  expect(wiki.session.readDocument).toHaveBeenLastCalledWith('ops/incident-response')
 })
