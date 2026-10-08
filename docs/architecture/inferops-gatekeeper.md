@@ -468,6 +468,9 @@ missing a button.
 - A Wiki section edit's version check and its write are two requests (InferOps' `PATCH` takes no
   expected version), so an edit made in InferMind between them is overwritten; and a section that
   someone else set to exactly the approved body counts as the edit applied.
+- A 401 to a write is trusted as InferOps' auth layer turning the request away before any effect,
+  whatever its body; no other status without InferOps' error envelope is. This assumes nothing in
+  front of InferOps answers 401 after forwarding a write.
 - Only board writes take InferOps' refusal as proof that nothing was applied. A dispatch, cancel,
   section or page edit InferOps refuses (a stale page version, a missing `issue:delegate`, the Wiki
   forbidden) is reported unknown and reconcile-only, until each one's refusal and same-key replay
