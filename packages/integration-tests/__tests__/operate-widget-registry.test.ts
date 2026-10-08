@@ -343,6 +343,53 @@ describe("a console's widget registry", () => {
     expect(await kept.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
   });
 
+  it("keeps operators' frozen widgets running across a Build edit of the source", async () => {
+    const author = await signUp(publicApi, nextUsernames("liveauthor")[0]!);
+    const widget = await publishWidget(author);
+    const s = await operationsSpace("live");
+    const installed = await s.space.installBlueprint(widget.blueprintId, {}, { version: 1, kind: "widget" });
+    const entry: ConsoleWidgetEntry = { gadgetId: installed, blueprintId: widget.blueprintId, version: 1, label: "Status", state: "resettable" };
+    const screen = await screenWith(s.space, [installed]);
+    const created = await s.space.createConsole(consoleOf(screen.id, [entry]));
+    const published = await s.space.publishConsole(created.id, created.revision);
+    const frozen = published.published!.content.widgets![0]!.gadgetId;
+    using used = await s.operator.openGadget(s.spaceId);
+    using session = await s.operator.getOperateSession();
+    await openConsole(session, s.spaceId, published, 0);
+    using handle = await used.getConsoleWidget(created.id, published.revision, frozen);
+    using server = await handle.connectToGadget() as unknown as RpcStub<Versioned>;
+    using tally = await server.tally();
+    const { tally: held } = await server.holder();
+    const [listed] = await server.tallies();
+    using bumper = await server.bumper();
+    expect(await server.bump()).toBe(1);
+
+    // The control: an ordinary gadget, the registered source, is restarted by the merge, and a fresh
+    // connection runs the changed code.
+    using source = await s.space.getGadget(installed);
+    using sourceServer = await source.connectToGadget() as unknown as RpcStub<Versioned>;
+    expect(await sourceServer.version()).toBe("v1");
+    expect(await commit(s.space, s.watched, installed, widgetFiles("v1"), widgetFiles("edited")))
+      .toEqual({ outcome: "merged" });
+    await expect(sourceServer.version()).rejects.toThrow(/restarted/);
+    {
+      using fresh = await source.connectToGadget() as unknown as RpcStub<Versioned>;
+      expect(await fresh.version()).toBe("edited");
+    }
+
+    // The operator's capabilities, kept from before the merge and never reconnected, still run the
+    // published code and its state.
+    expect(await server.version()).toBe("v1");
+    expect(await server.bump()).toBe(2);
+    expect(await tally.bump()).toBe(3);
+    expect(await held.bump()).toBe(4);
+    expect(await listed!.bump()).toBe(5);
+    expect(await bumper()).toBe(6);
+    expect(await handle.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
+    held[Symbol.dispose]();
+    listed![Symbol.dispose]();
+  });
+
   it("refuses a whole-workspace widget install to the use role outside a console", async () => {
     const author = await signUp(publicApi, nextUsernames("wholeauthor")[0]!);
     const widget = await publishWidget(author);

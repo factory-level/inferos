@@ -6705,13 +6705,16 @@ class OverseerImpl implements AgentHooks {
 
   // Increment the code version and restart the affected gadgets so they reload. If
   // `affectedGadgetIds` is omitted, conservatively restarts every gadget (e.g. for code commits,
-  // which are whole-doc updates that may span gadget roots); binding changes pass the one gadget
-  // they touched so that renaming a binding on gadget A doesn't restart gadget B.
+  // which are whole-doc updates that may span gadget roots) except frozen installs, whose commit
+  // no merge can change (see assertNotFrozen), so a Build edit doesn't cut off the operators using
+  // a published console's widgets; binding changes pass the one gadget they touched so that
+  // renaming a binding on gadget A doesn't restart gadget B. Explicit ids are always restarted.
   bumpVersion(affectedGadgetIds?: WorkpieceId[]): number {
     let codeVersion = this.storage.codeVersion.get() + 1;
     this.storage.codeVersion.put(codeVersion);
     let ids = affectedGadgetIds ?? [...this.storage.gadgets.list()]
-        .filter(record => record.type === "gadget")  // worktrees have no facet to restart
+        // Worktrees have no facet to restart, and a frozen install runs a commit no merge changes.
+        .filter(record => record.type === "gadget" && !record.frozenFor)
         .map(gadget => gadget.id);
     for (let id of ids) {
       this.ctx.facets.abort(this.gadgetFacetName(id),
