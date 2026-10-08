@@ -286,6 +286,9 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
   let states: State[];
   let created: LiveIssue;
   let staleRevision: string;
+  // Refused actions (steps e2 and h) and the InferOps issue state each left, rechecked in h2.
+  let staleRefusal: { id: number; issueId: string; revision: string };
+  let policyRefusal: { id: number; issueId: string; revision: string; stateId: string };
 
   beforeAll(async () => {
     for (const [name, value] of Object.entries({
@@ -509,6 +512,7 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     const after = await liveIssue(created.id);
     expect(after.revision).toBe(moved.revision);
     expect(after.title).toBe(before.title);
+    staleRefusal = { id: action.id, issueId: created.id, revision: after.revision };
     note(`e2. update proposed at revision ${before.revision}, overtaken in InferOps (now ${moved.revision}), ` +
       `approved: InferOps answered 409 STALE_REVISION; the action ended failed (notApplied, not retryable), ` +
       `a second approval was refused, and the issue stayed at ${after.revision} with its title`);
@@ -592,6 +596,8 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     expect(await actionEntry(lastMove)).toMatchObject({
       state: "failed", lastAttempt: { outcome: "notApplied", code: "FORBIDDEN", retryable: false },
     });
+    const refusedMove = lastMove;
+    expect(await failure(ws.approveAction(refusedMove))).toMatch(/not pending/);
     const afterRefusal = await liveIssue(issue.id);
     expect(afterRefusal).toMatchObject({ stateId: draft!.id, revision: inDraft.revision });
     // The same move made directly is InferOps' policy refusal: 403 FORBIDDEN naming the edge rule.
@@ -615,12 +621,63 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     const inReview = await liveIssue(issue.id);
     expect(inReview.stateId).toBe(review!.id);
     expect(inReview.revision).not.toBe(inDraft.revision);
+    policyRefusal = { id: refusedMove, issueId: issue.id, revision: inReview.revision, stateId: review!.id };
     note(`h. ${LIVE.policyProject} (${policy.projectId}) content policy revision ${policy.revision} ` +
       "(Draft -> Published denies move-in to every user; explain: EXPLICIT_DENY). " +
       `Created ${inReview.identifier} (${inReview.id}) in Idea at revision ${createdAt}; ` +
       `Idea -> Draft applied (revision ${inDraft.revision}); Draft -> Published approved but refused ` +
       `by InferOps ("${refused}"; direct: 403 FORBIDDEN, EXPLICIT_DENY), still Draft at revision ${afterRefusal.revision}; ` +
       `Draft -> Review applied (revision ${inReview.revision})`);
+  });
+
+  it("h2. after reloads, refused outcomes stay failed and unsent; an apply refused before sending stays approvable and then applies once", async () => {
+    const stored = async (id: number) => {
+      const entry = await actionEntry(id);
+      return { state: entry?.state, lastAttempt: entry?.type === "action" ? entry.lastAttempt : undefined };
+    };
+    const staleBefore = await stored(staleRefusal.id);
+    const policyBefore = await stored(policyRefusal.id);
+    const before = await liveIssue(created.id);
+    const priority = before.priority === "high" ? "medium" : "high";
+    const action = await proposed(async () =>
+      (await session.openIssue(created.id)).update({ priority }, before.revision));
+
+    // Reload with the integration switched off: the approval is refused before anything is sent.
+    await restartGatekeeper({ INFEROPS_ENABLED: "false" });
+    expect(await stored(staleRefusal.id)).toEqual(staleBefore);
+    expect(await stored(policyRefusal.id)).toEqual(policyBefore);
+    expect(await failure(ws.approveAction(action.id))).not.toBe("");
+    const unsent = await actionEntry(action.id);
+    expect(unsent).toMatchObject({
+      state: "pending", lastAttempt: { outcome: "notApplied", code: "DISABLED", retryable: true },
+    });
+    expect((await liveIssue(created.id)).revision).toBe(before.revision);
+
+    // Reload with it on again: the refused actions are still failed and are not sent again, and the
+    // unsent one applies once.
+    await restartGatekeeper({ INFEROPS_ENABLED: "true" });
+    expect(await stored(staleRefusal.id)).toEqual(staleBefore);
+    expect(await stored(policyRefusal.id)).toEqual(policyBefore);
+    expect(await failure(ws.approveAction(staleRefusal.id))).toMatch(/not pending/);
+    expect(await failure(ws.approveAction(policyRefusal.id))).toMatch(/not pending/);
+    expect((await liveIssue(staleRefusal.issueId)).revision).toBe(before.revision);
+    expect(await liveIssue(policyRefusal.issueId)).toMatchObject({
+      revision: policyRefusal.revision, stateId: policyRefusal.stateId,
+    });
+    await ws.approveAction(action.id);
+    expect(await actionEntry(action.id)).toMatchObject({ state: "approved" });
+    const applied = await liveIssue(created.id);
+    expect(applied).toMatchObject({ priority });
+    expect(applied.revision).not.toBe(before.revision);
+    expect(await failure(ws.approveAction(action.id))).toMatch(/not pending/);
+    expect((await liveIssue(created.id)).revision).toBe(applied.revision);
+    session = await (await ws.getGatekeeperById(connectionId)).openSession() as RpcStub<InferOpsProjectSession>;
+    note(`h2. across two Worker reloads, the refused actions ${staleRefusal.id} (STALE_REVISION) and ` +
+      `${policyRefusal.id} (FORBIDDEN) kept state failed and their attempts, and re-approval was refused ` +
+      `with InferOps unchanged (${created.identifier} at ${before.revision}, the content issue at ` +
+      `${policyRefusal.revision}); update ${action.id} approved while INFEROPS_ENABLED was off stayed ` +
+      `pending (notApplied DISABLED, retryable) with InferOps at ${before.revision}, then applied once ` +
+      `when on (revision ${applied.revision})`);
   });
 
   it.skipIf(!LIVE.repoId)("i. coding dispatch: an approved dispatch queues a real run, duplicates and stale revisions are refused, an approved cancel stops it (needs INFEROPS_LIVE_REPO_ID)", async () => {
