@@ -39,6 +39,25 @@ it('marks a registered widget unpublished until the console is published with it
   expect(container.textContent).toContain('Version 2 · Not yet published')
 })
 
+it('matches draft entries by their source install and published ones by their frozen install', () => {
+  const frozen = { ...registered, gadgetId: 40, frozen: { sourceGadgetId: 3, commitId: 'c3' } }
+  const status = () => [...container.querySelectorAll('[aria-label="Registered widgets"] li')].map(item => item.textContent)
+  // The use role reads the published registry, whose entries name their frozen installs.
+  render([frozen], [frozen], true)
+  expect(status()).toEqual([expect.stringContaining('Version 2 · Published')])
+  // A frozen install no longer current, as a stale view would hold, is not the published one.
+  render([{ ...frozen, gadgetId: 39 }], [frozen], true)
+  expect(status()).toEqual([expect.stringContaining('Not yet published')])
+  // In a draft: a new version, a renamed entry and another blueprint's install are not yet published.
+  render([{ ...registered, version: 3 }, { ...registered, gadgetId: 3, label: 'Renamed' }], [frozen])
+  expect(status()).toEqual([expect.stringContaining('Version 3 · Not yet published'), expect.stringContaining('Not yet published')])
+  render([{ ...registered, blueprintId: 'other' }], [frozen])
+  expect(status()).toEqual([expect.stringContaining('Not yet published')])
+  // A draft entry never matches a published entry by the frozen install's own id.
+  render([{ ...registered, gadgetId: 40 }], [frozen])
+  expect(status()).toEqual([expect.stringContaining('Not yet published')])
+})
+
 it('registers only after the builder declares the widget\'s state resettable', () => {
   render([registered])
   expect(button('Register widget')?.disabled).toBe(true)
