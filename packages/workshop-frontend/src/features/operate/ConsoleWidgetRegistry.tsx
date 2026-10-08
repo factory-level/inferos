@@ -30,8 +30,12 @@ export const ConsoleWidgetRegistry = ({ widgets, published, candidates, disabled
       label: label.trim() || choice.title, state: 'resettable' }])
     setSelected(''); setLabel(''); setResettable(false)
   }
+  // A draft entry names the registered (source) install, which the published registry records as
+  // `frozen.sourceGadgetId`; a published entry, as the use role reads it, already names its frozen
+  // install, so it matches only an entry of the current publication with that same frozen install.
   const isPublished = (entry: ConsoleWidgetEntry) => !!published?.some(item =>
-    item.frozen?.sourceGadgetId === entry.gadgetId && item.version === entry.version && item.label === entry.label)
+    (entry.frozen ? item.gadgetId === entry.gadgetId : item.frozen?.sourceGadgetId === entry.gadgetId) &&
+    item.blueprintId === entry.blueprintId && item.version === entry.version && item.label === entry.label)
 
   return <section aria-labelledby="console-widgets-heading" className="space-y-4">
     <div><h2 id="console-widgets-heading" className="text-sm font-medium text-kumo-default">Widgets</h2>
