@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  faultHostBoard,
   HOST_BOARD_EXPIRY_MS,
   hostBoardView,
   initialHostBoardState,
@@ -527,5 +528,89 @@ describe('selection subscription', () => {
     expect(view()).toEqual({ status: 'loading' })
     answer(ok())
     expect(view().status).toBe('ok')
+  })
+})
+
+describe('the accepted read\'s identity and deadlines', () => {
+  const shown = () => {
+    const current = view()
+    if (current.status !== 'ok') throw new Error(`expected ok, got ${current.status}`)
+    return current.read
+  }
+
+  it('names the read it shows, with a new token across a refresh and a new generation across an invalidation', () => {
+    mountSelected()
+    answer(ok())
+    const first = shown()
+    expect(first).toMatchObject({ contextToken: 1, token: lastRead().token, generation: state.generation })
+    advance(30_000)
+    dispatch({ type: 'timer', timer: 'refresh' })
+    answer(ok())
+    const refreshed = shown()
+    expect(refreshed.token).toBe(lastRead().token)
+    expect(refreshed.token).not.toBe(first.token)
+    expect(refreshed.generation).toBe(first.generation)
+    dispatch({ type: 'invalidate' })
+    answer(ok())
+    expect(shown().token).toBe(lastRead().token)
+    expect(shown().generation).toBeGreaterThan(refreshed.generation)
+  })
+
+  it('exposes the deadlines its expiry timer is armed for, and expires exactly at the earlier one', () => {
+    mountSelected()
+    const t0 = new Date(wall).toISOString()
+    const sent = at()
+    // The request slept: 5 s passed on the monotonic clock, 50 s on the wall clock.
+    mono += 5_000
+    wall += 50_000
+    answer(ok(t0))
+    const { deadlineMono, deadlineWall } = shown()
+    expect(deadlineMono).toBe(sent.mono + HOST_BOARD_EXPIRY_MS)
+    expect(deadlineWall).toBe(sent.wall + HOST_BOARD_EXPIRY_MS)
+    expect(expiryTimers().at(-1)).toEqual({
+      type: 'set-timer', timer: 'expiry', delayMs: Math.min(deadlineMono - mono, deadlineWall - wall),
+    })
+    // The tick's expiry recheck, with the wall clock ahead, rearms from the same, unchanged deadlines.
+    mono += 1_000
+    wall += 2_000
+    dispatch({ type: 'timer', timer: 'expiry' })
+    expect(shown()).toMatchObject({ deadlineMono, deadlineWall })
+    expect(expiryTimers().at(-1)).toEqual({
+      type: 'set-timer', timer: 'expiry', delayMs: Math.min(deadlineMono - mono, deadlineWall - wall),
+    })
+    wall = deadlineWall - 1
+    expect(view().status).toBe('ok')
+    wall = deadlineWall
+    expect(view().status).not.toBe('ok')
+  })
+})
+
+describe('a reducer fault', () => {
+  const fault = () => {
+    const step = faultHostBoard(state, at())
+    state = step.state
+    commands.push(...step.commands)
+  }
+
+  it('drops the read in flight and shows unavailable, so the next request reads again and a late answer is ignored', () => {
+    mountSelected()
+    const faulted = lastRead().token
+    fault()
+    expect(view()).toEqual({ status: 'unavailable' })
+    expect(commands).toContainEqual({ type: 'set-timer', timer: 'refresh', delayMs: 30_000 })
+    answer(ok(), faulted)
+    expect(view()).toEqual({ status: 'unavailable' })
+    dispatch({ type: 'retry' })
+    expect(reads()).toHaveLength(2)
+    answer(ok())
+    expect(view()).toMatchObject({ status: 'ok', board: BOARD })
+  })
+
+  it('clears a board that was shown', () => {
+    mountSelected()
+    answer(ok())
+    fault()
+    expect(view()).toEqual({ status: 'unavailable' })
+    expect(state.accepted).toBeNull()
   })
 })
