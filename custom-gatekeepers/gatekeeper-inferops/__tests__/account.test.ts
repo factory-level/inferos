@@ -82,8 +82,18 @@ type ApiCall = { path: string; token: string | null; workspaceId: string | null;
 /** Every fake's token tag, by the test that made it. */
 const issuers = new Map<string, string>();
 let fakes = 0;
+/** Requests that reached a fake after its test's teardown retired it; each teardown reports them. */
+const strays: ApiCall[] = [];
+/** `calls` as a list naming each request's path and the test that issued it, for failure messages. */
+const attributed = (calls: ApiCall[]) =>
+  calls.map(c => `${c.path} issued by ${JSON.stringify(c.issuer)}`).join("; ") || "(none)";
 /** The test that minted `token`: its fake's tag is the segment after the JWT's three. */
 const issuerOf = (token: string | null) => token === null ? null : issuers.get(token.split(".")[3] ?? "") ?? null;
+/** A refresh token on the wire is `refresh-<n>.<tag>`: the session it names, and the minting fake's tag. */
+const refreshParts = (wire: string | undefined) => {
+  const [session = "", tag = ""] = (wire ?? "").split(".");
+  return { session, tag };
+};
 
 /**
  * One fake behind `fetch`: InferLab central-auth (token exchange, refresh, logout) and the InferOps
@@ -120,39 +130,52 @@ class FakeInferLab {
   refreshes: string[] = [];
   exchanges = 0;
   apiCalls: ApiCall[] = [];
+  /** Refreshes and logouts presented with another fake's refresh token: refused, never applied. */
+  #foreignAuth: ApiCall[] = [];
   /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
   snapshotAnswer: (() => Response) | null = null;
   /** Requests that have reached a gate, by route. */
   held: Record<HeldRoute, number> = { embed: 0, snapshot: 0 };
   /** The open gate per route: a request reaching it waits there, after reading its answer. */
-  #gates: Partial<Record<HeldRoute, { arrive: () => void; released: Promise<void> }>> = {};
+  #gates: Partial<Record<HeldRoute, { arrive: (path: string) => void; released: Promise<void> }>> = {};
   /** Releases every gate this fake has opened, whether or not anything reached it. */
   #releases: Array<() => void> = [];
   #serial = 0;
-  /** The test this fake serves, and the tag every access token it mints carries. */
-  readonly test = expect.getState().currentTestName ?? "(outside a test)";
+  /** Set by teardown: from then on every request is refused and recorded as a stray. */
+  #retired = false;
   readonly #tag = `fake${++fakes}`;
 
-  constructor() {
+  /** `test` names the test this fake serves; every access token it mints carries its tag. */
+  constructor(readonly test = expect.getState().currentTestName ?? "(outside a test)") {
     issuers.set(this.#tag, this.test);
   }
 
   /**
    * Holds the next requests to `route` in flight until `release()`. `arrived` settles when the
-   * first reaches the gate. Release is idempotent, and `releaseAll` performs it too.
+   * first reaches the gate, and `path()` is then what it asked. Release is idempotent, and
+   * `releaseAll` performs it too.
    */
-  hold(route: HeldRoute): { arrived: Promise<void>; release: () => void } {
+  hold(route: HeldRoute): { arrived: Promise<void>; release: () => void; path: () => string | null } {
+    let reached: string | null = null;
     let arrive!: () => void;
     let open!: () => void;
     const arrived = new Promise<void>(resolve => { arrive = resolve; });
-    const gate = { arrive, released: new Promise<void>(resolve => { open = resolve; }) };
+    const gate = {
+      arrive: (path: string) => { reached ??= path; arrive(); },
+      released: new Promise<void>(resolve => { open = resolve; }),
+    };
     this.#gates[route] = gate;
     const release = () => {
       if (this.#gates[route] === gate) delete this.#gates[route];
       open();
     };
     this.#releases.push(release);
-    return { arrived, release };
+    return { arrived, release, path: () => reached };
+  }
+
+  /** Ends this fake's test: it answers nothing more, so a late request cannot pass as live. */
+  retire(): void {
+    this.#retired = true;
   }
 
   /** Opens every gate, so nothing this test held stays in flight past it. */
@@ -160,20 +183,20 @@ class FakeInferLab {
     for (const release of this.#releases.splice(0)) release();
   }
 
-  async #pass(route: HeldRoute): Promise<void> {
+  async #pass(route: HeldRoute, path: string): Promise<void> {
     const gate = this.#gates[route];
     if (!gate) return;
     this.held[route]++;
-    gate.arrive();
+    gate.arrive(path);
     await gate.released;
   }
 
   /** The requests this fake took with another test's token: work a previous test left in flight. */
   foreign(): ApiCall[] {
-    return this.apiCalls.filter(c => c.issuer !== null && c.issuer !== this.test);
+    return [...this.apiCalls.filter(c => c.issuer !== null && c.issuer !== this.test), ...this.#foreignAuth];
   }
 
-  /** The access token of the session `refreshToken` names. */
+  /** The access token of the session `refreshToken` (`refresh-<n>`) names. */
   accessOf(refreshToken: string): string {
     return this.sessions.get(refreshToken)!.access;
   }
@@ -181,10 +204,11 @@ class FakeInferLab {
   #issue(): { token: string; refreshToken: string } {
     const n = ++this.#serial;
     const token = `${jwt(Date.now() + this.accessTtlMs)}.${this.#tag}.${n}`;
-    const refreshToken = `refresh-${n}`;
     this.access.add(token);
-    this.sessions.set(refreshToken, { access: token });
-    return { token, refreshToken };
+    this.sessions.set(`refresh-${n}`, { access: token });
+    // Tagged on the wire, so a refresh another test's account sends here cannot rotate this test's
+    // session of the same number; sessions, refreshes and logouts record the plain `refresh-<n>`.
+    return { token, refreshToken: `refresh-${n}.${this.#tag}` };
   }
 
   /** Ends a session: its refresh token stops rotating and its access token stops working. */
@@ -196,7 +220,22 @@ class FakeInferLab {
 
   fetch = async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(String(input));
+    const headers = new Headers(init.headers);
+    const token = headers.get("authorization")?.replace(/^Bearer /, "") ?? null;
     const body = init.body ? JSON.parse(String(init.body)) as Record<string, string> : {};
+    if (this.#retired) {
+      const issuer = issuerOf(token) ?? issuers.get(refreshParts(body.refreshToken).tag) ?? null;
+      strays.push({ path: url.pathname + url.search, token, workspaceId: headers.get("x-workspace-id"), issuer });
+      return Response.json({ error: { code: "UNAUTHORIZED", message: "this test has ended" } }, { status: 401 });
+    }
+    if (url.pathname === "/auth/refresh" || url.pathname === "/auth/logout") {
+      const { tag } = refreshParts(body.refreshToken);
+      if (tag !== this.#tag) {
+        this.#foreignAuth.push({ path: url.pathname, token: null, workspaceId: null, issuer: issuers.get(tag) ?? null });
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      body.refreshToken = refreshParts(body.refreshToken).session;
+    }
     if (url.pathname === "/auth/token") {
       this.exchanges++;
       return Response.json({
@@ -221,8 +260,6 @@ class FakeInferLab {
       this.endSession(body.refreshToken!);
       return new Response(null, { status: 204 });
     }
-    const headers = new Headers(init.headers);
-    const token = headers.get("authorization")?.replace(/^Bearer /, "") ?? null;
     const workspaceId = headers.get("x-workspace-id");
     if (url.pathname === "/workspaces") {
       // The principal lane: a valid token, no workspace header.
@@ -246,7 +283,7 @@ class FakeInferLab {
         this.memberships.has(OPS) && url.searchParams.size === 1
         ? Response.json({ scope: { workspaceId: OPS, projectId: DEMO.id }, snapshot: SNAPSHOT })
         : Response.json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, { status: 404 }));
-      await this.#pass("snapshot");
+      await this.#pass("snapshot", url.pathname + url.search);
       return answer;
     }
     if (!workspaceId || !this.memberships.has(workspaceId)) {
@@ -289,7 +326,7 @@ class FakeInferLab {
       }
       if (widget === "table-view" && id === TABLE) {
         const answer = Response.json({ widget: "table-view", type: TABLE_TYPE, records: [TABLE_RECORD] });
-        await this.#pass("embed");
+        await this.#pass("embed", url.pathname + url.search);
         return answer;
       }
       if (widget === "record-card" && id === TABLE_ROW) {
@@ -325,40 +362,104 @@ class FakeInferLab {
   };
 }
 
+/** `fetch` as the runtime provides it, before any test stubs it. */
+const realFetch = globalThis.fetch;
+
+/**
+ * Opt-in reproduction of the loaded-runner flake; off by default, and it changes no assertion. With
+ * `GK_REPRO_DELAY_MS` set (see `vitest.config.ts`), the revoke test's host-board snapshot requests
+ * reach `fetch` that many ms late, then go to whichever `fetch` is current by then, as a request
+ * the runtime was slow to send would.
+ */
+const REPRO_DELAY_MS = Number((env as unknown as { GK_REPRO_DELAY_MS?: string }).GK_REPRO_DELAY_MS) || 0;
+const REPRO_TEST = "discards an answer held in flight across a revoke as stale";
+
+/** `fake.fetch`, with the reproduction's delay when it is on and `fake` serves the revoke test. */
+function fetchFor(fake: FakeInferLab): typeof fake.fetch {
+  if (REPRO_DELAY_MS <= 0 || !fake.test.includes(REPRO_TEST)) return fake.fetch;
+  const delayed = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    if (!String(input).includes("/project/board-snapshot")) return fake.fetch(input, init);
+    await new Promise(resolve => setTimeout(resolve, REPRO_DELAY_MS));
+    const current = globalThis.fetch as typeof fake.fetch;
+    return current === delayed ? fake.fetch(input, init) : current(input, init);
+  };
+  return delayed;
+}
+
 let inferlab: FakeInferLab;
 let accounts = 0;
 beforeEach(() => {
   inferlab = new FakeInferLab();
-  vi.stubGlobal("fetch", inferlab.fetch);
+  vi.stubGlobal("fetch", fetchFor(inferlab));
 });
-afterEach(async () => {
-  // Every read a test held is released and settled while its own fake still answers `fetch`, so
-  // none can land in the next test's fake and pass for one of that test's requests.
-  inferlab.releaseAll();
-  await Promise.all(inFlight.splice(0));
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-  expect(inferlab.foreign(), "InferOps requests made with another test's session").toEqual([]);
-});
+afterEach(() => teardown(inferlab, inFlight));
 
-/** Reads started by `heldRead`, settled (never rejected) for the cleanup above to await. */
-const inFlight: Array<Promise<unknown>> = [];
+/** A read `heldRead` started: its route, the test that started it, what it asked, and its end. */
+type HeldEntry = { route: HeldRoute; issuer: string; request: () => string; settled: Promise<unknown> };
+
+/** The reads the current test started with `heldRead`, for the teardown to drain. */
+const inFlight: HeldEntry[] = [];
+
+/** How long teardown waits for held reads: well inside vitest's 10s hook timeout. */
+const TEARDOWN_DEADLINE_MS = 5_000;
+
+/**
+ * Every test's teardown, callable directly so its stuck-read path is itself tested. Opens every gate
+ * `fake` holds and waits up to `deadlineMs` for `reads` to settle while `fake` still answers
+ * `fetch`, so none lands in the next test's fake. Whatever happens, it then restores the globals
+ * and retires `fake`. It fails naming each read still unsettled (route, issuer and request), any
+ * request `fake` took with another test's session, and any that reached a retired fake.
+ */
+async function teardown(fake: FakeInferLab, reads: HeldEntry[], deadlineMs = TEARDOWN_DEADLINE_MS): Promise<void> {
+  const pending = reads.splice(0);
+  const done = new Set<HeldEntry>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    fake.releaseAll();
+    await Promise.race([
+      Promise.all(pending.map(entry => entry.settled.then(() => { done.add(entry); }))),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, deadlineMs); }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    fake.retire();
+  }
+  const problems: string[] = [];
+  const unsettled = pending.filter(entry => !done.has(entry));
+  if (unsettled.length) {
+    problems.push(`held reads still unsettled after ${deadlineMs}ms: ` + unsettled
+      .map(entry => `${entry.route} read issued by ${JSON.stringify(entry.issuer)}, request ${entry.request()}`).join("; "));
+  }
+  const foreign = fake.foreign();
+  if (foreign.length) {
+    problems.push(`InferOps requests made with another test's session: ${attributed(foreign)}` +
+      ` (every request this test's fake took: ${attributed(fake.apiCalls)})`);
+  }
+  const late = strays.splice(0);
+  if (late.length) problems.push(`requests that reached a fake after its test ended: ${attributed(late)}`);
+  if (problems.length) throw new Error(problems.join("\n"));
+}
 
 /**
  * Starts `read` with its InferOps answer held at `route` until `settle()`, and returns once the
- * request has reached InferOps. The read is registered for cleanup and the release handle exists
+ * request has reached InferOps. The read is registered for teardown and the release handle exists
  * before anything is awaited, so a read that is slow to arrive, or fails, is still released and
- * drained before the next test. Arrival is awaited, not polled: a loaded runner only makes it slower.
+ * drained (or named) before the next test. Arrival is awaited, not polled: a loaded runner only
+ * makes it slower.
  */
-async function heldRead<T>(route: HeldRoute, read: () => Promise<T>): Promise<{ settle: () => Promise<T> }> {
-  const gate = inferlab.hold(route);
-  const before = inferlab.held[route];
+async function heldRead<T>(
+  route: HeldRoute, read: () => Promise<T>, fake = inferlab, reads = inFlight,
+): Promise<{ settle: () => Promise<T> }> {
+  const gate = fake.hold(route);
+  const before = fake.held[route];
   const outcome = read();
   const settled = outcome.then(value => ({ value }), (error: unknown) => ({ error }));
-  inFlight.push(settled);
+  reads.push({ route, issuer: fake.test, request: () => gate.path() ?? "(never reached InferOps)", settled });
   const first = await Promise.race([gate.arrived.then(() => null), settled]);
   if (first !== null) throw new Error(`the read settled before reaching InferOps: ${String(JSON.stringify(first))}`);
-  expect(inferlab.held[route]).toBe(before + 1);
+  expect(fake.held[route]).toBe(before + 1);
   return {
     settle: async () => {
       gate.release();
@@ -1180,7 +1281,7 @@ describe("host boards, the kernel-only read of a board binding's fixed target", 
         expect(serialized, raw).not.toContain(raw);
       }
       // Not adjudicated: no retry, no refresh, no expiry notice.
-      expect(snapshotCalls()).toHaveLength(1);
+      expect(snapshotCalls(), attributed(snapshotCalls())).toHaveLength(1);
       expect(inferlab.refreshes).toEqual([]);
       expect(expired).not.toContain("hb-report-fails");
       expectOnlySnapshotsSince(before);
@@ -1228,5 +1329,60 @@ describe("host boards, the kernel-only read of a board binding's fixed target", 
     for (const name of ["readHostBoardSnapshot", "connectionIdentity", "HostBoard", "board-snapshot", "board_snapshot"]) {
       expect(agentTypes).not.toContain(name);
     }
+  });
+});
+
+describe("the suite's teardown", () => {
+  it("names a held read that outlives its deadline, restores the globals, and catches the read's late request", async () => {
+    const name = expect.getState().currentTestName!;
+    const stuck = new FakeInferLab(`${name} [stuck]`);
+    const next = new FakeInferLab(`${name} [next]`);
+    vi.stubGlobal("fetch", stuck.fetch);
+    const { token } = await (await fetch("http://localhost:8080/auth/token", { method: "POST", body: "{}" }))
+      .json() as { token: string };
+    const snapshot = `http://localhost:8080/project/board-snapshot?ref=${encodeURIComponent(BOARD_URL)}`;
+    const auth = { headers: { authorization: `Bearer ${token}` } };
+
+    // A read that reaches InferOps, then stays unsettled past the deadline, then sends once more
+    // through whichever `fetch` is current, as a request held up past its test would.
+    let sendLate!: () => void;
+    const lateTurn = new Promise<void>(resolve => { sendLate = resolve; });
+    let answerLate!: (response: Response) => void;
+    const lateAnswer = new Promise<Response>(resolve => { answerLate = resolve; });
+    const reads: HeldEntry[] = [];
+    await heldRead("snapshot", async () => {
+      await fetch(snapshot, auth);
+      await lateTurn;
+      const response = await fetch(snapshot, auth);
+      answerLate(response);
+      return response;
+    }, stuck, reads);
+
+    const failed = await teardown(stuck, reads, 50).then(() => "", (error: unknown) => String(error));
+    expect(failed).toContain("held reads still unsettled after 50ms");
+    expect(failed).toContain(`snapshot read issued by ${JSON.stringify(`${name} [stuck]`)}`);
+    expect(failed).toContain(`request /project/board-snapshot?ref=${encodeURIComponent(BOARD_URL)}`);
+    // The globals were restored even though the drain timed out.
+    expect(globalThis.fetch).toBe(realFetch);
+
+    // The next test's fake: the late request lands in it, is refused, and is attributed to the stuck
+    // test rather than passing as one of the next test's own.
+    vi.stubGlobal("fetch", next.fetch);
+    sendLate();
+    expect((await lateAnswer).status).toBe(401);
+    expect(next.foreign()).toEqual([expect.objectContaining({
+      path: `/project/board-snapshot?ref=${encodeURIComponent(BOARD_URL)}`, issuer: `${name} [stuck]`,
+    })]);
+    const caught = await teardown(next, [], 50).then(() => "", (error: unknown) => String(error));
+    expect(caught).toContain("InferOps requests made with another test's session");
+    expect(caught).toContain(`issued by ${JSON.stringify(`${name} [stuck]`)}`);
+    expect(globalThis.fetch).toBe(realFetch);
+
+    // A request reaching the retired fake itself is refused and reported, never answered as live.
+    expect((await stuck.fetch(snapshot, auth)).status).toBe(401);
+    const stray = await teardown(next, [], 50).then(() => "", (error: unknown) => String(error));
+    expect(stray).toContain("requests that reached a fake after its test ended");
+    expect(stray).toContain(`issued by ${JSON.stringify(`${name} [stuck]`)}`);
+    expect(stuck.apiCalls).toHaveLength(1);
   });
 });
