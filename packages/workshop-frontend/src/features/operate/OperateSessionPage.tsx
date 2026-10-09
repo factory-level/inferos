@@ -5,7 +5,7 @@ import { PlusIcon, SlidersHorizontalIcon } from '@phosphor-icons/react'
 import type { ConsoleSource } from '@gadgets/workshop-shared/operate-console'
 import type { OperateEvent, OperateRef } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
-import { canBuild, invalidateWorkspaceScreens, useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
+import { canBuild, invalidateWorkspaceScreens, recheckWorkspaceScreens, useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useOperateSession } from './OperateSessionContext'
 import { refusalMessage } from './sessionRefusal'
@@ -209,7 +209,7 @@ export const OperateSessionPage = () => {
     {!configuring && !tools && run && operate.session && shownHostBoard?.id !== undefined && <ConsoleHostBoard key={`${run.consoleId}/${run.source}/${run.revision}/${shownHostBoard.id}`}
       session={operate.session.stub} console={{ consoleId: run.consoleId, source: run.source, revision: run.revision }}
       entry={{ ...shownHostBoard, id: shownHostBoard.id }} onClose={() => setHostBoardTarget(null)} onRefused={refuseHostBoard}
-      onStaleOrUnavailable={invalidateWorkspaceScreens} />}
+      onStaleOrUnavailable={recheckWorkspaceScreens} />}
     {publishing && <ConsolePublishDialog entry={publishing} onClose={() => { setPublishing(null); setSavedEntry(null) }} />}
   </div>
   </ConsoleWorkspaceShell>

@@ -34,6 +34,7 @@ vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFe
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
   canBuild: (entry: { workspace: { role?: string } }) => entry.workspace.role !== 'use',
   invalidateWorkspaceScreens: () => {},
+  recheckWorkspaceScreens: () => {},
   useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
     { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], publishedScreens: {}, consoles: [
       { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',

@@ -53,6 +53,45 @@ export const invalidateWorkspaceScreens = () => {
   for (const listener of revisionListeners) listener()
 }
 
+/** The least time between the starts of two reloads that `recheckWorkspaceScreens` asks for. */
+export const RECHECK_FLOOR_MS = 5_000
+
+// Loads in flight, when the latest started, and a recheck still owed (see recheckWorkspaceScreens).
+let loadsInFlight = 0
+let lastLoadStart = Number.NEGATIVE_INFINITY
+let recheckOwed = false
+let recheckTimer: ReturnType<typeof setTimeout> | undefined
+
+const recheckNow = () => {
+  recheckOwed = false
+  // The reload starts on the lists' next render; count its start now, so asks until then wait.
+  lastLoadStart = Date.now()
+  invalidateWorkspaceScreens()
+}
+
+const scheduleRecheck = () => {
+  if (!recheckOwed || recheckTimer !== undefined || loadsInFlight > 0) return
+  const wait = lastLoadStart + RECHECK_FLOOR_MS - Date.now()
+  if (wait <= 0) { recheckNow(); return }
+  recheckTimer = setTimeout(() => {
+    recheckTimer = undefined
+    // A load that started meanwhile settles first and schedules this again.
+    if (loadsInFlight === 0) recheckNow()
+  }, wait)
+}
+
+/**
+ * Asks for the screen lists to be re-read when nothing definite says they changed (a host board's
+ * `stale` or `unavailable` answer, which a selection change alone can cause). Unlike
+ * `invalidateWorkspaceScreens` it is coalesced, since each reload opens up to 48 workspaces: no
+ * reload starts while one is in flight or within `RECHECK_FLOOR_MS` of the last one's start, and
+ * every ask made meanwhile is answered by one trailing reload.
+ */
+export const recheckWorkspaceScreens = () => {
+  recheckOwed = true
+  scheduleRecheck()
+}
+
 // Each published console's screens as published, read on the still-open stub so the calls batch.
 const readPublishedScreens = async (overseer: RpcStub<Overseer>, consoles: OperateConsole[])
     : Promise<Record<string, CanvasDefinition[]>> =>
@@ -69,6 +108,8 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
   const key = `${durableViews}:${screensRevision}`
   const pending = byMode.get(key)
   if (pending) return pending
+  loadsInFlight++
+  lastLoadStart = Date.now()
   const load = api.listGadgets().then(async all => {
     const recent = all.toSorted((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
     const builds = recent.filter(workspace => workspace.role !== 'use').slice(0, MAX_SCREEN_WORKSPACES)
@@ -107,7 +148,11 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
     }))
     const [listed, consoled] = await Promise.all([built, operated])
     return [...listed, ...consoled.filter(entry => entry !== null)]
-  }).finally(() => byMode.delete(key))
+  }).finally(() => {
+    byMode.delete(key)
+    loadsInFlight--
+    scheduleRecheck()
+  })
   byMode.set(key, load)
   return load
 }
