@@ -40,7 +40,16 @@ type OperateSessionValue = {
   dispatch: (event: OperateEvent) => Promise<void>
   /** The session capability, for the session workspace (its operate chat). */
   session: { stub: RpcStub<OperateSession> } | null
+  /**
+   * The console revision the kernel last said has moved on (republished or deleted elsewhere)
+   * while this session had it open, or null. A run still naming exactly this revision shows
+   * nothing more of it: the kernel refuses its reads and navigation.
+   */
+  staleConsole: StaleConsole | null
 }
+
+/** A console revision a session had open when the kernel said it moved on. */
+export type StaleConsole = { workspaceId: string; consoleId: string; revision: string }
 
 const OperateSessionContext = createContext<OperateSessionValue | null>(null)
 
@@ -54,6 +63,7 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
   const [session, setSession] = useState<{ stub: RpcStub<OperateSession> } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [recentEvents, setRecentEvents] = useState<OperateEventRecord[]>([])
+  const [staleConsole, setStaleConsole] = useState<StaleConsole | null>(null)
   // The latest seq seen and the waiters for a newer one, outside render so dispatch reads them fresh.
   const latest = useRef<{ seq: number; waiters: Array<() => void> }>({ seq: 0, waiters: [] })
 
@@ -64,6 +74,17 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
     setSession({ stub })
     stub.subscribe(update => {
       if (cancelled) return
+      // A notice repeats the page unchanged, whose run it found stale. The saved consoles are
+      // re-read so the console reopens at its new revision.
+      const notice = update.consoleRevision
+      if (notice) {
+        const run = update.state.console
+        if (run?.workspaceId === notice.workspaceId && run.consoleId === notice.consoleId && run.revision !== notice.revision) {
+          setStaleConsole({ workspaceId: run.workspaceId, consoleId: run.consoleId, revision: run.revision })
+          invalidateWorkspaceScreens()
+        }
+        return
+      }
       if (update.record) {
         const record = update.record
         setRecentEvents(held => mergeRecords(held, [record]))
@@ -94,6 +115,7 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
       stub[Symbol.dispose]()
       setSession(null)
       setRecentEvents([])
+      setStaleConsole(null)
     }
   }, [authenticatedApi])
 
@@ -126,7 +148,7 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
   }
 
   return (
-    <OperateSessionContext.Provider value={{ snapshot, recentEvents, error, dispatch, session }}>
+    <OperateSessionContext.Provider value={{ snapshot, recentEvents, error, dispatch, session, staleConsole }}>
       {children}
     </OperateSessionContext.Provider>
   )

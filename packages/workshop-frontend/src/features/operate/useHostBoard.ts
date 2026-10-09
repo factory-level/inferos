@@ -53,13 +53,24 @@ export type HostBoardOptions = {
    * read is still issued.
    */
   onRequest?: (readToken: number) => void
+  /**
+   * Called once when the kernel refuses the handle because that console revision is no longer
+   * open (a guard refusal of a read or of the selection subscription); it is never read again.
+   */
+  onRefused?: () => void
+  /**
+   * Called after each current read answered `stale` or `unavailable`, which may mean the console
+   * revision moved on without this view being told, so a caller can re-check it.
+   */
+  onStaleOrUnavailable?: () => void
 }
 
 /**
  * One host board of the open console revision, read through the operator's own selection. It
  * acquires the kernel's handle for `target`, subscribes to its selection, and runs the host-board
  * state machine's reads and timers; the handle and subscription are disposed when `target` changes
- * or the view unmounts. The board is held only in memory.
+ * or the view unmounts. The board is held only in memory. `onRefused` and `onStaleOrUnavailable`
+ * (see {@link HostBoardOptions}) let the dialog close, or check its console, rather than linger.
  *
  * Nothing here reaches the global error reporter. An event the reducer throws on resets the
  * machine to {@link faultHostBoard}'s fixed *unavailable* state. Timer and DOM listener callbacks
@@ -71,6 +82,10 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
   const machine = useRef(initialHostBoardState(document.visibilityState === 'visible'))
   const onRequest = useRef(options?.onRequest)
   onRequest.current = options?.onRequest
+  const refused = useRef(options?.onRefused)
+  refused.current = options?.onRefused
+  const notShown = useRef(options?.onStaleOrUnavailable)
+  notShown.current = options?.onStaleOrUnavailable
   const run = useRef<(event: HostBoardInput) => void>(() => {})
   const [, setTick] = useState(0)
   const { consoleId, source, revision } = target.console
@@ -85,6 +100,12 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
     let subscription: RpcStub<{}> | null = null
     let subscriptions = 0
     let handleInvalid = false
+    // A refused handle is never read again, and the view is told once.
+    const refuse = () => {
+      if (disposed || handleInvalid) return
+      handleInvalid = true
+      try { refused.current?.() } catch { /* dropped, like onRequest's */ }
+    }
     let resubscribeTimer: ReturnType<typeof setTimeout> | undefined
     let backoff = HOST_BOARD_RESUBSCRIBE_MS
 
@@ -104,13 +125,21 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
           const { token } = command
           try { onRequest.current?.(token) } catch { /* dropped: the read is issued regardless */ }
           handle.readRequirement(requirement)
-            .then(read => apply({ type: 'read-answer', token, read }))
+            .then(read => {
+              apply({ type: 'read-answer', token, read })
+              // Without a guard refusal, a moved-on revision reads as `stale` (then `unavailable`):
+              // the caller re-checks the console rather than trust a notice it may have missed.
+              if (!disposed && (read.status === 'stale' || read.status === 'unavailable')) {
+                try { notShown.current?.() } catch { /* dropped, like onRequest's */ }
+              }
+            })
             // Anything but a recognized guard refusal is an ordinary failure: the board is cleared
             // and shown as unavailable, and only the cadence, Retry or the tab being shown again
             // reads again.
             .catch((caught: unknown) => {
-              if (isGuardRefusal(caught)) handleInvalid = true
-              apply({ type: 'read-failed', token, failure: isGuardRefusal(caught) ? 'handle-invalid' : 'error' })
+              const guard = isGuardRefusal(caught)
+              if (guard) refuse()
+              apply({ type: 'read-failed', token, failure: guard ? 'handle-invalid' : 'error' })
             })
             .catch(() => {})
         } else if (command.type === 'set-timer') {
@@ -158,7 +187,7 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
         else subscription = stub
       }).catch((caught: unknown) => {
         if (id !== subscriptions) return
-        if (isGuardRefusal(caught)) { handleInvalid = true; apply({ type: 'handle-invalidated' }) }
+        if (isGuardRefusal(caught)) { refuse(); apply({ type: 'handle-invalidated' }) }
         else ended()
       }).catch(() => {})
     }

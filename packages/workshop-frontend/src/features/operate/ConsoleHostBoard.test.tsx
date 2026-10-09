@@ -83,11 +83,13 @@ beforeEach(() => {
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
   accounts.list = []; accounts.filters = []; accounts.subscriber = null; accounts.fail = undefined
   handles = []; disposed = []; readFailures = []; subscribeFailure = undefined
-  readRequirement.mockReset(); getConsoleHostBoard.mockClear(); selectHostBoardConnection.mockReset()
+  readRequirement.mockReset(); getConsoleHostBoard.mockClear(); selectHostBoardConnection.mockReset(); onRefused.mockReset(); onStaleOrUnavailable.mockReset()
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
-const render = (ref = REF) => act(async () => root.render(<ConsoleHostBoard session={session} console={ref} entry={ENTRY} onClose={() => {}} />))
+const onRefused = vi.fn<() => void>()
+const onStaleOrUnavailable = vi.fn<() => void>()
+const render = (ref = REF) => act(async () => root.render(<ConsoleHostBoard session={session} console={ref} entry={ENTRY} onClose={() => {}} onRefused={onRefused} onStaleOrUnavailable={onStaleOrUnavailable} />))
 const current = () => handles.at(-1)!
 const send = (update: HostBoardSelectionUpdate, handle = current()) => act(async () => handle.deliver(update))
 const answer = (view: HostBoardView, handle = current(), index = handle.reads.length - 1) => act(async () => handle.reads[index](view))
@@ -138,20 +140,46 @@ describe('refusals and unrecognized errors', () => {
     await act(async () => button('Retry')!.click())
     expect(reads()).toBe(calls + 1)
     expect(text()).not.toContain(SECRET)
+    expect(onRefused).not.toHaveBeenCalled()
   })
 
-  it('never reads a handle again after a recognized guard refusal', async () => {
+  it('asks to close, and never reads the handle again, when a refresh is refused because the revision is no longer open', async () => {
     await render()
     await selected()
     readFailures.push(new Error('Console c1 at revision 4 is not open in your operate session with host board hb1.'))
     await answer({ status: 'unavailable' })
     await act(async () => button('Retry')!.click())
     await flush()
-    expect(text()).toContain('Nothing is shown for this board right now')
+    expect(onRefused).toHaveBeenCalledTimes(1)
+    expect(text()).not.toContain('This board is unavailable right now.')
     const calls = reads()
     await act(async () => window.dispatchEvent(new Event('focus')))
     await send({ state: 'selected', changeSeq: 2, selectionEpoch: 2 })
     expect(reads()).toBe(calls)
+    expect(onRefused).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks its page to re-check the console after each stale or unavailable answer, never after an ok one', async () => {
+    await render()
+    await selected()
+    await answer(ok())
+    expect(onStaleOrUnavailable).not.toHaveBeenCalled()
+    await send({ state: 'selected', changeSeq: 2, selectionEpoch: 2 })
+    await answer({ status: 'stale' })
+    // One recovery read follows a `stale`; it too is stale, and the board shows unavailable.
+    await answer({ status: 'stale' })
+    expect(onStaleOrUnavailable).toHaveBeenCalledTimes(2)
+    await act(async () => button('Retry')!.click())
+    await answer({ status: 'unavailable' })
+    expect(onStaleOrUnavailable).toHaveBeenCalledTimes(3)
+    expect(onRefused).not.toHaveBeenCalled()
+  })
+
+  it('asks to close when the selection subscription is refused because the console changed', async () => {
+    subscribeFailure = new Error('Console c1 at revision 4 is not open in your operate session with host board hb1.')
+    await render()
+    await flush()
+    expect(onRefused).toHaveBeenCalledTimes(1)
   })
 })
 

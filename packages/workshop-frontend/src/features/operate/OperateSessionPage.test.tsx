@@ -33,6 +33,7 @@ vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticate
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true }, hostBoards: testState.hostBoards }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
   canBuild: (entry: { workspace: { role?: string } }) => entry.workspace.role !== 'use',
+  invalidateWorkspaceScreens: () => {},
   useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
     { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], publishedScreens: {}, consoles: [
       { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',

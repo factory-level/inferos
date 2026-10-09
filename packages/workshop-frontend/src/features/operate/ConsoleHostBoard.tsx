@@ -14,16 +14,20 @@ import { useHostBoardSelection } from './useHostBoardSelection'
  * menu. Trusted host code renders it from the snapshot the kernel reads with the operator's own
  * selected connection; the entry's target only filters which of their accounts are offered.
  */
-export const ConsoleHostBoard = ({ session, console: ref, entry, onClose }: {
+export const ConsoleHostBoard = ({ session, console: ref, entry, onClose, onRefused, onStaleOrUnavailable }: {
   session: RpcStub<OperateSession>
   /** The revision the session opened. */
   console: ConsoleRef
   /** The host board, as that revision registers it; it has an id once saved. */
   entry: HostBoardEntry & { id: string }
   onClose: () => void
+  /** The kernel refused the board because that console revision is no longer open. */
+  onRefused: () => void
+  /** A read answered `stale` or `unavailable`: the revision may have moved on unannounced. */
+  onStaleOrUnavailable: () => void
 }) => {
   const target = { entryId: entry.id, console: ref }
-  const { view, dispatch } = useHostBoard(session, target, entry.requirement.name)
+  const { view, dispatch } = useHostBoard(session, target, entry.requirement.name, { onRefused, onStaleOrUnavailable })
   // Subscribed while the board is open, not only while the picker shows: any change clears the
   // board and re-reads through the operator's current selection; it never picks an account.
   const accounts = useHostBoardAccounts(entry.requirement.target, () => dispatch({ type: 'invalidate' }))
