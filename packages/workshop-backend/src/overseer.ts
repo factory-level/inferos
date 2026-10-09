@@ -3823,10 +3823,12 @@ class OverseerImpl implements AgentHooks {
   // gadget's RPC stub, a gatekeeper session stub, or an agent callback's stored arguments.
   // Entries whose targets no longer exist are silently skipped, mirroring the deleted-gadget
   // behavior elsewhere. `executionId` is the calling executeCodeMode run, minted into worktree
-  // loopbacks so they are usable only from within that execution.
+  // loopbacks -- and, in an operate workspace, gatekeeper and GIT loopbacks too -- so they are
+  // usable only from within that execution.
   getEnvForAgent(chatId: number, bindings: Record<string, ChatBindingEntry>,
                  executionId: string): object {
     let caller: GatekeeperCaller = {from: "agent", chatId};
+    let bound = this.storage.operateSession.get() ? {executionId} : {};
     // This must be a *plain* object: it becomes the loaded worker's `env`, and the loader's
     // serializer rejects anything else (including a null-prototype object) with DataCloneError.
     // So prototype-pollution safety comes from validation instead: names from before name
@@ -3836,7 +3838,7 @@ class OverseerImpl implements AgentHooks {
 
     // Before the chat's bindings, so a chat binding named GIT shadows it -- matching
     // describeBinding (see describeBinding in agent.ts).
-    env[GIT_BINDING_NAME] = this.makeBindingLoopback({type: "git"}, caller);
+    env[GIT_BINDING_NAME] = this.makeBindingLoopback({type: "git", ...bound}, caller);
 
     for (let [name, entry] of Object.entries(bindings)) {
       try {
@@ -3860,7 +3862,8 @@ class OverseerImpl implements AgentHooks {
             env[name] = this.makeBindingLoopback(
                 {type: "worktree", id: entry.id, executionId}, caller);
           } else if (this.storage.gatekeepers.get(entry.id)) {
-            env[name] = this.makeBindingLoopback({type: "gatekeeper", id: entry.id}, caller);
+            env[name] = this.makeBindingLoopback(
+                {type: "gatekeeper", id: entry.id, ...bound}, caller);
           }
           break;
         }
@@ -6045,6 +6048,7 @@ class OverseerImpl implements AgentHooks {
 
       case "gatekeeper":
         if (caller.from === "agent" && this.storage.operateSession.get()) {
+          this.#assertExecutionLive(target, caller);
           return this.#assertUsableInOperateChat(target.id).then(() =>
               this.openGatekeeperSession(target.id, this.getGatekeeperFacet(target.id), caller));
         }
@@ -6080,6 +6084,9 @@ class OverseerImpl implements AgentHooks {
       }
 
       case "git":
+        if (caller.from === "agent" && this.storage.operateSession.get()) {
+          this.#assertExecutionLive(target, caller);
+        }
         return Promise.resolve(new GitImpl(this, () => this.#gitAuthorFor(caller)));
 
       default:
@@ -6117,6 +6124,24 @@ class OverseerImpl implements AgentHooks {
   // the currently-running execution resolve. See executeCodeMode.
   #activeWorktreeTurns = new Map<number,
       {access: WorktreeTurnAccess, initiator: AiChatAuthorInfo, executionId: string}>();
+
+  // Every running executeCodeMode execution, by its executionId, mapped to its chat. Registered
+  // for exactly the run (see executeCodeMode).
+  #liveExecutions = new Map<string, number>();
+
+  // An operate workspace's agent gatekeeper and GIT loopbacks are usable only while the execution
+  // they were minted for runs, as worktree loopbacks are: a stub kept past it -- stored through
+  // `self` and delivered into a later execution of this chat or of another -- fails closed. The
+  // execution must also be the minting chat's, so the chat a session sees as its caller is the
+  // one actually using it.
+  #assertExecutionLive(target: {executionId?: string}, caller: {chatId: number}): void {
+    if (target.executionId === undefined ||
+        this.#liveExecutions.get(target.executionId) !== caller.chatId) {
+      throw new Error(
+          "This binding is no longer live; in an operate workspace, connection and GIT bindings " +
+          "are usable only while the executeCode call they were provided to is running.");
+    }
+  }
 
   // Maps chat ID to action numbers recently performed by that chat's agent. These are drained into
   // the chat log after the tool returns. `awaitDecision` is true if any captured action needs it.
@@ -9275,6 +9300,7 @@ class OverseerImpl implements AgentHooks {
     if (worktreeTurn !== undefined) {
       this.#activeWorktreeTurns.set(chatId, {access: worktreeTurn, initiator, executionId});
     }
+    this.#liveExecutions.set(executionId, chatId);
 
     if (onOutputText) {
       this.#codeModeOutputSubscribers.set(executionId, onOutputText);
@@ -9366,6 +9392,7 @@ class OverseerImpl implements AgentHooks {
       if (this.#activeWorktreeTurns.get(chatId)?.executionId === executionId) {
         this.#activeWorktreeTurns.delete(chatId);
       }
+      this.#liveExecutions.delete(executionId);
       this.#codeModeOutputSubscribers.delete(executionId);
       this.#codeModeResolvers.delete(executionId);
       this.#forgedRestoreTargets.delete(chatId);
@@ -11223,8 +11250,15 @@ type GatekeeperLoopbackProps = {
 };
 
 type BindingLoopbackTarget = {
-  type: "gadget" | "gatekeeper";
+  type: "gadget";
   id: WorkpieceId;
+} | {
+  type: "gatekeeper";
+  id: WorkpieceId;
+
+  // In an operate workspace, the executeCodeMode execution an agent loopback was minted for (see
+  // #assertExecutionLive); absent everywhere else.
+  executionId?: string;
 } | {
   type: "worktree";
   id: WorkpieceId;
@@ -11237,6 +11271,9 @@ type BindingLoopbackTarget = {
 } | {
   // The `env.GIT` binding (see git-binding.ts).
   type: "git";
+
+  // As for "gatekeeper".
+  executionId?: string;
 };
 
 /**
