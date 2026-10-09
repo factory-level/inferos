@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES, type OperateSession, type OperateSessionUpdate } from "@gadgets/workshop-shared/api";
 import { startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { callbackStubFor, connect, signUp } from "../src/rpc-client.js";
+import { callbackStubFor, connect, logIn, signUp, waitFor } from "../src/rpc-client.js";
 
 /** How soon an open session hears that its console was republished or deleted. */
 const NOTICE_BOUND_MS = 2_000;
@@ -240,24 +240,53 @@ it("gives every publish a new revision: one winner per expected revision, and a 
 
 it("tells every operate session with the console open, promptly and without logging, that it was republished or deleted", () =>
   withHarness(true, async url => {
-    using api = connect(url);
-    using owner = await signUp(api, "consolesnotifier");
-    using workspace = await owner.newGadget();
-    await workspace.newChat("Console workspace", null);
-    const board = await workspace.createCanvas({ title: "Board", sections: [] });
-    const created = await workspace.createConsole({
-      title: "Operations lead", fullChat: "off", views: [{ id: "board", title: "Board", type: "screen", screen: board.id }],
-    });
-    const { id: workspaceId } = await workspace.getMetadata();
-    const first = await workspace.publishConsole(created.id, created.revision);
-    using operatorApi = await signUp(api, "consolesnotified");
-    using bystanderApi = await signUp(api, "consolesbystander");
-    using removedApi = await signUp(api, "consolesremoved");
-    for (const name of ["consolesnotified", "consolesbystander", "consolesremoved"]) {
-      if (!await workspace.addCollaborator(name, "use")) throw new Error("Failed to share");
-    }
+    const [ownerName, operatorName, bystanderName, removedName] = ["consolesnotifier", "consolesnotified", "consolesbystander", "consolesremoved"];
+    const { workspaceId, created, first } = await (async () => {
+      using api = connect(url);
+      using owner = await signUp(api, ownerName);
+      using workspace = await owner.newGadget();
+      await workspace.newChat("Console workspace", null);
+      const board = await workspace.createCanvas({ title: "Board", sections: [] });
+      const created = await workspace.createConsole({
+        title: "Operations lead", fullChat: "off", views: [{ id: "board", title: "Board", type: "screen", screen: board.id }],
+      });
+      const { id: workspaceId } = await workspace.getMetadata();
+      const first = await workspace.publishConsole(created.id, created.revision);
+      for (const name of [operatorName, bystanderName, removedName]) {
+        using _user = await signUp(api, name);
+        if (!await workspace.addCollaborator(name, "use")) throw new Error("Failed to share");
+      }
+
+      // A collaborator removed after opening the console still has it open in their session, but is
+      // no longer told anything about the workspace. The removal comes first, from its own socket:
+      // revoking access restarts the workspace's Durable Object (scheduleAccessRestart,
+      // packages/workshop-backend/src/overseer.ts:6822), which closes the whole WebSocket of every
+      // session with the workspace open, the owner's included, so everything below reconnects.
+      // That restart behaviour is a separate finding and is not changed here.
+      {
+        using removedApi = connect(url);
+        using removedUser = await logIn(removedApi, removedName);
+        using removedSession = await removedUser.getOperateSession();
+        await removedSession.dispatch({ type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
+          source: "published", revision: first.revision, fullChat: "off", viewId: "board" }, 0);
+        await workspace.removeCollaborator((await removedUser.whoami()).id, []);
+      }
+      await waitFor("the workspace to restart", () => workspace.getMetadata().then(() => null, () => true));
+      return { workspaceId, created, first };
+    })();
     const open = { type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
       source: "published", revision: first.revision, fullChat: "off", viewId: "board" } as const;
+
+    // Each person on their own socket, as in a browser.
+    using ownerApi = connect(url);
+    using owner = await logIn(ownerApi, ownerName);
+    using workspace = await owner.openGadget(workspaceId);
+    using operatorApi = connect(url);
+    using operatorUser = await logIn(operatorApi, operatorName);
+    using bystanderApi = connect(url);
+    using bystanderUser = await logIn(bystanderApi, bystanderName);
+    using removedApi = connect(url);
+    using removedUser = await logIn(removedApi, removedName);
 
     // Each session's updates as they arrive, with when they arrived.
     const watch = async (session: RpcStub<OperateSession>) => {
@@ -278,21 +307,20 @@ it("tells every operate session with the console open, promptly and without logg
     };
 
     // The operator has the published console open; the builder previews its draft; the bystander,
-    // who can read the console too, has nothing open.
-    using session = await operatorApi.getOperateSession();
+    // who can read the console too, has nothing open; the removed collaborator's session still has
+    // it open.
+    using session = await operatorUser.getOperateSession();
     let page = await session.dispatch(open, 0);
     using builderSession = await owner.getOperateSession();
     await builderSession.dispatch({ ...open, source: "draft" }, 0);
-    using bystanderSession = await bystanderApi.getOperateSession();
+    using bystanderSession = await bystanderUser.getOperateSession();
+    using removedSession = await removedUser.getOperateSession();
     using operator = await watch(session);
     using builder = await watch(builderSession);
     using bystander = await watch(bystanderSession);
-    // A collaborator removed after opening the console still has it open in their session, but is
-    // no longer told anything about the workspace.
-    using removedSession = await removedApi.getOperateSession();
-    await removedSession.dispatch(open, 0);
     using removed = await watch(removedSession);
-    await workspace.removeCollaborator((await removedApi.whoami()).id, []);
+    const removedPage = await waitFor("the removed collaborator's page", async () => removed.updates[0]?.update ?? null);
+    expect(removedPage.state.console).toMatchObject({ consoleId: created.id, revision: first.revision });
 
     const publishedAt = performance.now();
     const second = await workspace.publishConsole(created.id, first.revision);
