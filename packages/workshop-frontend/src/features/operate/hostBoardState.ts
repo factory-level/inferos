@@ -1,4 +1,5 @@
-import type { BoardSnapshot, HostBoardRead, HostBoardSelectionEvent, HostBoardTarget } from './hostBoardTypes'
+import type { HostBoardView as HostBoardRead, HostBoardViewSnapshot as BoardSnapshot } from '@gadgets/workshop-shared/operate-console'
+import type { HostBoardSelectionEvent, HostBoardTarget } from './hostBoardTypes'
 
 // The freshness rules of a host-rendered board, as a pure reducer: every effect (a read, a timer)
 // is returned as a command for the caller to run, and every event carries the clocks it happened
@@ -144,11 +145,16 @@ export const hostBoardView = (state: HostBoardState, at: HostBoardClock): HostBo
     return { status: 'ok', board: state.accepted.board, readAt: state.accepted.readAt }
   }
   if (state.selection.state === 'none') return { status: 'not-connected' }
+  // A selection is being made: nothing is read until it commits.
+  if (state.selection.state === 'pending') return { status: 'loading' }
   if (state.inFlight || state.queued) return { status: 'loading' }
   if (state.outcome === 'not-connected') return { status: 'not-connected' }
   if (state.outcome === 'unavailable') return { status: 'unavailable' }
   return { status: 'cleared' }
 }
+
+/** A selection's epoch, with none yet (null) below every committed one. */
+const epochOf = (selection: HostBoardSelectionEvent) => selection.selectionEpoch ?? -1
 
 type Draft = { state: HostBoardState; commands: HostBoardCommand[] }
 
@@ -291,10 +297,10 @@ export const reduceHostBoard = (state: HostBoardState, event: HostBoardEvent): H
       const previous = d.state.selection
       const next = event.selection
       if (previous && next.changeSeq <= previous.changeSeq) break
-      if (previous && next.selectionEpoch < previous.selectionEpoch) break
+      if (previous && epochOf(next) < epochOf(previous)) break
       // A first snapshot after unknown authority restores nothing by itself: only the fenced read
       // it starts can show data again.
-      const changed = !previous || next.selectionEpoch > previous.selectionEpoch || next.state !== previous.state
+      const changed = !previous || epochOf(next) > epochOf(previous) || next.state !== previous.state
       if (changed) invalidate(d)
       d.state = { ...d.state, selection: next }
       if (changed) requestRead(d, at)

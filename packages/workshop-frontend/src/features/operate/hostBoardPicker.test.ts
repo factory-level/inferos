@@ -3,7 +3,6 @@ import { initialHostBoardPickerState, reduceHostBoardPicker, type HostBoardPicke
 import type { HostBoardTarget } from './hostBoardTypes'
 
 const TARGET: HostBoardTarget = {
-  kind: 'host-board',
   entryId: 'entry-1',
   console: { consoleId: 'console-1', source: 'published', revision: '4' },
 }

@@ -1,6 +1,7 @@
 import { useRef, type ReactNode } from 'react'
 import { Badge, Button, Loader } from '@cloudflare/kumo'
-import type { HostBoardColumn, HostBoardGroup, HostBoardIssue, HostBoardPriority } from './hostBoardTypes'
+import type { HostBoardViewColumn as HostBoardColumn, HostBoardViewGroup as HostBoardGroup, HostBoardViewIssue as HostBoardIssue,
+  HostBoardViewPriority as HostBoardPriority } from '@gadgets/workshop-shared/operate-console'
 import type { HostBoardViewState } from './hostBoardState'
 
 const GROUP_LABEL: Record<HostBoardGroup, string> = {

@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { Button, Checkbox } from '@cloudflare/kumo'
-import { DEFAULT_CONSOLE_CUSTOMIZATION } from '@gadgets/workshop-shared/operate-console'
+import { DEFAULT_CONSOLE_CUSTOMIZATION, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
+import { useServerConfig } from '../../ServerConfigContext'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { invalidateWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { buildReturnHref } from './operateMode'
-import type { ConsoleEntry } from './consoles'
+import { consoleContentForSave, type ConsoleEntry } from './consoles'
+import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 
 const ignore = () => {}
@@ -28,6 +30,10 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
     onMetadata: ignore, onShareKeyConsumed: ignore, onInvalidShareKey: ignore })
   const [customization, setCustomization] = useState(entry.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION })
   const [widgets, setWidgets] = useState(entry.console.widgets ?? [])
+  // Undefined until edited: the saved boards are then kept as they are (see `consoleContentForSave`).
+  const [hostBoards, setHostBoards] = useState<HostBoardEntry[] | undefined>(undefined)
+  const shownHostBoards = hostBoards ?? entry.console.hostBoards ?? []
+  const hostBoardsOn = useServerConfig()?.hostBoards === true
   const { workpieces } = useWorkspaceWorkpieces(overseer, entry.workspace.id)
   const candidates = [...workpieces.values()].flatMap(piece => piece.type === 'gadget' && piece.chatId === undefined &&
     !piece.frozenFor && piece.installedFrom?.kind === 'widget' ? [piece] : [])
@@ -38,8 +44,8 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
     if (!overseer || !editable || saving) return
     setSaving(true); setError(null)
     try {
-      await overseer.stub.replaceConsole(entry.console.id, entry.console.revision, { title: entry.console.title, views: entry.console.views, fullChat: entry.console.fullChat, customization,
-        ...(widgets.length > 0 || entry.console.widgets ? { widgets } : {}) })
+      await overseer.stub.replaceConsole(entry.console.id, entry.console.revision, consoleContentForSave({ title: entry.console.title, views: entry.console.views, fullChat: entry.console.fullChat, customization,
+        ...(widgets.length > 0 || entry.console.widgets ? { widgets } : {}) }, entry.console.hostBoards, hostBoards))
       invalidateWorkspaceScreens()
       onClose()
     } catch {
@@ -62,7 +68,9 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       {!editable && <p role="status" className="text-sm text-kumo-subtle">Console owners and editors manage these settings.</p>}
     </div>
     <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={candidates}
-      disabled={!editable || saving} onChange={setWidgets} />
+      hostBoardCount={shownHostBoards.length} disabled={!editable || saving} onChange={setWidgets} />
+    {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={entry.console.published?.content.hostBoards}
+      widgetCount={widgets.length} disabled={!editable || saving} onChange={setHostBoards} />}
     {error && <p role="alert" className="text-sm text-kumo-danger">{error}</p>}
     {editable && <>
       <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save settings'}</Button>

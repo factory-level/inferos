@@ -8,11 +8,11 @@ import {
   type HostBoardEvent,
   type HostBoardState,
 } from './hostBoardState'
-import type { BoardSnapshot, HostBoardRead, HostBoardTarget } from './hostBoardTypes'
+import type { HostBoardView as HostBoardRead, HostBoardViewSnapshot as BoardSnapshot } from '@gadgets/workshop-shared/operate-console'
+import type { HostBoardTarget } from './hostBoardTypes'
 
 const START_WALL = Date.parse('2026-10-08T12:00:00.000Z')
 const TARGET: HostBoardTarget = {
-  kind: 'host-board',
   entryId: 'entry-1',
   console: { consoleId: 'console-1', source: 'published', revision: '4' },
 }
@@ -341,6 +341,29 @@ describe('selection subscription', () => {
     dispatch({ type: 'selection', subscription: 1, selection: { state: 'selected', changeSeq: 1, selectionEpoch: 1 } })
     dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 0, selectionEpoch: 9 } })
     expect(state).toBe(before)
+  })
+
+  it('clears the board and reads nothing while a selection is pending, then reads once it commits', () => {
+    mountSelected()
+    answer(ok())
+    const sent = reads().length
+    dispatch({ type: 'selection', subscription: 1, selection: { state: 'pending', changeSeq: 2, selectionEpoch: 1 } })
+    expect(view()).toEqual({ status: 'loading' })
+    expect(reads()).toHaveLength(sent)
+    dispatch({ type: 'selection', subscription: 1, selection: { state: 'selected', changeSeq: 3, selectionEpoch: 2 } })
+    expect(reads()).toHaveLength(sent + 1)
+    answer(ok())
+    expect(view().status).toBe('ok')
+  })
+
+  it('orders a first selection after a delivery with no epoch yet', () => {
+    dispatch({ type: 'context', context: { token: 1, target: TARGET } })
+    dispatch({ type: 'selection-subscribed', subscription: 1 })
+    dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 1, selectionEpoch: null } })
+    expect(view()).toEqual({ status: 'not-connected' })
+    dispatch({ type: 'selection', subscription: 1, selection: { state: 'selected', changeSeq: 2, selectionEpoch: 1 } })
+    expect(view()).toEqual({ status: 'loading' })
+    expect(reads()).toHaveLength(1)
   })
 
   it('ignores deliveries from a subscription it no longer holds', () => {

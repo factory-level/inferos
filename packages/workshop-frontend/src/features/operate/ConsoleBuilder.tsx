@@ -3,7 +3,7 @@ import { Button, Input, Select } from '@cloudflare/kumo'
 import { ChatsCircleIcon, LayoutIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import { DEFAULT_CONSOLE_CUSTOMIZATION, MAX_CONSOLE_VIEWS, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, type ConsoleFullChat, type ConsoleView } from '@gadgets/workshop-shared/operate-console'
+import { DEFAULT_CONSOLE_CUSTOMIZATION, MAX_CONSOLE_VIEWS, MAX_WORKSPACE_CONSOLES, type ConsoleFullChat, type ConsoleView, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
@@ -11,9 +11,10 @@ import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { invalidateWorkspaceScreens, type WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { ConsoleScreenEditor } from './ConsoleScreenEditor'
 import { ConsoleViewEditor } from './ConsoleViewEditor'
+import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 import { consoleScreens } from '@gadgets/workshop-shared/operate-console'
-import type { ConsoleEntry } from './consoles'
+import { consoleContentForSave, type ConsoleEntry } from './consoles'
 
 const ignore = () => {}
 const START_LABELS: Record<ConsoleFullChat, string> = { default: 'Assistant first', available: 'A view first, with Assistant', off: 'A view first, with side chat only', only: 'Assistant only' }
@@ -27,12 +28,17 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   onSaved: (entry: ConsoleEntry) => void
 }) => {
   const { authenticatedApi } = useAuthenticatedApi()
-  const catalog = useServerConfig()?.canvasFeatures?.catalog ?? DEFAULT_CANVAS_CATALOG
+  const serverConfig = useServerConfig()
+  const catalog = serverConfig?.canvasFeatures?.catalog ?? DEFAULT_CANVAS_CATALOG
+  const hostBoardsOn = serverConfig?.hostBoards === true
   const [workspaceId, setWorkspaceId] = useState(initial?.workspace.id ?? (workspaces.length === 1 ? workspaces[0].workspace.id : ''))
   const [title, setTitle] = useState(initial?.console.title ?? '')
   const [views, setViews] = useState<ConsoleView[]>(() => structuredClone(initial?.console.views ?? []))
   const [fullChat, setFullChat] = useState<ConsoleFullChat>(initial?.console.fullChat ?? 'default')
   const [widgets, setWidgets] = useState(initial?.console.widgets ?? [])
+  // Undefined until edited: the saved boards are then kept as they are (see `consoleContentForSave`).
+  const [hostBoards, setHostBoards] = useState<HostBoardEntry[] | undefined>(undefined)
+  const shownHostBoards = hostBoards ?? initial?.console.hostBoards ?? []
   const [step, setStep] = useState(0)
   const [creatingScreen, setCreatingScreen] = useState(false)
   const [addedScreens, setAddedScreens] = useState<CanvasDefinition[]>([])
@@ -51,8 +57,8 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const available = !!overseer && ready && metadata?.id === workspaceId && metadata.role !== 'use' && !openError && !observerConfig
   const limitReached = !initial && (entry?.consoles.length ?? 0) >= MAX_WORKSPACE_CONSOLES
   const validate = () => {
-    const content = parseOperateConsoleContent({ title, views, fullChat, customization: initial?.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION },
-      ...(widgets.length > 0 || initial?.console.widgets ? { widgets } : {}) })
+    const content = consoleContentForSave({ title, views, fullChat, customization: initial?.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION },
+      ...(widgets.length > 0 || initial?.console.widgets ? { widgets } : {}) }, initial?.console.hostBoards, hostBoards)
     if (consoleScreens(content).some(id => !screens.some(screen => screen.id === id))) throw new Error('Choose an available screen for every view.')
     return content
   }
@@ -116,7 +122,9 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
             <Button disabled={!available || views.length >= MAX_CONSOLE_VIEWS} onClick={() => setCreatingScreen(true)}>Create a new screen</Button>
             {/* An installed widget a screen shows must be registered before the console can be saved. */}
             {widgetInstalls.length > 0 && <ConsoleWidgetRegistry widgets={widgets} published={initial?.console.published?.content.widgets}
-              candidates={widgetInstalls} disabled={!available} onChange={setWidgets} />}
+              candidates={widgetInstalls} hostBoardCount={shownHostBoards.length} disabled={!available} onChange={setWidgets} />}
+            {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={initial?.console.published?.content.hostBoards}
+              widgetCount={widgets.length} disabled={!available} onChange={setHostBoards} />}
           </>}
     </div>}
     {step === 2 && <div className="space-y-5">

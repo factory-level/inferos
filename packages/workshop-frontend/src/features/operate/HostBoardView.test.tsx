@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HostBoardView } from './HostBoardView'
 import type { HostBoardViewState } from './hostBoardState'
-import type { BoardSnapshot } from './hostBoardTypes'
+import type { HostBoardViewSnapshot as BoardSnapshot } from '@gadgets/workshop-shared/operate-console'
 
 const HOSTILE = '<img src=x onerror=alert(1)>'
 const board = (title = 'Fix the login'): BoardSnapshot => ({
