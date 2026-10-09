@@ -95,8 +95,11 @@ export function uniquePopupName(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`
 }
 
-// The connect popup this document opened last, closed before the next one opens: a stale popup
-// still parked on a provider page is otherwise left behind the new one.
+// The connect popup this document opened last, asked to close before the next one opens: a stale
+// popup still parked on a provider page is otherwise left behind the new one. Best-effort only.
+// The Workshop's `Cross-Origin-Opener-Policy: same-origin` severs this handle as soon as the popup
+// leaves the Workshop origin (it then reads `closed`), and Chromium 153 ignores the close for a
+// disowned popup even without that policy. A stale popup can still finish its own flow.
 let lastConnectPopup: Window | null = null
 
 /**

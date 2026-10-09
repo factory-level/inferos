@@ -215,6 +215,18 @@ before navigating it, and with no opener there is nothing to `postMessage` to. P
 isolate their pages with COOP sever the opener anyway, so a design resting on it would break with
 them regardless.
 
+The Workshop isolates its own documents the same way: every Workshop document carries
+`Cross-Origin-Opener-Policy: same-origin` (see the
+[platform baseline](architecture/platform-pillars.md#cross-origin-opener-policy)). The handoff
+does not notice. The nonce lives in the popup's own sessionStorage, which survives the
+browsing-context-group switches, and the handoff page still closes itself. Two things the tab can
+observe do change. The tab's popup handle reads `closed` as soon as the popup leaves the Workshop
+origin, which the sign-in buttons already allow for. And `openConnectWindow`'s attempt to close
+the previous connect popup cannot reach it. Popup names are fresh per flow, so a second connect
+click never reused the first popup in any case; it opens a new one beside it. In Chromium 153 the
+close was already ignored for a disowned popup, so the stale popup stayed open before this change
+too. It can still finish its own flow.
+
 A same-origin `BroadcastChannel` from the completion page would work only when the gatekeeper is
 served from the Workshop's origin, and the popup is already the Workshop SPA with its own session,
 so a channel would save one page load in that one deployment shape at the cost of a second transport

@@ -21,7 +21,7 @@ covers:
   - packages/integration-tests
   - scripts/preview/smoke.ts
   - scripts/preview/smoke.test.ts
-updated: 2026-10-07
+updated: 2026-10-09
 ---
 
 # Cloudflare-like local development
@@ -47,7 +47,7 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `scripts/consumer/gatekeepers.ts` | Validates, generates and drift-checks a wrapper's own gatekeepers for local development. |
 | `packages/router` | Public routing and frontend assets/backend fallback. |
 | `packages/integration-tests` | Real Workers and RPC test harness with external network interception; optionally boots the production router as the primary Worker. |
-| `scripts/preview/smoke.ts` | Opt-in, read-only smoke check of a deployed instance's public origin (app shell, `/api` handshake, gatekeeper routes, OAuth redirect origins). |
+| `scripts/preview/smoke.ts` | Opt-in, read-only smoke check of a deployed instance's public origin (app shell and its opener policy, `/api` handshake, gatekeeper routes, OAuth redirect origins). |
 
 ## Data and Control Flow
 
@@ -108,11 +108,11 @@ The connection is found through the native action log rather than a file: every 
 
 ## Router-path parity
 
-`startHarness({ router: {} })` (`packages/integration-tests/src/harness.ts`) boots `packages/router` from its checked-in `wrangler.jsonc` as the harness's primary Worker, ahead of the Workshop and the gatekeepers, so the harness URL is the deployment's public origin. The router keeps its production assets stanza (SPA fallback and worker-first paths) with `assets.directory` pointed at `fixtures/router-assets`, a two-file stand-in for the frontend build; it binds `WORKSHOP_BACKEND` and one `GATEKEEPER_<binding>` per gatekeeper to the gatekeeper's default export, the bindings the deploy service adds. Without the option the Workshop stays primary, so other suites are unchanged. The router is a Worker input of the suite (`src/worker-inputs.ts`), so watch mode reruns on a router change.
+`startHarness({ router: {} })` (`packages/integration-tests/src/harness.ts`) boots `packages/router` from its checked-in `wrangler.jsonc` as the harness's primary Worker, ahead of the Workshop and the gatekeepers, so the harness URL is the deployment's public origin. The router keeps its production assets stanza (SPA fallback and worker-first paths) with `assets.directory` pointed at `fixtures/router-assets`, a stand-in for the frontend build (a shell, one asset, and a copy of the frontend's `_headers`, which the suite requires to match the shipped file); it binds `WORKSHOP_BACKEND` and one `GATEKEEPER_<binding>` per gatekeeper to the gatekeeper's default export, the bindings the deploy service adds. Without the option the Workshop stays primary, so other suites are unchanged. The router is a Worker input of the suite (`src/worker-inputs.ts`), so watch mode reruns on a router change.
 
-`__tests__/router-parity.test.ts` sends every request to that origin over real HTTP: static assets and the SPA fallback, `/api` worker-first, the gatekeeper and unbound gatekeeper routes, the Cap'n Web WebSocket, the InferOps gatekeeper's InferLab sign-in legs (asserting the provider `redirect_uri` is on the public origin), a board read recorded as an observation, one approval applied once, a restart of all three Workers via `server.update` with Durable Object state kept, and a reconnect. Reloads wait with `settled()` and retry side-effect-free phases with `overFreshConnection()`, now exported from `src/rpc-client.ts` and shared with `inferops-isolation.test.ts`, because a WebSocket opened just after a reload can be dropped.
+`__tests__/router-parity.test.ts` sends every request to that origin over real HTTP: static assets and the SPA fallback, `Cross-Origin-Opener-Policy: same-origin` on Workshop documents ([platform baseline](platform-pillars.md#cross-origin-opener-policy)), `/api` worker-first, the gatekeeper and unbound gatekeeper routes, the Cap'n Web WebSocket, the InferOps gatekeeper's InferLab sign-in legs (asserting the provider `redirect_uri` is on the public origin), a board read recorded as an observation, one approval applied once, a restart of all three Workers via `server.update` with Durable Object state kept, and a reconnect. Reloads wait with `settled()` and retry side-effect-free phases with `overFreshConnection()`, now exported from `src/rpc-client.ts` and shared with `inferops-isolation.test.ts`, because a WebSocket opened just after a reload can be dropped.
 
-`scripts/preview/smoke.ts` is the cloud half: given a deployed base URL and an optional Access service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`), it checks the app shell and SPA fallback, a `/api` WebSocket handshake (upgraded or auth-challenged, never 404 or 5xx), each gatekeeper route answering from a gatekeeper rather than the shell, and, for connect URLs passed with `--connect-url`, the provider `redirect_uri` origin. It only sends GETs and closes the handshake at once, prints a JSON report and exits 0, 1 or 2. Its checks are pure classifiers over a response, which `smoke.test.ts` drives against a local fake server under `node --test`. The [parity wiki](../wiki/local-cloud-parity.md) holds the matrix, the recorded runtime versions and the recipe.
+`scripts/preview/smoke.ts` is the cloud half: given a deployed base URL and an optional Access service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`), it checks the app shell and SPA fallback, their `Cross-Origin-Opener-Policy: same-origin` header (`opener-policy`), a `/api` WebSocket handshake (upgraded or auth-challenged, never 404 or 5xx), each gatekeeper route answering from a gatekeeper rather than the shell, and, for connect URLs passed with `--connect-url`, the provider `redirect_uri` origin. It only sends GETs and closes the handshake at once, prints a JSON report and exits 0, 1 or 2. Its checks are pure classifiers over a response, which `smoke.test.ts` drives against a local fake server under `node --test`. The [parity wiki](../wiki/local-cloud-parity.md) holds the matrix, the recorded runtime versions and the recipe.
 
 ## Configuration
 

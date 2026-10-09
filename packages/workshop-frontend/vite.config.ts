@@ -26,6 +26,13 @@ const frontendBundleTaskOptions = {
 }
 
 const ownDist = { pattern: '!dist/**', base: 'package' } as const
+
+/**
+ * The headers every Workshop document carries. Deployed and `run-local` documents get them from
+ * `public/_headers` through Workers Static Assets; the dev and preview servers set them here, so a
+ * popup behaves the same under `pnpm dev-client` as in production. See `public/_headers` for why.
+ */
+const documentHeaders = { 'Cross-Origin-Opener-Policy': 'same-origin' } as const
 const viteBuildCommand =
   `node --input-type=module -e "process.env.NODE_ENV='production'; await (await import('vite')).build()"`
 
@@ -81,11 +88,15 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3000,
       host: true,
+      headers: documentHeaders,
       proxy: {
         '/api/client-errors': `http://${backendHost}`,
         '/blueprint-screenshot': `http://${backendHost}`,
         '/api/site-logo': `http://${backendHost}`,
       },
+    },
+    preview: {
+      headers: documentHeaders,
     },
     build: {
       // Production reporting uploads these separately; hidden maps never reveal a map URL to users.

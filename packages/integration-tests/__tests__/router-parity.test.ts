@@ -17,11 +17,12 @@
 // discovery and router wiring.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, Overseer, PublicApi } from "@gadgets/workshop-shared/api";
 import type { InferOpsProjectSession } from "../../../custom-gatekeepers/gatekeeper-inferops/src/types.js";
-import { startHarness, type Harness } from "../src/harness.js";
+import { ROUTER_ASSETS_DIR, startHarness, type Harness } from "../src/harness.js";
 import {
   INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, boardUrl, type FakePerson,
 } from "../src/inferops-fake.js";
@@ -108,6 +109,8 @@ async function signInThroughRouter(flowUrl: string, person: FakePerson): Promise
   const done = await throughRouter(fake.authorize(authorize.toString(), person));
   const html = await done.text();
   expect(done.status, html).toBe(200);
+  // The handoff page is a Workshop-origin document, so it carries the Workshop's opener policy.
+  expect(done.headers.get("cross-origin-opener-policy")).toBe("same-origin");
   expect(html).not.toContain(SHELL_MARKER);
   const literal = /var ticket = (".*?");\n/.exec(html);
   if (!literal) throw new Error("The handoff page carried no ticket");
@@ -158,6 +161,53 @@ describe("the router serves the frontend", () => {
     expect(gatekeeper.status).toBe(404);
     expect(await gatekeeper.text()).toBe("Not Found");
     expect(await isShell(await get("/gatekeeper/unbound/oauth"))).toBe(true);
+  });
+});
+
+describe("Workshop documents isolate their browsing context group", () => {
+  const COOP = "cross-origin-opener-policy";
+
+  it("serves the fixture build the frontend's own _headers file", () => {
+    // The fixture stands in for the real build, so its copy must be the file Vite ships.
+    const shipped = resolve(import.meta.dirname, "../../workshop-frontend/public/_headers");
+    expect(readFileSync(resolve(ROUTER_ASSETS_DIR, "_headers"), "utf8"))
+      .toBe(readFileSync(shipped, "utf8"));
+  });
+
+  it("sends Cross-Origin-Opener-Policy: same-origin on the shell, its SPA fallback, deep links and assets", async () => {
+    // Gadget frames may open popups that escape the sandbox; under same-origin those popups get no
+    // opener into the Workshop (see packages/workshop-frontend/public/_headers).
+    for (const path of ["/", "/index.html", "/w/42/canvas", "/w/42/operate", "/w/42/operate?board=ENG#x",
+        "/gatekeepers/context", "/connect/handoff", "/no/such/page", "/assets/app.js"]) {
+      const response = await get(path);
+      expect(response.status, path).toBe(200);
+      expect(response.headers.get(COOP), path).toBe("same-origin");
+    }
+    // The rules file is configuration, not an asset: its path falls back to the shell.
+    expect(await isShell(await get("/_headers"))).toBe(true);
+  });
+
+  it("sends it in place of a 404: on a missing asset's fallback and on the router's own 404 pages", async () => {
+    // Under single-page-application handling no asset path is a 404: a missing one gets the shell.
+    const missing = await get("/assets/missing.js");
+    expect(await isShell(missing)).toBe(true);
+    expect(missing.headers.get(COOP)).toBe("same-origin");
+    // Extension routes are off in the harness, so the router answers them itself.
+    for (const path of ["/extensions", "/extensions/hello-world"]) {
+      const response = await get(path);
+      expect(response.status, path).toBe(404);
+      expect(response.headers.get(COOP), path).toBe("same-origin");
+    }
+  });
+
+  it("sends it on the HTML a gatekeeper serves through the router, and not on RPC", async () => {
+    // An OAuth callback with no flow behind it renders the kit's invalid-link page. The handoff page
+    // a completed sign-in renders is checked in signInThroughRouter below.
+    const invalid = await get("/gatekeeper/inferops/oauth");
+    expect(invalid.status).toBe(400);
+    expect(invalid.headers.get("content-type")).toContain("text/html");
+    expect(invalid.headers.get(COOP)).toBe("same-origin");
+    expect((await get("/api")).headers.get(COOP)).toBeNull();
   });
 });
 

@@ -25,6 +25,8 @@ const behaviour = {
   access: false,
   /** Where the connect leg sends `redirect_uri`: this origin, or a stale one. */
   redirectOrigin: "self" as "self" | "other",
+  /** The app shell's Cross-Origin-Opener-Policy, as the frontend's `_headers` sets it, or none. */
+  openerPolicy: "same-origin" as string | null,
 };
 const seen: { path: string; method: string; headers: IncomingMessage["headers"] }[] = [];
 
@@ -60,7 +62,10 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
   // Everything else, unbound gatekeeper paths included, is the SPA fallback.
-  res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(SHELL);
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    ...(behaviour.openerPolicy ? { "cross-origin-opener-policy": behaviour.openerPolicy } : {}),
+  }).end(SHELL);
 }
 
 before(async () => {
@@ -106,7 +111,7 @@ describe("runSmoke against a fake deployment", () => {
     const report = await runSmoke(options({ connectUrls: [connectUrl] }));
     assert.equal(report.ok, true, JSON.stringify(report, null, 2));
     assert.deepEqual(report.checks.map(c => c.name),
-      ["app-shell", "api", "gatekeeper:inferops", "oauth:inferops"]);
+      ["app-shell", "opener-policy", "api", "gatekeeper:inferops", "oauth:inferops"]);
     assert.equal(checkNamed(report, "api").status, 101);
     assert.ok(seen.every(r => r.method === "GET"));
     // The handshake named the deployment's own origin, which the Workshop requires under Access.
@@ -125,6 +130,20 @@ describe("runSmoke against a fake deployment", () => {
     behaviour.api = "error";
     assert.equal(checkNamed(await runSmoke(options()), "api").ok, false);
     behaviour.api = "upgrade";
+  });
+
+  it("fails an app shell without Cross-Origin-Opener-Policy: same-origin", async () => {
+    try {
+      for (const policy of [null, "same-origin-allow-popups"]) {
+        behaviour.openerPolicy = policy;
+        const report = await runSmoke(options());
+        assert.equal(report.ok, false);
+        assert.equal(checkNamed(report, "app-shell").ok, true);
+        assert.match(checkNamed(report, "opener-policy").detail, new RegExp(`got ${policy ?? "none"}`));
+      }
+    } finally {
+      behaviour.openerPolicy = "same-origin";
+    }
   });
 
   it("fails a gatekeeper path that falls through to the app shell or has nothing behind it", async () => {
