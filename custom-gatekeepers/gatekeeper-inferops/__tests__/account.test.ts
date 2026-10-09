@@ -69,7 +69,21 @@ function jwt(expiresAt: number): string {
   return `${part({ alg: "HS256" })}.${part({ exp: Math.floor(expiresAt / 1000) })}.sig`;
 }
 
-type ApiCall = { path: string; token: string | null; workspaceId: string | null };
+/** The routes whose answers a test can hold in flight. */
+type HeldRoute = "embed" | "snapshot";
+
+/**
+ * One InferOps request. `issuer` is the test whose fake minted the request's access token (null for
+ * none or one no fake minted), so a request a previous test left in flight is told apart from one
+ * this test's own read sent.
+ */
+type ApiCall = { path: string; token: string | null; workspaceId: string | null; issuer: string | null };
+
+/** Every fake's token tag, by the test that made it. */
+const issuers = new Map<string, string>();
+let fakes = 0;
+/** The test that minted `token`: its fake's tag is the segment after the JWT's three. */
+const issuerOf = (token: string | null) => token === null ? null : issuers.get(token.split(".")[3] ?? "") ?? null;
 
 /**
  * One fake behind `fetch`: InferLab central-auth (token exchange, refresh, logout) and the InferOps
@@ -106,17 +120,58 @@ class FakeInferLab {
   refreshes: string[] = [];
   exchanges = 0;
   apiCalls: ApiCall[] = [];
-  /** While set, `object.embed` answers wait for it, after reading their answer: a request in flight. */
-  embedGate: Promise<void> | null = null;
-  /** Embed requests that have reached the gate. */
-  embedsHeld = 0;
   /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
   snapshotAnswer: (() => Response) | null = null;
-  /** While set, board snapshot answers wait for it, after reading their answer: a request in flight. */
-  snapshotGate: Promise<void> | null = null;
-  /** Snapshot requests that have reached the gate. */
-  snapshotsHeld = 0;
+  /** Requests that have reached a gate, by route. */
+  held: Record<HeldRoute, number> = { embed: 0, snapshot: 0 };
+  /** The open gate per route: a request reaching it waits there, after reading its answer. */
+  #gates: Partial<Record<HeldRoute, { arrive: () => void; released: Promise<void> }>> = {};
+  /** Releases every gate this fake has opened, whether or not anything reached it. */
+  #releases: Array<() => void> = [];
   #serial = 0;
+  /** The test this fake serves, and the tag every access token it mints carries. */
+  readonly test = expect.getState().currentTestName ?? "(outside a test)";
+  readonly #tag = `fake${++fakes}`;
+
+  constructor() {
+    issuers.set(this.#tag, this.test);
+  }
+
+  /**
+   * Holds the next requests to `route` in flight until `release()`. `arrived` settles when the
+   * first reaches the gate. Release is idempotent, and `releaseAll` performs it too.
+   */
+  hold(route: HeldRoute): { arrived: Promise<void>; release: () => void } {
+    let arrive!: () => void;
+    let open!: () => void;
+    const arrived = new Promise<void>(resolve => { arrive = resolve; });
+    const gate = { arrive, released: new Promise<void>(resolve => { open = resolve; }) };
+    this.#gates[route] = gate;
+    const release = () => {
+      if (this.#gates[route] === gate) delete this.#gates[route];
+      open();
+    };
+    this.#releases.push(release);
+    return { arrived, release };
+  }
+
+  /** Opens every gate, so nothing this test held stays in flight past it. */
+  releaseAll(): void {
+    for (const release of this.#releases.splice(0)) release();
+  }
+
+  async #pass(route: HeldRoute): Promise<void> {
+    const gate = this.#gates[route];
+    if (!gate) return;
+    this.held[route]++;
+    gate.arrive();
+    await gate.released;
+  }
+
+  /** The requests this fake took with another test's token: work a previous test left in flight. */
+  foreign(): ApiCall[] {
+    return this.apiCalls.filter(c => c.issuer !== null && c.issuer !== this.test);
+  }
 
   /** The access token of the session `refreshToken` names. */
   accessOf(refreshToken: string): string {
@@ -125,7 +180,7 @@ class FakeInferLab {
 
   #issue(): { token: string; refreshToken: string } {
     const n = ++this.#serial;
-    const token = `${jwt(Date.now() + this.accessTtlMs)}.${n}`;
+    const token = `${jwt(Date.now() + this.accessTtlMs)}.${this.#tag}.${n}`;
     const refreshToken = `refresh-${n}`;
     this.access.add(token);
     this.sessions.set(refreshToken, { access: token });
@@ -180,7 +235,7 @@ class FakeInferLab {
         id, tenant_id: "t1", product: "inferops", name: slug, slug,
       })));
     }
-    this.apiCalls.push({ path: url.pathname + url.search, token, workspaceId });
+    this.apiCalls.push({ path: url.pathname + url.search, token, workspaceId, issuer: issuerOf(token) });
     if (!token || !this.access.has(token)) {
       return Response.json({ error: { code: "UNAUTHORIZED", message: "bad token" } }, { status: 401 });
     }
@@ -191,10 +246,7 @@ class FakeInferLab {
         this.memberships.has(OPS) && url.searchParams.size === 1
         ? Response.json({ scope: { workspaceId: OPS, projectId: DEMO.id }, snapshot: SNAPSHOT })
         : Response.json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, { status: 404 }));
-      if (this.snapshotGate) {
-        this.snapshotsHeld++;
-        await this.snapshotGate;
-      }
+      await this.#pass("snapshot");
       return answer;
     }
     if (!workspaceId || !this.memberships.has(workspaceId)) {
@@ -237,10 +289,7 @@ class FakeInferLab {
       }
       if (widget === "table-view" && id === TABLE) {
         const answer = Response.json({ widget: "table-view", type: TABLE_TYPE, records: [TABLE_RECORD] });
-        if (this.embedGate) {
-          this.embedsHeld++;
-          await this.embedGate;
-        }
+        await this.#pass("embed");
         return answer;
       }
       if (widget === "record-card" && id === TABLE_ROW) {
@@ -282,10 +331,41 @@ beforeEach(() => {
   inferlab = new FakeInferLab();
   vi.stubGlobal("fetch", inferlab.fetch);
 });
-afterEach(() => {
+afterEach(async () => {
+  // Every read a test held is released and settled while its own fake still answers `fetch`, so
+  // none can land in the next test's fake and pass for one of that test's requests.
+  inferlab.releaseAll();
+  await Promise.all(inFlight.splice(0));
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  expect(inferlab.foreign(), "InferOps requests made with another test's session").toEqual([]);
 });
+
+/** Reads started by `heldRead`, settled (never rejected) for the cleanup above to await. */
+const inFlight: Array<Promise<unknown>> = [];
+
+/**
+ * Starts `read` with its InferOps answer held at `route` until `settle()`, and returns once the
+ * request has reached InferOps. The read is registered for cleanup and the release handle exists
+ * before anything is awaited, so a read that is slow to arrive, or fails, is still released and
+ * drained before the next test. Arrival is awaited, not polled: a loaded runner only makes it slower.
+ */
+async function heldRead<T>(route: HeldRoute, read: () => Promise<T>): Promise<{ settle: () => Promise<T> }> {
+  const gate = inferlab.hold(route);
+  const before = inferlab.held[route];
+  const outcome = read();
+  const settled = outcome.then(value => ({ value }), (error: unknown) => ({ error }));
+  inFlight.push(settled);
+  const first = await Promise.race([gate.arrived.then(() => null), settled]);
+  if (first !== null) throw new Error(`the read settled before reaching InferOps: ${String(JSON.stringify(first))}`);
+  expect(inferlab.held[route]).toBe(before + 1);
+  return {
+    settle: async () => {
+      gate.release();
+      return outcome;
+    },
+  };
+}
 
 /** Runs `body` with the test worker's exports, from inside a throwaway sign-in object. */
 async function withExports<R>(body: (exports: SignInExports) => Promise<R>): Promise<R> {
@@ -812,21 +892,9 @@ describe("custom tables as the person", () => {
     expect(inferlab.logouts).toEqual(["refresh-1"]);
   });
 
-  /** Starts a table read whose InferOps answer is held until `release()`; the read's outcome. */
-  async function heldRead(name: string) {
-    let release!: () => void;
-    inferlab.embedGate = new Promise<void>(resolve => { release = resolve; });
-    const before = inferlab.embedsHeld;
-    const outcome = failure(hooks().startBoundTableSession(name).listRecords());
-    await vi.waitFor(() => expect(inferlab.embedsHeld).toBe(before + 1));
-    return {
-      settle: async () => {
-        inferlab.embedGate = null;
-        release();
-        return outcome;
-      },
-    };
-  }
+  /** Starts a table read whose InferOps answer is held until `settle()`, which gives its failure. */
+  const heldTableRead = (name: string) =>
+    heldRead("embed", () => failure(hooks().startBoundTableSession(name).listRecords()));
 
   const tableObservations = async () =>
     (await hooks().log()).observations.filter(title => title === "List InferOps custom table rows").length;
@@ -835,7 +903,7 @@ describe("custom tables as the person", () => {
     const account = await connect("table-fence-reconnect");
     expect(await hooks().bindAccount("t-fence-reconnect", account, TABLE_URL)).toBeNull();
     const observed = await tableObservations();
-    const read = await heldRead("t-fence-reconnect");
+    const read = await heldTableRead("t-fence-reconnect");
 
     expect((await finish(await hooks().reconnectAccount(account))).status).toBe(200);
     const stageId = reconnects.find(r => r.label === "table-fence-reconnect")!.stageId;
@@ -853,7 +921,7 @@ describe("custom tables as the person", () => {
     const account = await connect("table-fence-revoke");
     expect(await hooks().bindAccount("t-fence-revoke", account, TABLE_URL)).toBeNull();
     const observed = await tableObservations();
-    const read = await heldRead("t-fence-revoke");
+    const read = await heldTableRead("t-fence-revoke");
 
     await hooks().revokeAccount(account);
 
@@ -1043,24 +1111,11 @@ describe("host boards, the kernel-only read of a board binding's fixed target", 
   });
 
   /** Starts a host-board read whose InferOps answer is held until `settle()`. */
-  async function heldRead(name: string) {
-    let release!: () => void;
-    inferlab.snapshotGate = new Promise<void>(resolve => { release = resolve; });
-    const held = inferlab.snapshotsHeld;
-    const outcome = boardOf(name);
-    await vi.waitFor(() => expect(inferlab.snapshotsHeld).toBe(held + 1));
-    return {
-      settle: async () => {
-        inferlab.snapshotGate = null;
-        release();
-        return outcome;
-      },
-    };
-  }
+  const heldBoardRead = (name: string) => heldRead("snapshot", () => boardOf(name));
 
   it("discards an answer held in flight across a reconnect as stale, then reads as the new session", async () => {
     const { account, before } = await bound("hb-reconnect");
-    const read = await heldRead("hb-reconnect");
+    const read = await heldBoardRead("hb-reconnect");
     expect((await finish(await hooks().reconnectAccount(account))).status).toBe(200);
     const stageId = reconnects.find(r => r.label === "hb-reconnect")!.stageId;
     expect(await hooks().commitReconnect(account, stageId)).toBeNull();
@@ -1075,7 +1130,7 @@ describe("host boards, the kernel-only read of a board binding's fixed target", 
 
   it("discards an answer held in flight across a revoke as stale, then reads as not-connected", async () => {
     const { account, before } = await bound("hb-revoke");
-    const read = await heldRead("hb-revoke");
+    const read = await heldBoardRead("hb-revoke");
     await hooks().revokeAccount(account);
 
     const outcome = await read.settle();
