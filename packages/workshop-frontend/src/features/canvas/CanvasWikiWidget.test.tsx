@@ -230,13 +230,14 @@ it('shows the Wiki read-only where edits are not offered', async () => {
   expect(wikiArticle().querySelector('[aria-label^="Edit section"]')).toBeNull()
 })
 
-it('shows what an agent reads, equal to the sections rendered, through the same connection', async () => {
+it('shows what an agent reads through the same connection, and does not compare a page whose widgets it reads as text', async () => {
   await render(widget())
   await click(button(wikiArticle(), 'Agent view'))
   const panel = wikiArticle().querySelector<HTMLElement>('[aria-label="Agent view"]')!
   const shown = wikiSections().filter(s => s.documentId === 'd1')
   expect(panel.querySelector('pre')?.textContent).toBe(documentText('Team handbook', shown.map(s => s.body)))
-  expect(panel.textContent).toContain('Same as this page')
+  // The handbook embeds the DEMO board.
+  expect(panel.textContent).toContain('Not compared: an agent reads each embedded widget as its live text.')
   expect(wiki.session.readDocumentText).toHaveBeenCalledWith('handbook')
 })
 
@@ -270,7 +271,7 @@ it('navigates an organized Wiki by its root, each Master in pillar order with it
   expect(pageBody().textContent).toContain('Page the on-call engineer.')
 })
 
-it('renders a page with a body as its body alone, embeds included, and the agent reads the same body', async () => {
+it('renders a page with a body as its body alone, embeds included, and shows the agent text without comparing its widgets', async () => {
   organize()
   await render(widget('ops/incident-response'))
   const body = pageBody()
@@ -287,6 +288,20 @@ it('renders a page with a body as its body alone, embeds included, and the agent
   const stored = pages.find(page => page.id === 'p1')!
   expect(panel.querySelector('pre')?.textContent).toBe(composeDocumentText(stored.title, { body: stored.body, visibleSections: ['Section text that is never part of the page.'], generated: null }))
   expect(panel.querySelector('pre')?.textContent).toContain('1. Page the on-call engineer.')
+  // InferOps reads each embedded widget as its live text, which this page draws as the widget.
+  expect(panel.textContent).toContain('Not compared: an agent reads each embedded widget as its live text.')
+  expect(panel.textContent).not.toContain('Same as this page')
+})
+
+it('shows a Master\'s documentation coverage in what an agent reads, and compares the page without it', async () => {
+  const { structure } = organize()
+  const page = { id: 'm1', masterRole: 'pillar' as const }
+  const coverage = '<!-- generated: documentation coverage -->\n## Documentation coverage\nDocumented 1 · Stale 0 · Partial 0 · Missing 1'
+  wiki.session.readDocumentText.mockResolvedValueOnce(`# Engineering\n\n${masterStructureText(page, structure)}\n\n${coverage}`)
+  await render(widget('engineering'))
+  await click(button(wikiArticle(), 'Agent view'))
+  const panel = wikiArticle().querySelector<HTMLElement>('[aria-label="Agent view"]')!
+  expect(panel.querySelector('pre')?.textContent).toContain('Documented 1 · Stale 0 · Partial 0 · Missing 1')
   expect(panel.textContent).toContain('Same as this page')
 })
 

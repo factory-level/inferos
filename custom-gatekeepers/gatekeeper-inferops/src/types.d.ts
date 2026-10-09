@@ -465,11 +465,16 @@ export interface InferOpsWikiSession {
   /** One page by its slug or UUID, with its body, its sections and its embedded references. */
   readDocument(slugOrId: string): Promise<WikiDocument>;
   /**
-   * One page as plain text: "# <title>", a blank line, then the page's body without a leading
-   * "# ..." title line (or, for a page with no body, each section's markdown, separated by blank
-   * lines). A Master page then adds a generated list of the pillars (the root) or of the pillar's
-   * pages, marked by an "<!-- generated: wiki structure -->" line. Embedded references stay as the
-   * links they are written as. Fails with NOT_FOUND for a page with nothing you can read.
+   * One page as plain text, exactly as a person reads it in InferMind: "# <title>", a blank line,
+   * then the page's body without a leading "# ..." title line (or, for a page with no body, each
+   * section's markdown, separated by blank lines). A Master page then adds a generated list of the
+   * pillars (the root) or of the pillar's pages, marked by an "<!-- generated: wiki structure -->"
+   * line, and a documentation coverage block, marked by an
+   * "<!-- generated: documentation coverage -->" line: documented, stale, partial and missing counts
+   * of the operations it measures, as your access allows, or a line saying coverage is unavailable
+   * or could not be loaded. Embedded widgets read as their live text. A page with an edit of yours
+   * not yet in effect reads with that edit, and then without coverage and with embeds as the links
+   * they are written as. Fails with NOT_FOUND for a page with nothing you can read.
    */
   readDocumentText(slugOrId: string): Promise<string>;
   /**

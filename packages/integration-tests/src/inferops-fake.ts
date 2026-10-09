@@ -900,6 +900,15 @@ export class InferOpsFake {
         // The detail shape: InferOps adds the page's body, version and Master role.
         return json(doc ? { ...wireDocument(doc), body: "", version: 1, masterRole: null } : null);
       }
+      // `document.text`: InferOps' own page text. These pages are not Masters and the fake resolves
+      // no widgets, so embeds stay links; a page it will not show is `text: null`, never a 404.
+      const textMatch = /^\/knowledge\/documents\/([^/]+)\/text$/.exec(url.pathname);
+      if (textMatch) {
+        const doc = documentIn(textMatch[1]!);
+        if (!doc) return json({ text: null });
+        const bodies = [...this.#sections.values()].filter(s => s.documentId === doc.id).map(s => s.body);
+        return json({ text: [`# ${doc.title}`, ...bodies].join("\n\n") });
+      }
       if (url.pathname === "/knowledge/sections") {
         const documentId = url.searchParams.get("documentId") ?? "";
         return json(documentIn(documentId)
