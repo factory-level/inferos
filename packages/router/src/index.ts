@@ -39,6 +39,7 @@ const OPENER_POLICY = ["Cross-Origin-Opener-Policy", "same-origin"] as const;
 function withOpenerPolicy(response: Response): Response {
   const type = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!type.startsWith("text/html") && !type.startsWith("application/xhtml+xml")) return response;
+  // Re-wrapping is safe: a WebSocket 101 (which a new Response could not carry) is never HTML.
   const document = new Response(response.body, response);
   document.headers.set(...OPENER_POLICY);
   return document;

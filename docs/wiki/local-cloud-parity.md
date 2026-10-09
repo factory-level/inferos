@@ -125,6 +125,7 @@ It prints one JSON report (`ok`, `baseUrl`, `accessServiceToken`, `checks[]`) an
 | `api` | A WebSocket handshake to `/api`, sent with the instance's own `Origin`, is upgraded, or is refused by an auth challenge (the Workshop's Access refusal, an Access login redirect, a 401 or a 403); a 404 or a 5xx fails. Only an upgrade or the Workshop's own refusal proves the backend was reached. |
 | `gatekeeper:<name>` | `/gatekeeper/<name>/` answers from the gatekeeper: not the app shell (an unbound route falls through to it) and not a 502–504. Defaults to every gatekeeper package this checkout deploys. |
 | `oauth:<name>` | For each `--connect-url`, the provider redirect's `redirect_uri` is on the base URL's origin under `/gatekeeper/<name>/`. Skipped without a connect URL. Fetching it starts one sign-in attempt, which expires unused; the report never prints the URL, since a connect URL is a bearer capability. |
+| `opener-policy` | The app shell (`/`) and a client route carry `Cross-Origin-Opener-Policy: same-origin`. Confirms the deploy applied `_headers`; see [platform pillars](../architecture/platform-pillars.md#cross-origin-opener-policy). |
 
 Without a service token, every path but `/api` is expected to be challenged by Access, and those checks fail saying so. `scripts/preview/smoke.test.ts` covers the checks against a local fake deployment.
 
