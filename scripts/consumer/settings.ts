@@ -98,6 +98,11 @@ export function tablesRequested({ config, env }: SettingsInput): boolean {
   return config.schemaVersion === 2 ? config.capabilities.INFEROPS_TABLES_ENABLED : env.INFEROPS_TABLES_ENABLED === "true";
 }
 
+/** Whether host boards are asked for, resolved like custom tables. */
+export function hostBoardsRequested({ config, env }: SettingsInput): boolean {
+  return config.schemaVersion === 2 ? config.capabilities.INFEROPS_HOST_BOARDS : env.INFEROPS_HOST_BOARDS === "true";
+}
+
 /** The wrapper's `codingWorkbench.repos`, read defensively so pins whose parser predates it still load. */
 function wrapperCodingRepos(config: ConsumerConfig): unknown[] | null {
   if (config.schemaVersion !== 2) return null;
@@ -233,6 +238,13 @@ export const SETTINGS: readonly SettingEntry[] = [
     requiredWhen: never,
     readAt: "`inferos.config.json` `capabilities.INFEROPS_TABLES_ENABLED` (version 2), else the shell",
     present: tablesRequested,
+  },
+  {
+    name: "INFEROPS_HOST_BOARDS", group: "Host and runtime", kind: "value", owner: "deployer", default: "off", source: "local",
+    description: "Proposed: turns kernel host boards on (a console's host-rendered board, read by each operator through their own connection). Needs `INFEROPS_ENABLED`; a version 2 wrapper's capability wins over the shell.",
+    requiredWhen: never,
+    readAt: "`inferos.config.json` `capabilities.INFEROPS_HOST_BOARDS` (version 2), else the shell",
+    present: hostBoardsRequested,
   },
   {
     name: "local.port", group: "Host and runtime", kind: "value", owner: "developer", default: "`8787`", source: "local",
@@ -421,7 +433,7 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
     });
   } catch (error) { add("INFEROPS_ENABLED", "error", "contradictory", (error as Error).message); }
   if (config.schemaVersion === 2) {
-    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED"] as const) {
+    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS"] as const) {
       if (env[name] !== undefined && env[name] !== String(config.capabilities[name])) {
         add(name, "warning", "contradictory", `The shell's ${name} differs from the wrapper capability, which wins; unset it`);
       }
@@ -430,7 +442,7 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
       add("codingWorkbench.repos", "warning", "contradictory", "The shell's CODING_WORKBENCH_REPOS is ignored; a version 2 wrapper's codingWorkbench.repos is the allowlist");
     }
   } else {
-    for (const name of ["CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED"] as const) {
+    for (const name of ["CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS"] as const) {
       if (env[name] !== undefined && !["true", "false"].includes(env[name]!)) {
         add(name, "error", "invalid", `${name} must be "true" or "false"`);
       }
@@ -438,6 +450,9 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
   }
   if (tablesRequested(input) && !inferOpsOn(input)) {
     add("INFEROPS_TABLES_ENABLED", "error", "contradictory", "INFEROPS_TABLES_ENABLED is on, but the InferOps integration (INFEROPS_ENABLED) is off");
+  }
+  if (hostBoardsRequested(input) && !inferOpsOn(input)) {
+    add("INFEROPS_HOST_BOARDS", "error", "contradictory", "INFEROPS_HOST_BOARDS is on, but the InferOps integration (INFEROPS_ENABLED) is off");
   }
 
   // Publication. A version 2 wrapper's capabilities win over the shell, as for coding dispatch.

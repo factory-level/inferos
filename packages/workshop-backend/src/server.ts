@@ -1,8 +1,9 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
-import { consoleEventMismatch } from '@gadgets/workshop-shared/operate-console';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
+import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
+import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
 import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -626,17 +627,38 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async getOperateSession(): Promise<RpcStub<OperateSession>> {
+    let claim = () => this.#user.claimOperateSessionWorkspace(this.overseers.newUniqueId().toString());
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
     return new OperateSessionImpl(() => this.#user, async () => {
-      let id = await this.#user.claimOperateSessionWorkspace(
-          this.overseers.newUniqueId().toString());
-      return this.#openGadgetInternal(id, undefined, undefined, true);
+      return this.#openGadgetInternal(await claim(), undefined, undefined, true);
     }, id => this.#openGadgetInternal(id),
     userId => wrapDoStubForTelemetry(this.users.get(this.users.idFromName(userId))),
-    boardRef => this.ctx.exports.SubjectPresenceDurableObject.getByName(boardRef));
+    boardRef => this.ctx.exports.SubjectPresenceDurableObject.getByName(boardRef), {
+      enabled: () => hostBoardsEnabled(this.env),
+      userId: this.#userId.toString(),
+      desk: async initialize => {
+        let id = await claim();
+        // Opening it once as the session marks it the owner's operate session workspace.
+        if (initialize) (await this.#openGadgetInternal(id, undefined, undefined, true))[Symbol.dispose]();
+        return this.overseers.get(this.overseers.idFromString(id));
+      },
+    });
   }
 }
+
+// What OperateSessionImpl needs for host boards: the switch, the caller's user id (the owner of
+// their operate session workspace) and that workspace's Durable Object, which holds their
+// selections and runs every read (see host-boards.ts).
+type HostBoardDeps = {
+  enabled: () => boolean;
+  userId: string;
+  desk: (initialize: boolean) => Promise<DurableObjectStub<OverseerDurableObject>>;
+};
+
+// The caller's context for one host board, re-read through their own access: their session must
+// show the console from that source at that revision, and that revision must offer the entry.
+type HostBoardRun = { workspaceId: string; entry: HostBoardEntry; sessionSeq: number };
 
 // Returned by getOperateSession(). The session's state lives in the user DO, which serializes every
 // dispatch; this capability only forwards to it, minting a fresh user-DO stub per call (see #user).
@@ -646,8 +668,132 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
       private openWorkspace: () => Promise<NativeRpcStub<Overseer>>,
       private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>,
       private otherUser: (userId: string) => DurableObjectStub<UserDurableObject>,
-      private subjectPresence: (boardRef: string) => DurableObjectStub<SubjectPresenceDurableObject>) {
+      private subjectPresence: (boardRef: string) => DurableObjectStub<SubjectPresenceDurableObject>,
+      private hostBoards: HostBoardDeps) {
     super();
+  }
+
+  // Null whenever the context no longer holds, including when anything along the way fails. A
+  // draft is read through the caller's own role, so it needs build access every time.
+  async #hostBoardRun(console: ConsoleRef, entryId: string, name?: string): Promise<HostBoardRun | null> {
+    try {
+      let page = await this.user().getOperatePage();
+      let run = page.state.console;
+      if (!run || run.consoleId !== console.consoleId || run.source !== console.source ||
+          run.revision !== console.revision) {
+        return null;
+      }
+      using workspace = await this.openConsoleWorkspace(run.workspaceId);
+      let saved = await workspace.getConsole(console.consoleId, console.source);
+      if (!saved || saved.revision !== console.revision) return null;
+      let entry = saved.hostBoards?.find(candidate => candidate.id === entryId);
+      if (!entry || (name !== undefined && entry.requirement.name !== name)) return null;
+      return { workspaceId: run.workspaceId, entry, sessionSeq: page.seq };
+    } catch {
+      return null;
+    }
+  }
+
+  #hostBoardGuard(console: ConsoleRef, entryId: string, name?: string): () => Promise<HostBoardContext | null> {
+    return async () => {
+      let run = await this.#hostBoardRun(console, entryId, name);
+      return run && { target: run.entry.requirement.target, sessionSeq: run.sessionSeq };
+    };
+  }
+
+  #requireHostBoards(): void {
+    if (!this.hostBoards.enabled()) throw new Error(HOST_BOARDS_OFF);
+  }
+
+  async selectHostBoardConnection(console: ConsoleRef, entryId: string, accountId: number,
+      requestKey: string): Promise<HostBoardSelection> {
+    this.#requireHostBoards();
+    let run = await this.#hostBoardRun(console, entryId);
+    if (!run) throw new Error(`Console ${console.consoleId} at revision ${console.revision} is not open in your operate session with host board ${entryId}.`);
+    let desk = await this.hostBoards.desk(true);
+    return desk.selectHostBoard(this.hostBoards.userId, requestKey,
+        { workspaceId: run.workspaceId, consoleId: console.consoleId, source: console.source,
+          revision: console.revision, entryId, accountId },
+        { target: run.entry.requirement.target, sessionSeq: run.sessionSeq },
+        this.#hostBoardGuard(console, entryId));
+  }
+
+  async getConsoleHostBoard(console: ConsoleRef, entryId: string): Promise<RpcStub<ConsoleHostBoard>> {
+    this.#requireHostBoards();
+    let run = await this.#hostBoardRun(console, entryId);
+    if (!run) {
+      throw new Error(`Console ${console.consoleId} at revision ${console.revision} is not open in your operate session with host board ${entryId}.`);
+    }
+    // The handle names its one requirement; any other name is refused before anything is read.
+    let requirement = run.entry.requirement.name;
+    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
+    //     type system doesn't know this.
+    return new ConsoleHostBoardImpl({
+      read: async name => {
+        if (name !== requirement) throw new Error(`Host board ${entryId} has no requirement ${name}.`);
+        return this.#readHostBoard(console, entryId, name);
+      },
+      subscribe: subscriber => this.#subscribeHostBoardSelection(console, entryId, subscriber),
+    });
+  }
+
+  async listHostBoardReads(): Promise<HostBoardReadAudit[]> {
+    let desk = await this.hostBoards.desk(false);
+    return desk.listHostBoardReads(this.hostBoards.userId);
+  }
+
+  // `readAt` is taken before anything is awaited, and one absolute deadline from it covers reaching
+  // the operate workspace and its desk's whole read (which enforces the same deadline itself and
+  // owns every effect).
+  async #readHostBoard(console: ConsoleRef, entryId: string, name: string): Promise<HostBoardView> {
+    let readAt = Date.now();
+    if (!this.hostBoards.enabled()) return { status: "unavailable" };
+    return readByDeadline(readAt, async () => {
+      let desk = await this.hostBoards.desk(false);
+      return await desk.readHostBoard(this.hostBoards.userId,
+          { consoleId: console.consoleId, entryId, requirementName: name, source: console.source,
+            revision: console.revision, readAt },
+          this.#hostBoardGuard(console, entryId, name)) as HostBoardView;
+    }, { now: () => Date.now(), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)) });
+  }
+
+  // One delivery lane per subscription (HostBoardSelectionRelay): snapshot first, newest state
+  // only, the caller's context re-checked before each delivery, and exactly one `unknown` when it
+  // ends. The selection workspace dropping its reference to `forward` (on its reset, or when the
+  // subscription ends) is observed as `forward`'s disposal, the same signal #openGadgetInternal
+  // uses, so a reset ends the subscription instead of leaving it silently live.
+  async #subscribeHostBoardSelection(console: ConsoleRef, entryId: string,
+      subscriber: RpcStub<(update: HostBoardSelectionUpdate) => void>): Promise<RpcStub<{}>> {
+    this.#requireHostBoards();
+    let run = await this.#hostBoardRun(console, entryId);
+    if (!run) throw new Error(`Console ${console.consoleId} at revision ${console.revision} is not open in your operate session with host board ${entryId}.`);
+    let target = run.entry.requirement.target;
+    let deliver = subscriber.dup();
+    let subscription: { [Symbol.dispose](): void } | undefined;
+    let relay = new HostBoardSelectionRelay(async update => { await deliver(update); }, async () => {
+      let now = await this.#hostBoardRun(console, entryId);
+      return !!now && now.entry.requirement.target === target && this.hostBoards.enabled();
+    }, () => {
+      subscription?.[Symbol.dispose]();
+      deliver[Symbol.dispose]();
+    });
+    let setUp = false;
+    let forward = async (state: HostBoardSelectionState) => { relay.push(state); };
+    (forward as unknown as Disposable)[Symbol.dispose] = () => { if (setUp) relay.end(); };
+    try {
+      let desk = await this.hostBoards.desk(true);
+      let result = await desk.subscribeHostBoardSelection(this.hostBoards.userId, target, forward) as
+          unknown as { snapshot: HostBoardSelectionState; subscription: { [Symbol.dispose](): void } };
+      subscription = result.subscription;
+      setUp = true;
+      if (relay.ended) subscription[Symbol.dispose]();
+      relay.start(result.snapshot);
+    } catch (error) {
+      relay.abandon();
+      throw error;
+    }
+    // @ts-expect-error An RpcTarget works in place of a stub, but the type system doesn't know this.
+    return new HostBoardSubscriptionHandle(() => relay.end());
   }
 
   // The reducer is pure, so it can't know whether a view or screen still belongs to the console a
@@ -770,6 +916,37 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
     //     system doesn't know this.
     return this.openWorkspace();
+  }
+}
+
+// The guarded host board handle (OperateSession.getConsoleHostBoard). It holds no target, account or
+// connection: each call re-resolves the caller's context and selection.
+@validateRpc()
+class ConsoleHostBoardImpl extends RpcTarget implements ConsoleHostBoard {
+  constructor(private calls: {
+    read: (name: string) => Promise<HostBoardView>;
+    subscribe: (subscriber: RpcStub<(update: HostBoardSelectionUpdate) => void>) => Promise<RpcStub<{}>>;
+  }) {
+    super();
+  }
+
+  async readRequirement(name: string): Promise<HostBoardView> {
+    return this.calls.read(name);
+  }
+
+  async subscribeSelection(subscriber: RpcStub<(update: HostBoardSelectionUpdate) => void>): Promise<RpcStub<{}>> {
+    return this.calls.subscribe(subscriber);
+  }
+}
+
+// Ends a host board selection subscription when the client disposes it.
+class HostBoardSubscriptionHandle extends RpcTarget {
+  constructor(private end: () => void) {
+    super();
+  }
+
+  [Symbol.dispose]() {
+    this.end();
   }
 }
 

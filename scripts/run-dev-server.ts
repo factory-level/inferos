@@ -25,6 +25,7 @@ import {
   INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, gatekeeperBaseUrl, gatekeeperBinding, getDevRouterAssets,
   getDevRouterConfig, getDevServerConfig, getInferLabLoginVars, inferLabLoginStartupError, resolveCodingWorkbenchEnabled, resolveInferOpsEnabled,
   resolveInferOpsTablesEnabled,
+  resolveInferOpsHostBoards,
   resolvePublicationFlag,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
@@ -171,6 +172,13 @@ const inferOpsTablesEnabled = resolveInferOpsTablesEnabled({
   capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_TABLES_ENABLED : null,
   inferOpsEnabled,
   shell: process.env.INFEROPS_TABLES_ENABLED,
+});
+// Host boards (proposed), resolved as custom tables are: off by default. Both the backend, which
+// owns the host-board kernel path, and the gatekeeper's board facet enforce the resulting var.
+const inferOpsHostBoards = resolveInferOpsHostBoards({
+  capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_HOST_BOARDS : null,
+  inferOpsEnabled,
+  shell: process.env.INFEROPS_HOST_BOARDS,
 });
 // Publication (#68): a version 2 wrapper's PUBLISH_CLOUDFLAREOS_* capabilities switch it; otherwise
 // off unless the shell turns it on. The backend enforces the resulting vars (publication.ts).
@@ -612,6 +620,7 @@ const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined
     CODING_WORKBENCH_ENABLED: codingWorkbenchEnabled,
     CODING_WORKBENCH_REPOS: codingWorkbenchRepos,
     INFEROPS_TABLES_ENABLED: inferOpsTablesEnabled,
+    INFEROPS_HOST_BOARDS: inferOpsHostBoards,
   },
 };
 
@@ -672,6 +681,8 @@ for (const gk of gatekeepers) {
   config.vars.DURABLE_VIEWS = canvasFeatures.durableViews ? "true" : "false";
   if (canvasConfig) config.vars.CANVAS_CATALOG = JSON.stringify(canvasConfig.catalog);
   Object.assign(config.vars, publicationFlags);
+  config.vars.INFEROPS_ENABLED = inferOpsEnabled;
+  config.vars.INFEROPS_HOST_BOARDS = inferOpsHostBoards;
 
   // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
   // environment, so you can run e.g.

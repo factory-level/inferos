@@ -1,6 +1,7 @@
 import type { ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type ConsoleSource, type ConsoleWidgetEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type ConsoleSource, type ConsoleWidgetEntry, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
 type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens" | "gadgets">;
@@ -155,7 +156,7 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
  */
 export class WorkspaceConsoleStore {
   constructor(private durableStorage: DurableObjectStorage, private storage: ConsoleStorage,
-      private env: Pick<Cloudflare.Env, "COMPOSABLE_VIEWS" | "DURABLE_VIEWS">,
+      private env: Pick<Cloudflare.Env, "COMPOSABLE_VIEWS" | "DURABLE_VIEWS" | "INFEROPS_HOST_BOARDS" | "INFEROPS_ENABLED">,
       private frozen?: FrozenInstalls) {}
 
   #requireEnabled(): void {
@@ -166,12 +167,38 @@ export class WorkspaceConsoleStore {
 
   // A console may only be saved over screens that exist; one deleted later shows as unavailable.
   // Its widgets are checked now and again at publication, since screens and gadgets change.
-  #parse(content: OperateConsoleContent): OperateConsoleContent {
-    let parsed = parseOperateConsoleContent(content);
+  #parse(content: OperateConsoleContent, current?: OperateConsole): OperateConsoleContent {
+    // Omitted means keep: editors that predate host boards send no `hostBoards`, and replacing
+    // through them must not delete saved entries. An explicit list (`[]` included) replaces them.
+    // The saved entries are merged in before parsing, so the combined registry limit applies.
+    let inherited = content.hostBoards === undefined && current?.hostBoards !== undefined;
+    let parsed = parseOperateConsoleContent(inherited ? { ...content, hostBoards: current!.hostBoards } : content);
     let missing = consoleScreens(parsed).find(screen => !this.storage.canvases.get(screen));
     if (missing) throw new Error(`Console screen ${missing} is not a screen in this workspace`);
     checkConsoleWidgets(this.storage, parsed);
-    return parsed;
+    if (parsed.hostBoards === undefined) return parsed;
+    return { ...parsed, hostBoards: this.#hostBoards(parsed.hostBoards, current) };
+  }
+
+  // A new entry gets its id here, and is refused while the switch is off; entries this console
+  // already holds stay editable and publishable then, since they grant nothing while it is off. An
+  // entry naming an id must be one of this console's (draft or published) with exactly that
+  // requirement, so a requirement never changes under its id and no id is forged.
+  #hostBoards(entries: HostBoardEntry[], current?: OperateConsole): HostBoardEntry[] {
+    if (entries.some(entry => entry.id === undefined) && !hostBoardsEnabled(this.env)) throw new Error(HOST_BOARDS_OFF);
+    let known = new Map<string, HostBoardEntry>();
+    for (let entry of [...current?.hostBoards ?? [], ...current?.published?.content.hostBoards ?? []]) {
+      if (entry.id !== undefined) known.set(entry.id, entry);
+    }
+    return entries.map(entry => {
+      if (entry.id === undefined) return { ...entry, id: crypto.randomUUID() };
+      let held = known.get(entry.id)?.requirement;
+      let { name, resource, target } = entry.requirement;
+      if (!held || held.name !== name || held.resource !== resource || held.target !== target) {
+        throw new Error(`Host board ${entry.id} is not this console's, or its requirement changed; add a new entry instead.`);
+      }
+      return entry;
+    });
   }
 
   list(): OperateConsole[] {
@@ -245,6 +272,12 @@ export class WorkspaceConsoleStore {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
+      // A host-only publication creates no install. While the switch is off, only entries already
+      // published may be published again; publishing any other is refused.
+      let published = new Set((current.published?.content.hostBoards ?? []).map(entry => entry.id));
+      if (!hostBoardsEnabled(this.env) && (current.hostBoards ?? []).some(entry => !published.has(entry.id))) {
+        throw new Error(HOST_BOARDS_OFF);
+      }
       let raised = { ...current, revision: String(BigInt(current.revision) + 1n) };
       return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen);
     });
@@ -269,7 +302,7 @@ export class WorkspaceConsoleStore {
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
       let replaced: OperateConsole = {
-        ...this.#parse(content), id,
+        ...this.#parse(content, current), id,
         revision: String(BigInt(current.revision) + 1n),
         published: current.published,
       };
