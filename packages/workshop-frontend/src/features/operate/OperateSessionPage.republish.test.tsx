@@ -88,6 +88,7 @@ vi.mock('./ConsoleHostBoard', () => ({
 
 import { OperateSessionProvider } from './OperateSessionContext'
 import { OperateSessionPage } from './OperateSessionPage'
+import { RECHECK_FLOOR_MS } from '../../pages/inferops-canvas/useWorkspaceScreens'
 
 let container: HTMLDivElement
 let root: Root
@@ -102,7 +103,7 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
 })
-afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 const settle = () => act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve() })
 const button = (label: string) => [...container.querySelectorAll('button')].find(item => item.textContent === label)
@@ -163,10 +164,14 @@ it('closes the dialog and reloads the list when the kernel refuses the board for
   expect(kernel.listings).toBeGreaterThan(listed)
 })
 
+const advance = (ms: number) => act(async () => { vi.advanceTimersByTime(ms) })
+
 // The lost-notice gap: no notice arrives, but a `stale` or `unavailable` answer makes the page
 // re-read its consoles, and the dialog closes only if that list shows the revision moved on.
 it('re-reads the list on a stale or unavailable answer, closing the dialog only once the revision has moved', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   await openBoardAtThree()
+  await advance(RECHECK_FLOOR_MS)
   let listed = kernel.listings
   await click('Answer stale')
   expect(kernel.listings).toBeGreaterThan(listed)
@@ -175,10 +180,40 @@ it('re-reads the list on a stale or unavailable answer, closing the dialog only 
   kernel.published = '5'
   listed = kernel.listings
   await click('Answer stale')
+  await advance(RECHECK_FLOOR_MS)
+  await settle()
   expect(kernel.listings).toBeGreaterThan(listed)
   expect(dialog()).toBeNull()
   await act(async () => kernel.subscriber!(kernel.page = { seq: kernel.page.seq + 1,
     state: applyOperateEvent(kernel.page.state, { type: 'showHome' }) }))
   await click('Open Console A')
   expect(kernel.dispatched.at(-1)).toMatchObject({ type: 'openConsole', revision: '5' })
+})
+
+// A stale answer may come from nothing more than a selection change; each re-reads up to 48
+// workspaces, so a burst of them reloads the list once, and again only after the floor.
+it('reloads the list once for a burst of stale answers, then at most once more after the floor', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  await openBoardAtThree()
+  await advance(RECHECK_FLOOR_MS)
+  const listed = kernel.listings
+  for (let i = 0; i < 3; i++) await click('Answer stale')
+  expect(kernel.listings).toBe(listed + 1)
+  await advance(RECHECK_FLOOR_MS)
+  await settle()
+  expect(kernel.listings).toBe(listed + 2)
+  await advance(RECHECK_FLOOR_MS * 3)
+  expect(kernel.listings).toBe(listed + 2)
+})
+
+// The kernel sends only newer notices, but two publishes fan out independently: the client
+// compares revisions too, so an older notice never closes a current board, and a deletion always does.
+it('ignores a notice for a revision older than the open one, and always heeds a deletion', async () => {
+  await openBoardAtThree()
+  await act(async () => kernel.subscriber!({ ...kernel.page,
+    consoleRevision: { workspaceId: 'ws1', consoleId: 'c1', revision: '2' } }))
+  expect(dialog()).toContain('Team board at 3')
+  await act(async () => kernel.subscriber!({ ...kernel.page,
+    consoleRevision: { workspaceId: 'ws1', consoleId: 'c1', revision: null } }))
+  expect(dialog()).toBeNull()
 })

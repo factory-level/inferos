@@ -5,6 +5,7 @@ import {
   faultHostBoard,
   hostBoardView,
   initialHostBoardState,
+  isCurrentRead,
   reduceHostBoard,
   type HostBoardClock,
   type HostBoardEvent,
@@ -126,10 +127,12 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
           try { onRequest.current?.(token) } catch { /* dropped: the read is issued regardless */ }
           handle.readRequirement(requirement)
             .then(read => {
+              // Only a current read's answer says anything about the console now.
+              const current = !disposed && isCurrentRead(machine.current, token)
               apply({ type: 'read-answer', token, read })
               // Without a guard refusal, a moved-on revision reads as `stale` (then `unavailable`):
               // the caller re-checks the console rather than trust a notice it may have missed.
-              if (!disposed && (read.status === 'stale' || read.status === 'unavailable')) {
+              if (current && (read.status === 'stale' || read.status === 'unavailable')) {
                 try { notShown.current?.() } catch { /* dropped, like onRequest's */ }
               }
             })

@@ -175,6 +175,17 @@ describe('refusals and unrecognized errors', () => {
     expect(onRefused).not.toHaveBeenCalled()
   })
 
+  it('does not ask for a re-check when a superseded read answers stale', async () => {
+    await render()
+    await selected()
+    // A newer selection supersedes the read in flight; its late `stale` is no news about the console.
+    await send({ state: 'selected', changeSeq: 2, selectionEpoch: 2 })
+    await answer({ status: 'stale' }, current(), 0)
+    expect(onStaleOrUnavailable).not.toHaveBeenCalled()
+    await answer({ status: 'unavailable' })
+    expect(onStaleOrUnavailable).toHaveBeenCalledTimes(1)
+  })
+
   it('asks to close when the selection subscription is refused because the console changed', async () => {
     subscribeFailure = new Error('Console c1 at revision 4 is not open in your operate session with host board hb1.')
     await render()

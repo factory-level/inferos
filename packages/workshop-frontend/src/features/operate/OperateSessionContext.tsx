@@ -21,6 +21,15 @@ const mergeRecords = (held: OperateEventRecord[], more: OperateEventRecord[]) =>
   return [...bySeq.values()].toSorted((a, b) => a.seq - b.seq).slice(-RECENT_EVENTS)
 }
 
+// Whether a notice's revision supersedes the run's: a deletion (null) always does, otherwise only
+// a later one. Revisions are decimal strings that only rise; a run from before they were recorded
+// has "", read as 0. The kernel sends only newer notices, but two publishes fan out independently,
+// so this does not rely on their order; a revision that is not a decimal string supersedes nothing.
+const supersedes = (notice: string | null, run: string) => {
+  if (notice === null) return true
+  try { return BigInt(run || '0') < BigInt(notice) } catch { return false }
+}
+
 type OperateSessionValue = {
   /** The session's page as of its latest event; null until the first snapshot arrives. */
   snapshot: OperateSessionSnapshot | null
@@ -79,7 +88,7 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
       const notice = update.consoleRevision
       if (notice) {
         const run = update.state.console
-        if (run?.workspaceId === notice.workspaceId && run.consoleId === notice.consoleId && run.revision !== notice.revision) {
+        if (run?.workspaceId === notice.workspaceId && run.consoleId === notice.consoleId && supersedes(notice.revision, run.revision)) {
           setStaleConsole({ workspaceId: run.workspaceId, consoleId: run.consoleId, revision: run.revision })
           invalidateWorkspaceScreens()
         }

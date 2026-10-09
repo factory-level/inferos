@@ -246,13 +246,22 @@ const recheck = (d: Draft, at: HostBoardClock, resume: boolean) => {
   if (resume && d.state.nextRefreshMono !== null && at.mono >= d.state.nextRefreshMono) requestRead(d, at)
 }
 
+/**
+ * Whether read `token` is the one in flight and its answer may still touch state: not superseded
+ * by an invalidation, a new context or a refused handle.
+ */
+export const isCurrentRead = (state: HostBoardState, token: number): boolean => {
+  const inFlight = state.inFlight
+  return !!inFlight && inFlight.token === token && inFlight.live && inFlight.contextToken === state.context?.token
+    && inFlight.generation === state.generation && state.handle === 'valid'
+}
+
 /** Takes the answer's read out of flight; returns it only when its answer may touch state. */
 const settle = (d: Draft, token: number): InFlightRead | null => {
   const inFlight = d.state.inFlight
   if (!inFlight || inFlight.token !== token) return null
+  const current = isCurrentRead(d.state, token)
   d.state = { ...d.state, inFlight: null }
-  const current = inFlight.live && inFlight.contextToken === d.state.context?.token
-    && inFlight.generation === d.state.generation && d.state.handle === 'valid'
   return current ? inFlight : null
 }
 

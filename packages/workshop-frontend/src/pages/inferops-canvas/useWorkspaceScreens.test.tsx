@@ -7,7 +7,7 @@ import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
-import { canBuild, useWorkspaceScreens, type WorkspaceScreensState } from './useWorkspaceScreens'
+import { canBuild, recheckWorkspaceScreens, RECHECK_FLOOR_MS, useWorkspaceScreens, type WorkspaceScreensState } from './useWorkspaceScreens'
 
 const CONSOLE: OperateConsole = { id: 'c1', revision: '0', published: null, title: 'Operations lead', fullChat: 'off',
   views: [{ id: 'board', title: 'Board', type: 'screen', screen: 's1' }] }
@@ -45,7 +45,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
 })
-afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 it('lists use-role workspaces that hold consoles, read-only, after the build workspaces', async () => {
   const screen: CanvasDefinition = { schemaVersion: 1, id: 's1', revision: '0', title: 'Board', sections: [] }
@@ -71,4 +71,37 @@ it('keeps each published console\'s screens as published, apart from the workspa
   await act(async () => root.render(<Probe api={api} />))
   if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
   expect(state.workspaces[0]!.publishedScreens).toEqual({ live: [published] })
+})
+
+it('coalesces rechecks: one reload in flight at a time, at least the floor apart, with one trailing reload', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  const loads: Array<() => void> = []
+  const api = {
+    listGadgets: () => new Promise<GadgetMetadataWithTimestamps[]>(resolve => loads.push(() => resolve([]))),
+    openGadget: () => { throw new Error('unused') },
+  } as unknown as RpcStub<AuthenticatedApi>
+  const finish = (index: number) => act(async () => loads[index]!())
+  const advance = (ms: number) => act(async () => { vi.advanceTimersByTime(ms) })
+  await act(async () => root.render(<Probe api={api} />))
+  await finish(0)
+  await advance(RECHECK_FLOOR_MS)
+
+  // A burst asks once: a reload starts at once, and later asks wait while it is in flight.
+  for (let i = 0; i < 5; i++) await act(async () => recheckWorkspaceScreens())
+  expect(loads).toHaveLength(2)
+  await advance(RECHECK_FLOOR_MS * 2)
+  expect(loads).toHaveLength(2)
+  // Asked again while in flight: one trailing reload once it settles and the floor has passed.
+  await act(async () => recheckWorkspaceScreens())
+  await act(async () => recheckWorkspaceScreens())
+  await finish(1)
+  expect(loads).toHaveLength(3)
+  await finish(2)
+  // Within the floor of the last start, a recheck waits for it.
+  await act(async () => recheckWorkspaceScreens())
+  await advance(RECHECK_FLOOR_MS - 1)
+  expect(loads).toHaveLength(3)
+  await advance(1)
+  expect(loads).toHaveLength(4)
+  await finish(3)
 })
