@@ -1,4 +1,5 @@
 import type { WorkspaceKind } from "./api";
+import { BOUND_VIEW_FILE, formatBoundViewProblems, parseBoundViewSpec } from "./bound-view";
 
 // What each workspace kind produces. The kind is deterministic (see `WorkspaceKind`), and this
 // module is what makes its output deterministic too: the rules the builder agent is given, the
@@ -20,7 +21,7 @@ export function isGadgetModule(path: string): boolean {
 }
 
 /** The file holding a view-only widget's bound view: a declarative spec with no code. */
-export const GADGET_VIEW_FILE = "view.json";
+export const GADGET_VIEW_FILE = BOUND_VIEW_FILE;
 
 /** The file declaring a callable widget's tools, which its server implements. */
 export const GADGET_TOOLS_FILE = "tools.json";
@@ -194,15 +195,16 @@ export function checkWorkspaceKind(
   return classifyGadgetFiles(kind, files).violations;
 }
 
-// Stand-ins for the parsers that have not landed yet, so nothing view-only or callable can be
-// published before they do: each refuses every file. `parseBoundViewSpec` (bound-view.ts)
-// replaces parseBoundViewSpecPending, and `parseWidgetTools` (widget-tools.ts) replaces
-// parseWidgetToolsPending.
-// Until then a widget that ships a root view.json or tools.json data file is refused, so the
-// refusal says to rename it.
-function parseBoundViewSpecPending(): never {
-  throw new Error(`view-only widgets are not supported yet; if ${GADGET_VIEW_FILE} is a data ` +
-      "file, rename it to publish this gadget");
+// `parseBoundViewSpec` as a classifier parser: throws its problems as one line, with the rename
+// hint, since a widget may ship a root view.json that is a data file. The stand-in for the tools
+// parser that has not landed yet refuses every file, so nothing callable can be published before
+// it does; `parseWidgetTools` (widget-tools.ts) replaces parseWidgetToolsPending.
+function parseBoundView(text: string): void {
+  let result = parseBoundViewSpec(text);
+  if (!result.ok) {
+    throw new Error(`${formatBoundViewProblems(result.problems)}; if ${GADGET_VIEW_FILE} is a ` +
+        "data file, rename it to publish this gadget");
+  }
 }
 function parseWidgetToolsPending(): never {
   throw new Error(`callable widgets are not supported yet; if ${GADGET_TOOLS_FILE} is a data ` +
@@ -210,7 +212,7 @@ function parseWidgetToolsPending(): never {
 }
 
 const GADGET_FILE_PARSERS: GadgetFileParsers = {
-  view: parseBoundViewSpecPending,
+  view: parseBoundView,
   tools: parseWidgetToolsPending,
 };
 
