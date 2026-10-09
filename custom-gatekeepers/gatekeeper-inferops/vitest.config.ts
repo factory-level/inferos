@@ -21,6 +21,10 @@ export default defineConfig({
         bindings: {
           INFERLAB_AUTH_ORIGIN: "http://localhost:8080",
           BASE_URL: "http://localhost:8787/gatekeeper/inferops",
+          // Opt-in reproduction of a loaded runner for account.test.ts, off unless set: delays the
+          // revoke test's snapshot requests by this many ms. Only a direct `pnpm test:run` sees it;
+          // a cached `vp run` strips undeclared variables, so it can never switch on there.
+          GK_REPRO_DELAY_MS: process.env.GK_REPRO_DELAY_MS ?? "",
         },
         durableObjects: {
           // Direct access to an account's mock data, to change it behind the gatekeeper's back.
