@@ -45,6 +45,13 @@ declare namespace Cloudflare {
      */
     INFEROPS_TABLES_ENABLED?: string;
     /**
+     * `"true"` or `"false"`: whether the kernel-only host-board read is on (`INFEROPS_HOST_BOARDS`,
+     * a proposed extension of the capability vocabulary). Unset counts as off (see host-board.ts);
+     * it also needs `INFEROPS_ENABLED`. Nothing sets it yet: no dev-server, wrapper or release
+     * resolution reads it.
+     */
+    INFEROPS_HOST_BOARDS?: string;
+    /**
      * The InferOps repository ids the wrapper's `codingWorkbench.repos` allowlists, comma-separated.
      * Ids only, never local paths. Unset allows no repository.
      */

@@ -12,8 +12,9 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleInferLabLogin } from "../src/inferlab-login.js";
+import type { HostBoardFence, HostBoardRead } from "@gadgets/gatekeeper-kit/host-board";
 import {
-  expired, reconnects, signIns, type AccountProps, type InferLabLogin, type SignInExports,
+  REPORT_SENTINEL, expired, reconnects, signIns, type AccountProps, type InferLabLogin, type SignInExports,
 } from "./worker.js";
 
 const LOGIN_ENV = {
@@ -48,6 +49,15 @@ const TABLE_TYPE = {
 const TABLE_RECORD = {
   id: TABLE_ROW, typeId: TABLE, typeVersion: 2, headSeq: "7", relations: [],
   values: { serial: "SN-1", custodian: "Ada Lovelace" },
+};
+
+/** The bound board as InferOps' `project.board_snapshot` answers it. */
+const SNAPSHOT = {
+  project: { identifier: "DEMO", name: "Demo" },
+  columns: [{
+    label: "Ready", group: "unstarted",
+    issues: [{ identifier: "DEMO-1", title: "First", priority: "high", targetDate: null, blocked: false }],
+  }],
 };
 
 const HOUR = 60 * 60 * 1000;
@@ -100,6 +110,12 @@ class FakeInferLab {
   embedGate: Promise<void> | null = null;
   /** Embed requests that have reached the gate. */
   embedsHeld = 0;
+  /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
+  snapshotAnswer: (() => Response) | null = null;
+  /** While set, board snapshot answers wait for it, after reading their answer: a request in flight. */
+  snapshotGate: Promise<void> | null = null;
+  /** Snapshot requests that have reached the gate. */
+  snapshotsHeld = 0;
   #serial = 0;
 
   /** The access token of the session `refreshToken` names. */
@@ -167,6 +183,19 @@ class FakeInferLab {
     this.apiCalls.push({ path: url.pathname + url.search, token, workspaceId });
     if (!token || !this.access.has(token)) {
       return Response.json({ error: { code: "UNAUTHORIZED", message: "bad token" } }, { status: 401 });
+    }
+    if (url.pathname === "/project/board-snapshot") {
+      // InferOps' principal lane: the reference names its own tenant and workspace, which must be
+      // the reader's; any miss is one generic NOT_FOUND.
+      const answer = this.snapshotAnswer?.() ?? (url.searchParams.get("ref") === BOARD_URL &&
+        this.memberships.has(OPS) && url.searchParams.size === 1
+        ? Response.json({ scope: { workspaceId: OPS, projectId: DEMO.id }, snapshot: SNAPSHOT })
+        : Response.json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, { status: 404 }));
+      if (this.snapshotGate) {
+        this.snapshotsHeld++;
+        await this.snapshotGate;
+      }
+      return answer;
     }
     if (!workspaceId || !this.memberships.has(workspaceId)) {
       return Response.json({ error: { code: "FORBIDDEN", message: "not a member" } }, { status: 403 });
@@ -840,5 +869,309 @@ describe("custom tables as the person", () => {
     expect(await hooks().bindAccount("t-shared", owner, TABLE_URL)).toBeNull();
     const member = await connect("table-member");
     expect(await hooks().addTableObserverFrom("t-shared", member)).toContain("cannot be shared");
+  });
+});
+
+describe("host boards, the kernel-only read of a board binding's fixed target", () => {
+  const vars = env as unknown as { INFEROPS_HOST_BOARDS?: string; INFEROPS_ENABLED?: string };
+  beforeEach(() => { vars.INFEROPS_HOST_BOARDS = "true"; });
+  afterEach(() => {
+    delete vars.INFEROPS_HOST_BOARDS;
+    delete vars.INFEROPS_ENABLED;
+  });
+
+  // The hooks' RPC typing loses the union, so the answers are typed back here.
+  type BindingProps = { accountId: string; host: string; projectKey: string; connected?: boolean; workspaceId?: string };
+  const boardOf = async (name: string) => await hooks().boundHostBoard(name) as unknown as HostBoardRead;
+  const fenceOf = async (name: string) => await hooks().boundHostFence(name) as unknown as HostBoardFence | null;
+  const boardFor = async (props: BindingProps) => await hooks().hostBoard(props) as unknown as HostBoardRead;
+  const fenceFor = async (props: BindingProps) => await hooks().hostFence(props) as unknown as HostBoardFence | null;
+  const okRead = (read: HostBoardRead) => {
+    if (read.status !== "ok") throw new Error(`expected ok, got ${JSON.stringify(read)}`);
+    return read;
+  };
+
+  const snapshotCalls = () => inferlab.apiCalls.filter(c => c.path.startsWith("/project/board-snapshot"));
+
+  /** Connects `label`, binds the board and returns the account and the API calls the binding made. */
+  async function bound(label: string) {
+    const account = await connect(label);
+    expect(await hooks().bindAccount(label, account, BOARD_URL)).toBeNull();
+    return { account, before: inferlab.apiCalls.length };
+  }
+
+  /** Only board snapshot reads were sent since `before`: never project.board, the project list or anything else. */
+  function expectOnlySnapshotsSince(before: number) {
+    for (const call of inferlab.apiCalls.slice(before)) expect(call.path).toMatch(/^\/project\/board-snapshot\?ref=/);
+  }
+
+  it("reads the binding's own board on the principal lane, with its scope and the fence of the attempt", async () => {
+    const { before } = await bound("hb-ok");
+    const observed = (await hooks().log()).observations.length;
+
+    const read = await boardOf("hb-ok");
+
+    expect(read).toEqual({
+      status: "ok",
+      scope: { workspaceId: OPS, projectId: DEMO.id },
+      snapshot: SNAPSHOT,
+      fence: await fenceOf("hb-ok"),
+    });
+    expect(okRead(read).fence.identity).not.toBe("");
+    expect(snapshotCalls()).toHaveLength(1);
+    const [call] = snapshotCalls();
+    expect(new URLSearchParams(call!.path.split("?")[1]).get("ref")).toBe(BOARD_URL);
+    expect(call!.workspaceId).toBeNull();
+    expect(call!.token).toBe(inferlab.accessOf("refresh-1"));
+    expectOnlySnapshotsSince(before);
+    // The kernel owns the audit: the gatekeeper records no observation.
+    expect((await hooks().log()).observations).toHaveLength(observed);
+  });
+
+  it("is unreachable while INFEROPS_HOST_BOARDS is off, or while InferOps is off whatever it says", async () => {
+    const { before } = await bound("hb-off");
+    delete vars.INFEROPS_HOST_BOARDS;
+    expect(await boardOf("hb-off")).toEqual({ status: "unavailable", reason: "disabled" });
+    expect(await fenceOf("hb-off")).toBeNull();
+    vars.INFEROPS_HOST_BOARDS = "yes";
+    expect(await boardOf("hb-off")).toEqual({ status: "unavailable", reason: "disabled" });
+    vars.INFEROPS_HOST_BOARDS = "true";
+    vars.INFEROPS_ENABLED = "false";
+    expect(await boardOf("hb-off")).toEqual({ status: "unavailable", reason: "disabled" });
+    expect(await fenceOf("hb-off")).toBeNull();
+    expect(inferlab.apiCalls.length).toBe(before);
+    // Back on, the same binding reads again: the switch deletes nothing.
+    delete vars.INFEROPS_ENABLED;
+    expect((await boardOf("hb-off")).status).toBe("ok");
+  });
+
+  it("takes its target from the props alone and refuses a key outside InferOps' bound before any request", async () => {
+    const account = await connect("hb-key");
+    const before = inferlab.apiCalls.length;
+    const props = { accountId: account.accountId, connected: true, host: "acme.operations", workspaceId: OPS };
+    for (const projectKey of ["DEMOKEY0001", "demo", "Demo", "1DEMO", ""]) {
+      expect(await boardFor({ ...props, projectKey }), projectKey)
+        .toEqual({ status: "unavailable", reason: "invalid-target" });
+    }
+    expect(await boardFor({ ...props, host: "acme", projectKey: "DEMO" }))
+      .toEqual({ status: "unavailable", reason: "invalid-target" });
+    expect(inferlab.apiCalls.length).toBe(before);
+    // The ten-character bound itself is a target: the reference is built from exactly these props.
+    expect(await boardFor({ ...props, projectKey: "DEMOKEY001" }))
+      .toEqual({ status: "unavailable", reason: "not-found" });
+    expect(new URLSearchParams(lastApiCall().path.split("?")[1]).get("ref"))
+      .toBe("inferops://acme.operations/project/board/DEMOKEY001");
+  });
+
+  it("never reads for a demo, unconnected or unresolved binding, and never falls back to anything", async () => {
+    const account = await connect("hb-demo");
+    const before = { api: inferlab.apiCalls.length, refreshes: inferlab.refreshes.length };
+    expect(await boardFor({ accountId: account.accountId, connected: true, host: "demo.local", projectKey: "DEMO" }))
+      .toEqual({ status: "not-connected" });
+    expect(await boardFor({ accountId: crypto.randomUUID(), host: "demo.local", projectKey: "DEMO" }))
+      .toEqual({ status: "not-connected" });
+    expect(await boardFor({ accountId: crypto.randomUUID(), host: "acme.operations", projectKey: "DEMO" }))
+      .toEqual({ status: "not-connected" });
+    expect(await boardFor({ accountId: account.accountId, connected: true, host: "acme.operations", projectKey: "DEMO" }))
+      .toEqual({ status: "not-connected" });
+    expect(await fenceFor({ accountId: account.accountId, connected: true, host: "demo.local", projectKey: "DEMO" }))
+      .toBeNull();
+    expect(inferlab.apiCalls.length).toBe(before.api);
+    expect(inferlab.refreshes.length).toBe(before.refreshes);
+  });
+
+  it("reduces every refusal and malformed answer to a status, with nothing InferOps said", async () => {
+    const { before } = await bound("hb-refusals");
+    const said = "server detail that must not leak";
+    const cases: Array<[() => Response, unknown]> = [
+      [() => Response.json({ error: { code: "NOT_FOUND", message: said } }, { status: 404 }), { status: "unavailable", reason: "not-found" }],
+      [() => Response.json({ error: { code: "SNAPSHOT_TOO_LARGE", message: said, details: { bound: "issues", limit: 500 } } }, { status: 422 }),
+        { status: "unavailable", reason: "too-large" }],
+      [() => Response.json({ error: { code: "FORBIDDEN", message: said } }, { status: 403 }), { status: "unavailable", reason: "forbidden" }],
+      [() => Response.json({ error: { code: "VALIDATION", message: said } }, { status: 400 }), { status: "unavailable", reason: "invalid-target" }],
+      [() => new Response(said, { status: 502 }), { status: "unavailable", reason: "provider" }],
+      [() => Response.json({ scope: { workspaceId: OPS, projectId: DEMO.id }, snapshot: SNAPSHOT, said }), { status: "unavailable", reason: "provider" }],
+      [() => Response.json({ error: { code: "NOT_FOUND", message: said } }), { status: "unavailable", reason: "provider" }],
+      // Another workspace's or project's board is never shown as this binding's.
+      [() => Response.json({ scope: { workspaceId: SALES, projectId: DEMO.id }, snapshot: SNAPSHOT }), { status: "unavailable", reason: "provider" }],
+      [() => Response.json({ scope: { workspaceId: OPS, projectId: DEMO.id }, snapshot: { ...SNAPSHOT, project: { identifier: "OTHER", name: "Other" } } }),
+        { status: "unavailable", reason: "provider" }],
+    ];
+    for (const [answer, expected] of cases) {
+      inferlab.snapshotAnswer = answer;
+      const read = await boardOf("hb-refusals");
+      expect(read).toEqual(expected);
+      expect(JSON.stringify(read)).not.toContain(said);
+    }
+    expect(snapshotCalls()).toHaveLength(cases.length);
+    expectOnlySnapshotsSince(before);
+  });
+
+  it("is not-connected once the session has ended, or the account is revoked", async () => {
+    const { account, before } = await bound("hb-dead");
+    inferlab.endSession("refresh-1");
+    expect(await boardOf("hb-dead")).toEqual({ status: "not-connected" });
+    expect(await fenceOf("hb-dead")).toBeNull();
+    expectOnlySnapshotsSince(before);
+
+    const revoked = await bound("hb-revoked");
+    await hooks().revokeAccount(revoked.account);
+    const sent = inferlab.apiCalls.length;
+    expect(await boardOf("hb-revoked")).toEqual({ status: "not-connected" });
+    expect(inferlab.apiCalls.length).toBe(sent);
+    expect(account.accountId).not.toBe(revoked.account.accountId);
+  });
+
+  it("heals a token InferOps rejects and fences on the retry's own read", async () => {
+    const { before } = await bound("hb-retry");
+    const first = await fenceOf("hb-retry");
+    inferlab.access.delete(inferlab.accessOf("refresh-1"));
+
+    const read = await boardOf("hb-retry");
+
+    const { fence } = okRead(read);
+    // The refresh superseded the credential the first attempt used: the fence is the retry's.
+    expect(fence.identity).not.toBe(first!.identity);
+    expect(fence.generation).toBe(first!.generation);
+    expect(await fenceOf("hb-retry")).toEqual(fence);
+    const tokens = snapshotCalls().map(c => c.token);
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).not.toBe(tokens[1]);
+    expect(tokens[1]).toBe(inferlab.accessOf("refresh-2"));
+    expect(inferlab.refreshes).toEqual(["refresh-1"]);
+    expectOnlySnapshotsSince(before);
+  });
+
+  /** Starts a host-board read whose InferOps answer is held until `settle()`. */
+  async function heldRead(name: string) {
+    let release!: () => void;
+    inferlab.snapshotGate = new Promise<void>(resolve => { release = resolve; });
+    const held = inferlab.snapshotsHeld;
+    const outcome = boardOf(name);
+    await vi.waitFor(() => expect(inferlab.snapshotsHeld).toBe(held + 1));
+    return {
+      settle: async () => {
+        inferlab.snapshotGate = null;
+        release();
+        return outcome;
+      },
+    };
+  }
+
+  it("discards an answer held in flight across a reconnect as stale, then reads as the new session", async () => {
+    const { account, before } = await bound("hb-reconnect");
+    const read = await heldRead("hb-reconnect");
+    expect((await finish(await hooks().reconnectAccount(account))).status).toBe(200);
+    const stageId = reconnects.find(r => r.label === "hb-reconnect")!.stageId;
+    expect(await hooks().commitReconnect(account, stageId)).toBeNull();
+
+    // InferOps answered the old session's request successfully; the answer is still discarded.
+    expect(await read.settle()).toEqual({ status: "stale" });
+    const next = await boardOf("hb-reconnect");
+    expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-2"));
+    expect(okRead(next).fence).toEqual(await fenceOf("hb-reconnect"));
+    expectOnlySnapshotsSince(before);
+  });
+
+  it("discards an answer held in flight across a revoke as stale, then reads as not-connected", async () => {
+    const { account, before } = await bound("hb-revoke");
+    const read = await heldRead("hb-revoke");
+    await hooks().revokeAccount(account);
+
+    const outcome = await read.settle();
+    expect(outcome).toEqual({ status: "stale" });
+    expect(JSON.stringify(outcome)).not.toContain("DEMO-1");
+    expect(await boardOf("hb-revoke")).toEqual({ status: "not-connected" });
+    expectOnlySnapshotsSince(before);
+  });
+
+  describe("normalization boundaries", () => {
+    const SENTINEL = "PRIVATE_CUSTOMER_SENTINEL";
+    const config = env as unknown as { INFEROPS_BASE_URL?: string; INFERLAB_AUTH_ORIGIN?: string };
+    const origin = config.INFERLAB_AUTH_ORIGIN;
+    let logged: string[];
+    beforeEach(() => {
+      logged = [];
+      for (const level of ["debug", "info", "log", "warn", "error"] as const) {
+        vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+          logged.push(args.map(a => a instanceof Error ? `${a.message} ${a.stack}` : JSON.stringify(a)).join(" "));
+        });
+      }
+    });
+    afterEach(() => {
+      delete config.INFEROPS_BASE_URL;
+      config.INFERLAB_AUTH_ORIGIN = origin;
+    });
+
+    it("logs only fixed classifications for a 401 whose adjudication RPC throws a sentinel error, and answers provider", async () => {
+      const { account, before } = await bound("hb-report-fails");
+      inferlab.snapshotAnswer = () => Response.json(
+        { error: { code: SENTINEL, message: SENTINEL, details: { [SENTINEL]: SENTINEL } } }, { status: 401 });
+      await env.INFEROPS_CREDENTIALS.get(env.INFEROPS_CREDENTIALS.idFromName(account.accountId)).failNextReport();
+
+      const read = await boardOf("hb-report-fails");
+
+      expect(read).toEqual({ status: "unavailable", reason: "provider" });
+      expect(JSON.stringify(read)).not.toContain(SENTINEL);
+      expect(JSON.stringify(read)).not.toContain(REPORT_SENTINEL);
+      // The only diagnostics: the HTTP client's fixed 401 entry and the source's fixed classification.
+      const serialized = logged.join("\n");
+      expect(serialized).toContain('"event":"credentials.rejection.report.failed"');
+      expect(serialized).toContain('"classification":"account_rpc_failed"');
+      for (const line of logged) {
+        expect(line).toMatch(/"code":"UNAUTHORIZED"|"classification":"account_rpc_failed"/);
+      }
+      for (const raw of [SENTINEL, REPORT_SENTINEL, "Durable Object reset", "credentials.js", "    at ", '"error"', '"stack"']) {
+        expect(serialized, raw).not.toContain(raw);
+      }
+      // Not adjudicated: no retry, no refresh, no expiry notice.
+      expect(snapshotCalls()).toHaveLength(1);
+      expect(inferlab.refreshes).toEqual([]);
+      expect(expired).not.toContain("hb-report-fails");
+      expectOnlySnapshotsSince(before);
+    });
+
+    it("answers a malformed INFEROPS_BASE_URL as provider, and null for the fence, without a request", async () => {
+      const { before } = await bound("hb-bad-base");
+      config.INFEROPS_BASE_URL = `${SENTINEL} is not a url`;
+      const read = await boardOf("hb-bad-base");
+      expect(read).toEqual({ status: "unavailable", reason: "provider" });
+      expect(await fenceOf("hb-bad-base")).toBeNull();
+      expect(inferlab.apiCalls.length).toBe(before);
+      expect(JSON.stringify(read) + logged.join("\n")).not.toContain(SENTINEL);
+      expect(logged.join("\n")).not.toContain("INFEROPS_BASE_URL");
+    });
+
+    it("answers an invalid InferLab origin, with no base URL, as provider, and null for the fence, without a request", async () => {
+      const { before } = await bound("hb-bad-origin");
+      for (const bad of [`ftp://${SENTINEL.toLowerCase()}.example`, `https://${SENTINEL.toLowerCase()}.example/path`, SENTINEL]) {
+        config.INFERLAB_AUTH_ORIGIN = bad;
+        const read = await boardOf("hb-bad-origin");
+        expect(read, bad).toEqual({ status: "unavailable", reason: "provider" });
+        expect(await fenceOf("hb-bad-origin")).toBeNull();
+        expect(JSON.stringify(read) + logged.join("\n")).not.toContain(SENTINEL.toLowerCase());
+        expect(logged.join("\n")).not.toContain(SENTINEL);
+      }
+      expect(inferlab.apiCalls.length).toBe(before);
+    });
+  });
+
+  it("is absent from the board session and from the agent types", async () => {
+    await bound("hb-session");
+    const session = hooks().startBoundSession("hb-session") as unknown as {
+      readHostBoardSnapshot(): Promise<unknown>; connectionIdentity(): Promise<unknown>;
+      readBoard(): Promise<Record<string, unknown>>;
+    };
+    expect(await failure(session.readHostBoardSnapshot())).not.toBe("");
+    expect(await failure(session.connectionIdentity())).not.toBe("");
+    const board = await session.readBoard();
+    expect(Object.keys(board)).not.toContain("scope");
+    expect(Object.keys(board)).not.toContain("fence");
+    // The agent's documentation is `types.d.ts` verbatim (through the `types.txt` symlink).
+    const agentTypes = (await import("../src/types.d.ts?raw" as string) as { default: string }).default;
+    expect(agentTypes).toContain("interface InferOpsProjectSession");
+    for (const name of ["readHostBoardSnapshot", "connectionIdentity", "HostBoard", "board-snapshot", "board_snapshot"]) {
+      expect(agentTypes).not.toContain(name);
+    }
   });
 });

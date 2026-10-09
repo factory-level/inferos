@@ -9,9 +9,10 @@ import type {
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper,
-  MockInferOps as BaseMockInferOps,
+  InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper,
+  InferOpsTableGatekeeper, InferOpsWikiGatekeeper, MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
+import type { RejectionVerdict } from "@gadgets/gatekeeper-kit/credentials";
 import { InferOpsError, type IssueChanges, type NewIssueRequest } from "../src/inferops-client.js";
 import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
@@ -24,7 +25,7 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsDispatchGatekeeper,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsDispatchGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
 } from "../src/inferops.js";
 
@@ -77,6 +78,32 @@ export class MockInferOps extends BaseMockInferOps {
                        expectedRevision: Revision, idempotencyKey: string): Promise<Issue> {
     return this.#faulted(() =>
       super.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey));
+  }
+}
+
+const REPORT_FAULT_KEY = "test:failNextReport";
+/** What the failed adjudication RPC's error carries, in its message and its stack. */
+export const REPORT_SENTINEL = "PRIVATE_REPORT_SENTINEL";
+
+/**
+ * The production credentials object plus a one-shot failure of the rejection-adjudication RPC, as
+ * a transport fault would fail it. Exported under the production name, so every account's
+ * `ctx.exports.InferOpsCredentials` is this class.
+ */
+export class InferOpsCredentials extends BaseInferOpsCredentials {
+  /** Makes the next `reportCredentialsRejected` throw instead of adjudicating. */
+  async failNextReport(): Promise<void> {
+    this.ctx.storage.kv.put(REPORT_FAULT_KEY, true);
+  }
+
+  override async reportCredentialsRejected(identity: string): Promise<RejectionVerdict> {
+    if (this.ctx.storage.kv.get<boolean>(REPORT_FAULT_KEY)) {
+      this.ctx.storage.kv.delete(REPORT_FAULT_KEY);
+      const error = new Error(`Durable Object reset ${REPORT_SENTINEL}`);
+      error.stack = `Error: ${REPORT_SENTINEL}\n    at ${REPORT_SENTINEL} (credentials.js:1:1)`;
+      throw error;
+    }
+    return super.reportCredentialsRejected(identity);
   }
 }
 
@@ -427,6 +454,26 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** What `bindAccount` minted under `name`, by the resource description it gives. */
   async describeBound(name: string) {
     return this.#bound(name).describe();
+  }
+
+  /** The kernel-only host-board read of a binding `bindAccount` made under `name`, as the overseer calls it. */
+  async boundHostBoard(name: string) {
+    return this.#bound(name).readHostBoardSnapshot();
+  }
+
+  /** The kernel-only connection fence of a binding `bindAccount` made under `name`. */
+  async boundHostFence(name: string) {
+    return this.#bound(name).connectionIdentity();
+  }
+
+  /** The kernel-only host-board read of a board binding with these props. */
+  async hostBoard(props: BindingProps) {
+    return this.#gatekeeper(props).readHostBoardSnapshot();
+  }
+
+  /** The kernel-only connection fence of a board binding with these props. */
+  async hostFence(props: BindingProps) {
+    return this.#gatekeeper(props).connectionIdentity();
   }
 
   /** A session over a binding `bindAccount` made under `name`. */

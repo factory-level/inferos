@@ -25,6 +25,12 @@
 //   A page body edit (`PATCH /knowledge/wiki/pages/<id>`) is InferOps' strict compare-and-swap on
 //   the page version: its 409 `STALE_VERSION` is reported as `STALE_REVISION`, and InferOps alone
 //   decides when a retry under the same key is replayed.
+// - `fetchBoardSnapshot` is the kernel-only host-board read (`GET /project/board-snapshot`, see
+//   host-board.ts): principal lane (bearer only, no workspace header, since the reference names its
+//   own workspace), bodies streamed under a byte cap before anything is parsed (256 KiB for a
+//   success, 4 KiB for an error envelope), every field and bound of the answer re-checked with no
+//   field more or less, and every refusal returned as a bounded reason rather than thrown. Only a
+//   401 throws, so the account can adjudicate the token and the read retry once.
 // - Nothing here logs a token, a header or a body, and InferOps' own error text is never passed on:
 //   failures are reported by operation name, status and code.
 //
@@ -36,6 +42,11 @@
 //   deployment. Local development only; it never backs a connected person.
 
 import { createLogger } from "@gadgets/observability/logger";
+import { readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
+import {
+  HOST_BOARD_LIMITS, type HostBoardColumn, type HostBoardIssue, type HostBoardScope,
+  type HostBoardSnapshot, type HostBoardUnavailableReason,
+} from "@gadgets/gatekeeper-kit/host-board";
 import {
   InferOpsError, atStage, type DispatchRequest, type InferOpsClient, type InferOpsErrorCode,
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
@@ -706,6 +717,178 @@ export async function listWorkspaceSlugs(baseUrl: string, token: string,
     if (!isSlug(slug)) throw new Malformed("workspace.slug is not valid");
     return { workspaceId: text(workspace.id, "workspace.id", UUID).toLowerCase(), slug };
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Host board snapshot (`project.board_snapshot`), kernel-only: see host-board.ts.
+
+const SNAPSHOT_OPERATION = "project.board_snapshot";
+
+/**
+ * What InferOps answered a board snapshot read with, short of a 401 (which throws `UNAUTHORIZED`):
+ * the parsed snapshot and its scope, or a refusal by bounded reason. Nothing InferOps said beyond
+ * its status and error code is kept.
+ */
+export type BoardSnapshotAnswer =
+  | { kind: "ok"; scope: HostBoardScope; snapshot: HostBoardSnapshot }
+  | { kind: "refused"; reason: Exclude<HostBoardUnavailableReason, "disabled"> };
+
+/** `value` as an object with exactly `keys`: the snapshot contract is strict, so nothing more. */
+function exactly(value: unknown, keys: readonly string[], what: string): Record<string, unknown> {
+  const object = record(value, what);
+  const own = Object.keys(object);
+  if (own.length !== keys.length || !keys.every(key => Object.hasOwn(object, key))) {
+    throw new Malformed(`${what} does not have exactly its fields`);
+  }
+  return object;
+}
+
+/** A string of at most `max` UTF-16 code units, InferOps' own measure. */
+function bounded(value: unknown, max: number, what: string): string {
+  const string = text(value, what);
+  if (string.length > max) throw new Malformed(`${what} is over its bound`);
+  return string;
+}
+
+const L = HOST_BOARD_LIMITS;
+
+function parseSnapshotIssue(value: unknown): HostBoardIssue {
+  const issue = exactly(value, ["identifier", "title", "priority", "targetDate", "blocked"], "issue");
+  return {
+    identifier: bounded(issue.identifier, L.issueIdentifier, "issue.identifier"),
+    title: bounded(issue.title, L.issueTitle, "issue.title"),
+    priority: oneOf(issue.priority, PRIORITIES, "issue.priority"),
+    targetDate: nullable(issue.targetDate, "issue.targetDate", DATE),
+    blocked: bool(issue.blocked, "issue.blocked"),
+  };
+}
+
+/**
+ * The board snapshot envelope `{ scope, snapshot }`, checked against every published bound
+ * (`BoardSnapshotResponseSchema`, which is strict): a board over any bound, or a field more or
+ * less anywhere, is a provider failure, never a partial board.
+ */
+export function parseBoardSnapshotResponse(body: unknown): { scope: HostBoardScope; snapshot: HostBoardSnapshot } {
+  const response = exactly(body, ["scope", "snapshot"], "response");
+  const scope = exactly(response.scope, ["workspaceId", "projectId"], "scope");
+  const snapshot = exactly(response.snapshot, ["project", "columns"], "snapshot");
+  const project = exactly(snapshot.project, ["identifier", "name"], "snapshot.project");
+  const rawColumns = list(snapshot.columns, "snapshot.columns");
+  if (rawColumns.length > L.columns) throw new Malformed("snapshot.columns is over its bound");
+  let total = 0;
+  const columns = rawColumns.map((value): HostBoardColumn => {
+    const column = exactly(value, ["label", "group", "issues"], "column");
+    const issues = list(column.issues, "column.issues");
+    if (issues.length > L.issuesPerColumn) throw new Malformed("column.issues is over its bound");
+    total += issues.length;
+    if (total > L.issues) throw new Malformed("snapshot issues are over their bound");
+    return {
+      label: bounded(column.label, L.columnLabel, "column.label"),
+      group: oneOf(column.group, STATE_GROUPS, "column.group"),
+      issues: issues.map(parseSnapshotIssue),
+    };
+  });
+  return {
+    scope: {
+      workspaceId: text(scope.workspaceId, "scope.workspaceId", UUID).toLowerCase(),
+      projectId: text(scope.projectId, "scope.projectId", UUID).toLowerCase(),
+    },
+    snapshot: {
+      project: {
+        identifier: bounded(project.identifier, L.projectIdentifier, "snapshot.project.identifier"),
+        name: bounded(project.name, L.projectName, "snapshot.project.name"),
+      },
+      columns,
+    },
+  };
+}
+
+/**
+ * The InferOps error codes a snapshot refusal may be logged under. Anything else InferOps sends is
+ * logged as `other`: a provider-chosen code is provider text, and never reaches a log verbatim.
+ */
+const SNAPSHOT_LOGGED_CODES: ReadonlySet<string> = new Set([
+  "NOT_FOUND", "SNAPSHOT_TOO_LARGE", "FORBIDDEN", "VALIDATION", "UNAUTHORIZED",
+]);
+
+/** The fixed local classification a snapshot failure is logged under. */
+function snapshotLogCode(wire: string | null): string {
+  if (wire === null) return "no_envelope";
+  return SNAPSHOT_LOGGED_CODES.has(wire) ? wire : "other";
+}
+
+/** The reason a refused snapshot read reports, from its status and InferOps' error code. */
+function snapshotRefusal(status: number, wire: string | null): BoardSnapshotAnswer {
+  if (status === 404 && wire === "NOT_FOUND") return { kind: "refused", reason: "not-found" };
+  if (status === 422 && wire === "SNAPSHOT_TOO_LARGE") return { kind: "refused", reason: "too-large" };
+  if (status === 403 && wire !== null) return { kind: "refused", reason: "forbidden" };
+  if (status === 400 && wire !== null) return { kind: "refused", reason: "invalid-target" };
+  return { kind: "refused", reason: "provider" };
+}
+
+/**
+ * Reads one board snapshot on InferOps' principal lane: `token` only, no workspace header, since
+ * `ref` (built by the caller from a binding's props) names its own workspace. A body is read as a
+ * stream and abandoned at the byte cap (256 KiB for a success, 4 KiB for an error envelope)
+ * before it is buffered whole or parsed. A 401 throws `UNAUTHORIZED` (so the caller's credential
+ * source can adjudicate and retry); every other outcome is returned. Logs carry the operation,
+ * the status and a fixed local classification only (an allowlisted InferOps code, or `other`):
+ * never the reference, the token, a body, a provider-chosen code or an error object.
+ */
+export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: string,
+                                         fetcher: typeof fetch = fetch): Promise<BoardSnapshotAnswer> {
+  const fail = (status: number, code: string, answer: BoardSnapshotAnswer): BoardSnapshotAnswer => {
+    logger.warn("InferOps request failed", {
+      event: "http.request.failed", operation: SNAPSHOT_OPERATION, status, code,
+    });
+    return answer;
+  };
+  const provider: BoardSnapshotAnswer = { kind: "refused", reason: "provider" };
+  let response: Response;
+  try {
+    response = await fetcher(`${baseUrl}/project/board-snapshot?${new URLSearchParams({ ref })}`, {
+      method: "GET",
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
+      // A redirect is never followed: it would carry the credential to wherever it points.
+      redirect: "manual",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    // The cause can name the request's address; only the fact is logged.
+    return fail(0, "unreachable", provider);
+  }
+  if (response.status === 401) {
+    await response.body?.cancel().catch(() => undefined);
+    logger.warn("InferOps request failed", {
+      event: "http.request.failed", operation: SNAPSHOT_OPERATION, status: 401, code: "UNAUTHORIZED",
+    });
+    throw new InferOpsError("UNAUTHORIZED", FAILURE_DETAIL.UNAUTHORIZED);
+  }
+  const success = response.status === 200;
+  let raw: string;
+  try {
+    raw = await readTextCapped(response, success ? L.bytes : L.errorBytes);
+  } catch {
+    // Over the cap (already cancelled), or the stream failed: nothing was parsed.
+    return fail(response.status, "unreadable_body", provider);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = undefined;
+  }
+  if (!success) {
+    const wire = body === undefined ? null : wireCode(body);
+    return fail(response.status, snapshotLogCode(wire), snapshotRefusal(response.status, wire));
+  }
+  if (body === undefined) return fail(200, "not_json", provider);
+  try {
+    return { kind: "ok", ...parseBoardSnapshotResponse(body) };
+  } catch {
+    // Only the fixed classification is logged: no error object, field name or value.
+    return fail(200, "malformed", provider);
+  }
 }
 
 // ---------------------------------------------------------------------------

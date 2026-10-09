@@ -7,7 +7,9 @@ import type { KvMutable } from "./kv";
 import { perStorage } from "./per-storage";
 import { SingleFlight } from "./single-flight";
 
-const logger = createLogger<{ vendorId: string }>({ component: "gatekeeper.credentials" });
+const logger = createLogger<{ vendorId: string; classification: string }>({
+  component: "gatekeeper.credentials",
+});
 
 /**
  * Durable Object KV used for credentials. Pass the stable `ctx.storage.kv` object so refreshes
@@ -714,6 +716,13 @@ export type CredentialSourceOptions<Creds> = {
   expiredMessage: string;
   /** Vendor id for log attribution. */
   vendorId?: string;
+  /**
+   * When true, a rejection report that fails to reach the account is logged as the fixed
+   * classification `account_rpc_failed` with no error object, so neither its message nor its stack
+   * reaches the log. For callers whose every log must be fixed text; the default (false) logs the
+   * error as before. The failure's handling is the same either way.
+   */
+  redactAccountErrors?: boolean;
 };
 
 /**
@@ -1024,7 +1033,7 @@ export class CredentialSource<Creds> {
     } catch (error) {
       this.#logger.error("failed to report credential rejection", {
         event: "credentials.rejection.report.failed",
-        error,
+        ...(this.#options.redactAccountErrors ? { classification: "account_rpc_failed" } : { error }),
       });
       return "unadjudicated";
     }

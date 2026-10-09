@@ -19,6 +19,7 @@
     "./credentials": "./src/credentials.ts",
     "./cursors": "./src/cursors.ts",
     "./endpoint": "./src/endpoint.ts",
+    "./host-board": "./src/host-board.ts",
     "./http-errors": "./src/http-errors.ts",
     "./observers": "./src/observers.ts",
     "./oauth-client": "./src/oauth-client.ts",
