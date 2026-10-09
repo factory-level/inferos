@@ -10071,25 +10071,30 @@ class OverseerImpl implements AgentHooks {
 
   // Tells the operate session of the owner and of every current collaborator that console
   // `consoleId` now stands at `revision` (null: deleted); each session passes it on only if it has
-  // that console open at another revision (UserDurableObject.noticeConsoleRevision). Not awaited by
-  // the publish or delete, and best effort: a session that misses it is still refused on its next
+  // that console open at an older revision (UserDurableObject.noticeConsoleRevision). Not awaited
+  // by the publish or delete, and best effort: a session that misses it is still refused on its next
   // read or navigation of the old revision.
+  //
+  // Deliberately not wrapped in ctx.waitUntil(), which has no effect in a Durable Object: unlike a
+  // Worker's request, finishing the call that started this does not cancel it, so it runs for as
+  // long as this object stays alive with these calls outstanding. It is lost only if the object is
+  // reset or evicted first (a restart, or a revocation's scheduled restart).
   announceConsoleRevision(consoleId: string, revision: string | null): void {
     let workspaceId = this.ctx.id.toString();
-    this.ctx.waitUntil((async () => {
+    let failed = (error: unknown) => this.logger.warn("failed to tell an operate session its console changed", {
+      event: "console.revision.notice.failed", gadgetId: workspaceId, error,
+    });
+    void (async () => {
       let users = [this.users.idFromString(this.ownerId!), ...(await this.getSharingManager())
           .listCollaborators().map(collaborator => this.users.idFromName(collaborator.profile.id))];
       for (let i = 0; i < users.length; i += LISTING_REFRESH_BATCH) {
         let results = await Promise.allSettled(users.slice(i, i + LISTING_REFRESH_BATCH)
             .map(id => this.users.get(id).noticeConsoleRevision(workspaceId, consoleId, revision)));
         for (let result of results) {
-          if (result.status !== "rejected") continue;
-          this.logger.warn("failed to tell an operate session its console changed", {
-            event: "console.revision.notice.failed", gadgetId: workspaceId, error: result.reason,
-          });
+          if (result.status === "rejected") failed(result.reason);
         }
       }
-    })());
+    })().catch(failed);
   }
 
   // The authorization gate every non-owner entry point (open(), receiveExternalMessage()) must

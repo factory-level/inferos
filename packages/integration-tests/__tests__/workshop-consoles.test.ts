@@ -252,7 +252,8 @@ it("tells every operate session with the console open, promptly and without logg
     const first = await workspace.publishConsole(created.id, created.revision);
     using operatorApi = await signUp(api, "consolesnotified");
     using bystanderApi = await signUp(api, "consolesbystander");
-    for (const name of ["consolesnotified", "consolesbystander"]) {
+    using removedApi = await signUp(api, "consolesremoved");
+    for (const name of ["consolesnotified", "consolesbystander", "consolesremoved"]) {
       if (!await workspace.addCollaborator(name, "use")) throw new Error("Failed to share");
     }
     const open = { type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
@@ -286,6 +287,12 @@ it("tells every operate session with the console open, promptly and without logg
     using operator = await watch(session);
     using builder = await watch(builderSession);
     using bystander = await watch(bystanderSession);
+    // A collaborator removed after opening the console still has it open in their session, but is
+    // no longer told anything about the workspace.
+    using removedSession = await removedApi.getOperateSession();
+    await removedSession.dispatch(open, 0);
+    using removed = await watch(removedSession);
+    await workspace.removeCollaborator((await removedApi.whoami()).id, []);
 
     const publishedAt = performance.now();
     const second = await workspace.publishConsole(created.id, first.revision);
@@ -299,6 +306,7 @@ it("tells every operate session with the console open, promptly and without logg
     // The builder's preview was of the draft at the old revision, which the publish raised too.
     expect((await noticeWithin(builder, 1, publishedAt)).consoleRevision).toEqual(notice.consoleRevision);
     expect(bystander.notices()).toEqual([]);
+    expect(removed.notices()).toEqual([]);
 
     // Reopened at the new revision, a session hears of the next change only, here a deletion.
     page = await session.dispatch({ ...open, revision: second.revision }, page.seq);
@@ -307,4 +315,5 @@ it("tells every operate session with the console open, promptly and without logg
     expect((await noticeWithin(operator, 2, deletedAt)).consoleRevision)
       .toEqual({ workspaceId, consoleId: created.id, revision: null });
     expect(bystander.notices()).toEqual([]);
+    expect(removed.notices()).toEqual([]);
   }));
