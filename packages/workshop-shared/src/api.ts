@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { ConsoleSource, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { ConsoleRef, ConsoleSource, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
@@ -513,6 +513,58 @@ export interface OperateSession extends RpcTarget {
    * still wait for approval, and change the session's page with events logged as actor `"agent"`.
    */
   getWorkspace(): Promise<RpcStub<Overseer>>;
+
+  /**
+   * Makes the connected account `accountId` the caller's own connection for the target of host
+   * board `entryId` of `console`, which the caller's operate session must have open from that
+   * source at that revision (a draft needs build access). The connection is created in the
+   * session's own workspace, for that target, and is never one found by URL or another person's.
+   *
+   * `requestKey` (1 to 128 letters, digits, - or _) makes the call idempotent: a retry with the
+   * same key and arguments returns the first call's outcome, or waits for it, across lost responses
+   * and restarts, without creating another connection; reusing a key with other arguments is
+   * refused before anything is created. Of two selections for one target, only the later one can
+   * be `selected`; the earlier is `superseded`, and its connection is removed. Refused while host
+   * boards are off.
+   */
+  selectHostBoardConnection(console: ConsoleRef, entryId: string, accountId: number,
+      requestKey: string): Promise<HostBoardSelection>;
+
+  /**
+   * The host board `entryId` of `console`, for trusted host rendering: refused unless host boards
+   * are on and the caller's operate session has that console open from that source at exactly that
+   * revision, with build access for a draft. Reads go through the caller's own selection only.
+   */
+  getConsoleHostBoard(console: ConsoleRef, entryId: string): Promise<RpcStub<ConsoleHostBoard>>;
+
+  /** The caller's most recent audited host-board reads (at most 200), newest first. */
+  listHostBoardReads(): Promise<HostBoardReadAudit[]>;
+}
+
+/**
+ * One host board of one console revision, bound to its caller (see
+ * `OperateSession.getConsoleHostBoard`). It holds no target, account or connection: each read
+ * resolves the caller's own selection afresh.
+ */
+export interface ConsoleHostBoard extends RpcTarget {
+  /**
+   * Reads requirement `name` of this host board with the caller's own selected connection. The
+   * console, revision and session are checked before and after the read, and the whole read has a
+   * 10-second deadline from its start: past it, the answer is `unavailable` and nothing the read
+   * produces later is returned, pinned or audited. Never throws for a connection or provider
+   * failure; the result is normalized (see `HostBoardView`).
+   */
+  readRequirement(name: string): Promise<HostBoardView>;
+
+  /**
+   * Calls `subscriber` with this host board's selection state, then again after every committed
+   * change, each a full state (see `HostBoardSelectionUpdate`). The subscription and its first
+   * state are taken together in the selection's workspace, so no change falls between them. When
+   * the caller's console context no longer holds, it delivers `unknown` once and ends. A delivery
+   * that fails ends it too. A selection change is a notification only: what to show comes from a
+   * fresh read. Dispose the returned stub to stop. Refused while host boards are off.
+   */
+  subscribeSelection(subscriber: RpcStub<(update: HostBoardSelectionUpdate) => void>): Promise<RpcStub<{}>>;
 }
 
 /**
@@ -1566,6 +1618,11 @@ export type ServerConfig = {
     flags: Record<PublicationFlag, boolean>;
     selfApproval: boolean;
   };
+  /**
+   * Whether host boards are on for this installation (`INFEROPS_HOST_BOARDS`, env-driven). Read
+   * only: it grants nothing, and the server checks the switch itself. Absent means off.
+   */
+  hostBoards?: boolean;
   /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
   defaultTheme?: DefaultThemeMode;
   /** Workshop listing density; omitted means comfortable. Gadget layouts are independent. */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalHostBoardTarget,
   consoleEventMismatch,
   consoleScreens,
   MAX_CONSOLE_VIEWS,
@@ -160,5 +161,41 @@ describe("which gadgets a console may offer", () => {
     expect(refusal(widget({ installedFrom: { ...install, dataContract: 1 } }))).toMatch(/data contract/);
     expect(refusal(widget({ bindings: { DATA: { target: 9 } } }))).toMatch(/has bindings/);
     expect(refusal(widget({ bindings: { DATA: { target: 9, pending: { chatId: 2 } } } }))).toMatch(/has bindings/);
+  });
+});
+
+describe("host board entries", () => {
+  const entry = (target = "inferops://acme.operations/project/board/ENG", extra = {}) =>
+    ({ kind: "host-board" as const, label: " Board ", requirement: { name: "board", resource: "inferops-board" as const, target }, ...extra });
+
+  it("canonicalises the target and trims the label, keeping legacy widgets untouched", () => {
+    let widget: ConsoleWidgetEntry = { gadgetId: 3, blueprintId: "bp", version: 1, label: "Status", state: "resettable" };
+    let parsed = parseOperateConsoleContent(content([board], {
+      widgets: [widget], hostBoards: [entry(" inferops://acme.operations/project/board/ENG/ ")] }));
+    expect(parsed.widgets).toEqual([widget]);
+    expect(parsed.hostBoards).toEqual([{ kind: "host-board", label: "Board",
+      requirement: { name: "board", resource: "inferops-board", target: "inferops://acme.operations/project/board/ENG" } }]);
+  });
+
+  it("accepts only the common key subset: uppercase, 1 to 10 characters", () => {
+    expect(canonicalHostBoardTarget("inferops://acme.operations/project/board/ENG10")).not.toBeNull();
+    for (let bad of ["inferops://acme.operations/project/board/eng", "inferops://acme.operations/project/board/ABCDEFGHIJK",
+        "inferops://Acme.operations/project/board/ENG", "inferops://acme/project/board/ENG",
+        "inferops://acme.operations/project/dispatch/ENG", "https://acme.operations/project/board/ENG"]) {
+      expect(canonicalHostBoardTarget(bad)).toBeNull();
+      expect(() => parseOperateConsoleContent(content([board], { hostBoards: [entry(bad)] }))).toThrow(/target/);
+    }
+  });
+
+  it("refuses duplicate ids or names, another resource, and too many entries in all", () => {
+    expect(() => parseOperateConsoleContent(content([board], { hostBoards: [entry(), entry()] }))).toThrow(/named twice/);
+    expect(() => parseOperateConsoleContent(content([board], { hostBoards: [
+      entry(undefined, { id: "a" }), { ...entry(undefined, { id: "a" }), requirement: { ...entry().requirement, name: "other" } },
+    ] }))).toThrow(/listed twice/);
+    expect(() => parseOperateConsoleContent(content([board], { hostBoards: [
+      { ...entry(), requirement: { ...entry().requirement, resource: "x" as "inferops-board" } }] }))).toThrow(/require/);
+    let many = Array.from({ length: MAX_CONSOLE_WIDGETS + 1 }, (_, i) =>
+      ({ ...entry(), requirement: { ...entry().requirement, name: `b${i}` } }));
+    expect(() => parseOperateConsoleContent(content([board], { hostBoards: many }))).toThrow(/at most/);
   });
 });

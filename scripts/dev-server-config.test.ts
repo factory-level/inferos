@@ -15,6 +15,7 @@ import {
   resolveCodingWorkbenchEnabled,
   resolveInferOpsEnabled,
   resolveInferOpsTablesEnabled,
+  resolveInferOpsHostBoards,
   resolvePublicationFlag,
 } from "./dev-server-config.ts";
 
@@ -235,5 +236,17 @@ describe("resolvePublicationFlag", () => {
   it("switches a version 2 wrapper with its capability, whatever the shell says", () => {
     assert.equal(resolvePublicationFlag("PUBLISH_CLOUDFLAREOS_APP", { capability: true, shell: "false" }), "true");
     assert.equal(resolvePublicationFlag("PUBLISH_CLOUDFLAREOS_APP", { capability: false, shell: "true" }), "false");
+  });
+});
+
+describe("resolveInferOpsHostBoards", () => {
+  it("is off by default, follows a version 2 capability over the shell, and needs InferOps on", () => {
+    assert.equal(resolveInferOpsHostBoards({ capability: null, inferOpsEnabled: "true", shell: undefined }), "false");
+    assert.equal(resolveInferOpsHostBoards({ capability: null, inferOpsEnabled: "true", shell: "true" }), "true");
+    assert.equal(resolveInferOpsHostBoards({ capability: false, inferOpsEnabled: "true", shell: "true" }), "false");
+    assert.throws(() => resolveInferOpsHostBoards({ capability: null, inferOpsEnabled: "true", shell: "on" }),
+      /INFEROPS_HOST_BOARDS must be "true" or "false"/);
+    assert.throws(() => resolveInferOpsHostBoards({ capability: true, inferOpsEnabled: "false", shell: undefined }),
+      /INFEROPS_HOST_BOARDS is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
   });
 });

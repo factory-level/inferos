@@ -115,6 +115,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "CODING_WORKBENCH_ENABLED", "CODING_WORKBENCH_REPOS",
       // ...and the custom-tables switch.
       "INFEROPS_TABLES_ENABLED",
+      // ...and the host-boards switch, set on the backend and the gatekeeper alike.
+      "INFEROPS_HOST_BOARDS",
       "ANTHROPIC_API_KEY",
       "GITHUB_REPOSITORY", "GITHUB_TOKEN", "PREVIEW_ADMINS", "PREVIEW_GITHUB_CLIENT_ID",
       "PREVIEW_GITHUB_CLIENT_SECRET", "PREVIEW_NAME", "PREVIEW_PR_NUMBER",

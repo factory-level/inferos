@@ -282,6 +282,15 @@ export function resolveInferOpsTablesEnabled(options: InferOpsSwitchOptions): "t
   return resolveInferOpsSwitch("INFEROPS_TABLES_ENABLED", options);
 }
 
+/**
+ * The `INFEROPS_HOST_BOARDS` var (proposed) that both the Workshop backend (`host-boards.ts`, every
+ * registration, selection, acquisition and read) and the InferOps gatekeeper's board facet check.
+ * Resolved exactly as `INFEROPS_TABLES_ENABLED`: off by default, never on while InferOps is off.
+ */
+export function resolveInferOpsHostBoards(options: InferOpsSwitchOptions): "true" | "false" {
+  return resolveInferOpsSwitch("INFEROPS_HOST_BOARDS", options);
+}
+
 /** What resolves one switch that lives inside the InferOps integration. */
 export type InferOpsSwitchOptions = {
   /** The wrapper's version 2 capability, or null for a version 1 wrapper or no wrapper. */
@@ -293,7 +302,7 @@ export type InferOpsSwitchOptions = {
 };
 
 function resolveInferOpsSwitch(
-  name: "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED", options: InferOpsSwitchOptions,
+  name: "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED" | "INFEROPS_HOST_BOARDS", options: InferOpsSwitchOptions,
 ): "true" | "false" {
   const { capability, inferOpsEnabled, shell } = options;
   if (capability === null && shell !== undefined && shell !== "true" && shell !== "false") {
