@@ -14,7 +14,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-08
+updated: 2026-10-09
 ---
 
 # InferOps gatekeeper
@@ -312,8 +312,16 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   and its sections, overlays a pending body edit on a page still at the version it was proposed at
   (`pendingBody: true`) and a pending edit on a section still at its version, and adds the
   wikilinks and the references of what the page reads as (its body, else its sections) (wiki.ts).
-  `readDocumentText` composes InferOps' page text from the same shown body and sections and, for a
-  Master only, the structure read for its generated block, and answers a page with nothing to read
+  `readDocumentText` returns InferOps' own page text for the account, `GET
+  /knowledge/documents/:id/text` (`document.text`, inferops#2367, the same string as InferOps'
+  `read_document` and the InferMind reader): the body or lens-visible sections, a Master's
+  structure block and its documentation coverage block (computed with the account's own
+  `project:read`, or a line saying it is unavailable or could not be loaded), and embedded widgets
+  as their live text. `text: null` is `NOT_FOUND`; a 404 (an InferOps without the read) or a
+  malformed answer is an error, never an empty page. While this binding has a pending edit live on
+  the page (a body edit or a section edit), the text is instead composed here from the shown body
+  and sections and, for a Master, the structure read (wiki.ts), so the caller reads back what it
+  proposed; that text has no coverage block and leaves embeds as links. Nothing to read is
   `NOT_FOUND`. `readStructure` returns the root, pillars and unfiled pages as InferOps lists them,
   which is only pages its document list shows. Each read is an observation; `listDocuments` returns
   the tree fields only. Access boundary, as InferOps draws it: the body is document-level
@@ -344,7 +352,10 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   reported. `revertAction` restores the previous body
   under `<instance>:<action>:revert` only while the section is at that version with that body.
   Observers: strategy B through the verifier's `hasWikiAccess(host, workspaceId)`, a page list with
-  the collaborator's own token.
+  the collaborator's own token. An admitted observer is remembered (`observer:<id>`) only so that a
+  `readDocumentText` answered by InferOps excludes them (`excludeObservers`): its coverage of an
+  operations workspace and its live widget state are not covered by Wiki access. The locally
+  composed text (pending edits) holds only Wiki data and excludes no one.
   The Wiki's `SupportedResource` sets `excludeFromOperateChat`
   ([#61](https://github.com/factory-level/inferos/issues/61)), so the Workshop keeps it out of
   operate chats: not offered, not requestable, left out of the agent's env and refused to its

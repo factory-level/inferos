@@ -1335,6 +1335,20 @@ export function openHttpInferOpsClient(
 
     readDocument,
 
+    async readDocumentText(documentId: string): Promise<string | null> {
+      if (!UUID.test(documentId)) return null;
+      // No `maybeEmpty`: InferOps answers a page it will not show with `text: null`, so a 404 means
+      // the read itself is missing (an InferOps before it) and must not pass as an empty page.
+      const body = await knowledge("wiki.document.text", {
+        method: "GET", path: `/knowledge/documents/${documentId}/text`,
+      });
+      return parsed("wiki.document.text", body, raw => {
+        const text = record(raw, "response").text;
+        if (text !== null && typeof text !== "string") throw new Malformed("text is not a string or null");
+        return text;
+      });
+    },
+
     async readStructure(): Promise<WikiStructureRecord> {
       const body = await knowledge("wiki.structure.get", { method: "GET", path: "/knowledge/wiki/structure" });
       return parsed("wiki.structure.get", body, parseStructure);

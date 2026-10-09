@@ -1037,4 +1037,30 @@ describe("the InferMind Wiki over HTTP", () => {
       ? Response.json({ documents: [] }) : undefined);
     expect(inferOpsErrorCode(await wrapped.listDocuments().catch(e => e))).toBe("UNAVAILABLE");
   });
+
+  it("reads a page's text from InferOps' document.text, passing its null, refusing anything else", async () => {
+    const text = "# Handbook\n\nThe page body.\n\n<!-- generated: documentation coverage -->\n## Documentation coverage";
+    const { client, calls } = fakeWiki(call => call.path === `/knowledge/documents/${DOC}/text`
+      ? Response.json({ text }) : call.path === `/knowledge/documents/${OTHER_DOC}/text`
+        ? Response.json({ text: null }) : undefined);
+    expect(await client.readDocumentText(DOC)).toBe(text);
+    expect(calls.at(-1)).toMatchObject({ method: "GET", path: `/knowledge/documents/${DOC}/text` });
+    expect(calls.at(-1)!.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(await client.readDocumentText(OTHER_DOC)).toBeNull();
+    const before = calls.length;
+    expect(await client.readDocumentText("../x")).toBeNull();
+    expect(calls.length).toBe(before);
+
+    // An InferOps without the read answers 404: never an empty page.
+    const { client: older } = fakeWiki(call => call.path.endsWith("/text")
+      ? Response.json({ error: { code: "NOT_FOUND", message: "no route" } }, { status: 404 }) : undefined);
+    expect(await older.readDocumentText(DOC).catch(e => e)).toBeInstanceOf(Error);
+    const { client: malformed } = fakeWiki(call => call.path.endsWith("/text") ? Response.json({ text: 3 }) : undefined);
+    expect(inferOpsErrorCode(await malformed.readDocumentText(DOC).catch(e => e))).toBe("UNAVAILABLE");
+    const { client: refused } = fakeWiki(call => call.path.endsWith("/text")
+      ? Response.json({ success: false, error: { code: "FORBIDDEN", message: "Missing permission: knowledge:read" } }, { status: 403 })
+      : undefined);
+    const error = await refused.readDocumentText(DOC).catch(e => e) as Error;
+    expect(error.message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
+  });
 });

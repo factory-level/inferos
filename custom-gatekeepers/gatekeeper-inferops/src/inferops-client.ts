@@ -310,6 +310,15 @@ export interface InferOpsClient {
   readStructure(): Promise<WikiStructureRecord>;
 
   /**
+   * One page as InferOps composes its text for this account (`document.text`, the same string as
+   * its `read_document`): the body or the sections the account's lens shows, a Master's generated
+   * structure and documentation coverage computed with the account's own access, and embedded
+   * widgets as their live text. Null when the page does not exist, cannot be seen or has nothing
+   * to read.
+   */
+  readDocumentText(documentId: string): Promise<string | null>;
+
+  /**
    * Replace a page's body (InferMind `knowledge:write`), compare-and-swap on the page version: a
    * page not at `expectedVersion` fails with STALE_REVISION, even when it already holds this body,
    * except that a retry under the same `idempotencyKey` is replayed when the page is exactly one
