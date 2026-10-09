@@ -148,14 +148,26 @@ export const pageReferences = (sections: readonly Pick<WikiSection, 'body'>[]): 
 
 /**
  * The page as the agent reads it, from what is shown: what `readDocumentText` returns for the same
- * reads. `structure` is needed only for a Master; without it a Master's text cannot be built (null),
- * as it is null for a page with nothing to read.
+ * reads, less what only InferOps adds (`agentTextShown`). `structure` is needed only for a Master;
+ * without it a Master's text cannot be built (null), as it is null for a page with nothing to read.
  */
 export const pageText = (document: Pick<WikiDocument, 'id' | 'title' | 'body' | 'masterRole' | 'sections'>, structure: WikiStructure | null): string | null =>
   document.masterRole !== null && structure === null ? null : composeDocumentText(document.title, {
     body: document.body, visibleSections: document.sections.map(section => section.body),
     generated: structure ? masterStructureText(document, structure) : null,
   })
+
+const COVERAGE_BLOCK = '\n\n<!-- generated: documentation coverage -->'
+
+/**
+ * The part of the agent text this page shows: without a Master's documentation coverage block,
+ * which InferOps computes with the person's own access and appends last. Embedded widgets are not
+ * undone here: InferOps reads them as live text, so a page with references is not comparable.
+ */
+export const agentTextShown = (text: string): string => {
+  const at = text.indexOf(COVERAGE_BLOCK)
+  return at === -1 ? text : text.slice(0, at)
+}
 
 /** What an embedded reference names. Naming grants nothing: each is resolved through its own connection. */
 export type WikiReference =

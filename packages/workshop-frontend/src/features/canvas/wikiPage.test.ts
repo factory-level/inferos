@@ -3,7 +3,7 @@ import type { WikiDocument, WikiDocumentNode } from '@inferos/gatekeeper-inferop
 import { authoredContent, composeDocumentText, documentText, embeddedReferences, masterStructureText, wikiPagePath } from '@inferos/gatekeeper-inferops/src/wiki'
 import demo from '@inferos/gatekeeper-inferops/src/fixtures/demo-wiki.json'
 import {
-  authoredBody, bodyEditable, editErrorText, firstNavigationPage, firstPage, pageReferences, pageText, parseWikiReference, reconcileBodyEdit,
+  agentTextShown, authoredBody, bodyEditable, editErrorText, firstNavigationPage, firstPage, pageReferences, pageText, parseWikiReference, reconcileBodyEdit,
   reconcileEdit, sectionBlocks, wikiNavigation, wikiPageSlug, wikiTree, type BodyEdit, type SectionEdit,
 } from './wikiPage'
 import { EMPTY_STRUCTURE, organizedWiki, wikiPages } from './wikiTestDoubles'
@@ -152,4 +152,14 @@ it('decides an awaiting body edit only from the page: pending, applied, rejected
   expect(reconcileBodyEdit(edit, at({ id: 'other' }))).toMatchObject({ phase: 'stale', message: 'The page is no longer in this Wiki.' })
   expect(editErrorText({ ...edit, phase: 'refused', code: 'STALE_REVISION' }, 'page')).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text.')
   expect(editErrorText({ ...edit, phase: 'stale' }, 'page')).toContain('the page changed in InferMind')
+})
+
+it('leaves a Master\'s documentation coverage block out of the agent text it compares, and nothing else', () => {
+  const page = '# Engineering\n\n<!-- generated: wiki structure -->\n## Pages in Engineering\n- [Release](/wiki/release)'
+  const coverage = '<!-- generated: documentation coverage -->\n## Documentation coverage\nCoverage unavailable: No coverage source is set for this wiki.'
+  expect(agentTextShown(`${page}\n\n${coverage}`)).toBe(page)
+  expect(agentTextShown(page)).toBe(page)
+  // The marker counts only as a block of its own, not quoted inside a paragraph.
+  const quoted = '# Notes\n\nWe mark it with <!-- generated: documentation coverage --> today.'
+  expect(agentTextShown(quoted)).toBe(quoted)
 })

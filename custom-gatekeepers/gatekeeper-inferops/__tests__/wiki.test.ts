@@ -605,6 +605,35 @@ describe("the integration switch and observers", () => {
     expect(await hooks.addWikiObserver(props, true)).toBeNull();
     expect(await hooks.addWikiObserver(props, false)).toContain("cannot read the InferMind Wiki of demo.local");
   });
+
+  it("reads page text as InferOps composes it, and keeps an admitted collaborator out of that read", async () => {
+    const { props, hooks, mock, session } = setup();
+    expect(await hooks.addWikiObserver(props, true)).toBeNull();
+    // InferOps' own `document.text` for the page is what the caller gets.
+    expect(await session.readDocumentText("company")).toBe(await mock.readDocumentText(COMPANY));
+    let log = await hooks.log();
+    expect(log.observations.at(-1)).toBe("Read Wiki page company as text");
+    expect(log.observationTexts.at(-1)).toContain("as InferOps composes it for this connection");
+    // Its coverage and live widget text are not covered by the Wiki admission.
+    expect(log.excluded.at(-1)).toEqual(["observer-1"]);
+    // The page itself is Wiki data the admission covers.
+    await session.readDocument("company");
+    log = await hooks.log();
+    expect(log.excluded.at(-1)).toEqual([]);
+  });
+
+  it("reads a page with an edit of its own waiting back with that edit, composed here", async () => {
+    const { props, hooks, session } = setup();
+    expect(await hooks.addWikiObserver(props, true)).toBeNull();
+    await session.updateDocumentBody("incident-response", "# Incident response\n\nCall the on-call first.", 4);
+    expect(await session.readDocumentText("incident-response")).toBe("# Incident response\n\nCall the on-call first.");
+    const log = await hooks.log();
+    expect(log.observationTexts.at(-1)).toContain("with its pending edits");
+    expect(log.excluded.at(-1)).toEqual([]);
+    // Another page, with nothing of its own waiting, still reads InferOps' text.
+    await session.readDocumentText("handbook");
+    expect((await hooks.log()).excluded.at(-1)).toEqual(["observer-1"]);
+  });
 });
 
 describe("the read projections", () => {

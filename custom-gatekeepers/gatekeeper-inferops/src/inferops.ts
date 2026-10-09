@@ -93,7 +93,7 @@ import {
 } from "@gadgets/gatekeeper-kit/credentials";
 import {
   InferOpsError, atStage, inferOpsErrorCode, isPolicyRefusal, writeStage, type InferOpsClient,
-  type ProjectSummary, type RunRecord, type TableRead, type WikiDocumentHead, type WriteStage,
+  type ProjectSummary, type RunRecord, type TableRead, type WikiDocumentHead, type WikiStructureRecord, type WriteStage,
 } from "./inferops-client";
 import {
   BOARD_WRITES, CheckRefused, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
@@ -2378,8 +2378,12 @@ export class InferOpsWikiGatekeeper
     return new WikiSessionImpl(this.#binding(), approvalQueue.dup());
   }
 
-  /** Strategy B: the binding is one workspace's Wiki, so admit an observer who can read it. */
-  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+  /**
+   * Strategy B: the binding is one workspace's Wiki, so admit an observer who can read it. The
+   * observer is remembered only so `readDocumentText` can exclude them: InferOps' page text carries
+   * documentation coverage and live widget state, which admitting them for the Wiki does not cover.
+   */
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
     const { host, workspaceId } = this.ctx.props;
     const verifier = user as unknown as Fetcher<InferOpsVerifierApi>;
     if (!(await verifier.hasWikiAccess(host, workspaceId))) {
@@ -2387,10 +2391,12 @@ export class InferOpsWikiGatekeeper
         `This collaborator cannot read the InferMind Wiki of ${host}, so they cannot observe data ` +
         `the Gadget read from it.`);
     }
+    this.ctx.storage.kv.put(OBSERVER_PREFIX + id, true);
   }
 
-  /** Nothing is tracked per observer under strategy B. */
-  async removeObserver(_id: string): Promise<void> {}
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(OBSERVER_PREFIX + id);
+  }
 
   /**
    * Apply a section edit or a page body edit; see `#sendSectionEdit` and `#sendBodyEdit`. The
@@ -2537,6 +2543,12 @@ export class InferOpsWikiGatekeeper
   }
 }
 
+/** A page as the session shows it: its pending edits overlaid, and a Master's structure if read. */
+type ShownPage = {
+  head: WikiDocumentHead; body: string; pendingBody: boolean; structure: WikiStructureRecord | null;
+  sections: WikiSection[];
+};
+
 @validateRpc()
 class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
   #binding: WikiBinding;
@@ -2589,7 +2601,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
    * The page as shown (its pending body edit and section edits overlaid) and, for a Master, the
    * structure its generated block lists. Only a Master's read costs the structure request.
    */
-  async #page(slugOrId: string, withStructure: boolean) {
+  async #page(slugOrId: string, withStructure: boolean): Promise<ShownPage> {
     const binding = this.#binding;
     const documentId = await this.#documentId(slugOrId);
     const head = await binding.client.readDocument(documentId).catch(hideDocumentExistence);
@@ -2621,12 +2633,43 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
   }
 
   /**
-   * InferOps' page-text contract (wiki.ts): the body, else the visible sections, then a Master's
-   * generated block. A page with none of them is answered as not readable, as InferOps answers it,
-   * rather than as a bare title.
+   * The page as InferOps composes its text for this account (`document.text`), so the caller reads
+   * what a person and an InferOps agent read: a Master's documentation coverage (computed with the
+   * account's own access) and embedded widgets as live text included. While this connection has an
+   * edit of the page waiting for a decision, the page is composed here instead with the edit
+   * overlaid (InferOps' page contract, wiki.ts), so the caller reads back what it proposed; that text
+   * leaves embeds as links and has no coverage block. Nothing on the page readable: NOT_FOUND.
+   *
+   * InferOps' text carries data the Wiki grant does not cover (coverage of an operations
+   * workspace, live widget state), so a collaborator admitted for the Wiki is excluded from it.
    */
   async readDocumentText(slugOrId: string): Promise<string> {
-    const { head, body, sections, structure } = await this.#page(slugOrId, true);
+    const binding = this.#binding;
+    const documentId = await this.#documentId(slugOrId);
+    if (binding.pendingEdits().length > 0) {
+      const page = await this.#page(documentId, true);
+      if (page.pendingBody || page.sections.some(section => section.pending)) {
+        return this.#composedText(page);
+      }
+    }
+    const text = await binding.client.readDocumentText(documentId).catch(hideDocumentExistence);
+    if (text === null) fail("NOT_FOUND", "Nothing on this page is readable.");
+    const title = /^# (.*)/.exec(text)?.[1] ?? "";
+    const observers = Array.from(binding.kv.list({ prefix: OBSERVER_PREFIX }),
+      ([key]) => key.slice(OBSERVER_PREFIX.length));
+    await this.#queue.authorizeObservation({
+      title: `Read Wiki page ${plainInline(slugOrId, 80)} as text`,
+      description: `Read page "${plainInline(title, 120)}" of the InferMind Wiki of ${binding.host} ` +
+        "as text, as InferOps composes it for this connection: its content, and for a Master its " +
+        "structure and documentation coverage, with embedded widgets as their live text.",
+      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
+    });
+    return text;
+  }
+
+  /** The page shown, with its pending edits, as InferOps' page contract composes it (wiki.ts). */
+  async #composedText(page: ShownPage): Promise<string> {
+    const { head, body, sections, structure } = page;
     const text = composeDocumentText(head.title, {
       body, visibleSections: sections.map(s => s.body),
       generated: structure ? masterStructureText(head, structure) : null,
@@ -2635,7 +2678,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     await this.#queue.authorizeObservation({
       title: `Read Wiki page ${plainInline(head.slug, 80)} as text`,
       description: `Read page "${plainInline(head.title, 120)}" of the InferMind Wiki of ` +
-        `${this.#binding.host} as text: ` +
+        `${this.#binding.host} as text, with its pending edits: ` +
         `${body.trim() ? "its body" : `${sections.length} sections`}` +
         `${structure ? " and its generated structure list" : ""}.`,
     });

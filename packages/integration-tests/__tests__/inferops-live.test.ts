@@ -42,6 +42,8 @@
 // overwrites the same section once directly to prove an apply-time version check. Step k
 // appends one marker line per run to the body of one page filed under a pillar, and overwrites it
 // once directly to prove InferOps' compare-and-swap refuses the overtaken approval.
+// Step l proposes two edits of that page and rejects both, and admits one new Workshop user as a
+// collaborator on a new gadget holding only the Wiki; nothing it does reaches InferOps.
 //
 // Run, after `pnpm --filter @gadgets/integration-tests run test:prebuild`:
 //   INFEROPS_LIVE_BASE_URL=... INFEROPS_LIVE_TOKEN=... INFEROPS_LIVE_WORKSPACE_ID=... \
@@ -59,7 +61,8 @@ import type {
 import { startHarness, type Harness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  connect, listConnectedAccounts, logIn, nextUsernames, signUp, waitFor,
+  connect, listConnectedAccounts, logIn, MAX_OBSERVER_PROMPTS, nextUsernames, ObserverConfigRecorder,
+  signUp, stubFor, waitFor,
 } from "../src/rpc-client.js";
 
 const LIVE = {
@@ -138,14 +141,12 @@ const liveRunsOf = async (issueId: string) =>
 
 type LiveSection = { id: string; documentId: string; tag: string; body: string; version: number };
 
-/** A live page as InferOps' page contract composes it: `# title`, then its body, else its sections. */
-async function livePageText(id: string, sections: LiveSection[]): Promise<string> {
-  const doc = await inferOps(`/knowledge/documents/${id}`, undefined, LIVE.wikiWorkspaceId) as
-    { title: string; body: string };
-  const lead = /^\s*#\s+(.*?)\s*(?:\r?\n|$)/.exec(doc.body);
-  const body = lead && lead[1]!.trim() === doc.title.trim() ? doc.body.slice(lead[0].length) : doc.body;
-  const parts = doc.body.trim() ? [body.trim()] : sections.map(section => section.body);
-  return [`# ${doc.title}`, ...parts].join("\n\n");
+/** A live page's text as InferOps itself answers it (`document.text`, the string `read_document` returns). */
+async function livePageText(id: string): Promise<string> {
+  const { text } = await inferOps(`/knowledge/documents/${id}/text`, undefined, LIVE.wikiWorkspaceId) as
+    { text: string | null };
+  if (text === null) throw new Error(`InferOps shows no text for page ${id}`);
+  return text;
 }
 
 const liveSection = async (id: string) =>
@@ -766,7 +767,7 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     expect(page.sections.map(s => ({ id: s.id, body: s.body, version: s.version })))
       .toEqual(liveSections.map(s => ({ id: s.id, body: s.body, version: s.version })));
     // Page text follows InferOps' page contract: the body when the page has one, else its sections.
-    expect(await wiki.readDocumentText(page.slug)).toBe(await livePageText(page.id, liveSections));
+    expect(await wiki.readDocumentText(page.slug)).toBe(await livePageText(page.id));
 
     // An edit waits for approval: reads show it pending, InferOps still has the old body.
     const section = page.sections[0]!;
@@ -804,7 +805,7 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       `/knowledge/documents in ${LIVE.workspaceSlug}: 403 FORBIDDEN). Bound ` +
       `${wikiUrl(LIVE.wikiWorkspaceSlug)} (${LIVE.wikiWorkspaceId}): ${pages.length} pages; read ` +
       `${page.slug} (${page.id}, ${page.sections.length} sections, ${page.references.length} references); ` +
-      "readDocumentText equals InferOps' page contract (body, else section bodies). Edited section " +
+      "readDocumentText equals InferOps' document.text. Edited section " +
       `${section.tag} (${section.id}): pending at version ${before.version}, unchanged in InferOps; ` +
       `after approval version ${before.version} -> ${edited.version}. Version ${before.version} refused ` +
       `STALE_REVISION at proposal; an edit at ${edited.version} overtaken by a direct PATCH (version ` +
@@ -832,21 +833,22 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     // each linked as one encoded /wiki/ segment.
     const pillar = structure.pillars.find(p => p.master && p.members.length > 0) ?? structure.pillars[0]!;
     const masterText = await wiki.readDocumentText(pillar.master!.id);
+    // InferOps' own text, coverage block included when the Wiki has a coverage source.
+    expect(masterText).toBe(await livePageText(pillar.master!.id));
+    const masterCoverage = masterText?.includes("## Documentation coverage") ?? false;
     expect(masterText).toContain(`## Pages in ${pillar.title}`);
     for (const member of pillar.members) {
       expect(masterText).toContain(`- [${member.title}](/wiki/${encodeURIComponent(member.slug)})`);
     }
 
-    // A filed page with a body reads as its body, matching InferOps' own page.
+    // A filed page reads as InferOps' own text for it.
     const member = pillar.members[0];
     if (!member) throw new Error(`Pillar ${pillar.key} files no page`);
     const page = await wiki.readDocument(member.id);
     const liveDoc = await inferOps(`/knowledge/documents/${member.id}`, undefined, LIVE.wikiWorkspaceId) as
       { body: string; version: number };
     expect({ body: page.body, version: page.version }).toEqual({ body: liveDoc.body, version: liveDoc.version });
-    const liveSections = await inferOps(`/knowledge/sections?documentId=${member.id}`, undefined,
-      LIVE.wikiWorkspaceId) as LiveSection[];
-    expect(await wiki.readDocumentText(member.id)).toBe(await livePageText(member.id, liveSections));
+    expect(await wiki.readDocumentText(member.id)).toBe(await livePageText(member.id));
 
     // A body edit waits for approval, shows as pendingBody, and leaves InferOps unchanged until then.
     const body = `# ${page.title}\n\n${liveDoc.body.replace(/^\s*#\s+.*(?:\r?\n)+/, "").trim()}\n\nInferOS live body edit ${new Date().toISOString()}`;
@@ -880,11 +882,71 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
 
     note(`k. ${wikiUrl(LIVE.wikiWorkspaceSlug)}: readStructure equals InferOps' (root ${structure.root.id}, ` +
       `${structure.pillars.length} pillars: ${structure.pillars.map(p => `${p.key}=${p.members.length}`).join(", ")}). ` +
-      `Master ${pillar.master!.slug} text lists its filed pages as /wiki/<encoded slug>. Page ${member.slug} ` +
-      `(${member.id}) text equals InferOps' page contract. Body edit pending at version ${page.version}, ` +
+      `Master ${pillar.master!.slug} text equals InferOps' document.text (coverage block: ${masterCoverage ? "yes" : "no"}) ` +
+      `and lists its filed pages as /wiki/<encoded slug>. Page ${member.slug} ` +
+      `(${member.id}) text equals InferOps' document.text. Body edit pending at version ${page.version}, ` +
       `unchanged in InferOps; after approval version ${page.version} -> ${edited.version}. Version ` +
       `${page.version} refused STALE_REVISION at proposal; an edit at ${edited.version} overtaken by a ` +
       `direct same-text PATCH (version ${direct.document.version}) refused at apply ` +
       `("${staleApply.slice(0, 120)}"); page left at version ${final.version}`);
+  });
+
+  it.skipIf(!WIKI_LIVE)("l. page text: an edit waiting reads back composed here, and InferOps' text is withheld once a collaborator is admitted, the page itself is not (needs INFEROPS_LIVE_WIKI_WORKSPACE_ID and _SLUG; runs after k)", async () => {
+    // A gadget of its own holding only the Wiki, so a collaborator is verified against nothing else.
+    ws = await api.newGadget();
+    const connection = await ws.newGatekeeper(accountId, wikiUrl(LIVE.wikiWorkspaceSlug));
+    if (!connection) throw new Error(`No connection for ${wikiUrl(LIVE.wikiWorkspaceSlug)}`);
+    const wiki = await connection.openSession() as RpcStub<InferOpsWikiSession>;
+    const structure = await wiki.readStructure();
+    const pillar = structure.pillars.find(p => p.master && p.members.length > 0);
+    if (!pillar) throw new Error("Apply an intake's pillars first (pillar.apply)");
+    const master = pillar.master!;
+    const member = pillar.members[0]!;
+
+    /** Propose a body edit of the member page that stays pending. */
+    const proposeEdit = async (marker: string) => {
+      const page = await wiki.readDocument(member.id);
+      const body = `# ${page.title}\n\n${page.body.replace(/^\s*#\s+.*(?:\r?\n)+/, "").trim()}\n\n${marker}`;
+      return await proposed(() => wiki.updateDocumentBody(member.id, body, page.version));
+    };
+
+    // An edit of its own waiting: the page reads back with it, composed in InferOS (InferOps has
+    // not got it), while a page with nothing waiting still reads InferOps' own text.
+    const marker = `InferOS live pending ${new Date().toISOString()}`;
+    const edit = await proposeEdit(marker);
+    const pendingText = await wiki.readDocumentText(member.id);
+    expect(pendingText).toContain(marker);
+    expect(await livePageText(member.id)).not.toContain(marker);
+    expect(await wiki.readDocumentText(master.id)).toBe(await livePageText(master.id));
+    await ws.rejectAction(edit.id);
+    expect(await wiki.readDocumentText(member.id)).toBe(await livePageText(member.id));
+
+    // A collaborator admitted to this gadget, verified against the Wiki with their own account.
+    const [collaboratorName] = nextUsernames("inferopslivec");
+    const collaborator = await signUp(connect(harness.url), collaboratorName!);
+    await collaborator.provisionAmbientAccount(VENDOR);
+    const collaboratorAccount = await waitFor("the collaborator's InferOps account", async () =>
+      (await listConnectedAccounts(collaborator)).find(a => a.vendorId === VENDOR) ?? null);
+    const { id: gadgetId } = await ws.getMetadata();
+    expect(await ws.addCollaborator(collaboratorName!, "build")).toBeTruthy();
+    const asked = new ObserverConfigRecorder().alwaysChoose(collaboratorAccount.id, MAX_OBSERVER_PROMPTS);
+    using callback = stubFor(asked);
+    using _collaboratorWs = await collaborator.openGadget(gadgetId, undefined, callback);
+
+    // InferOps' text carries coverage and live widget state the Wiki admission does not cover: withheld.
+    const blocked = await failure(wiki.readDocumentText(master.id));
+    expect(blocked).toMatch(/blocked because it contains data that a current collaborator/);
+    // The page itself is Wiki data the admission covers.
+    expect((await wiki.readDocument(master.id)).id).toBe(master.id);
+    // A page with an edit of its own waiting is composed here from Wiki data only: still readable.
+    const edit2 = await proposeEdit(`${marker} (with a collaborator)`);
+    expect(await wiki.readDocumentText(member.id)).toContain(`${marker} (with a collaborator)`);
+    await ws.rejectAction(edit2.id);
+
+    note(`l. ${wikiUrl(LIVE.wikiWorkspaceSlug)}: page ${member.slug} with a pending body edit read back ` +
+      "composed in InferOS (edit shown, absent from InferOps' document.text); Master " +
+      `${master.slug} still equal to InferOps' text; after rejecting, ${member.slug} equal to InferOps' ` +
+      `text again. Collaborator ${collaboratorName} admitted: Master text withheld ("${blocked.slice(0, 110)}"), ` +
+      "readDocument still answered, a pending-edit read still composed here");
   });
 });

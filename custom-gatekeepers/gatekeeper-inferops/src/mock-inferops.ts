@@ -58,6 +58,7 @@ import {
   type WikiStructureRecord,
 } from "./inferops-client";
 import type { Issue, Revision, RunResult, RunStatus } from "./types";
+import { composeDocumentText, masterStructureText } from "./wiki";
 
 /** The only InferOps host the mock serves; resource URLs naming another host are refused. */
 export const MOCK_HOST = "demo.local";
@@ -506,6 +507,21 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     };
   }
 
+  /**
+   * InferOps' `document.text` over the demo Wiki: the shared page contract. The demo workspace has
+   * no operational inventory and no live widgets, so no coverage block or widget text is added.
+   */
+  async readDocumentText(documentId: string): Promise<string | null> {
+    const head = this.#wiki().documents.find(d => d.id === documentId);
+    if (!head) return null;
+    const sections = await this.listSections(documentId);
+    const structure = head.masterRole ? await this.readStructure() : null;
+    return composeDocumentText(head.title, {
+      body: head.body, visibleSections: sections.map(s => s.body),
+      generated: structure ? masterStructureText(head, structure) : null,
+    });
+  }
+
   async updateDocument(documentId: string, changes: WikiPageChanges, expectedVersion: number,
                        idempotencyKey: string): Promise<WikiPageWrite> {
     if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
@@ -669,6 +685,7 @@ export function openInferOpsClient(
     listDocuments: () => stub.listDocuments(),
     readDocument: documentId => stub.readDocument(documentId),
     readStructure: () => stub.readStructure(),
+    readDocumentText: documentId => stub.readDocumentText(documentId),
     updateDocument: (documentId, changes, expectedVersion, idempotencyKey) =>
       refused(stub.updateDocument(documentId, changes, expectedVersion, idempotencyKey)),
     listSections: documentId => stub.listSections(documentId),
