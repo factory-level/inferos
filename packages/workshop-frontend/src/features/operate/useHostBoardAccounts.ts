@@ -6,14 +6,15 @@ import { useAuthenticatedApi } from '../../AuthContext'
 export type HostBoardAccount = { id: number; name: string }
 
 /**
- * The operator's own accounts with valid credentials for `targetRef` (null until listed), kept
+ * The operator's own accounts with valid credentials for `targetRef` (null until listed, and
+ * `unavailable` when they could not be listed), kept
  * subscribed for as long as the board is open, so a change is seen while the board shows too.
  * `onChanged` is called for every add, removal or credential change after the first listing; it
  * only invalidates the view, and never selects an account.
  */
-export const useHostBoardAccounts = (targetRef: string, onChanged: () => void): readonly HostBoardAccount[] | null => {
+export const useHostBoardAccounts = (targetRef: string, onChanged: () => void): readonly HostBoardAccount[] | null | 'unavailable' => {
   const { authenticatedApi } = useAuthenticatedApi()
-  const [accounts, setAccounts] = useState<readonly HostBoardAccount[] | null>(null)
+  const [accounts, setAccounts] = useState<readonly HostBoardAccount[] | null | 'unavailable'>(null)
   const changed = useRef(onChanged)
   changed.current = onChanged
 
@@ -34,7 +35,8 @@ export const useHostBoardAccounts = (targetRef: string, onChanged: () => void): 
       ready() { ready = true; publish() },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber, { resourceUrl: targetRef })
-    subscription.catch(() => { if (!cancelled) setAccounts([]) })
+    // A failed listing is not "no accounts": it is shown as its own state, with no cause.
+    subscription.catch(() => { if (!cancelled) setAccounts('unavailable') })
     return () => {
       cancelled = true
       subscription[Symbol.dispose]()

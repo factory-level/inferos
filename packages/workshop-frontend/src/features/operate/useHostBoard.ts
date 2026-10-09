@@ -20,10 +20,20 @@ const now = (): HostBoardClock => ({ mono: performance.now(), wall: Date.now() }
 
 /** The first wait before resubscribing after a subscription ended, doubled per attempt up to the cap. */
 export const HOST_BOARD_RESUBSCRIBE_MS = 2_000
+/**
+ * While a board is shown, expiry is rechecked this often on both clocks, so a board can't
+ * outlive its wall-clock expiry because a timer fired late after the device slept.
+ */
+export const HOST_BOARD_TICK_MS = 5_000
 const RESUBSCRIBE_CAP_MS = 30_000
 
 // The kernel's guard refusals: the console revision or session context the handle was acquired for
-// no longer holds, so the handle is never read again and a new one waits for a new context.
+// no longer holds, so the handle is never read again and a new one waits for a new context. The
+// kernel throws these as plain English errors with no code (OperateSessionImpl in
+// packages/workshop-backend/src/server.ts: "is not open in your operate session" at :712
+// selectHostBoardConnection, :725 getConsoleHostBoard and :769 #subscribeHostBoardSelection, and
+// "has no requirement" at :733 readRequirement), so they are matched by text
+// until a coded OperateSessionError exists. Anything unmatched is an ordinary failure (fail closed).
 const isGuardRefusal = (caught: unknown) =>
   getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.consoleChanged
   || (caught instanceof Error && /is not open in your operate session|has no requirement/.test(caught.message))
@@ -66,8 +76,9 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
           const { token } = command
           handle.readRequirement(requirement)
             .then(read => apply({ type: 'read-answer', token, read }))
-                        // Anything but a recognized guard refusal is an ordinary failure: the board is cleared
-            // and shown as unavailable, and only the cadence or Retry reads again.
+            // Anything but a recognized guard refusal is an ordinary failure: the board is cleared
+            // and shown as unavailable, and only the cadence, Retry or the tab being shown again
+            // reads again.
             .catch((caught: unknown) => {
               if (isGuardRefusal(caught)) handleInvalid = true
               apply({ type: 'read-failed', token, failure: isGuardRefusal(caught) ? 'handle-invalid' : 'error' })
@@ -131,10 +142,16 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('focus', onResume)
     window.addEventListener('pageshow', onResume)
+    window.addEventListener('online', onResume)
+    // Expiry is rechecked on its own, not only when something renders (see HOST_BOARD_TICK_MS);
+    // the recheck clears an expired board and rearms the expiry timer, and never reads early.
+    const tick = setInterval(() => { if (machine.current.accepted) apply({ type: 'timer', timer: 'expiry' }) }, HOST_BOARD_TICK_MS)
     return () => {
+      clearInterval(tick)
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('focus', onResume)
       window.removeEventListener('pageshow', onResume)
+      window.removeEventListener('online', onResume)
       // Drop the handle before disposing, so nothing settling later can touch the next context.
       apply({ type: 'context', context: null })
       disposed = true

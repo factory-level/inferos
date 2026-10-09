@@ -9,12 +9,16 @@ import type { OperateSession } from '@gadgets/workshop-shared/api'
 import type { HostBoardEntry, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView } from '@gadgets/workshop-shared/operate-console'
 
 type Subscriber = { add: (...args: unknown[]) => void; remove: (id: number) => void; ready: () => void }
-const accounts = vi.hoisted(() => ({ list: [] as { id: number; name: string }[], filters: [] as unknown[], subscriber: null as Subscriber | null }))
+const accounts = vi.hoisted(() => ({ list: [] as { id: number; name: string }[], filters: [] as unknown[], subscriber: null as Subscriber | null, fail: undefined as unknown }))
 const api = vi.hoisted(() => ({
   authenticatedApi: {
     subscribeConnectedAccounts: (subscriber: Subscriber, filter: unknown) => {
       accounts.filters.push(filter)
       accounts.subscriber = subscriber
+      if (accounts.fail !== undefined) {
+        const failed = Promise.reject(accounts.fail)
+        return Object.assign(failed, { [Symbol.dispose]: () => {} })
+      }
       for (const account of accounts.list) {
         subscriber.add(account.id, { displayName: account.name }, { displayName: 'InferOps' }, [], true, 'inferops')
       }
@@ -27,7 +31,7 @@ vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => api }))
 vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: unknown }) => <a href="/gatekeepers">{children as never}</a> }))
 
 import { ConsoleHostBoard } from './ConsoleHostBoard'
-import { HOST_BOARD_RESUBSCRIBE_MS } from './useHostBoard'
+import { HOST_BOARD_RESUBSCRIBE_MS, HOST_BOARD_TICK_MS } from './useHostBoard'
 
 const SECRET = 'Fix the login'
 const ENTRY: HostBoardEntry & { id: string } = { kind: 'host-board', id: 'hb1', label: 'Team board',
@@ -77,7 +81,7 @@ beforeEach(() => {
   visibility = 'visible'
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  accounts.list = []; accounts.filters = []; accounts.subscriber = null
+  accounts.list = []; accounts.filters = []; accounts.subscriber = null; accounts.fail = undefined
   handles = []; disposed = []; readFailures = []; subscribeFailure = undefined
   readRequirement.mockReset(); getConsoleHostBoard.mockClear(); selectHostBoardConnection.mockReset()
 })
@@ -210,7 +214,7 @@ describe('selection', () => {
     accounts.list = [{ id: 7, name: 'ana@acme.test' }]
     selectHostBoardConnection.mockResolvedValueOnce({ status: 'superseded' }).mockResolvedValueOnce({ status: 'selected' })
     await render()
-    await send({ state: 'none', changeSeq: 2, selectionEpoch: 1 })
+    await send({ state: 'none', changeSeq: 2, selectionEpoch: null })
     await act(async () => button('Use ana@acme.test')!.click())
     expect(reads()).toBe(0)
     expect(text()).toContain('Not connected for you')
@@ -239,6 +243,48 @@ describe('selection', () => {
     expect(text()).toContain('Fresh answer')
     expect(selectHostBoardConnection).not.toHaveBeenCalled()
   })
+})
+
+it('clears the board when the kernel reports the selection removed (none with a null epoch)', async () => {
+  await render()
+  await selected()
+  await answer(ok())
+  expect(text()).toContain(SECRET)
+  await send({ state: 'none', changeSeq: 2, selectionEpoch: null })
+  expect(text()).not.toContain(SECRET)
+  expect(text()).toContain('Not connected for you')
+})
+
+it('clears a board past its wall-clock expiry within one tick while the tab stays visible', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+  await render()
+  await selected()
+  await answer(ok())
+  expect(text()).toContain(SECRET)
+  // The device slept: the wall clock moved past expiry; the monotonic clock and timers did not.
+  vi.setSystemTime(Date.now() + 61_000)
+  await act(async () => { vi.advanceTimersByTime(HOST_BOARD_TICK_MS) })
+  expect(text()).not.toContain(SECRET)
+})
+
+it('rechecks expiry when the browser comes back online', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+  await render()
+  await selected()
+  await answer(ok())
+  vi.setSystemTime(Date.now() + 61_000)
+  await act(async () => window.dispatchEvent(new Event('online')))
+  expect(text()).not.toContain(SECRET)
+})
+
+it('says the account list could not be loaded, with no cause, when its subscription fails', async () => {
+  accounts.fail = new Error('accounts backend exploded')
+  await render()
+  await send({ state: 'none', changeSeq: 1, selectionEpoch: null })
+  await flush()
+  expect(text()).toContain('Could not list your InferOps accounts')
+  expect(text()).not.toContain('You have no InferOps account')
+  expect(text()).not.toContain('exploded')
 })
 
 describe('invalidation across delayed answers', () => {

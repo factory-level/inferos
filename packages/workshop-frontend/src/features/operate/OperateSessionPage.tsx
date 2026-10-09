@@ -48,7 +48,7 @@ export const OperateSessionPage = () => {
 
   const [widgetTarget, setWidgetTarget] = useState<ConsoleWidgetTarget | null>(null)
   // The host board open in a dialog, by the console revision it was opened from.
-  const [hostBoardTarget, setHostBoardTarget] = useState<{ consoleId: string; revision: string; entryId: string } | null>(null)
+  const [hostBoardTarget, setHostBoardTarget] = useState<{ consoleId: string; source: ConsoleSource; revision: string; entryId: string } | null>(null)
   const consoleId = operate?.snapshot?.state.console?.consoleId
   const notifyRefused = (caught: unknown) => {
     console.error('Operate session change failed:', caught)
@@ -104,11 +104,18 @@ export const OperateSessionPage = () => {
   }
   const visibleWidget = widgetTarget?.consoleId === consoleId ? widgetTarget : null
   // Shown only while the session still has that console revision open, and the revision lists it.
+  // A board belongs to the run it was opened from: once the console is left, opened from another
+  // source or revision, or covered by settings, setup or tools, it is closed for good, so coming back
+  // to the same revision neither reopens nor re-reads it. State is adjusted during render (React's
+  // pattern for resetting on a changed input), not in an Effect.
+  if (hostBoardTarget && (!run || configuring || tools || hostBoardTarget.consoleId !== run.consoleId
+    || hostBoardTarget.source !== run.source || hostBoardTarget.revision !== run.revision)) setHostBoardTarget(null)
   const shownHostBoard = hostBoardsOn && run && hostBoardTarget && hostBoardTarget.consoleId === run.consoleId
-    && hostBoardTarget.revision === run.revision && run.fullChat !== 'only' && entry?.console.revision === run.revision
+    && hostBoardTarget.source === run.source && hostBoardTarget.revision === run.revision && run.fullChat !== 'only' && entry?.console.revision === run.revision
     ? entry.console.hostBoards?.find(board => board.id === hostBoardTarget.entryId) : undefined
   // An assistant-only console has no widget menu, so it never offers its boards (the editors say so).
-  const openHostBoard = hostBoardsOn && run && run.fullChat !== 'only' ? (entryId: string) => setHostBoardTarget({ consoleId: run.consoleId, revision: run.revision, entryId }) : undefined
+  const openHostBoard = hostBoardsOn && run && run.fullChat !== 'only'
+    ? (entryId: string) => setHostBoardTarget({ consoleId: run.consoleId, source: run.source, revision: run.revision, entryId }) : undefined
   const settingsEntry = settings ? consoleEntries(workspaces).find(item => item.workspace.id === search.workspace && item.console.id === settings) : undefined
   const openView = async (viewId: string) => {
     setWidgetTarget(null)

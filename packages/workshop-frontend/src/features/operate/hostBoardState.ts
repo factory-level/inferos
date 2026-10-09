@@ -96,7 +96,7 @@ export type HostBoardEvent =
   | { type: 'read-failed'; token: number; failure: 'handle-invalid' | 'error'; at: HostBoardClock }
   | { type: 'retry'; at: HostBoardClock }
   | { type: 'visibility'; visible: boolean; at: HostBoardClock }
-  /** `focus`, `pageshow` or a transport reconnection: recheck expiry as on a resume. */
+  /** `focus`, `pageshow` or `online`: recheck expiry as on a resume. */
   | { type: 'resume'; at: HostBoardClock }
   | { type: 'timer'; timer: HostBoardTimer; at: HostBoardClock }
 
@@ -160,9 +160,6 @@ export const hostBoardView = (state: HostBoardState, at: HostBoardClock): HostBo
   if (state.outcome === 'unavailable') return { status: 'unavailable' }
   return { status: 'cleared' }
 }
-
-/** A selection's epoch, with none yet (null) below every committed one. */
-const epochOf = (selection: HostBoardSelectionEvent) => selection.selectionEpoch ?? -1
 
 type Draft = { state: HostBoardState; commands: HostBoardCommand[] }
 
@@ -246,6 +243,10 @@ const accept = (d: Draft, read: Extract<HostBoardRead, { status: 'ok' }>, sent: 
   }
   // A `readAt` later than the send is clamped to it, so a skewed server clock cannot extend
   // freshness; an earlier one shortens it on both clocks. Fixed here once, never recomputed.
+  // Open question (docs/architecture/inferops-canvas.md, "Open questions"): this compares the
+  // server's `readAt` with the client's wall clock, so a client clock 60 s or more ahead of the
+  // server refuses every answer (the board stays unavailable, with no reason given), and a smaller
+  // skew shortens the lifetime; at 30 s or more, every focus clears the board as overdue.
   const readAtWall = Math.min(readAtMs, sent.t0Wall)
   const readAtMono = sent.t0Mono - (sent.t0Wall - readAtWall)
   const accepted: AcceptedBoard = {
@@ -315,11 +316,13 @@ export const reduceHostBoard = (state: HostBoardState, event: HostBoardEvent): H
       if (event.subscription !== d.state.subscription) break
       const previous = d.state.selection
       const next = event.selection
+      // Ordered by `changeSeq` alone, which the kernel raises on every change of a target's
+      // selection and never resets (host-boards.ts:258/:330/:361/:389; slots are never deleted).
+      // The epoch is not an order: a removal and a re-pick's `pending` carry a null one.
       if (previous && next.changeSeq <= previous.changeSeq) break
-      if (previous && epochOf(next) < epochOf(previous)) break
-      // A first snapshot after unknown authority restores nothing by itself: only the fenced read
-      // it starts can show data again.
-      const changed = !previous || epochOf(next) > epochOf(previous) || next.state !== previous.state
+      // Any change of state or epoch (to null included) invalidates. A first snapshot after unknown
+      // authority restores nothing by itself: only the fenced read it starts can show data again.
+      const changed = !previous || next.selectionEpoch !== previous.selectionEpoch || next.state !== previous.state
       if (changed) invalidate(d)
       d.state = { ...d.state, selection: next }
       if (changed) requestRead(d, at)

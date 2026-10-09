@@ -72,7 +72,7 @@ describe('authority and the first read', () => {
   it('shows not-connected without reading when there is no selection', () => {
     dispatch({ type: 'context', context: { token: 1, target: TARGET } })
     dispatch({ type: 'selection-subscribed', subscription: 1 })
-    dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 1, selectionEpoch: 0 } })
+    dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 1, selectionEpoch: null } })
     expect(view()).toEqual({ status: 'not-connected' })
     expect(reads()).toHaveLength(0)
   })
@@ -91,7 +91,7 @@ describe('invalidation', () => {
   const signals: [string, () => void][] = [
     ['an account or picker change', () => dispatch({ type: 'invalidate' })],
     ['a newer selection epoch', () => dispatch({ type: 'selection', subscription: 1, selection: { state: 'selected', changeSeq: 2, selectionEpoch: 2 } })],
-    ['a selection removed', () => dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 2, selectionEpoch: 2 } })],
+    ['a selection removed', () => dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 2, selectionEpoch: null } })],
     ['a subscription failure', () => dispatch({ type: 'selection-failed', subscription: 1 })],
     ['a handle invalidation', () => dispatch({ type: 'handle-invalidated' })],
     ['a new context', () => dispatch({ type: 'context', context: { token: 2, target: TARGET } })],
@@ -418,13 +418,64 @@ describe('cadence', () => {
   })
 })
 
+// The kernel's selection states (`HostBoardDesk.selectionState`, host-boards.ts:396-405): `none`
+// always has a null epoch (never selected, or the connection removed, :389), `pending` carries
+// the committed selection's epoch or null, and every change raises `changeSeq` (:258/:330/:361/:389).
+const kernel = {
+  none: (changeSeq: number) => ({ state: 'none', changeSeq, selectionEpoch: null }) as const,
+  pending: (changeSeq: number, selectionEpoch: number | null) => ({ state: 'pending', changeSeq, selectionEpoch }) as const,
+  selected: (changeSeq: number, selectionEpoch: number) => ({ state: 'selected', changeSeq, selectionEpoch }) as const,
+}
+const deliver = (selection: ReturnType<(typeof kernel)[keyof typeof kernel]>, subscription = 1) =>
+  dispatch({ type: 'selection', subscription, selection })
+
+describe('selection removed and picked again, in the kernel\'s shapes', () => {
+  it('clears at a removal (none, null epoch), shows nothing restored by a late read, and reads again only once re-selected', () => {
+    mountSelected()
+    answer(ok())
+    advance(30_000)
+    dispatch({ type: 'timer', timer: 'refresh' })
+    const late = lastRead().token
+    deliver(kernel.none(2))
+    expect(state.accepted).toBeNull()
+    expect(view()).toEqual({ status: 'not-connected' })
+    answer(ok(), late)
+    expect(state.accepted).toBeNull()
+    expect(view()).toEqual({ status: 'not-connected' })
+    const before = reads().length
+    deliver(kernel.pending(3, null))
+    expect(view()).toEqual({ status: 'loading' })
+    expect(reads()).toHaveLength(before)
+    deliver(kernel.selected(4, 2))
+    expect(reads()).toHaveLength(before + 1)
+    answer(ok())
+    expect(view().status).toBe('ok')
+  })
+
+  it('orders deliveries by changeSeq alone: an epoch never makes an older or repeated one current', () => {
+    mountSelected()
+    answer(ok())
+    const before = state
+    deliver(kernel.selected(1, 7))
+    deliver(kernel.none(0))
+    expect(state).toBe(before)
+  })
+
+  it('treats a change of epoch alone, to null included, as an invalidation', () => {
+    mountSelected()
+    answer(ok())
+    deliver(kernel.pending(2, null))
+    expect(state.accepted).toBeNull()
+  })
+})
+
 describe('selection subscription', () => {
   it('ignores duplicate and older deliveries', () => {
     mountSelected()
     answer(ok())
     const before = state
     dispatch({ type: 'selection', subscription: 1, selection: { state: 'selected', changeSeq: 1, selectionEpoch: 1 } })
-    dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 0, selectionEpoch: 9 } })
+    dispatch({ type: 'selection', subscription: 1, selection: { state: 'none', changeSeq: 0, selectionEpoch: null } })
     expect(state).toBe(before)
   })
 
@@ -455,7 +506,7 @@ describe('selection subscription', () => {
     mountSelected()
     answer(ok())
     const before = state
-    dispatch({ type: 'selection', subscription: 7, selection: { state: 'none', changeSeq: 5, selectionEpoch: 5 } })
+    dispatch({ type: 'selection', subscription: 7, selection: { state: 'none', changeSeq: 5, selectionEpoch: null } })
     dispatch({ type: 'selection-failed', subscription: 7 })
     expect(state).toBe(before)
   })

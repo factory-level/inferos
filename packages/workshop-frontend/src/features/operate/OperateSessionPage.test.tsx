@@ -15,7 +15,7 @@ const testState = vi.hoisted(() => ({
   state: null as unknown,
   dispatch: null as unknown,
   recentEvents: [] as OperateEventRecord[],
-  search: {} as { setup?: string; tools?: boolean },
+  search: {} as { setup?: string; tools?: boolean; settings?: string; workspace?: string },
   navigate: vi.fn<(options: unknown) => void>(),
   hostBoards: false,
 }))
@@ -23,6 +23,7 @@ const testState = vi.hoisted(() => ({
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => testState.navigate, useSearch: () => testState.search }))
 vi.mock('./ConsoleWorkspaceShell', () => ({ ConsoleWorkspaceShell: ({ children }: { children: import('react').ReactNode }) => children }))
 vi.mock('./ConsoleBuilder', () => ({ ConsoleBuilder: () => <div data-testid="builder" /> }))
+vi.mock('./ConsoleSettings', () => ({ ConsoleSettings: () => <div data-testid="settings" /> }))
 
 vi.mock('@cloudflare/kumo', async importOriginal => ({
   ...await importOriginal<typeof import('@cloudflare/kumo')>(),
@@ -193,6 +194,23 @@ describe('host boards', () => {
     testState.hostBoards = true
     render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: { ...RUN, fullChat: 'only' } })
     expect(openBoard()).toBeUndefined()
+    expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
+  })
+
+  it.each([
+    ['the console is left', { ...INITIAL_OPERATE_PAGE }, {}],
+    ['settings open', null, { settings: 'c1', workspace: 'ws1' }],
+    ['the tools open', null, { tools: true }],
+  ] as const)('keeps a board closed after %s and the same revision is shown again', (_, away, search) => {
+    testState.hostBoards = true
+    const open = { ...INITIAL_OPERATE_PAGE, presentation: 'canvas' as const, chatOpen: true, console: RUN }
+    render(open)
+    act(() => openBoard()!.click())
+    expect(container.querySelector('[data-testid="host-board"]')).not.toBeNull()
+    testState.search = search
+    render(away ?? open)
+    testState.search = {}
+    render(open)
     expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
   })
 
