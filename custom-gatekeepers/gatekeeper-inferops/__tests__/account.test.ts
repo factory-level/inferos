@@ -1085,6 +1085,67 @@ describe("host boards, the kernel-only read of a board binding's fixed target", 
     expectOnlySnapshotsSince(before);
   });
 
+  describe("normalization boundaries", () => {
+    const SENTINEL = "PRIVATE_CUSTOMER_SENTINEL";
+    const config = env as unknown as { INFEROPS_BASE_URL?: string; INFERLAB_AUTH_ORIGIN?: string };
+    const origin = config.INFERLAB_AUTH_ORIGIN;
+    let logged: string[];
+    beforeEach(() => {
+      logged = [];
+      for (const level of ["debug", "info", "log", "warn", "error"] as const) {
+        vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+          logged.push(args.map(a => a instanceof Error ? `${a.message} ${a.stack}` : JSON.stringify(a)).join(" "));
+        });
+      }
+    });
+    afterEach(() => {
+      delete config.INFEROPS_BASE_URL;
+      config.INFERLAB_AUTH_ORIGIN = origin;
+    });
+
+    it("logs nothing InferOps said for a 401 whose adjudication RPC fails, and answers provider", async () => {
+      const { account, before } = await bound("hb-report-fails");
+      inferlab.snapshotAnswer = () => Response.json(
+        { error: { code: SENTINEL, message: SENTINEL, details: { [SENTINEL]: SENTINEL } } }, { status: 401 });
+      await env.INFEROPS_CREDENTIALS.get(env.INFEROPS_CREDENTIALS.idFromName(account.accountId)).failNextReport();
+
+      const read = await boardOf("hb-report-fails");
+
+      expect(read).toEqual({ status: "unavailable", reason: "provider" });
+      expect(logged.join("\n")).toContain("credentials.rejection.report.failed");
+      expect(JSON.stringify(read)).not.toContain(SENTINEL);
+      expect(logged.join("\n")).not.toContain(SENTINEL);
+      // Not adjudicated, so not retried and not expired.
+      expect(snapshotCalls()).toHaveLength(1);
+      expect(expired).not.toContain("hb-report-fails");
+      expectOnlySnapshotsSince(before);
+    });
+
+    it("answers a malformed INFEROPS_BASE_URL as provider, and null for the fence, without a request", async () => {
+      const { before } = await bound("hb-bad-base");
+      config.INFEROPS_BASE_URL = `${SENTINEL} is not a url`;
+      const read = await boardOf("hb-bad-base");
+      expect(read).toEqual({ status: "unavailable", reason: "provider" });
+      expect(await fenceOf("hb-bad-base")).toBeNull();
+      expect(inferlab.apiCalls.length).toBe(before);
+      expect(JSON.stringify(read) + logged.join("\n")).not.toContain(SENTINEL);
+      expect(logged.join("\n")).not.toContain("INFEROPS_BASE_URL");
+    });
+
+    it("answers an invalid InferLab origin, with no base URL, as provider, and null for the fence, without a request", async () => {
+      const { before } = await bound("hb-bad-origin");
+      for (const bad of [`ftp://${SENTINEL.toLowerCase()}.example`, `https://${SENTINEL.toLowerCase()}.example/path`, SENTINEL]) {
+        config.INFERLAB_AUTH_ORIGIN = bad;
+        const read = await boardOf("hb-bad-origin");
+        expect(read, bad).toEqual({ status: "unavailable", reason: "provider" });
+        expect(await fenceOf("hb-bad-origin")).toBeNull();
+        expect(JSON.stringify(read) + logged.join("\n")).not.toContain(SENTINEL.toLowerCase());
+        expect(logged.join("\n")).not.toContain(SENTINEL);
+      }
+      expect(inferlab.apiCalls.length).toBe(before);
+    });
+  });
+
   it("is absent from the board session and from the agent types", async () => {
     await bound("hb-session");
     const session = hooks().startBoundSession("hb-session") as unknown as {

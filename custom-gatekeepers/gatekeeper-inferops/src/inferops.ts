@@ -392,15 +392,25 @@ function tableClientFor(
 }
 
 /**
- * Who a host-board read may run as, or null: only a connected person, against the configured API,
- * in the workspace the binding resolved. The demo host, the stopgap connection and an account
- * without an identity never back one; there is no fallback to any of them.
+ * Who a host-board read may run as: only a connected person, against the configured API, in the
+ * workspace the binding resolved. The demo host, the stopgap connection, an account without an
+ * identity and a binding without a resolved workspace are `not-connected`; there is no fallback to
+ * any of them. A connected binding on a deployment whose API endpoint is missing or malformed
+ * (`INFEROPS_BASE_URL`, or the InferLab origin standing in for it) is `unavailable`. Throws
+ * nothing: endpoint parsing is inside this boundary.
  */
 function hostBoardAuthority(env: Cloudflare.Env, exports: ExportsWithStores, props: ProjectGatekeeperProps):
-    { endpoint: InferOpsEndpoint; source: CredentialSource<InferOpsAuthority>; workspaceId: string } | null {
-  if (!props.connected || props.host === DEMO_HOST || !props.workspaceId) return null;
-  const endpoint = inferOpsApiEndpoint(env);
-  if (!endpoint) return null;
+    { endpoint: InferOpsEndpoint; source: CredentialSource<InferOpsAuthority>; workspaceId: string } |
+    "not-connected" | "unavailable" {
+  if (!props.connected || props.host === DEMO_HOST || !props.workspaceId) return "not-connected";
+  let endpoint: InferOpsEndpoint | null;
+  try {
+    endpoint = inferOpsApiEndpoint(env);
+  } catch {
+    // A malformed INFEROPS_BASE_URL: its message names the variable, and is not passed on either.
+    return "unavailable";
+  }
+  if (!endpoint) return "unavailable";
   return { endpoint, source: accountSource(exports, props.accountId, props.workspaceId),
            workspaceId: props.workspaceId };
 }
@@ -416,11 +426,22 @@ function hostBoardAuthority(env: Cloudflare.Env, exports: ExportsWithStores, pro
  */
 async function readHostBoard(env: Cloudflare.Env, exports: ExportsWithStores,
                              props: ProjectGatekeeperProps): Promise<HostBoardRead> {
+  try {
+    return await readHostBoardOnce(env, exports, props);
+  } catch {
+    // The normalization boundary: nothing thrown below leaves as an error or a cause.
+    return unavailable("provider");
+  }
+}
+
+async function readHostBoardOnce(env: Cloudflare.Env, exports: ExportsWithStores,
+                                 props: ProjectGatekeeperProps): Promise<HostBoardRead> {
   if (!hostBoardsEnabled(env)) return unavailable("disabled");
   const ref = hostBoardRef(props.host, props.projectKey);
   if (ref === null) return unavailable("invalid-target");
   const authority = hostBoardAuthority(env, exports, props);
-  if (!authority) return HOST_BOARD_NOT_CONNECTED;
+  if (authority === "not-connected") return HOST_BOARD_NOT_CONNECTED;
+  if (authority === "unavailable") return unavailable("provider");
   const { endpoint, source, workspaceId } = authority;
   let sent: CredentialRead | undefined;
   let answer: BoardSnapshotAnswer;
@@ -452,13 +473,17 @@ async function readHostBoard(env: Cloudflare.Env, exports: ExportsWithStores,
   };
 }
 
-/** The current fence of a board binding's connection (`HostBoardConnectionFence`), or null. */
+/**
+ * The current fence of a board binding's connection (`HostBoardConnectionFence`), or null when the
+ * lane is off, no connected person backs the binding, or the deployment's endpoint is unusable.
+ * Throws nothing.
+ */
 async function hostBoardFence(env: Cloudflare.Env, exports: ExportsWithStores,
                               props: ProjectGatekeeperProps): Promise<HostBoardFence | null> {
-  if (!hostBoardsEnabled(env)) return null;
-  const authority = hostBoardAuthority(env, exports, props);
-  if (!authority) return null;
   try {
+    if (!hostBoardsEnabled(env)) return null;
+    const authority = hostBoardAuthority(env, exports, props);
+    if (typeof authority === "string") return null;
     const { identity, generation } = await authority.source.read();
     return { accountId: props.accountId, identity, generation };
   } catch {

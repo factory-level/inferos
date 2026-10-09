@@ -87,6 +87,14 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+const SENTINEL = "PRIVATE_CUSTOMER_SENTINEL";
+
+/** The sentinel reached neither the result nor any log line. */
+function expectNoSentinel(answer: unknown) {
+  expect(JSON.stringify(answer)).not.toContain(SENTINEL);
+  expect(logged.join("\n")).not.toContain(SENTINEL);
+}
+
 function expectNothingRaw(answer: BoardSnapshotAnswer) {
   const shown = JSON.stringify(answer) + logged.join("\n");
   for (const secret of [SERVER_TEXT, TOKEN, REF, "acme.operations", BASE]) expect(shown).not.toContain(secret);
@@ -273,16 +281,50 @@ describe("refusals", () => {
     });
   }
 
+  it("logs a provider-chosen error code as a fixed classification, never verbatim", async () => {
+    const result = await fake(() => json({
+      error: { code: SENTINEL, message: `${SENTINEL} message`, details: { [SENTINEL]: SENTINEL } },
+    }, 404)).read();
+    expect(result).toEqual({ kind: "refused", reason: "provider" });
+    expectNoSentinel(result);
+    expect(logged.join("\n")).toContain('"code":"other"');
+    // Known codes keep their name; message and details never appear, whatever the status.
+    for (const status of [400, 403, 404, 422, 500]) {
+      const known = await fake(() => json({ error: { code: "VALIDATION", message: SENTINEL, details: { why: SENTINEL } } }, status)).read();
+      expectNoSentinel(known);
+    }
+  });
+
+  it("logs a malformed answer as a fixed classification, without the field, value or an error", async () => {
+    const malformed: unknown[] = [
+      { ...envelope(), [SENTINEL]: 1 },
+      envelope({ columns: [column([issue(1, { priority: SENTINEL })])] }),
+      envelope({ columns: [column([issue(1, { title: SENTINEL.repeat(40) })])] }),
+      envelope({ columns: [column([], { group: SENTINEL })] }),
+      envelope({ scope: { workspaceId: SENTINEL, projectId: PROJECT } }),
+      envelope({ project: { identifier: SENTINEL.repeat(3), name: "E" } }),
+    ];
+    for (const body of malformed) {
+      const result = await fake(() => json(body)).read();
+      expect(result).toEqual({ kind: "refused", reason: "provider" });
+      expectNoSentinel(result);
+    }
+    const lines = logged.join("\n");
+    expect(lines).toContain('"code":"malformed"');
+    expect(lines).not.toMatch(/stack|Malformed|is not valid|over its bound/);
+  });
+
   it("throws UNAUTHORIZED for a 401, so the account can adjudicate the token", async () => {
     let caught: unknown;
     try {
-      await fake(() => refusal(401, "UNAUTHORIZED")).read();
+      await fake(() => json({ error: { code: SENTINEL, message: SENTINEL } }, 401)).read();
     } catch (error) {
       caught = error;
     }
     expect(inferOpsErrorCode(caught)).toBe("UNAUTHORIZED");
     expect(String(caught)).not.toContain(SERVER_TEXT);
     expect(logged.join("\n")).not.toContain(TOKEN);
+    expectNoSentinel(String(caught));
   });
 
   it("reports a network failure as the provider, without its cause", async () => {

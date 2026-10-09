@@ -803,6 +803,20 @@ export function parseBoardSnapshotResponse(body: unknown): { scope: HostBoardSco
   };
 }
 
+/**
+ * The InferOps error codes a snapshot refusal may be logged under. Anything else InferOps sends is
+ * logged as `other`: a provider-chosen code is provider text, and never reaches a log verbatim.
+ */
+const SNAPSHOT_LOGGED_CODES: ReadonlySet<string> = new Set([
+  "NOT_FOUND", "SNAPSHOT_TOO_LARGE", "FORBIDDEN", "VALIDATION", "UNAUTHORIZED",
+]);
+
+/** The fixed local classification a snapshot failure is logged under. */
+function snapshotLogCode(wire: string | null): string {
+  if (wire === null) return "no_envelope";
+  return SNAPSHOT_LOGGED_CODES.has(wire) ? wire : "other";
+}
+
 /** The reason a refused snapshot read reports, from its status and InferOps' error code. */
 function snapshotRefusal(status: number, wire: string | null): BoardSnapshotAnswer {
   if (status === 404 && wire === "NOT_FOUND") return { kind: "refused", reason: "not-found" };
@@ -818,7 +832,8 @@ function snapshotRefusal(status: number, wire: string | null): BoardSnapshotAnsw
  * stream and abandoned at the byte cap (256 KiB for a success, 4 KiB for an error envelope)
  * before it is buffered whole or parsed. A 401 throws `UNAUTHORIZED` (so the caller's credential
  * source can adjudicate and retry); every other outcome is returned. Logs carry the operation,
- * status and code only: never the reference, the token or a body.
+ * the status and a fixed local classification only (an allowlisted InferOps code, or `other`):
+ * never the reference, the token, a body, a provider-chosen code or an error object.
  */
 export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: string,
                                          fetcher: typeof fetch = fetch): Promise<BoardSnapshotAnswer> {
@@ -840,7 +855,7 @@ export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: st
     });
   } catch {
     // The cause can name the request's address; only the fact is logged.
-    return fail(0, "UNAVAILABLE", provider);
+    return fail(0, "unreachable", provider);
   }
   if (response.status === 401) {
     await response.body?.cancel().catch(() => undefined);
@@ -855,7 +870,7 @@ export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: st
     raw = await readTextCapped(response, success ? L.bytes : L.errorBytes);
   } catch {
     // Over the cap (already cancelled), or the stream failed: nothing was parsed.
-    return fail(response.status, "UNREADABLE_BODY", provider);
+    return fail(response.status, "unreadable_body", provider);
   }
   let body: unknown;
   try {
@@ -865,14 +880,14 @@ export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: st
   }
   if (!success) {
     const wire = body === undefined ? null : wireCode(body);
-    return fail(response.status, wire ?? "UNAVAILABLE", snapshotRefusal(response.status, wire));
+    return fail(response.status, snapshotLogCode(wire), snapshotRefusal(response.status, wire));
   }
-  if (body === undefined) return fail(200, "NOT_JSON", provider);
+  if (body === undefined) return fail(200, "not_json", provider);
   try {
-    return { kind: "ok", ...parsed(SNAPSHOT_OPERATION, body, parseBoardSnapshotResponse) };
+    return { kind: "ok", ...parseBoardSnapshotResponse(body) };
   } catch {
-    // `parsed` logged the field that failed.
-    return provider;
+    // Only the fixed classification is logged: no error object, field name or value.
+    return fail(200, "malformed", provider);
   }
 }
 

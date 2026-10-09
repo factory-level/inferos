@@ -15,6 +15,10 @@
  *
  * Every result is normalized: no provider message, cause, payload, URL or credential is ever
  * returned, only a status and, for `unavailable`, a bounded reason.
+ *
+ * Deadline: an implementation may time out each provider request, but this contract does not put
+ * the credential fetch, a refresh and its retry, and the completion fence under one deadline. A
+ * total deadline is the kernel caller's to impose.
  */
 
 /** The published bounds of a snapshot. String lengths are UTF-16 code units (JS `length`). */
@@ -76,7 +80,15 @@ export type HostBoardScope = { workspaceId: string; projectId: string };
  * fence and connection generation of that attempt (`CredentialRead`), for comparison with a fresh
  * `connectionIdentity()` later. Kernel-only material.
  */
-export type HostBoardFence = { accountId: string; identity: string; generation: string };
+export type HostBoardFence = {
+  /**
+   * The gatekeeper adapter's own string account id (its binding props), distinct from the
+   * kernel's numeric connected-account id: map between them, never compare them.
+   */
+  accountId: string;
+  identity: string;
+  generation: string;
+};
 
 /** Why a host board is unavailable, without anything the provider said. */
 export type HostBoardUnavailableReason =

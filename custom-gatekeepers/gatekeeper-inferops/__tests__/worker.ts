@@ -9,9 +9,10 @@ import type {
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper,
-  MockInferOps as BaseMockInferOps,
+  InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper,
+  InferOpsTableGatekeeper, InferOpsWikiGatekeeper, MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
+import type { RejectionVerdict } from "@gadgets/gatekeeper-kit/credentials";
 import { InferOpsError, type IssueChanges, type NewIssueRequest } from "../src/inferops-client.js";
 import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
@@ -24,7 +25,7 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsCredentials, InferOpsDispatchGatekeeper,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsDispatchGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
 } from "../src/inferops.js";
 
@@ -77,6 +78,28 @@ export class MockInferOps extends BaseMockInferOps {
                        expectedRevision: Revision, idempotencyKey: string): Promise<Issue> {
     return this.#faulted(() =>
       super.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey));
+  }
+}
+
+const REPORT_FAULT_KEY = "test:failNextReport";
+
+/**
+ * The production credentials object plus a one-shot failure of the rejection-adjudication RPC, as
+ * a transport fault would fail it. Exported under the production name, so every account's
+ * `ctx.exports.InferOpsCredentials` is this class.
+ */
+export class InferOpsCredentials extends BaseInferOpsCredentials {
+  /** Makes the next `reportCredentialsRejected` throw instead of adjudicating. */
+  async failNextReport(): Promise<void> {
+    this.ctx.storage.kv.put(REPORT_FAULT_KEY, true);
+  }
+
+  override async reportCredentialsRejected(identity: string): Promise<RejectionVerdict> {
+    if (this.ctx.storage.kv.get<boolean>(REPORT_FAULT_KEY)) {
+      this.ctx.storage.kv.delete(REPORT_FAULT_KEY);
+      throw new Error("Durable Object reset because its code was updated.");
+    }
+    return super.reportCredentialsRejected(identity);
   }
 }
 
