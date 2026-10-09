@@ -8,6 +8,7 @@ covers:
   - custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts
   - custom-gatekeepers/gatekeeper-inferops/src/table.ts
   - custom-gatekeepers/gatekeeper-inferops/src/host-board.ts
+  - packages/workshop-backend/src/host-boards.ts
   - custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts
   - packages/workshop-backend/src/publication.ts
   - packages/workshop-backend/__tests__/publication.test.ts
@@ -29,7 +30,7 @@ updated: 2026-10-08
 
 The eight-name capability vocabulary of [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md), plus `INFEROPS_TABLES_ENABLED` (read-only custom tables, MVP-20), is accepted by `inferos.config.json` schema version 2 ([#84](https://github.com/factory-level/inferos/pull/84), closing [#67](https://github.com/factory-level/inferos/issues/67)). Six capabilities have runtime code: `INFEROPS_ENABLED` ([#103](https://github.com/factory-level/inferos/pull/103)), `INFEROPS_AUTH` ([#94](https://github.com/factory-level/inferos/pull/94)), `CODING_WORKBENCH_ENABLED` (coding dispatch through the InferOps gatekeeper, [#69](https://github.com/factory-level/inferos/issues/69)/[#70](https://github.com/factory-level/inferos/issues/70)), `PUBLISH_CLOUDFLAREOS_WIDGET` and `PUBLISH_CLOUDFLAREOS_APP` (publication records, [#68](https://github.com/factory-level/inferos/issues/68)), and `INFEROPS_TABLES_ENABLED` (read-only custom-table bindings through the InferOps gatekeeper, see [custom tables](inferops-gatekeeper.md#custom-tables)). The other three are accepted as configuration, reported `unsupported`, and refused when switched on. Resolution across the CLI, deployment, server, tools and UI ([#33](https://github.com/factory-level/inferos/issues/33)) is unfinished.
 
-`INFEROPS_HOST_BOARDS` (the kernel-only host-board read, see [host boards](inferops-gatekeeper.md#host-boards)) is a **proposed** extension of ADR 0001's vocabulary, recorded here as `INFEROPS_TABLES_ENABLED` was. Unlike it, the name is not yet accepted by `inferos.config.json`: only the InferOps gatekeeper reads it, as a worker var, so nothing a wrapper or the dev server writes can turn it on yet (see [the enforcement inventory](#host-boards-enforcement-inventory)).
+`INFEROPS_HOST_BOARDS` (host boards: the kernel path in [operate mode](operate-mode.md#host-boards) and the gatekeeper's [board facet read](inferops-gatekeeper.md#host-boards)) is a **proposed** extension of ADR 0001's vocabulary, recorded here as `INFEROPS_TABLES_ENABLED` was. It is wired the same way: version 2 accepts it, requiring `INFEROPS_ENABLED`, and the dev server resolves it (off by default) and sets it on both the Workshop backend and the gatekeeper (see [the enforcement inventory](#host-boards-enforcement-inventory)).
 
 The detailed current state lives in [consumer configuration](consumer-configuration.md), which owns the same files; this page is the capability-shaped view of it.
 
@@ -46,11 +47,12 @@ The detailed current state lives in [consumer configuration](consumer-configurat
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | Server enforcement of `CODING_WORKBENCH_ENABLED` and the wrapper's repository allowlist: the dispatch resource kind is refused, and every call of a dispatch binding fails `DISABLED`, while it is off. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | The InferLab sign-in and per-person connect flows that `INFEROPS_AUTH` turns on. |
 | `custom-gatekeepers/gatekeeper-inferops/src/host-board.ts` | Server enforcement of the proposed `INFEROPS_HOST_BOARDS`: `hostBoardsEnabled` is checked on every call of the board facet's kernel-only `readHostBoardSnapshot` (answering `unavailable` / `disabled` with no request) and `connectionIdentity` (null), and needs `INFEROPS_ENABLED` on. |
+| `packages/workshop-backend/src/host-boards.ts` | Kernel enforcement of the proposed `INFEROPS_HOST_BOARDS` (`hostBoardsEnabled`, which also needs `INFEROPS_ENABLED` not off): host-board registration and publication, selection, acquisition and every read are refused while it is off. |
 | `custom-gatekeepers/gatekeeper-inferops/src/table.ts` | Server enforcement of `INFEROPS_TABLES_ENABLED`: the custom-table resource kind is withheld and refused, and every call of a table binding fails `DISABLED`, while it is off. |
 
 ## Data and Control Flow
 
-A version 2 file resolves each capability from its default (off), then its profile (none sets one), then an explicit override, with per-field provenance. The parser validates that `INFEROPS_CANVAS_STATE_MACHINE`, `CODING_WORKBENCH_ENABLED` and `INFEROPS_TABLES_ENABLED` each require `INFEROPS_ENABLED`, and never turns a flag on by itself. `inferos:check`, `doctor`, the wrapper `dev` command and `run-dev-server.ts --consumer-root` all refuse a switched-on capability whose `capabilitySources` file is absent from the pin. See [capability flags and schema version 2](consumer-configuration.md#capability-flags-and-schema-version-2).
+A version 2 file resolves each capability from its default (off), then its profile (none sets one), then an explicit override, with per-field provenance. The parser validates that `INFEROPS_CANVAS_STATE_MACHINE`, `CODING_WORKBENCH_ENABLED`, `INFEROPS_TABLES_ENABLED` and `INFEROPS_HOST_BOARDS` each require `INFEROPS_ENABLED`, and never turns a flag on by itself. `inferos:check`, `doctor`, the wrapper `dev` command and `run-dev-server.ts --consumer-root` all refuse a switched-on capability whose `capabilitySources` file is absent from the pin. See [capability flags and schema version 2](consumer-configuration.md#capability-flags-and-schema-version-2).
 
 | Capability | State at `main` | Where it is enforced |
 | --- | --- | --- |
@@ -63,7 +65,7 @@ A version 2 file resolves each capability from its default (off), then its profi
 | `AGENT_DEPLOYMENTS` | Unsupported | None. |
 | `CODING_WORKBENCH_ENABLED` | Supported | The gatekeeper refuses dispatch bindings and every call through existing ones, and dispatches only allowlisted repositories; see [local coding workflows](local-coding-workflows.md). |
 | `INFEROPS_TABLES_ENABLED` | Supported | The gatekeeper withholds the custom-table resource kind and its picker, refuses table bindings and every call through existing ones; see [custom tables](inferops-gatekeeper.md#custom-tables). |
-| `INFEROPS_HOST_BOARDS` | Proposed; not in the schema | The gatekeeper's kernel-only host-board read refuses every call while it is off (or `INFEROPS_ENABLED` is); see [host boards](inferops-gatekeeper.md#host-boards). No kernel caller exists yet. |
+| `INFEROPS_HOST_BOARDS` | Proposed; in the version 2 schema | The Workshop backend refuses host-board registration and publication, selection, acquisition and every read, and the gatekeeper's kernel-only facet methods refuse every call, while it is off (or `INFEROPS_ENABLED` is); see [host boards](operate-mode.md#host-boards). No UI yet. |
 
 ### Host boards enforcement inventory
 
@@ -75,15 +77,15 @@ Where `INFEROPS_TABLES_ENABLED` is resolved, and what this change does with `INF
 | Gatekeeper enforcement | `table.ts`, on every call | `host-board.ts`, on every call of both kernel-only methods |
 | Connection metadata (`connection.json` `credentials`, `enabledBy`) | Listed, and the `object/table` kind's switch | Listed as a var; no resource kind names it, since the read adds none |
 | Generated env types (`worker-configuration.d.ts`) and committed `wrangler.jsonc` vars | Neither (left unset, like every InferOps var) | Neither |
-| Workshop backend Worker | Not read | Not read |
-| Wrapper vocabulary (`scripts/consumer/config.ts` `CAPABILITY_NAMES`, `CAPABILITY_REQUIREMENTS`) | Accepted, requires `INFEROPS_ENABLED` | Not wired |
-| Capability sources (`scripts/consumer/runtime.ts`) | `table.ts` | Not wired |
-| Settings and doctor (`scripts/consumer/settings.ts`) | Reported, checked for contradiction | Not wired |
-| Dev server (`dev-server-config.ts` `resolveInferOpsTablesEnabled`, `run-dev-server.ts`, `env-passthrough.test.ts`) | Resolved and always set on the gatekeeper | Not wired: always unset, so off |
+| Workshop backend Worker (`src/env.d.ts`, `host-boards.ts`) | Not read | Read with `INFEROPS_ENABLED`: checked at console create, replace and publish (host entries), `selectHostBoardConnection`, `getConsoleHostBoard`, `subscribeSelection` and every `readRequirement`, in the session and again in the operate workspace |
+| Wrapper vocabulary (`scripts/consumer/config.ts` `CAPABILITY_NAMES`, `CAPABILITY_REQUIREMENTS`) | Accepted, requires `INFEROPS_ENABLED` | Accepted, requires `INFEROPS_ENABLED` |
+| Capability sources (`scripts/consumer/runtime.ts`) | `table.ts` | `packages/workshop-backend/src/host-boards.ts` |
+| Settings and doctor (`scripts/consumer/settings.ts`) | Reported, checked for contradiction | Reported (`hostBoardsRequested`), checked for an invalid shell value, a shell value a version 2 wrapper overrides, and contradiction |
+| Dev server (`dev-server-config.ts`, `run-dev-server.ts`, `env-passthrough.test.ts`) | `resolveInferOpsTablesEnabled`, always set on the gatekeeper | `resolveInferOpsHostBoards`, always set on the gatekeeper and the backend (with the resolved `INFEROPS_ENABLED`) |
 | Release manifest | Not set (cloud installs off) | Not set (off) |
-| Effective frontend capability (`ServerConfig`) | None | None |
+| Effective frontend capability (`ServerConfig`) | None | `ServerConfig.hostBoards`, read only; no UI reads it yet |
 
-Deliberately not wired yet, because each belongs to a later change: the wrapper vocabulary and its settings, doctor and capability-source entries; dev-server resolution; a kernel caller (the overseer reaching the facet), its registry and selection of a board; and any browser exposure. Until the dev server resolves it, the lane is reachable only from tests.
+The trusted host renderer and its freshness rules (refresh, expiry and resume) belong to the later UI change.
 
 ## Publication records
 
@@ -119,5 +121,5 @@ Option A of the [publication destinations design](../design/feature-capabilities
 
 ## Open Questions
 
-- `INFEROPS_HOST_BOARDS` is proposed only: whether it joins the version 2 vocabulary under that name (the others end in `_ENABLED`), who owns it and when the dev server and wrappers resolve it are undecided.
+- `INFEROPS_HOST_BOARDS` is proposed only: whether it keeps that name in the version 2 vocabulary (the others end in `_ENABLED`) and who owns it are undecided.
 - The owner and default of each capability other than `INFEROPS_ENABLED`, and when bootstrap should write version 2. These are listed under the [consumer configuration open questions](consumer-configuration.md#open-questions).

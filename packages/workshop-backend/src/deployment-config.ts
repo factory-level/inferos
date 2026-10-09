@@ -11,6 +11,7 @@ import { readAdminConfig } from "./admin-config.js";
 import { siteLogoImage } from "./site-logo.js";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { isPublicationFlagOn } from "./publication.js";
+import { hostBoardsEnabled } from "./host-boards.js";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
@@ -62,6 +63,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
       },
       selfApproval: isPublicationSelfApprovalAllowed(env),
     },
+    hostBoards: hostBoardsEnabled(env),
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),

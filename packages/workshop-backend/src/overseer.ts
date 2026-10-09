@@ -5,6 +5,8 @@ import { WorkspaceCanvasStore } from "./canvas-store";
 import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls } from "./console-store";
 import { checkWorkspaceKind } from "@gadgets/workshop-shared/workspace-kind";
 import { WorkspaceFlowStore } from "./flow-store";
+import { HostBoardDesk, hostBoardsEnabled, type HostBoardGuard, type HostBoardMint, type HostBoardReadRecord, type HostBoardReadRequest, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord, type HostBoardSelectionState } from "./host-boards";
+import type { HostBoardConnectionFence, HostBoardReader } from "@gadgets/gatekeeper-kit/host-board";
 import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
 import {
   artifactRefusalError, diffManifests, qualificationFindings, requireNameAndNumber, requireQualification,
@@ -15,7 +17,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, type ConsoleSource, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, type ConsoleSource, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -288,6 +290,11 @@ type GatekeeperRecord = {
   // Overseer.installBlueprint): binding it into an install is refused outside a test-only
   // workspace (bindWorkpiece). Records created before this was kept have none.
   mock?: true;
+
+  // Set at creation on a host-board connection (see host-boards.ts): who created it, for which
+  // selection request, from which account incarnation. Retries find their candidate by it, and a
+  // losing candidate is removed only when it matches.
+  hostBoardMint?: HostBoardMint;
 
   // OBSOLETE: Before we had support for multiple gadgets per workspace, the binding name and
   // blueprint annotation information lived on the GatekeeperRecord. These properties continue
@@ -750,6 +757,9 @@ type ChatAttachmentContentRecord = {
 // this value; observations never go through the approve/reject paths that would dereference
 // the gatekeeper, so no lookup is ever attempted.
 const BUILTIN_TOOL_GATEKEEPER_ID = -1;
+
+// How many audited host-board reads an operate session workspace keeps (see host-boards.ts).
+const HOST_BOARD_READS_KEPT = 1000;
 
 export type ActionRecord = {
   id: number,
@@ -1297,6 +1307,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       nextChatId: 0,
       nextHookId: 0,
       nextAgentCallId: 0,
+      nextHostBoardReadSeq: 0,
 
       // OBSOLETE: deadWorktreeIds existed to facilitate hiding worktrees from clients, but we
       // no longer do that. Noted here since old workspaces may still have a singleton by this
@@ -1326,6 +1337,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       consoleScreens: collection<ConsoleScreenSnapshot>()({
         primaryKey: record => consoleScreenKey(record.consoleId, record.screenId),
       }),
+      // An operate session workspace's host-board selections, by target; its selection requests,
+      // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
+      hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
+      hostBoardRequests: collection<HostBoardRequestRecord>()({ primaryKey: "requestKey" }),
+      hostBoardReads: collection<HostBoardReadRecord>()({ primaryKey: "seq" }),
       // Published agent artifact revisions, immutable, keyed `<kind>/<name>@<number>` so one
       // name's revisions list in number order (see artifact-store.ts).
       artifactRevisions: collection<ArtifactRevisionRecord>()({
@@ -2922,6 +2938,57 @@ class OverseerImpl implements AgentHooks {
       throw new Error(`Gadget ${id} is the frozen install console ${frozenFor.consoleId} published; ` +
           `change gadget ${frozenFor.sourceGadgetId} and publish the console again instead.`);
     }
+  }
+
+  #hostBoardDesk: HostBoardDesk | undefined;
+
+  // This operate session workspace's host boards (see host-boards.ts), one desk per instance.
+  // Connections are minted through the owner's user DO (`resolveHostBoardClass`, which wraps the
+  // `getGatekeeperClassFor` chokepoint) and reached only through `getGatekeeperFacet`.
+  hostBoardDesk(): HostBoardDesk {
+    let ownerId = this.ownerId!;
+    let owner = () => this.users.get(this.users.idFromString(ownerId));
+    let findMinted = (requestKey: string) => Array.from(this.storage.gatekeepers.list())
+        .find(record => record.hostBoardMint?.by === ownerId && record.hostBoardMint.requestKey === requestKey)?.id;
+    return this.#hostBoardDesk ??= new HostBoardDesk({
+      ownerId,
+      enabled: () => hostBoardsEnabled(this.env),
+      selections: this.storage.hostBoardSelections,
+      requests: this.storage.hostBoardRequests,
+      transaction: fn => this.ctx.storage.transactionSync(fn),
+      defer: fn => { setTimeout(fn, 0); },
+      recordAudit: entry => {
+        let seq = this.storage.nextHostBoardReadSeq.get();
+        this.storage.nextHostBoardReadSeq.put(seq + 1);
+        this.storage.hostBoardReads.put({ ...entry, seq });
+        // Bounded: only the latest records are kept.
+        if (seq >= HOST_BOARD_READS_KEPT) this.storage.hostBoardReads.delete(seq - HOST_BOARD_READS_KEPT);
+      },
+      connection: id => {
+        let record = this.storage.gatekeepers.get(id);
+        return record && { resourceUrl: record.resourceUrl, mint: record.hostBoardMint };
+      },
+      mintedBy: findMinted,
+      mint: async (accountId, target, stamp) => {
+        let resolved = await owner().resolveHostBoardClass(accountId, target);
+        await this.addGatekeeper(resolved.class,
+            { type: "gatekeeper", vendorId: resolved.vendorId, resourceUrl: target, typeUrlPattern: resolved.typeUrlPattern },
+            ownerId, undefined, resolved.mock,
+            { ...stamp, accountId, incarnation: resolved.account.incarnation });
+      },
+      // Only a candidate the desk proved its own, and never one a gadget binds or a hook uses.
+      drop: id => {
+        let bound = Array.from(this.storage.gadgets.list()).some(gadget =>
+            gadget.type === "gadget" && Object.values(gadget.bindings).some(edge => edge.target === id));
+        let hooked = Array.from(this.storage.boundHooks.list()).some(hook => hook.gatekeeperId === id);
+        if (!bound && !hooked) this.removeGatekeeper(id);
+      },
+      // The kit's kernel-only facet contract, viewed as the optional gitPull is (see #pullGitObjects).
+      facet: id => this.getGatekeeperFacet(id) as unknown as Fetcher<Gatekeeper<any> & HostBoardReader & HostBoardConnectionFence>,
+      account: accountId => owner().hostBoardAccount(accountId),
+      now: () => Date.now(),
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    });
   }
 
   // Creating and removing the frozen installs a console publication runs (see FrozenInstalls),
@@ -5856,7 +5923,7 @@ class OverseerImpl implements AgentHooks {
   // GadgetClientImpl). `actorUserId` is who the returned client acts for, for analytics only.
   async addGatekeeper(
       cls: GatekeeperClass, creationSpec: GatekeeperCreationSpec, actorUserId: string,
-      joinAs?: SessionKind, mock = false)
+      joinAs?: SessionKind, mock = false, hostBoardMint?: HostBoardMint)
       : Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
@@ -5864,6 +5931,7 @@ class OverseerImpl implements AgentHooks {
       class: cls,
       creationSpec,
       ...(mock ? {mock: true} : {}),
+      ...(hostBoardMint ? {hostBoardMint} : {}),
     };
 
     // The record is published only once, below, after describe() resolves -- the facet takes the
@@ -5961,6 +6029,7 @@ class OverseerImpl implements AgentHooks {
 
     this.ctx.facets.delete(`gatekeeper${id}`);
     this.storage.gatekeepers.delete(id);
+    if (this.storage.operateSession.get() && this.ownerId) this.hostBoardDesk().connectionRemoved(id);
   }
 
   // Open the session behind a binding loopback.
@@ -10474,6 +10543,60 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.outputsSnapshot();
   }
 
+  // The host-board kernel path (server.ts OperateSessionImpl). Reached only by Worker code holding
+  // the namespace, never by a client, and only for the owner's own operate session workspace.
+  #hostBoardDesk(ownerId: string): HostBoardDesk {
+    if (!this.impl.ownerId || this.impl.ownerId !== ownerId || !this.impl.storage.operateSession.get()) {
+      throw new Error("Not this person's operate session workspace.");
+    }
+    return this.impl.hostBoardDesk();
+  }
+
+  /** See `HostBoardDesk.select`. */
+  async selectHostBoard(ownerId: string, requestKey: string, payload: HostBoardSelectionPayload,
+                        guard: HostBoardGuard): Promise<HostBoardSelection> {
+    return this.#hostBoardDesk(ownerId).select(requestKey, payload, guard);
+  }
+
+  /** See `HostBoardDesk.read`. A workspace that is not yet the owner's session has no selection. */
+  async readHostBoard(ownerId: string, request: HostBoardReadRequest, guard: HostBoardGuard): Promise<HostBoardView> {
+    let desk;
+    try {
+      desk = this.#hostBoardDesk(ownerId);
+    } catch {
+      return { status: "not-connected" };
+    }
+    return desk.read(request, guard);
+  }
+
+  /**
+   * Subscribes `subscriber` to `target`'s selection state: the subscription is installed and its
+   * first state taken in one synchronous step, and that state is delivered before any later one.
+   * Returns the stub that ends it.
+   */
+  async subscribeHostBoardSelection(ownerId: string, target: string,
+      subscriber: (state: HostBoardSelectionState) => Promise<unknown>): Promise<Disposable> {
+    let deliver: typeof subscriber | undefined;
+    let { snapshot, unsubscribe } = this.#hostBoardDesk(ownerId).subscribe(target, state => deliver!(state));
+    // Kept past this call, which would otherwise dispose the stub when it returns. No await since
+    // the subscription and its snapshot were taken.
+    let kept = (subscriber as unknown as NativeRpcStub<typeof subscriber>).dup();
+    deliver = kept as unknown as typeof subscriber;
+    let end = () => {
+      unsubscribe();
+      kept[Symbol.dispose]();
+    };
+    deliver(snapshot).catch(end);
+    return new HostBoardSubscriptionImpl(end);
+  }
+
+  /** The owner's most recent audited host-board reads, newest first. */
+  async listHostBoardReads(ownerId: string): Promise<HostBoardReadAudit[]> {
+    if (this.impl.ownerId !== ownerId || !this.impl.storage.operateSession.get()) return [];
+    return Array.from(this.impl.storage.hostBoardReads.list({ reverse: true, limit: 200 }),
+        ({ kind, consoleId, entryId, requirementName, status, at }) => ({ kind, consoleId, entryId, requirementName, status, at }));
+  }
+
   /**
    * `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
    * by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
@@ -11098,6 +11221,12 @@ type BindingLoopbackTarget = {
  * TODO(multi-gadget): Rename to BindingLoopback. Stubs to this entrypoint aren't stored anywhere,
  * so a rename should be safe.
  */
+// Ends a host-board selection subscription when disposed.
+class HostBoardSubscriptionImpl extends NativeRpcTarget {
+  constructor(private unsubscribe: () => void) { super(); }
+  [Symbol.dispose]() { this.unsubscribe(); }
+}
+
 export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, GatekeeperLoopbackProps> {
   constructor(ctx: ExecutionContext<GatekeeperLoopbackProps>, env: Cloudflare.Env) {
     super(ctx, env);

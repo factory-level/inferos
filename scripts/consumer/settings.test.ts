@@ -99,6 +99,11 @@ test("contradictions are errors, and shell values a version 2 wrapper overrides 
   const tablesOn = validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_TABLES_ENABLED"]), {});
   assert.equal(tablesOn.ok, true);
   assert.equal(tablesOn.settings.find(setting => setting.name === "INFEROPS_TABLES_ENABLED")?.state, "set");
+  // Host boards resolve the same way.
+  assert.deepEqual(codes(validateSettings(v1(), { INFEROPS_HOST_BOARDS: "maybe" })), ["INFEROPS_HOST_BOARDS:invalid"]);
+  assert.ok(codes(validateSettings(v1(), { INFEROPS_ENABLED: "false", INFEROPS_HOST_BOARDS: "true" }))
+    .includes("INFEROPS_HOST_BOARDS:contradictory"));
+  assert.equal(validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_HOST_BOARDS"]), {}).ok, true);
 
   const slug = validateSettings(v1(), { INFEROPS_API_TOKEN: SECRET, INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_WORKSPACE_ID: "w1", INFEROPS_WORKSPACE_SLUG: "acme" });
   assert.deepEqual(codes(slug), ["INFEROPS_WORKSPACE_SLUG:contradictory"]);

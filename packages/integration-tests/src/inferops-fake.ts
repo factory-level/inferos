@@ -39,6 +39,13 @@
 // issue as a deletion in InferOps would. `revokeSessions` ends a
 // person's sessions at InferLab, so their access tokens get 401 and their refresh tokens too.
 //
+// Host boards: `GET /project/board-snapshot?ref=<board ref>`, InferOps' `project.board_snapshot`, a
+// principal-lane read (the reference names its workspace, no `x-workspace-id`): the person must hold
+// the workspace and the project must be in it, else one 404 NOT_FOUND. `boardNameFor` gives one
+// person's snapshots a project name of their own (synthetic per-person data), `snapshotProjectId`
+// answers another project id for a key (a reused key), and `holdSnapshots` holds the next answers,
+// or their bodies, until released.
+//
 // Everything a request carried is recorded in `requests`, and every committed write in `commits`,
 // so a test can say what reached InferOps, as whom, and what changed.
 
@@ -263,6 +270,11 @@ export class InferOpsFake {
   failNextWrites = 0;
   /** Commit the next write and store its response, then drop the connection instead of answering. */
   loseNextWriteResponse = false;
+  /** A project name, by person label, that person's board snapshots carry instead of the project's. */
+  readonly boardNameFor = new Map<string, string>();
+  /** A project id, by project key, that board snapshots report instead of the project's own. */
+  readonly snapshotProjectId = new Map<string, string>();
+  #snapshotHolds: { body: boolean; arrived: () => void; released: Promise<void> }[] = [];
 
   readonly #people = new Map<string, FakePerson>();
   readonly #sessions: Session[] = [];
@@ -419,6 +431,19 @@ export class InferOpsFake {
       url: `http://127.0.0.1:${address.port}`,
       close: () => new Promise(resolve => server.close(() => resolve())),
     };
+  }
+
+  /**
+   * Hold the next board-snapshot answer (or, with `body`, its body after the headers) until
+   * `release` is called. `arrived` resolves once the request is being held.
+   */
+  holdSnapshots(options: { body?: boolean } = {}): { arrived: Promise<void>; release: () => void } {
+    let arrived!: () => void;
+    let release!: () => void;
+    const arrival = new Promise<void>(resolve => { arrived = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    this.#snapshotHolds.push({ body: options.body ?? false, arrived, released });
+    return { arrived: arrival, release };
   }
 
   /** Change a person's memberships, in InferLab and InferOps alike, from now on. */
@@ -607,6 +632,7 @@ export class InferOpsFake {
     }
 
     if (url.pathname === "/object/embed" && method === "GET") return this.#embed(url, person);
+    if (url.pathname === "/project/board-snapshot" && method === "GET") return this.#boardSnapshot(url, record, person);
 
     const slug = (Object.keys(WORKSPACES) as WorkspaceSlug[])
       .find(s => WORKSPACES[s].id === workspaceId);
@@ -773,6 +799,46 @@ export class InferOpsFake {
     this.#runs.set(run.id, run);
     issue.revision = String(Number(issue.revision) + 1);
     return { status: 201, body: { run: this.#wireRun(run) } };
+  }
+
+  async #boardSnapshot(url: URL, record: FakeRequest, person: FakePerson): Promise<Response> {
+    const hold = this.#snapshotHolds.shift();
+    const notFound = failure(404, "NOT_FOUND", "no such board");
+    const match = /^inferops:\/\/([a-z0-9-]+)\.([a-z0-9-]+)\/project\/board\/([A-Z][A-Z0-9]*)$/.exec(url.searchParams.get("ref") ?? "");
+    const workspace = match?.[2] as WorkspaceSlug | undefined;
+    const project = match && match[1] === TENANT && workspace && person.workspaces.has(workspace)
+      ? Object.values(PROJECTS).find(p => p.identifier === match[3] && p.workspace === workspace) : undefined;
+    if (hold && !hold.body) {
+      hold.arrived();
+      await hold.released;
+    }
+    if (!project) return notFound;
+    const issues = [...this.#issues.values()].filter(i => i.projectId === project.id);
+    const body = JSON.stringify({
+      scope: { workspaceId: WORKSPACES[project.workspace].id, projectId: this.snapshotProjectId.get(project.identifier) ?? project.id },
+      snapshot: {
+        project: { identifier: project.identifier, name: this.boardNameFor.get(record.person ?? "") ?? project.name },
+        columns: project.states.map(state => ({
+          label: state.name, group: state.group,
+          issues: issues.filter(i => i.stateId === state.id).map(i => ({
+            identifier: i.identifier, title: i.title, priority: i.priority, targetDate: null, blocked: false,
+          })),
+        })),
+      },
+    });
+    if (!hold?.body) return new Response(body, { headers: { "content-type": "application/json" } });
+    // The headers go out at once; the body waits for the release.
+    const bytes = new TextEncoder().encode(body);
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(bytes.slice(0, 1));
+        hold.arrived();
+        await hold.released;
+        controller.enqueue(bytes.slice(1));
+        controller.close();
+      },
+    });
+    return new Response(stream, { headers: { "content-type": "application/json" } });
   }
 
   /**

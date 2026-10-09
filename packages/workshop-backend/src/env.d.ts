@@ -11,6 +11,13 @@ declare global {
       DURABLE_VIEWS?: string;
       /** Deployer-controlled composition catalog as JSON (see canvas-catalog.ts); never a grant. */
       CANVAS_CATALOG?: string;
+      /**
+       * Host boards (host-boards.ts): "true" turns the kernel's host-board lane on, only while
+       * INFEROPS_ENABLED is (unset counts as on, as in the InferOps gatekeeper). Off by default;
+       * a proposed extension of the capability vocabulary.
+       */
+      INFEROPS_HOST_BOARDS?: string;
+      INFEROPS_ENABLED?: string;
       // Local Bun companion. These are injected only by the opted-in local runtime.
       ENABLE_OPENAI_ASSISTANT_PLUGIN?: string;
       OPENAI_ASSISTANT_PLUGIN_URL?: string;

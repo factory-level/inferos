@@ -37,7 +37,42 @@ type ConnectedAccountRecord = {
   // (no OAuth flow), rather than the user connecting it. Such accounts are protected from manual
   // disconnect, since deleting one permanently destroys the user's data in that gatekeeper.
   autoProvisioned?: boolean;
+  // Account provenance for host boards (see hostBoardAccount): `incarnation` is fresh whenever the
+  // record starts pointing at a new account stub (a connect, or a same-id replacement), and `epoch`
+  // rises on every authoritative mutation (that, an expiry, a reconnect). Records written before
+  // either existed read as incarnation "initial" at epoch 0 until their next mutation.
+  incarnation?: string;
+  epoch?: number;
 };
+
+/**
+ * A connected account's provenance, as the host-board kernel path compares it: the account, its
+ * vendor, the incarnation of its account stub and the epoch of its last authoritative mutation.
+ */
+export type HostBoardAccount = { accountId: number; vendorId: string; incarnation: string; epoch: number };
+
+type AccountStorage = Pick<ReturnType<typeof makeUserStorage>, "connectedAccounts" | "accountEpoch">;
+
+/**
+ * Writes a connected-account record, stamping its provenance: a new epoch always, and a new
+ * incarnation when the record now points at a different account stub (`"replaced"`). Every write
+ * that changes an account goes through here.
+ */
+export function putAccount(storage: AccountStorage, record: ConnectedAccountRecord, change: "replaced" | "mutated"): void {
+  let epoch = storage.accountEpoch.get() + 1;
+  storage.accountEpoch.put(epoch);
+  record.epoch = epoch;
+  if (change === "replaced") record.incarnation = crypto.randomUUID();
+  storage.connectedAccounts.put(record);
+}
+
+/** Connected account `accountId`'s provenance now, or null when it does not exist. */
+export function accountProvenance(storage: Pick<AccountStorage, "connectedAccounts">, accountId: number)
+    : HostBoardAccount | null {
+  let record = storage.connectedAccounts.get(accountId);
+  if (!record) return null;
+  return { accountId, vendorId: record.vendorId, incarnation: record.incarnation ?? "initial", epoch: record.epoch ?? 0 };
+}
 
 // A connect ("connect") or reconnect/ensureResources ("restore") flow that a gatekeeper has finished
 // but the user's browser has not yet confirmed (see connect-handoff.ts). Keyed by the SHA-256 of the
@@ -308,6 +343,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
       outputsBackfillCursor: "",
 
       nextAccountId: 0,
+      // The last epoch stamped on a connected account (see ConnectedAccountRecord.epoch).
+      accountEpoch: 0,
       pinnedBlueprints: <string[]>[],
 
       // Per-user free-tier daily LLM-call counter (only used when ENABLE_CLOUDFLARE_LIMITS is on).
@@ -1774,13 +1811,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let description = await account.describe();
     let accountId = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(accountId + 1);
-    this.storage.connectedAccounts.put({
+    putAccount(this.storage, {
       id: accountId,
       account,
       description,
       vendorId,
       autoProvisioned: true,
-    });
+    }, "replaced");
   }
 
   // Dedup concurrent #ensureAutoProvisionedAccounts() calls. The provisioning loop awaits cross-worker
@@ -2093,20 +2130,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         existing.description = description;
         existing.credentialExpiresAt = expiresAt;
         existing.credentialsExpired = false;
-        this.storage.connectedAccounts.put(existing);
+        // A same-id replacement: a fresh incarnation, so nothing minted from the old grant matches.
+        putAccount(this.storage, existing, "replaced");
         return existing.id;
       }
     }
 
     let id = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(id + 1);
-    this.storage.connectedAccounts.put({
+    putAccount(this.storage, {
       id,
       account,
       description,
       vendorId,
       credentialExpiresAt: expiresAt,
-    });
+    }, "replaced");
     return id;
   }
 
@@ -2147,7 +2185,32 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       return;
     }
 
-    this.storage.connectedAccounts.put(record);
+    putAccount(this.storage, record, "replaced");
+  }
+
+  /**
+   * The provenance of connected account `accountId` now, or null when it no longer exists. For the
+   * host-board kernel path, which compares it after every await: a changed incarnation is another
+   * account under the same id, and a changed epoch is a mutation since the last check.
+   */
+  async hostBoardAccount(accountId: number): Promise<HostBoardAccount | null> {
+    return accountProvenance(this.storage, accountId);
+  }
+
+  /**
+   * `getGatekeeperClassFor` (the one chokepoint), together with the provenance of the account the
+   * class was minted from. Throws if the account was replaced or removed while the class was being
+   * resolved, since the class could then belong to the replacement.
+   */
+  async resolveHostBoardClass(accountId: number, url: string)
+      : Promise<Awaited<ReturnType<UserDurableObject["getGatekeeperClassFor"]>> & {account: HostBoardAccount}> {
+    let before = accountProvenance(this.storage, accountId);
+    let resolved = await this.getGatekeeperClassFor(accountId, url);
+    let after = accountProvenance(this.storage, accountId);
+    if (!before || !after || before.incarnation !== after.incarnation) {
+      throw new Error("This account changed while its connection was being made. Please try again.");
+    }
+    return {...resolved, account: after};
   }
 
   async markCredentialsExpired(accountId: number) {
@@ -2156,7 +2219,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     if (!record.credentialsExpired) {
       record.credentialsExpired = true;
-      this.storage.connectedAccounts.put(record);
+      putAccount(this.storage, record, "mutated");
     }
   }
 
@@ -2166,7 +2229,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     record.credentialsExpired = false;
     record.credentialExpiresAt = expiresAt;
-    this.storage.connectedAccounts.put(record);
+    putAccount(this.storage, record, "mutated");
 
     // Re-fetch the description since the user may have re-authed with different info. Best-effort:
     // the credentials are live either way, and a record still showing as expired over a failed
