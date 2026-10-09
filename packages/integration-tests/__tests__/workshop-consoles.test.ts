@@ -1,8 +1,12 @@
+import type { RpcStub } from "capnweb";
 import { expect, it } from "vitest";
-import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from "@gadgets/workshop-shared/api";
+import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES, type OperateSession, type OperateSessionUpdate } from "@gadgets/workshop-shared/api";
 import { startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { connect, signUp } from "../src/rpc-client.js";
+import { callbackStubFor, connect, signUp } from "../src/rpc-client.js";
+
+/** How soon an open session hears that its console was republished or deleted. */
+const NOTICE_BOUND_MS = 2_000;
 
 const withHarness = async (durable: boolean, run: (url: URL) => Promise<void>) => {
   const network = new NetworkInterceptor(); network.install();
@@ -232,4 +236,75 @@ it("gives every publish a new revision: one winner per expected revision, and a 
     expect(page.state.console).toMatchObject({ revision: second.revision });
     expect(await useWorkspace.getConsole(created.id, "published")).toEqual(second);
     expect(await useWorkspace.getConsoleScreen(created.id, board.id, "published")).toEqual(renamed);
+  }));
+
+it("tells every operate session with the console open, promptly and without logging, that it was republished or deleted", () =>
+  withHarness(true, async url => {
+    using api = connect(url);
+    using owner = await signUp(api, "consolesnotifier");
+    using workspace = await owner.newGadget();
+    await workspace.newChat("Console workspace", null);
+    const board = await workspace.createCanvas({ title: "Board", sections: [] });
+    const created = await workspace.createConsole({
+      title: "Operations lead", fullChat: "off", views: [{ id: "board", title: "Board", type: "screen", screen: board.id }],
+    });
+    const { id: workspaceId } = await workspace.getMetadata();
+    const first = await workspace.publishConsole(created.id, created.revision);
+    using operatorApi = await signUp(api, "consolesnotified");
+    using bystanderApi = await signUp(api, "consolesbystander");
+    for (const name of ["consolesnotified", "consolesbystander"]) {
+      if (!await workspace.addCollaborator(name, "use")) throw new Error("Failed to share");
+    }
+    const open = { type: "openConsole", workspaceId, consoleId: created.id, title: created.title,
+      source: "published", revision: first.revision, fullChat: "off", viewId: "board" } as const;
+
+    // Each session's updates as they arrive, with when they arrived.
+    const watch = async (session: RpcStub<OperateSession>) => {
+      const updates: Array<{ update: OperateSessionUpdate; at: number }> = [];
+      const subscriber = callbackStubFor((update: OperateSessionUpdate) => { updates.push({ update, at: performance.now() }); });
+      const subscription = await session.subscribe(subscriber);
+      return { updates, notices: () => updates.filter(({ update }) => update.consoleRevision),
+        [Symbol.dispose]() { subscription[Symbol.dispose](); subscriber[Symbol.dispose](); } };
+    };
+    const noticeWithin = async (watched: Awaited<ReturnType<typeof watch>>, count: number, since: number) => {
+      for (let waited = 0; watched.notices().length < count && waited < NOTICE_BOUND_MS; waited += 10) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      const notice = watched.notices()[count - 1];
+      expect(notice, "notice delivered").toBeDefined();
+      expect(notice!.at - since).toBeLessThan(NOTICE_BOUND_MS);
+      return notice!.update;
+    };
+
+    // The operator has the published console open; the builder previews its draft; the bystander,
+    // who can read the console too, has nothing open.
+    using session = await operatorApi.getOperateSession();
+    let page = await session.dispatch(open, 0);
+    using builderSession = await owner.getOperateSession();
+    await builderSession.dispatch({ ...open, source: "draft" }, 0);
+    using bystanderSession = await bystanderApi.getOperateSession();
+    using operator = await watch(session);
+    using builder = await watch(builderSession);
+    using bystander = await watch(bystanderSession);
+
+    const publishedAt = performance.now();
+    const second = await workspace.publishConsole(created.id, first.revision);
+    const notice = await noticeWithin(operator, 1, publishedAt);
+    // The page is unchanged and nothing is logged: the run still names the revision it opened,
+    // whose navigation the kernel goes on refusing until the operator reopens the console.
+    expect(notice).toEqual({ seq: page.seq, state: page.state,
+      consoleRevision: { workspaceId, consoleId: created.id, revision: second.revision } });
+    expect(await session.listEvents(page.seq, 10)).toEqual([]);
+    await expect(session.dispatch({ type: "openView", viewId: "board" }, page.seq)).rejects.toSatisfy(consoleChanged);
+    // The builder's preview was of the draft at the old revision, which the publish raised too.
+    expect((await noticeWithin(builder, 1, publishedAt)).consoleRevision).toEqual(notice.consoleRevision);
+    expect(bystander.notices()).toEqual([]);
+
+    // Reopened at the new revision, a session hears of the next change only, here a deletion.
+    page = await session.dispatch({ ...open, revision: second.revision }, page.seq);
+    const deletedAt = performance.now();
+    await workspace.deleteConsole(created.id, second.revision);
+    expect((await noticeWithin(operator, 2, deletedAt)).consoleRevision)
+      .toEqual({ workspaceId, consoleId: created.id, revision: null });
+    expect(bystander.notices()).toEqual([]);
   }));

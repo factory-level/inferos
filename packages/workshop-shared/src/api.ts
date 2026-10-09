@@ -592,6 +592,13 @@ export type OperateSubjectAuditPage = {
 export type OperateSessionUpdate = OperateSessionSnapshot & {
   /** The appended entry that produced this snapshot; absent on the first, current-state call. */
   record?: OperateEventRecord;
+  /**
+   * Set, with no `record` and the snapshot unchanged, when the console the page has open was
+   * published again at `revision`, or deleted (null), since the session opened it. It is a hint
+   * that grants and logs nothing: the page still names the revision it opened, which the kernel
+   * goes on refusing, so a client closes what it shows of that revision and reloads its consoles.
+   */
+  consoleRevision?: { workspaceId: string; consoleId: string; revision: string | null };
 };
 
 /** Machine-readable codes for expected `OperateSession` failures. */
