@@ -2230,13 +2230,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     record.credentialsExpired = false;
     record.credentialExpiresAt = expiresAt;
     putAccount(this.storage, record, "mutated");
+    let restored = accountProvenance(this.storage, accountId);
 
     // Re-fetch the description since the user may have re-authed with different info. Best-effort:
     // the credentials are live either way, and a record still showing as expired over a failed
     // describe() would send the user back through a reconnect that changes nothing.
     try {
-      record.description = await record.account.describe();
-      this.storage.connectedAccounts.put(record);
+      let description = await record.account.describe();
+      // Only the description, and only onto the record as restored: an expiry, a replacement or a
+      // disconnect that landed during describe() stands, and its provenance is never rolled back.
+      let current = this.storage.connectedAccounts.get(accountId);
+      let now = accountProvenance(this.storage, accountId);
+      if (current && now && restored && now.incarnation === restored.incarnation && now.epoch === restored.epoch) {
+        this.storage.connectedAccounts.put({ ...current, description });
+      }
     } catch (err) {
       logger.warn("failed to refresh the description of a restored account", {
         event: "account.describe.refresh.failed", vendorId: record.vendorId, accountId, error: err,

@@ -3,11 +3,11 @@
 // Everything here is synthetic; the integration suite drives the real Workshop and gatekeeper.
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import type { HostBoardFence, HostBoardRead } from "@gadgets/gatekeeper-kit/host-board";
 import type { HostBoardReadAudit } from "@gadgets/workshop-shared/operate-console";
 import {
-  HOST_BOARD_READ_DEADLINE_MS, HostBoardDesk, projectHostBoardSnapshot, type HostBoardContext, type HostBoardMint,
+  HOST_BOARD_READ_DEADLINE_MS, HostBoardDesk, HostBoardSelectionRelay, projectHostBoardSnapshot, readByDeadline, type HostBoardContext, type HostBoardMint,
   type HostBoardPorts, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord,
   type HostBoardSelectionState,
 } from "../src/host-boards";
@@ -16,6 +16,7 @@ import type { HostBoardAccount } from "../src/user";
 const TARGET = "inferops://acme.operations/project/board/ENG";
 const OTHER = "inferops://acme.operations/project/board/WEB";
 const OWNER = "owner-1";
+const INTENT = { target: TARGET, sessionSeq: 1 };
 const SNAPSHOT = {
   project: { identifier: "ENG", name: "Engineering (synthetic)" },
   columns: [{ label: "Todo", group: "unstarted", issues: [
@@ -142,8 +143,8 @@ const readRequest = (w: ReturnType<typeof world>) =>
 describe("host-board selection", () => {
   it("commits, and a same-key retry returns the outcome without another mint", async () => {
     let w = world();
-    expect(await w.desk.select("k1", payload(), w.guard)).toEqual({ status: "selected" });
-    expect(await w.desk.select("k1", payload(), w.guard)).toEqual({ status: "selected" });
+    expect(await w.desk.select("k1", payload(), INTENT, w.guard)).toEqual({ status: "selected" });
+    expect(await w.desk.select("k1", payload(), INTENT, w.guard)).toEqual({ status: "selected" });
     expect(w.state.mints).toBe(1);
     let slot = w.selections().get(TARGET)!;
     expect(slot.selection).toMatchObject({ gatekeeperId: 10, selectionEpoch: 1,
@@ -153,18 +154,18 @@ describe("host-board selection", () => {
 
   it("refuses a key reused with another payload before anything is created", async () => {
     let w = world();
-    await w.desk.select("k1", payload(), w.guard);
-    await expect(w.desk.select("k1", payload(8), w.guard)).rejects.toThrow(/different selection/);
-    await expect(w.desk.select("k1", payload(7, "entry-2"), w.guard)).rejects.toThrow(/different selection/);
+    await w.desk.select("k1", payload(), INTENT, w.guard);
+    await expect(w.desk.select("k1", payload(8), INTENT, w.guard)).rejects.toThrow(/different selection/);
+    await expect(w.desk.select("k1", payload(7, "entry-2"), INTENT, w.guard)).rejects.toThrow(/different selection/);
     expect(w.state.mints).toBe(1);
   });
 
   it("joins a concurrent same-key retry after a lost response: one mint, one outcome", async () => {
     let w = world();
     w.state.holdMint = held();
-    let first = w.desk.select("k1", payload(), w.guard);
+    let first = w.desk.select("k1", payload(), INTENT, w.guard);
     await tick();
-    let retry = w.desk.select("k1", payload(), w.guard);
+    let retry = w.desk.select("k1", payload(), INTENT, w.guard);
     w.state.holdMint.resolve();
     expect(await Promise.all([first, retry])).toEqual([{ status: "selected" }, { status: "selected" }]);
     expect(w.state.mints).toBe(1);
@@ -174,14 +175,14 @@ describe("host-board selection", () => {
     let w = world();
     // The connection was created, then the instance went away before committing.
     w.state.holdIdentity = held();
-    void w.desk.select("k1", payload(), w.guard);
+    void w.desk.select("k1", payload(), INTENT, w.guard);
     await tick(); await tick();
     expect(w.gatekeepers().size).toBe(1);
     expect(w.requests().get("k1")!.state).toBe("pending");
     // The old instance's call never returns; the restarted one resumes the same request.
     w.state.holdIdentity = null;
     let resumed = w.restart();
-    expect(await resumed.select("k1", payload(), w.guard)).toEqual({ status: "selected" });
+    expect(await resumed.select("k1", payload(), INTENT, w.guard)).toEqual({ status: "selected" });
     expect(w.state.mints).toBe(1);
     expect(w.selections().get(TARGET)!.intentEpoch).toBe(1);
     expect(w.selections().get(TARGET)!.selection!.selectionEpoch).toBe(1);
@@ -190,23 +191,23 @@ describe("host-board selection", () => {
   it("resumes after a restart that lost the mint with no new epoch, minting it once", async () => {
     let w = world();
     w.state.holdMint = held();
-    void w.desk.select("k1", payload(), w.guard);
+    void w.desk.select("k1", payload(), INTENT, w.guard);
     await tick();
     // The instance died mid-mint: nothing was created.
     let resumed = w.restart();
     w.state.holdMint = null;
-    expect(await resumed.select("k1", payload(), w.guard)).toEqual({ status: "selected" });
+    expect(await resumed.select("k1", payload(), INTENT, w.guard)).toEqual({ status: "selected" });
     expect(w.selections().get(TARGET)!.intentEpoch).toBe(1);
     expect(w.gatekeepers().size).toBe(1);
   });
 
   it("commits only the latest intent; the loser removes only its own candidate", async () => {
     let w = world();
-    expect(await w.desk.select("a1", payload(), w.guard)).toEqual({ status: "selected" });
+    expect(await w.desk.select("a1", payload(), INTENT, w.guard)).toEqual({ status: "selected" });
     w.state.holdIdentity = held();
-    let b = w.desk.select("b", payload(8), w.guard);
+    let b = w.desk.select("b", payload(8), INTENT, w.guard);
     await tick(); await tick();
-    let a2 = w.desk.select("a2", payload(), w.guard);
+    let a2 = w.desk.select("a2", payload(), INTENT, w.guard);
     w.state.holdIdentity.resolve();
     w.state.holdIdentity = null;
     expect(await b).toEqual({ status: "superseded" });
@@ -219,14 +220,14 @@ describe("host-board selection", () => {
     expect(w.requests().get("a1")!.state).toBe("superseded");
     expect(w.requests().get("b")!.state).toBe("superseded");
     // A tombstone never becomes a new selection.
-    expect(await w.desk.select("b", payload(8), w.guard)).toEqual({ status: "superseded" });
+    expect(await w.desk.select("b", payload(8), INTENT, w.guard)).toEqual({ status: "superseded" });
     expect(w.state.mints).toBe(3);
   });
 
   it("fails a selection whose account was replaced under the same id while it was made", async () => {
     let w = world();
     w.state.holdIdentity = held();
-    let pending = w.desk.select("k1", payload(), w.guard);
+    let pending = w.desk.select("k1", payload(), INTENT, w.guard);
     await tick(); await tick();
     w.state.account = { ...w.state.account!, incarnation: "inc-2", epoch: 2 };
     w.state.holdIdentity.resolve();
@@ -235,22 +236,23 @@ describe("host-board selection", () => {
     expect(w.selections().get(TARGET)!.selection).toBeNull();
   });
 
-  it("fails when the console context no longer holds at commit, and refuses a new key outright", async () => {
+  it("fails when the console context no longer holds at commit", async () => {
     let w = world();
     w.state.holdIdentity = held();
-    let pending = w.desk.select("k1", payload(), w.guard);
+    let pending = w.desk.select("k1", payload(), INTENT, w.guard);
     await tick(); await tick();
     w.state.context = null;
     w.state.holdIdentity.resolve();
     expect(await pending).toEqual({ status: "failed" });
-    await expect(w.desk.select("k2", payload(), w.guard)).rejects.toThrow(/not open/);
-    expect(w.requests().has("k2")).toBe(false);
+    // The session refuses a new request whose context does not hold; one that slips past fails here.
+    expect(await w.desk.select("k2", payload(), INTENT, w.guard)).toEqual({ status: "failed" });
+    expect(w.gatekeepers().size).toBe(0);
   });
 
   it("is refused while the switch is off", async () => {
     let w = world();
     w.state.enabled = false;
-    await expect(w.desk.select("k1", payload(), w.guard)).rejects.toThrow(/turned off/);
+    await expect(w.desk.select("k1", payload(), INTENT, w.guard)).rejects.toThrow(/turned off/);
     expect(w.state.mints).toBe(0);
   });
 });
@@ -258,7 +260,7 @@ describe("host-board selection", () => {
 describe("host-board reads", () => {
   async function selected() {
     let w = world();
-    await w.desk.select("k1", payload(), w.guard);
+    await w.desk.select("k1", payload(), INTENT, w.guard);
     return w;
   }
 
@@ -339,8 +341,8 @@ describe("host-board reads", () => {
     await tick(); await tick();
     let hold = w.state.holdSnapshot;
     w.state.holdSnapshot = null;
-    await w.desk.select("k2", payload(8), w.guard);
-    await w.desk.select("k3", payload(7), w.guard);
+    await w.desk.select("k2", payload(8), INTENT, w.guard);
+    await w.desk.select("k3", payload(7), INTENT, w.guard);
     hold.resolve();
     expect(await reading).toEqual({ status: "stale" });
     expect(w.audit).toEqual([]);
@@ -399,7 +401,7 @@ describe("host-board selection subscriptions", () => {
   it("takes its first state atomically, even while a mutation is in flight, then follows pending to committed", async () => {
     let w = world();
     w.state.holdIdentity = held();
-    let pending = w.desk.select("k1", payload(), w.guard);
+    let pending = w.desk.select("k1", payload(), INTENT, w.guard);
     await tick(); await tick();
     let sub = listen(w);
     expect(sub.snapshot).toEqual({ state: "pending", changeSeq: 1, selectionEpoch: null });
@@ -411,11 +413,11 @@ describe("host-board selection subscriptions", () => {
 
   it("never reports a commit that rolled back", async () => {
     let w = world();
-    await w.desk.select("k1", payload(), w.guard);
+    await w.desk.select("k1", payload(), INTENT, w.guard);
     let sub = listen(w);
     w.state.failCommit = true;
     // The second commit writes the new selection, then fails before it completes.
-    expect(await w.desk.select("k2", payload(8), w.guard)).toEqual({ status: "failed" });
+    expect(await w.desk.select("k2", payload(8), INTENT, w.guard)).toEqual({ status: "failed" });
     await deliveries(w);
     expect(sub.states.some(s => s.state === "selected" && s.selectionEpoch === 2)).toBe(false);
     expect(w.selections().get(TARGET)!.selection!.selectionEpoch).toBe(1);
@@ -424,12 +426,12 @@ describe("host-board selection subscriptions", () => {
 
   it("reports a deletion as none, then a recreation", async () => {
     let w = world();
-    await w.desk.select("k1", payload(), w.guard);
+    await w.desk.select("k1", payload(), INTENT, w.guard);
     let sub = listen(w);
     w.desk.connectionRemoved(w.selections().get(TARGET)!.selection!.gatekeeperId);
     await deliveries(w);
     expect(sub.states.at(-1)).toMatchObject({ state: "none", selectionEpoch: null });
-    await w.desk.select("k2", payload(), w.guard);
+    await w.desk.select("k2", payload(), INTENT, w.guard);
     await deliveries(w);
     expect(sub.states.at(-1)).toMatchObject({ state: "selected", selectionEpoch: 2 });
     let seqs = sub.states.map(s => s.changeSeq);
@@ -440,7 +442,7 @@ describe("host-board selection subscriptions", () => {
     let w = world();
     let sub = listen(w);
     sub.unsubscribe();
-    await w.desk.select("k1", payload(), w.guard);
+    await w.desk.select("k1", payload(), INTENT, w.guard);
     await deliveries(w);
     expect(sub.states).toEqual([]);
     expect(listen(w).snapshot).toEqual({ state: "selected", changeSeq: 2, selectionEpoch: 1 });
@@ -449,7 +451,7 @@ describe("host-board selection subscriptions", () => {
   it("hears nothing about another target, and is refused while the switch is off", async () => {
     let w = world();
     let other = listen(w, OTHER);
-    await w.desk.select("k1", payload(), w.guard);
+    await w.desk.select("k1", payload(), INTENT, w.guard);
     await deliveries(w);
     expect(other.states).toEqual([]);
     w.state.enabled = false;
@@ -460,10 +462,10 @@ describe("host-board selection subscriptions", () => {
     let w = world();
     let calls = 0;
     w.desk.subscribe(TARGET, () => { calls++; throw new Error("gone"); });
-    await w.desk.select("k1", payload(), w.guard);
+    await w.desk.select("k1", payload(), INTENT, w.guard);
     await deliveries(w);
     let after = calls;
-    await w.desk.select("k2", payload(), w.guard);
+    await w.desk.select("k2", payload(), INTENT, w.guard);
     await deliveries(w);
     expect(calls).toBe(after);
   });
@@ -489,10 +491,10 @@ describe("the operate workspace's host-board entry points", () => {
       instance.impl.storage.ownerId.put(OWNER);
       let guard = async () => ({ target: TARGET, sessionSeq: 1 });
       // Not yet an operate session workspace: nothing is reachable, even for the owner.
-      await expect(instance.selectHostBoard(OWNER, "k1", payload(), guard)).rejects.toThrow(/operate session workspace/);
+      await expect(instance.selectHostBoard(OWNER, "k1", payload(), INTENT, guard)).rejects.toThrow(/operate session workspace/);
       instance.impl.storage.operateSession.put(true);
       for (let intruder of ["someone-else", ""]) {
-        await expect(instance.selectHostBoard(intruder, "k1", payload(), guard)).rejects.toThrow(/operate session workspace/);
+        await expect(instance.selectHostBoard(intruder, "k1", payload(), INTENT, guard)).rejects.toThrow(/operate session workspace/);
         await expect(instance.subscribeHostBoardSelection(intruder, TARGET, async () => {})).rejects.toThrow(/operate session workspace/);
         expect(await instance.readHostBoard(intruder, { consoleId: "c1", entryId: "e", requirementName: "board",
           source: "published", revision: "3", readAt: Date.now() }, guard)).toEqual({ status: "not-connected" });
@@ -500,7 +502,199 @@ describe("the operate workspace's host-board entry points", () => {
       }
       // The owner, with the switch off (this test Worker leaves INFEROPS_HOST_BOARDS unset).
       await expect(instance.subscribeHostBoardSelection(OWNER, TARGET, async () => {})).rejects.toThrow(/turned off/);
-      await expect(instance.selectHostBoard(OWNER, "k1", payload(), guard)).rejects.toThrow(/turned off/);
+      await expect(instance.selectHostBoard(OWNER, "k1", payload(), INTENT, guard)).rejects.toThrow(/turned off/);
     });
+  });
+});
+
+describe("host-board race fences (review)", () => {
+  it("rejects a generation change after the initial sample even when the account epoch is unchanged", async () => {
+    let w = world();
+    await w.desk.select("k1", payload(), INTENT, w.guard);
+    w.state.holdSnapshot = held();
+    let hold = w.state.holdSnapshot;
+    // The answering attempt ran under a new connection generation the initial sample did not see.
+    w.state.answer = () => ({ status: "ok", scope: SCOPE, snapshot: SNAPSHOT as never,
+      fence: { accountId: "adapter-7", identity: "id-1", generation: "g-2" } });
+    let reading = w.desk.read(readRequest(w), w.guard);
+    await tick(); await tick();
+    w.state.fence = { accountId: "adapter-7", identity: "id-1", generation: "g-2" };
+    hold.resolve();
+    expect(await reading).toEqual({ status: "stale" });
+    expect(w.audit).toEqual([]);
+    expect(w.selections().get(TARGET)!.selection!.pinned).toBeUndefined();
+  });
+
+  it("never lets an older selection whose guard was held overtake a newer completed intent", async () => {
+    let w = world();
+    let olderGuard = held<void>();
+    let older = w.desk.select("older", payload(8), INTENT, async () => { await olderGuard.promise; return { target: TARGET, sessionSeq: 1 }; });
+    await tick();
+    expect(await w.desk.select("newer", payload(7), INTENT, w.guard)).toEqual({ status: "selected" });
+    olderGuard.resolve();
+    expect((await older).status).not.toBe("selected");
+    expect(w.selections().get(TARGET)!.selection!.mintedFor.requestKey).toBe("newer");
+  });
+
+  it("does not commit a selection whose session moved away and back while its identity was held", async () => {
+    let w = world();
+    w.state.holdIdentity = held();
+    let pending = w.desk.select("k1", payload(), INTENT, w.guard);
+    await tick(); await tick();
+    // Console A, away, then A again: same target, a later session sequence.
+    w.state.context = { target: TARGET, sessionSeq: 3 };
+    w.state.holdIdentity.resolve();
+    expect((await pending).status).not.toBe("selected");
+    expect(w.selections().get(TARGET)!.selection).toBeNull();
+  });
+
+  it("discards a read of the old selection released while a newer intent is reserved", async () => {
+    let w = world();
+    await w.desk.select("a", payload(), INTENT, w.guard);
+    w.state.holdSnapshot = held();
+    let snapshot = w.state.holdSnapshot;
+    let reading = w.desk.read(readRequest(w), w.guard);
+    await tick(); await tick();
+    w.state.holdSnapshot = null;
+    w.state.holdMint = held();
+    void w.desk.select("b", payload(8), INTENT, w.guard);
+    await tick(); await tick();
+    snapshot.resolve();
+    expect(await reading).toEqual({ status: "stale" });
+    expect(w.audit).toEqual([]);
+    expect(w.selections().get(TARGET)!.selection!.pinned).toBeUndefined();
+    w.state.holdMint.resolve();
+  });
+});
+
+describe("the selection delivery relay", () => {
+  const state = (changeSeq: number, sel: "none" | "pending" | "selected" = "selected") =>
+    ({ state: sel, changeSeq, selectionEpoch: sel === "selected" ? changeSeq : null });
+  function relay(options: { holds?: () => Promise<boolean> } = {}) {
+    let delivered: unknown[] = [];
+    let ends = 0;
+    let gate: ReturnType<typeof held<void>> | null = null;
+    let r = new HostBoardSelectionRelay(async update => {
+      delivered.push(update);
+      if (gate) await gate.promise;
+    }, options.holds ?? (async () => true), () => { ends++; });
+    return { r, delivered, ends: () => ends, hold() { gate = held(); return gate; }, open() { gate = null; } };
+  }
+  const settle = async () => { for (let i = 0; i < 10; i++) await tick(); };
+
+  it("delivers nothing before its snapshot, then the newest state, never an older one", async () => {
+    let t = relay();
+    t.r.push(state(3));
+    t.r.push(state(2));
+    await settle();
+    expect(t.delivered).toEqual([]);
+    t.r.start(state(1, "none"));
+    await settle();
+    expect(t.delivered).toEqual([state(3)]);
+    t.r.push(state(3));
+    t.r.push(state(2));
+    await settle();
+    expect(t.delivered).toEqual([state(3)]);
+  });
+
+  it("keeps one lane through a delayed guard: deliveries stay ordered", async () => {
+    let guards: ReturnType<typeof held<boolean>>[] = [];
+    let t = relay({ holds: () => { let g = held<boolean>(); guards.push(g); return g.promise; } });
+    t.r.start(state(1));
+    t.r.push(state(2));
+    t.r.push(state(3));
+    await settle();
+    expect(guards).toHaveLength(1);
+    guards[0]!.resolve(true);
+    await settle();
+    guards[1]!.resolve(true);
+    await settle();
+    expect(t.delivered).toEqual([state(1), state(3)]);
+  });
+
+  it("holds at most one pending state behind a slow consumer", async () => {
+    let t = relay();
+    let gate = t.hold();
+    t.r.start(state(1));
+    for (let n = 2; n <= 50; n++) t.r.push(state(n));
+    await settle();
+    t.open();
+    gate.resolve();
+    await settle();
+    expect(t.delivered).toEqual([state(1), state(50)]);
+  });
+
+  it("ends exactly once, with one unknown, under concurrent invalidation", async () => {
+    let t = relay({ holds: async () => false });
+    t.r.start(state(1));
+    t.r.end();
+    t.r.end();
+    t.r.push(state(2));
+    await settle();
+    expect(t.delivered.filter(u => (u as { state: string }).state === "unknown")).toHaveLength(1);
+    expect(t.ends()).toBe(1);
+    expect(t.delivered.filter(u => (u as { state: string }).state !== "unknown")).toEqual([]);
+  });
+
+  it("ends with unknown when a delivery fails, and abandons a failed setup silently", async () => {
+    let failing = new HostBoardSelectionRelay(async update => {
+      if (update.state !== "unknown") throw new Error("gone");
+    }, async () => true, () => {});
+    failing.start(state(1));
+    await settle();
+    expect(failing.ended).toBe(true);
+    let t = relay();
+    t.r.abandon();
+    t.r.start(state(1));
+    await settle();
+    expect(t.delivered).toEqual([]);
+    expect(t.ends()).toBe(1);
+  });
+
+  it("is told when the selection workspace resets: it drops the subscriber, which is disposed", async () => {
+    let stub = env.TEST_OVERSEER.getByName("host-board-reset");
+    await runInDurableObject(stub, async (instance: any) => {
+      instance.impl.ownerId = OWNER;
+      instance.impl.storage.ownerId.put(OWNER);
+      instance.impl.storage.operateSession.put(true);
+      instance.impl.env = { ...instance.impl.env, INFEROPS_HOST_BOARDS: "true" };
+    });
+    let disposed = Promise.withResolvers<void>();
+    let isDisposed = false;
+    let subscriber = async () => {};
+    (subscriber as unknown as Disposable)[Symbol.dispose] = () => { isDisposed = true; disposed.resolve(); };
+    let result = await (stub as any).subscribeHostBoardSelection(OWNER, TARGET, subscriber);
+    expect(result.snapshot).toEqual({ state: "none", changeSeq: 0, selectionEpoch: null });
+    expect(isDisposed).toBe(false);
+    await abortAllDurableObjects();
+    await disposed.promise;
+    expect(isDisposed).toBe(true);
+  });
+});
+
+describe("the read's one deadline", () => {
+  it("answers unavailable at exactly 10 s from readAt when the stall is before the desk starts", async () => {
+    let w = world();
+    let readAt = w.now;
+    // Reaching the operate workspace never completes; the desk never starts.
+    let reading = readByDeadline(readAt, () => new Promise(() => {}), { now: () => w.now, sleep: ms => w.ports.sleep(ms) });
+    let settled = false;
+    void reading.then(() => { settled = true; });
+    await w.advance(HOST_BOARD_READ_DEADLINE_MS - 1);
+    expect(settled).toBe(false);
+    await w.advance(1);
+    expect(settled).toBe(true);
+    expect(await reading).toEqual({ status: "unavailable" });
+  });
+
+  it("counts from readAt, so time spent before the call shortens it", async () => {
+    let w = world();
+    let readAt = w.now;
+    await w.advance(4_000);
+    let reading = readByDeadline(readAt, () => new Promise(() => {}), { now: () => w.now, sleep: ms => w.ports.sleep(ms) });
+    let settled = false;
+    void reading.then(() => { settled = true; });
+    await w.advance(HOST_BOARD_READ_DEADLINE_MS - 4_000);
+    expect(settled).toBe(true);
   });
 });

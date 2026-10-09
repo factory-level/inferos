@@ -5,7 +5,7 @@ import { WorkspaceCanvasStore } from "./canvas-store";
 import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls } from "./console-store";
 import { checkWorkspaceKind } from "@gadgets/workshop-shared/workspace-kind";
 import { WorkspaceFlowStore } from "./flow-store";
-import { HostBoardDesk, hostBoardsEnabled, type HostBoardGuard, type HostBoardMint, type HostBoardReadRecord, type HostBoardReadRequest, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord, type HostBoardSelectionState } from "./host-boards";
+import { HostBoardDesk, hostBoardsEnabled, type HostBoardContext, type HostBoardGuard, type HostBoardMint, type HostBoardReadRecord, type HostBoardReadRequest, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord, type HostBoardSelectionState } from "./host-boards";
 import type { HostBoardConnectionFence, HostBoardReader } from "@gadgets/gatekeeper-kit/host-board";
 import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
 import {
@@ -10554,8 +10554,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** See `HostBoardDesk.select`. */
   async selectHostBoard(ownerId: string, requestKey: string, payload: HostBoardSelectionPayload,
-                        guard: HostBoardGuard): Promise<HostBoardSelection> {
-    return this.#hostBoardDesk(ownerId).select(requestKey, payload, guard);
+                        intent: HostBoardContext, guard: HostBoardGuard): Promise<HostBoardSelection> {
+    return this.#hostBoardDesk(ownerId).select(requestKey, payload, intent, guard);
   }
 
   /** See `HostBoardDesk.read`. A workspace that is not yet the owner's session has no selection. */
@@ -10570,24 +10570,24 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Subscribes `subscriber` to `target`'s selection state: the subscription is installed and its
-   * first state taken in one synchronous step, and that state is delivered before any later one.
-   * Returns the stub that ends it.
+   * Subscribes `subscriber` to `target`'s selection state. The subscription is installed and its
+   * snapshot taken in one synchronous step, and the snapshot is returned with the stub that ends
+   * it; later committed changes go to `subscriber`. If this object resets, it drops its reference
+   * to `subscriber`, which the caller observes as that stub's disposal.
    */
   async subscribeHostBoardSelection(ownerId: string, target: string,
-      subscriber: (state: HostBoardSelectionState) => Promise<unknown>): Promise<Disposable> {
+      subscriber: (state: HostBoardSelectionState) => Promise<unknown>)
+      : Promise<{ snapshot: HostBoardSelectionState; subscription: Disposable }> {
     let deliver: typeof subscriber | undefined;
     let { snapshot, unsubscribe } = this.#hostBoardDesk(ownerId).subscribe(target, state => deliver!(state));
-    // Kept past this call, which would otherwise dispose the stub when it returns. No await since
-    // the subscription and its snapshot were taken.
+    // Kept past this call, which would otherwise dispose the stub when it returns.
     let kept = (subscriber as unknown as NativeRpcStub<typeof subscriber>).dup();
     deliver = kept as unknown as typeof subscriber;
     let end = () => {
       unsubscribe();
       kept[Symbol.dispose]();
     };
-    deliver(snapshot).catch(end);
-    return new HostBoardSubscriptionImpl(end);
+    return { snapshot, subscription: new HostBoardSubscriptionImpl(end) };
   }
 
   /** The owner's most recent audited host-board reads, newest first. */

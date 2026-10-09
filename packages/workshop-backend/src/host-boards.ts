@@ -21,7 +21,7 @@
 //   let that one snapshot through, bounded by the client's expiry of what it shows.
 
 import type { HostBoardConnectionFence, HostBoardFence, HostBoardReader, HostBoardScope, HOST_BOARD_LIMITS, HostBoardGroup, HostBoardPriority } from "@gadgets/gatekeeper-kit/host-board";
-import { HOST_BOARD_RESOURCE, HOST_BOARD_SNAPSHOT_LIMITS, type ConsoleSource, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type HostBoardViewGroup, type HostBoardViewIssue, type HostBoardViewPriority, type HostBoardViewSnapshot } from "@gadgets/workshop-shared/operate-console";
+import { HOST_BOARD_RESOURCE, HOST_BOARD_SNAPSHOT_LIMITS, type ConsoleSource, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView, type HostBoardViewGroup, type HostBoardViewIssue, type HostBoardViewPriority, type HostBoardViewSnapshot } from "@gadgets/workshop-shared/operate-console";
 import type { HostBoardAccount } from "./user";
 
 // The kernel projects with the provider's own bounds and enums; these fail to compile if they drift.
@@ -33,6 +33,25 @@ void [SAME_LIMITS, SAME_GROUPS, SAME_PRIORITIES];
 
 /** The whole read's deadline, from its start (`readAt`). */
 export const HOST_BOARD_READ_DEADLINE_MS = 10_000;
+
+/**
+ * Runs `work` (reaching the operate workspace, then its desk) under the read's one deadline,
+ * `readAt + HOST_BOARD_READ_DEADLINE_MS`, the same absolute deadline the desk enforces: a stall
+ * anywhere, before the desk starts included, answers `unavailable` then. A late answer or
+ * rejection is observed and dropped.
+ */
+export async function readByDeadline(readAt: number, work: () => Promise<HostBoardView>,
+    clock: { now(): number; sleep(ms: number): Promise<void> }): Promise<HostBoardView> {
+  let call = work();
+  call.catch(() => {});
+  let deadline = clock.sleep(Math.max(0, readAt + HOST_BOARD_READ_DEADLINE_MS - clock.now()))
+      .then((): HostBoardView => UNAVAILABLE);
+  try {
+    return await Promise.race([call, deadline]);
+  } catch {
+    return UNAVAILABLE;
+  }
+}
 
 /** The message every call refused by the switch carries. */
 export const HOST_BOARDS_OFF = "Host boards are turned off for this installation.";
@@ -77,6 +96,8 @@ export type HostBoardRequestRecord = {
   target: string;
   /** The intent epoch reserved for it. */
   epoch: number;
+  /** The caller's session sequence when it was made: it commits only while that still holds. */
+  sessionSeq: number;
   state: "pending" | "committed" | "failed" | "superseded";
 };
 
@@ -202,6 +223,9 @@ export type HostBoardSelectionState = {
 /** Receives full selection states in change order. */
 export type HostBoardSelectionSubscriber = (state: HostBoardSelectionState) => unknown;
 
+/** A target's intent and change version, as a read captured it before its first await. */
+type ReadVersion = { target: string; at: string };
+
 /** One call's liveness: cleared when its deadline answers for it. */
 type CallToken = { live: boolean; deadlineAt: number };
 
@@ -216,33 +240,32 @@ export class HostBoardDesk {
   constructor(private ports: HostBoardPorts) {}
 
   /**
-   * Selects `payload.accountId`'s connection for the guard's target, idempotently per
-   * `requestKey`. Throws when the switch is off, the key was used for another payload, or (for a
-   * new key) the guard no longer holds.
+   * Selects `payload.accountId`'s connection for `intent.target`, idempotently per `requestKey`.
+   * `intent` is the caller's context as the session read it when the request was made: the intent
+   * is reserved from it on arrival, before anything is awaited, so intents are ordered as they
+   * arrive, and it commits only if the guard still finds that target at that session sequence.
+   * Throws when the switch is off or the key was used for another payload.
    */
-  async select(requestKey: string, payload: HostBoardSelectionPayload, guard: HostBoardGuard)
-      : Promise<HostBoardSelection> {
+  async select(requestKey: string, payload: HostBoardSelectionPayload, intent: HostBoardContext,
+      guard: HostBoardGuard): Promise<HostBoardSelection> {
     if (!this.ports.enabled()) throw new Error(HOST_BOARDS_OFF);
     if (!isHostBoardRequestKey(requestKey)) throw new Error("A request key must be 1-128 letters, digits, - or _.");
     let existing = this.#existing(requestKey, payload);
     if (existing) return this.#join(existing, guard);
-    let context = await guard();
-    if (!context) throw new Error("This console is not open in your operate session as it was.");
-    let raced = this.#existing(requestKey, payload);
-    if (raced) return this.#join(raced, guard);
-    // Reserved synchronously, with the request stored, before anything is created.
-    let slot = this.ports.selections.get(context.target) ??
-        { target: context.target, owner: this.ports.ownerId, resource: HOST_BOARD_RESOURCE, intentEpoch: 0, selection: null };
+    // Reserved synchronously, with the request stored, before anything is awaited or created.
+    let slot = this.ports.selections.get(intent.target) ??
+        { target: intent.target, owner: this.ports.ownerId, resource: HOST_BOARD_RESOURCE, intentEpoch: 0, selection: null };
     slot = { ...slot, intentEpoch: slot.intentEpoch + 1, intentKey: requestKey, changeSeq: (slot.changeSeq ?? 0) + 1 };
     let record: HostBoardRequestRecord = {
-      requestKey, owner: this.ports.ownerId, payload, target: context.target, epoch: slot.intentEpoch, state: "pending",
+      requestKey, owner: this.ports.ownerId, payload, target: intent.target, epoch: slot.intentEpoch,
+      sessionSeq: intent.sessionSeq, state: "pending",
     };
     let reserved = slot;
     this.ports.transaction(() => {
       this.ports.selections.put(reserved);
       this.ports.requests.put(record);
     });
-    this.#notify(context.target);
+    this.#notify(intent.target);
     return this.#start(record, guard);
   }
 
@@ -294,7 +317,8 @@ export class HostBoardDesk {
       let connection = this.ports.connection(candidate);
       let mint = connection?.mint;
       if (!identity || !account || !mint || !context || connection?.resourceUrl !== record.target ||
-          context.target !== record.target || mint.accountId !== record.payload.accountId ||
+          context.target !== record.target || context.sessionSeq !== record.sessionSeq ||
+          mint.accountId !== record.payload.accountId ||
           account.incarnation !== mint.incarnation) {
         return this.#settle(record, "failed", candidate);
       }
@@ -435,28 +459,34 @@ export class HostBoardDesk {
     let context = await guard();
     if (!context) return STALE;
     let slot = this.ports.selections.get(context.target);
+    // The target's intent and change version too, not only the committed epoch: a newer intent
+    // reserved while this read runs supersedes it.
+    let version = this.#version(context.target);
     let selection = slot?.owner === this.ports.ownerId ? slot.selection : null;
-    if (!selection) return this.#commit(request, token, "not-connected");
+    if (!selection) return this.#commit(request, token, version, "not-connected");
     let { gatekeeperId, mintedFor, selectionEpoch } = selection;
     let connection = this.ports.connection(gatekeeperId);
     if (connection?.resourceUrl !== context.target || connection.mint?.by !== mintedFor.by ||
         connection.mint.requestKey !== mintedFor.requestKey || connection.mint.accountId !== mintedFor.accountId) {
-      return this.#notConnected(request, guard, token, context);
+      return this.#notConnected(request, guard, token, context, version);
     }
     let facet = this.ports.facet(gatekeeperId);
     let account = await this.ports.account(mintedFor.accountId);
-    if (!account || account.incarnation !== mintedFor.incarnation) return this.#notConnected(request, guard, token, context);
+    if (!account || account.incarnation !== mintedFor.incarnation) return this.#notConnected(request, guard, token, context, version);
     let current = await facet.connectionIdentity();
-    if (!current || current.accountId !== mintedFor.adapterAccountId) return this.#notConnected(request, guard, token, context);
+    if (!current || current.accountId !== mintedFor.adapterAccountId) return this.#notConnected(request, guard, token, context, version);
 
     let answer = await facet.readHostBoardSnapshot().catch(() => null);
     // A facet call fails when its connection was removed under it (a newer selection's cleanup).
     if (!answer) return this.#selectionMoved(context.target, gatekeeperId, selectionEpoch) ? STALE : UNAVAILABLE;
     if (answer.status === "stale") return STALE;
-    if (answer.status === "not-connected") return this.#notConnected(request, guard, token, context);
+    if (answer.status === "not-connected") return this.#notConnected(request, guard, token, context, version);
     if (answer.status === "unavailable" || answer.fence.accountId !== mintedFor.adapterAccountId) {
-      return this.#settleAfterCheck(request, guard, token, context, "unavailable");
+      return this.#settleAfterCheck(request, guard, token, context, version, "unavailable");
     }
+    // The answering attempt must be the connection sampled before the read: the same account and
+    // generation. Only the identity may differ, for a token refreshed within that generation.
+    if (answer.fence.accountId !== current.accountId || answer.fence.generation !== current.generation) return STALE;
     // The completion fence, against the attempt that answered (a token-refresh retry included).
     let after = await facet.connectionIdentity().catch(() => null);
     if (!after || !sameFence(after, answer.fence)) return STALE;
@@ -469,8 +499,8 @@ export class HostBoardDesk {
       return STALE;
     }
     let board = projectHostBoardSnapshot(answer.snapshot);
-    if (!board) return this.#commit(request, token, "unavailable");
-    return this.#commit(request, token, "ok", { target: context.target, gatekeeperId, selectionEpoch,
+    if (!board) return this.#commit(request, token, version, "unavailable");
+    return this.#commit(request, token, version, "ok", { target: context.target, gatekeeperId, selectionEpoch,
       scope: answer.scope, board });
   }
 
@@ -481,24 +511,32 @@ export class HostBoardDesk {
 
   // A not-connected (or unavailable) answer is audited only while the caller's context still holds.
   async #settleAfterCheck(request: HostBoardReadRequest, guard: HostBoardGuard, token: CallToken,
-      context: HostBoardContext, status: "not-connected" | "unavailable"): Promise<HostBoardView> {
+      context: HostBoardContext, version: ReadVersion, status: "not-connected" | "unavailable"): Promise<HostBoardView> {
     let after = await guard();
     if (!after || after.sessionSeq !== context.sessionSeq || after.target !== context.target) return STALE;
-    return this.#commit(request, token, status);
+    return this.#commit(request, token, version, status);
   }
 
-  #notConnected(request: HostBoardReadRequest, guard: HostBoardGuard, token: CallToken, context: HostBoardContext)
-      : Promise<HostBoardView> {
-    return this.#settleAfterCheck(request, guard, token, context, "not-connected");
+  #notConnected(request: HostBoardReadRequest, guard: HostBoardGuard, token: CallToken, context: HostBoardContext,
+      version: ReadVersion): Promise<HostBoardView> {
+    return this.#settleAfterCheck(request, guard, token, context, version, "not-connected");
+  }
+
+  // The target's intent epoch and change sequence: any reservation, commit, settlement or removal moves it.
+  #version(target: string): ReadVersion {
+    let slot = this.ports.selections.get(target);
+    return { target, at: `${slot?.intentEpoch ?? 0}:${slot?.changeSeq ?? 0}` };
   }
 
   // The one final compare-and-set: no await from the token check to the return. It validates the
   // call's token and deadline, then (for `ok`) the selection and its epoch and the pin, and only
   // then commits the pin and the audit.
-  #commit(request: HostBoardReadRequest, token: CallToken, status: "ok" | "not-connected" | "unavailable",
+  #commit(request: HostBoardReadRequest, token: CallToken, version: ReadVersion,
+      status: "ok" | "not-connected" | "unavailable",
       read?: { target: string; gatekeeperId: number; selectionEpoch: number; scope: HostBoardScope;
                board: HostBoardViewSnapshot }): HostBoardView {
     if (!token.live || this.ports.now() >= token.deadlineAt) return UNAVAILABLE;
+    if (this.#version(version.target).at !== version.at) return STALE;
     let view: HostBoardView = status === "not-connected" ? NOT_CONNECTED : UNAVAILABLE;
     if (status === "ok" && read) {
       let slot = this.ports.selections.get(read.target);
@@ -522,6 +560,83 @@ export class HostBoardDesk {
     this.ports.recordAudit({ kind: "host-board-read", consoleId: request.consoleId, entryId: request.entryId,
       requirementName: request.requirementName, status, at: new Date(this.ports.now()).toISOString() });
     return view;
+  }
+}
+
+/**
+ * The browser-facing side of one selection subscription: ONE delivery lane that keeps only the
+ * newest full state (so a slow consumer holds at most one pending), delivers nothing before the
+ * subscription's own snapshot is known, never an older or repeated `changeSeq`, re-checks the
+ * caller's context before every delivery, and ends exactly once, with one `unknown`, on a failed
+ * check or delivery, on `end()` (disposal, or the selection workspace dropping the subscription,
+ * as it does when it resets), never silently. `abandon()` ends a subscription that was never set up.
+ */
+export class HostBoardSelectionRelay {
+  #pending: HostBoardSelectionState | null = null;
+  #sent = -1;
+  #ready = false;
+  #draining = false;
+  #ended = false;
+
+  constructor(private deliver: (update: HostBoardSelectionUpdate) => Promise<unknown>,
+      private holds: () => Promise<boolean>, private onEnd: () => void) {}
+
+  /** Whether the subscription has ended. */
+  get ended(): boolean {
+    return this.#ended;
+  }
+
+  /** A state from the selection workspace, which may arrive before the snapshot or out of order. */
+  push(state: HostBoardSelectionState): void {
+    if (this.#ended) return;
+    if (!this.#pending || state.changeSeq > this.#pending.changeSeq) this.#pending = state;
+    void this.#drain();
+  }
+
+  /** The subscription's snapshot: deliveries start with it (or a newer state already pushed). */
+  start(snapshot: HostBoardSelectionState): void {
+    if (this.#ended) return;
+    this.#ready = true;
+    this.push(snapshot);
+  }
+
+  /** Ends the subscription with one `unknown`; idempotent. */
+  end(): void {
+    if (this.#ended) return;
+    this.#ended = true;
+    this.#pending = null;
+    this.deliver({ state: "unknown" }).catch(() => {}).finally(() => this.onEnd());
+  }
+
+  /** Ends a subscription that was never set up, telling the subscriber nothing. */
+  abandon(): void {
+    if (this.#ended) return;
+    this.#ended = true;
+    this.#pending = null;
+    this.onEnd();
+  }
+
+  async #drain(): Promise<void> {
+    if (!this.#ready || this.#draining || this.#ended) return;
+    this.#draining = true;
+    try {
+      while (this.#pending && !this.#ended) {
+        let state = this.#pending;
+        this.#pending = null;
+        if (state.changeSeq <= this.#sent) continue;
+        let holds = await this.holds().catch(() => false);
+        if (this.#ended) return;
+        if (!holds) return this.end();
+        try {
+          await this.deliver({ state: state.state, changeSeq: state.changeSeq, selectionEpoch: state.selectionEpoch });
+        } catch {
+          return this.end();
+        }
+        this.#sent = state.changeSeq;
+      }
+    } finally {
+      this.#draining = false;
+    }
   }
 }
 

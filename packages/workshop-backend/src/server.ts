@@ -3,7 +3,7 @@ import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
-import { HOST_BOARD_READ_DEADLINE_MS, HOST_BOARDS_OFF, hostBoardsEnabled, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
+import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
 import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -714,6 +714,7 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     return desk.selectHostBoard(this.hostBoards.userId, requestKey,
         { workspaceId: run.workspaceId, consoleId: console.consoleId, source: console.source,
           revision: console.revision, entryId, accountId },
+        { target: run.entry.requirement.target, sessionSeq: run.sessionSeq },
         this.#hostBoardGuard(console, entryId));
   }
 
@@ -741,31 +742,26 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     return desk.listHostBoardReads(this.hostBoards.userId);
   }
 
-  // `readAt` is taken before anything is awaited. The operate workspace enforces the deadline and
-  // owns every effect; this backstop answers only if that call itself never returns.
+  // `readAt` is taken before anything is awaited, and one absolute deadline from it covers reaching
+  // the operate workspace and its desk's whole read (which enforces the same deadline itself and
+  // owns every effect).
   async #readHostBoard(console: ConsoleRef, entryId: string, name: string): Promise<HostBoardView> {
     let readAt = Date.now();
     if (!this.hostBoards.enabled()) return { status: "unavailable" };
-    let call = (async (): Promise<HostBoardView> => {
+    return readByDeadline(readAt, async () => {
       let desk = await this.hostBoards.desk(false);
       return await desk.readHostBoard(this.hostBoards.userId,
           { consoleId: console.consoleId, entryId, requirementName: name, source: console.source,
             revision: console.revision, readAt },
           this.#hostBoardGuard(console, entryId, name)) as HostBoardView;
-    })();
-    call.catch(() => {});
-    let backstop = new Promise<HostBoardView>(resolve => setTimeout(() => resolve({ status: "unavailable" }),
-        Math.max(0, readAt + HOST_BOARD_READ_DEADLINE_MS + HOST_BOARD_BACKSTOP_MS - Date.now())));
-    try {
-      return await Promise.race([call, backstop]);
-    } catch {
-      return { status: "unavailable" };
-    }
+    }, { now: () => Date.now(), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)) });
   }
 
-  // Every delivery is checked against the caller's context first: once it no longer holds (the
-  // console moved, was republished, or the entry's target is no longer this one), the subscriber
-  // gets `unknown` once and the subscription ends.
+  // One delivery lane per subscription (HostBoardSelectionRelay): snapshot first, newest state
+  // only, the caller's context re-checked before each delivery, and exactly one `unknown` when it
+  // ends. The selection workspace dropping its reference to `forward` (on its reset, or when the
+  // subscription ends) is observed as `forward`'s disposal, the same signal #openGadgetInternal
+  // uses, so a reset ends the subscription instead of leaving it silently live.
   async #subscribeHostBoardSelection(console: ConsoleRef, entryId: string,
       subscriber: RpcStub<(update: HostBoardSelectionUpdate) => void>): Promise<RpcStub<{}>> {
     this.#requireHostBoards();
@@ -774,37 +770,30 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     let target = run.entry.requirement.target;
     let deliver = subscriber.dup();
     let subscription: { [Symbol.dispose](): void } | undefined;
-    let ended = false;
-    let end = () => {
-      if (ended) return;
-      ended = true;
+    let relay = new HostBoardSelectionRelay(async update => { await deliver(update); }, async () => {
+      let now = await this.#hostBoardRun(console, entryId);
+      return !!now && now.entry.requirement.target === target && this.hostBoards.enabled();
+    }, () => {
       subscription?.[Symbol.dispose]();
       deliver[Symbol.dispose]();
-    };
-    let forward = async ({ state, changeSeq, selectionEpoch }: HostBoardSelectionState) => {
-      if (ended) throw new Error("This subscription has ended.");
-      let now = await this.#hostBoardRun(console, entryId);
-      if (ended) throw new Error("This subscription has ended.");
-      if (!now || now.entry.requirement.target !== target || !this.hostBoards.enabled()) {
-        try {
-          await deliver({ state: "unknown" });
-        } finally {
-          end();
-        }
-        throw new Error("This subscription no longer fits its console.");
-      }
-      try {
-        await deliver({ state, changeSeq, selectionEpoch });
-      } catch (error) {
-        end();
-        throw error;
-      }
-    };
-    let desk = await this.hostBoards.desk(true);
-    subscription = await desk.subscribeHostBoardSelection(this.hostBoards.userId, target, forward) as { [Symbol.dispose](): void };
-    if (ended) subscription[Symbol.dispose]();
+    });
+    let setUp = false;
+    let forward = async (state: HostBoardSelectionState) => { relay.push(state); };
+    (forward as unknown as Disposable)[Symbol.dispose] = () => { if (setUp) relay.end(); };
+    try {
+      let desk = await this.hostBoards.desk(true);
+      let result = await desk.subscribeHostBoardSelection(this.hostBoards.userId, target, forward) as
+          unknown as { snapshot: HostBoardSelectionState; subscription: { [Symbol.dispose](): void } };
+      subscription = result.subscription;
+      setUp = true;
+      if (relay.ended) subscription[Symbol.dispose]();
+      relay.start(result.snapshot);
+    } catch (error) {
+      relay.abandon();
+      throw error;
+    }
     // @ts-expect-error An RpcTarget works in place of a stub, but the type system doesn't know this.
-    return new HostBoardSubscriptionHandle(end);
+    return new HostBoardSubscriptionHandle(() => relay.end());
   }
 
   // The reducer is pure, so it can't know whether a view or screen still belongs to the console a
@@ -929,9 +918,6 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     return this.openWorkspace();
   }
 }
-
-// How long past the read's own deadline the session waits for the operate workspace's answer.
-const HOST_BOARD_BACKSTOP_MS = 1_000;
 
 // The guarded host board handle (OperateSession.getConsoleHostBoard). It holds no target, account or
 // connection: each call re-resolves the caller's context and selection.

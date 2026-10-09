@@ -172,15 +172,20 @@ export class WorkspaceConsoleStore {
     let missing = consoleScreens(parsed).find(screen => !this.storage.canvases.get(screen));
     if (missing) throw new Error(`Console screen ${missing} is not a screen in this workspace`);
     checkConsoleWidgets(this.storage, parsed);
-    if (parsed.hostBoards === undefined) return parsed;
+    // Omitted means keep: editors that predate host boards send no `hostBoards`, and replacing
+    // through them must not delete saved entries. An explicit list (`[]` included) replaces them.
+    if (parsed.hostBoards === undefined) {
+      return current?.hostBoards === undefined ? parsed : { ...parsed, hostBoards: current.hostBoards };
+    }
     return { ...parsed, hostBoards: this.#hostBoards(parsed.hostBoards, current) };
   }
 
-  // Host boards are refused while the switch is off. A new entry gets its id here; an entry naming
-  // an id must be one of this console's (draft or published) with exactly that requirement, so a
-  // requirement never changes under its id and no id is forged.
+  // A new entry gets its id here, and is refused while the switch is off; entries this console
+  // already holds stay editable and publishable then, since they grant nothing while it is off. An
+  // entry naming an id must be one of this console's (draft or published) with exactly that
+  // requirement, so a requirement never changes under its id and no id is forged.
   #hostBoards(entries: HostBoardEntry[], current?: OperateConsole): HostBoardEntry[] {
-    if (entries.length > 0 && !hostBoardsEnabled(this.env)) throw new Error(HOST_BOARDS_OFF);
+    if (entries.some(entry => entry.id === undefined) && !hostBoardsEnabled(this.env)) throw new Error(HOST_BOARDS_OFF);
     let known = new Map<string, HostBoardEntry>();
     for (let entry of [...current?.hostBoards ?? [], ...current?.published?.content.hostBoards ?? []]) {
       if (entry.id !== undefined) known.set(entry.id, entry);
@@ -267,8 +272,12 @@ export class WorkspaceConsoleStore {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
-      // A host-only publication creates no install; it is refused only by the switch.
-      if ((current.hostBoards?.length ?? 0) > 0 && !hostBoardsEnabled(this.env)) throw new Error(HOST_BOARDS_OFF);
+      // A host-only publication creates no install. While the switch is off, only entries already
+      // published may be published again; publishing any other is refused.
+      let published = new Set((current.published?.content.hostBoards ?? []).map(entry => entry.id));
+      if (!hostBoardsEnabled(this.env) && (current.hostBoards ?? []).some(entry => !published.has(entry.id))) {
+        throw new Error(HOST_BOARDS_OFF);
+      }
       let raised = { ...current, revision: String(BigInt(current.revision) + 1n) };
       return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen);
     });
