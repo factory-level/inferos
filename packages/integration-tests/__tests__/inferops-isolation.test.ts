@@ -806,6 +806,8 @@ describe("the InferMind Wiki", () => {
     const requests = requestsBy(wren.person).filter(r => r.path.startsWith("/knowledge/"));
     expect(requests.length).toBeGreaterThan(0);
     expect(requests.every(r => r.workspaceId === MIND)).toBe(true);
+    // The text is InferOps' own `document.text`, asked with her token, not composed in InferOS.
+    expect(requests.map(r => r.path)).toContain(`/knowledge/documents/${DOCUMENTS.handbook.id}/text`);
     expect(requestsBy(wren.person).some(r => r.path.startsWith("/project/"))).toBe(false);
   });
 
