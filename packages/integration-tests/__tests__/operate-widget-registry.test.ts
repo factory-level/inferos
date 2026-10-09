@@ -483,7 +483,7 @@ describe("a console's widget registry", () => {
     await workflow.updateBlueprint(flowBlueprint.id, { updateCode: true });
   });
 
-  it("publishes a widget whose view.json parses, and refuses tools.json until its parser lands", async () => {
+  it("publishes a widget whose view.json parses, and checks its tools.json", async () => {
     const author = await signUp(publicApi, nextUsernames("kindpending")[0]!);
     const workspace = await author.newGadget("widget");
     const watched = await watch(workspace);
@@ -501,6 +501,25 @@ describe("a console's widget registry", () => {
         /cannot be published as a widget: A Widget with view\.json is a view with no code, but this gadget also has client\.js, server\.js\.$/);
     await commit(workspace, watched, gadgetId, { ...widgetFiles("v1"), "view.json": view }, { ...widgetFiles("v1"), "tools.json": "[]" });
     await expect(gadget.createBlueprint("Tools")).rejects.toThrow(
-        /cannot be published as a widget: This gadget's tools\.json is not a valid tool list: callable widgets are not supported yet; if tools\.json is a data file, rename it to publish this gadget\.$/);
+        /cannot be published as a widget: This gadget's tools\.json is not a valid tool list: it declares no tools; if tools\.json is a data file, rename it to publish this gadget\.$/);
+
+    // A valid tools.json publishes, with a UI (combined) or without one (tools-only); nothing
+    // lists or calls its tools yet.
+    const tools = JSON.stringify([{
+      name: "version", description: "The widget's version.", method: "version", effect: "read",
+      input: { type: "object", properties: {} }, output: { type: "string", maxLength: 16 },
+    }]);
+    const combined = { ...widgetFiles("v1"), "tools.json": tools };
+    await commit(workspace, watched, gadgetId, { ...widgetFiles("v1"), "tools.json": "[]" }, combined);
+    const blueprint = await gadget.createBlueprint("Tools");
+    const toolsOnly = { "server.js": widgetFiles("v1")["server.js"]!, "tools.json": tools };
+    await commit(workspace, watched, gadgetId, combined, toolsOnly);
+    await workspace.updateBlueprint(blueprint.id, { updateCode: true });
+
+    // A free-string input is refused at publish.
+    const free = tools.replace('"properties":{}', '"properties":{"q":{"type":"string"}},"additionalProperties":false');
+    await commit(workspace, watched, gadgetId, toolsOnly, { ...toolsOnly, "tools.json": free });
+    await expect(workspace.updateBlueprint(blueprint.id, { updateCode: true })).rejects.toThrow(
+        /This gadget's tools\.json is not a valid tool list: tool "version"'s input\.q is a free string/);
   });
 });

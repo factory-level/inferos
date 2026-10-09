@@ -1,5 +1,6 @@
 import type { WorkspaceKind } from "./api";
 import { BOUND_VIEW_FILE, formatBoundViewProblems, parseBoundViewSpec } from "./bound-view";
+import { RESERVED_TOOL_MODULES, WIDGET_TOOLS_FILE, parseWidgetTools } from "./widget-tools";
 
 // What each workspace kind produces. The kind is deterministic (see `WorkspaceKind`), and this
 // module is what makes its output deterministic too: the rules the builder agent is given, the
@@ -24,7 +25,7 @@ export function isGadgetModule(path: string): boolean {
 export const GADGET_VIEW_FILE = BOUND_VIEW_FILE;
 
 /** The file declaring a callable widget's tools, which its server implements. */
-export const GADGET_TOOLS_FILE = "tools.json";
+export const GADGET_TOOLS_FILE = WIDGET_TOOLS_FILE;
 
 /**
  * Stable identifier for one rule a gadget's files can fail, as `classifyGadgetFiles` reports it:
@@ -196,9 +197,7 @@ export function checkWorkspaceKind(
 }
 
 // `parseBoundViewSpec` as a classifier parser: throws its problems as one line, with the rename
-// hint, since a widget may ship a root view.json that is a data file. The stand-in for the tools
-// parser that has not landed yet refuses every file, so nothing callable can be published before
-// it does; `parseWidgetTools` (widget-tools.ts) replaces parseWidgetToolsPending.
+// hint, since a widget may ship a root view.json that is a data file.
 function parseBoundView(text: string): void {
   let result = parseBoundViewSpec(text);
   if (!result.ok) {
@@ -206,14 +205,10 @@ function parseBoundView(text: string): void {
         "data file, rename it to publish this gadget");
   }
 }
-function parseWidgetToolsPending(): never {
-  throw new Error(`callable widgets are not supported yet; if ${GADGET_TOOLS_FILE} is a data ` +
-      "file, rename it to publish this gadget");
-}
 
 const GADGET_FILE_PARSERS: GadgetFileParsers = {
   view: parseBoundView,
-  tools: parseWidgetToolsPending,
+  tools: parseWidgetTools,
 };
 
 // Whether `text` parses: total, so any throw (or text that could not be read) is a refusal.
@@ -236,7 +231,10 @@ function parseProblem(parse: (text: string) => unknown, text: string | null): st
  *
  * In a widget, a present `view.json` or `tools.json` stands in for `client.js`, and `view.json`
  * for `server.js` too; `tools.json` needs `server.js`, reported as `toolsWithoutServer` in place
- * of `missingServer`. `parsers` defaults to the kernel's; tests inject their own.
+ * of `missingServer`. A widget with `tools.json` is also `invalidTools` when it has a top-level
+ * file the tool runner reserves (`RESERVED_TOOL_MODULES`). `parsers` defaults to the kernel's:
+ * `parseBoundViewSpec` for `view.json` and `parseWidgetTools` for `tools.json`. Tests inject
+ * their own.
  */
 export function classifyGadgetFiles(
     kind: WorkspaceKind, files: ReadonlyMap<string, string | null>,
@@ -282,9 +280,19 @@ export function classifyGadgetFiles(
     }
     let toolsProblem = hasTools
         ? parseProblem(parsers.tools, files.get(GADGET_TOOLS_FILE) ?? null) : null;
-    if (toolsProblem !== null) {
-      report("invalidTools",
-          `This gadget's ${GADGET_TOOLS_FILE} is not a valid tool list: ${toolsProblem}.`);
+    let kernelModules = hasTools ? RESERVED_TOOL_MODULES.filter(path => files.has(path)) : [];
+    if (toolsProblem !== null || kernelModules.length > 0) {
+      let messages: string[] = [];
+      if (toolsProblem !== null) {
+        messages.push(`This gadget's ${GADGET_TOOLS_FILE} is not a valid tool list: ` +
+            `${toolsProblem}; if ${GADGET_TOOLS_FILE} is a data file, rename it to publish this ` +
+            "gadget.");
+      }
+      if (kernelModules.length > 0) {
+        messages.push(`A callable ${label} cannot have ${kernelModules.join(" or ")}: the kernel ` +
+            "reserves those module names for its tool runner.");
+      }
+      report("invalidTools", messages.join(" "));
     }
     if (hasTools && !hasServer) {
       report("toolsWithoutServer", `A ${label}'s ${GADGET_TOOLS_FILE} is served by its ` +
