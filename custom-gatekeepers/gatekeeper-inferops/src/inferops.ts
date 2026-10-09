@@ -278,6 +278,7 @@ function accountClient(
  */
 function accountSource(
   exports: ExportsWithStores, accountId: string, workspaceId: string,
+  options: { redactAccountErrors?: boolean } = {},
 ): CredentialSource<InferOpsAuthority> {
   return new CredentialSource<InferOpsAuthority>({
     account: () => {
@@ -290,6 +291,7 @@ function accountSource(
     isAuthError: error => inferOpsErrorCode(error) === "UNAUTHORIZED",
     expiredMessage: EXPIRED_MESSAGE,
     vendorId: VENDOR_ID,
+    ...options,
   });
 }
 
@@ -411,7 +413,9 @@ function hostBoardAuthority(env: Cloudflare.Env, exports: ExportsWithStores, pro
     return "unavailable";
   }
   if (!endpoint) return "unavailable";
-  return { endpoint, source: accountSource(exports, props.accountId, props.workspaceId),
+  // Redacted: a failed adjudication RPC is logged as a fixed classification, never its error.
+  return { endpoint,
+           source: accountSource(exports, props.accountId, props.workspaceId, { redactAccountErrors: true }),
            workspaceId: props.workspaceId };
 }
 

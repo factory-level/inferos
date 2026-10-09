@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleInferLabLogin } from "../src/inferlab-login.js";
 import type { HostBoardFence, HostBoardRead } from "@gadgets/gatekeeper-kit/host-board";
 import {
-  expired, reconnects, signIns, type AccountProps, type InferLabLogin, type SignInExports,
+  REPORT_SENTINEL, expired, reconnects, signIns, type AccountProps, type InferLabLogin, type SignInExports,
 } from "./worker.js";
 
 const LOGIN_ENV = {
@@ -1103,7 +1103,7 @@ describe("host boards, the kernel-only read of a board binding's fixed target", 
       config.INFERLAB_AUTH_ORIGIN = origin;
     });
 
-    it("logs nothing InferOps said for a 401 whose adjudication RPC fails, and answers provider", async () => {
+    it("logs only fixed classifications for a 401 whose adjudication RPC throws a sentinel error, and answers provider", async () => {
       const { account, before } = await bound("hb-report-fails");
       inferlab.snapshotAnswer = () => Response.json(
         { error: { code: SENTINEL, message: SENTINEL, details: { [SENTINEL]: SENTINEL } } }, { status: 401 });
@@ -1112,11 +1112,21 @@ describe("host boards, the kernel-only read of a board binding's fixed target", 
       const read = await boardOf("hb-report-fails");
 
       expect(read).toEqual({ status: "unavailable", reason: "provider" });
-      expect(logged.join("\n")).toContain("credentials.rejection.report.failed");
       expect(JSON.stringify(read)).not.toContain(SENTINEL);
-      expect(logged.join("\n")).not.toContain(SENTINEL);
-      // Not adjudicated, so not retried and not expired.
+      expect(JSON.stringify(read)).not.toContain(REPORT_SENTINEL);
+      // The only diagnostics: the HTTP client's fixed 401 entry and the source's fixed classification.
+      const serialized = logged.join("\n");
+      expect(serialized).toContain('"event":"credentials.rejection.report.failed"');
+      expect(serialized).toContain('"classification":"account_rpc_failed"');
+      for (const line of logged) {
+        expect(line).toMatch(/"code":"UNAUTHORIZED"|"classification":"account_rpc_failed"/);
+      }
+      for (const raw of [SENTINEL, REPORT_SENTINEL, "Durable Object reset", "credentials.js", "    at ", '"error"', '"stack"']) {
+        expect(serialized, raw).not.toContain(raw);
+      }
+      // Not adjudicated: no retry, no refresh, no expiry notice.
       expect(snapshotCalls()).toHaveLength(1);
+      expect(inferlab.refreshes).toEqual([]);
       expect(expired).not.toContain("hb-report-fails");
       expectOnlySnapshotsSince(before);
     });

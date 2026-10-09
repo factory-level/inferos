@@ -1491,6 +1491,42 @@ describe("CredentialSource", () => {
     }
   });
 
+  it("logs a failed report's error by default, and only a fixed classification when redacted", async () => {
+    const SENTINEL = "PRIVATE_CUSTOMER_SENTINEL";
+    const unreachable = () => {
+      const error = new Error(`account unreachable ${SENTINEL}`);
+      error.stack = `Error: ${SENTINEL}\n    at ${SENTINEL} (worker.js:1:1)`;
+      throw error;
+    };
+    const logged: unknown[][] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { logged.push(args); });
+    try {
+      const rejection = new Error("401");
+      // Ordinary callers are unchanged: the account's error is logged as it always was.
+      const ordinary = source({ reportCredentialsRejected: async () => unreachable() });
+      await expect(ordinary.instance.run(async () => { throw rejection })).rejects.toBe(rejection);
+      expect(logged).toHaveLength(1);
+      expect(JSON.stringify(logged[0])).toContain(SENTINEL);
+      expect(logged[0]![0]).toMatchObject({ event: "credentials.rejection.report.failed" });
+
+      logged.length = 0;
+      const redacted = source({ reportCredentialsRejected: async () => unreachable(), redactAccountErrors: true });
+      await expect(redacted.instance.run(async () => { throw rejection }, { replayable: true })).rejects.toBe(rejection);
+      expect(logged).toHaveLength(1);
+      expect(logged[0]![0]).toMatchObject({
+        event: "credentials.rejection.report.failed", classification: "account_rpc_failed",
+      });
+      const serialized = JSON.stringify(logged);
+      expect(serialized).not.toContain(SENTINEL);
+      expect(serialized).not.toMatch(/stack|account unreachable/);
+      // Handled the same way: not adjudicated, not retried, not dead-marked.
+      expect(redacted.reportCredentialsRejected).toHaveBeenCalledOnce();
+      expect(await redacted.instance.cacheAuthority()).toBe("gen-a");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("refuses a read served under the reserved empty identity, dropping the authority it had", async () => {
     let identity = "id-a";
     const { instance } = source({

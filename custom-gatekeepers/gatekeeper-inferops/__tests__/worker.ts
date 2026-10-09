@@ -82,6 +82,8 @@ export class MockInferOps extends BaseMockInferOps {
 }
 
 const REPORT_FAULT_KEY = "test:failNextReport";
+/** What the failed adjudication RPC's error carries, in its message and its stack. */
+export const REPORT_SENTINEL = "PRIVATE_REPORT_SENTINEL";
 
 /**
  * The production credentials object plus a one-shot failure of the rejection-adjudication RPC, as
@@ -97,7 +99,9 @@ export class InferOpsCredentials extends BaseInferOpsCredentials {
   override async reportCredentialsRejected(identity: string): Promise<RejectionVerdict> {
     if (this.ctx.storage.kv.get<boolean>(REPORT_FAULT_KEY)) {
       this.ctx.storage.kv.delete(REPORT_FAULT_KEY);
-      throw new Error("Durable Object reset because its code was updated.");
+      const error = new Error(`Durable Object reset ${REPORT_SENTINEL}`);
+      error.stack = `Error: ${REPORT_SENTINEL}\n    at ${REPORT_SENTINEL} (credentials.js:1:1)`;
+      throw error;
     }
     return super.reportCredentialsRejected(identity);
   }
