@@ -6,18 +6,50 @@
  * packages/typed-storage/__tests__/index.test.ts. structuredClone on every read/write mimics the
  * serialization boundary of real DO storage, and the iterator-invalidation check mirrors the real
  * kv.list() contract.
+ *
+ * transactionSync rolls back through an undo journal rather than by cloning the whole map, so a
+ * transaction costs O(keys it touches) and seeding n records stays O(n), not O(n^2). Each
+ * transaction records a touched key's prior value (or ABSENT) the first time it writes that key;
+ * a throw restores those, and a success folds the entries into the enclosing transaction's
+ * journal (keeping the outer's earlier ones), so an outer failure still undoes a nested commit.
+ * Saving the prior value by reference is safe because a stored value is a private clone that
+ * nothing mutates: put stores a fresh clone and every read hands out another.
  */
+const ABSENT = Symbol("absent");
+
+type UndoJournal = Map<string, unknown>;
+
 export function makeMockStorage(): DurableObjectStorage {
   let map = new Map<string, any>();
   let currentList: object | undefined;
+  let journal: UndoJournal | undefined;
+
+  let remember = (key: string) => {
+    if (journal !== undefined && !journal.has(key)) {
+      journal.set(key, map.has(key) ? map.get(key) : ABSENT);
+    }
+  };
 
   return <DurableObjectStorage>{
     transactionSync<T>(f: () => T): T {
-      let oldMap = structuredClone(map);
+      let outer = journal;
+      let own: UndoJournal = new Map();
+      journal = own;
       try {
-        return f();
+        let result = f();
+        journal = outer;
+        if (outer !== undefined) {
+          for (let [key, prior] of own) {
+            if (!outer.has(key)) outer.set(key, prior);
+          }
+        }
+        return result;
       } catch (err) {
-        map = oldMap;
+        journal = outer;
+        for (let [key, prior] of own) {
+          if (prior === ABSENT) map.delete(key);
+          else map.set(key, prior);
+        }
         throw err;
       }
     },
@@ -54,9 +86,12 @@ export function makeMockStorage(): DurableObjectStorage {
         currentList = undefined;
       },
       put<T>(key: string, value: T): void {
-        map.set(key, structuredClone(value));
+        let stored = structuredClone(value);
+        remember(key);
+        map.set(key, stored);
       },
       delete(key: string): boolean {
+        remember(key);
         return map.delete(key);
       },
     },
