@@ -47,7 +47,7 @@ The detailed current state lives in [consumer configuration](consumer-configurat
 | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts` | Server enforcement of `CODING_WORKBENCH_ENABLED` and the wrapper's repository allowlist: the dispatch resource kind is refused, and every call of a dispatch binding fails `DISABLED`, while it is off. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | The InferLab sign-in and per-person connect flows that `INFEROPS_AUTH` turns on. |
 | `custom-gatekeepers/gatekeeper-inferops/src/host-board.ts` | Server enforcement of the proposed `INFEROPS_HOST_BOARDS`: `hostBoardsEnabled` is checked on every call of the board facet's kernel-only `readHostBoardSnapshot` (answering `unavailable` / `disabled` with no request) and `connectionIdentity` (null), and needs `INFEROPS_ENABLED` on. |
-| `packages/workshop-backend/src/host-boards.ts` | Kernel enforcement of the proposed `INFEROPS_HOST_BOARDS` (`hostBoardsEnabled`, which also needs `INFEROPS_ENABLED` not off): host-board registration and publication, selection, acquisition and every read are refused while it is off. |
+| `packages/workshop-backend/src/host-boards.ts` | Kernel enforcement of the proposed `INFEROPS_HOST_BOARDS` (`hostBoardsEnabled`, which also needs `INFEROPS_ENABLED` not off): new host-board entries and the first publication of an entry are refused while it is off, and so are selection, acquisition and every read; saved entries are kept, stay editable, and entries already published can be republished, inert until it is on again. |
 | `custom-gatekeepers/gatekeeper-inferops/src/table.ts` | Server enforcement of `INFEROPS_TABLES_ENABLED`: the custom-table resource kind is withheld and refused, and every call of a table binding fails `DISABLED`, while it is off. |
 
 ## Data and Control Flow
@@ -65,7 +65,7 @@ A version 2 file resolves each capability from its default (off), then its profi
 | `AGENT_DEPLOYMENTS` | Unsupported | None. |
 | `CODING_WORKBENCH_ENABLED` | Supported | The gatekeeper refuses dispatch bindings and every call through existing ones, and dispatches only allowlisted repositories; see [local coding workflows](local-coding-workflows.md). |
 | `INFEROPS_TABLES_ENABLED` | Supported | The gatekeeper withholds the custom-table resource kind and its picker, refuses table bindings and every call through existing ones; see [custom tables](inferops-gatekeeper.md#custom-tables). |
-| `INFEROPS_HOST_BOARDS` | Proposed; in the version 2 schema | The Workshop backend refuses host-board registration and publication, selection, acquisition and every read, and the gatekeeper's kernel-only facet methods refuse every call, while it is off (or `INFEROPS_ENABLED` is); see [host boards](operate-mode.md#host-boards). No UI yet. |
+| `INFEROPS_HOST_BOARDS` | Proposed; in the version 2 schema | In the Workshop backend, new host-board entries and the first publication of an entry are refused while it is off, and so are selection, acquisition and every read; saved entries are kept, stay editable, and entries already published can be republished, inert until it is on again; and the gatekeeper's kernel-only facet methods refuse every call, while it is off (or `INFEROPS_ENABLED` is); see [host boards](operate-mode.md#host-boards). No UI yet. |
 
 ### Host boards enforcement inventory
 

@@ -168,15 +168,15 @@ export class WorkspaceConsoleStore {
   // A console may only be saved over screens that exist; one deleted later shows as unavailable.
   // Its widgets are checked now and again at publication, since screens and gadgets change.
   #parse(content: OperateConsoleContent, current?: OperateConsole): OperateConsoleContent {
-    let parsed = parseOperateConsoleContent(content);
+    // Omitted means keep: editors that predate host boards send no `hostBoards`, and replacing
+    // through them must not delete saved entries. An explicit list (`[]` included) replaces them.
+    // The saved entries are merged in before parsing, so the combined registry limit applies.
+    let inherited = content.hostBoards === undefined && current?.hostBoards !== undefined;
+    let parsed = parseOperateConsoleContent(inherited ? { ...content, hostBoards: current!.hostBoards } : content);
     let missing = consoleScreens(parsed).find(screen => !this.storage.canvases.get(screen));
     if (missing) throw new Error(`Console screen ${missing} is not a screen in this workspace`);
     checkConsoleWidgets(this.storage, parsed);
-    // Omitted means keep: editors that predate host boards send no `hostBoards`, and replacing
-    // through them must not delete saved entries. An explicit list (`[]` included) replaces them.
-    if (parsed.hostBoards === undefined) {
-      return current?.hostBoards === undefined ? parsed : { ...parsed, hostBoards: current.hostBoards };
-    }
+    if (parsed.hostBoards === undefined) return parsed;
     return { ...parsed, hostBoards: this.#hostBoards(parsed.hostBoards, current) };
   }
 

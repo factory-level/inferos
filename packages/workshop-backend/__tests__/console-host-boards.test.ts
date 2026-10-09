@@ -57,3 +57,31 @@ describe("host-board entries across the current editors", () => {
     expect(() => store(OFF).publish(fresh.id, fresh.revision)).toThrow(/turned off/);
   });
 });
+
+describe("the combined registry limit with preserved host boards", () => {
+  // Unbound widget installs, as `consoleWidgetRefusal` admits them.
+  function withWidgets(n: number) {
+    let t = setup();
+    let durableStorage = (t.store(ON) as unknown as { storage: ReturnType<typeof makeOverseerStorage> }).storage;
+    let widgets = Array.from({ length: n }, (_, i) => {
+      let id = 100 + i;
+      durableStorage.gadgets.put({ type: "gadget", id, title: `W${i}`, created: new Date(0), bindingName: `W${i}`,
+        bindings: {}, commitId: "c0", installedFrom: { blueprintId: "bp", version: 1, kind: "widget" } } as never);
+      return { gadgetId: id, blueprintId: "bp", version: 1, label: `W${i}`, state: "resettable" as const };
+    });
+    return { ...t, widgets };
+  }
+
+  for (let env of [ON, OFF]) {
+    it(`refuses a saved board plus 16 widgets, and keeps it with 15 (switch ${env.INFEROPS_HOST_BOARDS === "true" ? "on" : "off, published"})`, () => {
+      let { store, views, saved, widgets } = withWidgets(16);
+      let base = env === ON ? saved : store(ON).publish(saved.id, saved.revision);
+      let before = store(env).get(base.id, "draft");
+      expect(() => store(env).replace(base.id, base.revision, { ...builderPayload(views), widgets })).toThrow(/at most 16/);
+      expect(store(env).get(base.id, "draft")).toEqual(before);
+      let kept = store(env).replace(base.id, base.revision, { ...builderPayload(views), widgets: widgets.slice(0, 15) });
+      expect(kept.widgets).toHaveLength(15);
+      expect(kept.hostBoards).toEqual(saved.hostBoards);
+    });
+  }
+});

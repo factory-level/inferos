@@ -651,6 +651,8 @@ describe("the selection delivery relay", () => {
     expect(t.ends()).toBe(1);
   });
 
+  // Proves the native RPC signal only: a reset drops the workspace's reference to the subscriber
+  // stub, which its holder sees as disposal. The browser subscription end to end is not covered.
   it("is told when the selection workspace resets: it drops the subscriber, which is disposed", async () => {
     let stub = env.TEST_OVERSEER.getByName("host-board-reset");
     await runInDurableObject(stub, async (instance: any) => {
