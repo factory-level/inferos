@@ -1124,6 +1124,30 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return { seq: record.seq, state };
   }
 
+  // The live subscribeOperateSession() subscribers, which noticeConsoleRevision() also reaches.
+  #operateSubscribers = new Set<{ update(update: OperateSessionUpdate): void }>();
+
+  /**
+   * Called by a console's workspace when it publishes or deletes console `consoleId`: if the page
+   * has that console open at a revision older than `revision`, or `revision` is null (deleted),
+   * every subscriber is sent the unchanged snapshot with `consoleRevision` set (see
+   * OperateSessionUpdate). Nothing is logged or stored, and nothing else is sent.
+   *
+   * Revisions are decimal strings that only rise, compared as numbers: two publishes fan out
+   * independently, so an earlier one's notice may arrive after the session reopened at the later
+   * revision, and must not supersede it. (A run from before revisions were recorded has "", read
+   * as 0.)
+   */
+  async noticeConsoleRevision(workspaceId: string, consoleId: string, revision: string | null): Promise<void> {
+    let current = this.#operatePage();
+    let run = current.state.console;
+    if (run?.workspaceId !== workspaceId || run.consoleId !== consoleId) return;
+    if (revision !== null && BigInt(run.revision || "0") >= BigInt(revision)) return;
+    for (let subscriber of this.#operateSubscribers) {
+      subscriber.update({ ...current, consoleRevision: { workspaceId, consoleId, revision } });
+    }
+  }
+
   /** See OperateSession.subscribe(). */
   async subscribeOperateSession(subscriber: RpcStub<(update: OperateSessionUpdate) => void>)
       : Promise<RpcStub<{}>> {
@@ -1139,12 +1163,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (disposed) return;
       disposed = true;
       page.unsubscribe(pageSubscriber);
+      this.#operateSubscribers.delete(pageSubscriber);
       subscriber[Symbol.dispose]();
     };
 
     // Snapshot and subscribe with no await between, so no event can fall in the gap.
     subscriber(this.#operatePage()).catch(unsubscribe);
     page.subscribe(pageSubscriber);
+    this.#operateSubscribers.add(pageSubscriber);
 
     return new RpcStub<{}>({
       [Symbol.dispose]() {
