@@ -84,6 +84,12 @@ const EXPECTED: Record<string, ExpectedArea> = {
     // it signs in as the same account the dev frontend auto-logs in to.
     external: ["INFEROS_ADMIN_SESSION", "VITE_BACKEND_HOST", "VITE_DEV_PASSWORD", "VITE_DEV_USERNAME"],
   },
+  // `vitest.config.ts` passes an opt-in test-only delay (account.test.ts's flake reproduction) to
+  // the workerd suite. It is meant for a direct `pnpm test:run`; the cached `test` task strips it,
+  // which keeps it off there, and it shapes no build output.
+  "custom-gatekeepers/gatekeeper-inferops": {
+    external: ["GK_REPRO_DELAY_MS"],
+  },
   // Read by the Bun companion at runtime, never during a cached build.
   "assistant-plugins/openai": {
     external: ["INFEROS_CONFIG_DIR", "INFEROS_WORKSHOP_ORIGIN", "OPENAI_ASSISTANT_PLUGIN_SECRET"],
