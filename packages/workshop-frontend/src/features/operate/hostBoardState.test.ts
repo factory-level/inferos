@@ -266,14 +266,14 @@ describe('expiry', () => {
     expect(view()).toEqual({ status: 'unavailable' })
   })
 
-  it.each(['visibility', 'focus/pageshow/reconnect', 'render'] as const)(
+  it.each(['visibility', 'focus/pageshow/online', 'render'] as const)(
     'catches a suppressed expiry timer on %s', (trigger) => {
       mountSelected()
       answer(ok())
       dispatch({ type: 'visibility', visible: false })
       advance(HOST_BOARD_EXPIRY_MS)
       if (trigger === 'visibility') dispatch({ type: 'visibility', visible: true })
-      if (trigger === 'focus/pageshow/reconnect') dispatch({ type: 'resume' })
+      if (trigger === 'focus/pageshow/online') dispatch({ type: 'resume' })
       expect(view().status).not.toBe('ok')
     })
 

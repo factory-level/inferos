@@ -196,7 +196,7 @@ export const OperateSessionPage = () => {
         consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target), onOpenHostBoard: openHostBoard } : undefined} />
     </div>
     {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
-    {!configuring && !tools && run && operate.session && shownHostBoard?.id !== undefined && <ConsoleHostBoard key={`${run.consoleId}/${run.revision}/${shownHostBoard.id}`}
+    {!configuring && !tools && run && operate.session && shownHostBoard?.id !== undefined && <ConsoleHostBoard key={`${run.consoleId}/${run.source}/${run.revision}/${shownHostBoard.id}`}
       session={operate.session.stub} console={{ consoleId: run.consoleId, source: run.source, revision: run.revision }}
       entry={{ ...shownHostBoard, id: shownHostBoard.id }} onClose={() => setHostBoardTarget(null)} />}
     {publishing && <ConsolePublishDialog entry={publishing} onClose={() => { setPublishing(null); setSavedEntry(null) }} />}
