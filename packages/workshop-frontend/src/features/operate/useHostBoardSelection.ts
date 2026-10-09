@@ -43,6 +43,9 @@ export const useHostBoardSelection = (session: RpcStub<OperateSession>, target: 
       intent.entryId, intent.accountId, requestKey)
       .then(answer => answer.status === 'selected' ? 'selected' as const : 'settled' as const, () => 'lost' as const)
       .then(outcome => apply({ type: 'completed', contextToken: token, requestKey, outcome }))
+      // A throw from the completion (the reducer or `onConnected`) is dropped, never rethrown, so
+      // it cannot reach the global `unhandledrejection` reporter.
+      .catch(() => {})
   }
 
   useEffect(() => {

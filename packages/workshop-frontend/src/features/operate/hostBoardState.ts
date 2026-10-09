@@ -25,6 +25,9 @@ export type HostBoardContext = { token: number; target: HostBoardTarget }
 type AcceptedBoard = {
   board: BoardSnapshot
   readAt: string
+  /** The accepted read's identity: its token (new for every read) and the generation it was sent in. */
+  readToken: number
+  generation: number
   /** The read's start mapped to each clock; fixed once at accept. */
   readAtMono: number
   readAtWall: number
@@ -103,9 +106,18 @@ export type HostBoardEvent =
 /** The reducer's result. */
 export type HostBoardStep = { state: HostBoardState; commands: HostBoardCommand[] }
 
+/**
+ * The identity and lifetime of the read an `ok` view shows. `token` is new for every read, so a
+ * refresh at the same generation still carries a new one; `generation` is the invalidation
+ * generation the read was sent in. The deadlines are the ones its expiry is scheduled from, fixed
+ * at accept: the board is expired once either clock reaches its deadline (or the wall clock moves
+ * back), so a consumer can run its own expiry timer.
+ */
+export type HostBoardReadIdentity = { token: number; generation: number; deadlineMono: number; deadlineWall: number }
+
 /** What `HostBoardView` renders. */
 export type HostBoardViewState =
-  | { status: 'ok'; board: BoardSnapshot; readAt: string }
+  | { status: 'ok'; board: BoardSnapshot; readAt: string; read: HostBoardReadIdentity }
   | { status: 'loading' }
   | { status: 'not-connected' }
   | { status: 'unavailable' }
@@ -149,8 +161,10 @@ const isOverdue = (accepted: AcceptedBoard, at: HostBoardClock) =>
 export const hostBoardView = (state: HostBoardState, at: HostBoardClock): HostBoardViewState => {
   if (!state.context || state.handle === 'invalid') return { status: 'cleared' }
   if (!state.selection) return { status: 'unknown' }
-  if (state.accepted && !isExpired(state.accepted, at)) {
-    return { status: 'ok', board: state.accepted.board, readAt: state.accepted.readAt }
+  const accepted = state.accepted
+  if (accepted && !isExpired(accepted, at)) {
+    const { readToken: token, generation, deadlineMono, deadlineWall } = accepted
+    return { status: 'ok', board: accepted.board, readAt: accepted.readAt, read: { token, generation, deadlineMono, deadlineWall } }
   }
   if (state.selection.state === 'none') return { status: 'not-connected' }
   // A selection is being made: nothing is read until it commits.
@@ -252,6 +266,8 @@ const accept = (d: Draft, read: Extract<HostBoardRead, { status: 'ok' }>, sent: 
   const accepted: AcceptedBoard = {
     board: read.board,
     readAt: read.readAt,
+    readToken: sent.token,
+    generation: sent.generation,
     readAtMono,
     readAtWall,
     deadlineMono: readAtMono + HOST_BOARD_EXPIRY_MS,

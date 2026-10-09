@@ -20,6 +20,7 @@ const board = (title = 'Fix the login'): BoardSnapshot => ({
   ],
 })
 const READ_AT = '2026-10-08T12:00:00.000Z'
+const READ = { token: 1, generation: 1, deadlineMono: 61_000, deadlineWall: Date.parse(READ_AT) + 60_000 }
 
 let container: HTMLDivElement
 let root: Root
@@ -36,7 +37,7 @@ const region = () => container.querySelector('section[aria-label="Team board"]')
 
 describe('HostBoardView', () => {
   it('renders the board as columns and cards with the read time', () => {
-    render({ status: 'ok', board: board(), readAt: READ_AT })
+    render({ status: 'ok', board: board(), readAt: READ_AT, read: READ })
     const columns = [...region().querySelectorAll('section')]
     expect(columns.map(c => c.getAttribute('aria-label'))).toEqual(['Todo', 'Shipped'])
     expect(columns[0].querySelector('h3')?.textContent).toBe('TodoNot started · 2')
@@ -87,7 +88,7 @@ describe('HostBoardView', () => {
     hostile.project.name = HOSTILE
     hostile.columns[0].label = HOSTILE
     hostile.columns[0].issues[0].identifier = HOSTILE
-    render({ status: 'ok', board: hostile, readAt: READ_AT })
+    render({ status: 'ok', board: hostile, readAt: READ_AT, read: READ })
     expect(container.querySelector('img')).toBeNull()
     expect(region().textContent).toContain(HOSTILE)
   })
@@ -96,7 +97,7 @@ describe('HostBoardView', () => {
     const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map(level => vi.spyOn(console, level))
     const before = window.location.href
     localStorage.clear()
-    render({ status: 'ok', board: board('Secret roadmap item'), readAt: READ_AT })
+    render({ status: 'ok', board: board('Secret roadmap item'), readAt: READ_AT, read: READ })
     render({ status: 'cleared' })
     for (const spy of spies) {
       expect(JSON.stringify(spy.mock.calls)).not.toContain('Secret roadmap item')

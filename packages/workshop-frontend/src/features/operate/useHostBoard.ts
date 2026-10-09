@@ -38,15 +38,31 @@ const isGuardRefusal = (caught: unknown) =>
   getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.consoleChanged
   || (caught instanceof Error && /is not open in your operate session|has no requirement/.test(caught.message))
 
+/** Options for {@link useHostBoard}. */
+export type HostBoardOptions = {
+  /**
+   * Called with the read's token where each read is issued, before its answer can arrive, so a
+   * caller can tag the read (for example with its own epoch) and match the `ok` view's
+   * `read.token` against it later. It sees no board data.
+   */
+  onRequest?: (readToken: number) => void
+}
+
 /**
  * One host board of the open console revision, read through the operator's own selection. It
  * acquires the kernel's handle for `target`, subscribes to its selection, and runs the host-board
  * state machine's reads and timers; the handle and subscription are disposed when `target` changes
  * or the view unmounts. The board is held only in memory.
+ *
+ * Every promise chain here ends in a terminal catch that never rethrows, so a throw inside one of
+ * its handlers (from the reducer, say) is dropped rather than reaching the global
+ * `unhandledrejection` reporter with its raw reason.
  */
-export const useHostBoard = (session: RpcStub<OperateSession> | null, target: HostBoardTarget, requirement: string)
+export const useHostBoard = (session: RpcStub<OperateSession> | null, target: HostBoardTarget, requirement: string, options?: HostBoardOptions)
   : { view: HostBoardViewState; dispatch: (event: HostBoardInput) => void } => {
   const machine = useRef(initialHostBoardState(document.visibilityState === 'visible'))
+  const onRequest = useRef(options?.onRequest)
+  onRequest.current = options?.onRequest
   const run = useRef<(event: HostBoardInput) => void>(() => {})
   // Context tokens only rise, across unmount-time resets of the machine's context too.
   const contexts = useRef(0)
@@ -74,6 +90,7 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
         if (command.type === 'read') {
           if (!handle) continue
           const { token } = command
+          onRequest.current?.(token)
           handle.readRequirement(requirement)
             .then(read => apply({ type: 'read-answer', token, read }))
             // Anything but a recognized guard refusal is an ordinary failure: the board is cleared
@@ -83,6 +100,7 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
               if (isGuardRefusal(caught)) handleInvalid = true
               apply({ type: 'read-failed', token, failure: isGuardRefusal(caught) ? 'handle-invalid' : 'error' })
             })
+            .catch(() => {})
         } else if (command.type === 'set-timer') {
           clearTimeout(timers.get(command.timer))
           const { timer } = command
@@ -128,7 +146,7 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
         if (id !== subscriptions) return
         if (isGuardRefusal(caught)) { handleInvalid = true; apply({ type: 'handle-invalidated' }) }
         else ended()
-      })
+      }).catch(() => {})
     }
     subscribe()
 
