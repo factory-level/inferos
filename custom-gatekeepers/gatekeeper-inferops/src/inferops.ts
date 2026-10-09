@@ -45,6 +45,11 @@
 //   matches the workspace slug only). Personal columns are projected out (table.ts). A connected
 //   person's own sign-in or the demo mock only: the stopgap connection never serves a table.
 //   `addObserver` refuses every collaborator.
+// - Host boards (host-board.ts) are a kernel-only read of a board binding's fixed target:
+//   `readHostBoardSnapshot` and `connectionIdentity` on the board facet itself, never on a session
+//   or in the agent types, so only the overseer, which alone holds facet stubs, can call them. Off
+//   unless `INFEROPS_HOST_BOARDS` is on, a connected person only, fenced on the attempt that
+//   answered, and not an observation: the kernel owns its audit.
 // - Every returned read is authorized as an observation. Every write is checked against the
 //   simulated board, recorded with the exact request it will send and that request's fingerprint
 //   (actions.ts), and submitted as an action; none is auto-approvable. Until it is decided, reads
@@ -94,9 +99,15 @@ import {
   BOARD_WRITES, CheckRefused, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
 } from "./apply-attempts";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, openHttpInferOpsClient, tableNotFound, type InferOpsAuthority,
-  type InferOpsEndpoint,
+  WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, openHttpInferOpsClient, tableNotFound,
+  type BoardSnapshotAnswer, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
+import type {
+  HostBoardConnectionFence, HostBoardFence, HostBoardRead, HostBoardReader,
+} from "@gadgets/gatekeeper-kit/host-board";
+import {
+  HOST_BOARD_NOT_CONNECTED, HOST_BOARD_STALE, hostBoardRef, hostBoardsEnabled, unavailable,
+} from "./host-board";
 import { MockInferOps, openInferOpsClient } from "./mock-inferops";
 import { assertInferOpsEnabled, whileInferOpsEnabled } from "./enablement";
 import {
@@ -230,18 +241,7 @@ function accountClient(
   exports: ExportsWithStores, endpoint: InferOpsEndpoint, accountId: string, workspaceId: string,
   options: { fenceSuccess?: boolean } = {},
 ): InferOpsClient {
-  const source = new CredentialSource<InferOpsAuthority>({
-    account: () => {
-      const store = credentialsOf(exports, accountId);
-      return {
-        getCredentials: () => store.getCredentials(workspaceId),
-        reportCredentialsRejected: identity => store.reportCredentialsRejected(identity),
-      };
-    },
-    isAuthError: error => inferOpsErrorCode(error) === "UNAUTHORIZED",
-    expiredMessage: EXPIRED_MESSAGE,
-    vendorId: VENDOR_ID,
-  });
+  const source = accountSource(exports, accountId, workspaceId);
   return openHttpInferOpsClient({
     ...endpoint,
     async authorize(operation) {
@@ -269,6 +269,27 @@ function accountClient(
         throw error;
       }
     },
+  });
+}
+
+/**
+ * The connected person's authority in `workspaceId` (one of their own), fetched per operation from
+ * the account's `InferOpsCredentials` object; a token InferOps rejects is adjudicated there.
+ */
+function accountSource(
+  exports: ExportsWithStores, accountId: string, workspaceId: string,
+): CredentialSource<InferOpsAuthority> {
+  return new CredentialSource<InferOpsAuthority>({
+    account: () => {
+      const store = credentialsOf(exports, accountId);
+      return {
+        getCredentials: () => store.getCredentials(workspaceId),
+        reportCredentialsRejected: identity => store.reportCredentialsRejected(identity),
+      };
+    },
+    isAuthError: error => inferOpsErrorCode(error) === "UNAUTHORIZED",
+    expiredMessage: EXPIRED_MESSAGE,
+    vendorId: VENDOR_ID,
   });
 }
 
@@ -368,6 +389,81 @@ function tableClientFor(
     // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
     return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
   });
+}
+
+/**
+ * Who a host-board read may run as, or null: only a connected person, against the configured API,
+ * in the workspace the binding resolved. The demo host, the stopgap connection and an account
+ * without an identity never back one; there is no fallback to any of them.
+ */
+function hostBoardAuthority(env: Cloudflare.Env, exports: ExportsWithStores, props: ProjectGatekeeperProps):
+    { endpoint: InferOpsEndpoint; source: CredentialSource<InferOpsAuthority>; workspaceId: string } | null {
+  if (!props.connected || props.host === DEMO_HOST || !props.workspaceId) return null;
+  const endpoint = inferOpsApiEndpoint(env);
+  if (!endpoint) return null;
+  return { endpoint, source: accountSource(exports, props.accountId, props.workspaceId),
+           workspaceId: props.workspaceId };
+}
+
+/**
+ * The kernel-only read of a board binding's fixed target (`HostBoardReader`, host-board.ts): one
+ * `project.board_snapshot` request, built from the props alone, as the connected person. The read
+ * of the attempt that actually answered (the retry, after a token InferOps rejected was healed) is
+ * the fence; once the answer is in, the account must still hold exactly that connection
+ * (`assertConnectionUnchanged`), or the answer is discarded as `stale`. Never throws, never
+ * observes, and never falls back to `project.board`, the project list, demo data or another
+ * account. A snapshot whose scope or project is not the binding's is a provider failure.
+ */
+async function readHostBoard(env: Cloudflare.Env, exports: ExportsWithStores,
+                             props: ProjectGatekeeperProps): Promise<HostBoardRead> {
+  if (!hostBoardsEnabled(env)) return unavailable("disabled");
+  const ref = hostBoardRef(props.host, props.projectKey);
+  if (ref === null) return unavailable("invalid-target");
+  const authority = hostBoardAuthority(env, exports, props);
+  if (!authority) return HOST_BOARD_NOT_CONNECTED;
+  const { endpoint, source, workspaceId } = authority;
+  let sent: CredentialRead | undefined;
+  let answer: BoardSnapshotAnswer;
+  try {
+    answer = await source.run(async ({ token }, read) => {
+      sent = read;
+      return fetchBoardSnapshot(endpoint.baseUrl, token, ref);
+    }, { replayable: true });
+  } catch (error) {
+    if (isCredentialsExpired(error)) return HOST_BOARD_NOT_CONNECTED;
+    if (isCredentialsChanged(error)) return HOST_BOARD_STALE;
+    // A rejection the account could not adjudicate, or a membership the account no longer holds:
+    // nothing of the cause is passed on.
+    return unavailable("provider");
+  }
+  try {
+    await assertConnectionUnchanged(source, sent!);
+  } catch {
+    return HOST_BOARD_STALE;
+  }
+  if (answer.kind === "refused") return unavailable(answer.reason);
+  const { scope, snapshot } = answer;
+  if (scope.workspaceId !== workspaceId.toLowerCase() || snapshot.project.identifier !== props.projectKey) {
+    return unavailable("provider");
+  }
+  return {
+    status: "ok", scope, snapshot,
+    fence: { accountId: props.accountId, identity: sent!.identity, generation: sent!.generation },
+  };
+}
+
+/** The current fence of a board binding's connection (`HostBoardConnectionFence`), or null. */
+async function hostBoardFence(env: Cloudflare.Env, exports: ExportsWithStores,
+                              props: ProjectGatekeeperProps): Promise<HostBoardFence | null> {
+  if (!hostBoardsEnabled(env)) return null;
+  const authority = hostBoardAuthority(env, exports, props);
+  if (!authority) return null;
+  try {
+    const { identity, generation } = await authority.source.read();
+    return { accountId: props.accountId, identity, generation };
+  } catch {
+    return null;
+  }
 }
 
 /** The resource kinds offered now: coding dispatch and custom tables only while each is on. */
@@ -1072,7 +1168,7 @@ class ProjectBinding extends ActionBinding<ProjectGatekeeperProps> {
 @validateRpc()
 export class InferOpsProjectGatekeeper
     extends DurableObject<Cloudflare.Env, ProjectGatekeeperProps>
-    implements Gatekeeper<InferOpsProjectSession> {
+    implements Gatekeeper<InferOpsProjectSession>, HostBoardReader, HostBoardConnectionFence {
   #binding(): ProjectBinding {
     const { accountId, connected, host, workspaceId } = this.ctx.props;
     const account = { accountId, connected };
@@ -1130,6 +1226,21 @@ export class InferOpsProjectGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsProjectSession> {
     return new ProjectSessionImpl(this.#binding(), approvalQueue.dup());
+  }
+
+  /**
+   * Kernel-only (`HostBoardReader`): the binding's own board as a bounded snapshot, with its scope
+   * and the fence of the attempt that answered. A facet method rather than a session method, so
+   * only the facet's holder, the overseer, can call it: sessions, agents and widgets hold
+   * `ProjectSessionImpl`, and the agent types do not name it. Off unless `INFEROPS_HOST_BOARDS`.
+   */
+  async readHostBoardSnapshot(): Promise<HostBoardRead> {
+    return readHostBoard(this.env, this.ctx.exports, this.ctx.props);
+  }
+
+  /** Kernel-only (`HostBoardConnectionFence`): the binding's connection fence, read now. */
+  async connectionIdentity(): Promise<HostBoardFence | null> {
+    return hostBoardFence(this.env, this.ctx.exports, this.ctx.props);
   }
 
   /**

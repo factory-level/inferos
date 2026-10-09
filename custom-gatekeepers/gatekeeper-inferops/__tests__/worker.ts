@@ -429,6 +429,26 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return this.#bound(name).describe();
   }
 
+  /** The kernel-only host-board read of a binding `bindAccount` made under `name`, as the overseer calls it. */
+  async boundHostBoard(name: string) {
+    return this.#bound(name).readHostBoardSnapshot();
+  }
+
+  /** The kernel-only connection fence of a binding `bindAccount` made under `name`. */
+  async boundHostFence(name: string) {
+    return this.#bound(name).connectionIdentity();
+  }
+
+  /** The kernel-only host-board read of a board binding with these props. */
+  async hostBoard(props: BindingProps) {
+    return this.#gatekeeper(props).readHostBoardSnapshot();
+  }
+
+  /** The kernel-only connection fence of a board binding with these props. */
+  async hostFence(props: BindingProps) {
+    return this.#gatekeeper(props).connectionIdentity();
+  }
+
   /** A session over a binding `bindAccount` made under `name`. */
   async startBoundSession(name: string): Promise<InferOpsProjectSession> {
     return this.#bound(name).startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);

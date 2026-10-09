@@ -131,6 +131,7 @@
     { "name": "INFEROPS_ENABLED", "kind": "var", "purpose": "Capability switch for the whole integration, checked on every call.", "default": "Unset counts as on." },
     { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
     { "name": "INFEROPS_TABLES_ENABLED", "kind": "var", "purpose": "Capability switch for object/table, checked on every call.", "default": "Unset counts as off." },
+    { "name": "INFEROPS_HOST_BOARDS", "kind": "var", "purpose": "Proposed switch for the board facet's kernel-only host-board read (project.board_snapshot), checked on every call. Adds no resource kind.", "default": "Unset counts as off." },
     { "name": "CODING_WORKBENCH_REPOS", "kind": "var", "purpose": "Comma-separated InferOps repository ids a dispatch may target.", "default": "Unset allows no repository." }
   ],
   "compatibility": {
