@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { deserialize, serialize } from "capnweb";
 import { createTypedStorage } from "@gadgets/typed-storage";
+import { writeBlob, writeTree, type TreeEntry } from "isomorphic-git";
 import {
-  GITDIR, GitStore, blobOid, commitIdentityForAuthor, gitObjectsCollection, makeGitObjectsFs,
-  threeWayMerge,
+  BlobTextError, GITDIR, GitStore, blobOid, commitIdentityForAuthor, gitObjectsCollection,
+  makeGitObjectsFs, threeWayMerge,
 } from "../src/git-store";
 import { makeMockStorage } from "./mock-storage";
 import { decodeLooseObject, encodeLooseObject, parseGitCommitRefs, parseGitTree }
@@ -169,6 +170,70 @@ describe("GitStore", () => {
     let collision = new Map([["a", "file"], ["a/b", "dir entry"]]);
     await expect(store.writeFilesAsCommit(collision, options))
         .rejects.toThrow("conflicting file paths");
+  });
+});
+
+// Commits `files` (path -> raw bytes, one level of directories) as written by isomorphic-git,
+// since writeFilesAsCommit only takes text.
+async function commitBytes(files: Record<string, Uint8Array>) {
+  let objects = makeObjects();
+  let store = new GitStore(objects);
+  let fs = makeGitObjectsFs(objects);
+  let dirs = new Map<string, TreeEntry[]>();
+  let root: TreeEntry[] = [];
+  for (let [path, blob] of Object.entries(files)) {
+    let oid = await writeBlob({ fs, gitdir: GITDIR, blob });
+    let [dir, name] = path.includes("/") ? path.split("/") : [undefined, path];
+    let entry: TreeEntry = { mode: "100644", path: name!, oid, type: "blob" };
+    if (dir === undefined) root.push(entry);
+    else dirs.set(dir, [...dirs.get(dir) ?? [], entry]);
+  }
+  for (let [dir, tree] of dirs) {
+    root.push({ mode: "040000", path: dir, oid: await writeTree({ fs, gitdir: GITDIR, tree }),
+      type: "tree" });
+  }
+  let tree = await writeTree({ fs, gitdir: GITDIR, tree: root });
+  let oid = await store.writeCommitForTree(tree,
+      { parents: [], author: ALICE, message: "bytes", timestamp: new Date(1700000000_000) });
+  return { store, oid };
+}
+
+const utf8 = (text: string) => new TextEncoder().encode(text);
+
+describe("readCommitBlob", () => {
+  it("round-trips valid UTF-8, as bytes and as text", async () => {
+    let text = "{\"title\": \"Caf\u00e9 \u2713 \ud83d\ude00\"}\n";
+    let { store, oid } = await commitBytes({ "view.json": utf8(text), "lib/a.txt": utf8("a") });
+    expect(await store.readCommitBlob(oid, "view.json", "text")).toBe(text);
+    expect(await store.readCommitBlob(oid, "view.json")).toEqual(utf8(text));
+    expect(await store.readCommitBlob(oid, "lib/a.txt", "text")).toBe("a");
+  });
+
+  it("returns null for a path the commit has no file at", async () => {
+    let { store, oid } = await commitBytes({ "lib/a.txt": utf8("a") });
+    expect(await store.readCommitBlob(oid, "view.json")).toBeNull();
+    expect(await store.readCommitBlob(oid, "lib", "text")).toBeNull();
+    expect(await store.readCommitBlob(oid, "lib/b.txt")).toBeNull();
+    expect(await store.readCommitBlob(oid, "lib/a.txt/c")).toBeNull();
+  });
+
+  it("refuses invalid UTF-8 as text, which readCommitFiles replaces, but returns its bytes",
+      async () => {
+    let bytes = new Uint8Array([0x7b, 0xff, 0xfe, 0x7d]);
+    let { store, oid } = await commitBytes({ "view.json": bytes });
+    await expect(store.readCommitBlob(oid, "view.json", "text"))
+      .rejects.toThrow(new BlobTextError("view.json is not valid UTF-8"));
+    expect(await store.readCommitBlob(oid, "view.json")).toEqual(bytes);
+    expect((await store.readCommitFiles(oid)).get("view.json")).toBe("{\ufffd\ufffd}");
+  });
+
+  it("refuses a leading byte order mark as text", async () => {
+    let { store, oid } = await commitBytes(
+        { "tools.json": new Uint8Array([0xef, 0xbb, 0xbf, ...utf8("[]")]) });
+    await expect(store.readCommitBlob(oid, "tools.json", "text"))
+      .rejects.toThrow(new BlobTextError("tools.json starts with a byte order mark"));
+    await expect(store.readCommitBlob(oid, "tools.json", "text"))
+      .rejects.toBeInstanceOf(BlobTextError);
   });
 });
 

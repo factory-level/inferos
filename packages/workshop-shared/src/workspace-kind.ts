@@ -11,12 +11,60 @@ export const GADGET_UI_FILE = "client.js";
 /** The file holding a gadget's server (its Durable Object class). */
 export const GADGET_SERVER_FILE = "server.js";
 
+/** The file holding a view-only widget's bound view: a declarative spec with no code. */
+export const GADGET_VIEW_FILE = "view.json";
+
+/** The file declaring a callable widget's tools, which its server implements. */
+export const GADGET_TOOLS_FILE = "tools.json";
+
+/**
+ * Stable identifier for one rule a gadget's files can fail, as `classifyGadgetFiles` reports it:
+ * - `missingUi`: an app, or a widget with no view or tools, has no `client.js`;
+ * - `missingServer`: a workflow, or a widget with no view or tools, has no `server.js`;
+ * - `unexpectedUi`: a workflow has `client.js`;
+ * - `mixedView`: a widget has `view.json` together with any `.js` file or `tools.json`;
+ * - `unexpectedView` / `unexpectedTools`: an app or workflow has `view.json` / `tools.json`;
+ * - `invalidView` / `invalidTools`: a widget's `view.json` / `tools.json` does not parse;
+ * - `toolsWithoutServer`: a widget has `tools.json` but no `server.js`.
+ */
+export type GadgetFileViolationCode =
+  | "missingUi" | "missingServer" | "unexpectedUi" | "mixedView" | "unexpectedView"
+  | "invalidView" | "invalidTools" | "toolsWithoutServer" | "unexpectedTools";
+
 /** One way a gadget's files fail to fit its workspace's kind. */
 export type WorkspaceKindViolation = {
   /** Stable identifier for the rule that failed. */
-  code: "missingUi" | "missingServer" | "unexpectedUi";
+  code: GadgetFileViolationCode;
   /** One sentence for the person or the agent, naming the file and the kind. */
   message: string;
+};
+
+/**
+ * What a gadget's files make when they fit its kind: an `app`, a `workflow`, or one of the widget
+ * classes. A `visualWidget` has `client.js` and `server.js`; a `callableTools` widget has
+ * `server.js` and `tools.json` with no UI, and a `callableCombined` one has all three; a `viewOnly`
+ * widget has `view.json` and no code at all.
+ */
+export type GadgetFileClass =
+  | "app" | "workflow" | "visualWidget" | "callableTools" | "callableCombined" | "viewOnly";
+
+/** `classifyGadgetFiles`' result: the class when nothing failed, and every violation. */
+export type GadgetFileClassification = {
+  /** What the files make, or `null` when any rule failed. */
+  class: GadgetFileClass | null;
+  /** Every rule that failed, in a fixed order; empty when the files fit the kind. */
+  violations: WorkspaceKindViolation[];
+};
+
+/**
+ * The parsers that decide whether a widget's `view.json` and `tools.json` are valid. Each takes the
+ * file's text and throws when it does not parse; what it returns is ignored.
+ */
+export type GadgetFileParsers = {
+  /** Parses `view.json`. */
+  view(text: string): unknown;
+  /** Parses `tools.json`. */
+  tools(text: string): unknown;
 };
 
 const LABELS: Record<WorkspaceKind, string> = { app: "App", widget: "Widget", workflow: "Workflow" };
@@ -127,34 +175,130 @@ export function workspaceKindAllowsFile(kind: WorkspaceKind, filename: string): 
 }
 
 /**
- * Checks one gadget's filenames against its workspace's kind. An app or widget needs its UI file,
- * a widget or workflow needs its server, and a workflow must have no UI. Returns every violation;
- * an empty list means the gadget fits.
+ * Checks one gadget's filenames against its workspace's kind: `classifyGadgetFiles` without file
+ * contents. An app or widget needs its UI file, a widget or workflow needs its server, and a
+ * workflow must have no UI. Returns every violation; an empty list means the gadget fits.
  */
 export function checkWorkspaceKind(
     kind: WorkspaceKind, filenames: Iterable<string>): WorkspaceKindViolation[] {
-  let files = new Set(filenames);
+  let files = new Map<string, string | null>();
+  for (let filename of filenames) files.set(filename, null);
+  return classifyGadgetFiles(kind, files).violations;
+}
+
+// Stand-ins for the parsers that have not landed yet, so nothing view-only or callable can be
+// published before they do: each refuses every file. `parseBoundViewSpec` (bound-view.ts)
+// replaces parseBoundViewSpecPending, and `parseWidgetTools` (widget-tools.ts) replaces
+// parseWidgetToolsPending.
+function parseBoundViewSpecPending(): never {
+  throw new Error("view-only widgets are not supported yet");
+}
+function parseWidgetToolsPending(): never {
+  throw new Error("callable widgets are not supported yet");
+}
+
+const GADGET_FILE_PARSERS: GadgetFileParsers = {
+  view: parseBoundViewSpecPending,
+  tools: parseWidgetToolsPending,
+};
+
+// Whether `text` parses: total, so any throw (or text that could not be read) is a refusal.
+function parseProblem(parse: (text: string) => unknown, text: string | null): string | null {
+  if (text === null) return "it is not UTF-8 text";
+  try {
+    parse(text);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "it does not parse";
+  }
+}
+
+/**
+ * Classifies one gadget's files for its workspace's kind, reporting every rule that fails (see
+ * `GadgetFileViolationCode`). `files` holds every path in the gadget, with the text of the files
+ * the classifier parses: a widget's `view.json` and `tools.json`, read as strict UTF-8. A `null`
+ * there (unread, or not UTF-8) fails to parse; other paths' values are ignored. Nothing is parsed
+ * outside a widget: an app or workflow with either file is refused on its presence alone.
+ *
+ * In a widget, a present `view.json` or `tools.json` stands in for `client.js`, and `view.json`
+ * for `server.js` too; `tools.json` needs `server.js`, reported as `toolsWithoutServer` in place
+ * of `missingServer`. `parsers` defaults to the kernel's; tests inject their own.
+ */
+export function classifyGadgetFiles(
+    kind: WorkspaceKind, files: ReadonlyMap<string, string | null>,
+    parsers: GadgetFileParsers = GADGET_FILE_PARSERS): GadgetFileClassification {
   let label = LABELS[kind];
+  let article = kind === "app" ? "An" : "A";
+  let hasUi = files.has(GADGET_UI_FILE);
+  let hasServer = files.has(GADGET_SERVER_FILE);
+  let hasView = files.has(GADGET_VIEW_FILE);
+  let hasTools = files.has(GADGET_TOOLS_FILE);
+  let isWidget = kind === "widget";
   let violations: WorkspaceKindViolation[] = [];
+  let report = (code: GadgetFileViolationCode, message: string) =>
+    violations.push({ code, message });
+
+  // In a widget, a view or tools file stands in for client.js and server.js: a view needs no
+  // server, and tools without one are reported as toolsWithoutServer instead.
+  let standsIn = isWidget && (hasView || hasTools);
   if (kind === "workflow") {
-    if (files.has(GADGET_UI_FILE)) {
-      violations.push({
-        code: "unexpectedUi",
-        message: `A ${label} has no UI, but this gadget has ${GADGET_UI_FILE}.`,
-      });
+    if (hasUi) {
+      report("unexpectedUi", `A ${label} has no UI, but this gadget has ${GADGET_UI_FILE}.`);
     }
-  } else if (!files.has(GADGET_UI_FILE)) {
-    violations.push({
-      code: "missingUi",
-      message: `${kind === "app" ? "An" : "A"} ${label} needs a UI, but this gadget has no ` +
-          `${GADGET_UI_FILE}.`,
-    });
+  } else if (!hasUi && !standsIn) {
+    report("missingUi",
+        `${article} ${label} needs a UI, but this gadget has no ${GADGET_UI_FILE}.`);
   }
-  if (kind !== "app" && !files.has(GADGET_SERVER_FILE)) {
-    violations.push({
-      code: "missingServer",
-      message: `A ${label} needs a server, but this gadget has no ${GADGET_SERVER_FILE}.`,
-    });
+  if (kind !== "app" && !hasServer && !standsIn) {
+    report("missingServer",
+        `A ${label} needs a server, but this gadget has no ${GADGET_SERVER_FILE}.`);
   }
-  return violations;
+  if (isWidget) {
+    let code = [...files.keys()].filter(path => path.endsWith(".js")).toSorted();
+    if (hasView && (code.length > 0 || hasTools)) {
+      let others = hasTools ? [...code, GADGET_TOOLS_FILE] : code;
+      report("mixedView", `A ${label} with ${GADGET_VIEW_FILE} is a view with no code, but ` +
+          `this gadget also has ${others.join(", ")}.`);
+    }
+    let viewProblem = hasView
+        ? parseProblem(parsers.view, files.get(GADGET_VIEW_FILE) ?? null) : null;
+    if (viewProblem !== null) {
+      report("invalidView",
+          `This gadget's ${GADGET_VIEW_FILE} is not a valid view: ${viewProblem}.`);
+    }
+    let toolsProblem = hasTools
+        ? parseProblem(parsers.tools, files.get(GADGET_TOOLS_FILE) ?? null) : null;
+    if (toolsProblem !== null) {
+      report("invalidTools",
+          `This gadget's ${GADGET_TOOLS_FILE} is not a valid tool list: ${toolsProblem}.`);
+    }
+    if (hasTools && !hasServer) {
+      report("toolsWithoutServer", `A ${label}'s ${GADGET_TOOLS_FILE} is served by its ` +
+          `${GADGET_SERVER_FILE}, but this gadget has none.`);
+    }
+  } else {
+    for (let file of [GADGET_VIEW_FILE, GADGET_TOOLS_FILE]) {
+      if (!files.has(file)) continue;
+      report(file === GADGET_VIEW_FILE ? "unexpectedView" : "unexpectedTools",
+          `${article} ${label} does not use ${file}; rename this gadget's ${file} to publish it.`);
+    }
+  }
+
+  if (violations.length > 0) return { class: null, violations };
+  let fileClass: GadgetFileClass = !isWidget ? kind as "app" | "workflow"
+      : hasView ? "viewOnly"
+      : hasTools ? (hasUi ? "callableCombined" : "callableTools")
+      : "visualWidget";
+  return { class: fileClass, violations };
+}
+
+/**
+ * The violations that refuse publishing a blueprint version of this kind. A widget is refused on
+ * every one. An app or workflow is refused only on `unexpectedView` and `unexpectedTools`: its
+ * other rules were never enforced at publish, and still are not.
+ */
+export function blueprintPublishRefusals(
+    kind: WorkspaceKind, violations: readonly WorkspaceKindViolation[]): WorkspaceKindViolation[] {
+  if (kind === "widget") return [...violations];
+  return violations.filter(({ code }) => code === "unexpectedView" || code === "unexpectedTools");
 }
