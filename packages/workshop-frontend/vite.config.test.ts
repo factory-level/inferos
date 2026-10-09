@@ -1,4 +1,5 @@
 import type { ConfigEnv, UserConfig, UserConfigExport } from 'vite'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('vite', async (importOriginal) => {
@@ -28,5 +29,19 @@ describe('Vite development proxy', () => {
       '/api/site-logo': 'http://backend.from-env.test:9999',
     })
     expect(resolved.build?.sourcemap).toBe('hidden')
+  })
+})
+
+describe('Cross-Origin-Opener-Policy on Workshop documents', () => {
+  it('is set by the dev and preview servers', async () => {
+    const resolved = await resolveConfig(config)
+    expect(resolved.server?.headers).toEqual({ 'Cross-Origin-Opener-Policy': 'same-origin' })
+    expect(resolved.preview?.headers).toEqual({ 'Cross-Origin-Opener-Policy': 'same-origin' })
+  })
+
+  it('is set for every path by the _headers file Vite copies into the asset build', () => {
+    const rules = readFileSync(new URL('./public/_headers', import.meta.url), 'utf8')
+      .split('\n').filter(line => line.trim() && !line.trimStart().startsWith('#'))
+    expect(rules).toEqual(['/*', '  Cross-Origin-Opener-Policy: same-origin'])
   })
 })

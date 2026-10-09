@@ -1,0 +1,14 @@
+# Workers Static Assets headers for every Workshop document (and, harmlessly, every other asset;
+# the browser reads COOP only on documents). Copied into dist/ by Vite.
+#
+# Cross-Origin-Opener-Policy: same-origin puts the Workshop in a browsing context group of its own.
+# A Gadget frame may open popups (`allow-popups allow-popups-to-escape-sandbox`), and without this
+# such a popup keeps `opener.top` and can post to the operate page and its frames. Under same-origin
+# a popup opened from a cross-origin frame is severed: window.open() returns null and the popup's
+# opener is null. `same-origin-allow-popups` does not do this. See
+# docs/architecture/platform-pillars.md#cross-origin-opener-policy.
+#
+# Worker-first paths (/api, /gatekeeper/*, /extensions/*) never reach this file: the router sets the
+# same header on the HTML it serves there. The Vite dev and preview servers set it in vite.config.ts.
+/*
+  Cross-Origin-Opener-Policy: same-origin

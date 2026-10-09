@@ -12,6 +12,8 @@
 // resource. What it asserts:
 //
 //   app-shell     the router serves the frontend at `/`, and its SPA fallback for a client route
+//   opener-policy both carry `Cross-Origin-Opener-Policy: same-origin`, so a popup a Gadget frame
+//                 opens gets no opener into the Workshop (the frontend's `public/_headers`)
 //   api           a WebSocket handshake to `/api` reaches the Workshop: upgraded, or refused by an
 //                 auth challenge (Cloudflare Access or the Workshop's own), never a 404 or a 5xx
 //   gatekeeper:*  each bound gatekeeper's `/gatekeeper/<name>/` answers from the gatekeeper, not the
@@ -69,7 +71,7 @@ export interface SmokeResponse {
 
 /** One check's outcome in the report. */
 export interface SmokeCheck {
-  /** `app-shell`, `api`, `gatekeeper:<name>` or `oauth:<name>`. */
+  /** `app-shell`, `opener-policy`, `api`, `gatekeeper:<name>` or `oauth:<name>`. */
   name: string;
   /** Whether it passed. A skipped check is `ok` and says why in `detail`. */
   ok: boolean;
@@ -223,6 +225,27 @@ export function classifyAppShell(root: SmokeResponse, clientRoute: SmokeResponse
   return { ...base, ok: true, detail: "The router serves the app shell and its SPA fallback." };
 }
 
+/**
+ * Decide the opener policy check from the root and a client route's responses: both must carry
+ * `Cross-Origin-Opener-Policy: same-origin`. Static assets get it from the frontend's `_headers`,
+ * which only a deploy path that applies `_headers` rules turns into a response header.
+ */
+export function classifyOpenerPolicy(root: SmokeResponse, clientRoute: SmokeResponse): SmokeCheck {
+  const base = { name: "opener-policy", status: root.status };
+  const challenge = accessChallenge(root);
+  if (challenge) return { ...base, ok: false, detail: challenge };
+  for (const [path, response] of [["/", root], ["a client route", clientRoute]] as const) {
+    const policy = header(response, "cross-origin-opener-policy");
+    if (policy?.trim().toLowerCase() !== "same-origin") {
+      return {
+        ...base, ok: false,
+        detail: `Expected Cross-Origin-Opener-Policy: same-origin on ${path}, got ${policy ?? "none"}.`,
+      };
+    }
+  }
+  return { ...base, ok: true, detail: "The app shell and its SPA fallback carry Cross-Origin-Opener-Policy: same-origin." };
+}
+
 /** Decide one gatekeeper's check from its route's response and the app shell's body. */
 export function classifyGatekeeper(name: string, response: SmokeResponse, shellBody: string | null)
     : SmokeCheck {
@@ -336,11 +359,18 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
   };
 
   let shellBody: string | null = null;
+  let shell: [SmokeResponse, SmokeResponse] | null = null;
   await check("app-shell", async () => {
     const root = await send(at("/"));
-    const result = classifyAppShell(root, await send(at("/__inferos-smoke/client-route")));
+    const clientRoute = await send(at("/__inferos-smoke/client-route"));
+    shell = [root, clientRoute];
+    const result = classifyAppShell(root, clientRoute);
     if (result.ok) shellBody = root.body;
     return result;
+  });
+  await check("opener-policy", async () => {
+    if (!shell) throw new Error("the app shell could not be fetched");
+    return classifyOpenerPolicy(...shell);
   });
   await check("api", async () => classifyApiHandshake(await send(at("/api"), true)));
   for (const name of options.gatekeepers) {

@@ -98,6 +98,68 @@ describe('router fetch', () => {
   });
 });
 
+const COOP = 'cross-origin-opener-policy';
+const fetcher = (body: string, init?: ResponseInit) =>
+  ({ fetch: async () => new Response(body, init) }) as unknown as Fetcher;
+const html = (body: string, headers: Record<string, string> = {}) =>
+  fetcher(body, { headers: { 'content-type': 'text/html; charset=utf-8', ...headers } });
+const get = (env: Env, path: string) =>
+  router.fetch!(new Request(`https://example.com${path}`), env, {} as ExecutionContext);
+
+describe('opener policy on Worker-served documents', () => {
+
+  it('sets same-origin on gatekeeper, extension and backend HTML, keeping status and body', async () => {
+    const env = makeEnv({
+      ASSETS: stubFetcher('assets'),
+      CUSTOM_CLOUDFLARE_CODE: 'true',
+      WORKSHOP_BACKEND: html('<p>backend</p>'),
+      // A gatekeeper's connect handoff page, and one that chose a weaker policy for itself.
+      GATEKEEPER_GOOGLE: html('<p>handoff</p>'),
+      GATEKEEPER_LAX: html('<p>lax</p>', { 'cross-origin-opener-policy': 'unsafe-none' }),
+      CONSUMER_HELLO_WORLD: fetcher('<p>gone</p>', { status: 410, headers: { 'content-type': 'TEXT/HTML' } }),
+    });
+    for (const [path, body, status] of [
+      ['/gatekeeper/google/oauth', '<p>handoff</p>', 200],
+      ['/gatekeeper/lax/connect', '<p>lax</p>', 200],
+      ['/extensions/hello-world/page', '<p>gone</p>', 410],
+      ['/blueprint-screenshot/abc', '<p>backend</p>', 200],
+    ] as const) {
+      const response = await get(env, path);
+      expect(response.headers.get(COOP), path).toBe('same-origin');
+      expect(response.status, path).toBe(status);
+      expect(await response.text(), path).toBe(body);
+    }
+  });
+
+  it("sets it on the router's own 404 pages", async () => {
+    const env = makeEnv({ ASSETS: stubFetcher('assets') });
+    for (const path of ['/extensions', '/extensions/missing']) {
+      const response = await get(env, path);
+      expect(response.status, path).toBe(404);
+      expect(response.headers.get(COOP), path).toBe('same-origin');
+    }
+  });
+
+  it('leaves non-document responses and asset responses as they are', async () => {
+    const env = makeEnv({
+      ASSETS: stubFetcher('assets'),
+      WORKSHOP_BACKEND: fetcher('{}', { headers: { 'content-type': 'application/json' } }),
+      GATEKEEPER_GOOGLE: fetcher('', { status: 302, headers: { location: 'https://accounts.example/' } }),
+    });
+    expect((await get(env, '/api')).headers.get(COOP)).toBeNull();
+    const redirect = await get(env, '/gatekeeper/google/connect');
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get(COOP)).toBeNull();
+    // Static assets take the policy from the frontend's `_headers`, which ASSETS applies.
+    expect((await get(env, '/')).headers.get(COOP)).toBeNull();
+  });
+
+  it('sets it on documents the backend serves in dev, where there is no ASSETS binding', async () => {
+    const response = await get(makeEnv({ WORKSHOP_BACKEND: html('<p>dev</p>') }), '/w/1');
+    expect(response.headers.get(COOP)).toBe('same-origin');
+  });
+});
+
 describe('router email', () => {
   it('forwards to GATEKEEPER_EMAIL when bound', async () => {
     const received: unknown[] = [];

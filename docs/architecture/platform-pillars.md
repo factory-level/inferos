@@ -39,6 +39,20 @@ Such Markdown makes no network request without an operator click. A Markdown ima
 
 The InferMind Wiki widget (`WikiMarkdown`) also uses `skipHtml` and renders an image as its alt text only ([InferOps canvas](inferops-canvas.md)). The top-bar notice and announcement banner render admin-configured Markdown, not agent or tool text.
 
+### Cross-origin opener policy
+
+Every Workshop document is served with `Cross-Origin-Opener-Policy: same-origin`. The owner decided this on 2026-10-09 for MVP-26. Gadget frames on operate and canvas pages run with `sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"` (`GadgetUI.tsx`) so that a Gadget's `target="_blank"` links work. Without this policy, a popup a frame opened kept `opener.top` and could post to the Workshop page and its other frames. Under `same-origin` the Workshop sits in a browsing context group of its own. A popup opened from a cross-origin frame (a sandboxed Gadget's opaque origin) is placed in another group: `window.open()` returns `null`, the popup's `opener` is `null`, and no reference between them survives. `same-origin-allow-popups` keeps those references, so it does not help here. A Gadget's `target="_blank"` links still open.
+
+The header reaches documents by three routes:
+
+- **Static-asset navigations** (the app shell, every client route through the single-page-application fallback, and assets) take it from `packages/workshop-frontend/public/_headers` (`/*`). Vite copies that file into `dist/`, and Workers Static Assets applies it. Under single-page-application handling no asset path is a 404, so a missing path gets the shell with the header.
+- **Worker-served documents** come from the router (`packages/router/src/index.ts`): the `/gatekeeper/*` connect and error pages (including gatekeeper-kit's handoff page), `/extensions/*` pages, the router's own 404s, and in dev whatever the backend serves when there is no `ASSETS` binding. The router sets the header on any `text/html` or `application/xhtml+xml` response it returns, and replaces whatever policy the serving Worker chose, because the page shares the Workshop's origin. RPC, WebSocket upgrades, JSON and bodiless redirects pass through unchanged. Asset responses already carry the header and are not rewritten.
+- **The Vite dev and preview servers** set it through `server.headers` and `preview.headers` in `packages/workshop-frontend/vite.config.ts`.
+
+Nothing in the repository reads `window.opener`. Connect and sign-in popups are disowned before they are navigated (`openDisownedPopup` in `connectHandoff.ts`), and gatekeeper-kit's connect pages carry no opener or message transport. Both flows complete under the policy: the nonce is kept in the popup's own sessionStorage, and the handoff page still closes itself. The tab can see two differences. Its popup handle reads `closed` as soon as the popup leaves the Workshop origin; `OAuthButtons` already treats that as "not necessarily cancelled". And `openConnectWindow` can no longer close a stale connect popup, so a second connect click opens a new popup beside the first. Popup names are fresh per flow, so the first was never reused, and in Chromium 153 its close was already ignored. See [the connect handoff](../connect-handoff.md#why-not-postmessage-an-opener-or-a-broadcastchannel).
+
+Verification: `router.test.ts` covers the router rewrite; `vite.config.test.ts` covers the dev and preview config and the `_headers` rule; and `router-parity.test.ts` runs the production router over real HTTP with a fixture `_headers` that must equal the shipped one. That run checks the shell, deep links, the fallback for a missing asset, the router's 404s, the gatekeeper's invalid-link page and handoff page, and `/api`. `pnpm run-local` serves `dist/` through the same Wrangler asset worker. `scripts/preview/smoke.ts` checks the header on a deployed instance (`opener-policy`). The popup behaviour was checked in Chromium 153 only (Playwright, outside the repository, which has no browser tests). Firefox and WebKit are unverified: the connect flow relies on the popup's sessionStorage surviving the browsing-context-group switch, which has not been checked there, and who runs that check is not yet decided.
+
 ## Configuration
 
 Worker cloudflare.config.ts files generate committed wrangler.jsonc files. Router/backend service bindings and deployment input metadata determine installability. The development runner uses Wrangler/workerd; see [local development](local-development.md).
@@ -58,6 +72,10 @@ Follow-up, not yet done: the host page's only CSP is `frame-src srcdoc:` (`packa
 - The deployment's site logo: `components/SiteLogo.tsx:24`.
 
 Vendor logos and avatars come from third-party hosts that are not known at build time, so the policy's shape (an allowlist, a same-origin image proxy, or `data:`/`blob:` plus the deployment origin) is undecided.
+
+The opener policy in deployments built by the release pipeline is also an open question:
+
+- Deployments built by the release pipeline ship `_headers` as an ordinary asset in the router's asset manifest (`scripts/release/manifest-lib.ts` carries only `not_found_handling` and `run_worker_first`). Whether the deploy service turns it into header rules, as `wrangler deploy` does, is unverified. Until it does, `smoke.ts`'s `opener-policy` check is the way to confirm a deployed instance. If it does not, the fallback is to route document navigations through the router with `run_worker_first` patterns so `withOpenerPolicy` sets the header; that costs a Worker invocation per navigation and needs an owner decision before it is adopted.
 
 See each [draft pillar](../design/platform-pillars.md) and the [roadmap](../wiki/implementation-roadmap.md).
 
