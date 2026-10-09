@@ -121,6 +121,20 @@ describe('invalidation', () => {
     expect(view().status).toBe('ok')
   })
 
+  it('drops a read still in flight when the context changes, so the new context never waits on it', () => {
+    mountSelected()
+    const old = lastRead().token
+    dispatch({ type: 'context', context: { token: 2, target: TARGET } })
+    expect(state.inFlight).toBeNull()
+    dispatch({ type: 'selection-subscribed', subscription: 2 })
+    dispatch({ type: 'selection', subscription: 2, selection: { state: 'selected', changeSeq: 1, selectionEpoch: 1 } })
+    expect(lastRead()).toMatchObject({ contextToken: 2 })
+    expect(lastRead().token).not.toBe(old)
+    answer(ok(), old)
+    expect(state.accepted).toBeNull()
+    expect(state.inFlight).not.toBeNull()
+  })
+
   it('never reads the old handle again after a guard refusal, and waits for a new context', () => {
     mountSelected()
     dispatch({ type: 'read-failed', token: lastRead().token, failure: 'handle-invalid' })
@@ -262,6 +276,20 @@ describe('expiry', () => {
       if (trigger === 'focus/pageshow/reconnect') dispatch({ type: 'resume' })
       expect(view().status).not.toBe('ok')
     })
+
+  it('clears an expired board on its timer while hidden, reads nothing until shown, then re-reads', () => {
+    mountSelected()
+    answer(ok())
+    dispatch({ type: 'visibility', visible: false })
+    advance(HOST_BOARD_EXPIRY_MS)
+    const before = reads().length
+    dispatch({ type: 'timer', timer: 'expiry' })
+    expect(state.accepted).toBeNull()
+    expect(view().status).not.toBe('ok')
+    expect(reads()).toHaveLength(before)
+    dispatch({ type: 'visibility', visible: true })
+    expect(reads()).toHaveLength(before + 1)
+  })
 
   it('expires on a forward wall-clock jump while the monotonic clock paused in sleep', () => {
     mountSelected()

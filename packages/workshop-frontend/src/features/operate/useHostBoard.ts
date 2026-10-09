@@ -18,6 +18,10 @@ export type HostBoardInput = WithoutClock<HostBoardEvent>
 
 const now = (): HostBoardClock => ({ mono: performance.now(), wall: Date.now() })
 
+/** The first wait before resubscribing after a subscription ended, doubled per attempt up to the cap. */
+export const HOST_BOARD_RESUBSCRIBE_MS = 2_000
+const RESUBSCRIBE_CAP_MS = 30_000
+
 // The kernel's guard refusals: the console revision or session context the handle was acquired for
 // no longer holds, so the handle is never read again and a new one waits for a new context.
 const isGuardRefusal = (caught: unknown) =>
@@ -34,6 +38,8 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
   : { view: HostBoardViewState; dispatch: (event: HostBoardInput) => void } => {
   const machine = useRef(initialHostBoardState(document.visibilityState === 'visible'))
   const run = useRef<(event: HostBoardInput) => void>(() => {})
+  // Context tokens only rise, across unmount-time resets of the machine's context too.
+  const contexts = useRef(0)
   const [, setTick] = useState(0)
   const { consoleId, source, revision } = target.console
   const { entryId } = target
@@ -42,10 +48,13 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
     if (!session) return
     let disposed = false
     const timers = new Map<HostBoardTimer, ReturnType<typeof setTimeout>>()
-    const contextToken = (machine.current.context?.token ?? 0) + 1
+    const contextToken = ++contexts.current
     let handle: RpcStub<ConsoleHostBoard> | null = null
     let subscription: RpcStub<{}> | null = null
     let subscriptions = 0
+    let handleInvalid = false
+    let resubscribeTimer: ReturnType<typeof setTimeout> | undefined
+    let backoff = HOST_BOARD_RESUBSCRIBE_MS
 
     const apply = (event: HostBoardInput) => {
       if (disposed) return
@@ -57,7 +66,12 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
           const { token } = command
           handle.readRequirement(requirement)
             .then(read => apply({ type: 'read-answer', token, read }))
-            .catch((caught: unknown) => apply({ type: 'read-failed', token, failure: isGuardRefusal(caught) ? 'handle-invalid' : 'error' }))
+                        // Anything but a recognized guard refusal is an ordinary failure: the board is cleared
+            // and shown as unavailable, and only the cadence or Retry reads again.
+            .catch((caught: unknown) => {
+              if (isGuardRefusal(caught)) handleInvalid = true
+              apply({ type: 'read-failed', token, failure: isGuardRefusal(caught) ? 'handle-invalid' : 'error' })
+            })
         } else if (command.type === 'set-timer') {
           clearTimeout(timers.get(command.timer))
           const { timer } = command
@@ -73,25 +87,47 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
 
     handle = session.getConsoleHostBoard({ consoleId, source, revision }, entryId)
     apply({ type: 'context', context: { token: contextToken, target: { entryId, console: { consoleId, source, revision } } } })
+    // A subscription that ended (`unknown`, a failed delivery or a broken transport) leaves authority
+    // unknown and the board cleared; a fresh subscription, after a backoff or at once on a resume,
+    // restores it only through its own snapshot and a fenced read. A refused handle is never retried.
     const subscribe = () => {
+      clearTimeout(resubscribeTimer)
+      resubscribeTimer = undefined
+      if (disposed || handleInvalid) return
+      subscription?.[Symbol.dispose]()
+      subscription = null
       const id = ++subscriptions
       apply({ type: 'selection-subscribed', subscription: id })
+      const ended = () => {
+        if (disposed || handleInvalid || id !== subscriptions) return
+        apply({ type: 'selection-failed', subscription: id })
+        resubscribeTimer = setTimeout(subscribe, backoff)
+        backoff = Math.min(backoff * 2, RESUBSCRIBE_CAP_MS)
+      }
       const pending = handle!.subscribeSelection(update => {
-        if (update.state === 'unknown') apply({ type: 'selection-failed', subscription: id })
-        else apply({ type: 'selection', subscription: id, selection: update })
+        if (id !== subscriptions) return
+        if (update.state === 'unknown') { ended(); return }
+        backoff = HOST_BOARD_RESUBSCRIBE_MS
+        apply({ type: 'selection', subscription: id, selection: update })
       })
       pending.then(stub => {
         if (disposed || id !== subscriptions) stub[Symbol.dispose]()
         else subscription = stub
       }).catch((caught: unknown) => {
-        if (isGuardRefusal(caught)) apply({ type: 'handle-invalidated' })
-        else apply({ type: 'selection-failed', subscription: id })
+        if (id !== subscriptions) return
+        if (isGuardRefusal(caught)) { handleInvalid = true; apply({ type: 'handle-invalidated' }) }
+        else ended()
       })
     }
     subscribe()
 
-    const onVisibility = () => apply({ type: 'visibility', visible: document.visibilityState === 'visible' })
-    const onResume = () => apply({ type: 'resume' })
+    const resumeSubscription = () => { if (resubscribeTimer !== undefined) subscribe() }
+    const onVisibility = () => {
+      const visible = document.visibilityState === 'visible'
+      apply({ type: 'visibility', visible })
+      if (visible) resumeSubscription()
+    }
+    const onResume = () => { apply({ type: 'resume' }); resumeSubscription() }
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('focus', onResume)
     window.addEventListener('pageshow', onResume)
@@ -104,6 +140,7 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
       disposed = true
       run.current = () => {}
       for (const timer of timers.values()) clearTimeout(timer)
+      clearTimeout(resubscribeTimer)
       subscription?.[Symbol.dispose]()
       handle?.[Symbol.dispose]()
     }

@@ -3,61 +3,29 @@ import { Button } from '@cloudflare/kumo'
 import { Link } from '@tanstack/react-router'
 import type { RpcStub } from 'capnweb'
 import type { OperateSession } from '@gadgets/workshop-shared/api'
-import { AccountsSubscriberAdapter } from '../../accountsSubscriber'
-import { useAuthenticatedApi } from '../../AuthContext'
 import { initialHostBoardPickerState, reduceHostBoardPicker, type HostBoardPickerCommand, type HostBoardPickerEvent } from './hostBoardPicker'
 import type { HostBoardTarget } from './hostBoardTypes'
-
-type Account = { id: number; name: string }
+import type { HostBoardAccount } from './useHostBoardAccounts'
 
 /**
- * Chooses which of the operator's own InferOps accounts reads a host board. It lists only accounts
- * that can reach the board's target, and selects through the operator's session, which creates the
- * connection in their own session workspace; no one else's connection is ever offered. A retry of
- * the same choice reuses its request key, so a lost answer never creates a second connection.
+ * Chooses which of the operator's own InferOps accounts reads a host board. It offers only the
+ * accounts it is given (`useHostBoardAccounts`, filtered by the board's target), and selects
+ * through the operator's session, which creates the connection in their own session workspace; no
+ * one else's connection is ever offered. A retry after a lost answer reuses its request key, so it
+ * never creates a second connection; after a settled refusal the next choice is a new request.
  */
-export const HostBoardPicker = ({ session, target, targetRef, onAccountsChanged, onConnected }: {
+export const HostBoardPicker = ({ session, target, accounts, onConnected }: {
   session: RpcStub<OperateSession>
   target: HostBoardTarget
-  /** The entry's frozen target: it filters the accounts offered and grants nothing. */
-  targetRef: string
-  /** An account that can reach the board was added, removed or lost its credentials. */
-  onAccountsChanged: () => void
+  accounts: readonly HostBoardAccount[] | null
   onConnected: () => void
 }) => {
-  const { authenticatedApi } = useAuthenticatedApi()
-  const [accounts, setAccounts] = useState<readonly Account[] | null>(null)
   const [, setTick] = useState(0)
   const contextToken = useRef(0)
   const picker = useRef(initialHostBoardPickerState(0))
-  const changed = useRef(onAccountsChanged)
-  changed.current = onAccountsChanged
   const connected = useRef(onConnected)
   connected.current = onConnected
   const { consoleId, source, revision } = target.console
-
-  useEffect(() => {
-    let cancelled = false
-    let ready = false
-    const found = new Map<number, Account>()
-    const publish = () => { if (!cancelled) setAccounts([...found.values()]) }
-    const subscriber = new AccountsSubscriberAdapter({
-      add({ id, description, vendor, credentialsValid }) {
-        if (credentialsValid) found.set(id, { id, name: description.uniqueName ?? description.displayName ?? vendor.displayName })
-        else found.delete(id)
-        publish()
-        if (ready && !cancelled) changed.current()
-      },
-      remove(id) { found.delete(id); publish(); if (ready && !cancelled) changed.current() },
-      ready() { ready = true; publish() },
-    })
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber, { resourceUrl: targetRef })
-    subscription.catch(() => { if (!cancelled) setAccounts([]) })
-    return () => {
-      cancelled = true
-      subscription[Symbol.dispose]()
-    }
-  }, [authenticatedApi, targetRef])
 
   // The picker's state lives in a ref and is reduced synchronously, so its in-flight latch holds
   // before any re-render.
@@ -72,8 +40,8 @@ export const HostBoardPicker = ({ session, target, targetRef, onAccountsChanged,
     const { intent, requestKey, contextToken: token } = command
     session.selectHostBoardConnection({ consoleId: intent.consoleId, source: intent.source, revision: intent.revision },
       intent.entryId, intent.accountId, requestKey)
-      .then(outcome => outcome.status === 'selected', () => false)
-      .then(ok => apply({ type: 'completed', contextToken: token, requestKey, ok }))
+      .then(answer => answer.status === 'selected' ? 'selected' as const : 'settled' as const, () => 'lost' as const)
+      .then(outcome => apply({ type: 'completed', contextToken: token, requestKey, outcome }))
   }
 
   useEffect(() => {

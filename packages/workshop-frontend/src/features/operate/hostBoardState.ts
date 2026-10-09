@@ -263,8 +263,13 @@ export const reduceHostBoard = (state: HostBoardState, event: HostBoardEvent): H
   switch (event.type) {
     case 'context': {
       invalidate(d)
+      // A read of the previous context is dropped outright, not left to settle: its caller may be
+      // gone (an unmounted view never reports it), and the new context must not queue behind it.
+      // Its answer, if one still arrives, names a token no longer in flight and is ignored.
       d.state = {
         ...d.state,
+        inFlight: null,
+        queued: false,
         context: event.context,
         handle: 'valid',
         recoveryUsedIn: null,

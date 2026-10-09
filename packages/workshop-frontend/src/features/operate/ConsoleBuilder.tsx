@@ -124,7 +124,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
             {widgetInstalls.length > 0 && <ConsoleWidgetRegistry widgets={widgets} published={initial?.console.published?.content.widgets}
               candidates={widgetInstalls} hostBoardCount={shownHostBoards.length} disabled={!available} onChange={setWidgets} />}
             {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={initial?.console.published?.content.hostBoards}
-              widgetCount={widgets.length} disabled={!available} onChange={setHostBoards} />}
+              widgetCount={widgets.length} assistantOnly={fullChat === 'only'} disabled={!available} onChange={setHostBoards} />}
           </>}
     </div>}
     {step === 2 && <div className="space-y-5">
@@ -141,6 +141,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
         {views.map(view => <Select.Option key={view.id} value={view.id}>{view.title}</Select.Option>)}
       </Select>}
       {fullChat === 'only' && <p className="text-sm text-kumo-subtle">This console keeps its saved views, but only shows Assistant.</p>}
+      {fullChat === 'only' && hostBoardsOn && shownHostBoards.length > 0 && <p role="status" className="text-sm text-kumo-subtle">Its boards are unavailable to operators while it shows only Assistant.</p>}
     </div>}
     {step === 3 && <section aria-label="Console preview" className="overflow-hidden rounded-xl border border-kumo-line">
       <div className="border-b border-kumo-line px-5 py-3 font-medium text-kumo-default">{title}</div>

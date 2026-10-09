@@ -32,7 +32,12 @@ export type HostBoardPickerEvent =
   | { type: 'context'; contextToken: number | null }
   /** `freshKey` is used only when the intent is new; the caller generates it (`crypto.randomUUID()`). */
   | { type: 'submit'; target: HostBoardTarget; accountId: number; freshKey: string }
-  | { type: 'completed'; contextToken: number; requestKey: string; ok: boolean }
+  /**
+   * A selection call ended: `selected`; `settled` (the kernel answered `superseded` or `failed`,
+   * which it would answer that key again, so the next submit takes a fresh key); or `lost` (the
+   * call threw, so whether it was made is unknown and a retry of the same intent reuses its key).
+   */
+  | { type: 'completed'; contextToken: number; requestKey: string; outcome: 'selected' | 'settled' | 'lost' }
 
 /** The picker's state for a mounted context. */
 export const initialHostBoardPickerState = (contextToken: number): HostBoardPickerState =>
@@ -69,7 +74,8 @@ export const reduceHostBoardPicker = (state: HostBoardPickerState, event: HostBo
       if (event.contextToken !== state.contextToken || state.inFlight?.requestKey !== event.requestKey) {
         return { state, commands: [] }
       }
-      if (event.ok) return { state: { ...state, inFlight: null, last: null, failed: false }, commands: [{ type: 'connected' }] }
+      if (event.outcome === 'selected') return { state: { ...state, inFlight: null, last: null, failed: false }, commands: [{ type: 'connected' }] }
+      if (event.outcome === 'settled') return { state: { ...state, inFlight: null, last: null, failed: true }, commands: [] }
       return { state: { ...state, inFlight: null, failed: true }, commands: [] }
     }
   }

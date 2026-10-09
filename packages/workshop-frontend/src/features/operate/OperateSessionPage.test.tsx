@@ -189,11 +189,20 @@ describe('host boards', () => {
     expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
   })
 
+  it('offers no host board on a console that shows only Assistant', () => {
+    testState.hostBoards = true
+    render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: { ...RUN, fullChat: 'only' } })
+    expect(openBoard()).toBeUndefined()
+    expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
+  })
+
   it('opens a host board for the console revision the session has open, and closes it when that revision changes', () => {
     testState.hostBoards = true
     render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: RUN })
     act(() => openBoard()!.click())
     expect(container.querySelector('[data-testid="host-board"]')?.textContent).toBe('Team board c1/draft/0')
+    // Opening a board is local to this tab: nothing about it enters the shared session state.
+    expect(dispatch).not.toHaveBeenCalled()
     render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: { ...RUN, revision: '1' } })
     expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
   })

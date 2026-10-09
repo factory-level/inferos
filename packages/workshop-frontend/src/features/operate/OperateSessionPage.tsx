@@ -105,9 +105,10 @@ export const OperateSessionPage = () => {
   const visibleWidget = widgetTarget?.consoleId === consoleId ? widgetTarget : null
   // Shown only while the session still has that console revision open, and the revision lists it.
   const shownHostBoard = hostBoardsOn && run && hostBoardTarget && hostBoardTarget.consoleId === run.consoleId
-    && hostBoardTarget.revision === run.revision && entry?.console.revision === run.revision
+    && hostBoardTarget.revision === run.revision && run.fullChat !== 'only' && entry?.console.revision === run.revision
     ? entry.console.hostBoards?.find(board => board.id === hostBoardTarget.entryId) : undefined
-  const openHostBoard = hostBoardsOn && run ? (entryId: string) => setHostBoardTarget({ consoleId: run.consoleId, revision: run.revision, entryId }) : undefined
+  // An assistant-only console has no widget menu, so it never offers its boards (the editors say so).
+  const openHostBoard = hostBoardsOn && run && run.fullChat !== 'only' ? (entryId: string) => setHostBoardTarget({ consoleId: run.consoleId, revision: run.revision, entryId }) : undefined
   const settingsEntry = settings ? consoleEntries(workspaces).find(item => item.workspace.id === search.workspace && item.console.id === settings) : undefined
   const openView = async (viewId: string) => {
     setWidgetTarget(null)

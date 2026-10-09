@@ -70,7 +70,7 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
     <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={candidates}
       hostBoardCount={shownHostBoards.length} disabled={!editable || saving} onChange={setWidgets} />
     {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={entry.console.published?.content.hostBoards}
-      widgetCount={widgets.length} disabled={!editable || saving} onChange={setHostBoards} />}
+      widgetCount={widgets.length} assistantOnly={entry.console.fullChat === 'only'} disabled={!editable || saving} onChange={setHostBoards} />}
     {error && <p role="alert" className="text-sm text-kumo-danger">{error}</p>}
     {editable && <>
       <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save settings'}</Button>

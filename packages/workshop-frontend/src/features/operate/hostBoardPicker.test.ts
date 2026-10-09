@@ -20,11 +20,19 @@ describe('host-board picker intent', () => {
     expect(submit(first.state, 8, 'k3').commands).toEqual([])
   })
 
-  it('reuses the requestKey when the same intent is retried after a failure', () => {
+  it('reuses the requestKey when the same intent is retried after a lost answer', () => {
     const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
-    const failed = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', ok: false })
+    const failed = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'lost' })
     expect(failed.state.failed).toBe(true)
     expect(submit(failed.state, 7, 'k2').commands).toMatchObject([{ requestKey: 'k1' }])
+  })
+
+  it('takes a fresh requestKey after a settled superseded or failed answer, which that key would only repeat', () => {
+    const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
+    const settled = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'settled' })
+    expect(settled.state.failed).toBe(true)
+    expect(settled.commands).toEqual([])
+    expect(submit(settled.state, 7, 'k2').commands).toMatchObject([{ requestKey: 'k2' }])
   })
 
   it.each([
@@ -34,13 +42,13 @@ describe('host-board picker intent', () => {
     ['another entry', 7, { ...TARGET, entryId: 'entry-2' }],
   ])('takes a new requestKey for %s', (_, accountId, target) => {
     const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
-    const failed = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', ok: false })
+    const failed = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'lost' })
     expect(submit(failed.state, accountId, 'k2', target).commands).toMatchObject([{ requestKey: 'k2' }])
   })
 
   it('reports a commit once, and a later click is a new intent', () => {
     const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
-    const done = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', ok: true })
+    const done = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'selected' })
     expect(done.commands).toEqual([{ type: 'connected' }])
     expect(submit(done.state, 7, 'k2').commands).toMatchObject([{ requestKey: 'k2' }])
   })
@@ -48,7 +56,7 @@ describe('host-board picker intent', () => {
   it('ignores a late completion after a context change', () => {
     const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
     const moved = reduceHostBoardPicker(sent.state, { type: 'context', contextToken: 2 })
-    const late = reduceHostBoardPicker(moved.state, { type: 'completed', contextToken: 1, requestKey: 'k1', ok: true })
+    const late = reduceHostBoardPicker(moved.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'selected' })
     expect(late.commands).toEqual([])
     expect(late.state).toBe(moved.state)
   })
@@ -56,7 +64,7 @@ describe('host-board picker intent', () => {
   it('ignores a late completion after unmount, and submits nothing once unmounted', () => {
     const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
     const unmounted = reduceHostBoardPicker(sent.state, { type: 'context', contextToken: null })
-    expect(reduceHostBoardPicker(unmounted.state, { type: 'completed', contextToken: 1, requestKey: 'k1', ok: true }).commands).toEqual([])
+    expect(reduceHostBoardPicker(unmounted.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'selected' }).commands).toEqual([])
     expect(submit(unmounted.state, 7, 'k2').commands).toEqual([])
   })
 })

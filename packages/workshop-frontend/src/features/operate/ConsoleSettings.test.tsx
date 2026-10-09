@@ -123,3 +123,12 @@ it('sends an edited board list in full: a removal as an empty list, an addition 
   expect(lastContent().hostBoards).toEqual([{ kind: 'host-board', label: 'Ops board',
     requirement: { name: 'board-1', resource: 'inferops-board', target: 'inferops://acme.ops/project/board/OPS' } }])
 })
+
+it('marks boards unavailable and offers none to add on a console that shows only Assistant', () => {
+  state.hostBoards = true
+  act(() => root.render(<ConsoleSettings entry={{ ...withBoard, console: { ...withBoard.console, fullChat: 'only' } }} onClose={close} onEdit={edit} />))
+  const section = container.querySelector('[aria-labelledby="console-host-boards-heading"]')!
+  expect(section.textContent).toContain('This console shows only Assistant, so operators can\'t open boards on it.')
+  expect(section.querySelector('[aria-label="Registered boards"]')?.textContent).toContain('Unavailable on an Assistant-only console')
+  expect([...section.querySelectorAll('button')].some(button => button.textContent === 'Register board')).toBe(false)
+})
