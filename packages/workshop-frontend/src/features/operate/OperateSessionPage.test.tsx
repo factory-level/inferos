@@ -15,26 +15,30 @@ const testState = vi.hoisted(() => ({
   state: null as unknown,
   dispatch: null as unknown,
   recentEvents: [] as OperateEventRecord[],
-  search: {} as { setup?: string; tools?: boolean },
+  search: {} as { setup?: string; tools?: boolean; settings?: string; workspace?: string },
   navigate: vi.fn<(options: unknown) => void>(),
+  hostBoards: false,
 }))
 
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => testState.navigate, useSearch: () => testState.search }))
 vi.mock('./ConsoleWorkspaceShell', () => ({ ConsoleWorkspaceShell: ({ children }: { children: import('react').ReactNode }) => children }))
 vi.mock('./ConsoleBuilder', () => ({ ConsoleBuilder: () => <div data-testid="builder" /> }))
+vi.mock('./ConsoleSettings', () => ({ ConsoleSettings: () => <div data-testid="settings" /> }))
 
 vi.mock('@cloudflare/kumo', async importOriginal => ({
   ...await importOriginal<typeof import('@cloudflare/kumo')>(),
   useKumoToastManager: () => ({ add: () => {} }),
 }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
-vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true } }) }))
+vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true }, hostBoards: testState.hostBoards }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
   canBuild: (entry: { workspace: { role?: string } }) => entry.workspace.role !== 'use',
   useWorkspaceScreens: () => ({ status: 'ready', workspaces: [
     { workspace: { id: 'ws1' }, screens: [{ id: 'board', title: 'Shift board' }], flows: [], publishedScreens: {}, consoles: [
       { id: 'c1', revision: '0', title: 'Operations lead', fullChat: 'available',
-        views: [{ id: 'overview', title: 'Overview', type: 'rollup', screens: ['board'] }] },
+        views: [{ id: 'overview', title: 'Overview', type: 'rollup', screens: ['board'] }],
+        hostBoards: [{ kind: 'host-board', id: 'hb1', label: 'Team board',
+          requirement: { name: 'board-1', resource: 'inferops-board', target: 'inferops://acme.ops/project/board/ENG' } }] },
     ] },
   ] }),
 }))
@@ -44,7 +48,13 @@ vi.mock('./ConsolePage', () => ({
   ConsolePage: ({ entry, presentation }: { entry?: { console: { title: string } }; presentation: string }) =>
     <div data-testid="console">{entry?.console.title}/{presentation}</div>,
 }))
-vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: ({ layout }: { layout: string }) => <div data-testid="chat" data-layout={layout}><input aria-label="Chat draft" /></div> }))
+vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: ({ layout, consoleActions }: { layout: string; consoleActions?: { onOpenHostBoard?: (entryId: string) => void } }) =>
+  <div data-testid="chat" data-layout={layout}><input aria-label="Chat draft" />
+    {consoleActions?.onOpenHostBoard && <button type="button" onClick={() => consoleActions.onOpenHostBoard!('hb1')}>Open Team board</button>}</div> }))
+vi.mock('./ConsoleHostBoard', () => ({
+  ConsoleHostBoard: ({ entry, console: ref }: { entry: { id: string; label: string }; console: { consoleId: string; source: string; revision: string } }) =>
+    <div data-testid="host-board">{entry.label} {ref.consoleId}/{ref.source}/{ref.revision}</div>,
+}))
 vi.mock('./SessionApprovals', () => ({
   SessionApprovals: ({ screenWorkspaceId }: { screenWorkspaceId: string | null }) =>
     <div data-testid="approvals">{screenWorkspaceId}</div>,
@@ -54,7 +64,7 @@ vi.mock('./SessionScreen', () => ({ SessionScreen: ({ screenId }: { screenId: st
 vi.mock('./FlowScreen', () => ({ FlowScreen: ({ screenId }: { screenId: string }) => <div data-testid="step">{screenId}</div> }))
 vi.mock('./OperateSessionContext', () => ({
   useOperateSession: () => ({ snapshot: { seq: 3, state: testState.state }, recentEvents: testState.recentEvents,
-    error: null, dispatch: testState.dispatch, session: null }),
+    error: null, dispatch: testState.dispatch, session: { stub: {} } }),
 }))
 
 import { OperateSessionPage } from './OperateSessionPage'
@@ -75,6 +85,7 @@ beforeEach(() => {
   testState.dispatch = dispatch
   testState.recentEvents = []
   testState.search = {}
+  testState.hostBoards = false
 })
 
 afterEach(() => {
@@ -165,4 +176,52 @@ it('keeps one conversation mounted as home changes to a console, a screen, and s
   render(INITIAL_OPERATE_PAGE)
   expect(container.querySelector('input')).toBe(draft)
   expect(draft.value).toBe('Keep this draft')
+})
+
+const openBoard = () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Open Team board')
+
+describe('host boards', () => {
+  const RUN = { workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', source: 'draft' as const, revision: '0',
+    fullChat: 'available' as const, viewId: 'overview', screenId: null }
+
+  it('offers no host board while host boards are off', () => {
+    render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: RUN })
+    expect(openBoard()).toBeUndefined()
+    expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
+  })
+
+  it('offers no host board on a console that shows only Assistant', () => {
+    testState.hostBoards = true
+    render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: { ...RUN, fullChat: 'only' } })
+    expect(openBoard()).toBeUndefined()
+    expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
+  })
+
+  it.each([
+    ['the console is left', { ...INITIAL_OPERATE_PAGE }, {}],
+    ['settings open', null, { settings: 'c1', workspace: 'ws1' }],
+    ['the tools open', null, { tools: true }],
+  ] as const)('keeps a board closed after %s and the same revision is shown again', (_, away, search) => {
+    testState.hostBoards = true
+    const open = { ...INITIAL_OPERATE_PAGE, presentation: 'canvas' as const, chatOpen: true, console: RUN }
+    render(open)
+    act(() => openBoard()!.click())
+    expect(container.querySelector('[data-testid="host-board"]')).not.toBeNull()
+    testState.search = search
+    render(away ?? open)
+    testState.search = {}
+    render(open)
+    expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
+  })
+
+  it('opens a host board for the console revision the session has open, and closes it when that revision changes', () => {
+    testState.hostBoards = true
+    render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: RUN })
+    act(() => openBoard()!.click())
+    expect(container.querySelector('[data-testid="host-board"]')?.textContent).toBe('Team board c1/draft/0')
+    // Opening a board is local to this tab: nothing about it enters the shared session state.
+    expect(dispatch).not.toHaveBeenCalled()
+    render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: { ...RUN, revision: '1' } })
+    expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
+  })
 })

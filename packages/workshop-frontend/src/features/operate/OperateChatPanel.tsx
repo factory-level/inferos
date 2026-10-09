@@ -16,7 +16,7 @@ export const OperateChatPanel = ({ workspace, layout = 'side', welcome, consoleA
   layout?: 'home' | 'side' | 'full' | 'hidden'
   welcome?: string
   onClose: () => void
-  consoleActions?: { entry: ConsoleEntry; onOpenWidget: (target: ConsoleWidgetTarget) => void; onOpenView: (viewId: string) => void }
+  consoleActions?: { entry: ConsoleEntry; onOpenWidget: (target: ConsoleWidgetTarget) => void; onOpenView: (viewId: string) => void; onOpenHostBoard?: (entryId: string) => void }
 }) => {
   const split = useResizableSplit(layout === 'side', 'right')
   const [chatId, setChatId] = useState<number | null>(null)
@@ -32,7 +32,7 @@ export const OperateChatPanel = ({ workspace, layout = 'side', welcome, consoleA
       {layout === 'side' && <header className="flex h-12 shrink-0 items-center justify-between border-b border-kumo-line px-4">
         <span className="text-sm font-medium text-kumo-default">Assistant</span>
         <div className="flex items-center gap-1">
-          {consoleActions && <ConsoleWidgetActions entry={consoleActions.entry} onOpen={consoleActions.onOpenWidget} />}
+          {consoleActions && <ConsoleWidgetActions entry={consoleActions.entry} onOpen={consoleActions.onOpenWidget} onOpenHostBoard={consoleActions.onOpenHostBoard} />}
           <Button size="sm" variant="ghost" aria-label="Close assistant" onClick={onClose}><XIcon size={15} aria-hidden /></Button>
         </div>
       </header>}

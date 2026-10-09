@@ -19,6 +19,7 @@ import { ConsoleWorkspaceShell } from './ConsoleWorkspaceShell'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 import { ConsolePublishDialog } from './ConsolePublishDialog'
 import { ConsoleWidgetView } from './ConsoleWidgetView'
+import { ConsoleHostBoard } from './ConsoleHostBoard'
 import { viewScreens } from './consoles'
 import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from './consoles'
 import { FlowPage } from './FlowPage'
@@ -37,13 +38,17 @@ export const OperateSessionPage = () => {
   const navigate = useNavigate()
   const search = useSearch({ from: '/inferops-canvas' })
   const { authenticatedApi } = useAuthenticatedApi()
-  const durableViews = useServerConfig()?.canvasFeatures?.durableViews === true
+  const serverConfig = useServerConfig()
+  const durableViews = serverConfig?.canvasFeatures?.durableViews === true
+  const hostBoardsOn = serverConfig?.hostBoards === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
   const sessionWorkspace = useSessionWorkspace(operate?.session ?? null)
   const [savedEntry, setSavedEntry] = useState<ConsoleEntry | null>(null)
   const [publishing, setPublishing] = useState<ConsoleEntry | null>(null)
 
   const [widgetTarget, setWidgetTarget] = useState<ConsoleWidgetTarget | null>(null)
+  // The host board open in a dialog, by the console revision it was opened from.
+  const [hostBoardTarget, setHostBoardTarget] = useState<{ consoleId: string; source: ConsoleSource; revision: string; entryId: string } | null>(null)
   const consoleId = operate?.snapshot?.state.console?.consoleId
   const notifyRefused = (caught: unknown) => {
     console.error('Operate session change failed:', caught)
@@ -98,6 +103,19 @@ export const OperateSessionPage = () => {
     } catch (caught) { toasts.add({ title: refusalMessage(caught), variant: 'error' }) }
   }
   const visibleWidget = widgetTarget?.consoleId === consoleId ? widgetTarget : null
+  // Shown only while the session still has that console revision open, and the revision lists it.
+  // A board belongs to the run it was opened from: once the console is left, opened from another
+  // source or revision, or covered by settings, setup or tools, it is closed for good, so coming back
+  // to the same revision neither reopens nor re-reads it. State is adjusted during render (React's
+  // pattern for resetting on a changed input), not in an Effect.
+  if (hostBoardTarget && (!run || configuring || tools || hostBoardTarget.consoleId !== run.consoleId
+    || hostBoardTarget.source !== run.source || hostBoardTarget.revision !== run.revision)) setHostBoardTarget(null)
+  const shownHostBoard = hostBoardsOn && run && hostBoardTarget && hostBoardTarget.consoleId === run.consoleId
+    && hostBoardTarget.source === run.source && hostBoardTarget.revision === run.revision && run.fullChat !== 'only' && entry?.console.revision === run.revision
+    ? entry.console.hostBoards?.find(board => board.id === hostBoardTarget.entryId) : undefined
+  // An assistant-only console has no widget menu, so it never offers its boards (the editors say so).
+  const openHostBoard = hostBoardsOn && run && run.fullChat !== 'only'
+    ? (entryId: string) => setHostBoardTarget({ consoleId: run.consoleId, source: run.source, revision: run.revision, entryId }) : undefined
   const settingsEntry = settings ? consoleEntries(workspaces).find(item => item.workspace.id === search.workspace && item.console.id === settings) : undefined
   const openView = async (viewId: string) => {
     setWidgetTarget(null)
@@ -175,9 +193,12 @@ export const OperateSessionPage = () => {
       </div>
       <OperateChatPanel workspace={sessionWorkspace} layout={hideChat ? 'hidden' : home ? 'home' : centered ? 'full' : 'side'}
         onClose={() => send({ type: 'setChatOpen', open: false })}
-        consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target) } : undefined} />
+        consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target), onOpenHostBoard: openHostBoard } : undefined} />
     </div>
     {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
+    {!configuring && !tools && run && operate.session && shownHostBoard?.id !== undefined && <ConsoleHostBoard key={`${run.consoleId}/${run.source}/${run.revision}/${shownHostBoard.id}`}
+      session={operate.session.stub} console={{ consoleId: run.consoleId, source: run.source, revision: run.revision }}
+      entry={{ ...shownHostBoard, id: shownHostBoard.id }} onClose={() => setHostBoardTarget(null)} />}
     {publishing && <ConsolePublishDialog entry={publishing} onClose={() => { setPublishing(null); setSavedEntry(null) }} />}
   </div>
   </ConsoleWorkspaceShell>

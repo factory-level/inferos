@@ -8,12 +8,14 @@ import { MAX_CONSOLE_WIDGETS, type ConsoleWidgetEntry } from '@gadgets/workshop-
  * console's workspace from a published blueprint version; only that pinned version is registered,
  * and publishing the console freezes it for operators. The kernel checks every entry again.
  */
-export const ConsoleWidgetRegistry = ({ widgets, published, candidates, disabled, onChange }: {
+export const ConsoleWidgetRegistry = ({ widgets, published, candidates, hostBoardCount = 0, disabled, onChange }: {
   widgets: ConsoleWidgetEntry[]
   /** The registry operators use now, or undefined if the console was never published. */
   published: ConsoleWidgetEntry[] | undefined
   /** Widget installs of the workspace that could be registered. */
   candidates: GadgetSummary[]
+  /** Host boards the console holds, which count toward the same limit. */
+  hostBoardCount?: number
   disabled: boolean
   onChange: (widgets: ConsoleWidgetEntry[]) => void
 }) => {
@@ -23,7 +25,7 @@ export const ConsoleWidgetRegistry = ({ widgets, published, candidates, disabled
   const offered = candidates.filter(candidate => !widgets.some(entry => entry.gadgetId === candidate.id))
   const choice = offered.find(candidate => String(candidate.id) === selected)
   const install = choice?.installedFrom
-  const full = widgets.length >= MAX_CONSOLE_WIDGETS
+  const full = widgets.length + hostBoardCount >= MAX_CONSOLE_WIDGETS
   const add = () => {
     if (!choice || !install || !resettable || full) return
     onChange([...widgets, { gadgetId: choice.id, blueprintId: install.blueprintId, version: install.version,
@@ -65,7 +67,7 @@ export const ConsoleWidgetRegistry = ({ widgets, published, candidates, disabled
       <Checkbox label="This widget may start with empty state each time the console is published" checked={resettable}
         onCheckedChange={checked => setResettable(checked === true)} />
       <Button disabled={!choice || !resettable || full} onClick={add}>Register widget</Button>
-      {full && <p className="text-sm text-kumo-subtle">A console offers at most {MAX_CONSOLE_WIDGETS} widgets.</p>}
+      {full && <p className="text-sm text-kumo-subtle">A console offers at most {MAX_CONSOLE_WIDGETS} widgets{hostBoardCount > 0 ? ' and boards' : ''}.</p>}
     </div>}
   </section>
 }

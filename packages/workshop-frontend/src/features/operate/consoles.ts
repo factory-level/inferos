@@ -1,6 +1,6 @@
 import type { GadgetMetadataWithTimestamps, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import { publishedConsole, type ConsoleSource, type ConsoleView, type OperateConsole } from '@gadgets/workshop-shared/operate-console'
+import { parseOperateConsoleContent, publishedConsole, type ConsoleSource, type ConsoleView, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from '@gadgets/workshop-shared/operate-console'
 import type { OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
 import type { WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { gadgetIdOf } from '../canvas/canvasLayout'
@@ -86,3 +86,19 @@ export const screenInventory = (screen: CanvasDefinition,
     const key = widget.targetRef.split('/').at(-1) ?? widget.targetRef
     return { id: widget.id, kind: 'board', label: `Board ${key}` }
   }))
+
+/**
+ * Checks console content for saving, with its host boards as `edited`, or (undefined) as `saved`
+ * when the editor did not change them. Every check runs over the boards the console will hold, so
+ * the combined widget and host-board limit counts saved boards too; unedited boards are then left
+ * out, since the kernel keeps saved entries when the list is omitted, and an editor that never
+ * touched them cannot drop or alter them. An edited list, empty included, replaces them.
+ */
+export const consoleContentForSave = (content: Omit<OperateConsoleContent, 'hostBoards'>,
+  saved: HostBoardEntry[] | undefined, edited: HostBoardEntry[] | undefined): OperateConsoleContent => {
+  const boards = edited ?? saved
+  const parsed = parseOperateConsoleContent({ ...content, ...(boards === undefined ? {} : { hostBoards: boards }) })
+  if (edited !== undefined) return parsed
+  const { hostBoards: _kept, ...rest } = parsed
+  return rest
+}
