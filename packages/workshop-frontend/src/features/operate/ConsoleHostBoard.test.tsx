@@ -166,15 +166,42 @@ describe('selection', () => {
     expect(reads()).toBe(1)
   })
 
-  it('reuses the request key for a retry after a lost answer, so a duplicate makes no second connection', async () => {
+  // The kernel publishes `pending` as soon as it reserves the intent, before the reply: the view
+  // then shows loading, and the retry must stay reachable there with the same key.
+  it('keeps a same-key Retry reachable after a lost reply while the selection is pending', async () => {
     accounts.list = [{ id: 7, name: 'ana@acme.test' }]
-    selectHostBoardConnection.mockRejectedValueOnce(new Error('connection lost')).mockResolvedValueOnce({ status: 'selected' })
+    let reject!: (reason: unknown) => void
+    selectHostBoardConnection.mockImplementationOnce(() => new Promise((_, no) => { reject = no }))
+      .mockResolvedValueOnce({ status: 'selected' })
     await render()
     await send({ state: 'none', changeSeq: 1, selectionEpoch: null })
     await act(async () => button('Use ana@acme.test')!.click())
-    expect(text()).toContain('Could not use that connection')
+    await send({ state: 'pending', changeSeq: 2, selectionEpoch: null })
+    expect(text()).toContain('Reading the board')
+    await act(async () => reject(new Error('connection lost')))
+    expect(text()).toContain('Could not confirm your connection choice')
     expect(text()).not.toContain('connection lost')
+    await act(async () => button('Try that connection again')!.click())
+    const [first, second] = selectHostBoardConnection.mock.calls
+    expect(second.slice(0, 3)).toEqual([REF, 'hb1', 7])
+    expect(second[3]).toBe(first[3])
+  })
+
+  it('keeps the same-key Retry across a subscription that ends and comes back pending', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    accounts.list = [{ id: 7, name: 'ana@acme.test' }]
+    let reject!: (reason: unknown) => void
+    selectHostBoardConnection.mockImplementationOnce(() => new Promise((_, no) => { reject = no }))
+      .mockResolvedValueOnce({ status: 'selected' })
+    await render()
+    await send({ state: 'none', changeSeq: 1, selectionEpoch: null })
     await act(async () => button('Use ana@acme.test')!.click())
+    await send({ state: 'pending', changeSeq: 2, selectionEpoch: null })
+    await send({ state: 'unknown' })
+    await act(async () => { vi.advanceTimersByTime(HOST_BOARD_RESUBSCRIBE_MS) })
+    await send({ state: 'pending', changeSeq: 2, selectionEpoch: null })
+    await act(async () => reject(new Error('connection lost')))
+    await act(async () => button('Try that connection again')!.click())
     const [first, second] = selectHostBoardConnection.mock.calls
     expect(second[3]).toBe(first[3])
   })

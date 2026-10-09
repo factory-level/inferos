@@ -46,6 +46,16 @@ describe('host-board picker intent', () => {
     expect(submit(failed.state, accountId, 'k2', target).commands).toMatchObject([{ requestKey: 'k2' }])
   })
 
+  it('retries only a lost answer, with its intent and key, and nothing after a settled one', () => {
+    const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
+    const lost = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'lost' })
+    const retried = reduceHostBoardPicker(lost.state, { type: 'retry' })
+    expect(retried.commands).toMatchObject([{ type: 'select', requestKey: 'k1', intent: { accountId: 7 } }])
+    expect(reduceHostBoardPicker(retried.state, { type: 'retry' }).commands).toEqual([])
+    const settled = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'settled' })
+    expect(reduceHostBoardPicker(settled.state, { type: 'retry' }).commands).toEqual([])
+  })
+
   it('reports a commit once, and a later click is a new intent', () => {
     const sent = submit(initialHostBoardPickerState(1), 7, 'k1')
     const done = reduceHostBoardPicker(sent.state, { type: 'completed', contextToken: 1, requestKey: 'k1', outcome: 'selected' })

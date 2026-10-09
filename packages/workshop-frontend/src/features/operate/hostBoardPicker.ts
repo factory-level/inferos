@@ -18,7 +18,7 @@ export type HostBoardPickerState = {
   contextToken: number | null
   inFlight: { requestKey: string } | null
   /** The last unfinished intent and its key, reused when the same intent is retried. */
-  last: { fingerprint: string; requestKey: string } | null
+  last: { fingerprint: string; requestKey: string; intent: HostBoardPickIntent } | null
   failed: boolean
 }
 
@@ -32,6 +32,8 @@ export type HostBoardPickerEvent =
   | { type: 'context'; contextToken: number | null }
   /** `freshKey` is used only when the intent is new; the caller generates it (`crypto.randomUUID()`). */
   | { type: 'submit'; target: HostBoardTarget; accountId: number; freshKey: string }
+  /** Sends the last intent again with its key, after a lost answer; nothing otherwise. */
+  | { type: 'retry' }
   /**
    * A selection call ended: `selected`; `settled` (the kernel answered `superseded` or `failed`,
    * which it would answer that key again, so the next submit takes a fresh key); or `lost` (the
@@ -66,7 +68,15 @@ export const reduceHostBoardPicker = (state: HostBoardPickerState, event: HostBo
       const fingerprint = fingerprintOf(intent)
       const requestKey = state.last?.fingerprint === fingerprint ? state.last.requestKey : event.freshKey
       return {
-        state: { ...state, inFlight: { requestKey }, last: { fingerprint, requestKey }, failed: false },
+        state: { ...state, inFlight: { requestKey }, last: { fingerprint, requestKey, intent }, failed: false },
+        commands: [{ type: 'select', requestKey, intent, contextToken: state.contextToken }],
+      }
+    }
+    case 'retry': {
+      if (state.inFlight || state.contextToken === null || !state.failed || !state.last) return { state, commands: [] }
+      const { requestKey, intent } = state.last
+      return {
+        state: { ...state, inFlight: { requestKey }, failed: false },
         commands: [{ type: 'select', requestKey, intent, contextToken: state.contextToken }],
       }
     }

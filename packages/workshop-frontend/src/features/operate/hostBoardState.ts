@@ -30,7 +30,11 @@ type AcceptedBoard = {
   readAtWall: number
   deadlineMono: number
   deadlineWall: number
-  /** The latest wall time seen since accept, so moving the wall clock back cannot extend it. */
+  /**
+   * The latest wall time seen since accept. It does not prove how much time passed: a wall time
+   * below it means the clock moved back, so the board's age can no longer be bounded and it is
+   * treated as expired (cleared and read again).
+   */
   wallSeen: number
 }
 
@@ -127,8 +131,12 @@ export const initialHostBoardState = (visible: boolean): HostBoardState => ({
   nextRefreshMono: null,
 })
 
+/** The board's remaining lifetime: the smaller of the two clocks' (never extended by either). */
+const remaining = (accepted: AcceptedBoard, at: HostBoardClock) =>
+  Math.min(accepted.deadlineMono - at.mono, accepted.deadlineWall - at.wall)
+
 const isExpired = (accepted: AcceptedBoard, at: HostBoardClock) =>
-  at.mono >= accepted.deadlineMono || Math.max(accepted.wallSeen, at.wall) >= accepted.deadlineWall
+  at.wall < accepted.wallSeen || remaining(accepted, at) <= 0
 
 const isOverdue = (accepted: AcceptedBoard, at: HostBoardClock) =>
   at.mono > accepted.readAtMono + HOST_BOARD_RESUME_MS
@@ -210,7 +218,10 @@ const recheck = (d: Draft, at: HostBoardClock, resume: boolean) => {
       requestRead(d, at)
       return
     }
-    d.state = { ...d.state, accepted: { ...accepted, wallSeen: Math.max(accepted.wallSeen, at.wall) } }
+    // Either clock may have run ahead (a sleep pauses the monotonic one), so the timer is rearmed
+    // for whatever lifetime is left now.
+    d.state = { ...d.state, accepted: { ...accepted, wallSeen: at.wall } }
+    d.commands.push({ type: 'set-timer', timer: 'expiry', delayMs: remaining(accepted, at) })
   }
   if (resume && d.state.nextRefreshMono !== null && at.mono >= d.state.nextRefreshMono) requestRead(d, at)
 }
@@ -227,7 +238,9 @@ const settle = (d: Draft, token: number): InFlightRead | null => {
 
 const accept = (d: Draft, read: Extract<HostBoardRead, { status: 'ok' }>, sent: InFlightRead, at: HostBoardClock) => {
   const readAtMs = Date.parse(read.readAt)
+  // A replacement that cannot be accepted also clears the board it would have replaced.
   if (Number.isNaN(readAtMs) || read.publicationRevision !== d.state.context!.target.console.revision) {
+    clearData(d)
     d.state = { ...d.state, outcome: 'unavailable' }
     return
   }
@@ -245,11 +258,12 @@ const accept = (d: Draft, read: Extract<HostBoardRead, { status: 'ok' }>, sent: 
     wallSeen: Math.max(sent.t0Wall, at.wall),
   }
   if (isExpired(accepted, at)) {
+    clearData(d)
     d.state = { ...d.state, outcome: 'unavailable' }
     return
   }
   d.state = { ...d.state, accepted, outcome: 'none' }
-  d.commands.push({ type: 'set-timer', timer: 'expiry', delayMs: accepted.deadlineMono - at.mono })
+  d.commands.push({ type: 'set-timer', timer: 'expiry', delayMs: remaining(accepted, at) })
 }
 
 const afterSettle = (d: Draft, at: HostBoardClock) => {

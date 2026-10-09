@@ -334,6 +334,63 @@ describe('expiry', () => {
   })
 })
 
+const expiryTimers = () => commands.filter((c): c is Extract<HostBoardCommand, { type: 'set-timer' }> => c.type === 'set-timer' && c.timer === 'expiry')
+
+describe('expiry scheduling on both clocks', () => {
+  it('arms the expiry timer for the smaller remaining lifetime: an answer delayed across a sleep expires 10 s later', () => {
+    mountSelected()
+    const t0 = new Date(wall).toISOString()
+    // The request slept: 5 s passed on the monotonic clock, 50 s on the wall clock.
+    mono += 5_000
+    wall += 50_000
+    answer(ok(t0))
+    expect(view().status).toBe('ok')
+    expect(expiryTimers().at(-1)).toEqual({ type: 'set-timer', timer: 'expiry', delayMs: 10_000 })
+    advance(10_000)
+    dispatch({ type: 'timer', timer: 'expiry' })
+    expect(state.accepted).toBeNull()
+  })
+
+  it('rearms on a resume when the wall clock ran ahead: mono 5 s / wall 25 s leaves 35 s', () => {
+    mountSelected()
+    answer(ok())
+    mono += 5_000
+    wall += 25_000
+    dispatch({ type: 'resume' })
+    expect(view().status).toBe('ok')
+    expect(expiryTimers().at(-1)).toEqual({ type: 'set-timer', timer: 'expiry', delayMs: 35_000 })
+  })
+
+  it('clears and re-reads when the wall clock moved back, since the age can no longer be bounded', () => {
+    mountSelected()
+    answer(ok())
+    const before = reads().length
+    // A paused monotonic clock across a sleep, and a wall clock set back.
+    mono += 1_000
+    wall -= 600_000
+    expect(view().status).not.toBe('ok')
+    dispatch({ type: 'resume' })
+    expect(state.accepted).toBeNull()
+    expect(reads()).toHaveLength(before + 1)
+  })
+})
+
+describe('a rejected replacement', () => {
+  it.each([
+    ['an unparseable readAt', () => ok('not a date')],
+    ['another publication revision', () => ok(undefined, '5')],
+    ['an answer already expired', () => ok(new Date(wall - HOST_BOARD_EXPIRY_MS).toISOString())],
+  ])('clears the board it would have replaced (%s)', (_, replacement) => {
+    mountSelected()
+    answer(ok())
+    advance(30_000)
+    dispatch({ type: 'timer', timer: 'refresh' })
+    answer(replacement())
+    expect(state.accepted).toBeNull()
+    expect(view()).toEqual({ status: 'unavailable' })
+  })
+})
+
 describe('cadence', () => {
   it('refreshes every 30 s while visible and pauses while hidden', () => {
     mountSelected()
