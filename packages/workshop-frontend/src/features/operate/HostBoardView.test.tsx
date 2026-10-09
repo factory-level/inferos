@@ -20,7 +20,7 @@ const board = (title = 'Fix the login'): BoardSnapshot => ({
   ],
 })
 const READ_AT = '2026-10-08T12:00:00.000Z'
-const READ = { token: 1, generation: 1, deadlineMono: 61_000, deadlineWall: Date.parse(READ_AT) + 60_000 }
+const READ = { contextToken: 1, token: 1, generation: 1, deadlineMono: 61_000, deadlineWall: Date.parse(READ_AT) + 60_000 }
 
 let container: HTMLDivElement
 let root: Root

@@ -25,7 +25,8 @@ export type HostBoardContext = { token: number; target: HostBoardTarget }
 type AcceptedBoard = {
   board: BoardSnapshot
   readAt: string
-  /** The accepted read's identity: its token (new for every read) and the generation it was sent in. */
+  /** The accepted read's identity: its context, its token (new for every read) and the generation it was sent in. */
+  contextToken: number
   readToken: number
   generation: number
   /** The read's start mapped to each clock; fixed once at accept. */
@@ -107,13 +108,21 @@ export type HostBoardEvent =
 export type HostBoardStep = { state: HostBoardState; commands: HostBoardCommand[] }
 
 /**
- * The identity and lifetime of the read an `ok` view shows. `token` is new for every read, so a
- * refresh at the same generation still carries a new one; `generation` is the invalidation
- * generation the read was sent in. The deadlines are the ones its expiry is scheduled from, fixed
+ * The identity and lifetime of the read an `ok` view shows. `contextToken` is the handle's context
+ * (unique per acquired handle, across remounts too, as the caller mints it). `token` is new for
+ * every read within a context, so a refresh at the same generation still carries a new one;
+ * `generation` is the invalidation generation the read was sent in. Together the three are unique
+ * for the page's lifetime. The deadlines are the ones its expiry is scheduled from, fixed
  * at accept: the board is expired once either clock reaches its deadline (or the wall clock moves
  * back), so a consumer can run its own expiry timer.
  */
-export type HostBoardReadIdentity = { token: number; generation: number; deadlineMono: number; deadlineWall: number }
+export type HostBoardReadIdentity = {
+  contextToken: number
+  token: number
+  generation: number
+  deadlineMono: number
+  deadlineWall: number
+}
 
 /** What `HostBoardView` renders. */
 export type HostBoardViewState =
@@ -163,8 +172,8 @@ export const hostBoardView = (state: HostBoardState, at: HostBoardClock): HostBo
   if (!state.selection) return { status: 'unknown' }
   const accepted = state.accepted
   if (accepted && !isExpired(accepted, at)) {
-    const { readToken: token, generation, deadlineMono, deadlineWall } = accepted
-    return { status: 'ok', board: accepted.board, readAt: accepted.readAt, read: { token, generation, deadlineMono, deadlineWall } }
+    const { contextToken, readToken: token, generation, deadlineMono, deadlineWall } = accepted
+    return { status: 'ok', board: accepted.board, readAt: accepted.readAt, read: { contextToken, token, generation, deadlineMono, deadlineWall } }
   }
   if (state.selection.state === 'none') return { status: 'not-connected' }
   // A selection is being made: nothing is read until it commits.
@@ -266,6 +275,7 @@ const accept = (d: Draft, read: Extract<HostBoardRead, { status: 'ok' }>, sent: 
   const accepted: AcceptedBoard = {
     board: read.board,
     readAt: read.readAt,
+    contextToken: sent.contextToken,
     readToken: sent.token,
     generation: sent.generation,
     readAtMono,
@@ -285,6 +295,22 @@ const accept = (d: Draft, read: Extract<HostBoardRead, { status: 'ok' }>, sent: 
 
 const afterSettle = (d: Draft, at: HostBoardClock) => {
   if (d.state.queued) { d.state = { ...d.state, queued: false }; requestRead(d, at) }
+}
+
+/**
+ * The fixed safe state after an event the reducer could not apply (it threw). The board is cleared
+ * and shown as *unavailable*, like an ordinary failed read: the generation rises, so any late answer
+ * is dropped, and the read in flight is dropped outright rather than left to settle, so later
+ * requests are not stuck joining it. The 30 s cadence (while visible) or Retry reads again. The
+ * handle is kept as it was; a guard refusal still arrives as its own event.
+ */
+export const faultHostBoard = (state: HostBoardState, at: HostBoardClock): HostBoardStep => {
+  const d: Draft = { state, commands: [] }
+  invalidate(d)
+  d.state = { ...d.state, inFlight: null, queued: false, outcome: 'unavailable' }
+  d.commands.push({ type: 'clear-timer', timer: 'expiry' })
+  scheduleRefresh(d, at)
+  return d
 }
 
 /** Applies one event. Never throws; an event that does not apply leaves the state unchanged. */

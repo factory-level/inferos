@@ -27,11 +27,11 @@ vi.mock('./hostBoardState', async importOriginal => {
 
 import { useHostBoard, type HostBoardOptions } from './useHostBoard'
 import { useHostBoardSelection } from './useHostBoardSelection'
-import type { HostBoardViewState } from './hostBoardState'
+import { HOST_BOARD_EXPIRY_MS, type HostBoardViewState } from './hostBoardState'
 import type { HostBoardTarget } from './hostBoardTypes'
 
 const TARGET: HostBoardTarget = { entryId: 'hb1', console: { consoleId: 'c1', source: 'published', revision: '4' } }
-const ok = (title = 'Fix the login'): HostBoardView => ({ status: 'ok', readAt: new Date().toISOString(), publicationRevision: '4', board: {
+const ok = (title = 'Fix the login', readAt = new Date().toISOString()): HostBoardView => ({ status: 'ok', readAt, publicationRevision: '4', board: {
   project: { identifier: 'ENG', name: 'Engineering' },
   columns: [{ label: 'Todo', group: 'unstarted', issues: [{ identifier: 'ENG-1', title, priority: 'high', targetDate: null, blocked: false }] }],
 } })
@@ -70,8 +70,9 @@ const Picker = ({ onConnected }: { onConnected: () => void }) => {
 }
 
 // Everything a failure could reach: the Workshop reporter's transport (installed for real), every
-// console method, and window `error` / `unhandledrejection`. jsdom does not raise
-// `unhandledrejection` itself, so Node's is forwarded to the window as a browser would raise it.
+// console method, and window `error` / `unhandledrejection`. Timers here are Node's, and jsdom does
+// not raise `unhandledrejection` itself, so Node's uncaught exceptions and unhandled rejections are
+// forwarded to the window as a browser would raise them.
 let transport: ReturnType<typeof vi.fn<typeof fetch>>
 let seen: unknown[]
 let consoleCalls: unknown[][]
@@ -79,6 +80,9 @@ let consoleCalls: unknown[][]
 const nodeProcess = (globalThis as unknown as { process: { on: (name: string, listener: (reason: unknown) => void) => void; off: (name: string, listener: (reason: unknown) => void) => void } }).process
 const onNodeRejection = (reason: unknown) => {
   window.dispatchEvent(Object.assign(new Event('unhandledrejection'), { reason }))
+}
+const onNodeException = (error: unknown) => {
+  window.dispatchEvent(new ErrorEvent('error', { error, message: String(error) }))
 }
 const onWindowError = (event: ErrorEvent) => seen.push(event.error)
 const onWindowRejection = (event: Event) => seen.push((event as Event & { reason: unknown }).reason)
@@ -101,6 +105,7 @@ beforeEach(async () => {
   const reporting = await import('../../errorReporting')
   reporting.installWorkshopErrorReporting()
   nodeProcess.on('unhandledRejection', onNodeRejection)
+  nodeProcess.on('uncaughtException', onNodeException)
   window.addEventListener('error', onWindowError)
   window.addEventListener('unhandledrejection', onWindowRejection)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
@@ -108,6 +113,7 @@ beforeEach(async () => {
 afterEach(() => {
   act(() => root.unmount()); container.remove()
   nodeProcess.off('unhandledRejection', onNodeRejection)
+  nodeProcess.off('uncaughtException', onNodeException)
   window.removeEventListener('error', onWindowError)
   window.removeEventListener('unhandledrejection', onWindowRejection)
   vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks()
@@ -126,8 +132,8 @@ const leaks = () => Object.entries({
 }).filter(([, values]) => JSON.stringify(values).includes(SENTINEL)).map(([sink]) => sink)
 
 describe('containment', () => {
-  it('contains a reducer throw on read-answer, including on the failure path it falls into', async () => {
-    // The answer of this read throws in the reducer, and so does the read-failed it falls into.
+  it('contains a reducer throw on read-answer and its read-failed fallback, shows unavailable, and reads again', async () => {
+    // Both are poisoned, so the test holds whichever of them first meets the throw.
     poison.on = event => (event as HostBoardEvent).type === 'read-answer' || (event as HostBoardEvent).type === 'read-failed'
     await act(async () => root.render(<Board />))
     await selected()
@@ -137,7 +143,52 @@ describe('containment', () => {
     expect(leaks()).toEqual([])
     expect(seen).toEqual([])
     expect(transport).not.toHaveBeenCalled()
-    expect(latest.view.status).toBe('loading')
+    // The read that faulted is not left in flight: the view is unavailable, and Retry reads again.
+    expect(latest.view.status).toBe('unavailable')
+    poison.on = () => false
+    await act(async () => latest.dispatch({ type: 'retry' }))
+    expect(reads).toHaveLength(2)
+    await act(async () => reads[1].resolve(ok()))
+    expect(latest.view).toMatchObject({ status: 'ok', read: { token: 2 } })
+  })
+
+  it('contains a throwing onRequest, and still issues the read', async () => {
+    const onRequest = () => { throw new Error(SENTINEL) }
+    await act(async () => root.render(<Board options={{ onRequest }} />))
+    // A throw that escaped into the RPC callback delivering the selection counts as a leak too.
+    try { await selected() } catch (caught) { seen.push(caught) }
+    await settle()
+    expect(leaks()).toEqual([])
+    expect(seen).toEqual([])
+    expect(transport).not.toHaveBeenCalled()
+    expect(reads).toHaveLength(1)
+    await act(async () => reads[0].resolve(ok()))
+    expect(latest.view.status).toBe('ok')
+  })
+
+  it('contains a reducer throw from a timer', async () => {
+    await act(async () => root.render(<Board />))
+    await selected()
+    // A board 50 ms from expiry, so its real expiry timer fires during the test.
+    await act(async () => reads[0].resolve(ok('Fix the login', new Date(Date.now() - HOST_BOARD_EXPIRY_MS + 50).toISOString())))
+    expect(latest.view.status).toBe('ok')
+    poison.on = event => (event as HostBoardEvent).type === 'timer'
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)) })
+    expect(leaks()).toEqual([])
+    expect(seen).toEqual([])
+    expect(transport).not.toHaveBeenCalled()
+    expect(latest.view.status).toBe('unavailable')
+  })
+
+  it('contains a reducer throw from a DOM listener', async () => {
+    await act(async () => root.render(<Board />))
+    await selected()
+    poison.on = event => (event as HostBoardEvent).type === 'resume'
+    await act(async () => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('online')) })
+    await settle()
+    expect(leaks()).toEqual([])
+    expect(seen).toEqual([])
+    expect(transport).not.toHaveBeenCalled()
   })
 
   it('contains a rejected subscribeSelection whose handler throws', async () => {
@@ -179,5 +230,24 @@ describe('onRequest', () => {
     expect(latest.view).toMatchObject({ status: 'ok', read: { token: 1 } })
     await act(async () => reads[1].resolve(ok()))
     expect(latest.view).toMatchObject({ status: 'ok', read: { token: 2 } })
+  })
+})
+
+describe('read identity', () => {
+  it('gives a remounted board a new contextToken, though its read tokens and generations start over', async () => {
+    const mountAndRead = async (key: number) => {
+      reads = []
+      await act(async () => root.render(<Board key={key} />))
+      await selected()
+      await act(async () => reads[0].resolve(ok()))
+      if (latest.view.status !== 'ok') throw new Error(`expected ok, got ${latest.view.status}`)
+      return latest.view.read
+    }
+    const first = await mountAndRead(1)
+    const second = await mountAndRead(2)
+    expect(first.contextToken).toEqual(expect.any(Number))
+    expect(second.contextToken).toEqual(expect.any(Number))
+    expect(second.contextToken).not.toBe(first.contextToken)
+    expect({ token: second.token, generation: second.generation }).toEqual({ token: first.token, generation: first.generation })
   })
 })

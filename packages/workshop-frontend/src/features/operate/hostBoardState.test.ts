@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  faultHostBoard,
   HOST_BOARD_EXPIRY_MS,
   hostBoardView,
   initialHostBoardState,
@@ -541,7 +542,7 @@ describe('the accepted read\'s identity and deadlines', () => {
     mountSelected()
     answer(ok())
     const first = shown()
-    expect(first).toMatchObject({ token: lastRead().token, generation: state.generation })
+    expect(first).toMatchObject({ contextToken: 1, token: lastRead().token, generation: state.generation })
     advance(30_000)
     dispatch({ type: 'timer', timer: 'refresh' })
     answer(ok())
@@ -581,5 +582,35 @@ describe('the accepted read\'s identity and deadlines', () => {
     expect(view().status).toBe('ok')
     wall = deadlineWall
     expect(view().status).not.toBe('ok')
+  })
+})
+
+describe('a reducer fault', () => {
+  const fault = () => {
+    const step = faultHostBoard(state, at())
+    state = step.state
+    commands.push(...step.commands)
+  }
+
+  it('drops the read in flight and shows unavailable, so the next request reads again and a late answer is ignored', () => {
+    mountSelected()
+    const faulted = lastRead().token
+    fault()
+    expect(view()).toEqual({ status: 'unavailable' })
+    expect(commands).toContainEqual({ type: 'set-timer', timer: 'refresh', delayMs: 30_000 })
+    answer(ok(), faulted)
+    expect(view()).toEqual({ status: 'unavailable' })
+    dispatch({ type: 'retry' })
+    expect(reads()).toHaveLength(2)
+    answer(ok())
+    expect(view()).toMatchObject({ status: 'ok', board: BOARD })
+  })
+
+  it('clears a board that was shown', () => {
+    mountSelected()
+    answer(ok())
+    fault()
+    expect(view()).toEqual({ status: 'unavailable' })
+    expect(state.accepted).toBeNull()
   })
 })
