@@ -1,15 +1,15 @@
 // A guard for the authorization generation (callable-widget contract §4.1, step C5a). Every
-// authorization input is a typed-storage slot that makeOverseerStorage watches (watchAuthzInput in
-// sharing.ts): a subscriber raises the generation inside the same transactionSync as each write that
-// changes it, so a write site cannot forget its bump, however it reaches the slot (an alias, a
-// helper, an index delete). What remains to guard is the ways around the subscribers, and that the
-// watched set is complete:
+// authorization input is a typed-storage slot that makeOverseerStorage watches
+// (watchAuthzCollection and watchAuthzSingleton in sharing.ts): a subscriber raises the generation
+// inside the same transactionSync as each write that changes it, so a write site cannot forget its
+// bump, however it reaches the slot (an alias, a helper, an index delete). What remains to guard is
+// the ways around the subscribers, and that the watched set is complete:
 // - every input in the Overseer schema raises it on a change and not on an identical rewrite;
 // - no source names an input's storage key in a string (raw kv access), and makeOverseerStorage is
 //   the only typed-storage view of the Overseer's storage (a second view would have no subscribers);
 // - storage.deleteAll(), which bypasses subscribers, runs only in deleteSelf, which carries the
 //   generation over it;
-// - direct bumps are limited to the watcher, the access restart and deleteSelf.
+// - direct bumps are limited to the watchers, the access restart and deleteSelf.
 // authz-generation.test.ts drives each input through its real code path in a real Overseer.
 
 import { describe, expect, it } from "vitest";
@@ -173,13 +173,15 @@ describe("authorization inputs", () => {
     ]);
   });
 
-  it("only the watcher, the access restart and deleteSelf bump directly", () => {
+  it("only the watchers, the access restart and deleteSelf bump directly", () => {
     // Anything else is a storage write, which the subscribers already cover.
     expect(allSitesOf(/\bbumpAuthzGeneration\(/)).toEqual([
       "overseer.ts:OverseerClientInterface.deleteSelf",
       "overseer.ts:OverseerImpl.scheduleAccessRestart",
       "sharing.ts:(module).bumpAuthzGeneration",
-      "sharing.ts:(module).watchAuthzInput",
+      "sharing.ts:(module).bumpIfChanged",
+      "sharing.ts:(module).watchAuthzCollection",
+      "sharing.ts:(module).watchAuthzCollection",
     ]);
   });
 

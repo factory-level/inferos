@@ -82,16 +82,16 @@ async function hashShareKey(rawKey: string): Promise<string> {
  * observer record, owner or restart changed in between.
  */
 export interface AuthzGenerationStorage {
-  /** Starts at 0 and only ever rises, through `bumpAuthzGeneration`. */
+  /** Starts at 0 and, within one incarnation of the object, only rises (`bumpAuthzGeneration`). */
   authzGeneration: Singleton<number>;
 }
 
 /**
  * Raise the authorization generation by one and return the new value. Storage writes reach it
- * through `watchAuthzInput`; call it directly only for an input that is not a storage write (the
- * access restart). Call it in the same synchronous block as the change it covers, with no await
- * between them: a bump before an await would let a reader record the new generation and still
- * miss the change that follows it.
+ * through `watchAuthzCollection` and `watchAuthzSingleton`; call it directly only for an input that
+ * is not a storage write (the access restart). Call it in the same synchronous block as the change
+ * it covers, with no await between them: a bump before an await would let a reader record the new
+ * generation and still miss the change that follows it.
  */
 export function bumpAuthzGeneration(storage: AuthzGenerationStorage): number {
   let next = storage.authzGeneration.get() + 1;
@@ -105,36 +105,48 @@ export function readAuthzGeneration(storage: AuthzGenerationStorage): number {
 }
 
 /**
- * Make every change to `input` raise the authorization generation. The bump runs in a typed-storage
- * subscriber, which `put` and `delete` call inside the same `transactionSync` as the write, so it
- * commits or rolls back with the write whatever path, alias or helper made it. A rewrite of an
- * identical value changes no input and does not raise it. Register each input once, when its
- * storage is created.
+ * Make every change to `collection` raise the authorization generation: adding or deleting a
+ * record, or rewriting one with a different value. The bump runs in a typed-storage subscriber,
+ * which `put` and `delete` call inside the same `transactionSync` as the write (see `Subscriber`),
+ * so it commits or rolls back with the write whatever path, alias or helper made it. Register each
+ * input once, when its storage is created.
  */
-export function watchAuthzInput(
-    storage: AuthzGenerationStorage, input: Collection<any, any> | Singleton<unknown>): void {
-  let bump = () => { bumpAuthzGeneration(storage); };
-  let bumpIfChanged = (before: unknown, after: unknown) => {
-    if (!sameStoredValue(before, after)) bump();
-  };
-  if ("list" in input) {
-    input.subscribe({ add: bump, update: bumpIfChanged, remove: bump });
-  } else {
-    // A singleton's subscribers run before its value is written, so `get()` is still the old one.
-    input.subscribe({ update: value => bumpIfChanged(input.get(), value) });
-  }
+export function watchAuthzCollection<T extends object, K>(
+    storage: AuthzGenerationStorage, collection: Collection<T, K>): void {
+  collection.subscribe({
+    add: () => { bumpAuthzGeneration(storage); },
+    update: (before, after) => bumpIfChanged(storage, before, after),
+    remove: () => { bumpAuthzGeneration(storage); },
+  });
+}
+
+/**
+ * Make every put of a different value to `slot` raise the authorization generation, from a
+ * subscriber that runs inside the put's own `transactionSync`, as for `watchAuthzCollection`.
+ */
+export function watchAuthzSingleton<T>(storage: AuthzGenerationStorage, slot: Singleton<T>): void {
+  // Subscribers run before the value is written (see `SingletonSubscriber`), so `get()` is still
+  // the old one.
+  slot.subscribe({ update: value => bumpIfChanged(storage, slot.get(), value) });
 }
 
 /** Watch this module's two authorization inputs, the collaborators and the share keys. */
 export function watchSharingAuthzInputs(storage: SharingStorage): void {
-  watchAuthzInput(storage, storage.collaborators);
-  watchAuthzInput(storage, storage.shareKeys);
+  watchAuthzCollection(storage, storage.collaborators);
+  watchAuthzCollection(storage, storage.shareKeys);
+}
+
+// A rewrite of an identical value changes no input, so it does not raise the generation.
+function bumpIfChanged(storage: AuthzGenerationStorage, before: unknown, after: unknown): void {
+  if (!sameStoredValue(before, after)) bumpAuthzGeneration(storage);
 }
 
 // Equality over stored values (structured-clone data), compared per key rather than by
 // serialization, so key order does not matter: primitives by `Object.is`, dates by time, arrays by
-// element, plain objects by key, with an absent key equal to an undefined one (storage keeps the
-// same meaning for both). Anything else compares unequal, which costs only a spurious rise.
+// element, plain objects by key. An absent key equals an undefined one: no reader of these inputs
+// distinguishes the two (an optional field such as a link's `note` reads the same either way), and
+// `accountChoices` never stores `undefined`. Anything else compares unequal, which costs only a
+// spurious rise.
 function sameStoredValue(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
   if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();

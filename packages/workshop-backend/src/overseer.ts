@@ -75,8 +75,8 @@ import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker"
 import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
-    bumpAuthzGeneration, readAuthzGeneration, watchAuthzInput, watchSharingAuthzInputs }
-    from "./sharing";
+    bumpAuthzGeneration, readAuthzGeneration, watchAuthzCollection, watchAuthzSingleton,
+    watchSharingAuthzInputs } from "./sharing";
 import { AutoApprovalDrainer, autoApprovalRule } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
@@ -1644,13 +1644,15 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
     }
   });
 
-  // Every authorization input raises the generation from inside its own writes (watchAuthzInput).
-  // `deleteSelf`'s storage.deleteAll() bypasses subscribers and handles the generation itself.
+  // Every authorization input raises the generation from inside its own writes (see
+  // watchAuthzCollection). `deleteSelf`'s storage.deleteAll() bypasses subscribers and handles the
+  // generation itself.
   watchSharingAuthzInputs(typed);
-  for (let input of [typed.observers, typed.ownerId, typed.containsRestrictedData,
-                     typed.ownerInvitesOnly, typed.operateSession]) {
-    watchAuthzInput(typed, input);
-  }
+  watchAuthzCollection(typed, typed.observers);
+  watchAuthzSingleton(typed, typed.ownerId);
+  watchAuthzSingleton(typed, typed.containsRestrictedData);
+  watchAuthzSingleton(typed, typed.ownerInvitesOnly);
+  watchAuthzSingleton(typed, typed.operateSession);
   return typed;
 }
 
@@ -12329,8 +12331,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       // authorization generation, and resets the generation itself to 0. The carry-over is
       // required, not tidiness: until the restart aborts this object, a call that recorded g0
       // before the deletion is still running, and without it 0 -> 1 here and -> 2 at the restart
-      // could land back on its g0 and pass its check. The generation never decreases, and it is
-      // the one key a deleted workspace keeps.
+      // could land back on its g0 and pass its check. So within one incarnation the generation
+      // never decreases, and it is the one key a deleted workspace keeps. A crash before the put
+      // below restarts it at 0, which is harmless: no reader survives a restart.
       this.impl.storage.authzGeneration.put(generation);
       bumpAuthzGeneration(this.impl.storage);
       this.impl.recordGadgetAnalytics({
