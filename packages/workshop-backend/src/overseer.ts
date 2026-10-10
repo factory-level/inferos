@@ -74,8 +74,8 @@ import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
 import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
-import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank }
-    from "./sharing";
+import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
+    bumpAuthzGeneration, readAuthzGeneration } from "./sharing";
 import { AutoApprovalDrainer, autoApprovalRule } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
@@ -1330,6 +1330,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // its `ObservationDescription`. Share links stop working and only the owner can add
       // collaborators (enforced by SharingManager).
       ownerInvitesOnly: singleton(false),
+
+      // The authorization generation (see AuthzGenerationStorage in sharing.ts): raised by
+      // bumpAuthzGeneration at every change to who may reach this workspace or on what terms.
+      authzGeneration: 0,
     },
 
     collections: {
@@ -6245,12 +6249,18 @@ class OverseerImpl implements AgentHooks {
     let baseline = sharing && !this.storage.ownerInvitesOnly.get()
         ? sharing.computeEffectiveRoles() : undefined;
 
+    // Both flags are authorization inputs (one gates what the workspace may share, the other which
+    // grants count), so newly setting either raises the generation in this same block.
+    let flagsChanged =
+        (description.containsRestrictedData && !this.storage.containsRestrictedData.get()) ||
+        (description.ownerInvitesOnly && !this.storage.ownerInvitesOnly.get());
     if (description.containsRestrictedData) {
       this.storage.containsRestrictedData.put(true);
     }
     if (description.ownerInvitesOnly) {
       this.storage.ownerInvitesOnly.put(true);
     }
+    if (flagsChanged) bumpAuthzGeneration(this.storage);
 
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
@@ -6436,6 +6446,7 @@ class OverseerImpl implements AgentHooks {
     let allGatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
     let removals = unauthorized.map(observer => {
       this.storage.observers.delete(observer.profileId);
+      bumpAuthzGeneration(this.storage);
       return this.#removeObserverFromGatekeepers(observer.observerId, allGatekeeperIds);
     });
     for (let observerId of outOfScope) {
@@ -6890,7 +6901,12 @@ class OverseerImpl implements AgentHooks {
   //   the owner, who is also connected and will be disconnected) before their connection drops.
   //   Without the delay their own removeCollaborator()/revokeShareLink() call might reject with a
   //   connection error even though it succeeded.
+  //
+  // The restart is itself an authorization input: whatever triggered it (a removal, a revocation, a
+  // scope widening) was written synchronously before this call, so the bump here, before the first
+  // await, lands in that same block and is flushed by the sync below.
   async scheduleAccessRestart(reason: string): Promise<void> {
+    bumpAuthzGeneration(this.storage);
     await this.ctx.storage.sync();
     await scheduler.wait(100);
     this.ctx.abort(reason);
@@ -10110,6 +10126,7 @@ class OverseerImpl implements AgentHooks {
       let observer = this.storage.observers.get(entry.profile.id);
       if (!observer) continue;
       this.storage.observers.delete(observer.profileId);
+      bumpAuthzGeneration(this.storage);
       await this.#removeObserverFromGatekeepers(observer.observerId, gatekeeperIds);
     }
   }
@@ -10414,7 +10431,15 @@ class OverseerImpl implements AgentHooks {
 
     // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
     //    the record is the canonical moment the user becomes a configured observer.
+    //    A returning observer re-verified with the same choices rewrites an identical record, which
+    //    changes no authorization input, so only an admission or a changed record raises the
+    //    authorization generation.
+    let stored = this.storage.observers.get(profileId);
     this.storage.observers.put({profileId, observerId, accountChoices});
+    if (stored?.observerId !== observerId ||
+        JSON.stringify(stored.accountChoices) !== JSON.stringify(accountChoices)) {
+      bumpAuthzGeneration(this.storage);
+    }
   }
 
   // Render the observer verification failures as one line per binding, naming the connection and the
@@ -10482,6 +10507,14 @@ class OverseerImpl implements AgentHooks {
           this.storage, await this.getOwnerProfileId(), () => this.storage.ownerInvitesOnly.get());
     }
     return this.#sharingManager;
+  }
+
+  /**
+   * The workspace's authorization generation (see AuthzGenerationStorage). Synchronous, so a
+   * caller can compare it with an earlier reading in the same block as its final checks.
+   */
+  authzGeneration(): number {
+    return readAuthzGeneration(this.storage);
   }
 
   #codeIdMap = new Map<string, WorkerLoaderWorkerCode>;
@@ -10731,6 +10764,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         this.impl.ownerId = userId;
 
         this.impl.storage.ownerId.put(userId);
+        bumpAuthzGeneration(this.impl.storage);
 
         this.#initializeNewWorkspace();
       });
@@ -10741,8 +10775,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // An operate session workspace is its owner's alone, so it is never shared: any other caller
     // is refused before a share key is redeemed. Only the session (server.ts) marks one, for the
     // workspace its owner's user DO recorded; the mark is what every later open checks.
-    if (asOperateSession && isOwner) {
+    // The mark shuts out every other caller, so setting it raises the authorization generation.
+    if (asOperateSession && isOwner && !this.impl.storage.operateSession.get()) {
       this.impl.storage.operateSession.put(true);
+      bumpAuthzGeneration(this.impl.storage);
     }
     let operateSession = this.impl.storage.operateSession.get();
     if (operateSession && !isOwner) {
@@ -10886,6 +10922,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       this.impl.ownerId = callerId;
       this.impl.ownerProfileId = callerProfile.id;
       this.impl.storage.ownerId.put(callerId);
+      bumpAuthzGeneration(this.impl.storage);
       this.impl.storage.title.put(input.title);
       this.impl.storage.ownerRegistrationPending.put(true);
       this.#initializeNewWorkspace();
@@ -12291,7 +12328,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.#owner.deleteGadget(this.impl.ctx.id.toString());
+      let generation = this.impl.authzGeneration();
       await this.impl.ctx.storage.deleteAll();
+      // Deleting storage clears the owner and every grant. It would also reset the authorization
+      // generation, so carry it over before raising it: the generation never decreases, and it is
+      // the one key a deleted workspace keeps.
+      this.impl.storage.authzGeneration.put(Math.max(generation, this.impl.authzGeneration()));
+      bumpAuthzGeneration(this.impl.storage);
       this.impl.recordGadgetAnalytics({
         event_name: "gadget_deleted",
         user_id: this.#clientUser.id.toString(),

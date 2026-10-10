@@ -21,10 +21,15 @@
 // exception is the `ownerInvitesOnly` flag, which the Overseer supplies as a hook: once it is set,
 // only direct grants from the owner count, so it narrows which edges `computeEffectiveRoles`
 // follows and must be checked synchronously with each grant's storage write.
+//
+// AUTHORIZATION GENERATION: every write here that changes the permission graph (a grant, a role
+// change, a severed edge, a re-rooted keep, a redeemed, minted or revoked link) calls
+// `bumpAuthzGeneration` in the same synchronous block, after the method's last await.
+// `authz-generation-guard.test.ts` fails on a write site without one.
 
 import { AiChatAuthorInfo, CollaboratorInfo, PermissionEdge, CollaboratorRole, AffectedCollaborator,
     createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from "@gadgets/workshop-shared/api";
-import { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
+import { Collection, NonUniqueIndex, Singleton } from "@gadgets/typed-storage";
 
 /**
  * Roles are totally ordered: build > use. Higher rank means strictly more access. Exported so
@@ -67,6 +72,34 @@ async function hashShareKey(rawKey: string): Promise<string> {
   let sig = new Uint8Array(await crypto.subtle.sign(
       "HMAC", hmacKey, Uint8Array.fromHex(rawKey)));
   return sig.toHex();
+}
+
+/**
+ * The storage slice holding a workspace's authorization generation: a persisted counter that every
+ * change to an authorization input raises (callable-widget contract, section 4.1). A reader that
+ * records it, awaits, and finds it unchanged knows no grant, removal, revocation, policy flag,
+ * observer record, owner or restart changed in between.
+ */
+export interface AuthzGenerationStorage {
+  /** Starts at 0 and only ever rises, through `bumpAuthzGeneration`. */
+  authzGeneration: Singleton<number>;
+}
+
+/**
+ * Raise the authorization generation by one and return the new value. Call it in the same
+ * synchronous block as the storage write that changes an authorization input and, in an async
+ * function, after that function's last await: a bump at entry would let a reader record the new
+ * generation and still miss the change that follows it.
+ */
+export function bumpAuthzGeneration(storage: AuthzGenerationStorage): number {
+  let next = storage.authzGeneration.get() + 1;
+  storage.authzGeneration.put(next);
+  return next;
+}
+
+/** The current authorization generation. Synchronous, so it can be read with no await before it. */
+export function readAuthzGeneration(storage: AuthzGenerationStorage): number {
+  return storage.authzGeneration.get();
 }
 
 /** Each gadget stores its collaborator list. */
@@ -127,7 +160,7 @@ export type ShareKeyRecord = ShareLinkRecord | ShareKeyAliasRecord;
  * The slice of Overseer storage this module operates on. Satisfied by the real OverseerStorage
  * and easily constructed over a Map-backed mock DurableObjectStorage in tests.
  */
-export interface SharingStorage {
+export interface SharingStorage extends AuthzGenerationStorage {
   collaborators: Collection<CollaboratorRecord>;
   shareKeys: Collection<ShareKeyRecord> & {
     /** A link's copies, keyed by the link they alias. */
@@ -268,6 +301,7 @@ export class SharingManager {
           role,
         });
         this.storage.collaborators.put(existing);
+        bumpAuthzGeneration(this.storage);
       }
     } else {
       // New collaborator -- need full profile from their user DO. The RPC may race an observation
@@ -283,6 +317,7 @@ export class SharingManager {
           role,
         }],
       });
+      bumpAuthzGeneration(this.storage);
     }
   }
 
@@ -357,6 +392,7 @@ export class SharingManager {
         existing.addedBy.push(edge);
       }
       this.storage.collaborators.put(existing);
+      bumpAuthzGeneration(this.storage);
       return {
         profile: existing.profile,
         addedBy: existing.addedBy,
@@ -369,6 +405,7 @@ export class SharingManager {
       addedBy: [edge],
     };
     this.storage.collaborators.put(record);
+    bumpAuthzGeneration(this.storage);
     return {
       profile: record.profile,
       addedBy: record.addedBy,
@@ -434,6 +471,7 @@ export class SharingManager {
           e => !(e.type === "user" && e.sharer === caller.profileId));
     }
     this.storage.collaborators.put(target);
+    bumpAuthzGeneration(this.storage);
 
     this.#reRootKeptUsers(caller, baseline, new Set(keepUsers));
 
@@ -478,6 +516,7 @@ export class SharingManager {
       createdBy: opts.caller.profileId,
       role: opts.role,
     });
+    bumpAuthzGeneration(this.storage);
     return { key, linkId: hash };
   }
 
@@ -499,6 +538,7 @@ export class SharingManager {
     let { key, hash } = await this.#mintKey();
     this.#requireShareLinksAllowed();
     this.storage.shareKeys.put({ id: hash, alias: link.id });
+    bumpAuthzGeneration(this.storage);
     return { key };
   }
 
@@ -571,6 +611,7 @@ export class SharingManager {
 
     // Revoking makes the copies useless, and nothing references them, so delete them.
     this.storage.shareKeys.byAlias.delete(link.id);
+    bumpAuthzGeneration(this.storage);
 
     this.#reRootKeptUsers(caller, baseline, new Set(keepUsers));
 
@@ -750,6 +791,7 @@ export class SharingManager {
         role: minRole(prior, callerRole),
       });
       this.storage.collaborators.put(record);
+      bumpAuthzGeneration(this.storage);
     }
   }
 }
