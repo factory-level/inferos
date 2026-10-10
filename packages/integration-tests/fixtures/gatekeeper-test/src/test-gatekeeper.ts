@@ -49,6 +49,8 @@ const TYPES_CODE = `
 /** A stand-in resource whose reads and writes are deterministic and audited. */
 interface TestThing {
   readValue(): Promise<number>;
+  /** Searches the vendor for \`query\`; resolves the vendor's HTTP status. */
+  search(query: string): Promise<number>;
   writeValue(value: number): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
   /** Binds a hook the integration test fires through \`/control/fire-hook\`. */
@@ -582,6 +584,13 @@ export interface TestSession {
    */
   readValue(restricted?: boolean, ownerInvitesOnly?: boolean, excludeObservers?: string[])
       : Promise<number>;
+  /**
+   * Sends `query` to the fixture vendor's search API (`SEARCH_URL`), then records the observation:
+   * in that order, as Slack `search` and MCP read tools do, so the request leaves before anything
+   * authorizes it. A stand-in for a third-party read that only a gate acting before the call can
+   * stop (callable-widget contract §4.8.5). Resolves the vendor's HTTP status.
+   */
+  search(query: string): Promise<number>;
   /** `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would. */
   writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
@@ -617,6 +626,15 @@ class TestSessionTarget extends RpcTarget implements TestSession {
       ...(excludeObservers ? { excludeObservers } : {}),
     });
     return 42;
+  }
+
+  async search(query: string): Promise<number> {
+    const response = await fetch(`${SEARCH_URL}?q=${encodeURIComponent(query)}`);
+    await this.approvalQueue.authorizeObservation({
+      title: "Search the test vendor",
+      description: "Searched the integration-test vendor.",
+    });
+    return response.status;
   }
 
   async writeValue(
@@ -656,6 +674,10 @@ class TestSessionTarget extends RpcTarget implements TestSession {
     this.approvalQueue[Symbol.dispose]();
   }
 }
+
+// Where `TestSession.search` sends its query: a host the integration tests' network interceptor
+// answers (operate-console-tools.test.ts names it too).
+const SEARCH_URL = "https://vendor.test/search";
 
 const SET_VALUE_ACTION_KIND: ActionKind = { tag: "set-value", label: "Set value" };
 

@@ -49,8 +49,9 @@ import {
 } from "./git-store";
 import { GitCacheImpl, WorkspaceGitCache, gitObjectMetadataCollection } from "./git-cache";
 import { migrateCodeLogToGit } from "./git-migration";
-import { consoleToolTaintsCollection, dropStubsIfTainted, isConsoleToolTainted, usableWhileTainted }
-  from "./chat-taint";
+import {
+  consoleToolTaintsCollection, dropStubsIfTainted, isConsoleToolTainted, markConsoleToolTainted, usableWhileTainted,
+} from "./chat-taint";
 import * as Y from "yjs";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
@@ -9616,6 +9617,14 @@ class OverseerImpl implements AgentHooks {
 
   isConsoleToolTainted(chatId: number): boolean {
     return isConsoleToolTainted(this.storage, chatId);
+  }
+
+  consoleToolsEnabled(): boolean {
+    return consoleToolsEnabled(this.env);
+  }
+
+  markConsoleToolTainted(chatId: number): void {
+    markConsoleToolTainted(this.storage, chatId);
   }
 
   // Whether the operate chat must not use connection `id`: its resource is of a type its vendor

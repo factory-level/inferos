@@ -128,6 +128,10 @@ export function getToolCallSummary(
       return { verb: "Listed canvases" };
     case "editCanvas":
       return { verb: tc.input.canvasId ? "Edited canvas" : "Created canvas", target: tc.input.title };
+    case "listConsoleTools":
+      return { verb: "Listed console tools" };
+    case "callConsoleTool":
+      return { verb: "Called console tool", target: tc.input.tool };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
@@ -223,6 +227,10 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return "Listed canvases";
     case "editCanvas":
       return count === 1 ? "Edited a canvas" : `Made ${count} canvas edits`;
+    case "listConsoleTools":
+      return "Listed console tools";
+    case "callConsoleTool":
+      return count === 1 ? "Called a console tool" : `Called ${count} console tools`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -330,6 +338,8 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "requestConnection": return "Requesting a connection";
     case "listCanvases": return "Listing canvases";
     case "editCanvas": return "Editing canvas";
+    case "listConsoleTools": return "Listing console tools";
+    case "callConsoleTool": return "Calling console tool";
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -358,6 +368,8 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "requestConnection": return `Requesting ${pluralize(count, "connection")}`;
     case "listCanvases": return "Listing canvases";
     case "editCanvas": return `Making ${pluralize(count, "canvas edit")}`;
+    case "listConsoleTools": return "Listing console tools";
+    case "callConsoleTool": return `Calling ${pluralize(count, "console tool")}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;

@@ -6,8 +6,9 @@
 // collection, not on `chatMeta`, which is rewritten wholesale at many sites; only deleting the chat
 // (or the workspace) removes it.
 //
-// Nothing writes the mark yet: the console tools that will (callable-widget C6) do so at the start
-// of each call, before any authored code runs. Until then every gate here is inert.
+// The operate agent's console tools (listConsoleTools, callConsoleTool in agent.ts) write the mark
+// at the start of each call, before the console's workspace is reached and so before any authored
+// code runs or any authored text is read.
 
 import { collection } from "@gadgets/typed-storage";
 import type { OverseerStorage } from "./overseer";
