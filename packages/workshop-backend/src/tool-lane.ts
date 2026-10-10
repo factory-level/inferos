@@ -60,7 +60,8 @@ export const TOOL_LANE_LIMITS = {
 /**
  * The lane's own module names. The lane adds them to every load, so a commit that contains either
  * is refused, here and (by the caller) at publish. Keep in step with `RESERVED_TOOL_MODULES` in
- * `@gadgets/workshop-shared/widget-tools` (the publish-time check), which this does not import.
+ * `@gadgets/workshop-shared/widget-tools` (the publish-time check), which this does not import;
+ * `tool-lane.test.ts` asserts the two are equal.
  */
 export const TOOL_LANE_KERNEL_MODULES: readonly string[] = Object.freeze(["tool-main.js", "tool-guard.js"]);
 
@@ -261,7 +262,8 @@ export interface ToolLaneRequest {
 
 /**
  * A reserved slot: its facet name is recorded as pending, and the slot counts against the
- * workspace's and the caller's limits until `release()` (which `runIsolatedTool` calls).
+ * workspace's and the caller's limits until `release()` (which `runIsolatedTool` calls). It is
+ * created only through `ToolLane.reserve`, never constructed directly.
  */
 export class ToolLaneSlot {
   /** The lane the slot was reserved on. */

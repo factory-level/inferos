@@ -255,6 +255,7 @@ describe("readCommitBlob", () => {
   ])("refuses %s rather than reading it as absent", async (_name, path, at, mode) => {
     let { store, oid } = await commitSpecialEntries();
     expect(await store.readCommitBlob(oid, "dir/view.json", "text")).toBe("{}");
+    await expect(store.readCommitFiles(oid)).rejects.toBeInstanceOf(UnsupportedTreeEntryError);
     for (let read of [store.readCommitBlob(oid, path), store.readCommitBlob(oid, path, "text")]) {
       let error = await read.then(() => null, (thrown: unknown) => thrown);
       expect(error).toBeInstanceOf(Error);
@@ -271,6 +272,8 @@ describe("readCommitBlob", () => {
       .rejects.toThrow(new BlobTextError("tools.json starts with a byte order mark"));
     await expect(store.readCommitBlob(oid, "tools.json", "text"))
       .rejects.toBeInstanceOf(BlobTextError);
+    await expect(store.readCommitBlob(oid, "tools.json", "text"))
+      .rejects.toMatchObject({ name: "BlobTextError" });
   });
 });
 

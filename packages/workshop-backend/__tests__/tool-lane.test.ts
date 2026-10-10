@@ -13,7 +13,11 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { readToolEnvelope, runIsolatedTool, ToolLane, TOOL_LANE_LIMITS, type ToolLaneResult, type ToolLaneSlot } from "../src/tool-lane.js";
+import { RESERVED_TOOL_MODULES } from "@gadgets/workshop-shared/widget-tools";
+import {
+  readToolEnvelope, runIsolatedTool, ToolLane, TOOL_LANE_KERNEL_MODULES, TOOL_LANE_LIMITS, type ToolLaneResult,
+  type ToolLaneSlot,
+} from "../src/tool-lane.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
@@ -341,6 +345,12 @@ function streamOf(bytes: Uint8Array): ReadableStream {
 }
 
 // ---------------------------------------------------------------------------------------------
+
+describe("TOOL_LANE_KERNEL_MODULES", () => {
+  it("is the publish-time RESERVED_TOOL_MODULES, so publish refuses every name the lane adds", () => {
+    expect(TOOL_LANE_KERNEL_MODULES).toEqual(RESERVED_TOOL_MODULES);
+  });
+});
 
 describe("tool lane: results and envelopes", () => {
   it("returns an ok envelope's value, and frees the slot and the facet", () => inWorkspace(async (impl, state) => {

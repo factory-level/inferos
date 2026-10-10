@@ -19,6 +19,10 @@
       "types": "./src/bound-view.ts",
       "import": "./src/bound-view.ts"
     },
+    "./widget-tools": {
+      "types": "./src/widget-tools.ts",
+      "import": "./src/widget-tools.ts"
+    },
     "./feature-flags": {
       "types": "./src/feature-flags.ts",
       "import": "./src/feature-flags.ts"

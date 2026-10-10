@@ -121,10 +121,12 @@ const MATRIX: Row[] = [
     [], "visualWidget"],
 ];
 
-// `classify` uses the kernel's own parsers: the bound-view parser for view.json, and for
-// tools.json a stand-in that refuses every file for now; `refusals` the injected ones.
+// `classify` uses the kernel's own parsers: the bound-view parser for view.json and
+// `parseWidgetTools` for tools.json; `refusals` the injected ones.
 const classify = (kind: WorkspaceKind, files: Record<string, string | null>) =>
   classifyGadgetFiles(kind, new Map(Object.entries(files))).violations.map(v => v.code);
+const kernel = (kind: WorkspaceKind, files: Record<string, string>) =>
+  classifyGadgetFiles(kind, new Map(Object.entries(files)));
 const refusals = (kind: WorkspaceKind, files: Record<string, string | null>) =>
   blueprintPublishRefusals(kind,
       classifyGadgetFiles(kind, new Map(Object.entries(files)), parsers).violations)
@@ -138,26 +140,28 @@ describe("classifyGadgetFiles", () => {
     for (const violation of result.violations) expect(violation.message).toMatch(/\.$/);
   });
 
-  it("refuses every tools.json until its parser lands", () => {
-    expect(classify("widget", { ...SERVER, "tools.json": "[]" })).toEqual(["invalidTools"]);
-    expect(classify("widget", { ...UI, ...SERVER, "tools.json": "[]" })).toEqual(["invalidTools"]);
-    expect(classify("widget", { ...UI, ...SERVER })).toEqual([]);
-  });
-
-  // The matrix rows without tools.json, under the kernel's own view.json parser: `ok` becomes a
-  // valid bound view and `bad` one that does not parse.
+  // The kernel's own parsers, row by row: under `real`, `ok` becomes a valid bound view or tool
+  // list and `bad` one that does not parse.
   const VALID_VIEW = JSON.stringify({
     version: 1, title: "Open work", requirements: ["board"],
     root: { type: "count", label: "Open", of: { requirement: "board", collection: "issues" } },
   });
+  const VALID_TOOLS = JSON.stringify([{
+    name: "openCount", description: "How many issues are open.", method: "openCount", effect: "read",
+    input: { type: "object", properties: {} },
+    output: { type: "integer", minimum: 0, maximum: 1000 },
+  }]);
+  const REAL: Record<string, Record<string, string>> = {
+    "view.json": { ok: VALID_VIEW, bad: "{}" },
+    "tools.json": { ok: VALID_TOOLS, bad: "[]" },
+  };
   const real = (files: Record<string, string | null>) => Object.fromEntries(Object.entries(files).map(
-      ([path, text]) => [path, path !== "view.json" ? text : text === "ok" ? VALID_VIEW : text === "bad" ? "{}" : text]));
-  it.each(MATRIX.filter(([, , files]) => !("tools.json" in files)))(
-    "%s, with the bound-view parser", (_name, kind, files, expected, fileClass) => {
-      const result = classifyGadgetFiles(kind, new Map(Object.entries(real(files))));
-      expect(result.violations.map(violation => violation.code)).toEqual(expected);
-      expect(result.class).toBe(fileClass);
-    });
+      ([path, text]) => [path, text === null ? text : REAL[path]?.[text] ?? text]));
+  it.each(MATRIX)("%s, with the kernel's parsers", (_name, kind, files, expected, fileClass) => {
+    const result = classifyGadgetFiles(kind, new Map(Object.entries(real(files))));
+    expect(result.violations.map(violation => violation.code)).toEqual(expected);
+    expect(result.class).toBe(fileClass);
+  });
 
   it("classifies a valid view.json alone as view-only, and reports a bad one's problems", () => {
     expect(parseBoundViewSpec(VALID_VIEW).ok).toBe(true);
@@ -171,6 +175,46 @@ describe("classifyGadgetFiles", () => {
     expect(classify("widget", { ...UI, ...SERVER, "view.json": VALID_VIEW })).toEqual(["mixedView"]);
     expect(classify("widget", { "view.json": VALID_VIEW, "lib/x.js": "" })).toEqual(["mixedView"]);
     expect(classify("widget", { "view.json": null })).toEqual(["invalidView"]);
+  });
+
+  it("classifies a valid tools.json with server.js as callable", () => {
+    expect(kernel("widget", { ...SERVER, "tools.json": VALID_TOOLS }))
+      .toEqual({ class: "callableTools", violations: [] });
+    expect(kernel("widget", { ...UI, ...SERVER, "tools.json": VALID_TOOLS }))
+      .toEqual({ class: "callableCombined", violations: [] });
+    expect(classify("widget", { "tools.json": VALID_TOOLS })).toEqual(["toolsWithoutServer"]);
+    expect(classify("widget", { ...SERVER, "view.json": VALID_VIEW, "tools.json": VALID_TOOLS }))
+      .toEqual(["mixedView"]);
+    expect(classify("app", { ...UI, "tools.json": VALID_TOOLS })).toEqual(["unexpectedTools"]);
+  });
+
+  it("refuses an invalid tools.json with the parser's reason", () => {
+    const free = VALID_TOOLS.replace('"properties":{}',
+        '"properties":{"q":{"type":"string"}},"additionalProperties":false');
+    for (const [text, reason] of [
+      ["[]", "it declares no tools"],
+      [free, 'tool "openCount"\'s input.q is a free string'],
+      [VALID_TOOLS.replace('"method":"openCount"', '"method":"fetch"'), 'method "fetch" is reserved'],
+    ] as const) {
+      const { class: fileClass, violations } = kernel("widget", { ...SERVER, "tools.json": text });
+      expect(fileClass).toBeNull();
+      expect(violations.map(violation => violation.code)).toEqual(["invalidTools"]);
+      expect(violations[0]!.message).toMatch(/^This gadget's tools\.json is not a valid tool list: /);
+      expect(violations[0]!.message).toContain(reason);
+    }
+  });
+
+  it("refuses a callable widget that ships the tool runner's module names", () => {
+    const { violations } = kernel("widget", { ...SERVER, "tools.json": VALID_TOOLS, "tool-guard.js": "" });
+    expect(violations).toEqual([{ code: "invalidTools", message: "A callable Widget cannot have " +
+        "tool-guard.js: the kernel reserves those module names for its tool runner." }]);
+    expect(classify("widget", { ...SERVER, "tools.json": "[]", "tool-main.js": "", "tool-guard.js": "" }))
+      .toEqual(["invalidTools"]);
+    expect(kernel("widget", { ...SERVER, "tools.json": "[]", "tool-main.js": "" }).violations[0]!.message)
+      .toMatch(/declares no tools; if tools\.json is a data file, rename it to publish this gadget\. A callable Widget cannot have tool-main\.js/);
+    // A visual widget's files are its own, and a nested path is not the runner's.
+    expect(classify("widget", { ...UI, ...SERVER, "tool-main.js": "" })).toEqual([]);
+    expect(classify("widget", { ...SERVER, "tools.json": VALID_TOOLS, "lib/tool-main.js": "" })).toEqual([]);
   });
 
   it("checks filenames alone as before, failing to parse a view or tools it cannot read", () => {
@@ -192,8 +236,8 @@ describe("classifyGadgetFiles", () => {
       classifyGadgetFiles("widget", new Map(Object.entries(files))).violations
         .map(violation => violation.message);
     expect(messages({ ...UI, ...SERVER, "tools.json": "[]" })).toEqual([
-      "This gadget's tools.json is not a valid tool list: callable widgets are not supported " +
-          "yet; if tools.json is a data file, rename it to publish this gadget.",
+      "This gadget's tools.json is not a valid tool list: it declares no tools; if tools.json " +
+          "is a data file, rename it to publish this gadget.",
     ]);
     expect(messages({ "view.json": "{}" })).toEqual([
       "This gadget's view.json is not a valid view: missingKey at $.version; missingKey at " +
