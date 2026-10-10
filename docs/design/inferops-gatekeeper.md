@@ -232,7 +232,7 @@ InferOps' section `PATCH` takes no expected version and does not replay an idemp
 **Limits and pagination.**
 - A search returns at most `limit` hits, best first, with no cursor. It is a ranked top-N, and a caller who wants more refines the query.
 - Fewer than `limit` hits is normal.
-- Ties are broken by section id, so the same corpus and query give the same order.
+- Ties are broken by section id, both at each seed's cut-off and in the final order, so the same corpus and query give the same hits in the same order.
 - InferOS refuses these with `INVALID_REQUEST` before any request is sent:
   - an empty or all-whitespace query, or one over 500 characters after trimming;
   - a non-integer `limit`, or one outside 1–50.
@@ -245,7 +245,8 @@ InferOps' section `PATCH` takes no expected version and does not replay an idemp
   - The full-text leg filters rows before ranking.
   - The vector leg must not let an approximate index pick its top candidates before row security removes the hidden ones. An HNSW scan returns a bounded candidate list, so hidden near-duplicates would push readable sections out, and the hit count and order would then depend on what the person cannot see.
   - InferOps therefore runs the vector leg as an exact scan inside the scoped transaction. It proves this with a test that hidden near-duplicate sections do not change a reader's hits.
-  - Until that ships, the redaction claim holds for the full-text leg only, and a deployment with an embedding provider configured does not serve `searchWiki`.
+  - The fix belongs in InferOps' one shared search function, not only in the new capability. That way `search_knowledge` and `POST /knowledge/search`, which [decision 7](#decisions-for-the-owner) keeps, give InferMind's own agents the same guarantee.
+  - Until the exact vector leg and its test ship, InferOps' search runs full-text only, with the vector leg skipped.
 - A snippet comes from the hit's own section only, and a page title appears only through a readable hit.
 - `score` is not exposed. It is a fused rank with no meaning across queries.
 - An empty list means no readable match. InferOS never reports how many results were hidden, and InferOps returns no such count.
@@ -253,7 +254,7 @@ InferOps' section `PATCH` takes no expected version and does not replay an idemp
 **Snippets.**
 - A snippet is an excerpt of the section's **markdown source**, not rendered text.
 - Matched words are wrapped in highlight markers ([decision 6](#decisions-for-the-owner)). Because the source is markdown, text the author wrote can look like a highlight under the current `<b>` markers. InferOS treats the snippet as text, never as HTML.
-- A snippet is at most 300 characters.
+- A snippet is at most 300 characters. The cut can fall inside a highlight, so InferOS must tolerate an opening marker with no closing one.
 - A hit found by the vector leg alone has no matched words, so its snippet is the section's first words.
 
 **Errors and refusals.** Errors follow [Errors](#errors):
@@ -286,7 +287,7 @@ A page with no readable section reads as `NOT_FOUND`, identical to a missing pag
 
 **Cost.**
 - A search can make one embedding call when InferOps has a provider configured. InferOps' own rate limits apply, and a 429 is `UNAVAILABLE`.
-- InferOS adds a per-binding throttle ([decision 9](#decisions-for-the-owner)).
+- InferOS adds a throttle per connected account ([decision 9](#decisions-for-the-owner)).
 
 ##### Decisions for the owner
 
@@ -327,21 +328,22 @@ A page with no readable section reads as `NOT_FOUND`, identical to a missing pag
    - (b) Expose `knowledge_search` on MCP as well, with the old pair deprecated on a date.
    - (c) Remove the old pair now.
 
-   **Recommended: (a).** Nothing outside the repository breaks, and agents keep one MCP search tool.
+   **Recommended: (a).** Nothing outside the repository breaks, and agents keep one MCP search tool. Apart from the shared search fixes (an exact vector leg, the section-id tie-break, `sectionVersion` and the snippet cap), the POST route and `search_knowledge` stay unchanged.
 8. **Retained query.**
    - (a) Keep the full query in the observation.
    - (b) Keep its first 100 characters.
    - (c) Keep a hash only.
 
-   **Recommended: (b).** That is enough to audit what was asked without keeping long pasted text.
+   **Recommended: (b).** That is enough to audit what was asked without keeping long pasted text. Retained queries stay with their observations for the binding's lifetime. A reconnect does not clear them; revoking the binding does.
 9. **Throttling.**
    - (a) None in InferOS; rely on InferOps.
-   - (b) At most 30 searches a minute per binding, refused as `UNAVAILABLE`.
+   - (b) At most 30 searches a minute per binding.
+   - (c) At most 30 searches a minute per connected account, across all its bindings.
 
-   **Recommended: (b).** A gadget in a loop should not spend the workspace's embedding budget.
+   **Recommended: (c).** It bounds one person however many gadgets they open, and a gadget in a loop should not spend the workspace's embedding budget. A throttled search is refused as `UNAVAILABLE`, with a message saying it was rate limited and when to retry, distinct from an outage.
 10. **Query text in URLs.** InferOps' own request log records only the path, but the hosting platform's request log records the full URL, query text included.
     - (a) Accept: those logs stay inside InferOps' operational boundary under its retention.
-    - (b) The gatekeeper sends searches through the `POST` twin so the text never sits in a URL. This requires keeping that route.
+    - (b) The gatekeeper sends searches through the `POST` twin so the text never sits in a URL. This requires keeping that route, and the route would need everything this contract asks of search: `sectionVersion`, the snippet cap, the highlight sentinels and fixed tuning.
 
     **Recommended: (a).**
 
@@ -444,7 +446,7 @@ Still open:
 - No issue delete is in the contract, so an approved create cannot be undone from InferOS.
 - Whether InferOps registers `knowledge/document` as a widget kind, and whether a page reference names the slug or the page UUID. Slugs look stable (a page's `PATCH` changes only its title), but InferOps has not confirmed it.
 - The [knowledge read and search contract](#knowledge-read-and-search-contract-proposed) (2026-10-10) awaits the owner's decision on its ten options. InferOps' `knowledge.search` is built to the recommended options as a draft and merges only after that decision.
-- `readDocument` and `readDocumentText` have the same observer gap as search had: an observer admitted by a page list can see sections that only the owner's lens allows. Search excludes observers. The reads are out of scope here, and the gap is tracked for its own fix.
+- `readDocument`, and the page text InferOS composes locally while an edit is pending, have the observer gap that search had: an observer admitted by a page list can see sections that only the owner's lens allows. `readDocumentText` answered by InferOps already excludes observers, and search does too. The other two reads are out of scope here, and the gap is tracked for its own fix.
 - A section edit's version check and its write are two requests, so an edit made in InferMind between them is overwritten. Companion change 4 closes this.
 
 ## Related
