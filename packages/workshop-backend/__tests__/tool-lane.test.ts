@@ -294,8 +294,17 @@ function reserved(lane: ToolLane, caller: string): ToolLaneSlot {
   return slot;
 }
 
+// Runs `request` on `slot`, then releases the slot as the kernel's caller does once it is done.
+async function run(slot: ToolLaneSlot, request: Parameters<typeof runIsolatedTool>[1]): Promise<ToolLaneResult> {
+  try {
+    return await runIsolatedTool(slot, request);
+  } finally {
+    slot.release();
+  }
+}
+
 function call(slot: ToolLaneSlot, method: string, input: unknown = {}, options: { server?: string; deadlineMs?: number } = {}): Promise<ToolLaneResult> {
-  return runIsolatedTool(slot, {
+  return run(slot, {
     modules: { "server.js": options.server ?? TOOLS },
     method,
     inputJson: JSON.stringify(input),
@@ -386,11 +395,11 @@ describe("tool lane: results and envelopes", () => {
     let lane = testLane(impl, state, { gets });
     for (let kernel of ["tool-main.js", "tool-guard.js"]) {
       let slot = reserved(lane, "u1");
-      expect(await runIsolatedTool(slot, {
+      expect(await run(slot, {
         modules: { "server.js": TOOLS, [kernel]: "export {};" }, method: "echo", inputJson: "{}", deadlineAt: Date.now() + 4_000,
       })).toEqual({ status: "failed", reason: "reserved-module" });
     }
-    expect(await runIsolatedTool(reserved(lane, "u1"), {
+    expect(await run(reserved(lane, "u1"), {
       modules: { "main.js": TOOLS }, method: "echo", inputJson: "{}", deadlineAt: Date.now() + 4_000,
     })).toEqual({ status: "failed", reason: "no-server-module" });
     expect(gets).toEqual([]);
@@ -401,13 +410,13 @@ describe("tool lane: results and envelopes", () => {
     let gets: string[] = [];
     let lane = testLane(impl, state, { gets });
     for (let path of ["./tool-guard.js", "./tool-main.js", "lib//x.js", "lib/./x.js", "../x.js", "/x.js", "x.cjs", "x.wasm", "x.py", "lib/"]) {
-      expect(await runIsolatedTool(reserved(lane, "u1"), {
+      expect(await run(reserved(lane, "u1"), {
         modules: { "server.js": TOOLS, [path]: "export {};" }, method: "echo", inputJson: "{}", deadlineAt: Date.now() + 4_000,
       }), path).toEqual({ status: "failed", reason: "invalid-module" });
     }
     expect(gets).toEqual([]);
     // A nested plain path is an ordinary authored module.
-    expect(await runIsolatedTool(reserved(lane, "u1"), {
+    expect(await run(reserved(lane, "u1"), {
       modules: { "server.js": `export { Gadget } from "./lib/gadget.js";`, "lib/gadget.js": TOOLS },
       method: "echo", inputJson: "1", deadlineAt: Date.now() + 4_000,
     })).toEqual({ status: "ok", value: { echo: 1 } });
@@ -630,6 +639,22 @@ describe("tool lane: slots and the deadline", () => {
     other.release();
   }));
 
+  it("runIsolatedTool ends the call but leaves the slot to its caller, who releases it", () => inWorkspace(async (impl, state) => {
+    let lane = testLane(impl, state);
+    let slot = reserved(lane, "u1");
+    expect(await runIsolatedTool(slot, {
+      modules: { "server.js": TOOLS }, method: "echo", inputJson: "1", deadlineAt: Date.now() + 4_000,
+    })).toEqual({ status: "ok", value: { echo: 1 } });
+    // The facet is deleted and tombstoned, but the slot still counts against the caller.
+    expect(pendingNames(impl)).toEqual([]);
+    expect(impl.storage.toolFacetTombstones.byName.get(slot.name)).toBeDefined();
+    expect(slot.released).toBe(false);
+    expect(lane.reserve("u1")).toEqual({ refused: "caller-busy" });
+    slot.release();
+    expect(slot.released).toBe(true);
+    reserved(lane, "u1").release();
+  }));
+
   it("aborts an async wait at the deadline, deletes its facet and frees the slot", () => inWorkspace(async (impl, state) => {
     let lane = testLane(impl, state);
     let slot = reserved(lane, "u1");
@@ -665,7 +690,7 @@ describe("tool lane: deadline edge cases", () => {
     let gets: string[] = [];
     let lane = testLane(impl, state, { gets });
     for (let deadlineAt of [Date.now(), Date.now() - 1_000]) {
-      expect(await runIsolatedTool(reserved(lane, "u1"), {
+      expect(await run(reserved(lane, "u1"), {
         modules: { "server.js": TOOLS }, method: "echo", inputJson: "{}", deadlineAt,
       })).toEqual({ status: "failed", reason: "deadline" });
     }
