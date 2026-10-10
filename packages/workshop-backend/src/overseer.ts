@@ -1,15 +1,21 @@
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
-import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
+import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
-import { BOUND_VIEWS_OFF, boundViewsEnabled, consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
-import { parseWidgetTools } from "@gadgets/workshop-shared/widget-tools";
+import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
+import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
   isGadgetModule,
 } from "@gadgets/workshop-shared/workspace-kind";
 import { WorkspaceFlowStore } from "./flow-store";
-import { ToolLane, type PendingToolFacetRecord, type ToolFacetTombstoneRecord } from "./tool-lane";
+import { runIsolatedTool, ToolLane, type PendingToolFacetRecord, type ToolFacetTombstoneRecord, type ToolLaneSlot } from "./tool-lane";
+import {
+  CONSOLE_CHANGED_DURING_CALL, CONSOLE_TOOL_AUDIT_KEPT, CONSOLE_TOOL_DEADLINE_MS, framedToolListing,
+  NO_CONSOLE_TOOL_ACCESS, TOOL_SLOT_REFUSALS, UNVERIFIED_CONSOLE_TOOL_CALLER, untrustedFrame,
+  type ConsoleToolAuditRecord, type ConsoleToolAuditStatus, type ConsoleToolCaller, type ConsoleToolCallRequest,
+  type ConsoleToolListRequest, type ConsoleToolOutcome,
+} from "./console-tools";
 import { HostBoardDesk, hostBoardsEnabled, type HostBoardContext, type HostBoardGuard, type HostBoardMint, type HostBoardReadRecord, type HostBoardReadRequest, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord, type HostBoardSelectionState } from "./host-boards";
 import type { HostBoardConnectionFence, HostBoardReader } from "@gadgets/gatekeeper-kit/host-board";
 import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
@@ -1318,6 +1324,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       nextAgentCallId: 0,
       nextHostBoardReadSeq: 0,
       nextToolFacetTombstoneSeq: 0,
+      nextConsoleToolAuditSeq: 0,
 
       // OBSOLETE: deadWorktreeIds existed to facilitate hiding worktrees from clients, but we
       // no longer do that. Noted here since old workspaces may still have a singleton by this
@@ -1363,6 +1370,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: "seq",
         uniqueIndexes: { byName: (record: ToolFacetTombstoneRecord) => record.name },
       }),
+      // A console workspace's console tool calls, one record per attempt, each readable only by
+      // its caller (see listConsoleToolAudit); the latest CONSOLE_TOOL_AUDIT_KEPT are kept.
+      consoleToolAudit: collection<ConsoleToolAuditRecord>()({ primaryKey: "seq" }),
       // Published agent artifact revisions, immutable, keyed `<kind>/<name>@<number>` so one
       // name's revisions list in number order (see artifact-store.ts).
       artifactRevisions: collection<ArtifactRevisionRecord>()({
@@ -1777,6 +1787,16 @@ export function sanitizeMessageFormatRefs(
 // session is a "build" capability but never an observer's, so it is counted apart from the
 // collaborator roles.
 type SessionKind = CollaboratorRole | "owner";
+
+// What one console tool call got to, for its audit record (see OverseerImpl.invokeConsoleTool):
+// whether the caller checked out (only then is it recorded), whether the tool's code ran, and the
+// frozen commit and declared tool it found.
+type ConsoleToolAttempt = {verified: boolean, ran: boolean, commitId: string | null, tool: string | null};
+
+// A console tool refusal or failure, with kernel text only.
+function consoleToolFailure(reason: string): ConsoleToolOutcome {
+  return {status: "failed", reason};
+}
 
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
@@ -10606,6 +10626,323 @@ class OverseerImpl implements AgentHooks {
     return readAuthzGeneration(this.storage);
   }
 
+  // --- Console tools (callable-widget contract §3-§5, step C5b) ---
+  //
+  // Two sides. The operate session workspace (S) takes the console and revision from its owner's
+  // page, never from the agent, states who the call is for from its own stored owner, and asks the
+  // console's workspace (W). W trusts none of that: it verifies the caller, authorizes them with
+  // their own role, holds a session lease and pins the authorization generation through the call,
+  // and releases nothing authored until the post-checks pass.
+
+  /**
+   * The remote half of a console capability's check (`getConsoleWidget`, console tools): the
+   * operate page of `user`, the caller's own user Durable Object, shows this workspace's console
+   * `consoleId`, published, at exactly `revision`. Callers check the publication itself
+   * (`offeredWidget`, `offeredTool`) before awaiting this.
+   */
+  async consoleSessionCheck(user: DurableObjectStub<UserDurableObject>, consoleId: string,
+      revision: string): Promise<void> {
+    let open = (await user.getOperatePage()).state.console;
+    if (open?.workspaceId !== this.ctx.id.toString() || open.consoleId !== consoleId ||
+        open.source !== "published" || open.revision !== revision) {
+      throw new Error(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
+    }
+  }
+
+  #consoleStore(): WorkspaceConsoleStore {
+    if (!this.ownerId) throw new Error("Workspace has been deleted.");
+    return new WorkspaceConsoleStore(this.ctx.storage, this.storage, this.env, this.frozenInstalls());
+  }
+
+  // Why this workspace answers no console tool request, before the caller is looked at: the
+  // switch is off, it does not exist, or it is someone's operate session (which holds no console).
+  #consoleToolsRefusal(): string | null {
+    if (!consoleToolsEnabled(this.env)) return CONSOLE_TOOLS_OFF;
+    if (!this.ownerId || this.storage.operateSession.get()) return "This workspace offers no console tools.";
+    return null;
+  }
+
+  // The caller's user Durable Object, once `caller` checks out (§5): the user id is the one the
+  // profile id names (checked first, with no await), that user is that profile, and their recorded
+  // operate session is the workspace the caller names, which is never this one. Otherwise null.
+  async #consoleToolUser(caller: ConsoleToolCaller): Promise<DurableObjectStub<UserDurableObject> | null> {
+    if (this.users.idFromName(caller.profileId).toString() !== caller.userId ||
+        caller.sessionWorkspaceId === this.ctx.id.toString()) {
+      return null;
+    }
+    let user = wrapDoStubForTelemetry(this.users.get(this.users.idFromString(caller.userId)), this.logger);
+    let [profile, session] = await Promise.all([user.whoami(), user.operateSessionWorkspaceId()]);
+    return profile.id === caller.profileId && session === caller.sessionWorkspaceId ? user : null;
+  }
+
+  // The verified caller's role here: the owner builds; anyone else goes through
+  // authorizeCollaborator, which must find at least `use`.
+  async #consoleToolRole(caller: ConsoleToolCaller, user: DurableObjectStub<UserDurableObject>)
+      : Promise<SessionKind | null> {
+    if (caller.userId === this.ownerId) return "owner";
+    return await this.authorizeCollaborator(caller.profileId, user, {requireRole: "use"});
+  }
+
+  /**
+   * The tools the published console `request.consoleId` offers at `request.revision`, for `caller`
+   * (§3, W's side): each widget's frozen declarations that `offeredTool` still finds, framed as
+   * untrusted. Refused unless the switch is on, the caller checks out, holds at least `use` and has
+   * exactly that console and revision open in their operate session.
+   */
+  async listConsoleTools(caller: ConsoleToolCaller, request: ConsoleToolListRequest)
+      : Promise<ConsoleToolOutcome> {
+    let refusal = this.#consoleToolsRefusal();
+    if (refusal) return consoleToolFailure(refusal);
+    let deadlineAt = Math.min(request.deadlineAt, Date.now() + CONSOLE_TOOL_DEADLINE_MS);
+    let user = await this.#consoleToolUser(caller);
+    if (!user) return consoleToolFailure(UNVERIFIED_CONSOLE_TOOL_CALLER);
+    let role = await this.#consoleToolRole(caller, user);
+    if (!role) return consoleToolFailure(NO_CONSOLE_TOOL_ACCESS);
+    let {consoleId, revision} = request;
+    let sharing = await this.getSharingManager();
+    let store = this.#consoleStore();
+    let published = () => store.get(consoleId, "published");
+    if (published()?.revision !== revision) {
+      return consoleToolFailure(`Console ${consoleId} is not published at revision ${revision}.`);
+    }
+    try {
+      await this.consoleSessionCheck(user, consoleId, revision);
+    } catch (error) {
+      return consoleToolFailure((error as Error).message);
+    }
+    // Nothing is awaited from here on, so this is what the caller may see now.
+    let current = sharing.getEffectiveRole(caller.profileId);
+    let shown = published();
+    if (!current || shown?.revision !== revision) return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    if (Date.now() >= deadlineAt) return consoleToolFailure("The listing did not finish in time.");
+    let blocks = (shown.widgets ?? []).flatMap(entry => {
+      let tools = (entry.frozen?.tools ?? []).flatMap(declared => {
+        try {
+          return [store.offeredTool(consoleId, revision, entry.gadgetId, declared.name).tool];
+        } catch {
+          return [];
+        }
+      });
+      return tools.length > 0 ? [framedToolListing(entry, tools)] : [];
+    });
+    return {status: "ok", text: blocks.length > 0 ? blocks.join("\n\n") : "This console offers no tools."};
+  }
+
+  /**
+   * Runs one tool of a widget the published console offers, for `caller` (§4.1, W's steps 3-9):
+   * a slot reserved before any await; the caller verified and authorized with their own role; a
+   * session lease held and the authorization generation pinned until the end; the publication and
+   * the caller's page checked; the input validated against the declaration; the frozen commit run
+   * in the isolated lane (`runIsolatedTool`) under an absolute deadline of at most 10 s; the page
+   * checked again; then, with no await, the generation, the caller's role, the offer and the
+   * deadline. Only then is the result released, read through `parseToolEnvelope` against the
+   * declared output, and framed as untrusted. Every attempt by a verified caller writes one audit
+   * record, readable only by that caller (`listConsoleToolAudit`).
+   */
+  async invokeConsoleTool(caller: ConsoleToolCaller, request: ConsoleToolCallRequest)
+      : Promise<ConsoleToolOutcome> {
+    let refusal = this.#consoleToolsRefusal();
+    if (refusal) return consoleToolFailure(refusal);
+    if (this.users.idFromName(caller.profileId).toString() !== caller.userId) {
+      return consoleToolFailure(UNVERIFIED_CONSOLE_TOOL_CALLER);
+    }
+    let deadlineAt = Math.min(request.deadlineAt, Date.now() + CONSOLE_TOOL_DEADLINE_MS);
+    let slot = this.toolLane.reserve(caller.userId);
+    if ("refused" in slot) return consoleToolFailure(TOOL_SLOT_REFUSALS[slot.refused]);
+    let attempt: ConsoleToolAttempt = {verified: false, ran: false, commitId: null, tool: null};
+    let leave: (() => void) | undefined;
+    let outcome: ConsoleToolOutcome | undefined;
+    try {
+      outcome = await this.#invokeConsoleTool(caller, request, deadlineAt, slot, attempt,
+          kind => { leave = this.joinSession(kind); });
+      return outcome;
+    } finally {
+      slot.release();
+      if (attempt.verified) {
+        let status: ConsoleToolAuditStatus = outcome?.status === "ok" || outcome?.status === "error"
+            ? outcome.status : attempt.ran ? "failed" : "refused";
+        this.#recordConsoleToolAudit({at: Date.now(), userId: caller.userId, consoleId: request.consoleId,
+          revision: request.revision, gadgetId: request.gadgetId, commitId: attempt.commitId, tool: attempt.tool, status});
+      }
+      leave?.();
+    }
+  }
+
+  async #invokeConsoleTool(caller: ConsoleToolCaller, request: ConsoleToolCallRequest, deadlineAt: number,
+      slot: ToolLaneSlot, attempt: ConsoleToolAttempt, lease: (kind: SessionKind) => void)
+      : Promise<ConsoleToolOutcome> {
+    let user = await this.#consoleToolUser(caller);
+    if (!user) return consoleToolFailure(UNVERIFIED_CONSOLE_TOOL_CALLER);
+    attempt.verified = true;
+    let role = await this.#consoleToolRole(caller, user);
+    if (!role) return consoleToolFailure(NO_CONSOLE_TOOL_ACCESS);
+    let sharing = await this.getSharingManager();
+    lease(role);
+    let generation = this.authzGeneration();
+
+    let {consoleId, revision, gadgetId} = request;
+    let store = this.#consoleStore();
+    let offered;
+    try {
+      offered = store.offeredTool(consoleId, revision, gadgetId, request.tool);
+      await this.consoleSessionCheck(user, consoleId, revision);
+    } catch (error) {
+      return consoleToolFailure((error as Error).message);
+    }
+    let {entry, tool} = offered;
+    attempt.commitId = entry.frozen!.commitId;
+    attempt.tool = tool.name;
+    if (isReservedToolMethod(tool.method)) return consoleToolFailure(`Tool ${tool.name} cannot be called.`);
+    if (request.inputJson.length > WIDGET_TOOL_LIMITS.inputBytes) {
+      return consoleToolFailure(`The tool input is over ${WIDGET_TOOL_LIMITS.inputBytes} bytes.`);
+    }
+    let input: unknown;
+    try {
+      input = JSON.parse(request.inputJson);
+    } catch {
+      return consoleToolFailure("The tool input is not JSON.");
+    }
+    let problem = widgetToolValueProblem(tool.input, input);
+    if (problem !== null) return consoleToolFailure(`The tool input does not match tool ${tool.name}: ${problem}.`);
+
+    let files = await this.gitStore.readCommitFiles(attempt.commitId);
+    let modules = Object.fromEntries([...files].filter(([path]) => isGadgetModule(path)));
+    attempt.ran = true;
+    let result = await runIsolatedTool(slot, {modules, method: tool.method, inputJson: JSON.stringify(input), deadlineAt});
+    // A kernel failure carries no authored text, so it needs no post-check to be released.
+    if (result.status === "failed") {
+      return consoleToolFailure(result.reason === "deadline" ? "The tool did not finish in time." : "The tool failed.");
+    }
+
+    // The post-check: the caller's page, the last remote await.
+    try {
+      await this.consoleSessionCheck(user, consoleId, revision);
+    } catch {
+      return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    }
+    // The final check, with no await before the release.
+    let current = sharing.getEffectiveRole(caller.profileId);
+    // A published revision never changes, so finding the same name there finds the same declaration.
+    let stillOffered = () => {
+      try {
+        this.#consoleStore().offeredTool(consoleId, revision, gadgetId, tool.name);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (this.authzGeneration() !== generation || !current || roleRank(current) < roleRank("use") ||
+        !stillOffered()) {
+      return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    }
+    if (Date.now() >= deadlineAt) return consoleToolFailure("The tool did not finish in time.");
+
+    // The lane parsed the envelope already; it is read again through the shared parser, which is
+    // what checks the value against the declared output and the message's length.
+    let envelope;
+    try {
+      let raw = result.status === "ok" ? {t: "ok", v: result.value} : {t: "err", m: result.message, len: result.length};
+      envelope = parseToolEnvelope(new TextEncoder().encode(JSON.stringify(raw)), tool.output);
+    } catch {
+      return consoleToolFailure(`Tool ${tool.name} returned a result its declaration does not allow.`);
+    }
+    let payload = {widgetId: entry.gadgetId, tool: tool.name};
+    return envelope.t === "ok"
+        ? {status: "ok", text: untrustedFrame(entry, {...payload, output: envelope.v})}
+        : {status: "error", text: untrustedFrame(entry, {...payload, error: envelope.m})};
+  }
+
+  #recordConsoleToolAudit(record: Omit<ConsoleToolAuditRecord, "seq">): void {
+    this.storage.transaction(() => {
+      let seq = this.storage.nextConsoleToolAuditSeq.get();
+      this.storage.nextConsoleToolAuditSeq.put(seq + 1);
+      this.storage.consoleToolAudit.put({...record, seq});
+      if (seq >= CONSOLE_TOOL_AUDIT_KEPT) this.storage.consoleToolAudit.delete(seq - CONSOLE_TOOL_AUDIT_KEPT);
+    });
+  }
+
+  /**
+   * `caller`'s own console tool calls in this workspace, newest first (the latest 200 kept), once
+   * the caller checks out as for a call. No other caller's record is ever returned, and no client
+   * interface reads them: builders cannot.
+   */
+  async listConsoleToolAudit(caller: ConsoleToolCaller): Promise<Omit<ConsoleToolAuditRecord, "seq">[]> {
+    if (!this.ownerId || !await this.#consoleToolUser(caller)) return [];
+    let own: Omit<ConsoleToolAuditRecord, "seq">[] = [];
+    for (let record of this.storage.consoleToolAudit.list({reverse: true})) {
+      if (record.userId !== caller.userId) continue;
+      let {at, userId, consoleId, revision, gadgetId, commitId, tool, status} = record;
+      own.push({at, userId, consoleId, revision, gadgetId, commitId, tool, status});
+      if (own.length === 200) break;
+    }
+    return own;
+  }
+
+  // The operate session's side (S): the published console the owner's page has open, the owner's
+  // identity as this workspace stores it, and that console's workspace; or why there is none.
+  async #sessionConsole(): Promise<{owner: DurableObjectStub<UserDurableObject>, open: OperateConsoleRun,
+      caller: ConsoleToolCaller, workspace: DurableObjectStub<OverseerDurableObject>} | {reason: string}> {
+    if (!consoleToolsEnabled(this.env)) return {reason: CONSOLE_TOOLS_OFF};
+    if (!this.storage.operateSession.get() || !this.ownerId) {
+      return {reason: "This chat is not part of an operate session."};
+    }
+    let owner = wrapDoStubForTelemetry(this.users.get(this.users.idFromString(this.ownerId)), this.logger);
+    let open = (await owner.getOperatePage()).state.console;
+    if (!open || open.source !== "published") return {reason: "No published console is open in this operate session."};
+    let caller = {userId: this.ownerId, profileId: await this.getOwnerProfileId(),
+      sessionWorkspaceId: this.ctx.id.toString()};
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let workspace;
+    try {
+      workspace = ns.get(ns.idFromString(open.workspaceId));
+    } catch {
+      return {reason: "The open console's workspace does not exist."};
+    }
+    return {owner, open, caller, workspace};
+  }
+
+  // S's last step (§4.1 step 10): the owner's page still shows the console the request named.
+  async #sessionConsoleStillOpen(owner: DurableObjectStub<UserDurableObject>, was: OperateConsoleRun)
+      : Promise<boolean> {
+    let open = (await owner.getOperatePage()).state.console;
+    return open?.workspaceId === was.workspaceId && open.consoleId === was.consoleId &&
+        open.source === "published" && open.revision === was.revision;
+  }
+
+  /**
+   * The tools of the published console open in this operate session (§3, S's side), for the
+   * operate agent's discovery tool (C6), which marks its chat before calling. The console and
+   * revision come from the owner's page, never from the agent.
+   */
+  async listSessionConsoleTools(): Promise<ConsoleToolOutcome> {
+    let deadlineAt = Date.now() + CONSOLE_TOOL_DEADLINE_MS;
+    let session = await this.#sessionConsole();
+    if ("reason" in session) return consoleToolFailure(session.reason);
+    let {owner, open, caller, workspace} = session;
+    let outcome = await workspace.listConsoleTools(caller, {consoleId: open.consoleId, revision: open.revision, deadlineAt});
+    return await this.#sessionConsoleStillOpen(owner, open)
+        ? outcome : consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+  }
+
+  /**
+   * Calls `tool` of widget `widgetId` of the published console open in this operate session (§4.1,
+   * S's steps 1, 2 and 10), for the operate agent's invocation tool (C6), which marks its chat
+   * before calling. The 10 s deadline starts here; the console and revision come from the owner's
+   * page; `input` must be plain JSON of at most 512 bytes.
+   */
+  async callSessionConsoleTool(widgetId: WorkpieceId, tool: string, input: unknown): Promise<ConsoleToolOutcome> {
+    let deadlineAt = Date.now() + CONSOLE_TOOL_DEADLINE_MS;
+    let session = await this.#sessionConsole();
+    if ("reason" in session) return consoleToolFailure(session.reason);
+    let problem = plainJsonProblem(input, WIDGET_TOOL_LIMITS.inputBytes);
+    if (problem !== null) return consoleToolFailure(`The tool input is not valid: ${problem}.`);
+    let {owner, open, caller, workspace} = session;
+    let outcome = await workspace.invokeConsoleTool(caller, {consoleId: open.consoleId, revision: open.revision,
+      gadgetId: widgetId, tool, inputJson: JSON.stringify(input), deadlineAt});
+    return await this.#sessionConsoleStillOpen(owner, open)
+        ? outcome : consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+  }
+
   #codeIdMap = new Map<string, WorkerLoaderWorkerCode>;
 
   // Gadgets that had persistent restore stubs forged during each chat's currently-running
@@ -10820,6 +11157,27 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     if (this.impl.ownerId !== ownerId || !this.impl.storage.operateSession.get()) return [];
     return Array.from(this.impl.storage.hostBoardReads.list({ reverse: true, limit: 200 }),
         ({ kind, consoleId, entryId, requirementName, status, at }) => ({ kind, consoleId, entryId, requirementName, status, at }));
+  }
+
+  /**
+   * See `OverseerImpl.listConsoleTools`. Worker-only: an operate session workspace calls it for
+   * its owner; no client interface reaches it.
+   */
+  async listConsoleTools(caller: ConsoleToolCaller, request: ConsoleToolListRequest): Promise<ConsoleToolOutcome> {
+    return this.impl.listConsoleTools(caller, request);
+  }
+
+  /**
+   * See `OverseerImpl.invokeConsoleTool`. Worker-only: an operate session workspace calls it for
+   * its owner; no client interface reaches it.
+   */
+  async invokeConsoleTool(caller: ConsoleToolCaller, request: ConsoleToolCallRequest): Promise<ConsoleToolOutcome> {
+    return this.impl.invokeConsoleTool(caller, request);
+  }
+
+  /** See `OverseerImpl.listConsoleToolAudit`. Worker-only, like `invokeConsoleTool`. */
+  async listConsoleToolAudit(caller: ConsoleToolCaller): Promise<Omit<ConsoleToolAuditRecord, "seq">[]> {
+    return this.impl.listConsoleToolAudit(caller);
   }
 
   /**
@@ -14051,17 +14409,12 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // that console and revision open. So one kept from an older publication, from a console since
   // unpublished or deleted, or from a console the person has since left stops working.
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
-    let workspaceId = this.impl.ctx.id.toString();
     let ui = true;
     let check = async () => {
       // A published entry never changes (a republish makes new frozen installs), so its `ui` is
       // the same at every check.
       ui = this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.ui !== false;
-      let open = (await this.#clientUser.getOperatePage()).state.console;
-      if (open?.workspaceId !== workspaceId || open.consoleId !== consoleId ||
-          open.source !== "published" || open.revision !== revision) {
-        throw new Error(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
-      }
+      await this.impl.consoleSessionCheck(this.#clientUser, consoleId, revision);
     };
     await check();
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the

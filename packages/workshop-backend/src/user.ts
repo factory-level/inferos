@@ -1075,6 +1075,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return candidateId;
   }
 
+  /**
+   * The operate session's workspace id as recorded, or null when there is none (never claimed, or
+   * the recorded one was deleted). Read-only: a console workspace cross-checks the operate session
+   * a console tool call names against it.
+   */
+  async operateSessionWorkspaceId(): Promise<string | null> {
+    let existing = this.storage.operateSessionWorkspaceId.get();
+    return existing && this.storage.gadgets.get(existing) ? existing : null;
+  }
+
   // The stored page, with any field added to OperatePageState since it was stored filled in from
   // the initial page, so a session that predates a field reads as if it always had it. A subject
   // stored before it was derived from the board is re-derived the same way. A console opened
