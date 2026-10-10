@@ -929,7 +929,7 @@ describe("worktree binding description", () => {
     let c1 = await commitFiles(impl, { "a.txt": "one\n" });
     let created = await impl.createWorktree("Repo", 1, c1);
 
-    let description = await impl.describeBinding("REPO", created.id);
+    let description = await impl.describeBinding(1, "REPO", created.id);
     expect(description).toContain(`rooted at git commit ${c1}`);
     expect(description).toContain("export interface Worktree");
     expect(description).toContain("structuredGrep");
