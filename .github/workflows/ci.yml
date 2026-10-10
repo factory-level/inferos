@@ -56,10 +56,14 @@ jobs:
   test:
     name: Build and test
     runs-on: ubuntu-latest
-    # Install, build and test together take ~2.5 minutes. Without an explicit cap a wedged test
-    # process (a spawned child that outlives its reap keeps `node --test` alive forever) burns the
-    # 6-hour default instead of failing, on every run of the branch.
-    timeout-minutes: 20
+    # Without an explicit cap a wedged test process (a spawned child that outlives its reap keeps
+    # `node --test` alive forever) burns the 6-hour default instead of failing, on every run of the
+    # branch. 25 minutes leaves room for the 900 s per-command backstop
+    # (`TOTAL_TIMEOUT_SECONDS`, scripts/vitest-task-vite-config.ts) to fire first: about 1.5 minutes of
+    # checkout, install and build, the backend run starting about 1.3 minutes into the Test step, then
+    # up to 15 minutes before the backstop -- about 18 minutes in all. The backstop then reports which
+    # command hung, instead of GitHub cancelling the job.
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
