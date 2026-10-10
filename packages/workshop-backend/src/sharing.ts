@@ -21,10 +21,16 @@
 // exception is the `ownerInvitesOnly` flag, which the Overseer supplies as a hook: once it is set,
 // only direct grants from the owner count, so it narrows which edges `computeEffectiveRoles`
 // follows and must be checked synchronously with each grant's storage write.
+//
+// AUTHORIZATION GENERATION: both collections here are authorization inputs.
+// `watchSharingAuthzInputs` subscribes to them when the storage is created, so every write that
+// changes a record (a grant, a role change, a severed edge, a re-rooted keep, a redeemed, minted,
+// edited or revoked link) raises the generation inside that write's own transaction. The methods
+// below never bump by hand.
 
 import { AiChatAuthorInfo, CollaboratorInfo, PermissionEdge, CollaboratorRole, AffectedCollaborator,
     createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from "@gadgets/workshop-shared/api";
-import { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
+import { Collection, NonUniqueIndex, Singleton } from "@gadgets/typed-storage";
 
 /**
  * Roles are totally ordered: build > use. Higher rank means strictly more access. Exported so
@@ -67,6 +73,95 @@ async function hashShareKey(rawKey: string): Promise<string> {
   let sig = new Uint8Array(await crypto.subtle.sign(
       "HMAC", hmacKey, Uint8Array.fromHex(rawKey)));
   return sig.toHex();
+}
+
+/**
+ * The storage slice holding a workspace's authorization generation: a persisted counter that every
+ * change to an authorization input raises (callable-widget contract, section 4.1). A reader that
+ * records it, awaits, and finds it unchanged knows no grant, removal, revocation, policy flag,
+ * observer record, owner or restart changed in between.
+ */
+export interface AuthzGenerationStorage {
+  /** Starts at 0 and, within one incarnation of the object, only rises (`bumpAuthzGeneration`). */
+  authzGeneration: Singleton<number>;
+}
+
+/**
+ * Raise the authorization generation by one and return the new value. Storage writes reach it
+ * through `watchAuthzCollection` and `watchAuthzSingleton`; call it directly only for an input that
+ * is not a storage write (the access restart). Call it in the same synchronous block as the change
+ * it covers, with no await between them: a bump before an await would let a reader record the new
+ * generation and still miss the change that follows it.
+ */
+export function bumpAuthzGeneration(storage: AuthzGenerationStorage): number {
+  let next = storage.authzGeneration.get() + 1;
+  storage.authzGeneration.put(next);
+  return next;
+}
+
+/** The current authorization generation. Synchronous, so it can be read with no await before it. */
+export function readAuthzGeneration(storage: AuthzGenerationStorage): number {
+  return storage.authzGeneration.get();
+}
+
+/**
+ * Make every change to `collection` raise the authorization generation: adding or deleting a
+ * record, or rewriting one with a different value. The bump runs in a typed-storage subscriber,
+ * which `put` and `delete` call inside the same `transactionSync` as the write (see `Subscriber`),
+ * so it commits or rolls back with the write whatever path, alias or helper made it. Register each
+ * input once, when its storage is created.
+ */
+export function watchAuthzCollection<T extends object, K>(
+    storage: AuthzGenerationStorage, collection: Collection<T, K>): void {
+  collection.subscribe({
+    add: () => { bumpAuthzGeneration(storage); },
+    update: (before, after) => bumpIfChanged(storage, before, after),
+    remove: () => { bumpAuthzGeneration(storage); },
+  });
+}
+
+/**
+ * Make every put of a different value to `slot` raise the authorization generation, from a
+ * subscriber that runs inside the put's own `transactionSync`, as for `watchAuthzCollection`.
+ */
+export function watchAuthzSingleton<T>(storage: AuthzGenerationStorage, slot: Singleton<T>): void {
+  // Subscribers run before the value is written (see `SingletonSubscriber`), so `get()` is still
+  // the old one.
+  slot.subscribe({ update: value => bumpIfChanged(storage, slot.get(), value) });
+}
+
+/** Watch this module's two authorization inputs, the collaborators and the share keys. */
+export function watchSharingAuthzInputs(storage: SharingStorage): void {
+  watchAuthzCollection(storage, storage.collaborators);
+  watchAuthzCollection(storage, storage.shareKeys);
+}
+
+// A rewrite of an identical value changes no input, so it does not raise the generation.
+function bumpIfChanged(storage: AuthzGenerationStorage, before: unknown, after: unknown): void {
+  if (!sameStoredValue(before, after)) bumpAuthzGeneration(storage);
+}
+
+// Equality over stored values (structured-clone data), compared per key rather than by
+// serialization, so key order does not matter: primitives by `Object.is`, dates by time, arrays by
+// element, plain objects by key. An absent key equals an undefined one: no reader of these inputs
+// distinguishes the two (an optional field such as a link's `note` reads the same either way), and
+// `accountChoices` never stores `undefined`. Anything else compares unequal, which costs only a
+// spurious rise.
+function sameStoredValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length &&
+        a.every((item, i) => sameStoredValue(item, b[i]));
+  }
+  if (!isPlainObject(a) || !isPlainObject(b)) return false;
+  let keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every(key => sameStoredValue(a[key], b[key]));
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null &&
+      Object.getPrototypeOf(value) === Object.prototype;
 }
 
 /** Each gadget stores its collaborator list. */
@@ -127,7 +222,7 @@ export type ShareKeyRecord = ShareLinkRecord | ShareKeyAliasRecord;
  * The slice of Overseer storage this module operates on. Satisfied by the real OverseerStorage
  * and easily constructed over a Map-backed mock DurableObjectStorage in tests.
  */
-export interface SharingStorage {
+export interface SharingStorage extends AuthzGenerationStorage {
   collaborators: Collection<CollaboratorRecord>;
   shareKeys: Collection<ShareKeyRecord> & {
     /** A link's copies, keyed by the link they alias. */

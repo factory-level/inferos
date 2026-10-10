@@ -5,6 +5,7 @@ import {
   SharingStorage,
   CollaboratorRecord,
   ShareKeyRecord,
+  watchSharingAuthzInputs,
 } from "../src/sharing.js";
 import {
   AiChatAuthorInfo, PermissionEdge, CollaboratorRole, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES,
@@ -12,7 +13,8 @@ import {
 import { makeMockStorage } from "./mock-storage.js";
 
 function makeStorage(): SharingStorage {
-  return createTypedStorage(makeMockStorage(), {
+  let storage = createTypedStorage(makeMockStorage(), {
+    singletons: { authzGeneration: 0 },
     collections: {
       collaborators: collection<CollaboratorRecord>()({
         primaryKey: (record: CollaboratorRecord) => record.profile.id,
@@ -25,6 +27,8 @@ function makeStorage(): SharingStorage {
       }),
     },
   });
+  watchSharingAuthzInputs(storage);
+  return storage;
 }
 
 const OWNER = "owner@example.com";
@@ -828,5 +832,196 @@ describe("ownerInvitesOnly", () => {
 
     mgr.addCollaborator({ caller: owner, profile: profile("b"), role: "use" });
     expect(mgr.getEffectiveRole("b")).toBe("use");
+  });
+});
+
+// The authorization generation (callable-widget contract §4.1, step C5a): every sharing write that
+// changes a record raises it once per write, inside the write's own transaction (the subscribers
+// watchSharingAuthzInputs registers), and nothing else does. The Overseer-side inputs are
+// enumerated in authz-generation.test.ts.
+
+function generation(storage: SharingStorage): number {
+  return storage.authzGeneration.get();
+}
+
+// The generation tests' graph: a (use, from the owner) shares with b; c joined through the owner's
+// link k1.
+function seeded() {
+  let m = makeManagerWithFlag();
+  seedCollaborator(m.storage, "a", [userEdge(OWNER, "use")]);
+  seedCollaborator(m.storage, "b", [userEdge("a", "use")]);
+  seedLink(m.storage, "k1", OWNER, "use");
+  seedCollaborator(m.storage, "c", [keyEdge("k1", "use")]);
+  return m;
+}
+
+describe("authorization generation", () => {
+  // Each sharing mutation with the number of authorization writes it makes.
+  const MUTATIONS: [string, number, (m: ReturnType<typeof makeManagerWithFlag>) => unknown][] = [
+    ["addCollaborator (new)", 1,
+      ({ mgr }) => mgr.addCollaborator({ caller: owner, profile: profile("n"), role: "use" })],
+    ["addCollaborator (role change)", 1,
+      ({ mgr }) => mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "build" })],
+    ["removeCollaborator", 1, ({ mgr }) => mgr.removeCollaborator(owner, "a", [])],
+    ["removeCollaborator + #reRootKeptUsers", 2,
+      ({ mgr }) => mgr.removeCollaborator(owner, "a", ["b"])],
+    ["redeemShareKey (new collaborator)", 1, async ({ mgr, storage }) => {
+      let { key } = await mgr.createShareLink({ caller: owner, role: "use" });
+      let before = generation(storage);
+      await mgr.redeemShareKey({ rawKey: key, profileId: "n", fetchProfile: async () => profile("n") });
+      return generation(storage) - before;
+    }],
+    ["redeemShareKey (new edge)", 1, async ({ mgr, storage }) => {
+      let { key } = await mgr.createShareLink({ caller: owner, role: "use" });
+      let before = generation(storage);
+      await mgr.redeemShareKey({ rawKey: key, profileId: "a", fetchProfile: async () => profile("a") });
+      return generation(storage) - before;
+    }],
+    ["createShareLink", 1, ({ mgr }) => mgr.createShareLink({ caller: owner, role: "use" })],
+    ["newShareLinkKey", 1, ({ mgr }) => mgr.newShareLinkKey({ caller: owner, linkId: "k1" })],
+    ["revokeShareLink", 1, ({ mgr }) => mgr.revokeShareLink(owner, "k1", [])],
+    ["revokeShareLink + #reRootKeptUsers", 2, ({ mgr }) => mgr.revokeShareLink(owner, "k1", ["c"])],
+    // Each copy of a link is its own record, so revoking deletes, and counts, each one.
+    ["revokeShareLink (link with two copies)", 3, async ({ mgr, storage }) => {
+      await mgr.newShareLinkKey({ caller: owner, linkId: "k1" });
+      await mgr.newShareLinkKey({ caller: owner, linkId: "k1" });
+      let before = generation(storage);
+      mgr.revokeShareLink(owner, "k1", []);
+      return generation(storage) - before;
+    }],
+    // A note grants nothing, but the rule is "any change to the record": a spurious rise only
+    // refuses a call that can be retried, and an exemption is one more thing to keep correct.
+    ["updateShareLink (note edit)", 1, ({ mgr }) => mgr.updateShareLink(owner, "k1", "a note")],
+  ];
+
+  for (let [name, writes, mutate] of MUTATIONS) {
+    it(`${name} raises it by ${writes}`, async () => {
+      let m = seeded();
+      let before = generation(m.storage);
+      let result = await mutate(m);
+      // Redemption rows measure around the redeem alone (their setup mints a link).
+      let delta = typeof result === "number" ? result : generation(m.storage) - before;
+      expect(delta).toBe(writes);
+    });
+  }
+
+  it("is unchanged by reads, previews, no-op rewrites, refusals and no-op redemptions", async () => {
+    let m = seeded();
+    let { mgr, storage, flags } = m;
+    let { key } = await mgr.createShareLink({ caller: owner, role: "use" });
+    await mgr.redeemShareKey({ rawKey: key, profileId: "d", fetchProfile: async () => profile("d") });
+    let before = generation(storage);
+
+    mgr.listCollaborators();
+    mgr.listShareLinkRecords();
+    mgr.getEffectiveRole("a");
+    mgr.previewRemoveCollaborator(owner, "a");
+    mgr.previewRevokeShareLink(owner, "k1");
+    mgr.updateShareLink(owner, "k1", undefined);
+    expect(() => mgr.addCollaborator({ caller: collab("a"), profile: profile("x"), role: "build" }))
+        .toThrow(/higher than your own/);
+    expect(() => mgr.removeCollaborator(collab("c"), "a", [])).toThrow(/only remove/);
+    // An unknown key, a repeated redemption, and a revoked link's key.
+    await mgr.redeemShareKey({
+      rawKey: "00112233445566778899aabbccddeeff", profileId: "x", fetchProfile: async () => profile("x"),
+    });
+    await mgr.redeemShareKey({ rawKey: key, profileId: "d", fetchProfile: async () => profile("d") });
+    expect(generation(storage)).toBe(before);
+
+    // Under ownerInvitesOnly a redemption grants nothing, so an owner-added collaborator reopening
+    // with a link leaves the generation alone too.
+    flags.ownerInvitesOnly = true;
+    await mgr.redeemShareKey({ rawKey: key, profileId: "a", fetchProfile: async () => profile("a") });
+    expect(generation(storage)).toBe(before);
+  });
+
+  it("redeemShareKey bumps only at its write, after fetching the profile", async () => {
+    let { mgr, storage, flags } = makeManagerWithFlag();
+    let { key } = await mgr.createShareLink({ caller: owner, role: "use" });
+    let before = generation(storage);
+
+    let release!: () => void;
+    let held = new Promise<void>(resolve => { release = resolve; });
+    let redeeming = mgr.redeemShareKey({
+      rawKey: key, profileId: "n", fetchProfile: async () => { await held; return profile("n"); },
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // Parked in fetchProfile: nothing is written, so a reader sees no change yet.
+    expect(generation(storage)).toBe(before);
+    release();
+    await redeeming;
+    expect(generation(storage)).toBe(before + 1);
+
+    // A flag set during the RPC refuses the grant, and with no write there is no bump.
+    let { key: key2 } = await mgr.createShareLink({ caller: owner, role: "use" });
+    let held2!: () => void;
+    let parked = new Promise<void>(resolve => { held2 = resolve; });
+    let refused = mgr.redeemShareKey({
+      rawKey: key2, profileId: "m", fetchProfile: async () => { await parked; return profile("m"); },
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    let mid = generation(storage);
+    flags.ownerInvitesOnly = true;
+    held2();
+    await expect(refused).rejects.toThrow(/Share links are disabled/);
+    expect(generation(storage)).toBe(mid);
+  });
+
+  it("createShareLink and newShareLinkKey bump beside their put, not at entry", async () => {
+    let { mgr, storage, flags } = makeManagerWithFlag();
+    let { linkId } = await mgr.createShareLink({ caller: owner, role: "use" });
+    let before = generation(storage);
+
+    // Setting the flag while each call awaits its key mint refuses the write that follows; a bump
+    // at entry would have raised the generation for a grant that never happened.
+    let creating = mgr.createShareLink({ caller: owner, role: "use" });
+    let copying = mgr.newShareLinkKey({ caller: owner, linkId });
+    flags.ownerInvitesOnly = true;
+    await expect(creating).rejects.toThrow(/Share links are disabled/);
+    await expect(copying).rejects.toThrow(/Share links are disabled/);
+    expect(generation(storage)).toBe(before);
+  });
+
+  it("a revoke followed by a regrant raises it twice though the role reads the same", async () => {
+    let { mgr, storage } = makeManager();
+    mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use" });
+    let before = generation(storage);
+
+    mgr.removeCollaborator(owner, "a", []);
+    mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use" });
+
+    expect(mgr.getEffectiveRole("a")).toBe("use");
+    expect(generation(storage)).toBe(before + 2);
+  });
+
+  it("addCollaborator that changes nothing leaves it alone", () => {
+    let m = seeded();
+    let before = generation(m.storage);
+    // a already holds a use edge from the owner, so a repeat grant (or a lower one, which never
+    // downgrades) rewrites an identical record.
+    m.mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use" });
+    expect(generation(m.storage)).toBe(before);
+    // A note on the existing edge is a change, and raises it.
+    m.mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use", note: "hi" });
+    expect(generation(m.storage)).toBe(before + 1);
+    m.mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use", note: "hi" });
+    expect(generation(m.storage)).toBe(before + 1);
+  });
+
+  it("never decreases", async () => {
+    let { mgr, storage } = makeManager();
+    let seen = [generation(storage)];
+    let { key, linkId } = await mgr.createShareLink({ caller: owner, role: "build" });
+    seen.push(generation(storage));
+    await mgr.redeemShareKey({ rawKey: key, profileId: "a", fetchProfile: async () => profile("a") });
+    seen.push(generation(storage));
+    mgr.addCollaborator({ caller: collab("a"), profile: profile("b"), role: "use" });
+    seen.push(generation(storage));
+    mgr.revokeShareLink(owner, linkId, ["b"]);
+    seen.push(generation(storage));
+    mgr.removeCollaborator(owner, "a", []);
+    seen.push(generation(storage));
+    expect(seen).toEqual(seen.toSorted((x, y) => x - y));
+    expect(new Set(seen).size).toBe(seen.length);
   });
 });

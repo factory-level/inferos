@@ -111,6 +111,13 @@ type NonUniqueIndexed<T, Indexes, PK extends Key = Key> = {
   [K in keyof Indexes]: NonUniqueIndex<T, RemoveArray<ReturnType<Indexes[K]>>, PK>
 }
 
+/**
+ * Observes a collection's writes. `put` and `delete` call every subscriber inside the same
+ * `transactionSync` as the write, before the record is written: `update` receives the stored
+ * record and the new one, and `get()` still returns the old record. A subscriber that throws rolls
+ * back the write and anything the other subscribers wrote. Callers rely on this (the Overseer's
+ * authorization generation, `watchAuthzInput` in workshop-backend), so keep it.
+ */
 export interface Subscriber<T> {
   add(record: T): void;
   update(oldRecord :T, newRecord :T): void;
@@ -131,6 +138,13 @@ export interface Collection<T extends object, PrimaryKey = string> {
   unsubscribe(subscriber: Subscriber<T>): void;
 }
 
+/**
+ * Observes a singleton's writes. `put` calls every subscriber inside the same `transactionSync` as
+ * the write, before the value is written, so `get()` in `update` still returns the old value. A
+ * subscriber that throws rolls back the write and anything the other subscribers wrote. Callers
+ * rely on this (the Overseer's authorization generation, `watchAuthzInput` in workshop-backend), so
+ * keep it.
+ */
 export interface SingletonSubscriber<T> {
   update(value :T): void;
 }

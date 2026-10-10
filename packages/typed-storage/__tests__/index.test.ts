@@ -140,6 +140,31 @@ describe("singletons", () => {
     expect(subscriber.lastValue).toStrictEqual(321);
   });
 
+  // A contract callers rely on (see SingletonSubscriber): subscribers run before the write, inside
+  // its transaction.
+  it("runs subscribers before the write, inside its transaction", () => {
+    let storage = createTypedStorage(makeMockStorage(), {
+      singletons: { counter: 0, audit: 0 },
+    });
+    let seen: number[] = [];
+    storage.counter.subscribe({ update: () => {
+      seen.push(storage.counter.get());
+      storage.audit.put(storage.audit.get() + 1);
+    } });
+
+    storage.counter.put(5);
+    expect(seen).toEqual([0]);
+    expect(storage.audit.get()).toBe(1);
+
+    // A later subscriber throws: the put and the earlier subscriber's write both roll back.
+    let failing = { update: () => { throw new Error("refused"); } };
+    storage.counter.subscribe(failing);
+    expect(() => storage.counter.put(9)).toThrow("refused");
+    expect(seen).toEqual([0, 5]);
+    expect(storage.counter.get()).toBe(5);
+    expect(storage.audit.get()).toBe(1);
+  });
+
   it("uses the property name as the storage key by default", () => {
     let mockStorage = makeMockStorage();
     let storage = createTypedStorage(mockStorage, {
@@ -1045,5 +1070,41 @@ describe("non-unique index ranged get", () => {
     expect([...index.get("even", {reverse: true, limit: 2})].map(r => r.id))
         .toStrictEqual([6, 4]);
     expect([...index.get("even", {end: 2})].map(r => r.id)).toStrictEqual([0]);
+  });
+});
+
+// A contract callers rely on (see Subscriber): subscribers get the stored and new records, run
+// before the write, and run inside its transaction.
+describe("collection subscribers", () => {
+  it("run before the write, inside its transaction", () => {
+    let storage = createTypedStorage(makeMockStorage(), {
+      singletons: { audit: 0 },
+      collections: { items: collection<{ id: string; n: number }>()({ primaryKey: "id" }) },
+    });
+    let seen: string[] = [];
+    let bump = () => storage.audit.put(storage.audit.get() + 1);
+    storage.items.subscribe({
+      add: record => { seen.push(`add ${record.n} stored=${storage.items.get("a")?.n}`); bump(); },
+      update: (before, after) => {
+        seen.push(`update ${before.n}->${after.n} stored=${storage.items.get("a")?.n}`); bump();
+      },
+      remove: record => {
+        seen.push(`remove ${record.n} stored=${storage.items.get("a")?.n}`); bump();
+      },
+    });
+
+    storage.items.put({ id: "a", n: 1 });
+    storage.items.put({ id: "a", n: 2 });
+    storage.items.delete("a");
+    expect(seen).toEqual(["add 1 stored=undefined", "update 1->2 stored=1", "remove 2 stored=2"]);
+    expect(storage.audit.get()).toBe(3);
+
+    // A later subscriber throws: the put and the earlier subscriber's write both roll back.
+    storage.items.subscribe({
+      add: () => { throw new Error("refused"); }, update() {}, remove() {},
+    });
+    expect(() => storage.items.put({ id: "a", n: 3 })).toThrow("refused");
+    expect(storage.items.get("a")).toBeUndefined();
+    expect(storage.audit.get()).toBe(3);
   });
 });

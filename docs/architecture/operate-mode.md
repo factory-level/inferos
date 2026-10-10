@@ -41,7 +41,11 @@ covers:
   - packages/integration-tests/__tests__/operate-chat-no-wiki.test.ts
   - packages/workshop-backend/__tests__/execution-bound-loopbacks.test.ts
   - packages/integration-tests/__tests__/operate-execution-bound-loopbacks.test.ts
-updated: 2026-10-09
+  - packages/workshop-backend/src/sharing.ts
+  - packages/workshop-backend/__tests__/sharing.test.ts
+  - packages/workshop-backend/__tests__/authz-generation.test.ts
+  - packages/workshop-backend/__tests__/authz-generation-guard.test.ts
+updated: 2026-10-10
 ---
 
 # Operate mode
@@ -64,6 +68,7 @@ The operate session is implemented in the kernel: one per person, holding a page
 | `packages/workshop-backend/src/console-store.ts` | `WorkspaceConsoleStore`: a workspace's consoles in its Overseer, behind `Overseer.listConsoles` / `getConsole` / `getConsoleScreen` / `createConsole` / `replaceConsole` / `publishConsole` / `deleteConsole`, and `publishConsoleRecord`, which publishes a draft with copies of its screens (`consoleScreens` collection). |
 | `packages/workshop-backend/src/host-boards.ts` | `HostBoardDesk`: an operate session workspace's host-board connection selections (durable, idempotent per request key) and the fenced, deadline-bound read; the projection of a snapshot; `hostBoardsEnabled` (`INFEROPS_HOST_BOARDS`). See [host boards](#host-boards). |
 | `packages/workshop-backend/src/tool-lane.ts` | `ToolLane` and `runIsolatedTool`: the isolated lane a console widget's tool method runs in, one fresh Worker and facet per call, with its slots, pending-facet table, tombstones and sweeps. Internal: no client or agent reaches it yet. See [isolated tool lane](#isolated-tool-lane). |
+| `packages/workshop-backend/src/sharing.ts` | The sharing graph (`SharingManager`) and the authorization generation: `AuthzGenerationStorage`, `bumpAuthzGeneration`, `readAuthzGeneration`, and the subscriber helpers `watchAuthzCollection`, `watchAuthzSingleton` and `watchSharingAuthzInputs`. The Overseer exposes the generation as `OverseerImpl.authzGeneration()`. |
 | `packages/workshop-backend/scripts/dev-setup.ts` | `pnpm dev:setup --console` seeds Operate test data: a connection to the mock demo board, Board and Activity screens over it, and a published "Operations lead" console. |
 | `packages/workshop-backend/src/subject-presence.ts` | `SubjectPresenceDurableObject`, one per subject reference, holding that subject's in-memory roster (`SubjectRoster`) behind `OperateSession.subscribeToSubjectPresence()`. |
 | `packages/workshop-backend/src/server.ts` | `OperateSessionImpl` (`@validateRpc`), which forwards to the user DO with a fresh stub per call, opens the session workspace as an operate session, and checks console navigation events against the console revision the session opened before dispatching them. |
@@ -256,6 +261,29 @@ A bound view (MVP-26) is a widget's `view.json`: a declarative spec, with no cod
 - **Static limits** (`BOUND_VIEW_LIMITS`): depth 8, 64 nodes, 12 children per stack and 2 to 4 per `columns`, 16 queries, 4 `where` clauses and 2 sort keys per query, 1 to 8 table columns, 1 to 4 item leaves, 8 badge entries, `limit` 1 to 200 (50 when absent), Σ `limit` over lists and tables at most 500 rows and Σ `limit` × width at most 2,000 cells.
 
 The classifier's default `view.json` parser is `parseBoundViewSpec`, which throws its problems as one line (`formatBoundViewProblems`). So a widget whose files are a valid `view.json` and no `.js` file or `tools.json` is classified `viewOnly`, and its blueprint version publishes. Nothing else uses a bound view yet: there is no `bound-view` console entry kind, no delivery and no renderer, and nothing reads `view.json` outside the classifier. A view-only version can be installed, and its install registered and placed in a console's `widgets` like any widget install (`consoleWidgetRefusal` checks provenance, not files), but it has no code: `getUiBundle` returns `null`, a connect fails for want of a `server.js` as a UI-only app's does, it offers no export, and `view.json` reaches no frame. `bound-view.test.ts` covers every static limit at its bound and one past, a maximum legal spec at every bound at once, raw-text size in bytes and the BOM, invalid JSON, plain, nested, escaped and collapsing duplicate keys, plain and escaped forbidden keys, refused and accepted number lexemes, closed-schema keys, own-property lookups, literal and badge-key typing per field, columns' `as` and `map`, requirement names, nested collections, bidi controls (plain and escaped) and lone surrogates, problem accumulation and capping, and a seeded fuzz over random token strings and byte- and structure-mutated valid specs (total, never accepting invalid JSON); `workspace-kind.test.ts` runs every matrix row under the real `view.json` and `tools.json` parsers.
+
+### Authorization generation
+
+`authzGeneration` is a persisted Overseer singleton that rises at every change to an authorization input (step C5a of the callable-widget contract, §4.1). `OverseerImpl.authzGeneration()` reads it synchronously, so a caller can record it, await, and compare it again in the same block as its final checks. Nothing reads it yet: C5b's console tool call will refuse to release a result when it moved during the call.
+
+- **Mechanism: typed-storage subscribers.** `makeOverseerStorage` passes every authorization input to `watchAuthzCollection` or `watchAuthzSingleton` (`sharing.ts`): the `collaborators` and `shareKeys` collections (through `watchSharingAuthzInputs`), the `observers` collection, and the `ownerId`, `containsRestrictedData`, `ownerInvitesOnly` and `operateSession` singletons. The operate-session mark is missing from the contract's table, but it shuts out every other caller. Their subscriber calls `bumpAuthzGeneration` from inside typed storage's `put`/`delete`, which runs subscribers in the same `transactionSync` as the write and before it, so a singleton's `get()` still returns the old value. `typed-storage` documents this on `Subscriber` and `SingletonSubscriber` and tests it. So the bump is in the same synchronous block as the write, with no await between them, and it commits or rolls back with that write, whatever method, alias, helper or index delete made it. No write site bumps by hand. This was chosen over extending a source scan of write sites to aliases and bracket access, because a scan can only list the forms it knows.
+- **What counts as a change.** A collection record added or deleted raises it once. A record rewritten, or a singleton put, raises it only when the value differs from the stored one. The comparison is structural and per key: dates by time, arrays by element, and an absent key equal to an undefined one, since no reader distinguishes the two and `accountChoices` never stores `undefined`. So a repeated flag, a returning observer's identical record (whatever its `accountChoices` key order) and an `addCollaborator` that changes nothing leave it alone. Every other change raises it, including a share-link note edit (`updateShareLink`): a spurious rise only refuses a call that can be retried. One operation can raise it more than once: a removal that re-roots a kept user raises it twice, and revoking a link also deletes each of its copies, raising it once for the link and once per copy.
+- **Direct bumps.** Two inputs are not storage writes. `scheduleAccessRestart` bumps before its first await, in the same block as the removal, revocation or scope widening that triggered it, and its `storage.sync()` flushes the bump. `deleteSelf` is described below.
+- **Deletion.** `storage.deleteAll()` bypasses the subscribers and resets the generation to 0, so `deleteSelf` reads the generation first, writes it back after the deletion and then bumps it. The restart it schedules bumps once more. The carry-over is required. Until the restart's `ctx.abort()` about 100 ms later, a call that recorded `g0` before the deletion can still be running, and without the carry-over the generation would go 0, 1, 2 and could come back to that `g0` and pass the check. A deleted workspace therefore keeps this one key. "Never decreases" holds within one incarnation of the object: if it crashes between `deleteAll()` and the carry-over, the generation restarts at 0. That is harmless, because no reader survives a restart.
+- **Tests.** `authz-generation.test.ts` drives every input through its real code path in a real `OverseerDurableObject` and asserts the exact rise. It also checks the following:
+  - repeated flags and identical observer rewrites leave the generation unchanged;
+  - a revoke followed by a regrant raises it twice;
+  - it never decreases and survives `abortAllDurableObjects()`;
+  - after `deleteSelf` it exceeds every value read before the deletion;
+  - when `authorizeObservation`'s second flag put fails, that put's bump rolls back with it, and the first flag and its bump stay committed.
+
+  `sharing.test.ts` checks that nothing rises while `redeemShareKey` awaits the profile, that a refusal during the profile fetch or the key mint leaves it unchanged, and that an `addCollaborator` which changes nothing leaves it unchanged. `authz-generation-guard.test.ts` covers what would bypass the subscribers:
+  - each input in the Overseer schema rises on a change and not on an identical rewrite;
+  - no source names an input's storage key in a string (raw kv access), apart from two reviewed literals;
+  - `makeOverseerStorage` is the only typed-storage view of the Overseer's storage;
+  - `storage.deleteAll()` runs only in `deleteSelf`;
+  - only the helper and `deleteSelf` write the generation;
+  - direct bumps are limited to the watchers, `scheduleAccessRestart` and `deleteSelf`, and the restart bumps before its first await.
 
 ## Configuration
 
