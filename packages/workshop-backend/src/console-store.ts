@@ -1,7 +1,7 @@
-import type { BlueprintInstall, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
+import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleSource, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
@@ -186,6 +186,12 @@ export function boundViewRefusal(storage: Pick<ConsoleStorage, "gadgets">, entry
   let refusal = installRefusal(storage, entry);
   if (refusal) return refusal;
   let commit = currentCommit(storage, commits, entry.gadgetId);
+  return viewRefusal(entry, commit);
+}
+
+// Why `commit` is not a view `entry` can show: it must be view-only, with a valid spec reading
+// exactly the entry's requirements.
+function viewRefusal(entry: BoundViewEntry, commit: SourceCommit): string | null {
   let parsed = commit.viewText === null ? null : parseBoundViewSpec(commit.viewText);
   if (commit.classification.class !== "viewOnly" || !parsed?.ok) {
     let reasons = commit.classification.violations.map(violation => violation.message).join(" ");
@@ -375,6 +381,65 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
 }
 
 /**
+ * What `describeBoundView` reads through: the bound-view switch, the caller's console context, and
+ * a draft entry's source.
+ */
+export type BoundViewPorts = {
+  /** Whether bound views are on (`boundViewsEnabled`). */
+  enabled(): boolean;
+  /**
+   * The console as the caller's own operate session shows it, from the requested source at the
+   * requested revision and re-read through the caller's own access, with the workspace holding
+   * it; null when that does not hold.
+   */
+  run(): Promise<{ workspaceId: string; console: OperateConsole } | null>;
+  /**
+   * The draft entry's spec, read from its source at `commitId`, or else at its current commit,
+   * through the caller's own build access (`Overseer.getConsoleBoundViewDraft`).
+   */
+  readDraft(workspaceId: string, commitId: string | undefined): Promise<Pick<BoundViewDescription, "commitId" | "specText">>;
+};
+
+/**
+ * Bound view `entryId` of console `ref` as plain data (`OperateSession.getConsoleBoundView`).
+ * Refused while bound views are off, and unless `ports.run` shows the console with that entry and
+ * a host board for each of its requirements. A publication delivers only its frozen spec, and only
+ * at the frozen commit when `options.commitId` names one. A draft reads its source through
+ * `ports.readDraft` and then runs the guard again, refusing a context that moved meanwhile. The
+ * spec is re-parsed with the v1 parser and must read exactly the entry's requirements.
+ */
+export async function describeBoundView(ref: ConsoleRef, entryId: string, options: { commitId?: string },
+    ports: BoundViewPorts): Promise<BoundViewDescription> {
+  let refused = () => new Error(
+    `Console ${ref.consoleId} at revision ${ref.revision} is not open in your operate session with bound view ${entryId}.`);
+  let context = async () => {
+    if (!ports.enabled()) throw new Error(BOUND_VIEWS_OFF);
+    let run = await ports.run();
+    let entry = run?.console.boundViews?.find(candidate => candidate.id === entryId);
+    let boards = new Map((run?.console.hostBoards ?? []).map(board => [board.requirement.name, board.id]));
+    let requirements = (entry?.requirements ?? []).map(name => ({ name, hostBoardEntryId: boards.get(name) ?? "" }));
+    if (!run || !entry || requirements.some(requirement => !requirement.hostBoardEntryId)) throw refused();
+    return { workspaceId: run.workspaceId, entry, requirements };
+  };
+  let before = await context();
+  let source: Pick<BoundViewDescription, "commitId" | "specText"> | undefined = before.entry.frozen;
+  if (ref.source === "draft") {
+    source = await ports.readDraft(before.workspaceId, options.commitId);
+    if (JSON.stringify(await context()) !== JSON.stringify(before)) throw refused();
+  } else if (!source || (options.commitId !== undefined && options.commitId !== source.commitId)) {
+    throw refused();
+  }
+  if (!ports.enabled()) throw new Error(BOUND_VIEWS_OFF);
+  let parsed = parseBoundViewSpec(source.specText);
+  let names = parsed.ok ? parsed.spec.requirements : [];
+  if (names.length !== before.entry.requirements.length || names.some(name => !before.entry.requirements.includes(name))) {
+    throw new Error(`Bound view ${entryId}'s spec is not valid.`);
+  }
+  return { consoleRef: { consoleId: ref.consoleId, source: ref.source, revision: ref.revision }, entryId,
+    commitId: source.commitId, specText: source.specText, requirements: before.requirements };
+}
+
+/**
  * A workspace's authored consoles, reachable only through a build-capable Overseer session and
  * under the same installation flags as its canvases, which a console's views reference. Editing
  * changes a console's draft; `publish` makes the draft, with copies of its screens, what operators
@@ -530,6 +595,40 @@ export class WorkspaceConsoleStore {
       throw new Error(`Console ${consoleId} does not offer widget ${gadgetId}.`);
     }
     return entry;
+  }
+
+  // The draft's bound view `entryId` at `revision`, whose source must still pass the install checks.
+  #draftBoundView(id: string, revision: string, entryId: string): BoundViewEntry {
+    this.#requireEnabled();
+    let entry = this.#current(id, revision).boundViews?.find(candidate => candidate.id === entryId);
+    if (!entry) throw new Error(`Console ${id} has no bound view ${entryId}.`);
+    let refusal = installRefusal(this.storage, entry);
+    if (refusal) throw new Error(`Console bound view "${entry.label}": ${refusal}`);
+    return entry;
+  }
+
+  /**
+   * The commit a preview of draft bound view `entryId` of console `id` at `revision` reads when it
+   * pins none: its source's current one. Refused unless the draft is at `revision` with that entry,
+   * and its source passes the install checks of `boundViewRefusal`.
+   */
+  draftBoundViewCommit(id: string, revision: string, entryId: string): string {
+    let commitId = (this.storage.gadgets.get(this.#draftBoundView(id, revision, entryId).gadgetId) as GadgetRecord).commitId;
+    if (commitId === undefined) throw new Error(`Bound view ${entryId}'s gadget has no commit yet.`);
+    return commitId;
+  }
+
+  /**
+   * The spec a preview of draft bound view `entryId` of console `id` at `revision` shows, from
+   * `commit` (read as `SourceCommits` are, from the commit the preview pins or
+   * `draftBoundViewCommit`): checked as `draftBoundViewCommit` checks the entry, and the commit as
+   * `boundViewRefusal` checks a source's.
+   */
+  draftBoundViewSpec(id: string, revision: string, entryId: string, commit: SourceCommit): string {
+    let entry = this.#draftBoundView(id, revision, entryId);
+    let refusal = viewRefusal(entry, commit);
+    if (refusal) throw new Error(`Console bound view "${entry.label}": ${refusal}`);
+    return commit.viewText!;
   }
 
   /**

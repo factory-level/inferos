@@ -104,6 +104,11 @@ test("contradictions are errors, and shell values a version 2 wrapper overrides 
   assert.ok(codes(validateSettings(v1(), { INFEROPS_ENABLED: "false", INFEROPS_HOST_BOARDS: "true" }))
     .includes("INFEROPS_HOST_BOARDS:contradictory"));
   assert.equal(validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_HOST_BOARDS"]), {}).ok, true);
+  // Bound views need host boards on.
+  assert.deepEqual(codes(validateSettings(v1(), { INFEROPS_BOUND_VIEWS: "maybe" })), ["INFEROPS_BOUND_VIEWS:invalid"]);
+  assert.deepEqual(codes(validateSettings(v1(), { INFEROPS_BOUND_VIEWS: "true" })), ["INFEROPS_BOUND_VIEWS:contradictory"]);
+  assert.equal(validateSettings(v1(), { INFEROPS_HOST_BOARDS: "true", INFEROPS_BOUND_VIEWS: "true" }).ok, true);
+  assert.equal(validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS"]), {}).ok, true);
 
   const slug = validateSettings(v1(), { INFEROPS_API_TOKEN: SECRET, INFEROPS_BASE_URL: "http://localhost:8080", INFEROPS_WORKSPACE_ID: "w1", INFEROPS_WORKSPACE_SLUG: "acme" });
   assert.deepEqual(codes(slug), ["INFEROPS_WORKSPACE_SLUG:contradictory"]);

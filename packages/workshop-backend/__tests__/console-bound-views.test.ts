@@ -1,7 +1,8 @@
 // Console bound views (MVP-26, bound-view contract PR 2c): registration, coherent publication and
-// survival, over mock Durable Object storage with synthetic gadget records and commits. The last
-// suite runs the real commit reads in an OverseerDurableObject. Synthetic data only.
-import { describe, expect, it } from "vitest";
+// survival, over mock Durable Object storage with synthetic gadget records and commits; delivery
+// (PR 2d) through `describeBoundView`'s ports. The real-commit suites run the commit reads in an
+// OverseerDurableObject. Synthetic data only.
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { writeBlob, writeTree, type TreeEntry } from "isomorphic-git";
@@ -9,7 +10,8 @@ import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import type { BoundViewEntry, ConsoleWidgetEntry, HostBoardEntry, OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { parseWidgetTools } from "@gadgets/workshop-shared/widget-tools";
 import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
-import { CONSOLE_SIZE_LIMITS, WorkspaceConsoleStore, type FrozenInstalls, type SourceCommits } from "../src/console-store";
+import type { BoundViewFreeze, ConsoleRef } from "@gadgets/workshop-shared/operate-console";
+import { BOUND_VIEWS_OFF, CONSOLE_SIZE_LIMITS, describeBoundView, WorkspaceConsoleStore, type BoundViewPorts, type FrozenInstalls, type SourceCommits } from "../src/console-store";
 import { BlobTextError, GITDIR, makeGitObjectsFs, type GitStore } from "../src/git-store";
 import { makeOverseerStorage, type GadgetRecord, type OverseerDurableObject } from "../src/overseer";
 import { makeMockStorage } from "./mock-storage";
@@ -478,6 +480,155 @@ describe("publication against real commits", () => {
       expect(impl.storage.gadgets.byBindingName.get("WIDGET_PUBLISHED")).toBeUndefined();
       expect(impl.storage.nextGatekeeperId.get()).toBe(nextId);
       expect(store.get(saved.id, "draft")!.published).toBeNull();
+    });
+  });
+});
+
+describe("delivering a bound view", () => {
+  // A console as `publish` leaves it, its published projection, and ports reading them.
+  function delivery() {
+    let t = setup();
+    let saved = t.store().create(t.content({ boundViews: [view()] }), ALL);
+    let stored = t.publish(saved);
+    let published = { ...stored.published!.content, id: stored.id, revision: stored.published!.revision, published: stored.published };
+    let entryId = saved.boundViews![0]!.id!;
+    let ref = (source: "published" | "draft" = "published"): ConsoleRef =>
+      ({ consoleId: stored.id, source, revision: source === "published" ? published.revision : stored.revision });
+    let shown: OperateConsole | null = published;
+    let enabled = true;
+    let draftReads: (string | undefined)[] = [];
+    let ports = (overrides: Partial<BoundViewPorts> = {}): BoundViewPorts => ({
+      enabled: () => enabled,
+      run: async () => shown && { workspaceId: "ws", console: shown },
+      readDraft: async (_workspaceId, commitId) => {
+        draftReads.push(commitId);
+        return { commitId: commitId ?? "viewEdited", specText: COMMITS[commitId ?? "viewEdited"]!["view.json"]! };
+      },
+      ...overrides,
+    });
+    return { t, stored, published, entryId, ref, ports, draftReads,
+      show: (console: OperateConsole | null) => { shown = console; }, turn: (on: boolean) => { enabled = on; } };
+  }
+  const refused = /not open in your operate session with bound view/;
+
+  it("returns a publication's frozen spec and requirement mapping, never reading the source", async () => {
+    let d = delivery();
+    let frozen = d.published.boundViews![0]!.frozen!;
+    expect(await describeBoundView(d.ref(), d.entryId, {}, d.ports())).toEqual({ consoleRef: d.ref(), entryId: d.entryId,
+      commitId: "view", specText: frozen.specText, requirements: [{ name: "board", hostBoardEntryId: d.published.hostBoards![0]!.id }] });
+    // A later source edit changes nothing delivered: only `frozen` is read.
+    d.t.gadget(10, "viewEdited");
+    expect(await describeBoundView(d.ref(), d.entryId, { commitId: "view" }, d.ports())).toMatchObject({ commitId: "view", specText: frozen.specText });
+    expect(d.draftReads).toEqual([]);
+    await expect(describeBoundView(d.ref(), d.entryId, { commitId: "viewEdited" }, d.ports())).rejects.toThrow(refused);
+  });
+
+  it("re-parses the frozen spec, refusing one the v1 parser no longer accepts", async () => {
+    let d = delivery();
+    let entry = d.published.boundViews![0]!;
+    let broken = (frozen: BoundViewFreeze) => ({ ...d.published, boundViews: [{ ...entry, frozen }] });
+    d.show(broken({ ...entry.frozen!, specText: "{}" }));
+    await expect(describeBoundView(d.ref(), d.entryId, {}, d.ports())).rejects.toThrow(/spec is not valid/);
+    d.show(broken({ ...entry.frozen!, specText: spec(["ops"]) }));
+    await expect(describeBoundView(d.ref(), d.entryId, {}, d.ports())).rejects.toThrow(/spec is not valid/);
+  });
+
+  it("reads a draft from its source, pinned by commit when asked", async () => {
+    let d = delivery();
+    d.show(d.stored);
+    expect(await describeBoundView(d.ref("draft"), d.entryId, {}, d.ports())).toMatchObject({ commitId: "viewEdited",
+      specText: COMMITS.viewEdited!["view.json"] });
+    expect(await describeBoundView(d.ref("draft"), d.entryId, { commitId: "view" }, d.ports())).toMatchObject({ commitId: "view",
+      specText: COMMITS.view!["view.json"] });
+    expect(d.draftReads).toEqual([undefined, "view"]);
+  });
+
+  it("refuses when the context does not hold: another console, a stale revision, a forged entry, a host board's id", async () => {
+    let d = delivery();
+    d.show(null);
+    await expect(describeBoundView(d.ref(), d.entryId, {}, d.ports())).rejects.toThrow(refused);
+    d.show(d.published);
+    await expect(describeBoundView(d.ref(), "forged", {}, d.ports())).rejects.toThrow(refused);
+    await expect(describeBoundView(d.ref(), d.published.hostBoards![0]!.id!, {}, d.ports())).rejects.toThrow(refused);
+    // A published entry without a freeze is never delivered from its source instead.
+    d.show({ ...d.published, boundViews: [{ ...d.published.boundViews![0]!, frozen: undefined }] });
+    await expect(describeBoundView(d.ref(), d.entryId, {}, d.ports())).rejects.toThrow(refused);
+  });
+
+  it("re-runs the guard after the draft read, refusing a context that moved while it ran", async () => {
+    let d = delivery();
+    d.show(d.stored);
+    let ports = d.ports();
+    let moved = d.ports({ readDraft: async (workspaceId, commitId) => {
+      d.show(null);
+      return ports.readDraft(workspaceId, commitId);
+    } });
+    await expect(describeBoundView(d.ref("draft"), d.entryId, {}, moved)).rejects.toThrow(refused);
+    // An entry changed under the same revision (it cannot, but the fence compares it all the same).
+    d.show(d.stored);
+    let changed = d.ports({ readDraft: async (workspaceId, commitId) => {
+      d.show({ ...d.stored, boundViews: [{ ...d.stored.boundViews![0]!, requirements: ["other"] }] });
+      return ports.readDraft(workspaceId, commitId);
+    } });
+    await expect(describeBoundView(d.ref("draft"), d.entryId, {}, changed)).rejects.toThrow(refused);
+    // The switch turned off meanwhile.
+    d.show(d.stored);
+    let off = d.ports({ readDraft: async (workspaceId, commitId) => {
+      d.turn(false);
+      return ports.readDraft(workspaceId, commitId);
+    } });
+    await expect(describeBoundView(d.ref("draft"), d.entryId, {}, off)).rejects.toThrow(BOUND_VIEWS_OFF);
+  });
+
+  it("refuses every delivery while the switch is off, before anything is read", async () => {
+    let d = delivery();
+    d.turn(false);
+    let run = vi.fn(d.ports().run);
+    await expect(describeBoundView(d.ref(), d.entryId, {}, d.ports({ run }))).rejects.toThrow(BOUND_VIEWS_OFF);
+    expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe("a draft bound view's source, against real commits", () => {
+  type Impl = {
+    storage: ReturnType<typeof makeOverseerStorage>;
+    gitStore: { writeFilesAsCommit(files: Map<string, string>, options: object): Promise<string> };
+    createGadget(title: string, bindingName: string, chatId?: number, output?: undefined, commitId?: string): GadgetRecord;
+    frozenInstalls(): FrozenInstalls;
+    readSourceCommits(commitIds: Iterable<string>): Promise<SourceCommits>;
+  };
+
+  it("reads the source's current commit or a pinned one, and refuses one that is not the entry's view", async () => {
+    await runInDurableObject(env.TEST_OVERSEER.getByName("bound-view-draft"), async (instance: OverseerDurableObject, state: DurableObjectState) => {
+      let impl = (instance as unknown as { impl: Impl }).impl;
+      let write = (files: Record<string, string>) => impl.gitStore.writeFilesAsCommit(new Map(Object.entries(files)),
+        { message: "test", author: { name: "t", email: "t@example.com" }, timestamp: new Date(0), parents: [] });
+      let [first, second, mixed, twoBoards] = [await write(COMMITS.view!), await write(COMMITS.viewEdited!),
+        await write(COMMITS.mixed!), await write(COMMITS.twoBoards!)];
+      let record = impl.createGadget("View", "VIEW", undefined, undefined, first);
+      record.installedFrom = { blueprintId: "bp", version: 1, kind: "widget" };
+      impl.storage.gadgets.put(record);
+      impl.storage.canvases.put({ id: "floor", title: "Floor", revision: "0", sections: [] } as never);
+      let store = new WorkspaceConsoleStore(state.storage, impl.storage, ON, impl.frozenInstalls());
+      let content: OperateConsoleContent = { title: "Floor", fullChat: "off", views: [{ id: "floor", title: "Floor", type: "screen", screen: "floor" }],
+        hostBoards: [board()], boundViews: [{ ...view(record.id) }] };
+      let saved = store.create(content, await impl.readSourceCommits(store.sourceCommitIds(content)));
+      let entryId = saved.boundViews![0]!.id!;
+      let read = async (commitId: string) => store.draftBoundViewSpec(saved.id, saved.revision, entryId,
+        (await impl.readSourceCommits([commitId])).get(commitId)!);
+
+      expect(store.draftBoundViewCommit(saved.id, saved.revision, entryId)).toBe(first);
+      impl.storage.gadgets.put({ ...record, commitId: second });
+      expect(store.draftBoundViewCommit(saved.id, saved.revision, entryId)).toBe(second);
+      expect(await read(second)).toBe(COMMITS.viewEdited!["view.json"]);
+      expect(await read(first)).toBe(COMMITS.view!["view.json"]);
+      await expect(read(mixed)).rejects.toThrow(/not a view-only widget.*client\.js/);
+      await expect(read(twoBoards)).rejects.toThrow(/reads board, ops, not board/);
+      // The entry must be the draft's, at its revision, and its source still a valid install.
+      expect(() => store.draftBoundViewCommit(saved.id, saved.revision, "forged")).toThrow(/no bound view forged/);
+      expect(() => store.draftBoundViewCommit(saved.id, "7", entryId)).toThrow();
+      impl.storage.gadgets.put({ ...record, commitId: second, bindings: { x: {} as never } });
+      expect(() => store.draftBoundViewCommit(saved.id, saved.revision, entryId)).toThrow(/bindings/);
     });
   });
 });

@@ -1,8 +1,9 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
-import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
+import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type OperateConsole, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
+import { boundViewsEnabled, describeBoundView } from "./console-store.js";
 import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
 import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -636,6 +637,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     userId => wrapDoStubForTelemetry(this.users.get(this.users.idFromName(userId))),
     boardRef => this.ctx.exports.SubjectPresenceDurableObject.getByName(boardRef), {
       enabled: () => hostBoardsEnabled(this.env),
+      boundViews: () => boundViewsEnabled(this.env),
       userId: this.#userId.toString(),
       desk: async initialize => {
         let id = await claim();
@@ -649,15 +651,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
 // What OperateSessionImpl needs for host boards: the switch, the caller's user id (the owner of
 // their operate session workspace) and that workspace's Durable Object, which holds their
-// selections and runs every read (see host-boards.ts).
+// selections and runs every read (see host-boards.ts). Bound views, which show those reads, have a
+// switch of their own.
 type HostBoardDeps = {
   enabled: () => boolean;
+  boundViews: () => boolean;
   userId: string;
   desk: (initialize: boolean) => Promise<DurableObjectStub<OverseerDurableObject>>;
 };
 
-// The caller's context for one host board, re-read through their own access: their session must
-// show the console from that source at that revision, and that revision must offer the entry.
+// The caller's console context, re-read through their own access: their session must show the
+// console from that source at that revision, and that must still be the console's revision. A
+// host board's context also needs that revision to offer the entry.
+type ConsoleRun = { workspaceId: string; console: OperateConsole; sessionSeq: number };
 type HostBoardRun = { workspaceId: string; entry: HostBoardEntry; sessionSeq: number };
 
 // Returned by getOperateSession(). The session's state lives in the user DO, which serializes every
@@ -675,7 +681,7 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
 
   // Null whenever the context no longer holds, including when anything along the way fails. A
   // draft is read through the caller's own role, so it needs build access every time.
-  async #hostBoardRun(console: ConsoleRef, entryId: string, name?: string): Promise<HostBoardRun | null> {
+  async #consoleRun(console: ConsoleRef): Promise<ConsoleRun | null> {
     try {
       let page = await this.user().getOperatePage();
       let run = page.state.console;
@@ -686,12 +692,17 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
       using workspace = await this.openConsoleWorkspace(run.workspaceId);
       let saved = await workspace.getConsole(console.consoleId, console.source);
       if (!saved || saved.revision !== console.revision) return null;
-      let entry = saved.hostBoards?.find(candidate => candidate.id === entryId);
-      if (!entry || (name !== undefined && entry.requirement.name !== name)) return null;
-      return { workspaceId: run.workspaceId, entry, sessionSeq: page.seq };
+      return { workspaceId: run.workspaceId, console: saved, sessionSeq: page.seq };
     } catch {
       return null;
     }
+  }
+
+  async #hostBoardRun(console: ConsoleRef, entryId: string, name?: string): Promise<HostBoardRun | null> {
+    let run = await this.#consoleRun(console);
+    let entry = run?.console.hostBoards?.find(candidate => candidate.id === entryId);
+    if (!run || !entry || (name !== undefined && entry.requirement.name !== name)) return null;
+    return { workspaceId: run.workspaceId, entry, sessionSeq: run.sessionSeq };
   }
 
   #hostBoardGuard(console: ConsoleRef, entryId: string, name?: string): () => Promise<HostBoardContext | null> {
@@ -734,6 +745,20 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
         return this.#readHostBoard(console, entryId, name);
       },
       subscribe: subscriber => this.#subscribeHostBoardSelection(console, entryId, subscriber),
+    });
+  }
+
+  // Plain data under the host boards' guard (see describeBoundView). A draft's spec is read through
+  // the caller's own build access to the console workspace, never through authored code.
+  async getConsoleBoundView(console: ConsoleRef, entryId: string, options: { commitId?: string } = {})
+      : Promise<BoundViewDescription> {
+    return describeBoundView(console, entryId, options, {
+      enabled: this.hostBoards.boundViews,
+      run: () => this.#consoleRun(console),
+      readDraft: async (workspaceId, commitId) => {
+        using workspace = await this.openConsoleWorkspace(workspaceId);
+        return await workspace.getConsoleBoundViewDraft(console.consoleId, console.revision, entryId, commitId);
+      },
     });
   }
 

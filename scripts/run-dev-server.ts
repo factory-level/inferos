@@ -26,6 +26,7 @@ import {
   getDevRouterConfig, getDevServerConfig, getInferLabLoginVars, inferLabLoginStartupError, resolveCodingWorkbenchEnabled, resolveInferOpsEnabled,
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
+  resolveInferOpsBoundViews,
   resolvePublicationFlag,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
@@ -179,6 +180,13 @@ const inferOpsHostBoards = resolveInferOpsHostBoards({
   capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_HOST_BOARDS : null,
   inferOpsEnabled,
   shell: process.env.INFEROPS_HOST_BOARDS,
+});
+// Bound views (proposed): off by default, and only while host boards are on. Only the backend
+// enforces it; no gatekeeper reads it.
+const inferOpsBoundViews = resolveInferOpsBoundViews({
+  capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_BOUND_VIEWS : null,
+  hostBoards: inferOpsHostBoards,
+  shell: process.env.INFEROPS_BOUND_VIEWS,
 });
 // Publication (#68): a version 2 wrapper's PUBLISH_CLOUDFLAREOS_* capabilities switch it; otherwise
 // off unless the shell turns it on. The backend enforces the resulting vars (publication.ts).
@@ -683,6 +691,7 @@ for (const gk of gatekeepers) {
   Object.assign(config.vars, publicationFlags);
   config.vars.INFEROPS_ENABLED = inferOpsEnabled;
   config.vars.INFEROPS_HOST_BOARDS = inferOpsHostBoards;
+  config.vars.INFEROPS_BOUND_VIEWS = inferOpsBoundViews;
 
   // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
   // environment, so you can run e.g.

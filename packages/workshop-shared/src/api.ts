@@ -539,7 +539,33 @@ export interface OperateSession extends RpcTarget {
 
   /** The caller's most recent audited host-board reads (at most 200), newest first. */
   listHostBoardReads(): Promise<HostBoardReadAudit[]>;
+
+  /**
+   * The bound view `entryId` of `console`, as plain data for trusted host rendering: its spec, the
+   * commit it was read from, and the host board each requirement reads. Refused unless bound views
+   * are on and the caller's operate session has that console open from that source at exactly
+   * that revision, with build access for a draft. A publication delivers only the spec it froze
+   * (`BoundViewEntry.frozen`), never its source's; `options.commitId`, when given, must be that
+   * commit. A draft is read from its source at `options.commitId`, or else at the source's current
+   * commit, so a preview can stay on one commit. The kernel re-parses the spec before returning
+   * it; parse it again before use. Reads stay `getConsoleHostBoard`'s.
+   */
+  getConsoleBoundView(console: ConsoleRef, entryId: string, options?: { commitId?: string }): Promise<BoundViewDescription>;
 }
+
+/** A bound view as `OperateSession.getConsoleBoundView` delivers it. */
+export type BoundViewDescription = {
+  /** The console revision it was delivered for. */
+  consoleRef: ConsoleRef;
+  /** The bound view entry's id. */
+  entryId: string;
+  /** The commit of the view-only widget whose `view.json` this is. */
+  commitId: string;
+  /** That `view.json`, as validated by the v1 parser (`parseBoundViewSpec`). */
+  specText: string;
+  /** Each requirement the spec reads, with the id of the console's host board entry that serves it. */
+  requirements: { name: string; hostBoardEntryId: string }[];
+};
 
 /**
  * One host board of one console revision, bound to its caller (see
@@ -1631,6 +1657,11 @@ export type ServerConfig = {
    * only: it grants nothing, and the server checks the switch itself. Absent means off.
    */
   hostBoards?: boolean;
+  /**
+   * Whether bound views are on for this installation (`INFEROPS_BOUND_VIEWS`, only while host
+   * boards are). Read only, like `hostBoards`. Absent means off.
+   */
+  boundViews?: boolean;
   /** Deployment fallback theme; an explicit browser preference wins. Absent means system. */
   defaultTheme?: DefaultThemeMode;
   /** Workshop listing density; omitted means comfortable. Gadget layouts are independent. */
@@ -2602,6 +2633,15 @@ export interface Overseer extends RpcTarget {
    * Denied to the operate session.
    */
   getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * The spec a builder's preview of draft bound view `entryId` of console `consoleId` at `revision`
+   * shows: its source's `view.json` at `commitId`, or else at the source's current commit, read
+   * strictly and checked as publication checks it. Reach it through
+   * `OperateSession.getConsoleBoundView`, which checks the caller's session around it. Needs build
+   * access; denied to the use role and the operate session. Refused while bound views are off.
+   */
+  getConsoleBoundViewDraft(consoleId: string, revision: string, entryId: string, commitId?: string)
+      : Promise<Pick<BoundViewDescription, "commitId" | "specText">>;
 
   // --- Agent artifact revisions (see `@gadgets/workshop-shared/agent-artifact`) ---
   //

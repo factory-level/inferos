@@ -2,7 +2,7 @@ import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/
 import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
-import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
+import { BOUND_VIEWS_OFF, boundViewsEnabled, consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { parseWidgetTools } from "@gadgets/workshop-shared/widget-tools";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
@@ -86,7 +86,7 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { BoundViewDescription, GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -11779,6 +11779,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Build access may already open any gadget, so its capability is the ordinary one.
     return this.getGadget(gadgetId);
   }
+  // The pinned commit is any this workspace holds, as `readFilesAtCommit` reads; it must still be a
+  // view-only spec reading the entry's requirements, and the entry's source a valid install.
+  async getConsoleBoundViewDraft(consoleId: string, revision: string, entryId: string, commitId?: string)
+      : Promise<Pick<BoundViewDescription, "commitId" | "specText">> {
+    if (!boundViewsEnabled(this.impl.env)) throw new Error(BOUND_VIEWS_OFF);
+    let store = this.#consoleStore();
+    let read = commitId === undefined ? store.draftBoundViewCommit(consoleId, revision, entryId) : validateOid(commitId);
+    let commit = (await this.impl.readSourceCommits([read])).get(read)!;
+    return { commitId: read, specText: store.draftBoundViewSpec(consoleId, revision, entryId, commit) };
+  }
 
   #artifactRevision(ref: ArtifactRef): ArtifactRevisionRecord | null {
     let parsed = parseArtifactRef(ref);
@@ -13826,6 +13836,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
+  async getConsoleBoundViewDraft(_consoleId: string, _revision: string, _entryId: string, _commitId?: string)
+      : Promise<Pick<BoundViewDescription, "commitId" | "specText">> { this.#deny(); }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
     if (source !== "published") this.#deny();
     return this.#consoleStore().get(id, source);
@@ -14355,6 +14367,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
+  async getConsoleBoundViewDraft(_consoleId: string, _revision: string, _entryId: string, _commitId?: string)
+      : Promise<Pick<BoundViewDescription, "commitId" | "specText">> { this.#deny(); }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
       _model: ArtifactModelRequirement | null)
       : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> { this.#deny(); }

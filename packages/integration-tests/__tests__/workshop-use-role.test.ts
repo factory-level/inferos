@@ -97,6 +97,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
   publishConsole: ws => ws.publishConsole("console", "0"),
+  getConsoleBoundViewDraft: ws => ws.getConsoleBoundViewDraft("console", "0", "view"),
   validateArtifact: ws => ws.validateArtifact(1, "skill", [], null),
   diffArtifactRevisions: ws => ws.diffArtifactRevisions("skill/a@1", "skill/a@2"),
   publishArtifactRevision: ws => ws.publishArtifactRevision(1, "skill", "a", 1, [], null,

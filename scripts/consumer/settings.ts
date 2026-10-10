@@ -103,6 +103,11 @@ export function hostBoardsRequested({ config, env }: SettingsInput): boolean {
   return config.schemaVersion === 2 ? config.capabilities.INFEROPS_HOST_BOARDS : env.INFEROPS_HOST_BOARDS === "true";
 }
 
+/** Whether bound views are asked for, resolved like host boards. */
+export function boundViewsRequested({ config, env }: SettingsInput): boolean {
+  return config.schemaVersion === 2 ? config.capabilities.INFEROPS_BOUND_VIEWS : env.INFEROPS_BOUND_VIEWS === "true";
+}
+
 /** The wrapper's `codingWorkbench.repos`, read defensively so pins whose parser predates it still load. */
 function wrapperCodingRepos(config: ConsumerConfig): unknown[] | null {
   if (config.schemaVersion !== 2) return null;
@@ -252,6 +257,13 @@ export const SETTINGS: readonly SettingEntry[] = [
     requiredWhen: { test: () => false, text: "Never, until MVP-35 passes." },
     readAt: "The shell only; no `inferos.config.json` field",
     present: ({ env }) => env.CONSOLE_TOOLS === "true",
+  },
+  {
+    name: "INFEROPS_BOUND_VIEWS", group: "Host and runtime", kind: "value", owner: "deployer", default: "off", source: "local",
+    description: "Proposed: turns kernel bound views on (a console's authored, declarative view of its host boards, rendered by trusted host code from each operator's own reads). Needs `INFEROPS_HOST_BOARDS`; a version 2 wrapper's capability wins over the shell.",
+    requiredWhen: never,
+    readAt: "`inferos.config.json` `capabilities.INFEROPS_BOUND_VIEWS` (version 2), else the shell",
+    present: boundViewsRequested,
   },
   {
     name: "local.port", group: "Host and runtime", kind: "value", owner: "developer", default: "`8787`", source: "local",
@@ -440,7 +452,7 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
     });
   } catch (error) { add("INFEROPS_ENABLED", "error", "contradictory", (error as Error).message); }
   if (config.schemaVersion === 2) {
-    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS"] as const) {
+    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS"] as const) {
       if (env[name] !== undefined && env[name] !== String(config.capabilities[name])) {
         add(name, "warning", "contradictory", `The shell's ${name} differs from the wrapper capability, which wins; unset it`);
       }
@@ -449,7 +461,7 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
       add("codingWorkbench.repos", "warning", "contradictory", "The shell's CODING_WORKBENCH_REPOS is ignored; a version 2 wrapper's codingWorkbench.repos is the allowlist");
     }
   } else {
-    for (const name of ["CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS"] as const) {
+    for (const name of ["CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS"] as const) {
       if (env[name] !== undefined && !["true", "false"].includes(env[name]!)) {
         add(name, "error", "invalid", `${name} must be "true" or "false"`);
       }
@@ -460,6 +472,9 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
   }
   if (hostBoardsRequested(input) && !inferOpsOn(input)) {
     add("INFEROPS_HOST_BOARDS", "error", "contradictory", "INFEROPS_HOST_BOARDS is on, but the InferOps integration (INFEROPS_ENABLED) is off");
+  }
+  if (boundViewsRequested(input) && !(hostBoardsRequested(input) && inferOpsOn(input))) {
+    add("INFEROPS_BOUND_VIEWS", "error", "contradictory", "INFEROPS_BOUND_VIEWS is on, but host boards (INFEROPS_HOST_BOARDS) are off");
   }
 
   // Publication. A version 2 wrapper's capabilities win over the shell, as for coding dispatch.
