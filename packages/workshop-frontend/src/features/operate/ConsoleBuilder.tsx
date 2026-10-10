@@ -3,7 +3,7 @@ import { Button, Input, Select } from '@cloudflare/kumo'
 import { ChatsCircleIcon, LayoutIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import { DEFAULT_CONSOLE_CUSTOMIZATION, MAX_CONSOLE_VIEWS, MAX_WORKSPACE_CONSOLES, type ConsoleFullChat, type ConsoleView, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
+import { DEFAULT_CONSOLE_CUSTOMIZATION, MAX_CONSOLE_VIEWS, MAX_WORKSPACE_CONSOLES, type BoundViewEntry, type ConsoleFullChat, type ConsoleView, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
@@ -11,6 +11,7 @@ import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { invalidateWorkspaceScreens, type WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { ConsoleScreenEditor } from './ConsoleScreenEditor'
 import { ConsoleViewEditor } from './ConsoleViewEditor'
+import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 import { consoleScreens } from '@gadgets/workshop-shared/operate-console'
@@ -31,6 +32,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const serverConfig = useServerConfig()
   const catalog = serverConfig?.canvasFeatures?.catalog ?? DEFAULT_CANVAS_CATALOG
   const hostBoardsOn = serverConfig?.hostBoards === true
+  const boundViewsOn = hostBoardsOn && serverConfig?.boundViews === true
   const [workspaceId, setWorkspaceId] = useState(initial?.workspace.id ?? (workspaces.length === 1 ? workspaces[0].workspace.id : ''))
   const [title, setTitle] = useState(initial?.console.title ?? '')
   const [views, setViews] = useState<ConsoleView[]>(() => structuredClone(initial?.console.views ?? []))
@@ -39,6 +41,9 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   // Undefined until edited: the saved boards are then kept as they are (see `consoleContentForSave`).
   const [hostBoards, setHostBoards] = useState<HostBoardEntry[] | undefined>(undefined)
   const shownHostBoards = hostBoards ?? initial?.console.hostBoards ?? []
+  // Likewise for bound views; saved ones count toward the shared limit even while bound views are off.
+  const [boundViews, setBoundViews] = useState<BoundViewEntry[] | undefined>(undefined)
+  const shownBoundViews = boundViews ?? initial?.console.boundViews ?? []
   const [step, setStep] = useState(0)
   const [creatingScreen, setCreatingScreen] = useState(false)
   const [addedScreens, setAddedScreens] = useState<CanvasDefinition[]>([])
@@ -58,7 +63,8 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const limitReached = !initial && (entry?.consoles.length ?? 0) >= MAX_WORKSPACE_CONSOLES
   const validate = () => {
     const content = consoleContentForSave({ title, views, fullChat, customization: initial?.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION },
-      ...(widgets.length > 0 || initial?.console.widgets ? { widgets } : {}) }, initial?.console.hostBoards, hostBoards)
+      ...(widgets.length > 0 || initial?.console.widgets ? { widgets } : {}) }, initial?.console.hostBoards, hostBoards,
+      { saved: initial?.console.boundViews, edited: boundViews })
     if (consoleScreens(content).some(id => !screens.some(screen => screen.id === id))) throw new Error('Choose an available screen for every view.')
     return content
   }
@@ -122,9 +128,12 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
             <Button disabled={!available || views.length >= MAX_CONSOLE_VIEWS} onClick={() => setCreatingScreen(true)}>Create a new screen</Button>
             {/* An installed widget a screen shows must be registered before the console can be saved. */}
             {widgetInstalls.length > 0 && <ConsoleWidgetRegistry widgets={widgets} published={initial?.console.published?.content.widgets}
-              candidates={widgetInstalls} hostBoardCount={shownHostBoards.length} disabled={!available} onChange={setWidgets} />}
+              candidates={widgetInstalls} hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!available} onChange={setWidgets} />}
             {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={initial?.console.published?.content.hostBoards}
-              widgetCount={widgets.length} assistantOnly={fullChat === 'only'} disabled={!available} onChange={setHostBoards} />}
+              widgetCount={widgets.length + shownBoundViews.length} assistantOnly={fullChat === 'only'} disabled={!available} onChange={setHostBoards} />}
+            {boundViewsOn && <ConsoleBoundViewRegistry boundViews={shownBoundViews} published={initial?.console.published?.content.boundViews}
+              candidates={widgetInstalls} hostBoards={shownHostBoards} otherCount={widgets.length + shownHostBoards.length}
+              assistantOnly={fullChat === 'only'} disabled={!available} onChange={setBoundViews} />}
           </>}
     </div>}
     {step === 2 && <div className="space-y-5">
@@ -142,6 +151,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
       </Select>}
       {fullChat === 'only' && <p className="text-sm text-kumo-subtle">This console keeps its saved views, but only shows Assistant.</p>}
       {fullChat === 'only' && hostBoardsOn && shownHostBoards.length > 0 && <p role="status" className="text-sm text-kumo-subtle">Its boards are unavailable to operators while it shows only Assistant.</p>}
+      {fullChat === 'only' && boundViewsOn && shownBoundViews.length > 0 && <p role="status" className="text-sm text-kumo-subtle">Its views are unavailable to operators while it shows only Assistant.</p>}
     </div>}
     {step === 3 && <section aria-label="Console preview" className="overflow-hidden rounded-xl border border-kumo-line">
       <div className="border-b border-kumo-line px-5 py-3 font-medium text-kumo-default">{title}</div>

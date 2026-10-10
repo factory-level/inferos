@@ -20,6 +20,7 @@ import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 import { ConsolePublishDialog } from './ConsolePublishDialog'
 import { ConsoleWidgetView } from './ConsoleWidgetView'
 import { ConsoleHostBoard } from './ConsoleHostBoard'
+import { ConsoleBoundView } from './ConsoleBoundView'
 import { viewScreens } from './consoles'
 import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from './consoles'
 import { FlowPage } from './FlowPage'
@@ -41,6 +42,8 @@ export const OperateSessionPage = () => {
   const serverConfig = useServerConfig()
   const durableViews = serverConfig?.canvasFeatures?.durableViews === true
   const hostBoardsOn = serverConfig?.hostBoards === true
+  // Bound views read through host boards, so they are on only while both are.
+  const boundViewsOn = hostBoardsOn && serverConfig?.boundViews === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
   const sessionWorkspace = useSessionWorkspace(operate?.session ?? null)
   const [savedEntry, setSavedEntry] = useState<ConsoleEntry | null>(null)
@@ -49,6 +52,8 @@ export const OperateSessionPage = () => {
   const [widgetTarget, setWidgetTarget] = useState<ConsoleWidgetTarget | null>(null)
   // The host board open in a dialog, by the console revision it was opened from.
   const [hostBoardTarget, setHostBoardTarget] = useState<{ consoleId: string; source: ConsoleSource; revision: string; entryId: string } | null>(null)
+  // The bound view open in a dialog, by the same rules as a host board.
+  const [boundViewTarget, setBoundViewTarget] = useState<{ consoleId: string; source: ConsoleSource; revision: string; entryId: string } | null>(null)
   const consoleId = operate?.snapshot?.state.console?.consoleId
   const notifyRefused = (caught: unknown) => {
     console.error('Operate session change failed:', caught)
@@ -118,12 +123,32 @@ export const OperateSessionPage = () => {
   const shownHostBoard = hostBoardsOn && run && !runStale && hostBoardTarget && hostBoardTarget.consoleId === run.consoleId
     && hostBoardTarget.source === run.source && hostBoardTarget.revision === run.revision && run.fullChat !== 'only' && entry?.console.revision === run.revision
     ? entry.console.hostBoards?.find(board => board.id === hostBoardTarget.entryId) : undefined
+  if (boundViewTarget && (!run || runStale || listedElsewhere || configuring || tools || boundViewTarget.consoleId !== run.consoleId
+    || boundViewTarget.source !== run.source || boundViewTarget.revision !== run.revision)) setBoundViewTarget(null)
+  const shownBoundView = boundViewsOn && run && !runStale && boundViewTarget && boundViewTarget.consoleId === run.consoleId
+    && boundViewTarget.source === run.source && boundViewTarget.revision === run.revision && run.fullChat !== 'only' && entry?.console.revision === run.revision
+    ? entry.console.boundViews?.find(view => view.id === boundViewTarget.entryId) : undefined
+  // Co-residence: while a bound view is shown, every authored frame on the page is unmounted (the
+  // whole main region and the modal widget), and only one board or view dialog is open at a time.
+  const boundViewShown = shownBoundView?.id !== undefined
   // An assistant-only console has no widget menu, so it never offers its boards (the editors say so).
   const openHostBoard = hostBoardsOn && run && !runStale && run.fullChat !== 'only'
-    ? (entryId: string) => setHostBoardTarget({ consoleId: run.consoleId, source: run.source, revision: run.revision, entryId }) : undefined
+    ? (entryId: string) => {
+        setBoundViewTarget(null)
+        setHostBoardTarget({ consoleId: run.consoleId, source: run.source, revision: run.revision, entryId })
+      } : undefined
+  const openBoundView = boundViewsOn && run && !runStale && run.fullChat !== 'only'
+    ? (entryId: string) => {
+        setHostBoardTarget(null)
+        setBoundViewTarget({ consoleId: run.consoleId, source: run.source, revision: run.revision, entryId })
+      } : undefined
   // The kernel refused the board's revision: close it, and re-read the consoles so they reopen current.
   const refuseHostBoard = () => {
     setHostBoardTarget(null)
+    invalidateWorkspaceScreens()
+  }
+  const refuseBoundView = () => {
+    setBoundViewTarget(null)
     invalidateWorkspaceScreens()
   }
   const settingsEntry = settings ? consoleEntries(workspaces).find(item => item.workspace.id === search.workspace && item.console.id === settings) : undefined
@@ -159,7 +184,9 @@ export const OperateSessionPage = () => {
       <div hidden={centered} className={centered ? 'hidden' : home
         ? 'mx-auto w-full max-w-6xl shrink-0 px-5 pb-4 pt-6 sm:px-8'
         : `min-h-0 min-w-0 flex-1 overflow-auto ${!hideChat ? 'max-md:hidden' : ''}`}>
-        {settings
+        {boundViewShown
+          ? <p role="status" className="p-6 text-sm text-kumo-subtle">A view is open. Close it to return to this page.</p>
+          : settings
           ? settingsEntry ? <ConsoleSettings key={`${settingsEntry.console.id}/${settingsEntry.console.revision}`} entry={settingsEntry}
               onClose={() => void navigate({ to: '/inferops-canvas', search: {} })} onEdit={() => edit(settingsEntry)} />
             : <p role="status" className="p-6 text-sm text-kumo-subtle">{screens.status === 'loading' ? 'Loading settings…' : 'This console is unavailable.'}</p>
@@ -203,13 +230,17 @@ export const OperateSessionPage = () => {
       </div>
       <OperateChatPanel workspace={sessionWorkspace} layout={hideChat ? 'hidden' : home ? 'home' : centered ? 'full' : 'side'}
         onClose={() => send({ type: 'setChatOpen', open: false })}
-        consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target), onOpenHostBoard: openHostBoard } : undefined} />
+        consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target), onOpenHostBoard: openHostBoard, onOpenBoundView: openBoundView } : undefined} />
     </div>
-    {!configuring && !tools && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
-    {!configuring && !tools && run && operate.session && shownHostBoard?.id !== undefined && <ConsoleHostBoard key={`${run.consoleId}/${run.source}/${run.revision}/${shownHostBoard.id}`}
+    {!configuring && !tools && !boundViewShown && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
+    {!configuring && !tools && !boundViewShown && run && operate.session && shownHostBoard?.id !== undefined && <ConsoleHostBoard key={`${run.consoleId}/${run.source}/${run.revision}/${shownHostBoard.id}`}
       session={operate.session.stub} console={{ consoleId: run.consoleId, source: run.source, revision: run.revision }}
       entry={{ ...shownHostBoard, id: shownHostBoard.id }} onClose={() => setHostBoardTarget(null)} onRefused={refuseHostBoard}
       onStaleOrUnavailable={recheckWorkspaceScreens} />}
+    {!configuring && !tools && run && entry && operate.session && boundViewShown && <ConsoleBoundView key={`${run.consoleId}/${run.source}/${run.revision}/${shownBoundView.id}`}
+      session={operate.session.stub} console={{ consoleId: run.consoleId, source: run.source, revision: run.revision }}
+      entry={{ ...shownBoundView, id: shownBoundView.id! }} hostBoards={entry.console.hostBoards ?? []}
+      onClose={() => setBoundViewTarget(null)} onRefused={refuseBoundView} onStaleOrUnavailable={recheckWorkspaceScreens} />}
     {publishing && <ConsolePublishDialog entry={publishing} onClose={() => { setPublishing(null); setSavedEntry(null) }} />}
   </div>
   </ConsoleWorkspaceShell>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_CONSOLE_WIDGETS, type ConsoleWidgetEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
+import { MAX_CONSOLE_WIDGETS, type BoundViewEntry, type ConsoleWidgetEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
 import { consoleContentForSave } from './consoles'
 
 const BASE = { title: 'Operations', fullChat: 'default' as const, views: [{ id: 'v1', type: 'screen' as const, title: 'Board', screen: 's1' }] }
@@ -7,6 +7,9 @@ const board = (n: number): HostBoardEntry => ({ kind: 'host-board', id: `hb${n}`
   requirement: { name: `board-${n}`, resource: 'inferops-board', target: `inferops://acme.ops/project/board/K${n}` } })
 const widgets = (count: number): ConsoleWidgetEntry[] => Array.from({ length: count }, (_, n) =>
   ({ gadgetId: n + 1, blueprintId: 'bp', version: 1, label: `Widget ${n + 1}`, state: 'resettable' }))
+
+const view = (n: number, requirements = ['board-1']): BoundViewEntry => ({ kind: 'bound-view', id: `bv${n}`, gadgetId: 100 + n,
+  blueprintId: 'bp', version: 1, label: `View ${n}`, requirements })
 
 describe('consoleContentForSave', () => {
   it('omits unedited saved boards, so the kernel keeps them as they are', () => {
@@ -25,5 +28,19 @@ describe('consoleContentForSave', () => {
       .toThrow(`at most ${MAX_CONSOLE_WIDGETS} widgets, host boards and bound views`)
     expect(consoleContentForSave({ ...BASE, widgets: widgets(MAX_CONSOLE_WIDGETS - 1) }, [board(1)], undefined).widgets)
       .toHaveLength(MAX_CONSOLE_WIDGETS - 1)
+  })
+
+  it('omits unedited saved bound views, and sends an edited list in full', () => {
+    const kept = consoleContentForSave(BASE, [board(1)], undefined, { saved: [view(1)], edited: undefined })
+    expect(kept).not.toHaveProperty('boundViews')
+    expect(consoleContentForSave(BASE, [board(1)], undefined, { saved: [view(1)], edited: [] }).boundViews).toEqual([])
+    expect(consoleContentForSave(BASE, [board(1)], undefined, { saved: undefined, edited: [view(2)] }).boundViews).toEqual([view(2)])
+  })
+
+  it('counts saved bound views toward the combined limit, and checks their requirements against the boards kept', () => {
+    expect(() => consoleContentForSave({ ...BASE, widgets: widgets(MAX_CONSOLE_WIDGETS - 1) }, [board(1)], undefined, { saved: [view(1)], edited: undefined }))
+      .toThrow(`at most ${MAX_CONSOLE_WIDGETS} widgets, host boards and bound views`)
+    expect(() => consoleContentForSave(BASE, [board(1)], [board(2)], { saved: [view(1)], edited: undefined }))
+      .toThrow('board-1 is not the name of one of this console\'s host boards')
   })
 })

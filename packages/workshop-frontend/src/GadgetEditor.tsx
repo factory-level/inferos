@@ -72,6 +72,7 @@ import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from
 import { isImeComposing } from './keyboardEvent'
 import { useUiFeatureFlags } from './FeatureFlagsContext'
 import { WorkspaceKindHeader } from './features/workspace-kind/WorkspaceKindHeader'
+import { BoundViewBuildPreview, useBoundViewSource } from './features/operate/boundView/BoundViewBuildPreview'
 import { WorkflowTriggersPanel } from './features/workspace-kind/WorkflowTriggersPanel'
 import {
   hasAppViewToggle,
@@ -376,7 +377,10 @@ function NoGadgetPlaceholder({ height }: { height: string }) {
 // ─── component ────────────────────────────────────────────────────────────────
 
 export default function GadgetEditor() {
-  const canvasFeatures = useServerConfig()?.canvasFeatures
+  const serverConfig = useServerConfig()
+  const canvasFeatures = serverConfig?.canvasFeatures
+  // Bound views read through host boards, so their Build preview is on only while both are.
+  const boundViewsOn = serverConfig?.hostBoards === true && serverConfig?.boundViews === true
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id
   const navigate = useNavigate()
@@ -729,6 +733,11 @@ export default function GadgetEditor() {
   // selection, in which case gadget-dependent views render their empty states for a frame.
   const selectedGadgetStub =
     gadget !== null && gadget.id === selectedGadgetId ? gadget.stub : null
+  // A widget whose committed head has a `view.json` previews as a bound view, over a synthetic
+  // fixture (never InferOps data), in place of its gadget UI.
+  const boundViewSource = useBoundViewSource(
+    boundViewsOn && workspaceKind === 'widget' && selectedGadgetSummary ? overseer?.stub ?? null : null,
+    selectedGadgetSummary?.commitId)
   // Only the selected chat's streaming drives this editor. Everything downstream then narrows it
   // further to the selected workpiece.
   const streamingActiveFile = streamingActiveFileState?.chatId === effectiveSelectedChatId
@@ -1830,6 +1839,8 @@ export default function GadgetEditor() {
                   pendingActionCount={pendingActionCount}
                   onOpenActivity={() => openActivity('review')}
                 />
+              ) : boundViewSource !== null && !previewMode ? (
+                <BoundViewBuildPreview key={selectedGadgetId} text={boundViewSource} />
               ) : selectedGadgetStub && !previewMode ? (
                 <GadgetUI
                   key={selectedGadgetId}

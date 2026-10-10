@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button, Checkbox } from '@cloudflare/kumo'
-import { DEFAULT_CONSOLE_CUSTOMIZATION, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
+import { DEFAULT_CONSOLE_CUSTOMIZATION, type BoundViewEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
@@ -8,6 +8,7 @@ import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { invalidateWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { buildReturnHref } from './operateMode'
 import { consoleContentForSave, type ConsoleEntry } from './consoles'
+import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 
@@ -33,7 +34,12 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
   // Undefined until edited: the saved boards are then kept as they are (see `consoleContentForSave`).
   const [hostBoards, setHostBoards] = useState<HostBoardEntry[] | undefined>(undefined)
   const shownHostBoards = hostBoards ?? entry.console.hostBoards ?? []
-  const hostBoardsOn = useServerConfig()?.hostBoards === true
+  // Likewise for bound views; saved ones count toward the shared limit even while bound views are off.
+  const [boundViews, setBoundViews] = useState<BoundViewEntry[] | undefined>(undefined)
+  const shownBoundViews = boundViews ?? entry.console.boundViews ?? []
+  const serverConfig = useServerConfig()
+  const hostBoardsOn = serverConfig?.hostBoards === true
+  const boundViewsOn = hostBoardsOn && serverConfig?.boundViews === true
   const { workpieces } = useWorkspaceWorkpieces(overseer, entry.workspace.id)
   const candidates = [...workpieces.values()].flatMap(piece => piece.type === 'gadget' && piece.chatId === undefined &&
     !piece.frozenFor && piece.installedFrom?.kind === 'widget' ? [piece] : [])
@@ -45,7 +51,8 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
     setSaving(true); setError(null)
     try {
       await overseer.stub.replaceConsole(entry.console.id, entry.console.revision, consoleContentForSave({ title: entry.console.title, views: entry.console.views, fullChat: entry.console.fullChat, customization,
-        ...(widgets.length > 0 || entry.console.widgets ? { widgets } : {}) }, entry.console.hostBoards, hostBoards))
+        ...(widgets.length > 0 || entry.console.widgets ? { widgets } : {}) }, entry.console.hostBoards, hostBoards,
+        { saved: entry.console.boundViews, edited: boundViews }))
       invalidateWorkspaceScreens()
       onClose()
     } catch {
@@ -68,9 +75,12 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       {!editable && <p role="status" className="text-sm text-kumo-subtle">Console owners and editors manage these settings.</p>}
     </div>
     <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={candidates}
-      hostBoardCount={shownHostBoards.length} disabled={!editable || saving} onChange={setWidgets} />
+      hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!editable || saving} onChange={setWidgets} />
     {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={entry.console.published?.content.hostBoards}
-      widgetCount={widgets.length} assistantOnly={entry.console.fullChat === 'only'} disabled={!editable || saving} onChange={setHostBoards} />}
+      widgetCount={widgets.length + shownBoundViews.length} assistantOnly={entry.console.fullChat === 'only'} disabled={!editable || saving} onChange={setHostBoards} />}
+    {boundViewsOn && <ConsoleBoundViewRegistry boundViews={shownBoundViews} published={entry.console.published?.content.boundViews}
+      candidates={candidates} hostBoards={shownHostBoards} otherCount={widgets.length + shownHostBoards.length}
+      assistantOnly={entry.console.fullChat === 'only'} disabled={!editable || saving} onChange={setBoundViews} />}
     {error && <p role="alert" className="text-sm text-kumo-danger">{error}</p>}
     {editable && <>
       <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save settings'}</Button>
