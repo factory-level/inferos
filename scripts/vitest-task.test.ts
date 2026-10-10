@@ -51,20 +51,20 @@ describe("withTestTimeout", () => {
   it("wraps a bare command in the default thresholds", () => {
     assert.equal(
       withTestTimeout("vitest run"),
-      "gadgets-with-timeout --idle 60 --max 600 -- vitest run");
+      "gadgets-with-timeout --idle 60 --max 900 -- vitest run");
   });
 
   it("lets the object form raise only the idle threshold", () => {
     assert.equal(
       withTestTimeout({ command: "vitest run", idleSeconds: 120 }),
-      "gadgets-with-timeout --idle 120 --max 600 -- vitest run");
+      "gadgets-with-timeout --idle 120 --max 900 -- vitest run");
   });
 
   it("never lets a command override the wall-clock backstop", () => {
     // The type has no such field; this pins the runtime shape against a future one.
     const wrapped = withTestTimeout(
       { command: "vitest run", idleSeconds: 30, maxSeconds: 5 } as never);
-    assert.match(wrapped, / --max 600 -- /);
+    assert.match(wrapped, / --max 900 -- /);
   });
 });
 
