@@ -8,6 +8,7 @@ import {
   isGadgetModule,
 } from "@gadgets/workshop-shared/workspace-kind";
 import { WorkspaceFlowStore } from "./flow-store";
+import { ToolLane, type PendingToolFacetRecord, type ToolFacetTombstoneRecord } from "./tool-lane";
 import { HostBoardDesk, hostBoardsEnabled, type HostBoardContext, type HostBoardGuard, type HostBoardMint, type HostBoardReadRecord, type HostBoardReadRequest, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord, type HostBoardSelectionState } from "./host-boards";
 import type { HostBoardConnectionFence, HostBoardReader } from "@gadgets/gatekeeper-kit/host-board";
 import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
@@ -1312,6 +1313,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       nextHookId: 0,
       nextAgentCallId: 0,
       nextHostBoardReadSeq: 0,
+      nextToolFacetTombstoneSeq: 0,
 
       // OBSOLETE: deadWorktreeIds existed to facilitate hiding worktrees from clients, but we
       // no longer do that. Noted here since old workspaces may still have a singleton by this
@@ -1346,6 +1348,13 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
       hostBoardRequests: collection<HostBoardRequestRecord>()({ primaryKey: "requestKey" }),
       hostBoardReads: collection<HostBoardReadRecord>()({ primaryKey: "seq" }),
+      // Tool facets that may still exist, written before each is created, and the latest deleted
+      // names (see tool-lane.ts).
+      pendingToolFacets: collection<PendingToolFacetRecord>()({ primaryKey: "name" }),
+      toolFacetTombstones: collection<ToolFacetTombstoneRecord>()({
+        primaryKey: "seq",
+        uniqueIndexes: { byName: (record: ToolFacetTombstoneRecord) => record.name },
+      }),
       // Published agent artifact revisions, immutable, keyed `<kind>/<name>@<number>` so one
       // name's revisions list in number order (see artifact-store.ts).
       artifactRevisions: collection<ArtifactRevisionRecord>()({
@@ -1773,6 +1782,10 @@ class OverseerImpl implements AgentHooks {
   // from this via `new GitCacheImpl(...)`.
   readonly gitCache: WorkspaceGitCache;
 
+  // The isolated lane console tools run in (see tool-lane.ts). Swept at construction, before each
+  // call and from the alarm.
+  readonly toolLane: ToolLane;
+
   // Per-chat in-memory state for running agents.
   #liveChats = new Map<number, LiveChatContext>();
   #chatSubscribers: Set<RpcStub<AiChatSubscriber>> = new Set();
@@ -2032,6 +2045,12 @@ class OverseerImpl implements AgentHooks {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
 
+    // Tool facets left pending: retried until each is deleted (see ToolLane.nextSweepTime).
+    let toolSweepTime = this.toolLane.nextSweepTime();
+    if (toolSweepTime !== undefined) {
+      times.push(toolSweepTime);
+    }
+
     if (times.length > 0) {
       this.ctx.storage.setAlarm(Math.min(...times));
     } else {
@@ -2052,6 +2071,7 @@ class OverseerImpl implements AgentHooks {
   async runAlarmTasks(): Promise<void> {
     this.#inAlarmHandler = true;
     try {
+      this.toolLane.sweep();
       do {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
@@ -2166,6 +2186,17 @@ class OverseerImpl implements AgentHooks {
     // git-storage migration below is the asynchronous one, shielded by blockConcurrencyWhile.
     this.#migrateStorage();
     this.#recoverInterruptedApplies();
+    this.toolLane = new ToolLane({
+      facets: this.ctx.facets,
+      loader: this.env.LOADER,
+      pending: this.storage.pendingToolFacets,
+      tombstones: this.storage.toolFacetTombstones,
+      nextTombstoneSeq: this.storage.nextToolFacetTombstoneSeq,
+      transaction: fn => this.storage.transaction(fn),
+      pendingChanged: () => this.#updateAlarm(),
+    });
+    // No call is live in a new instance, so every pending tool facet is abandoned.
+    this.toolLane.sweep();
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
