@@ -1,7 +1,7 @@
 ---
 title: InferOps gatekeeper
 status: draft
-updated: 2026-10-07
+updated: 2026-10-10
 ---
 
 # InferOps gatekeeper
@@ -95,6 +95,7 @@ All paths are relative to the deployment's API base URL.
 | Wiki sections | `GET /knowledge/sections?documentId=<id>` | Bare array of `id`, `documentId`, `tag`, `body`, `version` (an integer), in page order. |
 | Wiki section | `GET /knowledge/sections/<id>` | The section, or `null` for one the workspace lacks. |
 | Section edit | `PATCH /knowledge/sections/<id>`, body `{ "body" }` | The section at its new `version`. |
+| Wiki search (proposed) | `GET /knowledge/search?query=<text>&limit=<n>` (`knowledge.search`) | `hits[]`: `sectionId`, `sectionVersion`, `tag`, `documentId`, `documentSlug`, `documentTitle`, `snippet`; `score` is dropped. See [Knowledge read and search contract](#knowledge-read-and-search-contract-proposed). |
 
 Writes send only the fields of the agent-facing declaration. A create always names the bound project's UUID (resolved from its key) and the state it lands in, resolved by InferOS from the board when the proposal is made: the caller's `stateId`, which must be one of the board's states, or else the first state of the `software` workflow (of the `content` workflow on a board that has no `software` states). `workflow` is sent only when that state's workflow is `content`; otherwise InferOps' default (`software`) applies. So the issue lands in the column the approver saw. `parentId`, `acceptanceCriteria`, `assigneeId`, dates, refs, `blockedReason` and `leaseGeneration` are not exposed. An update with no changed field is not proposed; a `null` description clears it.
 
@@ -188,11 +189,43 @@ The Wiki session (`InferOpsWikiSession` in the [declaration](inferops-gatekeeper
 - `listDocuments()` lists the workspace's pages with their place in the page tree (`parentId`, `siblingOrder`), in InferOps' order.
 - `readDocument(slugOrId)` reads one page and its sections, each with its `version` and its `[[target#tag]]` wikilinks (InferOps' v1 grammar, parsed from the body), plus the page's embedded references: the `inferops://` links that stand alone as a paragraph, the rule InferOps' own text resolver uses.
 - `readDocumentText(slugOrId)` is the agent text of the same sections, in the format of InferOps' `renderDocumentAsText`: `# <title>`, then each section's body, separated by blank lines. InferOps replaces each embedded reference with the live state of what it names; InferOS leaves the reference as written and never reads another resource through a Wiki binding. A page with no readable section is `NOT_FOUND`, as InferOps answers it.
+- `searchWiki(query, { limit })` returns the readable sections that best match a text query, best first, with the page each belongs to and a snippet. It is an observation; see [Knowledge read and search contract](#knowledge-read-and-search-contract-proposed).
 - `updateSection(sectionId, body, expectedVersion)` proposes replacing one section's markdown. Its action kind is `inferops.wiki-section-update`; it is never auto-approvable. Until it is decided, reads show the new body at the unchanged version, marked `pending: "update"`, and a second edit of the section is refused with `CONFLICT`. It is revertible while the section still shows the edit at the version it produced.
 
 Access is InferOps': the product gate (`requiresProduct: 'infermind'`), `knowledge:read` for reads and `knowledge:write` for an edit, row-level security on the workspace, and the InferMind lens on sections, all applied to the person's own token. InferOps answers both a missing product and a missing permission with 403 `FORBIDDEN` and says which only in its message text, which InferOS does not read, so the caller gets one `FORBIDDEN` message naming both causes. A Wiki URL naming one of the person's InferOps workspaces is refused before any request, saying that workspace has no Wiki.
 
 InferOps' section `PATCH` takes no expected version and does not replay an idempotency key. InferOS therefore checks the version itself: applying an edit reads the section first and sends the body only while the section is still at the version the edit was proposed at. A section already showing exactly the approved body at a later version counts as applied without a second write (a retried apply whose first response was lost); any other change refuses the edit as stale. The fingerprint and the idempotency key are as for every other action, and the key is sent although InferOps ignores it today. The page's own `body` is read-only in InferOps and is not part of this contract; root, pillar and Master pages and coverage states are InferOps' to build ([factory-level/inferops#2324](https://github.com/factory-level/inferops/issues/2324), [#2325](https://github.com/factory-level/inferops/issues/2325)).
+
+#### Knowledge read and search contract (proposed)
+
+**Status: proposed on 2026-10-10 for the owner's approval ([factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326), MVP-32). Nothing here is agreed until the owner records a decision; no InferOS wiring starts before then.** It states what InferOps provides to the gatekeeper for knowledge reads and search. Every choice still open is listed under [Decisions for the owner](#decisions-for-the-owner) with a recommendation; the text below assumes the recommended option.
+
+**Operations.** The reads are the existing page list, page, section list, section and page-text endpoints in [Endpoints](#endpoints). Search is one new InferOps capability, `knowledge.search`: `GET /knowledge/search` with `query` (1–500 characters, trimmed) and `limit` (1–100; the gatekeeper sends at most 50, default 20). It is InferOps' existing hybrid section search (full-text and, where an embedding provider is configured, vector seeds, then a graph re-rank that can only reorder the seed) declared once as a capability, so the HTTP route, the MCP tool and the `inferops knowledge search` command share one scoped function and one permission. The seed size and graph weight stay at InferOps' defaults; the gatekeeper does not send them.
+
+**Scope is the binding.** The workspace is the one a `knowledge/wiki` binding resolved among the person's own InferMind workspaces when it was granted, sent as `X-Workspace-Id`. No method takes a workspace, tenant, host or page scope, and no query text, page reference, widget parameter or `inferops://` link can widen it. Search covers the whole Wiki of that workspace; subtree search ([factory-level/inferops#1951](https://github.com/factory-level/inferops/issues/1951)) narrows results later and never grants.
+
+**Per-person identity.** Every read and search uses the connected person's own InferLab token, as for every other InferOps request ([ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md)). The deployment's stopgap or demo connection never serves a Wiki search. A shared gadget searches with the viewer's own connection, never the owner's.
+
+**Permission model.** InferOps decides, on every request: the product gate (`infermind`), `knowledge:read`, workspace row-level security, and the InferMind lens on sections (a section is readable when it touches a confirmed relationship whose pathway type the person holds a read grant on, or when the person created it). Search applies the same row-level rules as the page reads, inside one scoped transaction, before candidates are chosen. It is never a filter applied to finished results. A grant removed in InferOps takes effect on the next request; InferOS keeps no permission state of its own.
+
+**Limits and pagination.** A search returns at most `limit` hits, best first, and no cursor: it is a ranked top-N, and a caller wanting more refines the query. The page and section lists stay the existing whole-list reads, as for the board. A query over 500 characters, or a `limit` outside 1–50, is refused by InferOS with `INVALID_REQUEST` before any request.
+
+**Redaction.** A section the person cannot read does not appear as a hit and does not change any other hit: not its snippet, its order, the number of hits, or a graph boost (only relationships between readable sections count, and only confirmed ones). A snippet is cut from the hit's own section only. A page title appears only through a readable hit. `score` is not exposed: it is a fused rank with no meaning across queries. An empty list means no readable match; InferOS never reports how many results were hidden, and InferOps returns no such count.
+
+**Errors and refusals.** As in [Errors](#errors): 400 → `INVALID_REQUEST`, 401 → `UNAUTHORIZED`, 403 (missing product or `knowledge:read`) → `FORBIDDEN`, 5xx, network failure or a response that fails validation → `UNAVAILABLE`. A page read with no readable section is `NOT_FOUND`, identical to a missing page. A search never answers `NOT_FOUND`: no readable match is an empty list.
+
+**Revision and staleness.** Each hit carries the section's `version` as of the search (`sectionVersion`), an integer that changes with every edit. A hit is a pointer, not content: before quoting a section to a person or proposing an edit, InferOS reads the page again and uses the section's current body and `version`; an edit always names the version that read returned. A hit whose section has since been deleted, or become unreadable, reads as `NOT_FOUND` through its page. Search reflects a section's full-text index at commit time; the vector seed (when configured) may lag an edit until InferOps' reindex job runs, which can affect order but never readability.
+
+**What InferOS may cache.** References only: page `id`/`slug`, section `id` and `version`, and a binding's resolved workspace. InferOS does not persist section bodies, page text, snippets or hit lists beyond the request that returned them. The observation that records a search keeps the query and the hit references, not snippets. Anything shown again is read again through the gatekeeper. Cached references are cleared when the binding is revoked, the account reconnects or the person's workspaces change. InferOps stays authoritative for content, permissions and versions.
+
+##### Decisions for the owner
+
+1. **Search endpoint.** (a) a new `knowledge.search` capability, `GET /knowledge/search`, one declaration for HTTP, MCP and CLI; (b) the gatekeeper calls the existing `POST /knowledge/search` route as it is. **Recommended: (a).** It gives the gatekeeper a declared capability with its permission in InferOps' catalog, and the existing route stays as it is for current callers.
+2. **Pagination.** (a) ranked top-N, `limit` ≤ 50, no cursor; (b) an offset cursor over the fused ranking; (c) a keyset cursor. **Recommended: (a).** The ranking is over a bounded seed (at most 200 sections per leg), so a cursor would page a list that changes between requests; refining the query is the honest way to see more.
+3. **Staleness signal on hits.** (a) each hit carries `sectionVersion`, and InferOS rereads before quoting or editing; (b) no version, always reread. **Recommended: (a).** It is an additive field, lets InferOS tell a changed section from an unchanged one without a read, and keeps the edit path's expected version explicit.
+4. **Tuning knobs.** (a) InferOps defaults for seed size and graph weight, the gatekeeper sends only `query` and `limit`; (b) pass them through. **Recommended: (a).** Fewer inputs for a shared gadget to tamper with, and InferOps can retune without a contract change.
+5. **Score.** (a) drop `score` at the gatekeeper; (b) pass it on. **Recommended: (a).** The fused rank is comparable only within one response, and order already carries it.
+6. **Snippet format.** (a) InferOps' current highlighted text (`<b>…</b>` around matched words), which InferOS treats as text; (b) InferOps returns plain text with match offsets. **Recommended: (a)** for now; (b) only if a renderer needs offsets.
 
 ### Custom tables
 
@@ -214,6 +247,7 @@ Wanted from InferOps, tracked in [factory-level/inferops#2326](https://github.co
 3. **An optional project constraint on issue read and transition.** A caller-supplied project id that InferOps enforces, answering an issue of another project as `NOT_FOUND`, so the scope check is made in the same transaction as the write.
 4. **An expected version and idempotency on section edits.** `PATCH /knowledge/sections/<id>` accepting `expectedVersion` (refused with a conflict code when it no longer matches) and replaying `X-Idempotency-Key`, so the version check is made in the same transaction as the write.
 5. **Distinct codes for the knowledge refusals.** A product gate refusal distinguishable from a missing permission, and a 404 instead of a 500 for a section `PATCH` naming a section the workspace lacks.
+6. **A scoped Wiki search.** The `knowledge.search` capability with `sectionVersion` on each hit, as proposed in [Knowledge read and search contract](#knowledge-read-and-search-contract-proposed). Unlike 1–5 it is needed for `searchWiki`; the other Wiki reads do not depend on it.
 
 ## Non-Goals
 
@@ -287,6 +321,7 @@ Still open:
 - InferOps enforces configured workflow policy on content issues only; a software issue's create or update is governed by InferOS's approval alone until InferOps' software policy ships. Live acceptance of a policy refusal therefore needs a content issue.
 - No issue delete is in the contract, so an approved create cannot be undone from InferOS.
 - Whether InferOps registers `knowledge/document` as a widget kind, and whether a page reference names the slug or the page UUID. Slugs look stable (a page's `PATCH` changes only its title), but InferOps has not confirmed it.
+- The [knowledge read and search contract](#knowledge-read-and-search-contract-proposed) (2026-10-10) awaits the owner's decision on its six options; InferOps' `knowledge.search` is built to the recommended options as a draft and merges only after that decision.
 - A section edit's version check and its write are two requests, so an edit made in InferMind between them is overwritten. Companion change 4 closes this.
 
 ## Related

@@ -359,6 +359,27 @@ export interface WikiDocument {
   references: string[];
 }
 
+/** One ranked match of a Wiki search: a section you can read, with the page it belongs to. */
+export interface WikiSearchHit {
+  /** The matching section's UUID; readDocument() of its page returns it. */
+  sectionId: string;
+  /** The section's version when it was searched; reread the page before quoting or editing it. */
+  sectionVersion: number;
+  /** The section's anchor tag. */
+  tag: string;
+  /** The page's UUID. */
+  documentId: string;
+  /** The page's short name. */
+  documentSlug: string;
+  /** Page title. */
+  documentTitle: string;
+  /**
+   * Plain text around the match, cut from this section only. Matched words are wrapped in
+   * <b>…</b>; treat the text as text, never as HTML.
+   */
+  snippet: string;
+}
+
 /**
  * The InferMind Wiki of one workspace, fixed when this capability is created. Fails with
  * FORBIDDEN when the workspace is not an InferMind workspace or your InferOps access lacks
@@ -375,6 +396,12 @@ export interface InferOpsWikiSession {
    * with no section you can read.
    */
   readDocumentText(slugOrId: string): Promise<string>;
+  /**
+   * The sections you can read that best match a text query, best first: at most `limit` (1–50,
+   * default 20) hits. There is no next page; refine the query to find more. A query of 1–500
+   * characters. No match, and nothing you can read, are both an empty list.
+   */
+  searchWiki(query: string, options?: { limit?: number }): Promise<WikiSearchHit[]>;
   /**
    * Replace a section's markdown. Supply the version you read it at; a section edited since fails
    * with STALE_REVISION. Reads show the new body at once, marked pending "update". A body equal to
