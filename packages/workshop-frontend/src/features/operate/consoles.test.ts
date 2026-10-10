@@ -22,7 +22,7 @@ describe('consoleContentForSave', () => {
 
   it('counts saved boards toward the combined limit even when they are left out', () => {
     expect(() => consoleContentForSave({ ...BASE, widgets: widgets(MAX_CONSOLE_WIDGETS) }, [board(1)], undefined))
-      .toThrow(`at most ${MAX_CONSOLE_WIDGETS} widgets and host boards`)
+      .toThrow(`at most ${MAX_CONSOLE_WIDGETS} widgets, host boards and bound views`)
     expect(consoleContentForSave({ ...BASE, widgets: widgets(MAX_CONSOLE_WIDGETS - 1) }, [board(1)], undefined).widgets)
       .toHaveLength(MAX_CONSOLE_WIDGETS - 1)
   })

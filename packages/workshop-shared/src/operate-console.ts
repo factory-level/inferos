@@ -23,8 +23,11 @@ export const MAX_ROLLUP_SCREENS = 12;
 /** Longest console or view title. */
 export const MAX_CONSOLE_TITLE_LENGTH = 120;
 
-/** Most widgets one console's registry offers. */
+/** Most entries one console's registry offers: widgets, host boards and bound views together. */
 export const MAX_CONSOLE_WIDGETS = 16;
+
+/** Most host-board requirements one bound view reads. */
+export const MAX_BOUND_VIEW_REQUIREMENTS = 4;
 
 /**
  * Whether a console offers the full chat presentation: `off` (never; the default), `available`
@@ -135,6 +138,50 @@ export type HostBoardEntry = {
   requirement: HostBoardRequirement;
 };
 
+/** Where a published bound view came from, and the spec it shows. */
+export type BoundViewFreeze = {
+  /** The registered view-only widget install the spec was read from. */
+  sourceGadgetId: WorkpieceId;
+  /** The commit of that install whose `view.json` was read, at publication. */
+  commitId: string;
+  /** That commit's `view.json`, as validated at publication. Re-parsed wherever it is used. */
+  specText: string;
+};
+
+/**
+ * One bound view a console offers: a view-only widget install's `view.json` (see `bound-view.ts`),
+ * which trusted host code renders from each operator's own reads of the console's host boards. It
+ * runs no code and creates no install. In a draft it is read from the registered install at
+ * preview; publishing copies the spec into `frozen`, and the published entry shows only that, so
+ * later edits to the install, or its deletion, change nothing until the next publication. Refused
+ * unless the installation turns bound views on (`INFEROPS_BOUND_VIEWS`).
+ */
+export type BoundViewEntry = {
+  /** The entry's tag. */
+  kind: "bound-view";
+  /**
+   * Server-minted at first save and stable for the entry's life; a new entry omits it. An entry
+   * naming an id must be one the console already holds, with the same `gadgetId`.
+   */
+  id?: string;
+  /** The registered view-only widget install, in the draft and in the publication alike. */
+  gadgetId: WorkpieceId;
+  /** The blueprint the install came from; must match its `installedFrom`. */
+  blueprintId: string;
+  /** The blueprint version the install runs; must match its `installedFrom`. */
+  version: number;
+  /** The name operators see. 1 to `MAX_CONSOLE_TITLE_LENGTH` characters. */
+  label: string;
+  /**
+   * The host-board requirement names the view reads: 1 to `MAX_BOUND_VIEW_REQUIREMENTS`, unique,
+   * each exactly the requirement name of one of the same console's `hostBoards`, and equal as a
+   * set to the spec's own `requirements`.
+   */
+  requirements: string[];
+  /** Set by publication only; a client-supplied value is dropped. */
+  frozen?: BoundViewFreeze;
+};
+
 /** The authored part of a console. */
 export type OperateConsoleContent = {
   /** The console's name, shown on its tile and in the Operate sidebar. 1 to `MAX_CONSOLE_TITLE_LENGTH` characters. */
@@ -152,9 +199,14 @@ export type OperateConsoleContent = {
   widgets?: ConsoleWidgetEntry[];
   /**
    * The host boards this console offers, with unique ids and requirement names. Absent means
-   * none. Together with `widgets`, at most `MAX_CONSOLE_WIDGETS` entries.
+   * none. Together with `widgets` and `boundViews`, at most `MAX_CONSOLE_WIDGETS` entries.
    */
   hostBoards?: HostBoardEntry[];
+  /**
+   * The bound views this console offers, with unique ids. Absent means none. Each names only
+   * requirements of this content's `hostBoards`.
+   */
+  boundViews?: BoundViewEntry[];
 };
 
 /**
@@ -251,8 +303,9 @@ export function parseOperateConsoleContent(content: OperateConsoleContent): Oper
   });
   let widgets = content.widgets === undefined ? undefined : parseWidgets(content.widgets);
   let hostBoards = content.hostBoards === undefined ? undefined : parseHostBoards(content.hostBoards);
-  if ((widgets?.length ?? 0) + (hostBoards?.length ?? 0) > MAX_CONSOLE_WIDGETS) {
-    throw new TypeError(`A console offers at most ${MAX_CONSOLE_WIDGETS} widgets and host boards.`);
+  let boundViews = content.boundViews === undefined ? undefined : parseBoundViews(content.boundViews, hostBoards ?? []);
+  if ((widgets?.length ?? 0) + (hostBoards?.length ?? 0) + (boundViews?.length ?? 0) > MAX_CONSOLE_WIDGETS) {
+    throw new TypeError(`A console offers at most ${MAX_CONSOLE_WIDGETS} widgets, host boards and bound views.`);
   }
   let customization = content.customization;
   if (customization !== undefined) {
@@ -266,7 +319,8 @@ export function parseOperateConsoleContent(content: OperateConsoleContent): Oper
   return { title: title(content.title, "console"), views: parsed, fullChat: content.fullChat,
     ...(customization === undefined ? {} : { customization }),
     ...(widgets === undefined ? {} : { widgets }),
-    ...(hostBoards === undefined ? {} : { hostBoards }) };
+    ...(hostBoards === undefined ? {} : { hostBoards }),
+    ...(boundViews === undefined ? {} : { boundViews }) };
 }
 
 function parseWidgets(entries: ConsoleWidgetEntry[]): ConsoleWidgetEntry[] {
@@ -331,6 +385,45 @@ function parseHostBoards(entries: HostBoardEntry[]): HostBoardEntry[] {
     }
     return { kind: "host-board", ...(entry.id === undefined ? {} : { id: entry.id }),
       label: title(entry.label, "host board"), requirement: { name, resource, target: canonical } };
+  });
+}
+
+/**
+ * Checks a console's bound view entries and returns trimmed copies, without `frozen`, which only
+ * publication sets. Each needs a unique id when it has one, a gadget id, a blueprint version, and 1
+ * to `MAX_BOUND_VIEW_REQUIREMENTS` unique requirement names, each exactly the name of one of
+ * `hostBoards`. Throws a `TypeError` naming the first problem. Whether the gadget is a view-only
+ * install with that spec is the store's check.
+ */
+export function parseBoundViews(entries: BoundViewEntry[], hostBoards: readonly HostBoardEntry[]): BoundViewEntry[] {
+  let ids = new Set<string>();
+  let boards = new Set(hostBoards.map(board => board.requirement.name));
+  return entries.map(entry => {
+    if (entry.kind !== "bound-view") throw new TypeError("A bound view entry must be of kind bound-view.");
+    if (entry.id !== undefined) {
+      if (!ID.test(entry.id)) throw new TypeError("A bound view id must be 1-64 letters, digits, - or _.");
+      if (ids.has(entry.id)) throw new TypeError(`Bound view ${entry.id} is listed twice.`);
+      ids.add(entry.id);
+    }
+    if (!Number.isSafeInteger(entry.gadgetId) || entry.gadgetId < 0) {
+      throw new TypeError("A bound view must name a gadget id.");
+    }
+    if (!Number.isSafeInteger(entry.version) || entry.version < 1) {
+      throw new TypeError("A bound view's version must be a blueprint version number.");
+    }
+    let names = entry.requirements;
+    if (names.length === 0 || names.length > MAX_BOUND_VIEW_REQUIREMENTS) {
+      throw new TypeError(`A bound view reads 1-${MAX_BOUND_VIEW_REQUIREMENTS} host-board requirements.`);
+    }
+    if (new Set(names).size !== names.length) throw new TypeError("A bound view names a requirement twice.");
+    // Exact and case-sensitive, like the spec's own names: a near miss is a different requirement.
+    let unknown = names.find(name => !boards.has(name));
+    if (unknown !== undefined) {
+      throw new TypeError(`Bound view requirement ${unknown} is not the name of one of this console's host boards.`);
+    }
+    return { kind: "bound-view", ...(entry.id === undefined ? {} : { id: entry.id }), gadgetId: entry.gadgetId,
+      blueprintId: entry.blueprintId, version: entry.version, label: title(entry.label, "bound view"),
+      requirements: [...names] };
   });
 }
 

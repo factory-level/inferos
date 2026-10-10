@@ -2,7 +2,7 @@ import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/
 import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
-import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls } from "./console-store";
+import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
   isGadgetModule,
@@ -3080,6 +3080,18 @@ class OverseerImpl implements AgentHooks {
   // view.json and tools.json are classified from their strict UTF-8 text.
   async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string): Promise<void> {
     kind ??= DEFAULT_WORKSPACE_KIND;
+    let files = await this.#classifiedFiles(kind, commitId);
+    let refusals = blueprintPublishRefusals(kind, classifyGadgetFiles(kind, files).violations);
+    if (refusals.length > 0) {
+      let article = kind === "app" ? "an" : "a";
+      throw new Error(`This gadget cannot be published as ${article} ${kind}: ` +
+          refusals.map(violation => violation.message).join(" "));
+    }
+  }
+
+  // A commit's full file map as `classifyGadgetFiles` takes it: every path, with a widget's
+  // view.json and tools.json read as strict UTF-8 (null when they are not).
+  async #classifiedFiles(kind: WorkspaceKind, commitId: string): Promise<Map<string, string | null>> {
     let files: Map<string, string | null> = await this.gitStore.readCommitFiles(commitId);
     let parsed = kind === "widget" ? [GADGET_VIEW_FILE, GADGET_TOOLS_FILE] : [];
     for (let path of parsed.filter(name => files.has(name))) {
@@ -3088,12 +3100,21 @@ class OverseerImpl implements AgentHooks {
         throw error;
       }));
     }
-    let refusals = blueprintPublishRefusals(kind, classifyGadgetFiles(kind, files).violations);
-    if (refusals.length > 0) {
-      let article = kind === "app" ? "an" : "a";
-      throw new Error(`This gadget cannot be published as ${article} ${kind}: ` +
-          refusals.map(violation => violation.message).join(" "));
+    return files;
+  }
+
+  // The commits a console save or publication checks its registered gadgets against (see
+  // SourceCommits), each classified as a widget from its full file map, read before the
+  // transaction that checks them.
+  async readSourceCommits(commitIds: Iterable<string>): Promise<SourceCommits> {
+    let commits = new Map<string, SourceCommit>();
+    for (let commitId of new Set(commitIds)) {
+      let files = await this.#classifiedFiles("widget", commitId);
+      let classification = classifyGadgetFiles("widget", files);
+      commits.set(commitId, { classification,
+        viewText: classification.class === "viewOnly" ? files.get(GADGET_VIEW_FILE) ?? null : null });
     }
+    return commits;
   }
 
   // Chat deletion's workpiece cleanup: remove the gadgets and worktrees still provisional to the
@@ -11715,16 +11736,28 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
-  async createConsole(content: OperateConsoleContent): Promise<OperateConsole> { return this.#consoleStore().create(content); }
+  // Saving checks each registered gadget's current commit, read first; one that moves meanwhile
+  // refuses the save.
+  async createConsole(content: OperateConsoleContent): Promise<OperateConsole> {
+    let store = this.#consoleStore();
+    return store.create(content, await this.impl.readSourceCommits(store.sourceCommitIds(content)));
+  }
   async replaceConsole(id: string, expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole> {
-    return this.#consoleStore().replace(id, expectedRevision, content);
+    let store = this.#consoleStore();
+    let commits = await this.impl.readSourceCommits(store.sourceCommitIds(content, id));
+    return store.replace(id, expectedRevision, content, commits);
   }
   async deleteConsole(id: string, expectedRevision: string): Promise<void> {
     this.#consoleStore().delete(id, expectedRevision);
     this.impl.announceConsoleRevision(id, null);
   }
+  // Publication captures the console and its sources, reads the captured commits, then publishes
+  // in one transaction only if the capture still holds (see ConsoleCapture).
   async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
-    let published = this.#consoleStore().publish(id, expectedRevision);
+    let store = this.#consoleStore();
+    let capture = store.capture(id, expectedRevision);
+    let commits = await this.impl.readSourceCommits(capture.commitIds);
+    let published = store.publish(id, expectedRevision, capture, commits);
     this.impl.announceConsoleRevision(id, published.revision);
     return published;
   }
