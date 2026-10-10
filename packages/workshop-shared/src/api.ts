@@ -4571,9 +4571,10 @@ export type AiToolCall = {
     /** The declared tool name. */
     tool: string;
     /**
-     * The tool's input as the agent sent it; `{}` when omitted. Typed as a declared input is shaped
-     * (flat, each value a builder-written enum string, a boolean or an integer); the console's
-     * workspace checks it against the declaration, and refuses a call whose input does not match.
+     * The tool's input as the agent sent it; `{}` when omitted. Shaped as a declared input
+     * (`WidgetToolSchema` for inputs: flat, each value a builder-written enum string, a boolean or
+     * an integer), which the tool's parameter schema enforces before the call; the console's
+     * workspace checks the values against the declaration, and refuses a call that does not match.
      */
     input?: {[name: string]: string | number | boolean};
   };

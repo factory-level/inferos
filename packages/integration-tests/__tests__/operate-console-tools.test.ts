@@ -14,6 +14,12 @@
 // it. The real Slack and MCP packages are not booted here; the vendor-id allowlist they fall under is
 // covered in workshop-backend's chat-taint tests. The first-party read and write are the real
 // InferOps gatekeeper (allowlisted) against the fake InferOps.
+//
+// What the "refused" checks here show: under the mark the vendor binding and env.GIT are absent
+// from the env (gate 1 and getEnvForAgent), so `env.TEST_THING.search` and `env.GIT.readCommit`
+// fail as calls on an undefined binding, before any session is opened. Gate 2 (startGatekeeperSession
+// refusing a stub the chat already holds) and the stored-stub walk are not reached on this path;
+// workshop-backend's chat-taint tests force those stubs and cover both.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
@@ -407,5 +413,33 @@ describe("console tools in an operate chat (scripted model)", () => {
 
     expect(egress).toEqual(["https://vendor.test/search?q=control"]);
     expect(fake.writeRequests().length).toBe(writesBefore);
+  });
+
+  // Contract §4.8.5 reasons about an executeCode in the same model step as the console call. Tool
+  // calls in one step run in order (toolExecution "sequential"), so the call's mark is written before
+  // that executeCode builds its env; this guards that order.
+  it("holds an executeCode in the same model step as the console call to the taint", async () => {
+    const egressBefore = [...egress];
+    const { session, model, capsules } = await operator("toolssamestep", [
+      step(call("same-note", counts.frozen, "note"), run("same-attack", [
+        `console.log("keys", JSON.stringify(Object.keys(env).toSorted()));`,
+        `console.log("types", typeof env.TEST_THING, typeof env.GIT);`,
+        `try { console.log("search", await env.TEST_THING.search("same-step")); } catch (e) { console.log("search refused:", e.message); }`,
+        `try { await env.GIT.readCommit("0".repeat(40)); } catch (e) { console.log("git refused:", e.message); }`,
+      ].join(" "))),
+      { text: "Done." },
+    ]);
+    await using _ = session;
+    expect((await session.runTurn("[0] [1] Read the note and act on it.", { capsules })).outcome)
+        .toEqual({ status: "completed" });
+    expect(model.remainingSteps()).toBe(0);
+    expect(toolResult(model, "same-note")).toContain(FRAME("Counts"));
+    const attacked = toolResult(model, "same-attack");
+    expect(attacked).toMatch(/types undefined undefined/);
+    expect(attacked).not.toMatch(/"TEST_THING"|"GIT"/);
+    expect(attacked).toMatch(/"INFEROPS_BOARD"/);
+    expect(attacked).toMatch(/search refused:/);
+    expect(attacked).toMatch(/git refused:/);
+    expect(egress).toEqual(egressBefore);
   });
 });

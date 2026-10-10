@@ -19,7 +19,7 @@ import type { AiChatAuthorInfo, AiChatMessage, AiToolCall } from "@gadgets/works
 import type { OverseerDurableObject } from "../src/overseer.js";
 import { runAgent } from "../src/agent";
 import { isConsoleToolTainted } from "../src/chat-taint";
-import type { ConsoleToolOutcome } from "../src/console-tools";
+import { CONSOLE_TOOL_FAILED, type ConsoleToolOutcome } from "../src/console-tools";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -200,6 +200,38 @@ describe("calling the console tools", () => {
     expect(own).not.toHaveProperty("output");
     expect(forged!.error).toContain(REFUSAL);
   }));
+
+  it("replaces an exception from the session's side with fixed kernel text, the chat still marked", () =>
+    withOperateChat(async h => {
+      const SECRET = "internal detail 1234";
+      h.impl.listSessionConsoleTools = async () => { throw new Error(SECRET); };
+      h.impl.callSessionConsoleTool = async () => { throw new Error(SECRET); };
+      let { contexts } = await runScriptedTurn(h.impl, [
+        step(fauxToolCall("listConsoleTools", {})),
+        step(fauxToolCall("callConsoleTool", { widgetId: 7, tool: "count", input: { status: "open" } })),
+        done(),
+      ]);
+      let results = toolResults(contexts[2]!);
+      expect(results.map(({ name, isError }) => ({ name, isError }))).toEqual([
+        { name: "listConsoleTools", isError: true }, { name: "callConsoleTool", isError: true },
+      ]);
+      for (let result of results) expect(result.text).toContain(CONSOLE_TOOL_FAILED);
+      expect(JSON.stringify(contexts)).not.toContain(SECRET);
+      let recorded = recordedCalls(h.impl);
+      expect(recorded.map(call => call.error)).toEqual([CONSOLE_TOOL_FAILED, CONSOLE_TOOL_FAILED]);
+      expect(JSON.stringify(recorded)).not.toContain(SECRET);
+      expect(isConsoleToolTainted(h.impl.storage, CHAT)).toBe(true);
+    }));
+
+  it("rejects an input that is not a declared input's flat shape before the console or the mark", () =>
+    withOperateChat(async h => {
+      await runScriptedTurn(h.impl, [
+        step(fauxToolCall("callConsoleTool", { widgetId: 7, tool: "count", input: { status: { nested: "open" } } })),
+        done(),
+      ]);
+      expect(h.sessionCalls).toEqual([]);
+      expect(isConsoleToolTainted(h.impl.storage, CHAT)).toBe(false);
+    }));
 
   it("refuses webFetch in the steps after a console call, with nothing fetched", () => withOperateChat(async h => {
     let fetched: string[] = [];

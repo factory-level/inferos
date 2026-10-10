@@ -20,7 +20,7 @@ import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./w
 import { formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
-import type { ConsoleToolOutcome } from "./console-tools";
+import { CONSOLE_TOOL_FAILED, type ConsoleToolOutcome } from "./console-tools";
 import type { SpawnCallableOptions } from "./agent-spawner-binding";
 import { traceRejectedToolCall, traceTool } from "./agent-tracing";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
@@ -3163,8 +3163,17 @@ async function runAgentPass(
 
   // A console tool's outcome as its result: `ok` is recorded as the output, while a tool's own
   // `error` and a refusal are thrown, so the call is recorded and shown as failed. Either text is
-  // kernel-built (authored text only inside the untrusted frame), so it is passed on unchanged.
-  let consoleToolResult = (toolCallId: string, outcome: ConsoleToolOutcome) => {
+  // kernel-built: authored text appears only inside the untrusted frame, and a refusal's kernel text
+  // may name a declared tool or input property identifier. It is passed on unchanged. An exception
+  // from the session's side (an RPC failure) is replaced by fixed kernel text: none of its own text
+  // reaches the model.
+  let consoleToolResult = async (toolCallId: string, ask: () => Promise<ConsoleToolOutcome>) => {
+    let outcome: ConsoleToolOutcome;
+    try {
+      outcome = await ask();
+    } catch {
+      outcome = {status: "failed", reason: CONSOLE_TOOL_FAILED};
+    }
     if (outcome.status === "ok") return toolResult(outcome.text, {output: outcome.text});
     let message = outcome.status === "error" ? outcome.text : outcome.reason;
     toolCallNotes.set(toolCallId, {error: message});
@@ -4026,7 +4035,9 @@ async function runAgentPass(
     }),
 
     // Offered only in operate chats while console tools are on (see consoleTools). Each marks the
-    // chat before anything else, so the mark holds whatever the console answers.
+    // chat before anything else, so the mark holds whatever the console answers, a refusal
+    // included; a call whose arguments fail the parameter schema never reaches execute, or the
+    // console. If the mark throws, the console is not asked.
     listConsoleTools: defineTool({
       name: "listConsoleTools",
       label: "List console tools",
@@ -4034,7 +4045,7 @@ async function runAgentPass(
       parameters: Type.Object({}),
       execute: async (toolCallId) => {
         hooks.markConsoleToolTainted(chatId);
-        return consoleToolResult(toolCallId, await hooks.listSessionConsoleTools());
+        return await consoleToolResult(toolCallId, () => hooks.listSessionConsoleTools());
       }
     }),
 
@@ -4045,16 +4056,18 @@ async function runAgentPass(
       parameters: Type.Object({
         widgetId: Type.Integer({description: "The widget's widgetId, from listConsoleTools."}),
         tool: Type.String({description: "The tool's name, from listConsoleTools."}),
+        // A declared input's shape (WidgetToolSchema): one flat object of string enums, booleans
+        // and integers. The console's workspace checks the values against the declaration.
         input: Type.Optional(Type.Object({}, {
-          additionalProperties: true,
+          additionalProperties: Type.Union([Type.String(), Type.Integer(), Type.Boolean()]),
           description: "The tool's input, matching the choices it declares. Omit for a tool that " +
               "takes none.",
         })),
       }),
       execute: async (toolCallId, {widgetId, tool, input}) => {
         hooks.markConsoleToolTainted(chatId);
-        return consoleToolResult(toolCallId,
-            await hooks.callSessionConsoleTool(widgetId, tool, input ?? {}));
+        return await consoleToolResult(toolCallId,
+            () => hooks.callSessionConsoleTool(widgetId, tool, input ?? {}));
       }
     }),
   };
