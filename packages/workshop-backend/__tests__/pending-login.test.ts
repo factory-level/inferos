@@ -68,6 +68,7 @@ async function receive(stub: DurableObjectStub<PendingLogin>): Promise<string> {
 }
 
 const EXPIRED = "error:This sign-in attempt has expired. Please try again.";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Age the stored result without running the alarm; the result is the DO's only entry here.
 const age = (stub: DurableObjectStub<PendingLogin>) =>
@@ -263,7 +264,10 @@ describe("LoginConnectCallbackImpl", () => {
       });
       const callback = callbackFor(user, pendingId);
 
-      const handoff = await callback.reconnectComplete(STAGE_ID, new Date("2027-01-01"));
+      // Expiries relative to now, so both stay in the future; the restore extends the first.
+      const staged = new Date(Date.now() + 90 * DAY_MS);
+      const restored = new Date(Date.now() + 120 * DAY_MS);
+      const handoff = await callback.reconnectComplete(STAGE_ID, staged);
       expect(handoff.ticket).toMatch(/^[0-9a-f]{64}$/);
       expect([...user.storage.pendingHandoffs.list()]).toMatchObject([
         { kind: "restore", accountId: 0, stageId: STAGE_ID },
@@ -272,9 +276,9 @@ describe("LoginConnectCallbackImpl", () => {
 
       await callback.credentialsExpired();
       expect(user.storage.connectedAccounts.get(0)?.credentialsExpired).toBe(true);
-      await callback.credentialsRestored(new Date("2027-02-01"));
+      await callback.credentialsRestored(restored);
       expect(user.storage.connectedAccounts.get(0)).toMatchObject({
-        credentialsExpired: false, credentialExpiresAt: new Date("2027-02-01"),
+        credentialsExpired: false, credentialExpiresAt: restored,
       });
     });
   });

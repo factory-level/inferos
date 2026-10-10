@@ -16,6 +16,10 @@ declare module "cloudflare:workers" {
 
 const TARGET = "https://workshop.example";
 const EXPIRED = "This connection attempt has expired. Please try again.";
+const DAY_MS = 24 * 60 * 60 * 1000;
+// A credential expiry that stays in the future, relative to now. Call it inside a test: workerd
+// does not advance the clock at module scope.
+const credentialExpiryIn = (days: number) => new Date(Date.now() + days * DAY_MS);
 
 // A collection of records that expire, as a test ages or counts them.
 type Expiring<T extends { expiresAt: Date }> = { list(): Iterable<T>; put(record: unknown): void };
@@ -91,6 +95,7 @@ function expireAll(records: Expiring<{ expiresAt: Date }>) {
 describe("connect handoff", () => {
   it("stages a connect and activates it only when its ticket is redeemed", async () => {
     const { stub, inDo } = freshUser();
+    const credentialExpiresAt = credentialExpiryIn(90);
     const { handoff, nonce } = await inDo(async user => {
       const { account } = fakeAccount(user, "octocat");
       user.storage.nextAccountId.put(1);
@@ -101,7 +106,7 @@ describe("connect handoff", () => {
       expect(flow.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(CONNECT_FLOW_LIFETIME_MS);
       expect(await user.ctx.storage.getAlarm()).toBe(flow.expiresAt.getTime());
 
-      const staged = await user.stagePendingConnect(0, account, "github", new Date("2027-01-01"));
+      const staged = await user.stagePendingConnect(0, account, "github", credentialExpiresAt);
       expect(user.storage.connectedAccounts.get(0)).toBeUndefined();
       const [pending] = Array.from(user.storage.pendingHandoffs.list());
       expect(pending).toBeDefined();
@@ -125,7 +130,7 @@ describe("connect handoff", () => {
     await inDo(async user => {
       expect(user.storage.connectedAccounts.get(0)).toMatchObject({
         id: 0, vendorId: "github", description: { displayName: "octocat" },
-        credentialExpiresAt: new Date("2027-01-01"),
+        credentialExpiresAt,
       });
       expect(await fakeAccount(user, "octocat").calls()).toEqual(["describe"]);
       expect(pendingCount(user)).toBe(0);
@@ -185,6 +190,7 @@ describe("connect handoff", () => {
 
   it("commits a staged reconnect and then marks the credentials restored", async () => {
     const { stub, inDo } = freshUser();
+    const credentialExpiresAt = credentialExpiryIn(240);
     const { ticket } = await inDo(async user => {
       const { account } = fakeAccount(user, "renewed");
       user.storage.nextAccountId.put(1);
@@ -192,7 +198,7 @@ describe("connect handoff", () => {
         id: 0, account, vendorId: "github", description: { displayName: "old" },
         credentialsExpired: true,
       });
-      const handoff = await user.stagePendingRestore(0, STAGE_ID, new Date("2027-06-01"));
+      const handoff = await user.stagePendingRestore(0, STAGE_ID, credentialExpiresAt);
       expect(await fakeAccount(user, "renewed").calls()).toEqual([]);
       expect(user.storage.connectedAccounts.get(0)?.credentialsExpired).toBe(true);
       return handoff;
@@ -205,7 +211,7 @@ describe("connect handoff", () => {
       expect(await fakeAccount(user, "renewed").calls())
         .toEqual([`commitReconnect(${STAGE_ID})`, "describe"]);
       expect(user.storage.connectedAccounts.get(0)).toMatchObject({
-        credentialsExpired: false, credentialExpiresAt: new Date("2027-06-01"),
+        credentialsExpired: false, credentialExpiresAt,
         description: { displayName: "renewed" },
       });
     });
@@ -213,13 +219,14 @@ describe("connect handoff", () => {
 
   it("marks a committed reconnect restored even when the description cannot be refreshed", async () => {
     const { stub, inDo } = freshUser();
+    const credentialExpiresAt = credentialExpiryIn(240);
     const { ticket } = await inDo(async user => {
       user.storage.nextAccountId.put(1);
       user.storage.connectedAccounts.put({
         id: 0, account: fakeAccount(user, "stale", { failDescribe: true }).account, vendorId: "github",
         description: { displayName: "old" }, credentialsExpired: true,
       });
-      return user.stagePendingRestore(0, STAGE_ID, new Date("2027-06-01"));
+      return user.stagePendingRestore(0, STAGE_ID, credentialExpiresAt);
     });
     const nonce = await stub.openConnectFlow(0);
 
@@ -230,7 +237,7 @@ describe("connect handoff", () => {
       expect(await fakeAccount(user, "stale").calls())
         .toEqual([`commitReconnect(${STAGE_ID})`, "describe"]);
       expect(user.storage.connectedAccounts.get(0)).toMatchObject({
-        credentialsExpired: false, credentialExpiresAt: new Date("2027-06-01"),
+        credentialsExpired: false, credentialExpiresAt,
         description: { displayName: "old" },
       });
     });
