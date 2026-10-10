@@ -4547,6 +4547,38 @@ export type AiToolCall = {
     operations: {type: CanvasOperation["type"]}[];
   };
   output?: string;
+} | {
+  /**
+   * List the tools of the published console open in the operate session (operate chats only, while
+   * `CONSOLE_TOOLS` is on). The output is kernel-built text, each widget's block led by the
+   * untrusted-output frame; it is recorded so replay never lists again.
+   */
+  toolName: "listConsoleTools";
+  input: {};
+  output?: string;
+} | {
+  /**
+   * Call one tool of a widget the open published console offers (operate chats only, while
+   * `CONSOLE_TOOLS` is on). The console and revision come from the person's page, never from the
+   * agent. Success is recorded in `output` and a tool's own error or a refusal in `error`, both as
+   * the agent saw them (authored text only inside the untrusted-output frame); replay re-emits the
+   * record and never calls the tool again.
+   */
+  toolName: "callConsoleTool";
+  input: {
+    /** The widget's frozen install, as `listConsoleTools` named it. */
+    widgetId: WorkpieceId;
+    /** The declared tool name. */
+    tool: string;
+    /**
+     * The tool's input as the agent sent it; `{}` when omitted. Shaped as a declared input
+     * (`WidgetToolSchema` for inputs: flat, each value a builder-written enum string, a boolean or
+     * an integer), which the tool's parameter schema enforces before the call; the console's
+     * workspace checks the values against the declaration, and refuses a call that does not match.
+     */
+    input?: {[name: string]: string | number | boolean};
+  };
+  output?: string;
 });
 
 // TODO: Extend AiToolCall for code-mode tool calls.
