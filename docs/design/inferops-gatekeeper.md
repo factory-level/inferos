@@ -232,7 +232,7 @@ InferOps' section `PATCH` takes no expected version and does not replay an idemp
 **Limits and pagination.**
 - A search returns at most `limit` hits, best first, with no cursor. It is a ranked top-N, and a caller who wants more refines the query.
 - Fewer than `limit` hits is normal.
-- Ties are broken by section id, both at each seed's cut-off and in the final order, so the same corpus and query give the same hits in the same order.
+- Ties are broken by section id, both at each seed's cut-off and in the final order, so the same corpus and query give the same hits in the same order. The exception is an embedding-provider outage: InferOps then answers from full text alone, which can change the hits.
 - InferOS refuses these with `INVALID_REQUEST` before any request is sent:
   - an empty or all-whitespace query, or one over 500 characters after trimming;
   - a non-integer `limit`, or one outside 1–50.
@@ -255,6 +255,7 @@ InferOps' section `PATCH` takes no expected version and does not replay an idemp
 - A snippet is an excerpt of the section's **markdown source**, not rendered text. InferOps highlights it with `ts_headline` over the section `body`, while full-text matching runs on the normalized text (`normalized_body`), so a highlight can occasionally miss a word that matched, or mark one inside markdown syntax.
 - Matched words are wrapped in highlight markers ([decision 6](#decisions-for-the-owner)). Because the source is markdown, text the author wrote can look like a highlight under the current `<b>` markers. InferOS treats the snippet as text, never as HTML.
 - A snippet is at most 300 characters. The cut can fall inside a highlight, so InferOS must tolerate an opening marker with no closing one.
+- InferOS interprets highlight markers in `snippet` only, never in `documentTitle`, `tag` or `documentSlug`, and never entity-decodes a snippet: `&lt;` stays the four characters it is.
 - A hit found by the vector leg alone has no matched words, so its snippet is the section's first words.
 
 **Errors and refusals.** Errors follow [Errors](#errors):
