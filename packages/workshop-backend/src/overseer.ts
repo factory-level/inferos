@@ -3,6 +3,7 @@ import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-sha
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
+import { parseWidgetTools } from "@gadgets/workshop-shared/widget-tools";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
   isGadgetModule,
@@ -3107,14 +3108,17 @@ class OverseerImpl implements AgentHooks {
 
   // The commits a console save or publication checks its registered gadgets against (see
   // SourceCommits), each classified as a widget from its paths and its view.json and tools.json
-  // (see #classifiedFiles), read before the transaction that checks them.
+  // (see #classifiedFiles), read before the transaction that checks them: one pass that keeps a
+  // view-only commit's view.json text and a callable commit's parsed tools.json.
   async readSourceCommits(commitIds: Iterable<string>): Promise<SourceCommits> {
     let commits = new Map<string, SourceCommit>();
     for (let commitId of new Set(commitIds)) {
       let files = await this.#classifiedFiles("widget", commitId);
       let classification = classifyGadgetFiles("widget", files);
+      let callable = classification.class === "callableTools" || classification.class === "callableCombined";
       commits.set(commitId, { classification,
-        viewText: classification.class === "viewOnly" ? files.get(GADGET_VIEW_FILE) ?? null : null });
+        viewText: classification.class === "viewOnly" ? files.get(GADGET_VIEW_FILE) ?? null : null,
+        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null });
     }
     return commits;
   }
@@ -11754,7 +11758,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.announceConsoleRevision(id, null);
   }
   // Publication captures the console and its sources, reads the captured commits, then publishes
-  // in one transaction only if the capture still holds (see ConsoleCapture).
+  // in one transaction only if the capture still holds (see ConsoleCapture), each widget entry
+  // freezing its commit's surfaces and each bound view its spec.
   async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
     let store = this.#consoleStore();
     let capture = store.capture(id, expectedRevision);
@@ -14019,8 +14024,11 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // unpublished or deleted, or from a console the person has since left stops working.
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     let workspaceId = this.impl.ctx.id.toString();
+    let ui = true;
     let check = async () => {
-      this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
+      // A published entry never changes (a republish makes new frozen installs), so its `ui` is
+      // the same at every check.
+      ui = this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.ui !== false;
       let open = (await this.#clientUser.getOperatePage()).state.console;
       if (open?.workspaceId !== workspaceId || open.consoleId !== consoleId ||
           open.source !== "published" || open.revision !== revision) {
@@ -14030,7 +14038,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     await check();
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
+    return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check, !ui);
   }
 
   // --- Denied methods (build-only) ---
@@ -14710,8 +14718,10 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
 
   // `check`, for a widget opened through a console, throws once that console no longer offers it
   // or the caller no longer has it open; it runs before every call that reaches the gadget.
+  // `uiLess` marks a console widget published with no UI (a tools-only callable widget): its tools
+  // run only in isolated lanes, so nothing here renders it or reaches its shared server.
   constructor(private impl: OverseerImpl, private id: WorkpieceId,
-      private clientUserId: string, private check?: () => Promise<void>) {
+      private clientUserId: string, private check?: () => Promise<void>, private uiLess = false) {
     super();
     this.#leaveSession = impl.joinSession("use");
   }
@@ -14731,6 +14741,10 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     throw new Error("Unauthorized: this collaborator only has permission to use the gadget's UI.");
   }
 
+  #denyUiLess(): void {
+    if (this.uiLess) throw new Error(`Gadget ${this.id} has no UI; its console offers only its tools.`);
+  }
+
   // --- Allowed methods ---
 
   async getId(): Promise<WorkpieceId> {
@@ -14746,6 +14760,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (chatId !== undefined) {
       this.#deny();
     }
+    this.#denyUiLess();
     await this.check?.();
     return this.impl.getGadgetUiBundle(this.id);
   }
@@ -14754,6 +14769,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (chatId !== undefined) {
       this.#deny();
     }
+    this.#denyUiLess();
     await this.check?.();
 
     this.impl.recordGadgetAnalytics({
@@ -14769,12 +14785,14 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
     if (chatId !== undefined) this.#deny();
+    this.#denyUiLess();
     await this.check?.();
     return this.impl.getGadgetExportFormats(this.id);
   }
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
+    this.#denyUiLess();
     await this.check?.();
     return this.impl.exportGadget(this.id, id);
   }

@@ -4,7 +4,7 @@ import {
   consoleEventMismatch,
   consoleScreens,
   MAX_CONSOLE_VIEWS,
-  MAX_CONSOLE_WIDGETS,
+  MAX_BLUEPRINT_ID_LENGTH, MAX_CONSOLE_WIDGETS,
   MAX_ROLLUP_SCREENS,
   parseOperateConsoleContent,
   publishedConsole,
@@ -133,6 +133,15 @@ describe("console widget registry", () => {
     expect(() => parseOperateConsoleContent(content([board],
         { widgets: [{ ...entry, state: "kept" as ConsoleWidgetEntry["state"] }] }))).toThrow(/resettable/);
   });
+
+  it("bounds the blueprint id at MAX_BLUEPRINT_ID_LENGTH characters, and requires a string", () => {
+    let parse = (blueprintId: unknown) => () =>
+      parseOperateConsoleContent(content([board], { widgets: [{ ...entry, blueprintId } as ConsoleWidgetEntry] }));
+    expect(parse("b".repeat(MAX_BLUEPRINT_ID_LENGTH))()).toMatchObject({ widgets: [{ blueprintId: "b".repeat(128) }] });
+    for (let blueprintId of ["b".repeat(MAX_BLUEPRINT_ID_LENGTH + 1), "", undefined, 1]) {
+      expect(parse(blueprintId)).toThrow(new TypeError("A console widget must name a blueprint id of 1-128 characters."));
+    }
+  });
 });
 
 describe("which gadgets a console may offer", () => {
@@ -209,11 +218,15 @@ describe("bound view entries", () => {
   const parse = (extra: object) => () => parseOperateConsoleContent(content([board],
     { hostBoards, boundViews: [entry(extra) as BoundViewEntry] }));
 
-  it("refuses a blueprint id that is not a string and requirements that are not a list of strings", () => {
+  it("refuses a blueprint id that is not a string of 1-128 characters and requirements that are not a list of strings", () => {
     expect(parseOperateConsoleContent(content([board], { hostBoards, boundViews: [entry()] })).boundViews)
       .toEqual([{ ...entry(), label: "View" }]);
     for (let blueprintId of [undefined, null, 1, ["bp"], { id: "bp" }]) {
-      expect(parse({ blueprintId })).toThrow(new TypeError("A bound view must name a blueprint id."));
+      expect(parse({ blueprintId })).toThrow(new TypeError("A bound view must name a blueprint id of 1-128 characters."));
+    }
+    expect(parse({ blueprintId: "b".repeat(MAX_BLUEPRINT_ID_LENGTH) })).not.toThrow();
+    for (let blueprintId of ["b".repeat(MAX_BLUEPRINT_ID_LENGTH + 1), ""]) {
+      expect(parse({ blueprintId })).toThrow(new TypeError("A bound view must name a blueprint id of 1-128 characters."));
     }
     for (let requirements of [undefined, null, "board", { 0: "board", length: 1 }, [1], ["board", null], [["board"]]]) {
       expect(parse({ requirements })).toThrow(new TypeError("A bound view's requirements must be a list of requirement names."));

@@ -1,6 +1,6 @@
 ---
 title: Configuration ownership and required settings
-updated: 2026-10-05
+updated: 2026-10-09
 ---
 
 # Configuration ownership and required settings
@@ -54,6 +54,7 @@ as its `settings` check. Doctor reports a secret by presence only and never prin
 | `INFEROPS_ENABLED` | value | deployer | off in version 2; on for version 1 and the plain checkout | Optional. | local | `inferos.config.json` `capabilities.INFEROPS_ENABLED` (version 2), else the shell; `resolveInferOpsEnabled` | The InferOps integration switch the gatekeeper enforces on every call. A version 2 wrapper's capability wins over the shell. |
 | `INFEROPS_TABLES_ENABLED` | value | deployer | off | Optional. | local | `inferos.config.json` `capabilities.INFEROPS_TABLES_ENABLED` (version 2), else the shell | Turns read-only InferOps custom-table bindings through the InferOps gatekeeper on. Needs `INFEROPS_ENABLED`; a version 2 wrapper's capability wins over the shell. |
 | `INFEROPS_HOST_BOARDS` | value | deployer | off | Optional. | local | `inferos.config.json` `capabilities.INFEROPS_HOST_BOARDS` (version 2), else the shell | Proposed: turns kernel host boards on (a console's host-rendered board, read by each operator through their own connection). Needs `INFEROPS_ENABLED`; a version 2 wrapper's capability wins over the shell. |
+| `CONSOLE_TOOLS` | value | deployer | off | Never, until MVP-35 passes. | local | The shell only; no `inferos.config.json` field | Turns callable widget tools on for console publication (`consoleToolsEnabled`): off unless exactly `"true"`. **Must not be set in any shared or deployed environment** until MVP-35 records the remote CPU, wall-time and memory checks as passed (see [operate mode](../architecture/operate-mode.md#configuration)); set only in test harnesses. |
 | `local.port` | value | developer | `8787` | Always. | local | `inferos.config.json`; `pnpm dev` and `pnpm local start` | The wrapper's local Workshop port, distinct per wrapper. |
 | `upstream.revision` | reference | deployer | none | Always. | local | `inferos.config.json`, checked against the submodule by `inferos:check` | The exact InferOS commit the wrapper pins (and `upstream.repository`, an HTTPS URL or absolute path with no credentials). |
 | `Cloud deployment target` | reference | deployer | none | Optional. | cloud | No wrapper deploy command yet | Worker names, account and route for a hosted customer. **Unsupported:** The private customer runs locally; cloud deployment is tracked in factory-level/inferos#11. |
