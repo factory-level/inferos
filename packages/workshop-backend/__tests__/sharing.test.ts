@@ -5,6 +5,7 @@ import {
   SharingStorage,
   CollaboratorRecord,
   ShareKeyRecord,
+  watchSharingAuthzInputs,
 } from "../src/sharing.js";
 import {
   AiChatAuthorInfo, PermissionEdge, CollaboratorRole, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES,
@@ -12,7 +13,7 @@ import {
 import { makeMockStorage } from "./mock-storage.js";
 
 function makeStorage(): SharingStorage {
-  return createTypedStorage(makeMockStorage(), {
+  let storage = createTypedStorage(makeMockStorage(), {
     singletons: { authzGeneration: 0 },
     collections: {
       collaborators: collection<CollaboratorRecord>()({
@@ -26,6 +27,8 @@ function makeStorage(): SharingStorage {
       }),
     },
   });
+  watchSharingAuthzInputs(storage);
+  return storage;
 }
 
 const OWNER = "owner@example.com";
@@ -833,8 +836,9 @@ describe("ownerInvitesOnly", () => {
 });
 
 // The authorization generation (callable-widget contract §4.1, step C5a): every sharing write that
-// changes who reaches the workspace raises it once per write, in the same synchronous block, and
-// nothing else does. The Overseer-side inputs are enumerated in authz-generation.test.ts.
+// changes a record raises it once per write, inside the write's own transaction (the subscribers
+// watchSharingAuthzInputs registers), and nothing else does. The Overseer-side inputs are
+// enumerated in authz-generation.test.ts.
 
 function generation(storage: SharingStorage): number {
   return storage.authzGeneration.get();
@@ -877,6 +881,17 @@ describe("authorization generation", () => {
     ["newShareLinkKey", 1, ({ mgr }) => mgr.newShareLinkKey({ caller: owner, linkId: "k1" })],
     ["revokeShareLink", 1, ({ mgr }) => mgr.revokeShareLink(owner, "k1", [])],
     ["revokeShareLink + #reRootKeptUsers", 2, ({ mgr }) => mgr.revokeShareLink(owner, "k1", ["c"])],
+    // Each copy of a link is its own record, so revoking deletes, and counts, each one.
+    ["revokeShareLink (link with two copies)", 3, async ({ mgr, storage }) => {
+      await mgr.newShareLinkKey({ caller: owner, linkId: "k1" });
+      await mgr.newShareLinkKey({ caller: owner, linkId: "k1" });
+      let before = generation(storage);
+      mgr.revokeShareLink(owner, "k1", []);
+      return generation(storage) - before;
+    }],
+    // A note grants nothing, but the rule is "any change to the record": a spurious rise only
+    // refuses a call that can be retried, and an exemption is one more thing to keep correct.
+    ["updateShareLink (note edit)", 1, ({ mgr }) => mgr.updateShareLink(owner, "k1", "a note")],
   ];
 
   for (let [name, writes, mutate] of MUTATIONS) {
@@ -890,7 +905,7 @@ describe("authorization generation", () => {
     });
   }
 
-  it("is unchanged by reads, previews, note edits, refusals and no-op redemptions", async () => {
+  it("is unchanged by reads, previews, no-op rewrites, refusals and no-op redemptions", async () => {
     let m = seeded();
     let { mgr, storage, flags } = m;
     let { key } = await mgr.createShareLink({ caller: owner, role: "use" });
@@ -902,7 +917,7 @@ describe("authorization generation", () => {
     mgr.getEffectiveRole("a");
     mgr.previewRemoveCollaborator(owner, "a");
     mgr.previewRevokeShareLink(owner, "k1");
-    mgr.updateShareLink(owner, "k1", "a note");
+    mgr.updateShareLink(owner, "k1", undefined);
     expect(() => mgr.addCollaborator({ caller: collab("a"), profile: profile("x"), role: "build" }))
         .toThrow(/higher than your own/);
     expect(() => mgr.removeCollaborator(collab("c"), "a", [])).toThrow(/only remove/);
@@ -977,6 +992,20 @@ describe("authorization generation", () => {
 
     expect(mgr.getEffectiveRole("a")).toBe("use");
     expect(generation(storage)).toBe(before + 2);
+  });
+
+  it("addCollaborator that changes nothing leaves it alone", () => {
+    let m = seeded();
+    let before = generation(m.storage);
+    // a already holds a use edge from the owner, so a repeat grant (or a lower one, which never
+    // downgrades) rewrites an identical record.
+    m.mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use" });
+    expect(generation(m.storage)).toBe(before);
+    // A note on the existing edge is a change, and raises it.
+    m.mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use", note: "hi" });
+    expect(generation(m.storage)).toBe(before + 1);
+    m.mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use", note: "hi" });
+    expect(generation(m.storage)).toBe(before + 1);
   });
 
   it("never decreases", async () => {

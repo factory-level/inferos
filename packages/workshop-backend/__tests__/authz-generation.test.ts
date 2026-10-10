@@ -2,8 +2,10 @@
 // input in the §4.1 table is driven here, through the real code path that changes it, and each must
 // raise the generation by the number of writes it makes. The generation never decreases and
 // survives a Durable Object restart, and a revoke followed by a regrant raises it twice even though
-// the role reads the same afterwards. sharing.test.ts checks the sharing writes' placement after
-// their last await; authz-generation-guard.test.ts pins every write site in the source.
+// the role reads the same afterwards. A bump commits or rolls back with its own write, and a
+// deleted workspace's generation exceeds every value read before the deletion. sharing.test.ts
+// checks the sharing writes' placement after their awaits; authz-generation-guard.test.ts checks
+// that every input is watched and that nothing writes one past the watchers.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding). The User DOs, gatekeeper
 // facets and the restart's ctx.abort() are the only fakes: a real abort would kill the test DO.
@@ -336,6 +338,46 @@ describe("authorization generation", () => {
           { title: "t", description: "d", containsRestrictedData: true, ownerInvitesOnly: true },
           { from: "user" });
       expect(impl.authzGeneration()).toBe(before);
+    });
+  });
+
+  it("a bump commits or rolls back with its own write", async () => {
+    await withOverseer(async ({ impl }) => {
+      seedGatekeeper(impl, 1);
+      // The second flag's put fails after its bump has run (a later subscriber throws, as an index
+      // conflict would). Its transaction undoes both; the first flag and its bump stay committed.
+      let failing = { update: () => { throw new Error("second put fails"); } };
+      impl.storage.ownerInvitesOnly.subscribe(failing);
+      let before = impl.authzGeneration();
+      try {
+        await expect(impl.authorizeObservation(1,
+            { title: "t", description: "d", containsRestrictedData: true, ownerInvitesOnly: true },
+            { from: "user" })).rejects.toThrow(/second put fails/);
+      } finally {
+        impl.storage.ownerInvitesOnly.unsubscribe(failing);
+      }
+      expect(impl.storage.containsRestrictedData.get()).toBe(true);
+      expect(impl.storage.ownerInvitesOnly.get()).toBe(false);
+      expect(impl.authzGeneration()).toBe(before + 1);
+    });
+  });
+
+  it("after deleteSelf, exceeds every value read before the deletion", async () => {
+    await withOverseer(async ({ impl, instance }) => {
+      let client = await openAsOwner(instance);
+      client.notifyClosed = async () => {};
+      // Raise it well past the two bumps deleteSelf makes, so a reset to 0 would land on a value a
+      // call in flight could have recorded (0 -> 1 -> 2) and pass its check.
+      let sharing = await impl.getSharingManager();
+      let seen = [impl.authzGeneration()];
+      for (let id of ["a", "b", "c"]) {
+        sharing.addCollaborator({ caller: owner, profile: profile(id), role: "use" });
+        seen.push(impl.authzGeneration());
+      }
+      expect(Math.max(...seen)).toBeGreaterThan(2);
+
+      await client.deleteSelf();
+      expect(impl.authzGeneration()).toBeGreaterThan(Math.max(...seen));
     });
   });
 
