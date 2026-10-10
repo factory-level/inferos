@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import type { Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
@@ -27,6 +27,35 @@ const textModules: Plugin = {
     }
   },
 }
+
+// capnweb-validate decides what to transform by the id with its query stripped, so it also takes
+// `foo.ts?raw` (and `?url`, `?inline`), whose code is vite's `export default "<source>"`. It then
+// applies edits whose offsets come from the file's TypeScript source (the validator prelude at 0,
+// and `__cw.__validateRpcClass(...)` over each `@validateRpc()`) to that string module, splicing
+// them into the middle of the string. The guard tests read `src/` through `?raw` to scan what is
+// on disk, so those ids are left untransformed; every module id without such a query is
+// validated as before.
+const STRING_QUERY = /[?&](?:raw|url|inline)(?:[&=]|$)/
+function rpcValidation(): Plugin {
+  let plugin = capnwebValidate() as Plugin
+  let transform = plugin.transform as Extract<Plugin['transform'], (...args: never[]) => unknown>
+  return {
+    ...plugin,
+    transform(code, id, options) {
+      return STRING_QUERY.test(id) ? null : transform.call(this, code, id, options)
+    },
+  }
+}
+
+// The UTF-16 length of every `src/**/*.ts` file as it is on disk, keyed as the guard tests'
+// `import.meta.glob("../src/**/*.ts")` keys it, so a test in workerd (which cannot read the disk)
+// can check that a `?raw` import is the file itself (see rpcValidation).
+const sourceLengths = Object.fromEntries(
+  readdirSync(path.resolve(import.meta.dirname, 'src'), { recursive: true, encoding: 'utf-8' })
+    .filter(file => file.endsWith('.ts'))
+    .map(file => [`../src/${file.split(path.sep).join('/')}`,
+      readFileSync(path.resolve(import.meta.dirname, 'src', file), 'utf-8').length]),
+)
 
 // Records the agent spans (see src/agent-tracing.ts) this Worker emits, as a streaming tail
 // worker receives them, so tests can read them back through the SPAN_RECORDER binding.
@@ -67,7 +96,7 @@ export default {
 export default defineConfig({
   plugins: [
     textModules,
-    capnwebValidate(),
+    rpcValidation(),
     cloudflareTest({
       // The production Worker plus test-only entrypoints (see __tests__/test-worker.ts).
       main: './__tests__/test-worker.ts',
@@ -99,6 +128,7 @@ export default defineConfig({
       },
     }),
   ],
+  define: { __WORKSHOP_SOURCE_LENGTHS__: JSON.stringify(sourceLengths) },
   test: {
     include: ['__tests__/*.test.ts'],
     // Asserts the pool actually started, rather than trusting a green run to mean workerd.

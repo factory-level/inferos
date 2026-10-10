@@ -50,6 +50,8 @@ covers:
   - packages/workshop-backend/src/chat-taint.ts
   - packages/workshop-backend/__tests__/chat-taint.test.ts
   - packages/workshop-backend/__tests__/chat-taint-guard.test.ts
+  - packages/workshop-backend/__tests__/raw-sources.test.ts
+  - packages/workshop-backend/vitest.config.ts
   - packages/integration-tests/__tests__/operate-external-messages.test.ts
 updated: 2026-10-10
 ---
@@ -323,6 +325,8 @@ A console offers a view-only install only as a **bound view entry** (`BoundViewE
   - `storage.deleteAll()` runs only in `deleteSelf`;
   - only the helper and `deleteSelf` write the generation;
   - direct bumps are limited to the watchers, `scheduleAccessRestart` and `deleteSelf`, and the restart bumps before its first await.
+
+  Both guard tests read `src/` through `import.meta.glob(…, {query: "?raw"})`. capnweb-validate picks the modules it transforms by the id without its query, so it would also edit those string modules, applying offsets taken from the TypeScript source to vite's `export default "<source>"` and splicing `__cw.__validateRpcClass(…)` into the scanned text. `vitest.config.ts` therefore wraps the plugin (`rpcValidation`) to leave `?raw`, `?url` and `?inline` ids untransformed, and `raw-sources.test.ts` checks that every `?raw` source has its on-disk length (passed in through `define` as `__WORKSHOP_SOURCE_LENGTHS__`, since workerd cannot read the disk) and contains none of the transform's names.
 
 ## Configuration
 
