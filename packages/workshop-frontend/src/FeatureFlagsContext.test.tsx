@@ -76,4 +76,36 @@ describe("FeatureFlagsProvider", () => {
       loading: false,
     });
   });
+
+  // A reconnect replaces the stub. Falling back to the defaults until it answers would switch every
+  // flag-gated surface off and on again, unmounting it (and its state) mid-blip.
+  it("keeps the flags last loaded while a replacement API reloads them", async () => {
+    const replacement = deferred<UiFeatureFlags>();
+    let currentApi = api(async () => RESOLVED_FLAGS);
+    let current: ReturnType<typeof useUiFeatureFlags> | undefined;
+
+    vi.mocked(useAuthenticatedApi).mockImplementation(
+      () => ({ authenticatedApi: currentApi }) as ReturnType<typeof useAuthenticatedApi>,
+    );
+
+    function Probe() {
+      current = useUiFeatureFlags();
+      return null;
+    }
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(<FeatureFlagsProvider><Probe /></FeatureFlagsProvider>));
+    const loaded = { ...DEFAULT_UI_FEATURE_FLAGS, ...RESOLVED_FLAGS };
+    expect(current).toEqual({ flags: loaded, loading: false });
+
+    currentApi = api(() => replacement.promise);
+    await act(async () => root!.render(<FeatureFlagsProvider><Probe /></FeatureFlagsProvider>));
+    expect(current).toEqual({ flags: loaded, loading: true });
+
+    await act(async () => { replacement.resolve({} as UiFeatureFlags); });
+    expect(current).toEqual({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: false });
+  });
 });

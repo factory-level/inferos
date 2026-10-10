@@ -45,8 +45,12 @@ export function FeatureFlagsProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true }
   }, [authenticatedApi])
 
-  const value = loaded?.api === authenticatedApi
-    ? { flags: loaded.flags, loading: false }
+  // A replacement stub (a reconnect re-authenticates on the new socket) keeps the flags last
+  // loaded until its own answer arrives. Falling back to the defaults meanwhile would switch every
+  // flag-gated surface off and on again, remounting it and dropping its state, such as an open
+  // host-board dialog under the Operate shell.
+  const value = loaded
+    ? { flags: loaded.flags, loading: loaded.api !== authenticatedApi }
     : { flags: DEFAULT_UI_FEATURE_FLAGS, loading: true }
 
   return <FeatureFlagsContext.Provider value={value}>{children}</FeatureFlagsContext.Provider>

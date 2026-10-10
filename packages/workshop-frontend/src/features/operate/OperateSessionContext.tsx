@@ -79,6 +79,9 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
   useEffect(() => {
     let cancelled = false
     let subscription: RpcStub<{}> | undefined
+    // A reconnect re-runs this with the replacement stub while the page and its snapshot stay
+    // mounted, so a failed subscribe on the previous connection must not outlive it.
+    setError(null)
     const stub = authenticatedApi.getOperateSession()
     setSession({ stub })
     stub.subscribe(update => {
