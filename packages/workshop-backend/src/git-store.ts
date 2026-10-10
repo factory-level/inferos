@@ -219,7 +219,9 @@ export class UnsupportedTreeEntryError extends Error {
 }
 
 /** Thrown by `GitStore.readCommitBlob(…, "text")` for a file that is not strict UTF-8 text. */
-export class BlobTextError extends Error {}
+export class BlobTextError extends Error {
+  override name = "BlobTextError";
+}
 
 // Decodes `bytes` as UTF-8 with no replacement and no byte order mark, naming `path` on refusal.
 function decodeStrictUtf8(bytes: Uint8Array, path: string): string {
