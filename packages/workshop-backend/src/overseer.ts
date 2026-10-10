@@ -3089,10 +3089,12 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // A commit's full file map as `classifyGadgetFiles` takes it: every path, with a widget's
-  // view.json and tools.json read as strict UTF-8 (null when they are not).
+  // A commit's file map as `classifyGadgetFiles` takes it: every path, which is all it reads of
+  // most files, with only a widget's view.json and tools.json read, as strict UTF-8 (null when
+  // they are not). No other blob is read or decoded.
   async #classifiedFiles(kind: WorkspaceKind, commitId: string): Promise<Map<string, string | null>> {
-    let files: Map<string, string | null> = await this.gitStore.readCommitFiles(commitId);
+    let files = new Map<string, string | null>(
+        (await this.gitStore.readCommitPaths(commitId)).map(path => [path, null]));
     let parsed = kind === "widget" ? [GADGET_VIEW_FILE, GADGET_TOOLS_FILE] : [];
     for (let path of parsed.filter(name => files.has(name))) {
       files.set(path, await this.gitStore.readCommitBlob(commitId, path, "text").catch(error => {
@@ -3104,8 +3106,8 @@ class OverseerImpl implements AgentHooks {
   }
 
   // The commits a console save or publication checks its registered gadgets against (see
-  // SourceCommits), each classified as a widget from its full file map, read before the
-  // transaction that checks them.
+  // SourceCommits), each classified as a widget from its paths and its view.json and tools.json
+  // (see #classifiedFiles), read before the transaction that checks them.
   async readSourceCommits(commitIds: Iterable<string>): Promise<SourceCommits> {
     let commits = new Map<string, SourceCommit>();
     for (let commitId of new Set(commitIds)) {

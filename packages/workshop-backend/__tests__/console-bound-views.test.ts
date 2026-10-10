@@ -4,10 +4,12 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
+import { writeBlob, writeTree, type TreeEntry } from "isomorphic-git";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import type { BoundViewEntry, ConsoleWidgetEntry, HostBoardEntry, OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
 import { CONSOLE_SIZE_LIMITS, WorkspaceConsoleStore, type FrozenInstalls, type SourceCommits } from "../src/console-store";
+import { BlobTextError, GITDIR, makeGitObjectsFs, type GitStore } from "../src/git-store";
 import { makeOverseerStorage, type GadgetRecord, type OverseerDurableObject } from "../src/overseer";
 import { makeMockStorage } from "./mock-storage";
 
@@ -304,8 +306,7 @@ describe("publishing a console's bound views", () => {
 describe("publication against real commits", () => {
   type Impl = {
     storage: ReturnType<typeof makeOverseerStorage>;
-    gitStore: { writeFilesAsCommit(files: Map<string, string>, options: object): Promise<string>;
-      readCommitFiles(oid: string): Promise<Map<string, string>> };
+    gitStore: GitStore;
     createGadget(title: string, bindingName: string, chatId?: number, output?: undefined, commitId?: string): GadgetRecord;
     frozenInstalls(): FrozenInstalls;
     readSourceCommits(commitIds: Iterable<string>): Promise<SourceCommits>;
@@ -334,13 +335,13 @@ describe("publication against real commits", () => {
     await inOverseer("bound-view-race", async (impl, state) => {
       let { store, saved, record, codeCommit } = await prepare(impl, state);
       let capture = store.capture(saved.id, saved.revision);
-      let read = impl.gitStore.readCommitFiles.bind(impl.gitStore);
-      impl.gitStore.readCommitFiles = async oid => {
+      let read = impl.gitStore.readCommitPaths.bind(impl.gitStore);
+      impl.gitStore.readCommitPaths = async oid => {
         impl.storage.gadgets.put({ ...impl.storage.gadgets.get(record.id) as GadgetRecord, commitId: codeCommit });
         return read(oid);
       };
       let commits = await impl.readSourceCommits(capture.commitIds);
-      impl.gitStore.readCommitFiles = read;
+      impl.gitStore.readCommitPaths = read;
       expect(() => store.publish(saved.id, saved.revision, capture, commits)).toThrow(/changed while it was being published/);
       expect(store.get(saved.id, "draft")!.published).toBeNull();
     });
@@ -353,6 +354,113 @@ describe("publication against real commits", () => {
       let published = store.publish(saved.id, saved.revision, capture, await impl.readSourceCommits(capture.commitIds));
       expect(published.published!.content.boundViews![0]!.frozen).toEqual(
         { sourceGadgetId: record.id, commitId: viewCommit, specText: COMMITS.view!["view.json"] });
+    });
+  });
+
+  // A commit of raw bytes, with at most one directory level, written into the overseer's own
+  // object store. Returns the commit and each file's blob oid.
+  async function commitBytes(impl: Impl, files: Record<string, string | Uint8Array>) {
+    let fs = makeGitObjectsFs(impl.storage.gitObjects);
+    let blobs = new Map<string, string>();
+    let root: TreeEntry[] = [];
+    let dirs = new Map<string, TreeEntry[]>();
+    for (let [path, content] of Object.entries(files)) {
+      let blob = typeof content === "string" ? new TextEncoder().encode(content) : content;
+      let oid = await writeBlob({ fs, gitdir: GITDIR, blob });
+      blobs.set(path, oid);
+      let [dir, name] = path.includes("/") ? path.split("/") : [undefined, path];
+      let entry: TreeEntry = { mode: "100644", path: name!, oid, type: "blob" };
+      if (dir === undefined) root.push(entry);
+      else dirs.set(dir, [...dirs.get(dir) ?? [], entry]);
+    }
+    for (let [dir, tree] of dirs) {
+      root.push({ mode: "040000", path: dir, oid: await writeTree({ fs, gitdir: GITDIR, tree }), type: "tree" });
+    }
+    let commit = await impl.gitStore.writeCommitForTree(await writeTree({ fs, gitdir: GITDIR, tree: root }),
+      { message: "test", author: { name: "t", email: "t@example.com" }, timestamp: new Date(0), parents: [] });
+    return { commit, blobs };
+  }
+
+  const NOT_UTF8 = new Uint8Array([0x2f, 0x2f, 0xff, 0xfe, 0x0a]);
+  const TOOLS = JSON.stringify([{ name: "version", description: "The widget's version.", method: "version", effect: "read",
+    input: { type: "object", properties: {} }, output: { type: "string", maxLength: 16 } }]);
+
+  it("reads only a commit's paths, plus its view.json and tools.json", async () => {
+    await inOverseer("bound-view-paths", async impl => {
+      // A widget's code is neither read nor decoded: one file is not UTF-8, another's blob is gone.
+      let { commit, blobs } = await commitBytes(impl, { "client.js": NOT_UTF8, "server.js": "", "lib/util.js": "x" });
+      impl.storage.gitObjects.delete(blobs.get("lib/util.js")!);
+      let mixed = await commitBytes(impl, { "view.json": spec(["board"]), "client.js": NOT_UTF8 });
+      let read: string[] = [];
+      let readBlob = impl.gitStore.readCommitBlob.bind(impl.gitStore) as (oid: string, path: string, as: "text") => Promise<string | null>;
+      impl.gitStore.readCommitBlob = (async (oid: string, path: string, as: "text") => {
+        read.push(path);
+        return readBlob(oid, path, as);
+      }) as GitStore["readCommitBlob"];
+      impl.gitStore.readCommitFiles = () => { throw new Error("readCommitFiles decodes every file"); };
+      let commits = await impl.readSourceCommits([commit, mixed.commit]);
+      expect(commits.get(commit)).toEqual({ classification: { class: "visualWidget", violations: [] }, viewText: null });
+      expect(commits.get(mixed.commit)!.classification.violations.map(violation => violation.code)).toEqual(["mixedView"]);
+      expect(read).toEqual(["view.json"]);
+    });
+  });
+
+  it("classifies exactly as the full file map with strict view.json and tools.json did", async () => {
+    await inOverseer("bound-view-classes", async impl => {
+      const cases: Record<string, string | Uint8Array>[] = [
+        ...Object.values(COMMITS),
+        { "view.json": NOT_UTF8 },
+        { "view.json": new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(spec(["board"]))]) },
+        { "view.json": spec(["board"]), "tools.json": TOOLS },
+        { "view.json": spec(["board"]), "lib/a.js": NOT_UTF8 },
+        { "server.js": "", "tools.json": TOOLS },
+        { "client.js": "", "server.js": "", "tools.json": TOOLS },
+        { "client.js": "", "server.js": "", "tools.json": "[]" },
+        { "client.js": "", "tools.json": NOT_UTF8 },
+        { "server.js": "", "tools.json": TOOLS, "tool-main.js": "" },
+        { "client.js": NOT_UTF8 },
+        { "README.md": NOT_UTF8 },
+        {},
+      ];
+      for (let files of cases) {
+        let { commit } = await commitBytes(impl, files);
+        // What readSourceCommits did before: every file decoded, then the two parsed files re-read strictly.
+        let full = new Map<string, string | null>(await impl.gitStore.readCommitFiles(commit));
+        for (let path of ["view.json", "tools.json"].filter(name => full.has(name))) {
+          full.set(path, await impl.gitStore.readCommitBlob(commit, path, "text").catch(error => {
+            if (error instanceof BlobTextError) return null;
+            throw error;
+          }));
+        }
+        let expected = classifyGadgetFiles("widget", full);
+        let { classification, viewText } = (await impl.readSourceCommits([commit])).get(commit)!;
+        expect(classification).toEqual(expected);
+        expect(viewText).toBe(expected.class === "viewOnly" ? full.get("view.json") : null);
+      }
+    });
+  });
+
+  it("undoes a refused publication's frozen installs in the overseer's own storage", async () => {
+    await inOverseer("bound-view-oversize", async (impl, state) => {
+      let long = "b".repeat(CONSOLE_SIZE_LIMITS.console);
+      let { commit } = await commitBytes(impl, COMMITS.widget!);
+      let record = impl.createGadget("Widget", "WIDGET", undefined, undefined, commit);
+      record.installedFrom = { blueprintId: long, version: 1, kind: "widget" };
+      impl.storage.gadgets.put(record);
+      impl.storage.canvases.put({ id: "floor", title: "Floor", revision: "0", sections: [] } as never);
+      let store = new WorkspaceConsoleStore(state.storage, impl.storage, ON, impl.frozenInstalls());
+      let content: OperateConsoleContent = { title: "Floor", fullChat: "off", views: [{ id: "floor", title: "Floor", type: "screen", screen: "floor" }],
+        widgets: [{ gadgetId: record.id, blueprintId: long, version: 1, label: "W", state: "resettable" }] };
+      let saved = store.create(content, await impl.readSourceCommits(store.sourceCommitIds(content)));
+      let gadgets = Array.from(impl.storage.gadgets.list());
+      let nextId = impl.storage.nextGatekeeperId.get();
+      let capture = store.capture(saved.id, saved.revision);
+      let commits = await impl.readSourceCommits(capture.commitIds);
+      expect(() => store.publish(saved.id, saved.revision, capture, commits)).toThrow(/over 458752 bytes published/);
+      expect(Array.from(impl.storage.gadgets.list())).toEqual(gadgets);
+      expect(impl.storage.gadgets.byBindingName.get("WIDGET_PUBLISHED")).toBeUndefined();
+      expect(impl.storage.nextGatekeeperId.get()).toBe(nextId);
+      expect(store.get(saved.id, "draft")!.published).toBeNull();
     });
   });
 });

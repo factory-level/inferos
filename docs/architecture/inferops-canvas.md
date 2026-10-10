@@ -26,7 +26,7 @@ covers:
   - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-10-09
+updated: 2026-10-10
 ---
 
 # InferOps canvas and transactional widgets
@@ -352,7 +352,7 @@ The kind decides what the workspace builds, through pure functions in `workshop-
 - `checkWorkspaceKind(kind, filenames)` is the classifier given filenames alone. It is unchanged for gadgets with no `view.json` or `tools.json`.
 - `blueprintPublishRefusals(kind, violations)` is what blueprint publish enforces: every violation for a widget, and only `unexpectedView` and `unexpectedTools` for an app or workflow. Their other codes were never enforced at publish (see [Operate mode](operate-mode.md#console-widget-registry)).
 
-`GitStore.readCommitBlob(commitId, path)` (`git-store.ts`) reads one file of a commit as raw bytes. With `"text"`, it decodes them as strict UTF-8 and throws `BlobTextError` on invalid UTF-8 or a leading byte order mark. It returns `null` only when nothing is there, the path names a directory, or it runs through a file. A symlink or submodule anywhere on the path throws `UnsupportedTreeEntryError`, which `readCommitFiles` now throws too, so it is never read as absent. It has no size cap, so callers must cap the bytes before parsing. `readCommitFiles` still decodes non-fatally. Blueprint publish reads a widget's `view.json` and `tools.json` through it, so a file that is not strict UTF-8 is classified as not parsing.
+`GitStore.readCommitBlob(commitId, path)` (`git-store.ts`) reads one file of a commit as raw bytes. With `"text"`, it decodes them as strict UTF-8 and throws `BlobTextError` on invalid UTF-8 or a leading byte order mark. It returns `null` only when nothing is there, the path names a directory, or it runs through a file. A symlink or submodule anywhere on the path throws `UnsupportedTreeEntryError`, which `readCommitFiles` now throws too, so it is never read as absent. It has no size cap, so callers must cap the bytes before parsing. `readCommitFiles` still decodes non-fatally. Blueprint publish reads a widget's `view.json` and `tools.json` through `readCommitBlob`, so a file that is not strict UTF-8 is classified as not parsing. `readCommitPaths(commitId)` lists exactly the paths `readCommitFiles` would key, through the same tree walk and the same refusal of symlinks and submodules, without reading any blob. Classification lists a commit's paths through it and reads no other blob.
 
 The agent's `writeFile` and `editFile` refuse `client.js` in a workflow workspace's gadgets (`workspaceKindAllowsFile`), so a workflow cannot gain a UI through the agent. Worktrees are exempt. The agent reads the kind once per turn through the `getWorkspaceKind` hook.
 

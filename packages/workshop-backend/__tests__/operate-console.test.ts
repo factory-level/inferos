@@ -8,6 +8,7 @@ import {
   MAX_ROLLUP_SCREENS,
   parseOperateConsoleContent,
   publishedConsole,
+  type BoundViewEntry,
   type ConsoleView,
   type ConsoleWidgetEntry,
   type OperateConsole,
@@ -197,5 +198,25 @@ describe("host board entries", () => {
     let many = Array.from({ length: MAX_CONSOLE_WIDGETS + 1 }, (_, i) =>
       ({ ...entry(), requirement: { ...entry().requirement, name: `b${i}` } }));
     expect(() => parseOperateConsoleContent(content([board], { hostBoards: many }))).toThrow(/at most/);
+  });
+});
+
+describe("bound view entries", () => {
+  const hostBoards = [{ kind: "host-board" as const, label: "Board",
+    requirement: { name: "board", resource: "inferops-board" as const, target: "inferops://acme.operations/project/board/ENG" } }];
+  const entry = (extra: object = {}) =>
+    ({ kind: "bound-view" as const, gadgetId: 3, blueprintId: "bp", version: 1, label: " View ", requirements: ["board"], ...extra });
+  const parse = (extra: object) => () => parseOperateConsoleContent(content([board],
+    { hostBoards, boundViews: [entry(extra) as BoundViewEntry] }));
+
+  it("refuses a blueprint id that is not a string and requirements that are not a list of strings", () => {
+    expect(parseOperateConsoleContent(content([board], { hostBoards, boundViews: [entry()] })).boundViews)
+      .toEqual([{ ...entry(), label: "View" }]);
+    for (let blueprintId of [undefined, null, 1, ["bp"], { id: "bp" }]) {
+      expect(parse({ blueprintId })).toThrow(new TypeError("A bound view must name a blueprint id."));
+    }
+    for (let requirements of [undefined, null, "board", { 0: "board", length: 1 }, [1], ["board", null], [["board"]]]) {
+      expect(parse({ requirements })).toThrow(new TypeError("A bound view's requirements must be a list of requirement names."));
+    }
   });
 });

@@ -21,8 +21,8 @@ export type FrozenInstalls = {
 
 /**
  * A registered gadget's commit as read before a console save or publication: its classification as
- * a widget (`classifyGadgetFiles`, from its full file map), and its `view.json` text when it is
- * view-only.
+ * a widget (`classifyGadgetFiles`, from its paths and its `view.json` and `tools.json` text), and
+ * its `view.json` text when it is view-only.
  */
 export type SourceCommit = {
   /** The commit's files, classified for the `widget` kind. */

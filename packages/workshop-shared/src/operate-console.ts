@@ -390,9 +390,9 @@ function parseHostBoards(entries: HostBoardEntry[]): HostBoardEntry[] {
 
 /**
  * Checks a console's bound view entries and returns trimmed copies, without `frozen`, which only
- * publication sets. Each needs a unique id when it has one, a gadget id, a blueprint version, and 1
- * to `MAX_BOUND_VIEW_REQUIREMENTS` unique requirement names, each exactly the name of one of
- * `hostBoards`. Throws a `TypeError` naming the first problem. Whether the gadget is a view-only
+ * publication sets. Each needs a unique id when it has one, a gadget id, a string blueprint id, a
+ * blueprint version, and an array of 1 to `MAX_BOUND_VIEW_REQUIREMENTS` unique string requirement
+ * names, each exactly the name of one of `hostBoards`. Throws a `TypeError` naming the first problem. Whether the gadget is a view-only
  * install with that spec is the store's check.
  */
 export function parseBoundViews(entries: BoundViewEntry[], hostBoards: readonly HostBoardEntry[]): BoundViewEntry[] {
@@ -408,10 +408,14 @@ export function parseBoundViews(entries: BoundViewEntry[], hostBoards: readonly 
     if (!Number.isSafeInteger(entry.gadgetId) || entry.gadgetId < 0) {
       throw new TypeError("A bound view must name a gadget id.");
     }
+    if (typeof entry.blueprintId !== "string") throw new TypeError("A bound view must name a blueprint id.");
     if (!Number.isSafeInteger(entry.version) || entry.version < 1) {
       throw new TypeError("A bound view's version must be a blueprint version number.");
     }
-    let names = entry.requirements;
+    let names: unknown = entry.requirements;
+    if (!Array.isArray(names) || !names.every((name): name is string => typeof name === "string")) {
+      throw new TypeError("A bound view's requirements must be a list of requirement names.");
+    }
     if (names.length === 0 || names.length > MAX_BOUND_VIEW_REQUIREMENTS) {
       throw new TypeError(`A bound view reads 1-${MAX_BOUND_VIEW_REQUIREMENTS} host-board requirements.`);
     }

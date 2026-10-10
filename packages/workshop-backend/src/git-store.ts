@@ -286,8 +286,24 @@ export class GitStore {
   async readCommitFiles(oid: string): Promise<Map<string, string>> {
     let { commit } = await readCommit({ fs: this.#fs, gitdir: GITDIR, oid, cache: this.#cache });
     let files = new Map<string, string>();
-    await this.#collectTreeFiles(commit.tree, "", files);
+    await this.#walkTreeFiles(commit.tree, "", async (path, blobOid) => {
+      let { blob } = await readBlob(
+          { fs: this.#fs, gitdir: GITDIR, oid: blobOid, cache: this.#cache });
+      files.set(path, new TextDecoder().decode(blob));
+    });
     return files;
+  }
+
+  /**
+   * Lists the paths of a commit's files, exactly the keys `readCommitFiles()` would return, without
+   * reading or decoding any blob. A symlink or submodule anywhere in the tree throws
+   * `UnsupportedTreeEntryError`, as it does there.
+   */
+  async readCommitPaths(oid: string): Promise<string[]> {
+    let { commit } = await readCommit({ fs: this.#fs, gitdir: GITDIR, oid, cache: this.#cache });
+    let paths: string[] = [];
+    await this.#walkTreeFiles(commit.tree, "", path => { paths.push(path); });
+    return paths;
   }
 
   /**
@@ -488,18 +504,18 @@ export class GitStore {
     return await writeTree({ fs: this.#fs, gitdir: GITDIR, tree: entries });
   }
 
-  async #collectTreeFiles(
-      treeOid: string, prefix: string, out: Map<string, string>): Promise<void> {
+  // Visits every regular file under a tree with its `/`-joined path and blob oid, refusing any
+  // symlink or submodule.
+  async #walkTreeFiles(treeOid: string, prefix: string,
+      visit: (path: string, blobOid: string) => Promise<void> | void): Promise<void> {
     let { tree } = await readTree(
         { fs: this.#fs, gitdir: GITDIR, oid: treeOid, cache: this.#cache });
     for (let entry of tree) {
       let path = prefix + entry.path;
       if (entry.type === "tree") {
-        await this.#collectTreeFiles(entry.oid, `${path}/`, out);
+        await this.#walkTreeFiles(entry.oid, `${path}/`, visit);
       } else if (entry.type === "blob" && (entry.mode === "100644" || entry.mode === "100755")) {
-        let { blob } = await readBlob(
-            { fs: this.#fs, gitdir: GITDIR, oid: entry.oid, cache: this.#cache });
-        out.set(path, new TextDecoder().decode(blob));
+        await visit(path, entry.oid);
       } else {
         throw new UnsupportedTreeEntryError(
             `unsupported tree entry at ${path}: mode ${entry.mode}`);

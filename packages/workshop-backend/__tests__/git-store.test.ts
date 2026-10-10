@@ -265,6 +265,16 @@ describe("readCommitBlob", () => {
     }
   });
 
+  it("lists the keys readCommitFiles returns, reading no blob", async () => {
+    let { store, oid } = await commitBytes(
+        { "view.json": utf8("{}"), "client.js": new Uint8Array([0xff]), "lib/a.js": utf8("a") });
+    let paths = await store.readCommitPaths(oid);
+    expect(paths).toEqual([...(await store.readCommitFiles(oid)).keys()]);
+    expect(paths.toSorted()).toEqual(["client.js", "lib/a.js", "view.json"]);
+    let { store: special, oid: specialOid } = await commitSpecialEntries();
+    await expect(special.readCommitPaths(specialOid)).rejects.toBeInstanceOf(UnsupportedTreeEntryError);
+  });
+
   it("refuses a leading byte order mark as text", async () => {
     let { store, oid } = await commitBytes(
         { "tools.json": new Uint8Array([0xef, 0xbb, 0xbf, ...utf8("[]")]) });
