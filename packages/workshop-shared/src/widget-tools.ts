@@ -51,8 +51,9 @@ export const WIDGET_TOOL_LIMITS = Object.freeze({
 });
 
 /**
- * Method names a tool may never call: the Durable Object and Worker lifecycle and handler names,
- * the tool runner's own `__invoke`, names an RPC layer or `JSON.stringify` treats specially
+ * Method names a tool may never call: the Durable Object and Worker lifecycle and handler names
+ * (`test` is workerd's handler for `workerd test` runs), the tool
+ * runner's own `__invoke`, names an RPC layer or `JSON.stringify` treats specially
  * (`then`, `dup`, `toJSON`), `Object.prototype`'s methods, and `ctx`/`env`. `isReservedToolMethod`
  * also refuses every name that starts with `_` or `webSocket`.
  */
@@ -157,6 +158,8 @@ const INDEX = /^(?:0|[1-9][0-9]*)$/;
 // Control and format characters (bidi overrides, zero-width), line and paragraph separators, and
 // lone surrogates: what keeps authored text to one visible line.
 const NOT_PLAIN_LINE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
+// What an error message may not keep: `NOT_PLAIN_LINE` less line feed.
+const NOT_ERROR_TEXT = /[^\n\P{Cc}]|[\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/gu;
 
 /**
  * Parses `tools.json`'s text into its tool declarations, or throws an `Error` whose message names
@@ -330,7 +333,9 @@ export function parseToolEnvelope(bytes: Uint8Array, output: WidgetToolSchema): 
     if (typeof len !== "number" || !Number.isSafeInteger(len) || len < codePoints(m)) {
       throw new Error("the error's length is not a whole number at least its message's");
     }
-    return { t: "err", m, len };
+    // Widget code wrote `m`, so it may hold several lines; keep them but blank every other control
+    // or format character (bidi overrides, zero-width) and lone surrogate, one for one.
+    return { t: "err", m: m.replace(NOT_ERROR_TEXT, " "), len };
   }
   throw new Error(shape);
 }

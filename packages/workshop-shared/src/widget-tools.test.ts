@@ -198,6 +198,22 @@ describe("parseWidgetTools: input schemas (no exception)", () => {
   });
 });
 
+describe("parseWidgetTools: unsupported keywords", () => {
+  test.each([
+    ["format", { type: "string", maxLength: 8, format: "uri" }],
+    ["default", { type: "boolean", default: true }],
+    ["const", { type: "string", maxLength: 8, const: "x" }],
+  ])("refuses %j in an output schema", (keyword, schema) => {
+    expect(() => parseWidgetTools(outputFile({ type: "object", additionalProperties: false, properties: { p: schema } })))
+      .toThrow(new RegExp(`"${keyword}", which is not supported`));
+  });
+
+  test.each(["format", "default", "const"])("refuses %j in an input schema", keyword => {
+    expect(() => parseWidgetTools(inputFile({ p: { type: "boolean", [keyword]: true } })))
+      .toThrow(new RegExp(`"${keyword}", which is not supported`));
+  });
+});
+
 describe("parseWidgetTools: output schemas", () => {
   test("accepts every type, nested three deep", () => {
     const output = {
@@ -396,11 +412,21 @@ describe("parseToolEnvelope", () => {
     expect(() => parseToolEnvelope(envelope(value), output)).toThrow(message);
   });
 
+  test("refuses a byte-order mark before the envelope", () => {
+    expect(() => parseToolEnvelope(encode('\uFEFF{"t":"ok","v":{"count":1}}'), output)).toThrow(/^the result is not UTF-8 JSON$/);
+  });
+
+  test("blanks control and format characters in an error, keeping line feeds", () => {
+    const m = "line one\nline\u202Etwo\u0007\u200B\u2028\uD800end";
+    expect(parseToolEnvelope(envelope({ t: "err", m, len: 24 }), output))
+      .toEqual({ t: "err", m: "line one\nline two    end", len: 24 });
+  });
+
   test("refuses malformed bytes without quoting them", () => {
     const secret = "secret-sentinel";
     for (const bytes of [
       encode(`{"t":"ok","v":${secret}`), encode(""), new Uint8Array([0x7b, 0xff, 0x7d]),
-      encode(`﻿{"t":"ok","v":{"count":1}}`), encode("null"), encode(`"${secret}"`),
+      encode(`\uFEFF{"t":"ok","v":{"count":1}}`), encode("null"), encode(`"${secret}"`),
     ]) {
       expect(() => parseToolEnvelope(bytes, output)).toThrow(/^the result is (not UTF-8 JSON|not an ok or err envelope)$/);
     }
