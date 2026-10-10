@@ -3,7 +3,7 @@ import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { BOUND_VIEW_FILE, formatBoundViewProblems, parseBoundViewSpec } from '@gadgets/workshop-shared/bound-view'
 import { contain } from './contain'
-import { Budget, evaluateBoundView } from './evaluate'
+import { Budget, evaluateBoundView, type BoundViewEvaluation } from './evaluate'
 import { BOUND_VIEW_FIXTURE } from './fixture'
 import { mountBoundRoot, type BoundRoot } from './BoundViewRenderer'
 
@@ -27,6 +27,8 @@ export const useBoundViewSource = (overseer: RpcStub<Overseer> | null, commitId:
   return found && found.commitId === commitId ? found.text : null
 }
 
+type PreviewResult = { status: 'problems'; problems: string } | (BoundViewEvaluation & { title: string }) | { status: 'failed' }
+
 /**
  * The Build preview of a view-only widget: its `view.json` checked live with the v1 parser (problem
  * codes and spec paths, never values), and rendered by the real renderer in its own dedicated root
@@ -37,11 +39,17 @@ export const BoundViewBuildPreview = ({ text }: { text: string }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<BoundRoot | null>(null)
   // Parsed and evaluated once per text: the dedicated root re-renders only when the spec changes.
+  // Contained like the Operate view's evaluation: a throw becomes the fixed failed state, unread.
   const result = useMemo(() => {
-    const parsed = parseBoundViewSpec(text)
-    if (!parsed.ok) return { status: 'problems' as const, problems: formatBoundViewProblems(parsed.problems) }
-    const evaluation = evaluateBoundView(parsed.spec, new Map(parsed.spec.requirements.map(name => [name, BOUND_VIEW_FIXTURE])), new Budget())
-    return { ...evaluation, title: parsed.spec.title }
+    let outcome: PreviewResult = { status: 'failed' }
+    contain(() => { outcome = { status: 'failed' } }, () => {
+      const parsed = parseBoundViewSpec(text)
+      if (!parsed.ok) { outcome = { status: 'problems', problems: formatBoundViewProblems(parsed.problems) }; return }
+      const evaluation = evaluateBoundView(parsed.spec, new Map(parsed.spec.requirements.map(name => [name, BOUND_VIEW_FIXTURE])), new Budget())
+      outcome = { ...evaluation, title: parsed.spec.title }
+    })()
+    // Assigned inside the contained callback, which control-flow narrowing cannot see.
+    return outcome as PreviewResult
   }, [text])
   const tree = result.status === 'ok' ? result.tree : null
 
@@ -66,7 +74,7 @@ export const BoundViewBuildPreview = ({ text }: { text: string }) => {
 
   return <section aria-label="View preview" className="h-full space-y-4 overflow-auto p-5 text-sm">
     <header className="space-y-1">
-      <h2 className="text-base font-medium text-kumo-default">{result.status === 'problems' ? 'view.json' : <bdi>{result.title}</bdi>}</h2>
+      <h2 className="text-base font-medium text-kumo-default">{'title' in result ? <bdi>{result.title}</bdi> : 'view.json'}</h2>
       <p role="note" className="text-xs text-kumo-subtle">Preview over a made-up sample board, not your InferOps data. Operators see it over their own boards once the view is registered on a console and published.</p>
     </header>
     {result.status === 'problems' && <div role="alert" className="space-y-1 text-kumo-danger">
@@ -75,7 +83,7 @@ export const BoundViewBuildPreview = ({ text }: { text: string }) => {
     </div>}
     {result.status === 'too-large' && <p role="status" className="text-kumo-subtle">This view is too large to show.</p>}
     {result.status === 'invalid' && <p role="status" className="text-kumo-subtle">This view can&apos;t be shown over the sample board.</p>}
-    {failed && <p role="status" className="text-kumo-subtle">This preview could not be shown. Edit view.json, or reload to try again.</p>}
+    {(failed || result.status === 'failed') && <p role="status" className="text-kumo-subtle">This preview could not be shown. Edit view.json, or reload to try again.</p>}
     {/* The dedicated root's container: no class, display set inline only. */}
     <div ref={containerRef} />
   </section>

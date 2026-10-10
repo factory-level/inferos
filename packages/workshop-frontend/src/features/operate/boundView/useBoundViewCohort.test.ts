@@ -128,6 +128,35 @@ describe('accepting reads', () => {
     expect(cohort.shown().status).toBe('waiting')
   })
 
+  it('asks only that child to read again, once per read, when its read was sent under an older changeSeq or epoch', () => {
+    const cohort = ready()
+    const a = child(cohort, 'a', 11)
+    const b = child(cohort, 'b', 12)
+    // A changeSeq-only bump while A's read was in flight: the host board does not re-read on its own.
+    const late = a.request(board('Late'), { changeSeq: 1 })
+    cohort.offer('a', CONSOLE, late, 2)
+    expect(a.dispatched).toEqual(['invalidate'])
+    cohort.offer('a', CONSOLE, late, 2)
+    expect(a.dispatched).toEqual(['invalidate'])
+    expect(b.dispatched).toEqual([])
+    // Its new read, sent under the current changeSeq, is accepted.
+    cohort.offer('a', CONSOLE, a.request(board('Fresh'), { changeSeq: 2 }), 2)
+    cohort.offer('b', CONSOLE, b.request(board()), 1)
+    expect(shownText(cohort)).toContain('Fresh')
+    // Nothing is re-read for another console, an untagged read, or before the description is ready.
+    const other = ready()
+    const c = child(other, 'a', 13)
+    other.offer('a', { ...CONSOLE, revision: '4' }, c.request(board(), { changeSeq: 1 }), 2)
+    const untagged = { ...c.request(board()), read: { contextToken: 13, token: 99, generation: 0, deadlineMono: performance.now() + 60_000, deadlineWall: Date.now() + 60_000 } } as HostBoardViewState
+    other.offer('a', CONSOLE, untagged, 1)
+    expect(c.dispatched).toEqual([])
+    const loading = new BoundViewCohort({ console: CONSOLE, entryId: 'bv1' })
+    loading.gate(true, 'callback')
+    const d = child(loading, 'a', 14)
+    loading.offer('a', CONSOLE, d.request(board(), { changeSeq: 1 }), 2)
+    expect(d.dispatched).toEqual([])
+  })
+
   it('accepts nothing before the frame gate first passes, and nothing while it is blocked', () => {
     const cohort = new BoundViewCohort({ console: CONSOLE, entryId: 'bv1' })
     cohort.attach(container, mount)

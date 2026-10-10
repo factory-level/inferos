@@ -12,6 +12,7 @@ import { contain } from './boundView/contain'
 import { useBoundViewCohort, type BoundViewCohort, type BoundViewShown } from './boundView/useBoundViewCohort'
 
 const SHOWN_STATUS: Partial<Record<BoundViewShown['status'], string>> = {
+  waiting: 'Waiting for a fresh read of every board this view uses…',
   blocked: 'Close the other window or widget to see this view.',
   'too-large': 'This view is too large to show.',
   invalid: 'This view can\'t be shown with this board data.',
@@ -51,7 +52,7 @@ export const ConsoleBoundView = ({ session, console: ref, entry, hostBoards, onC
   return <Dialog.Root open onOpenChange={open => { if (!open) onClose() }}>
     <Dialog size="lg" className="flex max-h-[90dvh] !w-[min(1200px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl bg-kumo-base p-0">
       <header className="flex items-center justify-between gap-3 border-b border-kumo-line px-5 py-3">
-        <Dialog.Title className="truncate text-sm font-medium text-kumo-default">{entry.label}</Dialog.Title>
+        <Dialog.Title className="truncate text-sm font-medium text-kumo-default"><bdi>{entry.label}</bdi></Dialog.Title>
         <div className="flex items-center gap-2">
           {draft && <Button size="sm" variant="ghost" onClick={refresh}>Refresh preview</Button>}
           <Dialog.Close render={<Button size="sm" variant="ghost" aria-label="Close view"><XIcon size={16} aria-hidden /></Button>} />

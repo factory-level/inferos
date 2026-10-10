@@ -49,7 +49,13 @@ export type BoundViewShown =
 
 type Tag = HostBoardReadSent & { epoch: number }
 type Accepted = { read: HostBoardReadIdentity; board: HostBoardViewSnapshot }
-type Member = { dispatch: (event: { type: 'invalidate' }) => void; tags: Map<number, Tag>; accepted: Accepted | null }
+type Member = {
+  dispatch: (event: { type: 'invalidate' }) => void
+  tags: Map<number, Tag>
+  accepted: Accepted | null
+  /** The last read token this member was asked to replace because it was sent under an older state. */
+  replaced: number | null
+}
 
 const sameConsole = (a: ConsoleRef, b: ConsoleRef) => a.consoleId === b.consoleId && a.source === b.source && a.revision === b.revision
 const sameRead = (a: HostBoardReadIdentity, b: HostBoardReadIdentity) =>
@@ -113,7 +119,7 @@ export class BoundViewCohort {
    * returned cleanup only unregisters: a child's unmount never invalidates, so a clear cannot loop.
    */
   register(name: string, dispatch: Member['dispatch']): () => void {
-    const member: Member = { dispatch, tags: new Map(), accepted: null }
+    const member: Member = { dispatch, tags: new Map(), accepted: null, replaced: null }
     this.#members.set(name, member)
     return () => { if (this.#members.get(name) === member) this.#members.delete(name) }
   }
@@ -125,13 +131,20 @@ export class BoundViewCohort {
 
   /**
    * Offers requirement `name`'s current view, read for `console` with the selection at
-   * `changeSeq`; called after every commit of its child. An `ok` view is accepted if it fits (see
-   * the class comment). A child whose accepted read is replaced by anything it cannot accept (it
-   * left `ok` on its own tick, its selection changed, …) invalidates the whole cohort.
+   * `changeSeq`; called after every commit of its child, so again whenever the gate clears or the
+   * description becomes ready. An `ok` view is accepted if it fits (see the class comment). A child
+   * whose accepted read is replaced by anything it cannot accept (it left `ok` on its own tick, its
+   * selection changed, …) invalidates the whole cohort. An `ok` view that was never accepted
+   * because it was sent under an older epoch or `changeSeq` (a `changeSeq`-only bump does not
+   * invalidate the host board, so its hook would keep it until its next scheduled read) makes that
+   * child alone read again, once per read, as soon as the gate is clear and the description ready.
    */
   offer(name: string, console: ConsoleRef, view: HostBoardViewState, changeSeq: number | null): void {
     const member = this.#members.get(name)
     if (this.#disposed || !member) return
+    // Intentional: a read already accepted stays accepted when `changeSeq` moves after it was
+    // accepted. A change that matters invalidates through the selection signal; a bare
+    // `changeSeq` bump does not unsettle what is shown.
     if (view.status === 'ok' && member.accepted && sameRead(member.accepted.read, view.read)) return
     if (view.status === 'ok' && this.#acceptable(member, console, view.read, changeSeq)) {
       member.accepted = { read: view.read, board: view.board }
@@ -139,7 +152,21 @@ export class BoundViewCohort {
       this.#notify()
       return
     }
-    if (member.accepted) this.invalidate(this.#epoch, 'render')
+    if (member.accepted) { this.invalidate(this.#epoch, 'render'); return }
+    if (view.status === 'ok' && this.#outdated(member, console, view.read, changeSeq) && member.replaced !== view.read.token) {
+      member.replaced = view.read.token
+      try { member.dispatch({ type: 'invalidate' }) } catch { this.fail() }
+    }
+  }
+
+  // An unexpired read of this console, tagged for this hook context and generation, whose only
+  // fault is the epoch or `changeSeq` it was sent under: one read sent now would be accepted.
+  #outdated(member: Member, console: ConsoleRef, read: HostBoardReadIdentity, changeSeq: number | null): boolean {
+    if (this.#gate !== 'clear' || this.#failed || this.#description.status !== 'ready' || changeSeq === null) return false
+    if (!sameConsole(console, this.context.console) || expired(read, now())) return false
+    const tag = member.tags.get(read.token)
+    return !!tag && tag.contextToken === read.contextToken && tag.generation === read.generation
+      && (tag.epoch !== this.#epoch || tag.changeSeq !== changeSeq)
   }
 
   #acceptable(member: Member, console: ConsoleRef, read: HostBoardReadIdentity, changeSeq: number | null): boolean {
@@ -407,12 +434,20 @@ export const useBoundViewCohort = (session: RpcStub<OperateSession>, context: Bo
     }
   }, [cohort])
 
-  useEffect(() => contain(cohort.site, () => session.getConsoleBoundView(context.console, context.entryId)
-    .then(description => cohort.setDescription(token, description, ids.current), (caught: unknown) => {
-      cohort.descriptionFailed(token)
-      if (isGuardRefusal(caught)) refused.current()
-    }))(),
-  // A new context token (a "Refresh preview") fetches anew; the view is remounted for any other context.
+  useEffect(() => {
+    // A request from a superseded run (the session stub was swapped for the same account) is
+    // ignored, answer or refusal, so it can neither mark the description unavailable nor close the
+    // view while the current session's request is in flight.
+    let superseded = false
+    contain(cohort.site, () => session.getConsoleBoundView(context.console, context.entryId)
+      .then(description => { if (!superseded) cohort.setDescription(token, description, ids.current) }, (caught: unknown) => {
+        if (superseded) return
+        cohort.descriptionFailed(token)
+        if (isGuardRefusal(caught)) refused.current()
+      }))()
+    return () => { superseded = true }
+  },
+  // A new context token (a "Refresh preview") or session fetches anew; the view is remounted for any other context.
   [cohort, session, token])
 
   useLayoutEffect(() => contain(cohort.site, () => cohort.sync())())

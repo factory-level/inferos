@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
+// @vitest-environment jsdom
+import { act } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parseBoundViewSpec, type BoundViewSpec } from '@gadgets/workshop-shared/bound-view'
 import type { HostBoardViewColumn, HostBoardViewIssue, HostBoardViewSnapshot } from '@gadgets/workshop-shared/operate-console'
 import { BOUND_VIEW_BUDGETS, Budget, evaluateBoundView, mergeSort, type BoundViewBudgetLine, type BoundViewLeaf, type BoundViewTree } from './evaluate'
+import { mountBoundRoot, type BoundRoot } from './BoundViewRenderer'
 
 const spec = (root: unknown, requirements = ['board-1']): BoundViewSpec => {
   const parsed = parseBoundViewSpec(JSON.stringify({ version: 1, title: 'View', requirements, root }))
@@ -288,5 +291,82 @@ describe('amplification', () => {
     expect(evaluate(spec(listOfField('title')), one(maxBoard('a')), budget)).toEqual({ status: 'too-large' })
     expect(budget.spent.rowVisits).toBe(0)
     expect(budget.events.filter(event => event.kind === 'spend' && event.line !== 'elements')).toEqual([])
+  })
+})
+
+// The `elements` and `text` lines charge exactly what the renderer emits: every element, and every
+// code unit except a group header's, whose count and separator are charged at their bound.
+describe('what is charged is what is rendered', () => {
+  let container: HTMLDivElement
+  let root: BoundRoot | null = null
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    container = document.createElement('div')
+    document.body.append(container)
+  })
+  afterEach(() => { if (root) act(() => root!.unmount()); root = null; container.remove(); vi.unstubAllGlobals() })
+
+  const rendered = (s: BoundViewSpec, snapshots: ReadonlyMap<string, HostBoardViewSnapshot>) => {
+    const budget = new Budget()
+    const result = evaluate(s, snapshots, budget)
+    if (result.status !== 'ok') throw new Error(`expected ok, got ${result.status}`)
+    root = mountBoundRoot(container, () => { throw new Error('the renderer failed') })
+    act(() => root!.render(result.tree))
+    const element = container.firstElementChild!
+    return { budget, elements: element.querySelectorAll('*').length, text: element.textContent!.length }
+  }
+  const small = board(column('Todo', [issue('ENG-1', { priority: 'high', targetDate: '2026-01-02' }), issue('ENG-2', { blocked: true })]),
+    column('Done', [issue('ENG-3')], 'completed'))
+  const leaves = [{ type: 'field', label: 'Title', value: { field: 'title' } }, { type: 'field', value: { field: 'identifier' } },
+    { type: 'badge', value: { field: 'priority' } }, { type: 'text', text: 'note', tone: 'muted' }]
+  const columns = [{ header: 'Id', field: 'identifier' }, { header: 'Due', field: 'targetDate', as: 'date' }, { header: 'Blocked', field: 'blocked', as: 'flag' },
+    { header: 'Group', field: 'group', as: 'badge', map: { started: { label: 'Going', tone: 'info' } } }]
+  const specs: [string, unknown][] = [
+    ['every static node', { type: 'stack', gap: 'sm', children: [
+      { type: 'text', text: 'Heading', size: 'lg' }, { type: 'empty', text: 'Nothing yet' },
+      { type: 'field', label: 'Project', value: { requirement: 'board-1', field: 'project.name' } },
+      { type: 'field', value: { requirement: 'board-1', field: 'project.identifier' } },
+      { type: 'columns', children: [{ type: 'count', label: 'Open', of: { requirement: 'board-1', collection: 'issues' } },
+        { type: 'count', label: 'Columns', of: { requirement: 'board-1', collection: 'columns' } }] },
+    ] }],
+    ['an ungrouped list with every leaf', { type: 'list', of: { requirement: 'board-1', collection: 'issues' }, item: leaves, empty: 'None' }],
+    ['an empty list and an empty table', { type: 'stack', children: [
+      { type: 'list', of: { requirement: 'board-1', collection: 'issues', where: [{ field: 'title', equals: 'missing' }] }, item: leaves, empty: 'No rows' },
+      { type: 'table', of: { requirement: 'board-1', collection: 'issues', where: [{ field: 'title', equals: 'missing' }] }, columns, empty: 'No rows' },
+    ] }],
+    ['a table with text, date, flag and badge cells', { type: 'table', of: { requirement: 'board-1', collection: 'issues' }, columns, empty: 'None' }],
+  ]
+  it.each(specs)('for %s', (_, node) => {
+    const { budget, elements, text } = rendered(spec(node), one(small))
+    expect(budget.charged.elements).toBe(elements)
+    expect(budget.charged.text).toBe(text)
+  })
+
+  it('for a grouped list, charging each group header\'s copy at its bound', () => {
+    const { budget, elements, text } = rendered(spec({ type: 'list', groupBy: 'column', of: { requirement: 'board-1', collection: 'issues' }, item: leaves, empty: 'None' }), one(small))
+    expect(budget.charged.elements).toBe(elements)
+    // Two headers: " · " and one digit each, against 9 + 3 charged.
+    expect(budget.charged.text).toBe(text + 2 * (9 + 3 - 3 - 1))
+  })
+
+  it('for the maximum legal spec over maximum boards', () => {
+    const { budget, elements, text } = rendered(maxSpec(), maxSnapshots())
+    expect(budget.charged.elements).toBe(elements)
+    expect(budget.charged.elements).toBeLessThanOrEqual(BOUND_VIEW_BUDGETS.elements)
+    expect(budget.charged.text).toBeGreaterThanOrEqual(text)
+  })
+
+  it('for a spec maximal in elements: 500 rows of four labelled fields, each row its own group', () => {
+    const day = (index: number) => new Date(Date.UTC(2026, 0, 1 + index)).toISOString().slice(0, 10)
+    const dated = board(...[0, 200, 400].map(start => column(`C${start}`, Array.from({ length: start === 400 ? 100 : 200 }, (_, index) =>
+      issue(`ENG-${start + index}`, { targetDate: day(start + index) })))))
+    const item = ['title', 'identifier', 'column', 'priority'].map((field, index) => ({ type: 'field', label: label(`L${index}`), value: { field } }))
+    const lists = [200, 200, 100].map(limit => ({ type: 'list', groupBy: 'targetDate', item, empty: 'e',
+      of: { requirement: 'board-1', collection: 'issues', sort: [{ field: 'identifier', dir: limit === 100 ? 'desc' : 'asc' }], limit } }))
+    const { budget, elements } = rendered(spec({ type: 'stack', children: lists }), one(dated))
+    expect(budget.spent.groups).toBe(500)
+    expect(budget.charged.cells).toBe(2000)
+    expect(budget.charged.elements).toBe(elements)
+    expect(budget.charged.elements).toBeLessThanOrEqual(BOUND_VIEW_BUDGETS.elements)
   })
 })

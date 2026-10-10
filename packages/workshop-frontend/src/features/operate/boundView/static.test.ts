@@ -38,6 +38,35 @@ describe('bound-view code reports nothing', () => {
   })
 })
 
+describe('bound-view code reaches no network, storage or history sink', () => {
+  // The global or `window.` form of each, not a method of the same name on an RPC stub.
+  const SINKS: [string, RegExp][] = [
+    ['fetch', /(?<![.\w$])(?:window\s*\.\s*)?fetch\s*\(/],
+    ['sendBeacon', /\bsendBeacon\b/],
+    ['XMLHttpRequest', /\bXMLHttpRequest\b/],
+    ['WebSocket', /\bWebSocket\b/],
+    ['EventSource', /\bEventSource\b/],
+    ['window.open', /(?<![.\w$])(?:window\s*\.\s*)?open\s*\(/],
+    ['new Image', /\bnew\s+Image\b/],
+    ['localStorage', /\blocalStorage\b/],
+    ['sessionStorage', /\bsessionStorage\b/],
+    ['indexedDB', /\bindexedDB\b/],
+    ['document.cookie', /\bdocument\s*\.\s*cookie\b/],
+    ['pushState', /\bpushState\b/],
+    ['replaceState', /\breplaceState\b/],
+  ]
+  it.each([...BOUND_VIEW_FILES, ...HOOKS])('%s', path => {
+    const source = code(file(path))
+    expect(SINKS.filter(([, sink]) => sink.test(source)).map(([name]) => name)).toEqual([])
+  })
+
+  it('would catch each sink', () => {
+    const samples: Record<string, string> = { 'window.open': 'window.open(url)', 'new Image': 'new Image()', fetch: 'fetch(url)', 'document.cookie': 'document.cookie' }
+    const missed = SINKS.filter(([name, sink]) => !sink.test(samples[name] ?? `${name}.x`)).map(([name]) => name)
+    expect(missed).toEqual([])
+  })
+})
+
 describe('frames and shadow roots', () => {
   const FRAME = /(?:^|[\s({,>])<(?:iframe|frame|object|embed|fencedframe)[\s/>]|createElement\(\s*['"`](?:iframe|frame|object|embed|fencedframe)['"`]/
   it('has exactly the three known frame producers in the frontend and shared UI', () => {

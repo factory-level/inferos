@@ -194,6 +194,39 @@ describe('showing a bound view', () => {
     expect([handle('a').reads.length, handle('b').reads.length]).toEqual([before[0] + 1, before[1] + 1])
   })
 
+  it('ignores the description request of a superseded session, so a swapped stub\'s answer is kept', async () => {
+    onRefused.mockClear()
+    let rejectOld: (reason: unknown) => void = () => {}
+    getConsoleBoundView.mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject }))
+    await render()
+    // The same account's session, through a new stub: the view fetches again under the same context.
+    descriptions.push(description(REF))
+    const swapped = { ...session } as unknown as RpcStub<OperateSession>
+    await act(async () => root.render(<ConsoleBoundView session={swapped} console={REF} entry={ENTRY} hostBoards={BOARDS}
+      onClose={() => {}} onRefused={onRefused} onStaleOrUnavailable={() => {}} />))
+    await act(async () => rejectOld(new Error('Console c1 at revision 4 is not open in your operate session with bound view bv1.')))
+    expect(getConsoleBoundView).toHaveBeenCalledTimes(2)
+    expect(onRefused).not.toHaveBeenCalled()
+    expect(parentText()).not.toContain('This view is unavailable right now')
+    expect(parentText()).toContain('Triage')
+  })
+
+  it('says it is waiting, and reads again at once when a read was sent under an older changeSeq', async () => {
+    descriptions.push(description(REF))
+    await render()
+    await select('a'); await select('b')
+    expect(parentText()).toContain('Waiting for a fresh read of every board this view uses')
+    // A changeSeq-only bump (same state and epoch) while A's read is in flight.
+    await select('a', 2, 1)
+    const sent = handle('a').reads.length
+    await answer('a', ok(REF, 'Sent under 1')); await answer('b', ok(REF, 'B one'))
+    expect(shownText()).toBe('')
+    expect(handle('a').reads.length).toBe(sent + 1)
+    await answer('a', ok(REF, 'Sent under 2'))
+    expect(shownText()).toContain('Sent under 2')
+    expect(parentText()).not.toContain('Waiting for a fresh read')
+  })
+
   it('closes on a guard refusal of its description', async () => {
     getConsoleBoundView.mockRejectedValueOnce(new Error('Console c1 at revision 4 is not open in your operate session with bound view bv1.'))
     await render()

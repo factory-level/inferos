@@ -20,20 +20,23 @@ import { HOST_BOARD_SNAPSHOT_LIMITS, type HostBoardViewGroup, type HostBoardView
  * - `rowVisits`: 16 queries × 500 rows.
  * - `comparisons`: per query, n × 4 `where` + n⌈log₂ n⌉ × 2 sort keys at n = 500, × 16 queries.
  * - `groups`: at most one per limited row, Σ 500.
- * - `elements`: accounting units, one per spec node, row, cell and group header, plus the `<bdi>`
- *   wrappers (one per spec node and group header, two per cell): 64 + 500 + 2,000 + 500 + 4,000
- *   + 500 + 64.
+ * - `elements`: the DOM elements `BoundViewRenderer` renders, exactly (see {@link ELEMENTS}): its
+ *   wrapper (1); 16 queries × 24 (a table's wrapper, table, head, header row, 8 × (th + bdi),
+ *   body, and the empty row's tr, td and bdi); 48 other nodes × 4 (a labelled field: p, span and
+ *   two bdi); 500 rows × 1 (li or tr); 2,000 cells × 4 (a labelled list field: span, span and two
+ *   bdi); and 500 list sections × 4 (section, h3, bdi, ul) = 1 + 384 + 192 + 500 + 8,000 + 2,000.
  * - `cells`: the static Σ limit × (columns or item leaves).
- * - `text`: every emitted code unit: 2,000 cells × 700 + 500 group headers × 112 + 8,192 of
- *   authored static text + 16 counts × 3 digits.
+ * - `text`: every emitted code unit: 2,000 cells × 701 (label, separator, value) + 500 group
+ *   headers × 112 + 8,192 of authored static text + 64 nodes × 201 (a field's project value and
+ *   separator, or a count's separator) + 16 counts × 3 digits.
  */
 export const BOUND_VIEW_BUDGETS = {
   rowVisits: 8_000,
   comparisons: 176_000,
   groups: 500,
-  elements: 7_628,
+  elements: 11_077,
   cells: 2_000,
-  text: 1_464_240,
+  text: 1_479_104,
 } as const satisfies Record<string, number>
 
 /** One line of {@link BOUND_VIEW_BUDGETS}. */
@@ -227,7 +230,9 @@ const order = (name: BoundViewField, a: Exclude<Value, null>, b: Exclude<Value, 
 
 /**
  * A stable bottom-up merge sort. It never calls `Array.prototype.sort`, so the number of
- * comparisons is bounded and known in advance: at most n⌈log₂ n⌉ − 2^⌈log₂ n⌉ + 1.
+ * comparisons is bounded and known in advance: merging runs of a and b elements takes at most
+ * a + b − 1, so each of the ⌈log₂ n⌉ passes takes fewer than n, and the whole sort at most
+ * n⌈log₂ n⌉ (3,993 at n = 500, a little over the top-down n⌈log₂ n⌉ − 2^⌈log₂ n⌉ + 1 = 3,989).
  */
 export const mergeSort = <T>(items: readonly T[], compare: (a: T, b: T) => number): T[] => {
   const n = items.length
@@ -254,6 +259,44 @@ const digits = (value: number) => String(value).length
 /** Host copy around a group header's key and count (" · " and room to spare). */
 const HEADER_COPY = 9
 const HEADER_COUNT_DIGITS = 3
+/** The space `BoundViewRenderer` puts between a label and its value. */
+const SEPARATOR = 1
+
+/**
+ * The DOM elements `BoundViewRenderer` renders for each part of a tree, which the `elements`
+ * budget charges exactly. Kept beside the renderer's markup by a test that compares the charge with
+ * the rendered element count.
+ */
+const ELEMENTS = {
+  /** The renderer's wrapper `div`. */
+  wrapper: 1,
+  /** A stack's or columns' `div`. */
+  container: 1,
+  /** `p` and `bdi`: a text, an empty, a field without a label, or an empty list's text. */
+  paragraph: 2,
+  /** A label's `span` and `bdi`. */
+  label: 2,
+  /** A count's `p`, label `span` and `bdi`, and value `bdi`. */
+  count: 4,
+  /** A non-empty list's `div`. */
+  list: 1,
+  /** A list section's `section` and `ul`; a group header adds its `h3` and `bdi`. */
+  section: 2,
+  header: 2,
+  /** A table's wrapper `div`, `table`, `thead`, header `tr` and `tbody`; each header's `th` and `bdi`. */
+  table: 5,
+  tableHeader: 2,
+  /** An empty table's `tr`, `td` and `bdi`. */
+  tableEmpty: 3,
+  /** A list row's `li`, or a table row's `tr`. */
+  row: 1,
+  /** A leaf's `span` (a badge's, a text's, or a field's) and its value `bdi`. */
+  leaf: 2,
+  /** A table cell's `td`; its text `bdi`, or its badge `span` and `bdi`. */
+  cell: 1,
+  cellText: 1,
+  cellBadge: 2,
+} as const
 
 class Evaluator {
   constructor(private readonly boards: ReadonlyMap<string, Board>, private readonly budget: Budget) {}
@@ -322,27 +365,39 @@ class Evaluator {
     return sorted.slice(0, query.limit ?? LIMIT_DEFAULT)
   }
 
+  /** The whole view: the renderer's wrapper, then the root node. */
+  root(node: BoundViewNode): BoundViewTree {
+    this.#pay('elements', ELEMENTS.wrapper)
+    return this.node(node)
+  }
+
   node(node: BoundViewNode): BoundViewTree {
-    // One accounting unit for the node and one for its `<bdi>` wrapper.
-    this.#pay('elements', 2)
     switch (node.type) {
-      case 'stack': return { type: 'stack', gap: node.gap ?? 'md', children: node.children.map(child => this.node(child)) }
-      case 'columns': return { type: 'columns', children: node.children.map(child => this.node(child)) }
+      case 'stack':
+        this.#pay('elements', ELEMENTS.container)
+        return { type: 'stack', gap: node.gap ?? 'md', children: node.children.map(child => this.node(child)) }
+      case 'columns':
+        this.#pay('elements', ELEMENTS.container)
+        return { type: 'columns', children: node.children.map(child => this.node(child)) }
       case 'text':
+        this.#pay('elements', ELEMENTS.paragraph)
         this.#pay('text', node.text.length)
         return { type: 'text', text: node.text, tone: node.tone ?? 'default', size: node.size ?? 'md' }
       case 'empty':
+        this.#pay('elements', ELEMENTS.paragraph)
         this.#pay('text', node.text.length)
         return { type: 'empty', text: node.text }
       case 'field': {
         const project = this.#board(node.value.requirement).project
         const value = node.value.field === 'project.identifier' ? project.identifier : project.name
-        this.#pay('text', (node.label?.length ?? 0) + value.length)
+        this.#pay('elements', ELEMENTS.paragraph + (node.label === undefined ? 0 : ELEMENTS.label))
+        this.#pay('text', (node.label === undefined ? 0 : node.label.length + SEPARATOR) + value.length)
         return { type: 'field', label: node.label ?? null, value }
       }
       case 'count': {
         const value = this.#match(node.of).length
-        this.#pay('text', node.label.length + digits(value))
+        this.#pay('elements', ELEMENTS.count)
+        this.#pay('text', node.label.length + SEPARATOR + digits(value))
         return { type: 'count', label: node.label, value }
       }
       case 'list': return this.#list(node)
@@ -354,9 +409,11 @@ class Evaluator {
   #list(node: Extract<BoundViewNode, { type: 'list' }>): BoundViewTree {
     const rows = this.#rows(node.of)
     if (rows.length === 0) {
+      this.#pay('elements', ELEMENTS.paragraph)
       this.#pay('text', node.empty.length)
       return { type: 'list', sections: [], empty: node.empty }
     }
+    this.#pay('elements', ELEMENTS.list)
     const sections: { header: { key: string; count: number } | null; rows: BoundViewLeaf[][] }[] = []
     const byKey = new Map<string, number>()
     for (const row of rows) {
@@ -367,7 +424,7 @@ class Evaluator {
         if (index === undefined) {
           if (key.length > BOUND_VIEW_GROUP_KEY_MAX) throw new BudgetExceeded()
           this.#pay('groups', 1)
-          this.#pay('elements', 2)
+          this.#pay('elements', ELEMENTS.section + ELEMENTS.header)
           this.#pay('text', key.length + HEADER_COUNT_DIGITS + HEADER_COPY)
           index = sections.push({ header: { key, count: 0 }, rows: [] }) - 1
           byKey.set(key, index)
@@ -375,6 +432,7 @@ class Evaluator {
         section = sections[index]
         section.header!.count++
       } else if (!section) {
+        this.#pay('elements', ELEMENTS.section)
         section = { header: null, rows: [] }
         sections.push(section)
       }
@@ -387,16 +445,18 @@ class Evaluator {
     // The row's text is known from the snapshot's string lengths and the authored leaves: it is
     // charged, with the row's cells and elements, before any of the row's leaves is built.
     const parts = item.map(leaf => {
-      if (leaf.type === 'text') return { leaf, shown: leaf.text, length: leaf.text.length }
+      if (leaf.type === 'text') return { leaf, shown: leaf.text, length: leaf.text.length, elements: ELEMENTS.leaf }
       const value = valueOf(row, leaf.value.field)
       if (leaf.type === 'badge') {
         const shown = badge(leaf.value.field, value, leaf.map)
-        return { leaf, shown, length: shown.label.length }
+        return { leaf, shown, length: shown.label.length, elements: ELEMENTS.leaf }
       }
       const shown = display(leaf.value.field, value)
-      return { leaf, shown, length: (leaf.label?.length ?? 0) + shown.length }
+      return leaf.label === undefined
+        ? { leaf, shown, length: shown.length, elements: ELEMENTS.leaf }
+        : { leaf, shown, length: leaf.label.length + SEPARATOR + shown.length, elements: ELEMENTS.leaf + ELEMENTS.label }
     })
-    this.#payRow(parts.length, parts.reduce((sum, part) => sum + part.length, 0))
+    this.#payRow(parts)
     return parts.map(({ leaf, shown }): BoundViewLeaf => {
       if (leaf.type === 'text') return { type: 'text', text: leaf.text, tone: leaf.tone ?? 'default' }
       if (leaf.type === 'badge') return { type: 'badge', ...(shown as { label: string; tone: BoundViewTone }) }
@@ -405,10 +465,12 @@ class Evaluator {
   }
 
   #table(node: Extract<BoundViewNode, { type: 'table' }>): BoundViewTree {
+    this.#pay('elements', ELEMENTS.table + ELEMENTS.tableHeader * node.columns.length)
     this.#pay('text', node.columns.reduce((sum, column) => sum + column.header.length, 0))
     const headers = node.columns.map(column => column.header)
     const rows = this.#rows(node.of)
     if (rows.length === 0) {
+      this.#pay('elements', ELEMENTS.tableEmpty)
       this.#pay('text', node.empty.length)
       return { type: 'table', headers, rows: [], empty: node.empty }
     }
@@ -416,21 +478,27 @@ class Evaluator {
       type: 'table', headers, empty: null,
       rows: rows.map(row => {
         // As for list rows: the text is measured, and the row paid for, before its cells are built.
+        // `as: 'date'` and `'flag'` show as text: the contract gives them no other rendering.
         const parts = node.columns.map(column => {
           const value = valueOf(row, column.field)
-          return column.as === 'badge' ? { badge: badge(column.field, value, column.map) } : { text: display(column.field, value) }
+          if (column.as === 'badge') {
+            const shown = badge(column.field, value, column.map)
+            return { badge: shown, length: shown.label.length, elements: ELEMENTS.cell + ELEMENTS.cellBadge }
+          }
+          const shown = display(column.field, value)
+          return { text: shown, length: shown.length, elements: ELEMENTS.cell + ELEMENTS.cellText }
         })
-        this.#payRow(parts.length, parts.reduce((sum, part) => sum + (part.badge ? part.badge.label.length : part.text!.length), 0))
+        this.#payRow(parts)
         return parts.map((part): BoundViewCell => part.badge ? { type: 'badge', ...part.badge } : { type: 'text', value: part.text! })
       }),
     }
   }
 
-  /** One row: its element, and per cell the cell and its two `<bdi>` wrappers; its text. */
-  #payRow(cells: number, length: number) {
-    this.#pay('cells', cells)
-    this.#pay('elements', 1 + 3 * cells)
-    this.#pay('text', length)
+  /** One row, before its nodes are built: its cells, its element and each cell's, and its text. */
+  #payRow(parts: readonly { length: number; elements: number }[]) {
+    this.#pay('cells', parts.length)
+    this.#pay('elements', ELEMENTS.row + parts.reduce((sum, part) => sum + part.elements, 0))
+    this.#pay('text', parts.reduce((sum, part) => sum + part.length, 0))
   }
 }
 
@@ -451,7 +519,7 @@ export const evaluateBoundView = (spec: BoundViewSpec, snapshots: ReadonlyMap<st
       if (!snapshots.has(requirement)) return { status: 'invalid' }
       boards.set(requirement, revalidate(snapshots.get(requirement)))
     }
-    return { status: 'ok', tree: new Evaluator(boards, budget).node(spec.root) }
+    return { status: 'ok', tree: new Evaluator(boards, budget).root(spec.root) }
   } catch (caught) {
     return caught instanceof BudgetExceeded ? { status: 'too-large' } : { status: 'invalid' }
   }

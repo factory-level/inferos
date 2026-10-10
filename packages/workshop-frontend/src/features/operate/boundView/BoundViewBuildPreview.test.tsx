@@ -5,6 +5,17 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { FileAtCommit, Overseer } from '@gadgets/workshop-shared/api'
+
+// The real evaluator, which a test can make throw.
+const evaluator = vi.hoisted(() => ({ throws: false }))
+vi.mock('./evaluate', async importOriginal => {
+  const actual = await importOriginal<typeof import('./evaluate')>()
+  return { ...actual, evaluateBoundView: (...args: Parameters<typeof actual.evaluateBoundView>) => {
+    if (evaluator.throws) throw new RangeError(`echo ${args[0].title}`)
+    return actual.evaluateBoundView(...args)
+  } }
+})
+
 import { BoundViewBuildPreview, useBoundViewSource } from './BoundViewBuildPreview'
 
 const SPEC = JSON.stringify({ version: 1, title: 'Due soon', requirements: ['board-1', 'board-2'], root: { type: 'stack', children: [
@@ -18,7 +29,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
 })
-afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); evaluator.throws = false })
 
 const preview = () => container.querySelector('[aria-label="View preview"]')!
 
@@ -37,6 +48,26 @@ describe('BoundViewBuildPreview', () => {
     await act(async () => root.render(<BoundViewBuildPreview text={text} />))
     expect(preview().querySelector('[role="alert"]')?.textContent).toMatch(/unknownRequirement at \$\.root\.of\.requirement/)
     expect(preview().textContent).not.toContain('Secret title')
+  })
+
+  it('contains a throwing evaluation: the fixed failed state, nothing rendered, nothing reported', async () => {
+    evaluator.throws = true
+    const errors: unknown[] = []
+    const onError = (event: ErrorEvent) => { errors.push(event.message) }
+    window.addEventListener('error', onError)
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await act(async () => root.render(<BoundViewBuildPreview text={SPEC} />))
+      await act(async () => {})
+      expect(preview().textContent).toContain('This preview could not be shown.')
+      expect(preview().textContent).not.toContain('echo')
+      expect(container.querySelector<HTMLElement>('[aria-label="View preview"] > div:last-child')!.style.display).toBe('none')
+      expect(errors).toEqual([])
+      expect(consoleError).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('error', onError)
+      consoleError.mockRestore()
+    }
   })
 
   it('replaces the preview when the text changes, and hides it when the text stops parsing', async () => {
