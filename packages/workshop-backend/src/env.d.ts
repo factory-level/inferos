@@ -17,6 +17,11 @@ declare global {
        * a proposed extension of the capability vocabulary.
        */
       INFEROPS_HOST_BOARDS?: string;
+      /**
+       * Bound views (console-store.ts): "true" turns console bound views on, only while host boards
+       * are. Off by default; checked at registration and publication.
+       */
+      INFEROPS_BOUND_VIEWS?: string;
       INFEROPS_ENABLED?: string;
       // Local Bun companion. These are injected only by the opted-in local runtime.
       ENABLE_OPENAI_ASSISTANT_PLUGIN?: string;

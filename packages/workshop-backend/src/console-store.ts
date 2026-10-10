@@ -1,6 +1,8 @@
-import type { ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
+import type { BlueprintInstall, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
+import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type ConsoleSource, type ConsoleWidgetEntry, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleSource, type ConsoleWidgetEntry, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
@@ -18,13 +20,59 @@ export type FrozenInstalls = {
 };
 
 /**
- * Why a console of this workspace cannot offer `entry`, or null if it can: the entry must name a
- * permanent, unfrozen gadget installed from a widget blueprint at the entry's blueprint and
- * version, declaring no data contract, and with no bindings at all. Bindings are checked on the
- * gadget itself, since they can be added after install; they run under the binder's own accounts,
- * so a frozen copy would lend them to every operator.
+ * A registered gadget's commit as read before a console save or publication: its classification as
+ * a widget (`classifyGadgetFiles`, from its paths and its `view.json` and `tools.json` text), and
+ * its `view.json` text when it is view-only.
  */
-export function consoleWidgetRefusal(storage: Pick<ConsoleStorage, "gadgets">, entry: ConsoleWidgetEntry): string | null {
+export type SourceCommit = {
+  /** The commit's files, classified for the `widget` kind. */
+  classification: GadgetFileClassification;
+  /** The strict UTF-8 text of `view.json`, for a `viewOnly` commit; otherwise null. */
+  viewText: string | null;
+};
+
+/**
+ * The commits of a console's registered gadgets, by commit id, read outside the storage
+ * transaction that checks them. A commit is immutable, so the transaction need only check that
+ * each gadget is still at a commit read here.
+ */
+export type SourceCommits = ReadonlyMap<string, SourceCommit>;
+
+/** The message every save or publication refused by the bound-view switch carries. */
+export const BOUND_VIEWS_OFF = "Bound views are turned off for this installation.";
+
+/**
+ * Whether bound views are on: `INFEROPS_BOUND_VIEWS` exactly `"true"`, and only while host boards
+ * are (`hostBoardsEnabled`), whose reads they show. Checked at registration and publication.
+ */
+export function boundViewsEnabled(
+    env: Pick<Cloudflare.Env, "INFEROPS_BOUND_VIEWS" | "INFEROPS_HOST_BOARDS" | "INFEROPS_ENABLED">): boolean {
+  return env.INFEROPS_BOUND_VIEWS === "true" && hostBoardsEnabled(env);
+}
+
+/**
+ * The size bounds of a stored console, in UTF-8 bytes of `JSON.stringify`: a bound view entry
+ * without `frozen` (its spec is not stored), one with it (the spec at most doubles when escaped),
+ * and the whole stored record, draft and publication together, well inside a Durable Object's
+ * per-value limit.
+ */
+export const CONSOLE_SIZE_LIMITS = {
+  /** A bound view entry as saved: 4 KiB. */
+  boundViewEntry: 4 * 1024,
+  /** A published bound view entry, with its `frozen` spec: 20 KiB. */
+  frozenBoundViewEntry: 20 * 1024,
+  /** A stored console, checked at publication: 448 KiB. */
+  console: 448 * 1024,
+} as const;
+
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+// What `consoleWidgetRefusal` and `boundViewRefusal` share: the registered gadget is a permanent,
+// unfrozen widget install at the entry's blueprint and version, with no data contract or bindings.
+function installRefusal(storage: Pick<ConsoleStorage, "gadgets">,
+    entry: Pick<ConsoleWidgetEntry, "gadgetId" | "blueprintId" | "version">): string | null {
   let record = storage.gadgets.get(entry.gadgetId);
   if (record?.type !== "gadget" || record.pending) return `Gadget ${entry.gadgetId} is not a gadget of this workspace.`;
   if (record.frozenFor) return `Gadget ${entry.gadgetId} is a frozen install; register the install it was made from.`;
@@ -40,6 +88,58 @@ export function consoleWidgetRefusal(storage: Pick<ConsoleStorage, "gadgets">, e
   }
   if (Object.keys(record.bindings).length > 0) {
     return `Gadget ${entry.gadgetId} has bindings; a console offers only widgets with none.`;
+  }
+  return null;
+}
+
+// The read commit of the gadget `id`'s current commit, or a refusal when it was not read (it moved
+// since, so the caller must try again).
+function currentCommit(storage: Pick<ConsoleStorage, "gadgets">, commits: SourceCommits,
+    id: WorkpieceId): SourceCommit | string {
+  let record = storage.gadgets.get(id);
+  let commit = record?.type === "gadget" && record.commitId !== undefined ? commits.get(record.commitId) : undefined;
+  return commit ?? `Gadget ${id} changed while it was being checked; try again.`;
+}
+
+/**
+ * Why a console of this workspace cannot offer `entry`, or null if it can: the entry must name a
+ * permanent, unfrozen gadget installed from a widget blueprint at the entry's blueprint and
+ * version, declaring no data contract, and with no bindings at all. Bindings are checked on the
+ * gadget itself, since they can be added after install; they run under the binder's own accounts,
+ * so a frozen copy would lend them to every operator. Given `commits`, its current commit must be
+ * one of them and must not be view-only: a view has no code to run, and is offered only as a
+ * bound view (`boundViewRefusal`).
+ */
+export function consoleWidgetRefusal(storage: Pick<ConsoleStorage, "gadgets">, entry: ConsoleWidgetEntry,
+    commits?: SourceCommits): string | null {
+  let refusal = installRefusal(storage, entry);
+  if (refusal || !commits) return refusal;
+  let commit = currentCommit(storage, commits, entry.gadgetId);
+  if (typeof commit === "string") return commit;
+  return commit.classification.class === "viewOnly"
+    ? `Gadget ${entry.gadgetId} is a view with no code; offer it as a bound view instead.` : null;
+}
+
+/**
+ * Why a console of this workspace cannot offer `entry` as a bound view, or null if it can: the
+ * gadget must pass the same install checks as a registered widget (`consoleWidgetRefusal`), its
+ * current commit must be one of `commits` and classified view-only, and its spec's requirement
+ * names must equal the entry's as a set.
+ */
+export function boundViewRefusal(storage: Pick<ConsoleStorage, "gadgets">, entry: BoundViewEntry,
+    commits: SourceCommits): string | null {
+  let refusal = installRefusal(storage, entry);
+  if (refusal) return refusal;
+  let commit = currentCommit(storage, commits, entry.gadgetId);
+  if (typeof commit === "string") return commit;
+  let parsed = commit.viewText === null ? null : parseBoundViewSpec(commit.viewText);
+  if (commit.classification.class !== "viewOnly" || !parsed?.ok) {
+    let reasons = commit.classification.violations.map(violation => violation.message).join(" ");
+    return `Gadget ${entry.gadgetId} is not a view-only widget.${reasons ? ` ${reasons}` : ""}`;
+  }
+  let declared = parsed.spec.requirements;
+  if (declared.length !== entry.requirements.length || declared.some(name => !entry.requirements.includes(name))) {
+    return `Gadget ${entry.gadgetId}'s view reads ${declared.join(", ")}, not ${entry.requirements.join(", ")}.`;
   }
   return null;
 }
@@ -63,14 +163,15 @@ function withFrozenGadgets(screen: CanvasDefinition, frozen: Map<WorkpieceId, Wo
 
 /**
  * Checks `content`'s widget registry and placements in this workspace, throwing the first problem:
- * each entry must pass `consoleWidgetRefusal`, and every widget install (or frozen install) placed
+ * each entry must pass `consoleWidgetRefusal` (against `commits`, when given), and every widget install (or frozen install) placed
  * on a screen the console shows must be registered. Other gadgets, such as installed apps, are
  * placed as before.
  */
-function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets">, content: OperateConsoleContent): void {
+function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets">, content: OperateConsoleContent,
+    commits?: SourceCommits): void {
   let registered = new Set<WorkpieceId>();
   for (let entry of content.widgets ?? []) {
-    let refusal = consoleWidgetRefusal(storage, entry);
+    let refusal = consoleWidgetRefusal(storage, entry, commits);
     if (refusal) throw new Error(`Console widget "${entry.label}": ${refusal}`);
     registered.add(entry.gadgetId);
   }
@@ -115,19 +216,70 @@ function dropFrozenInstalls(storage: Pick<ConsoleStorage, "gadgets">, frozen: Fr
 }
 
 /**
+ * What a console publication reads before its transaction (`WorkspaceConsoleStore.capture`): the
+ * draft revision; each bound view entry, in order, with the host-board entry id each requirement
+ * name maps to and its source gadget's provenance and commit as they were; and the commit of every
+ * registered widget and bound view. The publication refuses unless the same capture, taken again
+ * inside its transaction, is equal.
+ */
+export type ConsoleCapture = {
+  /** The draft revision captured. */
+  revision: string;
+  /** The bound view entries, in order. */
+  boundViews: {
+    id: string | null;
+    requirements: { name: string; hostBoardEntryId: string | null }[];
+    source: { gadgetId: WorkpieceId; installedFrom: BlueprintInstall | null; commitId: string | null };
+  }[];
+  /** Every registered gadget's commit, each once: what the publication must read. */
+  commitIds: string[];
+};
+
+function captureConsole(storage: Pick<ConsoleStorage, "gadgets">, stored: OperateConsole): ConsoleCapture {
+  let boards = new Map((stored.hostBoards ?? []).map(board => [board.requirement.name, board.id ?? null]));
+  let source = (gadgetId: WorkpieceId) => {
+    let record = storage.gadgets.get(gadgetId);
+    let gadget = record?.type === "gadget" ? record : undefined;
+    return { gadgetId, installedFrom: gadget?.installedFrom ?? null, commitId: gadget?.commitId ?? null };
+  };
+  let boundViews = (stored.boundViews ?? []).map(entry => ({
+    id: entry.id ?? null,
+    requirements: entry.requirements.map(name => ({ name, hostBoardEntryId: boards.get(name) ?? null })),
+    source: source(entry.gadgetId),
+  }));
+  let registered = [...stored.widgets ?? [], ...stored.boundViews ?? []].map(entry => source(entry.gadgetId).commitId);
+  return { revision: stored.revision, boundViews,
+    commitIds: [...new Set(registered.filter(commitId => commitId !== null))] };
+}
+
+/**
  * Makes `stored`'s draft its published revision, copying in the canvases its views reference.
  * Each registered widget gets a frozen install made through `frozen`, which the published
  * registry and screen copies reference instead of the registered gadget, and the frozen installs
- * of the console's previous publication are removed. Everything is checked before anything is
- * created. Call inside a storage transaction. Shared by publishing and the storage migration that
- * publishes consoles saved before publication existed, which have no widgets.
+ * of the console's previous publication are removed. Each bound view must pass `boundViewRefusal`
+ * against `commits`, and gets its source commit's spec in `frozen`; no install is made for it.
+ * Everything is checked before anything is created, except the stored record's size, which is
+ * checked last. Call inside a storage transaction, which undoes the installs if that refuses.
+ * Shared by publishing and the storage migration that publishes consoles saved before publication
+ * existed, which have no widgets or bound views.
  */
 export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateConsole, publishedAt: string,
-    frozen?: FrozenInstalls): OperateConsole {
+    frozen?: FrozenInstalls, commits?: SourceCommits): OperateConsole {
   let { id, revision, published: _, ...content } = stored;
-  checkConsoleWidgets(storage, content);
+  checkConsoleWidgets(storage, content, commits);
   let entries = content.widgets ?? [];
   if (entries.length > 0 && !frozen) throw new Error("This console's widgets cannot be published here.");
+  let boundViews = (content.boundViews ?? []).map((entry): BoundViewEntry => {
+    if (!commits) throw new Error("This console's bound views cannot be published here.");
+    let refusal = boundViewRefusal(storage, entry, commits);
+    if (refusal) throw new Error(`Console bound view "${entry.label}": ${refusal}`);
+    let commitId = (storage.gadgets.get(entry.gadgetId) as GadgetRecord).commitId!;
+    let published = { ...entry, frozen: { sourceGadgetId: entry.gadgetId, commitId, specText: commits.get(commitId)!.viewText! } };
+    if (jsonBytes(published) > CONSOLE_SIZE_LIMITS.frozenBoundViewEntry) {
+      throw new Error(`Console bound view "${entry.label}" is over ${CONSOLE_SIZE_LIMITS.frozenBoundViewEntry} bytes published.`);
+    }
+    return published;
+  });
 
   let frozenIds = new Map<WorkpieceId, WorkpieceId>();
   let widgets = entries.map((entry): ConsoleWidgetEntry => {
@@ -141,8 +293,12 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
     let screen = storage.canvases.get(screenId);
     if (screen) storage.consoleScreens.put({ consoleId: id, screenId, screen: withFrozenGadgets(screen, frozenIds) });
   }
-  let publishedContent = content.widgets === undefined ? content : { ...content, widgets };
+  let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
+    ...(content.boundViews === undefined ? {} : { boundViews }) };
   let result: OperateConsole = { ...stored, published: { revision, publishedAt, content: publishedContent } };
+  if (jsonBytes(result) > CONSOLE_SIZE_LIMITS.console) {
+    throw new Error(`This console would be over ${CONSOLE_SIZE_LIMITS.console} bytes published.`);
+  }
   storage.consoles.put(result);
   if (frozen) dropFrozenInstalls(storage, frozen, id, new Set(frozenIds.values()));
   return result;
@@ -156,7 +312,7 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
  */
 export class WorkspaceConsoleStore {
   constructor(private durableStorage: DurableObjectStorage, private storage: ConsoleStorage,
-      private env: Pick<Cloudflare.Env, "COMPOSABLE_VIEWS" | "DURABLE_VIEWS" | "INFEROPS_HOST_BOARDS" | "INFEROPS_ENABLED">,
+      private env: Pick<Cloudflare.Env, "COMPOSABLE_VIEWS" | "DURABLE_VIEWS" | "INFEROPS_HOST_BOARDS" | "INFEROPS_BOUND_VIEWS" | "INFEROPS_ENABLED">,
       private frozen?: FrozenInstalls) {}
 
   #requireEnabled(): void {
@@ -165,19 +321,27 @@ export class WorkspaceConsoleStore {
     }
   }
 
+  // Omitted means keep: editors that predate host boards or bound views send no `hostBoards` or
+  // `boundViews`, and replacing through them must not delete saved entries. An explicit list (`[]`
+  // included) replaces them. The saved entries are merged in before parsing, so the combined
+  // registry limit and the requirement names apply.
+  #inherit(content: OperateConsoleContent, current?: OperateConsole): OperateConsoleContent {
+    return { ...content,
+      ...(content.hostBoards === undefined && current?.hostBoards !== undefined ? { hostBoards: current.hostBoards } : {}),
+      ...(content.boundViews === undefined && current?.boundViews !== undefined ? { boundViews: current.boundViews } : {}) };
+  }
+
   // A console may only be saved over screens that exist; one deleted later shows as unavailable.
-  // Its widgets are checked now and again at publication, since screens and gadgets change.
-  #parse(content: OperateConsoleContent, current?: OperateConsole): OperateConsoleContent {
-    // Omitted means keep: editors that predate host boards send no `hostBoards`, and replacing
-    // through them must not delete saved entries. An explicit list (`[]` included) replaces them.
-    // The saved entries are merged in before parsing, so the combined registry limit applies.
-    let inherited = content.hostBoards === undefined && current?.hostBoards !== undefined;
-    let parsed = parseOperateConsoleContent(inherited ? { ...content, hostBoards: current!.hostBoards } : content);
+  // Its widgets and bound views are checked now, against `commits`, and again at publication,
+  // since screens and gadgets change.
+  #parse(content: OperateConsoleContent, commits: SourceCommits | undefined, current?: OperateConsole): OperateConsoleContent {
+    let parsed = parseOperateConsoleContent(this.#inherit(content, current));
     let missing = consoleScreens(parsed).find(screen => !this.storage.canvases.get(screen));
     if (missing) throw new Error(`Console screen ${missing} is not a screen in this workspace`);
-    checkConsoleWidgets(this.storage, parsed);
-    if (parsed.hostBoards === undefined) return parsed;
-    return { ...parsed, hostBoards: this.#hostBoards(parsed.hostBoards, current) };
+    checkConsoleWidgets(this.storage, parsed, commits);
+    let hostBoards = parsed.hostBoards === undefined ? undefined : this.#hostBoards(parsed.hostBoards, current);
+    let boundViews = parsed.boundViews === undefined ? undefined : this.#boundViews(parsed.boundViews, commits, current);
+    return { ...parsed, ...(hostBoards === undefined ? {} : { hostBoards }), ...(boundViews === undefined ? {} : { boundViews }) };
   }
 
   // A new entry gets its id here, and is refused while the switch is off; entries this console
@@ -199,6 +363,40 @@ export class WorkspaceConsoleStore {
       }
       return entry;
     });
+  }
+
+  // As `#hostBoards`, under the bound-view switch: an entry naming an id must be one of this
+  // console's with the same gadget, so an id never moves to another source. Every entry must also
+  // pass `boundViewRefusal` and the saved size bound.
+  #boundViews(entries: BoundViewEntry[], commits: SourceCommits | undefined, current?: OperateConsole): BoundViewEntry[] {
+    if (entries.some(entry => entry.id === undefined) && !boundViewsEnabled(this.env)) throw new Error(BOUND_VIEWS_OFF);
+    let known = new Map<string, BoundViewEntry>();
+    for (let entry of [...current?.boundViews ?? [], ...current?.published?.content.boundViews ?? []]) {
+      if (entry.id !== undefined) known.set(entry.id, entry);
+    }
+    return entries.map(entry => {
+      if (entry.id !== undefined && known.get(entry.id)?.gadgetId !== entry.gadgetId) {
+        throw new Error(`Bound view ${entry.id} is not this console's, or its gadget changed; add a new entry instead.`);
+      }
+      let saved = entry.id === undefined ? { ...entry, id: crypto.randomUUID() } : entry;
+      if (jsonBytes(saved) > CONSOLE_SIZE_LIMITS.boundViewEntry) {
+        throw new Error(`Console bound view "${entry.label}" is over ${CONSOLE_SIZE_LIMITS.boundViewEntry} bytes.`);
+      }
+      let refusal = boundViewRefusal(this.storage, saved, commits ?? new Map());
+      if (refusal) throw new Error(`Console bound view "${entry.label}": ${refusal}`);
+      return saved;
+    });
+  }
+
+  /**
+   * The commits of the gadgets that saving `content` over console `id` (or creating it) would
+   * check: those of its widgets and bound views, including bound views kept from the saved draft.
+   * The caller reads them (see `SourceCommits`) and passes them to `create` or `replace`.
+   */
+  sourceCommitIds(content: OperateConsoleContent, id?: string): string[] {
+    let current = id === undefined ? undefined : this.storage.consoles.get(id);
+    let merged = this.#inherit(content, current ?? undefined);
+    return captureConsole(this.storage, { ...merged, id: "", revision: "", published: null }).commitIds;
   }
 
   list(): OperateConsole[] {
@@ -262,32 +460,55 @@ export class WorkspaceConsoleStore {
   }
 
   /**
+   * What publishing console `id` at `expectedRevision` would freeze, as it is now (see
+   * `ConsoleCapture`). The caller reads `commitIds` (see `SourceCommits`) and passes both to
+   * `publish`.
+   */
+  capture(id: string, expectedRevision: string): ConsoleCapture {
+    this.#requireEnabled();
+    return captureConsole(this.storage, this.#current(id, expectedRevision));
+  }
+
+  /**
    * Publishes the draft at `expectedRevision`: operators move to it, with each screen as it is
    * now, and later edits to the console or its screens stay draft until the next publish. Each
    * publish raises the revision, like a replace, so of two publishes at one revision only the
    * first wins, and a republish of unchanged content (picking up edited screens) is still a new
-   * revision that open sessions move to.
+   * revision that open sessions move to. Given a `capture` and the `commits` it names, the console
+   * and its sources must still be as captured; bound views are published only that way, each
+   * with its captured commit's spec.
    */
-  publish(id: string, expectedRevision: string): OperateConsole {
+  publish(id: string, expectedRevision: string, capture?: ConsoleCapture, commits?: SourceCommits): OperateConsole {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
-      // A host-only publication creates no install. While the switch is off, only entries already
+      if (capture && JSON.stringify(captureConsole(this.storage, current)) !== JSON.stringify(capture)) {
+        throw new Error(`Console ${id} or one of its gadgets changed while it was being published; publish again.`);
+      }
+      // A host-only publication creates no install. While a switch is off, only entries already
       // published may be published again; publishing any other is refused.
       let published = new Set((current.published?.content.hostBoards ?? []).map(entry => entry.id));
       if (!hostBoardsEnabled(this.env) && (current.hostBoards ?? []).some(entry => !published.has(entry.id))) {
         throw new Error(HOST_BOARDS_OFF);
       }
+      let views = new Set((current.published?.content.boundViews ?? []).map(entry => entry.id));
+      if (!boundViewsEnabled(this.env) && (current.boundViews ?? []).some(entry => !views.has(entry.id))) {
+        throw new Error(BOUND_VIEWS_OFF);
+      }
       let raised = { ...current, revision: String(BigInt(current.revision) + 1n) };
-      return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen);
+      return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen, capture && commits);
     });
   }
 
-  create(content: OperateConsoleContent): OperateConsole {
+  /**
+   * Creates a console from `content`. `commits` holds the commits of the gadgets it registers
+   * (`sourceCommitIds`); without it, bound views are refused and widgets are not checked for views.
+   */
+  create(content: OperateConsoleContent, commits?: SourceCommits): OperateConsole {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
       let created: OperateConsole = {
-        ...this.#parse(content), id: crypto.randomUUID(), revision: "0", published: null,
+        ...this.#parse(content, commits), id: crypto.randomUUID(), revision: "0", published: null,
       };
       if (Array.from(this.storage.consoles.list({ limit: MAX_WORKSPACE_CONSOLES })).length >= MAX_WORKSPACE_CONSOLES) {
         throw new Error("Workspace console limit reached");
@@ -297,12 +518,13 @@ export class WorkspaceConsoleStore {
     });
   }
 
-  replace(id: string, expectedRevision: string, content: OperateConsoleContent): OperateConsole {
+  /** Replaces console `id`'s draft at `expectedRevision` with `content`, checked as in `create`. */
+  replace(id: string, expectedRevision: string, content: OperateConsoleContent, commits?: SourceCommits): OperateConsole {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
       let replaced: OperateConsole = {
-        ...this.#parse(content, current), id,
+        ...this.#parse(content, commits, current), id,
         revision: String(BigInt(current.revision) + 1n),
         published: current.published,
       };
