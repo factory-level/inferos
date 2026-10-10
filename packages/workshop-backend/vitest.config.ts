@@ -38,24 +38,33 @@ const textModules: Plugin = {
 const STRING_QUERY = /[?&](?:raw|url|inline)(?:[&=]|$)/
 function rpcValidation(): Plugin {
   let plugin = capnwebValidate() as Plugin
-  let transform = plugin.transform as Extract<Plugin['transform'], (...args: never[]) => unknown>
-  return {
-    ...plugin,
-    transform(code, id, options) {
-      return STRING_QUERY.test(id) ? null : transform.call(this, code, id, options)
-    },
+  // A function today; the object-hook form (`{handler, filter}`) keeps its filter around the wrap.
+  let hook = plugin.transform
+  let transform = typeof hook === 'function' ? hook : hook?.handler
+  if (!transform) throw new Error('capnweb-validate has no transform hook to wrap')
+  let wrapped: typeof transform = function (code, id, options) {
+    return STRING_QUERY.test(id) ? null : transform.call(this, code, id, options)
   }
+  return { ...plugin, transform: typeof hook === 'function' ? wrapped : { ...hook, handler: wrapped } }
 }
 
 // The UTF-16 length of every `src/**/*.ts` file as it is on disk, keyed as the guard tests'
 // `import.meta.glob("../src/**/*.ts")` keys it, so a test in workerd (which cannot read the disk)
-// can check that a `?raw` import is the file itself (see rpcValidation).
+// can check that a `?raw` import is the file itself (see rpcValidation). Computed once, when this
+// config loads: under `--watch`, restart after editing `src/` or the lengths are stale.
 const sourceLengths = Object.fromEntries(
   readdirSync(path.resolve(import.meta.dirname, 'src'), { recursive: true, encoding: 'utf-8' })
     .filter(file => file.endsWith('.ts'))
     .map(file => [`../src/${file.split(path.sep).join('/')}`,
       readFileSync(path.resolve(import.meta.dirname, 'src', file), 'utf-8').length]),
 )
+// The same for the sources outside `src/` that a guard reads through `?raw` (chat-taint-guard's
+// agent APIs), keyed by their path from `__tests__/`.
+const guardedSourceLengths = Object.fromEntries([
+  '../../gatekeeper-context/src/library-gatekeeper.ts',
+  '../../gatekeeper-scheduler/src/types.d.ts',
+  '../../../custom-gatekeepers/gatekeeper-inferops/src/types.d.ts',
+].map(file => [file, readFileSync(path.resolve(import.meta.dirname, '__tests__', file), 'utf-8').length]))
 
 // Records the agent spans (see src/agent-tracing.ts) this Worker emits, as a streaming tail
 // worker receives them, so tests can read them back through the SPAN_RECORDER binding.
@@ -128,7 +137,10 @@ export default defineConfig({
       },
     }),
   ],
-  define: { __WORKSHOP_SOURCE_LENGTHS__: JSON.stringify(sourceLengths) },
+  define: {
+    __WORKSHOP_SOURCE_LENGTHS__: JSON.stringify(sourceLengths),
+    __WORKSHOP_GUARDED_SOURCE_LENGTHS__: JSON.stringify(guardedSourceLengths),
+  },
   test: {
     include: ['__tests__/*.test.ts'],
     // Asserts the pool actually started, rather than trusting a green run to mean workerd.
