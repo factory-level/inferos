@@ -1,6 +1,7 @@
 // Host boards with the switch off (the default): the kernel refuses registration and publication,
 // selection and acquisition, and reports the switch off to clients. The read checkpoint is covered
-// by workshop-backend's host-boards.test.ts. Synthetic data only.
+// by workshop-backend's host-boards.test.ts. Bound views, which need host boards, are refused at
+// delivery too. Synthetic data only.
 
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
@@ -36,7 +37,7 @@ afterAll(async () => {
 });
 
 it("refuses host boards at registration, selection and acquisition while the switch is off", async () => {
-  expect((await publicApi.getServerConfig()).hostBoards).toBe(false);
+  expect(await publicApi.getServerConfig()).toMatchObject({ hostBoards: false, boundViews: false });
   const api = await signUp(publicApi, nextUsernames("hboff")[0]!);
   const ws = await api.newGadget();
   const screen = await ws.createCanvas({ title: "Floor", sections: [] });
@@ -52,4 +53,5 @@ it("refuses host boards at registration, selection and acquisition while the swi
   const ref = { consoleId: published.id, source: "published" as const, revision: published.revision };
   await expect(session.selectHostBoardConnection(ref, "any", 0, "k1")).rejects.toThrow(/turned off/);
   await expect(session.getConsoleHostBoard(ref, "any")).rejects.toThrow(/turned off/);
+  await expect(session.getConsoleBoundView(ref, "any")).rejects.toThrow(/Bound views are turned off/);
 });

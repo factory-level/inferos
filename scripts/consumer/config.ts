@@ -2,7 +2,7 @@
 export const CAPABILITY_NAMES = [
   "INFEROPS_ENABLED", "INFEROPS_CANVAS_STATE_MACHINE", "HARNESS_HG_ENABLED", "INFEROPS_AUTH",
   "PUBLISH_CLOUDFLAREOS_WIDGET", "PUBLISH_CLOUDFLAREOS_APP", "AGENT_DEPLOYMENTS", "CODING_WORKBENCH_ENABLED",
-  "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS",
+  "INFEROPS_TABLES_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS",
 ] as const;
 
 /** One customer capability flag name. */
@@ -122,6 +122,8 @@ export const CAPABILITY_REQUIREMENTS: Partial<Record<CapabilityName, readonly Ca
   INFEROPS_TABLES_ENABLED: ["INFEROPS_ENABLED"],
   // Host boards (proposed): the kernel reads them through the InferOps gatekeeper's board facet.
   INFEROPS_HOST_BOARDS: ["INFEROPS_ENABLED"],
+  // Bound views (proposed): a bound view shows host-board reads, so it needs host boards on.
+  INFEROPS_BOUND_VIEWS: ["INFEROPS_HOST_BOARDS"],
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

@@ -291,6 +291,17 @@ export function resolveInferOpsHostBoards(options: InferOpsSwitchOptions): "true
   return resolveInferOpsSwitch("INFEROPS_HOST_BOARDS", options);
 }
 
+/**
+ * The `INFEROPS_BOUND_VIEWS` var (proposed) the Workshop backend checks (`console-store.ts`, every
+ * bound-view registration, first publication and delivery). Resolved as `INFEROPS_HOST_BOARDS`, from
+ * the resolved host-board switch in place of `INFEROPS_ENABLED`: a bound view shows host-board reads.
+ */
+export function resolveInferOpsBoundViews(
+  options: Omit<InferOpsSwitchOptions, "inferOpsEnabled"> & { hostBoards: "true" | "false" },
+): "true" | "false" {
+  return resolveSwitch("INFEROPS_BOUND_VIEWS", options, options.hostBoards, "host boards (INFEROPS_HOST_BOARDS) are");
+}
+
 /** What resolves one switch that lives inside the InferOps integration. */
 export type InferOpsSwitchOptions = {
   /** The wrapper's version 2 capability, or null for a version 1 wrapper or no wrapper. */
@@ -304,13 +315,17 @@ export type InferOpsSwitchOptions = {
 function resolveInferOpsSwitch(
   name: "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED" | "INFEROPS_HOST_BOARDS", options: InferOpsSwitchOptions,
 ): "true" | "false" {
-  const { capability, inferOpsEnabled, shell } = options;
+  return resolveSwitch(name, options, options.inferOpsEnabled, "the InferOps integration (INFEROPS_ENABLED) is");
+}
+
+function resolveSwitch(name: string, { capability, shell }: Pick<InferOpsSwitchOptions, "capability" | "shell">,
+    required: "true" | "false", requiredIs: string): "true" | "false" {
   if (capability === null && shell !== undefined && shell !== "true" && shell !== "false") {
     throw new Error(`${name} must be "true" or "false"`);
   }
   const on = capability ?? shell === "true";
-  if (on && inferOpsEnabled !== "true") {
-    throw new Error(`${name} is on, but the InferOps integration (INFEROPS_ENABLED) is off`);
+  if (on && required !== "true") {
+    throw new Error(`${name} is on, but ${requiredIs} off`);
   }
   return on ? "true" : "false";
 }

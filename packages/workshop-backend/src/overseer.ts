@@ -2,7 +2,7 @@ import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/
 import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
-import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
+import { BOUND_VIEWS_OFF, boundViewsEnabled, consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { parseWidgetTools } from "@gadgets/workshop-shared/widget-tools";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
@@ -86,7 +86,7 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { BoundViewDescription, GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -1666,6 +1666,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
 /** The Overseer's typed storage. See makeOverseerStorage. */
 export type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
+
+// How many commits of a draft bound view's source history a preview may pin (see
+// getConsoleBoundViewDraft): a walk of commit headers only, no trees or blobs.
+const BOUND_VIEW_PIN_DEPTH = 64;
 
 // Validates a client-supplied commit oid before it reaches the git store.
 function validateOid(oid: string): string {
@@ -11779,6 +11783,28 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Build access may already open any gadget, so its capability is the ordinary one.
     return this.getGadget(gadgetId);
   }
+  // A pinned commit must be the source's current commit or one of its ancestors within
+  // BOUND_VIEW_PIN_DEPTH commits of it (git log order), so another gadget's view, or one the
+  // source's history no longer reaches, is refused; a preview pinned further back refreshes. It
+  // must still be a view-only spec reading the entry's requirements, and the entry's source a
+  // valid install. Build clients may call this directly rather than through their operate session:
+  // that is acceptable, because build access can already read the source's files.
+  async getConsoleBoundViewDraft(consoleId: string, revision: string, entryId: string, commitId?: string)
+      : Promise<Pick<BoundViewDescription, "commitId" | "specText">> {
+    if (!boundViewsEnabled(this.impl.env)) throw new Error(BOUND_VIEWS_OFF);
+    let store = this.#consoleStore();
+    let current = store.draftBoundViewCommit(consoleId, revision, entryId);
+    let read = commitId === undefined ? current : validateOid(commitId);
+    if (read !== current) {
+      // A history the walk cannot finish (an ancestor not held here) refuses: fail closed.
+      let history = await this.impl.gitStore.readCommitLog(current, {depth: BOUND_VIEW_PIN_DEPTH}).catch(() => []);
+      if (!history.some(entry => entry.oid === read)) {
+        throw new Error(`Commit ${read} is not in the recent history of bound view ${entryId}'s source.`);
+      }
+    }
+    let commit = (await this.impl.readSourceCommits([read])).get(read)!;
+    return { commitId: read, specText: store.draftBoundViewSpec(consoleId, revision, entryId, commit) };
+  }
 
   #artifactRevision(ref: ArtifactRef): ArtifactRevisionRecord | null {
     let parsed = parseArtifactRef(ref);
@@ -13826,6 +13852,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
+  async getConsoleBoundViewDraft(_consoleId: string, _revision: string, _entryId: string, _commitId?: string)
+      : Promise<Pick<BoundViewDescription, "commitId" | "specText">> { this.#deny(); }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
     if (source !== "published") this.#deny();
     return this.#consoleStore().get(id, source);
@@ -14355,6 +14383,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
+  async getConsoleBoundViewDraft(_consoleId: string, _revision: string, _entryId: string, _commitId?: string)
+      : Promise<Pick<BoundViewDescription, "commitId" | "specText">> { this.#deny(); }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
       _model: ArtifactModelRequirement | null)
       : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> { this.#deny(); }

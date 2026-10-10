@@ -16,6 +16,7 @@ import {
   resolveInferOpsEnabled,
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
+  resolveInferOpsBoundViews,
   resolvePublicationFlag,
 } from "./dev-server-config.ts";
 
@@ -248,5 +249,17 @@ describe("resolveInferOpsHostBoards", () => {
       /INFEROPS_HOST_BOARDS must be "true" or "false"/);
     assert.throws(() => resolveInferOpsHostBoards({ capability: true, inferOpsEnabled: "false", shell: undefined }),
       /INFEROPS_HOST_BOARDS is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
+  });
+});
+
+describe("resolveInferOpsBoundViews", () => {
+  it("is off by default, follows a version 2 capability over the shell, and needs host boards on", () => {
+    assert.equal(resolveInferOpsBoundViews({ capability: null, hostBoards: "true", shell: undefined }), "false");
+    assert.equal(resolveInferOpsBoundViews({ capability: null, hostBoards: "true", shell: "true" }), "true");
+    assert.equal(resolveInferOpsBoundViews({ capability: false, hostBoards: "true", shell: "true" }), "false");
+    assert.throws(() => resolveInferOpsBoundViews({ capability: null, hostBoards: "true", shell: "on" }),
+      /INFEROPS_BOUND_VIEWS must be "true" or "false"/);
+    assert.throws(() => resolveInferOpsBoundViews({ capability: true, hostBoards: "false", shell: undefined }),
+      /INFEROPS_BOUND_VIEWS is on, but host boards \(INFEROPS_HOST_BOARDS\) are off/);
   });
 });
