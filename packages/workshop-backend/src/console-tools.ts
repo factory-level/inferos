@@ -5,7 +5,9 @@
 //
 // Every result the agent will see is kernel-built JSON in which authored text (a console's widget
 // labels, a tool's description, output and error message) appears only as JSON values, after a
-// fixed line naming it untrusted (§4.8.1). Kernel refusals carry kernel text only.
+// fixed line naming it untrusted (§4.8.1). Kernel refusals carry kernel text, which may name a
+// declared identifier (a tool or input property name: at most 48 letters, digits and underscores,
+// as parseWidgetTools admits them), and never any other authored text or an exception's text.
 
 import type { WorkpieceId } from "@gadgets/workshop-shared/api";
 import type { ConsoleWidgetEntry } from "@gadgets/workshop-shared/operate-console";
@@ -55,8 +57,8 @@ export type ConsoleToolCallRequest = ConsoleToolListRequest & {
 
 /**
  * A listing's or a call's outcome. `ok` (a listing, or a tool's output) and `error` (the message a
- * tool reported) carry kernel-built JSON after the untrusted frame; `failed` carries kernel text
- * only, never authored text.
+ * tool reported) carry kernel-built JSON after the untrusted frame; `failed` carries kernel text,
+ * which may name a declared tool or input property identifier, and no other authored text.
  */
 export type ConsoleToolOutcome =
   | { status: "ok"; text: string }
@@ -128,3 +130,39 @@ export const TOOL_SLOT_REFUSALS: Readonly<Record<ToolLaneRefusal, string>> = Obj
   "cleanup-behind": "Tool cleanup is behind; try again shortly.",
   "name-collision": "The tool call could not start; try again.",
 });
+
+/** The kernel's answer when a listing or call failed in the kernel: never the exception's text. */
+export const CONSOLE_TOOL_FAILED = "The console tool call failed.";
+
+/** The kernel's answer when a call's deadline passed. */
+export const TOOL_TIMED_OUT = "The tool did not finish in time.";
+
+/** The kernel's answer when a listing's deadline passed. */
+export const LISTING_TIMED_OUT = "The listing did not finish in time.";
+
+/**
+ * Thrown by the Overseer's `consoleSessionCheck` when the caller's page does not show the console
+ * at that revision: a refusal whose kernel text may be passed on, unlike an RPC failure.
+ */
+export class ConsoleNotOpenError extends Error {}
+
+/** Thrown by `beforeDeadline` when the deadline passes first. */
+export class ConsoleToolDeadlineError extends Error {}
+
+/**
+ * `promise`, or a `ConsoleToolDeadlineError` once `deadlineAt` (epoch ms) passes, whichever comes
+ * first, so a slow Durable Object or storage read cannot hold a lane slot past the deadline. The
+ * losing promise is left to settle; nothing reads it.
+ */
+export function beforeDeadline<T>(promise: Promise<T>, deadlineAt: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ConsoleToolDeadlineError()), Math.max(0, deadlineAt - Date.now()));
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** The fixed text for a failure thrown during a listing or call: `timedOut` for the deadline. */
+export function thrownConsoleToolFailure(error: unknown, timedOut: string): string {
+  return error instanceof ConsoleToolDeadlineError ? timedOut : CONSOLE_TOOL_FAILED;
+}

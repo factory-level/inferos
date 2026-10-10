@@ -11,8 +11,9 @@ import {
 import { WorkspaceFlowStore } from "./flow-store";
 import { runIsolatedTool, ToolLane, type PendingToolFacetRecord, type ToolFacetTombstoneRecord, type ToolLaneSlot } from "./tool-lane";
 import {
-  CONSOLE_CHANGED_DURING_CALL, CONSOLE_TOOL_AUDIT_KEPT, CONSOLE_TOOL_DEADLINE_MS, framedToolListing,
-  NO_CONSOLE_TOOL_ACCESS, TOOL_SLOT_REFUSALS, UNVERIFIED_CONSOLE_TOOL_CALLER, untrustedFrame,
+  beforeDeadline, CONSOLE_CHANGED_DURING_CALL, CONSOLE_TOOL_AUDIT_KEPT, CONSOLE_TOOL_DEADLINE_MS,
+  CONSOLE_TOOL_FAILED, ConsoleNotOpenError, framedToolListing, LISTING_TIMED_OUT, NO_CONSOLE_TOOL_ACCESS,
+  thrownConsoleToolFailure, TOOL_SLOT_REFUSALS, TOOL_TIMED_OUT, UNVERIFIED_CONSOLE_TOOL_CALLER, untrustedFrame,
   type ConsoleToolAuditRecord, type ConsoleToolAuditStatus, type ConsoleToolCaller, type ConsoleToolCallRequest,
   type ConsoleToolListRequest, type ConsoleToolOutcome,
 } from "./console-tools";
@@ -10645,7 +10646,7 @@ class OverseerImpl implements AgentHooks {
     let open = (await user.getOperatePage()).state.console;
     if (open?.workspaceId !== this.ctx.id.toString() || open.consoleId !== consoleId ||
         open.source !== "published" || open.revision !== revision) {
-      throw new Error(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
+      throw new ConsoleNotOpenError(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
     }
   }
 
@@ -10694,27 +10695,37 @@ class OverseerImpl implements AgentHooks {
     let refusal = this.#consoleToolsRefusal();
     if (refusal) return consoleToolFailure(refusal);
     let deadlineAt = Math.min(request.deadlineAt, Date.now() + CONSOLE_TOOL_DEADLINE_MS);
-    let user = await this.#consoleToolUser(caller);
+    try {
+      return await this.#listConsoleTools(caller, request, deadlineAt);
+    } catch (error) {
+      return consoleToolFailure(thrownConsoleToolFailure(error, LISTING_TIMED_OUT));
+    }
+  }
+
+  async #listConsoleTools(caller: ConsoleToolCaller, request: ConsoleToolListRequest, deadlineAt: number)
+      : Promise<ConsoleToolOutcome> {
+    let user = await beforeDeadline(this.#consoleToolUser(caller), deadlineAt);
     if (!user) return consoleToolFailure(UNVERIFIED_CONSOLE_TOOL_CALLER);
-    let role = await this.#consoleToolRole(caller, user);
+    let role = await beforeDeadline(this.#consoleToolRole(caller, user), deadlineAt);
     if (!role) return consoleToolFailure(NO_CONSOLE_TOOL_ACCESS);
     let {consoleId, revision} = request;
-    let sharing = await this.getSharingManager();
+    let sharing = await beforeDeadline(this.getSharingManager(), deadlineAt);
     let store = this.#consoleStore();
     let published = () => store.get(consoleId, "published");
     if (published()?.revision !== revision) {
       return consoleToolFailure(`Console ${consoleId} is not published at revision ${revision}.`);
     }
     try {
-      await this.consoleSessionCheck(user, consoleId, revision);
+      await beforeDeadline(this.consoleSessionCheck(user, consoleId, revision), deadlineAt);
     } catch (error) {
-      return consoleToolFailure((error as Error).message);
+      if (error instanceof ConsoleNotOpenError) return consoleToolFailure(error.message);
+      throw error;
     }
     // Nothing is awaited from here on, so this is what the caller may see now.
     let current = sharing.getEffectiveRole(caller.profileId);
     let shown = published();
     if (!current || shown?.revision !== revision) return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
-    if (Date.now() >= deadlineAt) return consoleToolFailure("The listing did not finish in time.");
+    if (Date.now() >= deadlineAt) return consoleToolFailure(LISTING_TIMED_OUT);
     let blocks = (shown.widgets ?? []).flatMap(entry => {
       let tools = (entry.frozen?.tools ?? []).flatMap(declared => {
         try {
@@ -10736,8 +10747,9 @@ class OverseerImpl implements AgentHooks {
    * in the isolated lane (`runIsolatedTool`) under an absolute deadline of at most 10 s; the page
    * checked again; then, with no await, the generation, the caller's role, the offer and the
    * deadline. Only then is the result released, read through `parseToolEnvelope` against the
-   * declared output, and framed as untrusted. Every attempt by a verified caller writes one audit
-   * record, readable only by that caller (`listConsoleToolAudit`).
+   * declared output, and framed as untrusted. Every await is raced against the deadline, and
+   * anything thrown ends the call with fixed kernel text, never the exception's. Every attempt by a
+   * verified caller writes one audit record, readable only by that caller (`listConsoleToolAudit`).
    */
   async invokeConsoleTool(caller: ConsoleToolCaller, request: ConsoleToolCallRequest)
       : Promise<ConsoleToolOutcome> {
@@ -10751,49 +10763,61 @@ class OverseerImpl implements AgentHooks {
     if ("refused" in slot) return consoleToolFailure(TOOL_SLOT_REFUSALS[slot.refused]);
     let attempt: ConsoleToolAttempt = {verified: false, ran: false, commitId: null, tool: null};
     let leave: (() => void) | undefined;
-    let outcome: ConsoleToolOutcome | undefined;
+    let outcome: ConsoleToolOutcome;
+    let threw = false;
     try {
       outcome = await this.#invokeConsoleTool(caller, request, deadlineAt, slot, attempt,
           kind => { leave = this.joinSession(kind); });
-      return outcome;
-    } finally {
-      slot.release();
-      if (attempt.verified) {
-        let status: ConsoleToolAuditStatus = outcome?.status === "ok" || outcome?.status === "error"
-            ? outcome.status : attempt.ran ? "failed" : "refused";
-        this.#recordConsoleToolAudit({at: Date.now(), userId: caller.userId, consoleId: request.consoleId,
-          revision: request.revision, gadgetId: request.gadgetId, commitId: attempt.commitId, tool: attempt.tool, status});
-      }
-      leave?.();
+    } catch (error) {
+      // A kernel failure (a user Durable Object, storage, the deadline): fixed text only.
+      threw = true;
+      outcome = consoleToolFailure(thrownConsoleToolFailure(error, TOOL_TIMED_OUT));
     }
+    // The slot is held until here: through the lane's cleanup and every check after it.
+    slot.release();
+    if (attempt.verified) {
+      let status: ConsoleToolAuditStatus = outcome.status === "ok" || outcome.status === "error"
+          ? outcome.status : attempt.ran || threw ? "failed" : "refused";
+      this.#recordConsoleToolAudit({at: Date.now(), userId: caller.userId, consoleId: request.consoleId,
+        revision: request.revision, gadgetId: request.gadgetId, commitId: attempt.commitId, tool: attempt.tool, status});
+    }
+    leave?.();
+    return outcome;
   }
 
   async #invokeConsoleTool(caller: ConsoleToolCaller, request: ConsoleToolCallRequest, deadlineAt: number,
       slot: ToolLaneSlot, attempt: ConsoleToolAttempt, lease: (kind: SessionKind) => void)
       : Promise<ConsoleToolOutcome> {
-    let user = await this.#consoleToolUser(caller);
+    let user = await beforeDeadline(this.#consoleToolUser(caller), deadlineAt);
     if (!user) return consoleToolFailure(UNVERIFIED_CONSOLE_TOOL_CALLER);
     attempt.verified = true;
-    let role = await this.#consoleToolRole(caller, user);
+    let role = await beforeDeadline(this.#consoleToolRole(caller, user), deadlineAt);
     if (!role) return consoleToolFailure(NO_CONSOLE_TOOL_ACCESS);
-    let sharing = await this.getSharingManager();
+    // With no await since authorization returned: a change after it moves the generation.
     lease(role);
     let generation = this.authzGeneration();
+    let sharing = await beforeDeadline(this.getSharingManager(), deadlineAt);
 
     let {consoleId, revision, gadgetId} = request;
     let store = this.#consoleStore();
     let offered;
     try {
       offered = store.offeredTool(consoleId, revision, gadgetId, request.tool);
-      await this.consoleSessionCheck(user, consoleId, revision);
     } catch (error) {
       return consoleToolFailure((error as Error).message);
+    }
+    try {
+      await beforeDeadline(this.consoleSessionCheck(user, consoleId, revision), deadlineAt);
+    } catch (error) {
+      // Only the check's own refusal is passed on; an RPC failure is the caller's generic one.
+      if (error instanceof ConsoleNotOpenError) return consoleToolFailure(error.message);
+      throw error;
     }
     let {entry, tool} = offered;
     attempt.commitId = entry.frozen!.commitId;
     attempt.tool = tool.name;
     if (isReservedToolMethod(tool.method)) return consoleToolFailure(`Tool ${tool.name} cannot be called.`);
-    if (request.inputJson.length > WIDGET_TOOL_LIMITS.inputBytes) {
+    if (new TextEncoder().encode(request.inputJson).byteLength > WIDGET_TOOL_LIMITS.inputBytes) {
       return consoleToolFailure(`The tool input is over ${WIDGET_TOOL_LIMITS.inputBytes} bytes.`);
     }
     let input: unknown;
@@ -10805,20 +10829,21 @@ class OverseerImpl implements AgentHooks {
     let problem = widgetToolValueProblem(tool.input, input);
     if (problem !== null) return consoleToolFailure(`The tool input does not match tool ${tool.name}: ${problem}.`);
 
-    let files = await this.gitStore.readCommitFiles(attempt.commitId);
+    let files = await beforeDeadline(this.gitStore.readCommitFiles(attempt.commitId), deadlineAt);
     let modules = Object.fromEntries([...files].filter(([path]) => isGadgetModule(path)));
     attempt.ran = true;
     let result = await runIsolatedTool(slot, {modules, method: tool.method, inputJson: JSON.stringify(input), deadlineAt});
     // A kernel failure carries no authored text, so it needs no post-check to be released.
     if (result.status === "failed") {
-      return consoleToolFailure(result.reason === "deadline" ? "The tool did not finish in time." : "The tool failed.");
+      return consoleToolFailure(result.reason === "deadline" ? TOOL_TIMED_OUT : "The tool failed.");
     }
 
     // The post-check: the caller's page, the last remote await.
     try {
-      await this.consoleSessionCheck(user, consoleId, revision);
-    } catch {
-      return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+      await beforeDeadline(this.consoleSessionCheck(user, consoleId, revision), deadlineAt);
+    } catch (error) {
+      if (error instanceof ConsoleNotOpenError) return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+      throw error;
     }
     // The final check, with no await before the release.
     let current = sharing.getEffectiveRole(caller.profileId);
@@ -10835,10 +10860,11 @@ class OverseerImpl implements AgentHooks {
         !stillOffered()) {
       return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
     }
-    if (Date.now() >= deadlineAt) return consoleToolFailure("The tool did not finish in time.");
+    if (Date.now() >= deadlineAt) return consoleToolFailure(TOOL_TIMED_OUT);
 
     // The lane parsed the envelope already; it is read again through the shared parser, which is
-    // what checks the value against the declared output and the message's length.
+    // what checks the value against the declared output and the message's length, and blanks the
+    // message's control and format characters, separators and lone surrogates (C1's rule).
     let envelope;
     try {
       let raw = result.status === "ok" ? {t: "ok", v: result.value} : {t: "err", m: result.message, len: result.length};
@@ -10862,8 +10888,9 @@ class OverseerImpl implements AgentHooks {
   }
 
   /**
-   * `caller`'s own console tool calls in this workspace, newest first (the latest 200 kept), once
-   * the caller checks out as for a call. No other caller's record is ever returned, and no client
+   * `caller`'s own console tool calls in this workspace, newest first: at most the latest 200 of
+   * theirs among the `CONSOLE_TOOL_AUDIT_KEPT` (1,000) records the workspace keeps, once the caller
+   * checks out as for a call. No other caller's record is ever returned, and no client
    * interface reads them: builders cannot.
    */
   async listConsoleToolAudit(caller: ConsoleToolCaller): Promise<Omit<ConsoleToolAuditRecord, "seq">[]> {
@@ -10916,12 +10943,17 @@ class OverseerImpl implements AgentHooks {
    */
   async listSessionConsoleTools(): Promise<ConsoleToolOutcome> {
     let deadlineAt = Date.now() + CONSOLE_TOOL_DEADLINE_MS;
-    let session = await this.#sessionConsole();
-    if ("reason" in session) return consoleToolFailure(session.reason);
-    let {owner, open, caller, workspace} = session;
-    let outcome = await workspace.listConsoleTools(caller, {consoleId: open.consoleId, revision: open.revision, deadlineAt});
-    return await this.#sessionConsoleStillOpen(owner, open)
-        ? outcome : consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    try {
+      let session = await this.#sessionConsole();
+      if ("reason" in session) return consoleToolFailure(session.reason);
+      let {owner, open, caller, workspace} = session;
+      let outcome = await workspace.listConsoleTools(caller, {consoleId: open.consoleId, revision: open.revision, deadlineAt});
+      return await this.#sessionConsoleStillOpen(owner, open)
+          ? outcome : consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    } catch {
+      // An RPC failure (the owner's or the console's Durable Object): kernel text only.
+      return consoleToolFailure(CONSOLE_TOOL_FAILED);
+    }
   }
 
   /**
@@ -10932,15 +10964,20 @@ class OverseerImpl implements AgentHooks {
    */
   async callSessionConsoleTool(widgetId: WorkpieceId, tool: string, input: unknown): Promise<ConsoleToolOutcome> {
     let deadlineAt = Date.now() + CONSOLE_TOOL_DEADLINE_MS;
-    let session = await this.#sessionConsole();
-    if ("reason" in session) return consoleToolFailure(session.reason);
-    let problem = plainJsonProblem(input, WIDGET_TOOL_LIMITS.inputBytes);
-    if (problem !== null) return consoleToolFailure(`The tool input is not valid: ${problem}.`);
-    let {owner, open, caller, workspace} = session;
-    let outcome = await workspace.invokeConsoleTool(caller, {consoleId: open.consoleId, revision: open.revision,
-      gadgetId: widgetId, tool, inputJson: JSON.stringify(input), deadlineAt});
-    return await this.#sessionConsoleStillOpen(owner, open)
-        ? outcome : consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    try {
+      let session = await this.#sessionConsole();
+      if ("reason" in session) return consoleToolFailure(session.reason);
+      let problem = plainJsonProblem(input, WIDGET_TOOL_LIMITS.inputBytes);
+      if (problem !== null) return consoleToolFailure(`The tool input is not valid: ${problem}.`);
+      let {owner, open, caller, workspace} = session;
+      let outcome = await workspace.invokeConsoleTool(caller, {consoleId: open.consoleId, revision: open.revision,
+        gadgetId: widgetId, tool, inputJson: JSON.stringify(input), deadlineAt});
+      return await this.#sessionConsoleStillOpen(owner, open)
+          ? outcome : consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    } catch {
+      // As in listSessionConsoleTools.
+      return consoleToolFailure(CONSOLE_TOOL_FAILED);
+    }
   }
 
   #codeIdMap = new Map<string, WorkerLoaderWorkerCode>;
