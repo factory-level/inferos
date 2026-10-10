@@ -62,11 +62,28 @@ export type StaleConsole = { workspaceId: string; consoleId: string; revision: s
 
 const OperateSessionContext = createContext<OperateSessionValue | null>(null)
 
+// A React key per signed-in account (or, with no account key, per stub), so nothing outlives a switch.
+const accountScopes = new WeakMap<object, number>()
+let nextAccountScope = 0
+const accountScope = (account: object) => {
+  let scope = accountScopes.get(account)
+  if (scope === undefined) accountScopes.set(account, scope = ++nextAccountScope)
+  return scope
+}
+
 /**
  * Holds this tab's view of the person's single operate session: one subscription, kept live, that
- * every tab and device of theirs shares through the kernel.
+ * every tab and device of theirs shares through the kernel. It and everything under it (the page,
+ * an open host board) are mounted afresh for each account, whatever the feature flags say, so no
+ * account's session state outlives a switch to another. A replacement stub for the same account
+ * (a reconnect) keeps them; one whose account is unknown does not (fail closed).
  */
 export const OperateSessionProvider = ({ children }: { children: ReactNode }) => {
+  const { authenticatedApi, accountKey } = useAuthenticatedApi()
+  return <AccountOperateSession key={accountScope(accountKey ?? authenticatedApi)}>{children}</AccountOperateSession>
+}
+
+const AccountOperateSession = ({ children }: { children: ReactNode }) => {
   const { authenticatedApi } = useAuthenticatedApi()
   const [snapshot, setSnapshot] = useState<OperateSessionSnapshot | null>(null)
   const [session, setSession] = useState<{ stub: RpcStub<OperateSession> } | null>(null)
@@ -79,6 +96,9 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
   useEffect(() => {
     let cancelled = false
     let subscription: RpcStub<{}> | undefined
+    // A reconnect re-runs this with the replacement stub while the page and its snapshot stay
+    // mounted, so a failed subscribe on the previous connection must not outlive it.
+    setError(null)
     const stub = authenticatedApi.getOperateSession()
     setSession({ stub })
     stub.subscribe(update => {
@@ -124,7 +144,8 @@ export const OperateSessionProvider = ({ children }: { children: ReactNode }) =>
       stub[Symbol.dispose]()
       setSession(null)
       setRecentEvents([])
-      setStaleConsole(null)
+      // `staleConsole` is kept: the kernel sends a notice once, so one that landed just before a
+      // reconnect must still hold after it. Another account remounts this with none.
     }
   }, [authenticatedApi])
 

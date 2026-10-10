@@ -9,6 +9,11 @@ interface AuthContextType {
   currentUser: AiChatAuthorInfo | null
   /** Whether the current user is a deployment admin. False while loading / for non-admins. */
   isAdmin: boolean
+  /**
+   * The signed-in account's opaque key from `useAuth`: the same object across a reconnect's
+   * replacement stub, a new one for another account, and null when unknown.
+   */
+  accountKey: object | null
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
@@ -16,10 +21,11 @@ const AuthContext = createContext<AuthContextType | null>(null)
 interface AuthProviderProps {
   children: ReactNode
   authenticatedApi: RpcStub<AuthenticatedApi>
+  accountKey: object | null
   onLogout: () => void
 }
 
-export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProviderProps) {
+export function AuthProvider({ children, authenticatedApi, accountKey, onLogout }: AuthProviderProps) {
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
 
@@ -40,7 +46,7 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
   }, [authenticatedApi])
 
   return (
-    <AuthContext.Provider value={{ authenticatedApi, logout: onLogout, currentUser, isAdmin }}>
+    <AuthContext.Provider value={{ authenticatedApi, logout: onLogout, currentUser, isAdmin, accountKey }}>
       {children}
     </AuthContext.Provider>
   )

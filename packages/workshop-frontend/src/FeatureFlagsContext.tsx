@@ -9,6 +9,10 @@ import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from './AuthContext'
 
 type FeatureFlagsContextValue = {
+  /**
+   * The flags. While `loading` is true they may be stale: the last ones loaded for this account,
+   * kept while a reconnect's replacement stub reloads them, or else the defaults.
+   */
   flags: UiFeatureFlags
   loading: boolean
 }
@@ -16,9 +20,10 @@ type FeatureFlagsContextValue = {
 const FeatureFlagsContext = createContext<FeatureFlagsContextValue | null>(null)
 
 export function FeatureFlagsProvider({ children }: { children: ReactNode }) {
-  const { authenticatedApi } = useAuthenticatedApi()
+  const { authenticatedApi, accountKey } = useAuthenticatedApi()
   const [loaded, setLoaded] = useState<{
     api: RpcStub<AuthenticatedApi>
+    accountKey: object | null
     flags: UiFeatureFlags
   } | null>(null)
 
@@ -31,22 +36,31 @@ export function FeatureFlagsProvider({ children }: { children: ReactNode }) {
         if (!cancelled) {
           setLoaded({
             api: authenticatedApi,
+            accountKey,
             flags: { ...DEFAULT_UI_FEATURE_FLAGS, ...flags },
           })
         }
       } catch {
         if (!cancelled) {
-          setLoaded({ api: authenticatedApi, flags: { ...DEFAULT_UI_FEATURE_FLAGS } })
+          setLoaded({ api: authenticatedApi, accountKey, flags: { ...DEFAULT_UI_FEATURE_FLAGS } })
         }
       }
     }
     void loadFlags()
 
     return () => { cancelled = true }
-  }, [authenticatedApi])
+  }, [authenticatedApi, accountKey])
 
-  const value = loaded?.api === authenticatedApi
-    ? { flags: loaded.flags, loading: false }
+  // A replacement stub for the same account (a reconnect re-authenticates on the new socket with
+  // the same token) keeps the flags last loaded until its own answer arrives. Falling back to the
+  // defaults meanwhile would switch every flag-gated surface off and on again, remounting it and
+  // dropping its state, such as an open host-board dialog under the Operate shell. Any other
+  // replacement, or one whose account is unknown, gets the defaults at once: they unmount what the
+  // previous account's flags enabled, so nothing of that account stays on screen.
+  const current = loaded?.api === authenticatedApi
+  const sameAccount = !!loaded && accountKey != null && loaded.accountKey === accountKey
+  const value = loaded && (current || sameAccount)
+    ? { flags: loaded.flags, loading: !current }
     : { flags: DEFAULT_UI_FEATURE_FLAGS, loading: true }
 
   return <FeatureFlagsContext.Provider value={value}>{children}</FeatureFlagsContext.Provider>
