@@ -89,6 +89,35 @@ export class Gadget extends DurableObject {
 }
 `;
 
+// A tool that tries to shadow the frozen prototype with an own `__invoke` on the runner instance.
+// The base constructor assigns `ctx` and `env` to each new instance, so setters for them installed
+// on Object.prototype or DurableObject.prototype at top level run on the ToolRunner instance before
+// any call. With `install` they define an own `__invoke` there; without, they only record that
+// they ran (the control that shows the setters really reach the runner).
+const instanceForger = (target: "object" | "do", install: boolean) => `
+import { DurableObject } from "cloudflare:workers";
+const forged = async function () {
+  const bytes = new TextEncoder().encode(JSON.stringify({ t: "ok", v: "FORGED" }));
+  return new ReadableStream({ type: "bytes", start(c) { c.enqueue(bytes); c.close(); } });
+};
+const reached = [];
+const target = ${JSON.stringify(target)} === "object" ? Object.prototype : DurableObject.prototype;
+for (const key of ["ctx", "env"]) {
+  Object.defineProperty(target, key, {
+    configurable: true,
+    set(value) {
+      Object.defineProperty(this, key, { value, writable: true, configurable: true });
+      if (this.constructor.name !== "ToolRunner") return;
+      reached.push(key);
+      if (${install}) Object.defineProperty(this, "__invoke", { value: forged, configurable: true });
+    },
+  });
+}
+export class Gadget extends DurableObject {
+  run(input) { return { echo: input, reached }; }
+}
+`;
+
 // An authored module that attaches itself to the guard before tool-main.js can.
 const PRE_ATTACH = `
 import { DurableObject } from "cloudflare:workers";
@@ -220,8 +249,8 @@ function loaderCode(modules: Record<string, string>, mainModule = Object.keys(mo
 }
 
 interface TestLaneOptions {
-  /** Makes `facets.delete` throw while set. */
-  faults?: { deleteThrows: boolean };
+  /** Makes `facets.delete` (and, if set, `facets.abort`) throw while set. */
+  faults?: { deleteThrows: boolean; abortThrows?: boolean };
   /** Records every name `facets.get` is asked for. */
   gets?: string[];
   mintId?: () => string;
@@ -236,7 +265,10 @@ function testLane(impl: Impl, state: DurableObjectState, options: TestLaneOption
   return new ToolLane({
     facets: {
       get: ((name: string, startup: any) => { options.gets?.push(name); return state.facets.get(name, startup); }) as DurableObjectFacets["get"],
-      abort: (name, reason) => state.facets.abort(name, reason),
+      abort: (name, reason) => {
+        if (faults.abortThrows) throw new Error("injected facets.abort failure");
+        state.facets.abort(name, reason);
+      },
       delete: name => {
         if (faults.deleteThrows) throw new Error("injected facets.delete failure");
         state.facets.delete(name);
@@ -355,6 +387,22 @@ describe("tool lane: results and envelopes", () => {
     expect(pendingNames(impl)).toEqual([]);
   }));
 
+  it("refuses module paths that are not plain relative .js paths, before loading", () => inWorkspace(async (impl, state) => {
+    let gets: string[] = [];
+    let lane = testLane(impl, state, { gets });
+    for (let path of ["./tool-guard.js", "./tool-main.js", "lib//x.js", "lib/./x.js", "../x.js", "/x.js", "x.cjs", "x.wasm", "x.py", "lib/"]) {
+      expect(await runIsolatedTool(reserved(lane, "u1"), {
+        modules: { "server.js": TOOLS, [path]: "export {};" }, method: "echo", inputJson: "{}", deadlineAt: Date.now() + 4_000,
+      }), path).toEqual({ status: "failed", reason: "invalid-module" });
+    }
+    expect(gets).toEqual([]);
+    // A nested plain path is an ordinary authored module.
+    expect(await runIsolatedTool(reserved(lane, "u1"), {
+      modules: { "server.js": `export { Gadget } from "./lib/gadget.js";`, "lib/gadget.js": TOOLS },
+      method: "echo", inputJson: "1", deadlineAt: Date.now() + 4_000,
+    })).toEqual({ status: "ok", value: { echo: 1 } });
+  }));
+
   it("caps a huge first chunk at 16 KiB + 1 (spike c5.huge)", () => inWorkspace(async (impl, state) => {
     let lane = testLane(impl, state);
     expect(await call(reserved(lane, "u1"), "huge", { bytes: 8 * 1024 * 1024 }))
@@ -400,6 +448,19 @@ describe("tool lane: module graph (spike case 5)", () => {
     expect(value.echo).toEqual({ n: 7 });
     expect(value.topLevel).toMatch(/^blocked: /);
     expect(value.atConstruction).toMatch(/^blocked: /);
+  }));
+
+  it("an own __invoke on the runner instance, set from a ctx/env setter, fails the call rather than forging it", () => inWorkspace(async (impl, state) => {
+    let lane = testLane(impl, state);
+    for (let target of ["object", "do"] as const) {
+      // Control: the setters run on the runner instance itself.
+      expect(await call(reserved(lane, "u1"), "run", 1, { server: instanceForger(target, false) }), target)
+          .toEqual({ status: "ok", value: { echo: 1, reached: ["ctx", "env"] } });
+      // workerd dispatches RPC only to prototype methods: an own `__invoke` makes it refuse the call
+      // ("The RPC receiver does not implement the method"), which the lane reports as `threw`.
+      expect(await call(reserved(lane, "u1"), "run", 1, { server: instanceForger(target, true) }), target)
+          .toEqual({ status: "failed", reason: "threw" });
+    }
   }));
 
   it("an authored module that attaches itself first fails the load instead of substituting", () => inWorkspace(async (impl, state) => {
@@ -575,6 +636,34 @@ describe("tool lane: slots and the deadline", () => {
   }));
 });
 
+describe("tool lane: deadline edge cases", () => {
+  it("still answers at the deadline when aborting the facet throws", () => inWorkspace(async (impl, state) => {
+    let faults = { deleteThrows: false, abortThrows: true };
+    let lane = testLane(impl, state, { faults });
+    let slot = reserved(lane, "u1");
+    let started = Date.now();
+    expect(await call(slot, "wait", { ms: 60_000 }, { deadlineMs: 200 })).toEqual({ status: "failed", reason: "deadline" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    // The release could not abort either, so the row waits for a sweep; the slot is free.
+    expect(Array.from(impl.storage.pendingToolFacets.list())).toMatchObject([{ name: slot.name, attempts: 1 }]);
+    faults.abortThrows = false;
+    reserved(lane, "u1").release();
+    expect(pendingNames(impl)).toEqual([]);
+  }));
+
+  it("runs no code for a deadline that has already passed", () => inWorkspace(async (impl, state) => {
+    let gets: string[] = [];
+    let lane = testLane(impl, state, { gets });
+    for (let deadlineAt of [Date.now(), Date.now() - 1_000]) {
+      expect(await runIsolatedTool(reserved(lane, "u1"), {
+        modules: { "server.js": TOOLS }, method: "echo", inputJson: "{}", deadlineAt,
+      })).toEqual({ status: "failed", reason: "deadline" });
+    }
+    expect(gets).toEqual([]);
+    expect(pendingNames(impl)).toEqual([]);
+  }));
+});
+
 describe("tool lane: cleanup and sweeps (spike case 4)", () => {
   it("an abandoned call's payload stays until the sweep before the next call deletes it", () => inWorkspace(async (impl, state) => {
     let payload = `synthetic-${crypto.randomUUID()}`;
@@ -684,6 +773,21 @@ describe("tool lane: cleanup and sweeps (spike case 4)", () => {
       expect(await state.storage.getAlarm()).toBeNull();
     }, name);
   });
+
+  it("a live call that outlasts the alarm does not re-arm it at the time that just fired", () => inWorkspace(async (impl, state) => {
+    // Under steady traffic some call is always live. If live rows held the retry time, every alarm
+    // would find nothing abandoned and set that same (by then past) time again: a hot loop.
+    let slot = reserved(impl.toolLane, "u1");
+    let fired = await state.storage.getAlarm();
+    expect(fired).not.toBeNull();  // a live row still schedules a wake-up, in case the object crashes
+    await scheduler.wait(5);  // the alarm fires later than the reservation
+    await impl.runAlarmTasks();
+    let next = await state.storage.getAlarm();
+    expect(next === null || (fired !== null && next > fired), `fired at ${fired}, re-armed at ${next}`).toBe(true);
+    expect(next! - Date.now()).toBeGreaterThan(29_000);
+    expect(pendingNames(impl)).toEqual([slot.name]);
+    slot.release();
+  }));
 
   it("a real scheduled alarm sweeps an abandoned facet and its payload", async () => {
     let name = workspaceName();

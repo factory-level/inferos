@@ -12,6 +12,9 @@
 //   captured its intrinsics and frozen its runner before any authored module evaluates. The guard
 //   bounds the envelope only: authored code still computes the value and can patch intrinsics the
 //   guard does not own, so the tag proves nothing and the caller re-validates what comes back.
+//   (The contract's §4.2 list of captured intrinsics includes `Array.isArray`; the guard never
+//   calls it, so it is not captured. It does capture `Object.getOwnPropertyDescriptor` and
+//   `String.prototype.slice`, which it does call.)
 // - Return channel. The runner answers with a byte stream of one JSON envelope, `{t:"ok", v}` or
 //   `{t:"err", m, len}` with `m` cut to 1 KiB in the isolate. The kernel reads it with a BYOB reader
 //   into a fixed buffer of 16 KiB + 1 and cancels on overflow, so it keeps no more than that
@@ -56,7 +59,8 @@ export const TOOL_LANE_LIMITS = {
 
 /**
  * The lane's own module names. The lane adds them to every load, so a commit that contains either
- * is refused, here and (by the caller) at publish.
+ * is refused, here and (by the caller) at publish. Keep in step with `RESERVED_TOOL_MODULES` in
+ * `@gadgets/workshop-shared/widget-tools` (the publish-time check), which this does not import.
  */
 export const TOOL_LANE_KERNEL_MODULES: readonly string[] = Object.freeze(["tool-main.js", "tool-guard.js"]);
 
@@ -65,6 +69,15 @@ const TOOL_COMPATIBILITY_DATE = "2026-02-01";
 
 /** The authored module `tool-main.js` imports, the widget's own server module. */
 const AUTHORED_MAIN = "server.js";
+
+/**
+ * Whether `path` is a plain relative `.js` module path: `/`-separated segments, none empty, `.` or
+ * `..`, ending in `.js`. Anything else (`./tool-guard.js`, `a//b.js`, `x.cjs`, `x.wasm`) is refused,
+ * so a kernel name can only appear in the one spelling the reserved-name check compares.
+ */
+function plainModulePath(path: string): boolean {
+  return path.endsWith(".js") && path.split("/").every(segment => segment !== "" && segment !== "." && segment !== "..");
+}
 
 // The guard. It imports nothing authored and owns the runner: it captures every intrinsic it later
 // uses at top level, then freezes the runner class, its prototype and each of its exports before
@@ -200,9 +213,11 @@ export type ToolLaneRefusal =
 export type ToolLaneFailure =
   /** The commit contains one of `TOOL_LANE_KERNEL_MODULES`. */
   | "reserved-module"
+  /** The commit contains a module that is not a plain relative `.js` path. */
+  | "invalid-module"
   /** The commit has no `server.js`. */
   | "no-server-module"
-  /** The deadline passed first. */
+  /** The deadline passed first, or had already passed when the call was to start. */
   | "deadline"
   /** The call threw over RPC (its text is not read). */
   | "threw"
@@ -249,9 +264,22 @@ export interface ToolLaneRequest {
  * workspace's and the caller's limits until `release()` (which `runIsolatedTool` calls).
  */
 export class ToolLaneSlot {
+  /** The lane the slot was reserved on. */
+  readonly lane: ToolLane;
+  /** The call's facet name, `tool-<randomUUID>`. */
+  readonly name: string;
+  /** The user the slot was reserved for. */
+  readonly callerUserId: string;
+  #cleanUp: () => void;
   #released = false;
 
-  constructor(readonly lane: ToolLane, readonly name: string, readonly callerUserId: string) {}
+  /** Made by `ToolLane.reserve`, which passes its private cleanup for this slot as `cleanUp`. */
+  constructor(lane: ToolLane, name: string, callerUserId: string, cleanUp: () => void) {
+    this.lane = lane;
+    this.name = name;
+    this.callerUserId = callerUserId;
+    this.#cleanUp = cleanUp;
+  }
 
   /** Whether the slot has been released. */
   get released(): boolean { return this.#released; }
@@ -263,7 +291,7 @@ export class ToolLaneSlot {
   release(): void {
     if (this.#released) return;
     this.#released = true;
-    this.lane.cleanUp(this);
+    this.#cleanUp();
   }
 }
 
@@ -273,7 +301,8 @@ export class ToolLane {
   // The names of this instance's live calls, with their callers. Lost on restart, which is what
   // lets the startup sweep treat every pending row as abandoned.
   #live = new Map<string, string>();
-  // The alarm time while pending rows remain, set once and held so recomputes don't push it out.
+  // The alarm time while pending rows remain, set once and held so recomputes don't push it out,
+  // and cleared by every sweep so the next one is due a full delay after it.
   #retryAt: number | undefined;
 
   constructor(ports: ToolLanePorts) {
@@ -300,12 +329,14 @@ export class ToolLane {
     pending.put({ name, callerUserId, startedAt: Date.now(), state: "pending", attempts: 0 });
     this.#live.set(name, callerUserId);
     this.#ports.pendingChanged();
-    return new ToolLaneSlot(this, name, callerUserId);
+    return new ToolLaneSlot(this, name, callerUserId, () => this.#cleanUp(name));
   }
 
   /**
    * Deletes the facets of pending rows that are not live in this instance, oldest first, attempting
    * at most `TOOL_LANE_LIMITS.sweepDeletes`. A delete that throws counts an attempt and stays pending.
+   * Every sweep clears the held retry time: otherwise a call live across the alarm would keep the
+   * time that just fired, and the alarm would re-arm in the past and fire again at once.
    */
   sweep(): ToolLaneSweep {
     let rows = Array.from(this.#ports.pending.list());
@@ -318,16 +349,15 @@ export class ToolLane {
       else result.failed.push(row.name);
     }
     result.remaining -= result.deleted.length;
-    if (abandoned.length > 0) {
-      this.#retryAt = undefined;
-      this.#ports.pendingChanged();
-    }
+    this.#retryAt = undefined;
+    if (abandoned.length > 0) this.#ports.pendingChanged();
     return result;
   }
 
   /**
-   * When the alarm should next sweep: while pending rows remain, 30 s from when this was first
-   * asked, backing off to 5 min after repeated failed deletes; otherwise undefined.
+   * When the alarm should next sweep: while pending rows remain (live ones too, so a crash mid-call
+   * still wakes the object), 30 s from when this was first asked since the last sweep, backing off
+   * to 5 min after repeated failed deletes; otherwise undefined.
    */
   nextSweepTime(): number | undefined {
     let attempts = -1;
@@ -340,13 +370,13 @@ export class ToolLane {
     return this.#retryAt ??= Date.now() + delay;
   }
 
-  /** Ends a slot's call: abort, delete, tombstone, free. Called by `ToolLaneSlot.release()` only. */
-  cleanUp(slot: ToolLaneSlot): void {
+  // Ends a slot's call: abort, delete, tombstone, free. Reached only through the slot's release().
+  #cleanUp(name: string): void {
     try {
-      let row = this.#ports.pending.get(slot.name);
+      let row = this.#ports.pending.get(name);
       if (row !== undefined) this.#deleteFacet(row);
     } finally {
-      this.#live.delete(slot.name);
+      this.#live.delete(name);
       this.#ports.pendingChanged();
     }
   }
@@ -420,12 +450,16 @@ export async function runIsolatedTool(slot: ToolLaneSlot, request: ToolLaneReque
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     if (slot.released) throw new Error("The tool slot was already released.");
-    if (Object.keys(request.modules).some(path => TOOL_LANE_KERNEL_MODULES.includes(path))) {
+    let paths = Object.keys(request.modules);
+    if (!paths.every(plainModulePath)) return { status: "failed", reason: "invalid-module" };
+    if (paths.some(path => TOOL_LANE_KERNEL_MODULES.includes(path))) {
       return { status: "failed", reason: "reserved-module" };
     }
     if (typeof request.modules[AUTHORED_MAIN] !== "string") {
       return { status: "failed", reason: "no-server-module" };
     }
+    // Step 7 of the contract's flow needs `Date.now() < deadlineAt`: an expired call runs no code.
+    if (Date.now() >= request.deadlineAt) return { status: "failed", reason: "deadline" };
     let lane = slot.lane;
     let call = (async (): Promise<ToolLaneResult> => {
       let returned: unknown;
@@ -438,7 +472,13 @@ export async function runIsolatedTool(slot: ToolLaneSlot, request: ToolLaneReque
     })();
     let deadline = new Promise<ToolLaneResult>(resolve => {
       timer = setTimeout(() => {
-        lane.abort(slot, "The tool call reached its deadline.");
+        // Resolve even if the abort throws, or the race would wait on the call it failed to end.
+        // The release that follows aborts and deletes again, and a failure there stays pending.
+        try {
+          lane.abort(slot, "The tool call reached its deadline.");
+        } catch (error) {
+          logger.warn("tool facet abort at the deadline failed", { event: "tool-lane.deadline.abort.failed", error });
+        }
         resolve({ status: "failed", reason: "deadline" });
       }, Math.max(0, request.deadlineAt - Date.now()));
     });
