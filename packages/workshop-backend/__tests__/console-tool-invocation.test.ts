@@ -479,6 +479,36 @@ describe("invokeConsoleTool", () => {
         expect(pendingRows(h)).toEqual([]);
       });
     });
+
+    it("hold the caller's slot through cleanup, the post-check and the final check", async () => {
+      await withConsole(async h => {
+        let p1 = operator(h, "p1", "use");
+        // Park the second page check (the post-check, after the lane has run) until released.
+        let checks = 0;
+        let reached!: () => void;
+        let inPostCheck = new Promise<void>(resolve => { reached = resolve; });
+        let release!: () => void;
+        let gate = new Promise<void>(resolve => { release = resolve; });
+        let check = h.impl.consoleSessionCheck.bind(h.impl);
+        h.impl.consoleSessionCheck = async (...args: unknown[]) => {
+          if (++checks === 2) {
+            reached();
+            await gate;
+          }
+          return check(...args);
+        };
+        let first = call(h, p1, "count", { status: "open" });
+        await inPostCheck;
+        // The lane's cleanup has run (the facet is deleted), but the call has not returned.
+        expect(pendingRows(h)).toEqual([]);
+        expect(await call(h, p1, "count", { status: "closed" })).toEqual(
+            { status: "failed", reason: TOOL_SLOT_REFUSALS["caller-busy"] });
+        release();
+        expect((await first).status).toBe("ok");
+        // Once the first call has returned, the slot is free again.
+        expect((await call(h, p1, "count", { status: "closed" })).status).toBe("ok");
+      });
+    });
   });
 
   describe("audit", () => {

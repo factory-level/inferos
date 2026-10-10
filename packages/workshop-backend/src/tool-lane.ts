@@ -262,8 +262,10 @@ export interface ToolLaneRequest {
 
 /**
  * A reserved slot: its facet name is recorded as pending, and the slot counts against the
- * workspace's and the caller's limits until `release()` (which `runIsolatedTool` calls). It is
- * created only through `ToolLane.reserve`, never constructed directly.
+ * workspace's and the caller's limits until `release()`. `runIsolatedTool` cleans up the facet
+ * (`endCall()`) but leaves the slot reserved, so the caller holds it through whatever checks
+ * follow and releases it when it is done. It is created only through `ToolLane.reserve`, never
+ * constructed directly.
  */
 export class ToolLaneSlot {
   /** The lane the slot was reserved on. */
@@ -272,28 +274,45 @@ export class ToolLaneSlot {
   readonly name: string;
   /** The user the slot was reserved for. */
   readonly callerUserId: string;
-  #cleanUp: () => void;
+  #endCall: () => void;
+  #free: () => void;
+  #ended = false;
   #released = false;
 
-  /** Made by `ToolLane.reserve`, which passes its private cleanup for this slot as `cleanUp`. */
-  constructor(lane: ToolLane, name: string, callerUserId: string, cleanUp: () => void) {
+  /**
+   * Made by `ToolLane.reserve`, which passes its private cleanup for this slot's facet as `endCall`
+   * and for the slot itself as `free`.
+   */
+  constructor(lane: ToolLane, name: string, callerUserId: string, endCall: () => void, free: () => void) {
     this.lane = lane;
     this.name = name;
     this.callerUserId = callerUserId;
-    this.#cleanUp = cleanUp;
+    this.#endCall = endCall;
+    this.#free = free;
   }
 
   /** Whether the slot has been released. */
   get released(): boolean { return this.#released; }
 
   /**
-   * Aborts and deletes the facet, then frees the slot. A failed delete leaves the row pending for a
-   * sweep. Idempotent.
+   * Aborts and deletes the facet, keeping the slot reserved. A failed delete leaves the row pending
+   * for a sweep once the slot is released. Idempotent.
    */
+  endCall(): void {
+    if (this.#ended) return;
+    this.#ended = true;
+    this.#endCall();
+  }
+
+  /** Ends the call (`endCall()`) if that has not happened, then frees the slot. Idempotent. */
   release(): void {
     if (this.#released) return;
     this.#released = true;
-    this.#cleanUp();
+    try {
+      this.endCall();
+    } finally {
+      this.#free();
+    }
   }
 }
 
@@ -331,7 +350,7 @@ export class ToolLane {
     pending.put({ name, callerUserId, startedAt: Date.now(), state: "pending", attempts: 0 });
     this.#live.set(name, callerUserId);
     this.#ports.pendingChanged();
-    return new ToolLaneSlot(this, name, callerUserId, () => this.#cleanUp(name));
+    return new ToolLaneSlot(this, name, callerUserId, () => this.#endCall(name), () => this.#free(name));
   }
 
   /**
@@ -372,15 +391,16 @@ export class ToolLane {
     return this.#retryAt ??= Date.now() + delay;
   }
 
-  // Ends a slot's call: abort, delete, tombstone, free. Reached only through the slot's release().
-  #cleanUp(name: string): void {
-    try {
-      let row = this.#ports.pending.get(name);
-      if (row !== undefined) this.#deleteFacet(row);
-    } finally {
-      this.#live.delete(name);
-      this.#ports.pendingChanged();
-    }
+  // Ends a slot's call: abort, delete, tombstone. Reached only through the slot's endCall().
+  #endCall(name: string): void {
+    let row = this.#ports.pending.get(name);
+    if (row !== undefined) this.#deleteFacet(row);
+  }
+
+  // Frees a slot. Reached only through the slot's release(), after its endCall().
+  #free(name: string): void {
+    this.#live.delete(name);
+    this.#ports.pendingChanged();
   }
 
   /** Loads a call's code: the kernel modules around the authored ones, with no capabilities. */
@@ -444,9 +464,11 @@ interface ToolRunnerRpc extends Rpc.DurableObjectBranded {
 }
 
 /**
- * Runs `request` on `slot` and releases the slot once its facet is cleaned up, whatever the
- * outcome. The call races `request.deadlineAt`; at the deadline the facet is aborted, which ends
- * asynchronous waits but not CPU-bound code (see the module comment).
+ * Runs `request` on `slot` and cleans up its facet (`slot.endCall()`), whatever the outcome. The
+ * slot stays reserved: the caller releases it once it is done with the result (contract §4.1: the
+ * slot is held through cleanup and the checks after it). The call races `request.deadlineAt`; at
+ * the deadline the facet is aborted, which ends asynchronous waits but not CPU-bound code (see the
+ * module comment).
  */
 export async function runIsolatedTool(slot: ToolLaneSlot, request: ToolLaneRequest): Promise<ToolLaneResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -475,7 +497,7 @@ export async function runIsolatedTool(slot: ToolLaneSlot, request: ToolLaneReque
     let deadline = new Promise<ToolLaneResult>(resolve => {
       timer = setTimeout(() => {
         // Resolve even if the abort throws, or the race would wait on the call it failed to end.
-        // The release that follows aborts and deletes again, and a failure there stays pending.
+        // The endCall that follows aborts and deletes again, and a failure there stays pending.
         try {
           lane.abort(slot, "The tool call reached its deadline.");
         } catch (error) {
@@ -487,7 +509,7 @@ export async function runIsolatedTool(slot: ToolLaneSlot, request: ToolLaneReque
     return await Promise.race([call, deadline]);
   } finally {
     clearTimeout(timer);
-    slot.release();
+    slot.endCall();
   }
 }
 
