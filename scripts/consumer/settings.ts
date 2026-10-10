@@ -247,6 +247,13 @@ export const SETTINGS: readonly SettingEntry[] = [
     present: hostBoardsRequested,
   },
   {
+    name: "CONSOLE_TOOLS", group: "Host and runtime", kind: "value", owner: "deployer", default: "off", source: "local",
+    description: "Turns callable widget tools on for console publication (`consoleToolsEnabled`): off unless exactly `\"true\"`. **Must not be set in any shared or deployed environment** until MVP-35 records the remote CPU, wall-time and memory checks as passed (see [operate mode](../architecture/operate-mode.md#configuration)); set only in test harnesses.",
+    requiredWhen: { test: () => false, text: "Never, until MVP-35 passes." },
+    readAt: "The shell only; no `inferos.config.json` field",
+    present: ({ env }) => env.CONSOLE_TOOLS === "true",
+  },
+  {
     name: "local.port", group: "Host and runtime", kind: "value", owner: "developer", default: "`8787`", source: "local",
     description: "The wrapper's local Workshop port, distinct per wrapper.",
     requiredWhen: always,
