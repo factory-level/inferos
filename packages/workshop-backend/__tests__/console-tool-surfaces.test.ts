@@ -65,9 +65,9 @@ function maxToolsJson(description = "Reads.", limit: number = WIDGET_TOOL_LIMITS
 
 // An exactly 8 KiB spec of worst-case escaping: every authored character and the padding escape to
 // two bytes when the spec is embedded in a JSON string (as in console-bound-views.test.ts).
-function maxSpec(): string {
+function maxSpec(requirement = "board"): string {
   let children = Array.from({ length: 12 }, () => ({ type: "text", text: '"'.repeat(200) }));
-  let text = JSON.stringify({ version: 1, title: '"'.repeat(200), requirements: ["board"], root: { type: "stack", children } });
+  let text = JSON.stringify({ version: 1, title: '"'.repeat(200), requirements: [requirement], root: { type: "stack", children } });
   return text + "\n".repeat(8192 - new TextEncoder().encode(text).length);
 }
 
@@ -174,6 +174,20 @@ describe("console tool surfaces at publication", () => {
     expect(() => t.store(ON).publish(saved.id, saved.revision)).toThrow(/cannot be published here/);
   });
 
+  it("refuses a registered gadget with no commit as such, not as a change to retry", () => {
+    let t = setup();
+    t.screen("floor", []);
+    let uncommitted = () => t.storage.gadgets.put({ type: "gadget", id: 5, title: "W5", created: new Date(0), bindingName: "W5",
+      bindings: {}, installedFrom: { blueprintId: "bp5", version: 1, kind: "widget" } } as GadgetRecord);
+    uncommitted();
+    expect(() => t.save(ON, t.content("floor", [t.entry(5)]))).toThrow(/^Gadget 5 has no committed files, so a console cannot offer it\.$/);
+    // Saved while it had a commit, then left with none: publication refuses the same way.
+    t.install(5, "visual", "bp5");
+    let saved = t.save(ON, t.content("floor", [t.entry(5)]));
+    uncommitted();
+    expect(() => t.publish(ON, saved.id, saved.revision)).toThrow(/^Gadget 5 has no committed files/);
+  });
+
   it("refuses a registered widget whose commit is not a widget with code", () => {
     let t = setup();
     t.install(4, "broken");
@@ -249,18 +263,42 @@ describe("offeredTool", () => {
 });
 
 describe("the whole-console size cap with frozen tools", () => {
-  const LABEL = "L".repeat(120);
-  const board: HostBoardEntry = { kind: "host-board", label: "Board",
-    requirement: { name: "board", resource: "inferops-board", target: "inferops://acme.operations/project/board/ENG" } };
+  // Worst-case escaping: a lone surrogate serializes as a 6-byte \uXXXX escape. Gadget ids are the
+  // largest a storage key takes (below Number.MAX_SAFE_INTEGER).
+  const worst = (length: number) => "\ud800".repeat(length);
+  const NAME = "r".repeat(64);
   const maxTools = maxToolsJson();
   const SIZED = {
     maxTools: sourceCommit({ "server.js": SERVER, "tools.json": maxTools }),
-    maxView: sourceCommit({ "view.json": maxSpec() }),
+    maxView: sourceCommit({ "view.json": maxSpec(NAME) }),
   };
-  const widget = (gadgetId: number, blueprintId = `bp${gadgetId}`): ConsoleWidgetEntry =>
-    ({ gadgetId, blueprintId, version: 1, label: LABEL, state: "resettable" });
-  const view = (gadgetId: number): BoundViewEntry =>
-    ({ kind: "bound-view", gadgetId, blueprintId: `bp${gadgetId}`, version: 1, label: LABEL, requirements: ["board"] });
+  const BLUEPRINT = worst(128);
+  const widget = (gadgetId: number): ConsoleWidgetEntry =>
+    ({ gadgetId: 2 ** 53 - 2 - gadgetId, blueprintId: BLUEPRINT, version: 2 ** 53 - 1, label: worst(120), state: "resettable" });
+  const view = (gadgetId: number): BoundViewEntry => ({ kind: "bound-view", gadgetId: 2 ** 53 - 2 - gadgetId, blueprintId: BLUEPRINT,
+    version: 2 ** 53 - 1, label: worst(120), requirements: [NAME] });
+  const board: HostBoardEntry = { kind: "host-board", label: worst(120),
+    requirement: { name: NAME, resource: "inferops-board", target: "inferops://acme.operations/project/board/ENGINEERIN" } };
+
+  // The most legal content: every field at its bound with worst-case escaping, 12 rollups of 12
+  // screens with 64-character ids, and every registry entry carrying its largest frozen payload.
+  function maxConsole(widgets: number, views: number) {
+    let t = setup(SIZED);
+    let screens = Array.from({ length: 12 }, (_, index) => `${index}`.padStart(64, "s"));
+    for (let id of screens) t.screen(id, []);
+    let put = (id: number, commitId: string) => t.storage.gadgets.put({ type: "gadget", id, title: "W", created: new Date(0),
+      bindingName: `W${id}`, bindings: {}, commitId, installedFrom: { blueprintId: BLUEPRINT, version: 2 ** 53 - 1, kind: "widget" } } as GadgetRecord);
+    let entries = Array.from({ length: widgets }, (_, index) => widget(index));
+    let bound = Array.from({ length: views }, (_, index) => view(100 + index));
+    for (let entry of entries) put(entry.gadgetId, "maxTools");
+    for (let entry of bound) put(entry.gadgetId, "maxView");
+    let content: OperateConsoleContent = { title: worst(120), fullChat: "available",
+      customization: { screens: false, widgets: false, tools: false, skills: false },
+      views: screens.map((_, index) => ({ id: `${index}`.padStart(64, "v"), title: worst(120), type: "rollup" as const, screens })),
+      widgets: entries, ...(views === 0 ? {} : { hostBoards: [board], boundViews: bound }) };
+    let saved = t.save(ALL_ON, content);
+    return { t, saved };
+  }
 
   it("re-serializes a maximal tools.json to more than 16 KiB but at most 32 KiB", () => {
     expect(new TextEncoder().encode(maxTools).length).toBeLessThanOrEqual(WIDGET_TOOL_LIMITS.fileBytes);
@@ -272,40 +310,41 @@ describe("the whole-console size cap with frozen tools", () => {
   it.each([
     ["16 callable widgets", 16, 0],
     ["13 callable widgets, one host board and two maximal bound views", 13, 2],
-  ])("publishes a legal maximum console of %s", (_, widgets, views) => {
-    let t = setup(SIZED);
-    t.screen("floor", []);
-    for (let id = 1; id <= widgets; id++) t.install(id, "maxTools");
-    for (let id = 101; id <= 100 + views; id++) t.install(id, "maxView");
-    let saved = t.save(ALL_ON, { ...t.content("floor", Array.from({ length: widgets }, (_, index) => widget(index + 1))),
-      ...(views === 0 ? {} : { hostBoards: [board], boundViews: Array.from({ length: views }, (_, index) => view(101 + index)) }) });
+  ])("keeps the most legal console of %s within every bound term and under the cap", (_, widgets, views) => {
+    let { t, saved } = maxConsole(widgets, views);
+    // Each saved entry is under 2 KiB, inside the 4 KiB `entry` term; the rest of the draft is
+    // under 24 KiB, inside its 32 KiB term; the whole draft inside 96 KiB.
+    let entries = [...saved.widgets ?? [], ...saved.hostBoards ?? [], ...saved.boundViews ?? []];
+    expect(entries).toHaveLength(16);
+    for (let entry of entries) expect(bytes(entry)).toBeLessThan(2 * 1024);
+    let { widgets: _w, hostBoards: _h, boundViews: _b, id: _i, revision: _r, published: _p, ...rest } = saved;
+    expect(bytes(rest)).toBeLessThan(24 * 1024);
+    expect(bytes(saved)).toBeLessThanOrEqual(96 * 1024);
     let published = t.publish(ALL_ON, saved.id, saved.revision);
     let content = published.published!.content;
-    expect(content.widgets).toHaveLength(widgets);
-    for (let entry of content.widgets!) {
-      expect(entry.frozen!.tools).toEqual(SIZED.maxTools.tools);
-      expect(bytes(entry.frozen!.tools)).toBeGreaterThan(16 * 1024);
-    }
+    for (let entry of content.widgets!) expect(entry.frozen!.tools).toEqual(SIZED.maxTools.tools);
     for (let entry of content.boundViews ?? []) {
       expect(bytes(entry)).toBeGreaterThan(16 * 1024);
       expect(bytes(entry)).toBeLessThanOrEqual(CONSOLE_SIZE_LIMITS.frozenBoundViewEntry);
     }
-    expect(bytes(t.storage.consoles.get(saved.id))).toBeLessThanOrEqual(CONSOLE_SIZE_LIMITS.console);
+    // Legal content cannot reach the cap: the largest stays more than 64 KiB under it.
+    expect(bytes(t.storage.consoles.get(saved.id))).toBeLessThan(CONSOLE_SIZE_LIMITS.console - 64 * 1024);
   });
 
-  // The cap itself is reached only past what the entries' own bounds allow, here through a widget
-  // whose blueprint id is padded (stored twice: in the draft and in the publication) and a tool
-  // description (stored once, in the frozen tools), so the row can be sized to the byte.
+  // Since no legal console reaches the cap, it is reached through a stored draft whose title no
+  // parse would accept (stored twice, in the draft and the publication) plus a tool description
+  // (stored once, in the frozen tools), so the row can be sized to the byte. The cap is the
+  // backstop that refuses such a row.
   it("publishes a row of exactly the cap, and refuses one byte over with its frozen installs undone", () => {
     const PAD = 1000;
     let attempt = (padding: number, description: string) => {
       let t = setup({ ...SIZED, tuned: sourceCommit({ "server.js": SERVER, "tools.json": maxToolsJson(description, 8 * 1024) }) });
       t.screen("floor", []);
       for (let id = 1; id <= 15; id++) t.install(id, "maxTools");
-      let blueprintId = "b".repeat(padding);
-      t.install(16, "tuned", blueprintId);
-      let widgets = [...Array.from({ length: 15 }, (_, index) => widget(index + 1)), widget(16, blueprintId)];
-      let saved = t.save(ALL_ON, t.content("floor", widgets));
+      t.install(16, "tuned");
+      let widgets = Array.from({ length: 16 }, (_, index) => t.entry(index + 1));
+      let saved = { ...t.save(ALL_ON, t.content("floor", widgets)), title: "t".repeat(padding) };
+      t.storage.consoles.put(saved);
       let before = [...t.storage.gadgets.list()];
       try {
         t.publish(ALL_ON, saved.id, saved.revision);

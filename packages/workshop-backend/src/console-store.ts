@@ -76,27 +76,35 @@ export function boundViewsEnabled(
 }
 
 /**
- * The size bounds of a stored console, in UTF-8 bytes of `JSON.stringify`: a bound view entry
- * without `frozen` (its spec is not stored), one with it (the spec at most doubles when escaped),
- * and the whole stored record, draft and publication together, well inside a Durable Object's
- * per-value limit.
+ * The size bounds of a stored console, in UTF-8 bytes of `JSON.stringify`: a registry entry as
+ * saved, a bound view entry with its `frozen` spec (the spec at most doubles when escaped), and the
+ * whole stored record, draft and publication together, well inside a Durable Object's per-value
+ * limit. Each is a backstop: the field bounds `parseOperateConsoleContent` enforces keep legal
+ * content under every one of them.
  */
 export const CONSOLE_SIZE_LIMITS = {
-  /** A bound view entry as saved: 4 KiB. */
-  boundViewEntry: 4 * 1024,
+  /**
+   * Any registry entry (widget, host board or bound view) as saved, checked at save: 4 KiB. Its
+   * fields are bounded (a label of 120 and a blueprint id of 128 code units, ids of 64, at most 4
+   * requirement names of 64), so even with every character escaped to 6 bytes an entry is under
+   * 2 KiB.
+   */
+  entry: 4 * 1024,
   /** A published bound view entry, with its `frozen` spec: 20 KiB. */
   frozenBoundViewEntry: 20 * 1024,
   /**
    * A stored console, checked at publication: 704 KiB, the sum of four bounds over the at most
-   * `MAX_CONSOLE_WIDGETS` (16) registry entries. The draft is at most 16 × 4 KiB of entries plus
-   * 32 KiB of title, views, customization and host boards (96 KiB), and the publication's content
-   * as much again (96 KiB). On top, each published entry freezes at most one payload: a bound
+   * `MAX_CONSOLE_WIDGETS` (16) registry entries. The draft is at most 16 × 4 KiB of entries
+   * (`entry`) plus 32 KiB of title, views and customization (12 views of at most 12 screen ids
+   * come to under 24 KiB even fully escaped) = 96 KiB, and the publication's content as much again
+   * (96 KiB). On top, each published entry freezes at most one payload: a bound
    * view's spec, at most 16 KiB escaped (8 KiB at most doubled), or a callable widget's tools, at
    * most 32 KiB (a 16 KiB `tools.json` re-serialized: whitespace, strings and keys never grow,
    * and a number grows by at most 17 bytes, as `1e20` does, while each schema holding numbers is
    * at least 42 bytes with at most two, so the whole at most doubles). So the frozen payloads come
    * to at most 16 × 32 KiB (512 KiB). 704 KiB stays inside the 2 MB per-value limit of
-   * SQLite-backed Durable Objects.
+   * SQLite-backed Durable Objects. Legal content stays well under it, so it never refuses a
+   * console that parsed; it guards the row if a field bound is ever loosened.
    */
   console: 704 * 1024,
 } as const;
@@ -129,10 +137,14 @@ function installRefusal(storage: Pick<ConsoleStorage, "gadgets">,
 }
 
 // The read commit of the gadget `id`'s current commit. Throws `CONSOLE_CHANGED` when it was not
-// read: it moved since, so the caller must try again.
+// read: it moved since, so the caller must try again. A gadget with no commit at all has nothing
+// to check, which no retry changes, so that refusal is its own.
 function currentCommit(storage: Pick<ConsoleStorage, "gadgets">, commits: SourceCommits, id: WorkpieceId): SourceCommit {
   let record = storage.gadgets.get(id);
-  let commit = record?.type === "gadget" && record.commitId !== undefined ? commits.get(record.commitId) : undefined;
+  if (record?.type === "gadget" && record.commitId === undefined) {
+    throw new Error(`Gadget ${id} has no committed files, so a console cannot offer it.`);
+  }
+  let commit = record?.type === "gadget" ? commits.get(record.commitId!) : undefined;
   if (!commit) throw new Error(CONSOLE_CHANGED);
   return commit;
 }
@@ -399,6 +411,11 @@ export class WorkspaceConsoleStore {
     checkConsoleWidgets(this.storage, parsed, commits);
     let hostBoards = parsed.hostBoards === undefined ? undefined : this.#hostBoards(parsed.hostBoards, current);
     let boundViews = parsed.boundViews === undefined ? undefined : this.#boundViews(parsed.boundViews, commits, current);
+    for (let entry of [...parsed.widgets ?? [], ...hostBoards ?? [], ...boundViews ?? []]) {
+      if (jsonBytes(entry) > CONSOLE_SIZE_LIMITS.entry) {
+        throw new Error(`Console entry "${entry.label}" is over ${CONSOLE_SIZE_LIMITS.entry} bytes.`);
+      }
+    }
     return { ...parsed, ...(hostBoards === undefined ? {} : { hostBoards }), ...(boundViews === undefined ? {} : { boundViews }) };
   }
 
@@ -425,9 +442,10 @@ export class WorkspaceConsoleStore {
 
   // As `#hostBoards`, under the bound-view switch: an entry naming an id must be one of this
   // console's with the same gadget, so an id never moves to another source. Every entry must also
-  // pass `boundViewRefusal` and the saved size bound.
+  // pass `boundViewRefusal`, so bound views are saved only given the commits it checks.
   #boundViews(entries: BoundViewEntry[], commits: SourceCommits | undefined, current?: OperateConsole): BoundViewEntry[] {
     if (entries.some(entry => entry.id === undefined) && !boundViewsEnabled(this.env)) throw new Error(BOUND_VIEWS_OFF);
+    if (entries.length > 0 && !commits) throw new Error("This console's bound views cannot be saved here.");
     let known = new Map<string, BoundViewEntry>();
     for (let entry of [...current?.boundViews ?? [], ...current?.published?.content.boundViews ?? []]) {
       if (entry.id !== undefined) known.set(entry.id, entry);
@@ -437,10 +455,7 @@ export class WorkspaceConsoleStore {
         throw new Error(`Bound view ${entry.id} is not this console's, or its gadget changed; add a new entry instead.`);
       }
       let saved = entry.id === undefined ? { ...entry, id: crypto.randomUUID() } : entry;
-      if (jsonBytes(saved) > CONSOLE_SIZE_LIMITS.boundViewEntry) {
-        throw new Error(`Console bound view "${entry.label}" is over ${CONSOLE_SIZE_LIMITS.boundViewEntry} bytes.`);
-      }
-      let refusal = boundViewRefusal(this.storage, saved, commits ?? new Map());
+      let refusal = boundViewRefusal(this.storage, saved, commits!);
       if (refusal) throw new Error(`Console bound view "${entry.label}": ${refusal}`);
       return saved;
     });

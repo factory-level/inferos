@@ -154,7 +154,11 @@ describe("saving a console's bound views", () => {
   it("refuses a source whose commit moved after it was read", () => {
     let t = setup();
     expect(() => t.store().create(t.content({ boundViews: [view()] }), commitsOf("widget"))).toThrow(/changed while it was being saved or published; try again/);
-    expect(() => t.store().create(t.content({ boundViews: [view()] }))).toThrow(/changed while it was being saved or published; try again/);
+  });
+
+  it("refuses bound views saved without the commits they are checked against, as no retry fixes it", () => {
+    let t = setup();
+    expect(() => t.store().create(t.content({ boundViews: [view()] }))).toThrow(/^This console's bound views cannot be saved here\.$/);
   });
 
   it("refuses a new entry while the switch is off, or host boards are, keeping saved entries editable", () => {
@@ -170,11 +174,14 @@ describe("saving a console's bound views", () => {
       .toThrow(/Bound views are turned off/);
   });
 
-  it("bounds a saved entry at 4 KiB and the registry at 16 entries with widgets and host boards", () => {
+  it("bounds a saved entry's blueprint id at 128 characters and the registry at 16 entries with widgets and host boards", () => {
     let t = setup();
-    let long = "b".repeat(CONSOLE_SIZE_LIMITS.boundViewEntry);
-    t.gadget(11, "view", { installedFrom: { blueprintId: long, version: 1, kind: "widget" } });
-    expect(() => t.store().create(t.content({ boundViews: [{ ...view(11), blueprintId: long }] }), ALL)).toThrow(/over 4096 bytes/);
+    let [limit, over] = ["b".repeat(128), "b".repeat(129)];
+    t.gadget(11, "view", { installedFrom: { blueprintId: limit, version: 1, kind: "widget" } });
+    t.gadget(12, "view", { installedFrom: { blueprintId: over, version: 1, kind: "widget" } });
+    let atLimit = t.store().create(t.content({ boundViews: [{ ...view(11), blueprintId: limit }] }), ALL);
+    expect(bytes(atLimit.boundViews![0])).toBeLessThanOrEqual(CONSOLE_SIZE_LIMITS.entry);
+    expect(() => t.store().create(t.content({ boundViews: [{ ...view(12), blueprintId: over }] }), ALL)).toThrow(/blueprint id of 1-128 characters/);
     let fifteen = Array.from({ length: 15 }, () => view());
     expect(t.store().create(t.content({ boundViews: fifteen }), ALL).boundViews).toHaveLength(15);
     expect(() => t.store().create(t.content({ boundViews: [...fifteen, view()] }), ALL)).toThrow(/at most 16 widgets, host boards and bound views/);
@@ -292,11 +299,14 @@ describe("publishing a console's bound views", () => {
     expect(bytes(t.storage.consoles.get(published.id))).toBeLessThanOrEqual(CONSOLE_SIZE_LIMITS.console);
   });
 
+  // Legal content cannot reach the cap (see console-tool-surfaces.test.ts), so the stored draft is
+  // given a title no parse would accept.
   it("refuses a console row over 704 KiB", () => {
     let t = setup();
-    let long = "b".repeat(CONSOLE_SIZE_LIMITS.console);
-    t.gadget(30, "widget", { installedFrom: { blueprintId: long, version: 1, kind: "widget" } });
-    let saved = t.store().create(t.content({ widgets: [{ gadgetId: 30, blueprintId: long, version: 1, label: "W", state: "resettable" }] }), ALL);
+    t.gadget(30, "widget");
+    let created = t.store().create(t.content({ widgets: [{ gadgetId: 30, blueprintId: "bp", version: 1, label: "W", state: "resettable" }] }), ALL);
+    let saved = { ...created, title: "t".repeat(CONSOLE_SIZE_LIMITS.console) };
+    t.storage.consoles.put(saved);
     expect(() => t.publish(saved)).toThrow(/over 720896 bytes published/);
     expect(t.storage.consoles.get(saved.id)!.published).toBeNull();
   });
@@ -447,16 +457,18 @@ describe("publication against real commits", () => {
 
   it("undoes a refused publication's frozen installs in the overseer's own storage", async () => {
     await inOverseer("bound-view-oversize", async (impl, state) => {
-      let long = "b".repeat(CONSOLE_SIZE_LIMITS.console);
       let { commit } = await commitBytes(impl, COMMITS.widget!);
       let record = impl.createGadget("Widget", "WIDGET", undefined, undefined, commit);
-      record.installedFrom = { blueprintId: long, version: 1, kind: "widget" };
+      record.installedFrom = { blueprintId: "bp", version: 1, kind: "widget" };
       impl.storage.gadgets.put(record);
       impl.storage.canvases.put({ id: "floor", title: "Floor", revision: "0", sections: [] } as never);
       let store = new WorkspaceConsoleStore(state.storage, impl.storage, ON, impl.frozenInstalls());
       let content: OperateConsoleContent = { title: "Floor", fullChat: "off", views: [{ id: "floor", title: "Floor", type: "screen", screen: "floor" }],
-        widgets: [{ gadgetId: record.id, blueprintId: long, version: 1, label: "W", state: "resettable" }] };
-      let saved = store.create(content, await impl.readSourceCommits(store.sourceCommitIds(content)));
+        widgets: [{ gadgetId: record.id, blueprintId: "bp", version: 1, label: "W", state: "resettable" }] };
+      // A title no parse would accept: legal content cannot reach the cap.
+      let saved = { ...store.create(content, await impl.readSourceCommits(store.sourceCommitIds(content))),
+        title: "t".repeat(CONSOLE_SIZE_LIMITS.console) };
+      impl.storage.consoles.put(saved);
       let gadgets = Array.from(impl.storage.gadgets.list());
       let nextId = impl.storage.nextGatekeeperId.get();
       let capture = store.capture(saved.id, saved.revision);

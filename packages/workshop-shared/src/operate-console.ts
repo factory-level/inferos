@@ -24,6 +24,13 @@ export const MAX_ROLLUP_SCREENS = 12;
 /** Longest console or view title. */
 export const MAX_CONSOLE_TITLE_LENGTH = 120;
 
+/**
+ * Longest blueprint id a widget or bound view entry names, in characters. Minted ids are 32 hex
+ * digits and bundled ones are short names; the bound keeps every entry small (see
+ * `parseOperateConsoleContent`).
+ */
+export const MAX_BLUEPRINT_ID_LENGTH = 128;
+
 /** Most entries one console's registry offers: widgets, host boards and bound views together. */
 export const MAX_CONSOLE_WIDGETS = 16;
 
@@ -103,7 +110,7 @@ export type ConsoleWidgetFreeze = {
 export type ConsoleWidgetEntry = {
   /** The registered install (draft) or its frozen install (published). */
   gadgetId: WorkpieceId;
-  /** The blueprint the install came from; must match its `installedFrom`. */
+  /** The blueprint the install came from, 1 to `MAX_BLUEPRINT_ID_LENGTH` characters; must match its `installedFrom`. */
   blueprintId: string;
   /** The blueprint version the install runs; must match its `installedFrom`. */
   version: number;
@@ -180,7 +187,7 @@ export type BoundViewEntry = {
   id?: string;
   /** The registered view-only widget install, in the draft and in the publication alike. */
   gadgetId: WorkpieceId;
-  /** The blueprint the install came from; must match its `installedFrom`. */
+  /** The blueprint the install came from, 1 to `MAX_BLUEPRINT_ID_LENGTH` characters; must match its `installedFrom`. */
   blueprintId: string;
   /** The blueprint version the install runs; must match its `installedFrom`. */
   version: number;
@@ -276,6 +283,13 @@ function title(value: string, what: string): string {
   return trimmed;
 }
 
+function blueprintId(value: unknown, what: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_BLUEPRINT_ID_LENGTH) {
+    throw new TypeError(`A ${what} must name a blueprint id of 1-${MAX_BLUEPRINT_ID_LENGTH} characters.`);
+  }
+  return value;
+}
+
 function screenId(value: string): string {
   if (!ID.test(value) || value.length > MAX_OPERATE_ID_LENGTH) {
     throw new TypeError("A console screen must be a canvas id.");
@@ -356,8 +370,8 @@ function parseWidgets(entries: ConsoleWidgetEntry[]): ConsoleWidgetEntry[] {
           "starts it with empty local state.");
     }
     // `frozen` is publication's to set, so a client's is dropped rather than trusted.
-    return { gadgetId: entry.gadgetId, blueprintId: entry.blueprintId, version: entry.version,
-      label: title(entry.label, "widget"), state: entry.state };
+    return { gadgetId: entry.gadgetId, blueprintId: blueprintId(entry.blueprintId, "console widget"),
+      version: entry.version, label: title(entry.label, "widget"), state: entry.state };
   });
 }
 
@@ -404,8 +418,8 @@ function parseHostBoards(entries: HostBoardEntry[]): HostBoardEntry[] {
 
 /**
  * Checks a console's bound view entries and returns trimmed copies, without `frozen`, which only
- * publication sets. Each needs a unique id when it has one, a gadget id, a string blueprint id, a
- * blueprint version, and an array of 1 to `MAX_BOUND_VIEW_REQUIREMENTS` unique string requirement
+ * publication sets. Each needs a unique id when it has one, a gadget id, a blueprint id of 1 to
+ * `MAX_BLUEPRINT_ID_LENGTH` characters, a blueprint version, and an array of 1 to `MAX_BOUND_VIEW_REQUIREMENTS` unique string requirement
  * names, each exactly the name of one of `hostBoards`. Throws a `TypeError` naming the first problem. Whether the gadget is a view-only
  * install with that spec is the store's check.
  */
@@ -422,7 +436,7 @@ export function parseBoundViews(entries: BoundViewEntry[], hostBoards: readonly 
     if (!Number.isSafeInteger(entry.gadgetId) || entry.gadgetId < 0) {
       throw new TypeError("A bound view must name a gadget id.");
     }
-    if (typeof entry.blueprintId !== "string") throw new TypeError("A bound view must name a blueprint id.");
+    blueprintId(entry.blueprintId, "bound view");
     if (!Number.isSafeInteger(entry.version) || entry.version < 1) {
       throw new TypeError("A bound view's version must be a blueprint version number.");
     }
