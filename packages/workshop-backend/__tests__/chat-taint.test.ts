@@ -12,9 +12,10 @@
 // request could leave: a gatekeeper facet reached, a gatekeeper session opened, a git session
 // opened, and any fetch() from the Overseer's isolate. The executeCode env's loopbacks are the real
 // ones, so a call on a stub in loaded code reaches startGatekeeperSession exactly as in production
-// (the pool cannot then run the session's methods, but the session open is already recorded).
+// (see GatekeeperLoopback.prototype.ping below), then fails on the recorded session, which has
+// no methods.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub, RpcTarget as NativeRpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import {
@@ -23,7 +24,7 @@ import {
 import { keyString } from "@gadgets/typed-storage";
 import type { AiChatAuthorInfo, Overseer } from "@gadgets/workshop-shared/api";
 import { diffFiles, type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import type { OverseerDurableObject } from "../src/overseer.js";
+import { GatekeeperLoopback, type OverseerDurableObject } from "../src/overseer.js";
 import { runAgent } from "../src/agent";
 import {
   dropStubsIfTainted, isConsoleToolTainted, markConsoleToolTainted, STUB_WALK_MAX_DEPTH,
@@ -132,6 +133,22 @@ function intercept(impl: any): string[] {
   return sent;
 }
 
+// In production a call on a binding loopback is pipelined onto the session its constructor opens,
+// so the call -- and the execution making it -- waits for that open. This pool's entrypoint wrapper
+// serves only methods on the entrypoint's prototype, and GatekeeperLoopback serves its methods from
+// the Proxy it returns instead, so the wrapper refuses the call at once. Nothing then waits for the
+// open: the request the constructor sent can land after the execution has ended, when an operate
+// workspace refuses it as no longer live, or be cancelled with the refused call. Declaring the
+// method the loaded code calls on the prototype, forwarding to the Proxy, restores the production
+// path.
+Object.defineProperty(GatekeeperLoopback.prototype, "ping", {
+  configurable: true,
+  value(this: Record<string, (...args: unknown[]) => unknown>, ...args: unknown[]) {
+    return this.ping(...args);
+  },
+});
+afterAll(() => { delete (GatekeeperLoopback.prototype as any).ping; });
+
 afterEach(() => { vi.unstubAllGlobals(); });
 
 let doCounter = 0;
@@ -185,6 +202,9 @@ const TOUCH_EVERYTHING = `
     console.log(JSON.stringify(Object.keys(env).toSorted()));
     console.log(JSON.stringify(env.ARGS?.map(v => v === undefined ? null : typeof v) ?? null));
   }`;
+
+const TOUCH_WIDGET = `
+  export default async function(self, env) { try { await env.WIDGET.ping(); } catch {} }`;
 
 const wait = (ms: number) => `export default async function() { await new Promise(r => setTimeout(r, ${ms})); }`;
 
@@ -361,8 +381,9 @@ describe("gate 1: a tainted chat's executeCode env", () => {
     await run.done;
     expect(sent.filter(entry => entry.startsWith("gadget:"))).toEqual([]);
 
-    // Unmarked, chat B gets both, and reaches the gadget.
-    let control = startExecution(impl, B, TOUCH_EVERYTHING, WITH_WORKPIECES);
+    // Unmarked, chat B gets both, and reaches the gadget. It touches only the gadget: TREE is chat
+    // A's worktree, so B's session to it is refused, and that refusal goes unhandled in the loopback.
+    let control = startExecution(impl, B, TOUCH_WIDGET, WITH_WORKPIECES);
     expect(Object.keys(await control.env)).toEqual(expect.arrayContaining(["WIDGET", "TREE"]));
     await control.done;
     expect(sent).toContain(`gadget:${GADGET}`);
