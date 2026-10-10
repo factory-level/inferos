@@ -1667,11 +1667,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 /** The Overseer's typed storage. See makeOverseerStorage. */
 export type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
 
-// Validates a client-supplied commit oid before it reaches the git store.
 // How many commits of a draft bound view's source history a preview may pin (see
 // getConsoleBoundViewDraft): a walk of commit headers only, no trees or blobs.
 const BOUND_VIEW_PIN_DEPTH = 64;
 
+// Validates a client-supplied commit oid before it reaches the git store.
 function validateOid(oid: string): string {
   if (!/^[0-9a-f]{40}$/.test(oid)) {
     throw new Error("Invalid commit id.");

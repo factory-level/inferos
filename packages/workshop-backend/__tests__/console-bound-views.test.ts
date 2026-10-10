@@ -3,7 +3,7 @@
 // (PR 2d) through `describeBoundView`'s ports. The real-commit suites run the commit reads in an
 // OverseerDurableObject. Synthetic data only.
 import { describe, expect, it, vi } from "vitest";
-import { env } from "cloudflare:workers";
+import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { writeBlob, writeTree, type TreeEntry } from "isomorphic-git";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
@@ -641,6 +641,42 @@ describe("a draft bound view's source, against real commits", () => {
       expect(() => store.draftBoundViewCommit(saved.id, "7", entryId)).toThrow();
       impl.storage.gadgets.put({ ...record, commitId: second, bindings: { x: {} as never } });
       expect(() => store.draftBoundViewCommit(saved.id, saved.revision, entryId)).toThrow(/bindings/);
+    });
+  });
+});
+
+// The pin rule lives on the Overseer interface: a builder's draft preview may pin the source's
+// current commit or one of its last BOUND_VIEW_PIN_DEPTH (64) ancestors, and nothing further back.
+describe("a draft bound view's pinned commit, through the Overseer interface", () => {
+  it("accepts a pin 63 commits back and refuses one 64 back, beyond the walk", async () => {
+    await runInDurableObject(env.TEST_OVERSEER.getByName("bound-view-pin-depth"), async (instance: OverseerDurableObject) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let impl = (instance as unknown as { impl: any }).impl;
+      impl.env = { ...impl.env, ...ON };
+      let ownerId = impl.users.newUniqueId().toString();
+      impl.ownerId = ownerId;
+      impl.ensureAmbientCapsules = async () => {};
+      impl.markOutputsDirty = () => {};
+      let client = await instance.open(ownerId, "owner-profile", new NativeRpcStub<() => void>(() => {}));
+      // A linear history of 66 view-only commits; the source is at the last.
+      let chain: string[] = [];
+      for (let index = 0; index < 66; index++) {
+        chain.push(await impl.gitStore.writeFilesAsCommit(new Map([["view.json", spec(["board"], `V${index}`)]]),
+          { message: `v${index}`, author: { name: "t", email: "t@example.com" }, timestamp: new Date(index * 1000), parents: chain.slice(-1) }));
+      }
+      let record = impl.createGadget("View", "VIEW", undefined, undefined, chain.at(-1)) as GadgetRecord;
+      record.installedFrom = { blueprintId: "bp", version: 1, kind: "widget" };
+      impl.storage.gadgets.put(record);
+      let screen = await client.createCanvas({ title: "Floor", sections: [] });
+      let saved = await client.createConsole({ title: "Floor", fullChat: "off", views: [{ id: "floor", title: "Floor", type: "screen", screen: screen.id }],
+        hostBoards: [board()], boundViews: [{ ...view(record.id) }] });
+      let entryId = saved.boundViews![0]!.id!;
+      let draft = (commitId?: string) => client.getConsoleBoundViewDraft(saved.id, saved.revision, entryId, commitId);
+      expect(await draft()).toEqual({ commitId: chain[65], specText: spec(["board"], "V65") });
+      // The walk from the current commit takes it and its 63 nearest ancestors: chain[2] is the last.
+      expect(await draft(chain[2])).toEqual({ commitId: chain[2], specText: spec(["board"], "V2") });
+      await expect(draft(chain[1])).rejects.toThrow(/not in the recent history of bound view/);
+      await expect(draft(chain[0])).rejects.toThrow(/not in the recent history of bound view/);
     });
   });
 });
