@@ -3,8 +3,8 @@ import { deserialize, serialize } from "capnweb";
 import { createTypedStorage } from "@gadgets/typed-storage";
 import { writeBlob, writeTree, type TreeEntry } from "isomorphic-git";
 import {
-  BlobTextError, GITDIR, GitStore, blobOid, commitIdentityForAuthor, gitObjectsCollection,
-  makeGitObjectsFs, threeWayMerge,
+  BlobTextError, GITDIR, GitStore, UnsupportedTreeEntryError, blobOid, commitIdentityForAuthor,
+  gitObjectsCollection, makeGitObjectsFs, threeWayMerge,
 } from "../src/git-store";
 import { makeMockStorage } from "./mock-storage";
 import { decodeLooseObject, encodeLooseObject, parseGitCommitRefs, parseGitTree }
@@ -225,6 +225,43 @@ describe("readCommitBlob", () => {
       .rejects.toThrow(new BlobTextError("view.json is not valid UTF-8"));
     expect(await store.readCommitBlob(oid, "view.json")).toEqual(bytes);
     expect((await store.readCommitFiles(oid)).get("view.json")).toBe("{\ufffd\ufffd}");
+  });
+
+  // A commit whose root holds a symlink, a submodule and a directory; real git writes both
+  // special entries, which readCommitFiles already rejects.
+  async function commitSpecialEntries() {
+    let objects = makeObjects();
+    let store = new GitStore(objects);
+    let fs = makeGitObjectsFs(objects);
+    let target = await writeBlob({ fs, gitdir: GITDIR, blob: utf8("dir") });
+    let view = await writeBlob({ fs, gitdir: GITDIR, blob: utf8("{}") });
+    let dir = await writeTree({ fs, gitdir: GITDIR,
+      tree: [{ mode: "100644", path: "view.json", oid: view, type: "blob" }] });
+    let tree = await writeTree({ fs, gitdir: GITDIR, tree: [
+      { mode: "040000", path: "dir", oid: dir, type: "tree" },
+      { mode: "120000", path: "link", oid: target, type: "blob" },
+      { mode: "160000", path: "sub", oid: SECOND_COMMIT_OID, type: "commit" },
+    ] });
+    let oid = await store.writeCommitForTree(tree,
+        { parents: [], author: ALICE, message: "special", timestamp: new Date(1700000000_000) });
+    return { store, oid };
+  }
+
+  it.each([
+    ["a symlink at the path", "link", "link", "120000"],
+    ["a symlink in the middle of the path", "link/view.json", "link", "120000"],
+    ["a submodule at the path", "sub", "sub", "160000"],
+    ["a submodule in the middle of the path", "sub/view.json", "sub", "160000"],
+  ])("refuses %s rather than reading it as absent", async (_name, path, at, mode) => {
+    let { store, oid } = await commitSpecialEntries();
+    expect(await store.readCommitBlob(oid, "dir/view.json", "text")).toBe("{}");
+    for (let read of [store.readCommitBlob(oid, path), store.readCommitBlob(oid, path, "text")]) {
+      let error = await read.then(() => null, (thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(`unsupported tree entry at ${at}: mode ${mode}`);
+      expect((error as Error).name).toBe("UnsupportedTreeEntryError");
+      expect(error).toBeInstanceOf(UnsupportedTreeEntryError);
+    }
   });
 
   it("refuses a leading byte order mark as text", async () => {

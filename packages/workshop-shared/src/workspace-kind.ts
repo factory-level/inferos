@@ -11,6 +11,14 @@ export const GADGET_UI_FILE = "client.js";
 /** The file holding a gadget's server (its Durable Object class). */
 export const GADGET_SERVER_FILE = "server.js";
 
+/**
+ * Whether a gadget's file is one of its JavaScript modules: what the gadget loader hands the
+ * Worker as code, and what makes a widget with `view.json` a `mixedView`.
+ */
+export function isGadgetModule(path: string): boolean {
+  return path.endsWith(".js");
+}
+
 /** The file holding a view-only widget's bound view: a declarative spec with no code. */
 export const GADGET_VIEW_FILE = "view.json";
 
@@ -190,11 +198,15 @@ export function checkWorkspaceKind(
 // published before they do: each refuses every file. `parseBoundViewSpec` (bound-view.ts)
 // replaces parseBoundViewSpecPending, and `parseWidgetTools` (widget-tools.ts) replaces
 // parseWidgetToolsPending.
+// Until then a widget that ships a root view.json or tools.json data file is refused, so the
+// refusal says to rename it.
 function parseBoundViewSpecPending(): never {
-  throw new Error("view-only widgets are not supported yet");
+  throw new Error(`view-only widgets are not supported yet; if ${GADGET_VIEW_FILE} is a data ` +
+      "file, rename it to publish this gadget");
 }
 function parseWidgetToolsPending(): never {
-  throw new Error("callable widgets are not supported yet");
+  throw new Error(`callable widgets are not supported yet; if ${GADGET_TOOLS_FILE} is a data ` +
+      "file, rename it to publish this gadget");
 }
 
 const GADGET_FILE_PARSERS: GadgetFileParsers = {
@@ -254,7 +266,7 @@ export function classifyGadgetFiles(
         `A ${label} needs a server, but this gadget has no ${GADGET_SERVER_FILE}.`);
   }
   if (isWidget) {
-    let code = [...files.keys()].filter(path => path.endsWith(".js")).toSorted();
+    let code = [...files.keys()].filter(isGadgetModule).toSorted();
     if (hasView && (code.length > 0 || hasTools)) {
       let others = hasTools ? [...code, GADGET_TOOLS_FILE] : code;
       report("mixedView", `A ${label} with ${GADGET_VIEW_FILE} is a view with no code, but ` +

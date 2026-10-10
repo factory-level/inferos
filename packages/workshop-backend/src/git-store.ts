@@ -209,6 +209,15 @@ export interface WriteCommitOptions {
 // A parsed-but-unwritten tree: file contents at the leaves, subtrees within.
 type TreeNode = Map<string, TreeNode | string>;
 
+/**
+ * Thrown when a commit holds a symlink or submodule where a file or directory is read: on the
+ * path `GitStore.readCommitBlob` reads, or anywhere `GitStore.readCommitFiles` walks. Neither is
+ * ever written here, but imported history could contain one.
+ */
+export class UnsupportedTreeEntryError extends Error {
+  override name = "UnsupportedTreeEntryError";
+}
+
 /** Thrown by `GitStore.readCommitBlob(…, "text")` for a file that is not strict UTF-8 text. */
 export class BlobTextError extends Error {}
 
@@ -280,10 +289,12 @@ export class GitStore {
   }
 
   /**
-   * Reads one file of a commit, or `null` when the commit has no regular file at `path`. Returns
-   * the blob's raw bytes, or with `"text"`, the bytes decoded as strict UTF-8: unlike
-   * `readCommitFiles`, which replaces invalid sequences, it throws `BlobTextError` on invalid
-   * UTF-8 or a leading byte order mark. Symlinks and submodules are rejected, as there.
+   * Reads one file of a commit, or `null` when the commit has no file at `path` (nothing there,
+   * a directory, or a path through a file). Returns the blob's raw bytes, or with `"text"`, the
+   * bytes decoded as strict UTF-8: unlike `readCommitFiles`, which replaces invalid sequences, it
+   * throws `BlobTextError` on invalid UTF-8 or a leading byte order mark. A symlink or submodule
+   * anywhere on `path` throws `UnsupportedTreeEntryError` rather than reading as absent. There is
+   * no size cap: callers cap the bytes before parsing them.
    */
   async readCommitBlob(oid: string, path: string): Promise<Uint8Array | null>;
   async readCommitBlob(oid: string, path: string, as: "text"): Promise<string | null>;
@@ -296,19 +307,21 @@ export class GitStore {
       let { tree } = await readTree(
           { fs: this.#fs, gitdir: GITDIR, oid: treeOid, cache: this.#cache });
       let entry = tree.find(candidate => candidate.path === segment);
+      let last = i === segments.length - 1;
       if (entry === undefined) return null;
-      if (i < segments.length - 1) {
-        if (entry.type !== "tree") return null;
+      if (entry.type === "tree") {
+        if (last) return null;
         treeOid = entry.oid;
-      } else if (entry.type !== "blob") {
-        return null;
-      } else if (entry.mode !== "100644" && entry.mode !== "100755") {
-        throw new Error(`unsupported tree entry at ${path}: mode ${entry.mode}`);
-      } else {
-        let { blob } = await readBlob(
-            { fs: this.#fs, gitdir: GITDIR, oid: entry.oid, cache: this.#cache });
-        return as === "text" ? decodeStrictUtf8(blob, path) : blob;
+        continue;
       }
+      if (entry.type !== "blob" || (entry.mode !== "100644" && entry.mode !== "100755")) {
+        throw new UnsupportedTreeEntryError(`unsupported tree entry at ` +
+            `${segments.slice(0, i + 1).join("/")}: mode ${entry.mode}`);
+      }
+      if (!last) return null;
+      let { blob } = await readBlob(
+          { fs: this.#fs, gitdir: GITDIR, oid: entry.oid, cache: this.#cache });
+      return as === "text" ? decodeStrictUtf8(blob, path) : blob;
     }
     return null;
   }
@@ -486,7 +499,8 @@ export class GitStore {
             { fs: this.#fs, gitdir: GITDIR, oid: entry.oid, cache: this.#cache });
         out.set(path, new TextDecoder().decode(blob));
       } else {
-        throw new Error(`unsupported tree entry at ${path}: mode ${entry.mode}`);
+        throw new UnsupportedTreeEntryError(
+            `unsupported tree entry at ${path}: mode ${entry.mode}`);
       }
     }
   }

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { WORKSPACE_KINDS, type WorkspaceKind } from "@gadgets/workshop-shared/api";
 import {
-  blueprintPublishRefusals, checkWorkspaceKind, classifyGadgetFiles, workspaceKindAllowsFile,
-  workspaceKindContract, workspaceKindStarter, type GadgetFileClass, type GadgetFileParsers,
-  type GadgetFileViolationCode,
+  blueprintPublishRefusals, checkWorkspaceKind, classifyGadgetFiles, isGadgetModule,
+  workspaceKindAllowsFile, workspaceKindContract, workspaceKindStarter, type GadgetFileClass,
+  type GadgetFileParsers, type GadgetFileViolationCode,
 } from "@gadgets/workshop-shared/workspace-kind";
 
 const codes = (...args: Parameters<typeof checkWorkspaceKind>) =>
@@ -156,6 +156,34 @@ describe("classifyGadgetFiles", () => {
     expect(view!.message).toBe("An App does not use view.json; rename this gadget's view.json " +
         "to publish it.");
     expect(tools!.message).toMatch(/rename this gadget's tools\.json/);
+  });
+
+  it("tells the author of a widget with a view.json or tools.json data file to rename it", () => {
+    const messages = (files: Record<string, string>) =>
+      classifyGadgetFiles("widget", new Map(Object.entries(files))).violations
+        .map(violation => violation.message);
+    expect(messages({ ...UI, ...SERVER, "tools.json": "[]" })).toEqual([
+      "This gadget's tools.json is not a valid tool list: callable widgets are not supported " +
+          "yet; if tools.json is a data file, rename it to publish this gadget.",
+    ]);
+    expect(messages({ "view.json": "{}" })).toEqual([
+      "This gadget's view.json is not a valid view: view-only widgets are not supported yet; " +
+          "if view.json is a data file, rename it to publish this gadget.",
+    ]);
+  });
+
+  it("counts a gadget's JavaScript modules as the gadget loader does", () => {
+    // The loader (OverseerImpl's worker code) loads exactly the paths isGadgetModule accepts, and
+    // mixedView refuses a view with any of them.
+    for (const path of ["client.js", "server.js", "lib/util.js", "a.b.js"]) {
+      expect(isGadgetModule(path), path).toBe(true);
+      expect(classify("widget", { [path]: "", "view.json": "{}" }), path).toContain("mixedView");
+    }
+    for (const path of ["view.json", "lib.mjs", "x.cjs", "a.ts", "js", "README.md"]) {
+      expect(isGadgetModule(path), path).toBe(false);
+      expect(classify("widget", { [path]: "", "view.json": "{}" }), path)
+        .not.toContain("mixedView");
+    }
   });
 });
 

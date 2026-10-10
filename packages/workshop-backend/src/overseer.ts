@@ -5,6 +5,7 @@ import { WorkspaceCanvasStore } from "./canvas-store";
 import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls } from "./console-store";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
+  isGadgetModule,
 } from "@gadgets/workshop-shared/workspace-kind";
 import { WorkspaceFlowStore } from "./flow-store";
 import { HostBoardDesk, hostBoardsEnabled, type HostBoardContext, type HostBoardGuard, type HostBoardMint, type HostBoardReadRecord, type HostBoardReadRequest, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord, type HostBoardSelectionState } from "./host-boards";
@@ -5377,7 +5378,7 @@ class OverseerImpl implements AgentHooks {
 
       let modules: Record<string, string> = {};
       for (let [file, content] of files) {
-        if (file.endsWith(".js")) {
+        if (isGadgetModule(file)) {
           modules[file] = content;
         }
       }

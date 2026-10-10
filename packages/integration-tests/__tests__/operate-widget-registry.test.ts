@@ -491,9 +491,9 @@ describe("a console's widget registry", () => {
     const gadgetId = await gadget.getId();
     await commit(workspace, watched, gadgetId, {}, { "view.json": "{}" });
     await expect(gadget.createBlueprint("View")).rejects.toThrow(
-        /cannot be published as a widget: This gadget's view\.json is not a valid view: view-only widgets are not supported yet\.$/);
+        /cannot be published as a widget: This gadget's view\.json is not a valid view: view-only widgets are not supported yet; if view\.json is a data file, rename it to publish this gadget\.$/);
     await commit(workspace, watched, gadgetId, { "view.json": "{}" }, { ...widgetFiles("v1"), "tools.json": "[]" });
     await expect(gadget.createBlueprint("Tools")).rejects.toThrow(
-        /cannot be published as a widget: This gadget's tools\.json is not a valid tool list: callable widgets are not supported yet\.$/);
+        /cannot be published as a widget: This gadget's tools\.json is not a valid tool list: callable widgets are not supported yet; if tools\.json is a data file, rename it to publish this gadget\.$/);
   });
 });
