@@ -27,7 +27,7 @@ vi.mock('./hostBoardState', async importOriginal => {
 
 import { useHostBoard, type HostBoardOptions } from './useHostBoard'
 import { useHostBoardSelection } from './useHostBoardSelection'
-import { HOST_BOARD_EXPIRY_MS, type HostBoardViewState } from './hostBoardState'
+import { HOST_BOARD_EXPIRY_MS } from './hostBoardState'
 import type { HostBoardTarget } from './hostBoardTypes'
 
 const TARGET: HostBoardTarget = { entryId: 'hb1', console: { consoleId: 'c1', source: 'published', revision: '4' } }
@@ -58,7 +58,7 @@ const session = {
   selectHostBoardConnection,
 } as unknown as RpcStub<OperateSession>
 
-let latest: { view: HostBoardViewState; dispatch: ReturnType<typeof useHostBoard>['dispatch'] }
+let latest: ReturnType<typeof useHostBoard>
 const Board = ({ options }: { options?: HostBoardOptions }) => {
   latest = useHostBoard(session, TARGET, 'board-1', options)
   return null
@@ -230,6 +230,22 @@ describe('onRequest', () => {
     expect(latest.view).toMatchObject({ status: 'ok', read: { token: 1 } })
     await act(async () => reads[1].resolve(ok()))
     expect(latest.view).toMatchObject({ status: 'ok', read: { token: 2 } })
+  })
+
+  it('names what each read was sent under, and exposes the latest selection changeSeq', async () => {
+    const sent: unknown[] = []
+    await act(async () => root.render(<Board options={{ onRequest: (token, at) => sent.push({ token, ...at }) }} />))
+    expect(latest.changeSeq).toBeNull()
+    await selected()
+    await act(async () => reads[0].resolve(ok()))
+    if (latest.view.status !== 'ok') throw new Error('expected ok')
+    const { contextToken, generation } = latest.view.read
+    expect(sent).toEqual([{ token: 1, contextToken, generation, changeSeq: 1 }])
+    // A newer delivery with the same state and epoch does not invalidate the board, but its
+    // changeSeq is visible, so a caller can still refuse a read sent before it.
+    await act(async () => deliver({ state: 'selected', changeSeq: 2, selectionEpoch: 1 }))
+    expect(latest.view.status).toBe('ok')
+    expect(latest.changeSeq).toBe(2)
   })
 })
 

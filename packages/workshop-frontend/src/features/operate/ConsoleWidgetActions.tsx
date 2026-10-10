@@ -13,20 +13,27 @@ export type ConsoleWidgetTarget = {
 
 /**
  * Open a console widget directly from the assistant dock, without changing its conversation, or
- * one of the console's host boards when `onOpenHostBoard` is given (host boards are on).
+ * one of the console's host boards when `onOpenHostBoard` is given (host boards are on), or one of
+ * its bound views when `onOpenBoundView` is given (bound views are on).
  */
-export const ConsoleWidgetActions = ({ entry, onOpen, onOpenHostBoard }: {
+export const ConsoleWidgetActions = ({ entry, onOpen, onOpenHostBoard, onOpenBoundView }: {
   entry: ConsoleEntry
   onOpen: (target: ConsoleWidgetTarget) => void
   onOpenHostBoard?: (entryId: string) => void
+  onOpenBoundView?: (entryId: string) => void
 }) => {
   const [open, setOpen] = useState(false)
   const included = new Set(consoleScreens(entry.console))
   const screens = entry.screens.filter(screen => included.has(screen.id))
   const hostBoards = onOpenHostBoard ? (entry.console.hostBoards ?? []).flatMap(board => board.id === undefined ? [] : [{ ...board, id: board.id }]) : []
+  const boundViews = onOpenBoundView ? (entry.console.boundViews ?? []).flatMap(view => view.id === undefined ? [] : [{ ...view, id: view.id }]) : []
   const chooseHostBoard = (entryId: string) => {
     setOpen(false)
     onOpenHostBoard?.(entryId)
+  }
+  const chooseBoundView = (entryId: string) => {
+    setOpen(false)
+    onOpenBoundView?.(entryId)
   }
   const choose = (screenId: string, widgetId: string, presentation: 'page' | 'modal') => {
     setOpen(false)
@@ -42,7 +49,13 @@ export const ConsoleWidgetActions = ({ entry, onOpen, onOpenHostBoard }: {
           <span className="truncate">{board.label}</span>
         </Button>)}
       </section>}
-      {hostBoards.length === 0 && screens.every(screen => screen.sections.every(section => section.widgets.length === 0)) && <p className="text-sm text-kumo-subtle">Add widgets to a screen in console setup.</p>}
+      {boundViews.length > 0 && <section className="mb-3" aria-label="Views">
+        <h3 className="mb-1 text-xs text-kumo-subtle">Views</h3>
+        {boundViews.map(view => <Button key={view.id} size="sm" variant="ghost" className="w-full justify-start" onClick={() => chooseBoundView(view.id)}>
+          <span className="truncate">{view.label}</span>
+        </Button>)}
+      </section>}
+      {hostBoards.length === 0 && boundViews.length === 0 && screens.every(screen => screen.sections.every(section => section.widgets.length === 0)) && <p className="text-sm text-kumo-subtle">Add widgets to a screen in console setup.</p>}
       {screens.filter(screen => screen.sections.some(section => section.widgets.length > 0)).map(screen => <section key={screen.id} className="mb-3 last:mb-0" aria-label={screen.title}>
         <h3 className="mb-1 text-xs text-kumo-subtle">{screen.title}</h3>
         {screen.sections.flatMap(section => section.widgets.map((widget, index) => {

@@ -3,7 +3,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { HostBoardEntry, OperateConsoleContent } from '@gadgets/workshop-shared/operate-console'
+import type { BoundViewEntry, HostBoardEntry, OperateConsoleContent } from '@gadgets/workshop-shared/operate-console'
 import type { ConsoleEntry } from './consoles'
 
 const state = vi.hoisted(() => ({
@@ -11,8 +11,9 @@ const state = vi.hoisted(() => ({
   replace: vi.fn<(id: string, revision: string, content: OperateConsoleContent) => Promise<void>>(),
   invalidate: vi.fn<() => void>(),
   hostBoards: false,
+  boundViews: false,
 }))
-vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ hostBoards: state.hostBoards }) }))
+vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ hostBoards: state.hostBoards, boundViews: state.boundViews }) }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({
   overseer: { stub: { replaceConsole: state.replace } }, metadata: { role: state.denied ? 'use' : 'build' },
@@ -33,7 +34,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('PointerEvent', MouseEvent)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  state.denied = false; state.hostBoards = false; state.replace.mockReset().mockResolvedValue(); state.invalidate.mockClear(); close.mockClear(); edit.mockClear()
+  state.denied = false; state.hostBoards = false; state.boundViews = false; state.replace.mockReset().mockResolvedValue(); state.invalidate.mockClear(); close.mockClear(); edit.mockClear()
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 const render = () => act(() => root.render(<ConsoleSettings entry={entry} onClose={close} onEdit={edit} />))
@@ -131,4 +132,30 @@ it('marks boards unavailable and offers none to add on a console that shows only
   expect(section.textContent).toContain('This console shows only Assistant, so operators can\'t open boards on it.')
   expect(section.querySelector('[aria-label="Registered boards"]')?.textContent).toContain('Unavailable on an Assistant-only console')
   expect([...section.querySelectorAll('button')].some(button => button.textContent === 'Register board')).toBe(false)
+})
+
+const VIEW: BoundViewEntry = { kind: 'bound-view', id: 'bv1', gadgetId: 3, blueprintId: 'bp', version: 1, label: 'Triage view', requirements: ['board-1'] }
+const withView = { ...withBoard, console: { ...withBoard.console, boundViews: [VIEW] } }
+
+it.each([
+  ['bound views are off', { hostBoards: true, boundViews: false }],
+  ['host boards are off', { hostBoards: false, boundViews: true }],
+])('shows no views while %s, and saving leaves the saved views to the kernel to keep', async (_, flags) => {
+  Object.assign(state, flags)
+  act(() => root.render(<ConsoleSettings entry={withView} onClose={close} onEdit={edit} />))
+  expect(container.querySelector('#console-bound-views-heading')).toBeNull()
+  expect(container.textContent).not.toContain('Triage view')
+  await act(async () => save().click())
+  expect(lastContent()).not.toHaveProperty('boundViews')
+})
+
+it('keeps saved views untouched when not edited, and sends an edited list in full', async () => {
+  state.hostBoards = true; state.boundViews = true
+  act(() => root.render(<ConsoleSettings entry={withView} onClose={close} onEdit={edit} />))
+  expect(container.querySelector('[aria-label="Registered views"]')?.textContent).toContain('Triage view')
+  await act(async () => save().click())
+  expect(lastContent()).not.toHaveProperty('boundViews')
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Remove Triage view"]')!.click())
+  await act(async () => save().click())
+  expect(lastContent().boundViews).toEqual([])
 })
