@@ -483,7 +483,7 @@ describe("a console's widget registry", () => {
     await workflow.updateBlueprint(flowBlueprint.id, { updateCode: true });
   });
 
-  it("refuses a widget's view.json or tools.json until their parsers land", async () => {
+  it("publishes a widget whose view.json parses, and refuses tools.json until its parser lands", async () => {
     const author = await signUp(publicApi, nextUsernames("kindpending")[0]!);
     const workspace = await author.newGadget("widget");
     const watched = await watch(workspace);
@@ -491,8 +491,15 @@ describe("a console's widget registry", () => {
     const gadgetId = await gadget.getId();
     await commit(workspace, watched, gadgetId, {}, { "view.json": "{}" });
     await expect(gadget.createBlueprint("View")).rejects.toThrow(
-        /cannot be published as a widget: This gadget's view\.json is not a valid view: view-only widgets are not supported yet; if view\.json is a data file, rename it to publish this gadget\.$/);
-    await commit(workspace, watched, gadgetId, { "view.json": "{}" }, { ...widgetFiles("v1"), "tools.json": "[]" });
+        /cannot be published as a widget: This gadget's view\.json is not a valid view: missingKey at \$\.version; .*; if view\.json is a data file, rename it to publish this gadget\.$/);
+    const view = JSON.stringify({ version: 1, title: "Open work", requirements: ["board"],
+      root: { type: "count", label: "Open", of: { requirement: "board", collection: "issues" } } });
+    await commit(workspace, watched, gadgetId, { "view.json": "{}" }, { "view.json": view });
+    await gadget.createBlueprint("View");
+    await commit(workspace, watched, gadgetId, { "view.json": view }, { ...widgetFiles("v1"), "view.json": view });
+    await expect(gadget.createBlueprint("Mixed")).rejects.toThrow(
+        /cannot be published as a widget: A Widget with view\.json is a view with no code, but this gadget also has client\.js, server\.js\.$/);
+    await commit(workspace, watched, gadgetId, { ...widgetFiles("v1"), "view.json": view }, { ...widgetFiles("v1"), "tools.json": "[]" });
     await expect(gadget.createBlueprint("Tools")).rejects.toThrow(
         /cannot be published as a widget: This gadget's tools\.json is not a valid tool list: callable widgets are not supported yet; if tools\.json is a data file, rename it to publish this gadget\.$/);
   });

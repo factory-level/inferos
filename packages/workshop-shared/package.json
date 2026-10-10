@@ -15,6 +15,10 @@
       "types": "./src/workspace-kind.ts",
       "import": "./src/workspace-kind.ts"
     },
+    "./bound-view": {
+      "types": "./src/bound-view.ts",
+      "import": "./src/bound-view.ts"
+    },
     "./feature-flags": {
       "types": "./src/feature-flags.ts",
       "import": "./src/feature-flags.ts"

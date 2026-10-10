@@ -5,6 +5,7 @@ import {
   workspaceKindAllowsFile, workspaceKindContract, workspaceKindStarter, type GadgetFileClass,
   type GadgetFileParsers, type GadgetFileViolationCode,
 } from "@gadgets/workshop-shared/workspace-kind";
+import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 
 const codes = (...args: Parameters<typeof checkWorkspaceKind>) =>
   checkWorkspaceKind(...args).map(violation => violation.code);
@@ -120,9 +121,9 @@ const MATRIX: Row[] = [
     [], "visualWidget"],
 ];
 
-// `classify` uses the kernel's own parsers, which refuse every view.json and tools.json for
-// now; `refusals` the injected ones.
-const classify = (kind: WorkspaceKind, files: Record<string, string>) =>
+// `classify` uses the kernel's own parsers: the bound-view parser for view.json, and for
+// tools.json a stand-in that refuses every file for now; `refusals` the injected ones.
+const classify = (kind: WorkspaceKind, files: Record<string, string | null>) =>
   classifyGadgetFiles(kind, new Map(Object.entries(files))).violations.map(v => v.code);
 const refusals = (kind: WorkspaceKind, files: Record<string, string | null>) =>
   blueprintPublishRefusals(kind,
@@ -137,11 +138,39 @@ describe("classifyGadgetFiles", () => {
     for (const violation of result.violations) expect(violation.message).toMatch(/\.$/);
   });
 
-  it("refuses every view.json and tools.json until their parsers land", () => {
-    expect(classify("widget", { "view.json": "{}" })).toEqual(["invalidView"]);
+  it("refuses every tools.json until its parser lands", () => {
     expect(classify("widget", { ...SERVER, "tools.json": "[]" })).toEqual(["invalidTools"]);
     expect(classify("widget", { ...UI, ...SERVER, "tools.json": "[]" })).toEqual(["invalidTools"]);
     expect(classify("widget", { ...UI, ...SERVER })).toEqual([]);
+  });
+
+  // The matrix rows without tools.json, under the kernel's own view.json parser: `ok` becomes a
+  // valid bound view and `bad` one that does not parse.
+  const VALID_VIEW = JSON.stringify({
+    version: 1, title: "Open work", requirements: ["board"],
+    root: { type: "count", label: "Open", of: { requirement: "board", collection: "issues" } },
+  });
+  const real = (files: Record<string, string | null>) => Object.fromEntries(Object.entries(files).map(
+      ([path, text]) => [path, path !== "view.json" ? text : text === "ok" ? VALID_VIEW : text === "bad" ? "{}" : text]));
+  it.each(MATRIX.filter(([, , files]) => !("tools.json" in files)))(
+    "%s, with the bound-view parser", (_name, kind, files, expected, fileClass) => {
+      const result = classifyGadgetFiles(kind, new Map(Object.entries(real(files))));
+      expect(result.violations.map(violation => violation.code)).toEqual(expected);
+      expect(result.class).toBe(fileClass);
+    });
+
+  it("classifies a valid view.json alone as view-only, and reports a bad one's problems", () => {
+    expect(parseBoundViewSpec(VALID_VIEW).ok).toBe(true);
+    expect(classifyGadgetFiles("widget", new Map([["view.json", VALID_VIEW]])))
+      .toEqual({ class: "viewOnly", violations: [] });
+    const [bad] = classifyGadgetFiles("widget", new Map([["view.json", '{"version":1,"version":1}']])).violations;
+    expect(bad).toEqual({ code: "invalidView",
+      message: "This gadget's view.json is not a valid view: duplicateKey at $.version; if " +
+          "view.json is a data file, rename it to publish this gadget." });
+    expect(classify("widget", { "view.json": "{}" })).toEqual(["invalidView"]);
+    expect(classify("widget", { ...UI, ...SERVER, "view.json": VALID_VIEW })).toEqual(["mixedView"]);
+    expect(classify("widget", { "view.json": VALID_VIEW, "lib/x.js": "" })).toEqual(["mixedView"]);
+    expect(classify("widget", { "view.json": null })).toEqual(["invalidView"]);
   });
 
   it("checks filenames alone as before, failing to parse a view or tools it cannot read", () => {
@@ -167,8 +196,9 @@ describe("classifyGadgetFiles", () => {
           "yet; if tools.json is a data file, rename it to publish this gadget.",
     ]);
     expect(messages({ "view.json": "{}" })).toEqual([
-      "This gadget's view.json is not a valid view: view-only widgets are not supported yet; " +
-          "if view.json is a data file, rename it to publish this gadget.",
+      "This gadget's view.json is not a valid view: missingKey at $.version; missingKey at " +
+          "$.title; missingKey at $.requirements; missingKey at $.root; if view.json is a data " +
+          "file, rename it to publish this gadget.",
     ]);
   });
 
