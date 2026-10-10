@@ -62,7 +62,8 @@ beforeEach(() => {
   onCreate.mockClear().mockResolvedValue({ ok: true })
   onUpdate.mockClear().mockResolvedValue({ ok: true })
 })
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); vi.useRealTimers() })
+// Restore the clock first, so an unmount that throws cannot leave Date frozen for later tests.
+afterEach(async () => { vi.useRealTimers(); await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
 it('renders the given columns with their cards: identifier, title, priority, assignee, due date and blocked reason', async () => {
   // The fixture's target date is 2026-10-09: pin "today" before it, or the card reads "Overdue".
@@ -80,6 +81,21 @@ it('renders the given columns with their cards: identifier, title, priority, ass
   expect(container.querySelector('[data-issue-id="3"]')).toBeNull()
   // Targets follow the issue's workflow over the whole board, not the shown columns.
   expect(menuItems('1')).toEqual(['Move to Doing', 'Move to Done'])
+})
+
+it('marks an open card overdue only once its target day has passed in UTC', async () => {
+  // The fixture's card 1 targets 2026-10-09 and sits in Todo, an open state.
+  const dueSpan = () => [...card('1').querySelectorAll('span')].find(span => /^(Due|Overdue) /.test(span.textContent ?? ''))!
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-10-10T12:00:00Z'))
+  await render(basic)
+  expect(dueSpan().textContent).toBe('Overdue Oct 9')
+  expect(dueSpan().classList.contains('text-kumo-danger')).toBe(true)
+  // The last minute of the target day is still on time.
+  vi.setSystemTime(new Date('2026-10-09T23:59:00Z'))
+  await render({ ...basic })
+  expect(dueSpan().textContent).toBe('Due Oct 9')
+  expect(dueSpan().classList.contains('text-kumo-danger')).toBe(false)
 })
 
 it('moves with the keyboard: arrows choose a column, Enter proposes, Escape cancels; the result is announced', async () => {
