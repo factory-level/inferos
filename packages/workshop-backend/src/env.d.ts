@@ -23,6 +23,13 @@ declare global {
        */
       INFEROPS_BOUND_VIEWS?: string;
       INFEROPS_ENABLED?: string;
+      /**
+       * Console tools (console-store.ts `consoleToolsEnabled`): "true" lets console publication
+       * snapshot callable widgets' tools. Off by default, and set only in test harnesses: it must
+       * not be set in any shared or deployed environment until MVP-35 records the remote CPU,
+       * wall-time and memory checks as passed (operate-mode.md, "Callable widget surfaces").
+       */
+      CONSOLE_TOOLS?: string;
       // Local Bun companion. These are injected only by the opted-in local runtime.
       ENABLE_OPENAI_ASSISTANT_PLUGIN?: string;
       OPENAI_ASSISTANT_PLUGIN_URL?: string;

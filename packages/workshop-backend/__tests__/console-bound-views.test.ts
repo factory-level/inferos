@@ -7,6 +7,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { writeBlob, writeTree, type TreeEntry } from "isomorphic-git";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import type { BoundViewEntry, ConsoleWidgetEntry, HostBoardEntry, OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { parseWidgetTools } from "@gadgets/workshop-shared/widget-tools";
 import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
 import { CONSOLE_SIZE_LIMITS, WorkspaceConsoleStore, type FrozenInstalls, type SourceCommits } from "../src/console-store";
 import { BlobTextError, GITDIR, makeGitObjectsFs, type GitStore } from "../src/git-store";
@@ -51,7 +52,7 @@ function commitsOf(...ids: string[]): SourceCommits {
   return new Map(ids.map(id => {
     let files = new Map<string, string | null>(Object.entries(COMMITS[id]!));
     let classification = classifyGadgetFiles("widget", files);
-    return [id, { classification, viewText: classification.class === "viewOnly" ? files.get("view.json")! : null }];
+    return [id, { classification, viewText: classification.class === "viewOnly" ? files.get("view.json")! : null, tools: null }];
   }));
 }
 const ALL = commitsOf(...Object.keys(COMMITS));
@@ -152,8 +153,8 @@ describe("saving a console's bound views", () => {
 
   it("refuses a source whose commit moved after it was read", () => {
     let t = setup();
-    expect(() => t.store().create(t.content({ boundViews: [view()] }), commitsOf("widget"))).toThrow(/changed while it was being checked/);
-    expect(() => t.store().create(t.content({ boundViews: [view()] }))).toThrow(/changed while it was being checked/);
+    expect(() => t.store().create(t.content({ boundViews: [view()] }), commitsOf("widget"))).toThrow(/changed while it was being saved or published; try again/);
+    expect(() => t.store().create(t.content({ boundViews: [view()] }))).toThrow(/changed while it was being saved or published; try again/);
   });
 
   it("refuses a new entry while the switch is off, or host boards are, keeping saved entries editable", () => {
@@ -214,16 +215,16 @@ describe("publishing a console's bound views", () => {
 
   // Each race changes the console or a source between the capture and the transaction.
   const races: [string, (t: ReturnType<typeof setup>, stored: OperateConsole) => void, RegExp][] = [
-    ["the source moves to a commit that also has client.js", t => t.gadget(10, "mixed"), /changed while it was being published/],
-    ["the source moves to an edited view", t => t.gadget(10, "viewEdited"), /changed while it was being published/],
+    ["the source moves to a commit that also has client.js", t => t.gadget(10, "mixed"), /changed while it was being saved or published; try again/],
+    ["the source moves to an edited view", t => t.gadget(10, "viewEdited"), /changed while it was being saved or published; try again/],
     ["the source's provenance changes", t => t.gadget(10, "view", { installedFrom: { blueprintId: "bp", version: 2, kind: "widget" } }),
-      /changed while it was being published/],
-    ["the source is deleted", t => t.storage.gadgets.delete(10), /changed while it was being published/],
+      /changed while it was being saved or published; try again/],
+    ["the source is deleted", t => t.storage.gadgets.delete(10), /changed while it was being saved or published; try again/],
     ["the source gains a binding", t => t.gadget(10, "view", { bindings: { DB: {} as never } }), /has bindings/],
     ["an entry is added at the same revision", (t, stored) => t.storage.consoles.put({ ...stored, boundViews: [...stored.boundViews!, { ...view(), id: "x" }] }),
-      /changed while it was being published/],
+      /changed while it was being saved or published; try again/],
     ["the requirement mapping changes at the same revision", (t, stored) =>
-      t.storage.consoles.put({ ...stored, hostBoards: [{ ...stored.hostBoards![0]!, id: "other" }] }), /changed while it was being published/],
+      t.storage.consoles.put({ ...stored, hostBoards: [{ ...stored.hostBoards![0]!, id: "other" }] }), /changed while it was being saved or published; try again/],
   ];
   for (let [name, race, refusal] of races) {
     it(`refuses when ${name}, leaving the live publication`, () => {
@@ -291,12 +292,12 @@ describe("publishing a console's bound views", () => {
     expect(bytes(t.storage.consoles.get(published.id))).toBeLessThanOrEqual(CONSOLE_SIZE_LIMITS.console);
   });
 
-  it("refuses a console row over 448 KiB", () => {
+  it("refuses a console row over 704 KiB", () => {
     let t = setup();
     let long = "b".repeat(CONSOLE_SIZE_LIMITS.console);
     t.gadget(30, "widget", { installedFrom: { blueprintId: long, version: 1, kind: "widget" } });
     let saved = t.store().create(t.content({ widgets: [{ gadgetId: 30, blueprintId: long, version: 1, label: "W", state: "resettable" }] }), ALL);
-    expect(() => t.publish(saved)).toThrow(/over 458752 bytes published/);
+    expect(() => t.publish(saved)).toThrow(/over 720896 bytes published/);
     expect(t.storage.consoles.get(saved.id)!.published).toBeNull();
   });
 });
@@ -342,7 +343,7 @@ describe("publication against real commits", () => {
       };
       let commits = await impl.readSourceCommits(capture.commitIds);
       impl.gitStore.readCommitPaths = read;
-      expect(() => store.publish(saved.id, saved.revision, capture, commits)).toThrow(/changed while it was being published/);
+      expect(() => store.publish(saved.id, saved.revision, capture, commits)).toThrow(/changed while it was being saved or published; try again/);
       expect(store.get(saved.id, "draft")!.published).toBeNull();
     });
   });
@@ -385,12 +386,13 @@ describe("publication against real commits", () => {
   const TOOLS = JSON.stringify([{ name: "version", description: "The widget's version.", method: "version", effect: "read",
     input: { type: "object", properties: {} }, output: { type: "string", maxLength: 16 } }]);
 
-  it("reads only a commit's paths, plus its view.json and tools.json", async () => {
+  it("reads only a commit's paths, plus its view.json and tools.json, in one pass that keeps both", async () => {
     await inOverseer("bound-view-paths", async impl => {
       // A widget's code is neither read nor decoded: one file is not UTF-8, another's blob is gone.
       let { commit, blobs } = await commitBytes(impl, { "client.js": NOT_UTF8, "server.js": "", "lib/util.js": "x" });
       impl.storage.gitObjects.delete(blobs.get("lib/util.js")!);
       let mixed = await commitBytes(impl, { "view.json": spec(["board"]), "client.js": NOT_UTF8 });
+      let callable = await commitBytes(impl, { "server.js": NOT_UTF8, "tools.json": TOOLS });
       let read: string[] = [];
       let readBlob = impl.gitStore.readCommitBlob.bind(impl.gitStore) as (oid: string, path: string, as: "text") => Promise<string | null>;
       impl.gitStore.readCommitBlob = (async (oid: string, path: string, as: "text") => {
@@ -398,10 +400,13 @@ describe("publication against real commits", () => {
         return readBlob(oid, path, as);
       }) as GitStore["readCommitBlob"];
       impl.gitStore.readCommitFiles = () => { throw new Error("readCommitFiles decodes every file"); };
-      let commits = await impl.readSourceCommits([commit, mixed.commit]);
-      expect(commits.get(commit)).toEqual({ classification: { class: "visualWidget", violations: [] }, viewText: null });
+      let commits = await impl.readSourceCommits([commit, mixed.commit, callable.commit]);
+      expect(commits.get(commit)).toEqual({ classification: { class: "visualWidget", violations: [] }, viewText: null, tools: null });
       expect(commits.get(mixed.commit)!.classification.violations.map(violation => violation.code)).toEqual(["mixedView"]);
-      expect(read).toEqual(["view.json"]);
+      // The callable widget's tools come from the same read that classified it (C4's surfaces).
+      expect(commits.get(callable.commit)).toEqual({ classification: { class: "callableTools", violations: [] },
+        viewText: null, tools: parseWidgetTools(TOOLS) });
+      expect(read).toEqual(["view.json", "tools.json"]);
     });
   });
 
@@ -456,7 +461,7 @@ describe("publication against real commits", () => {
       let nextId = impl.storage.nextGatekeeperId.get();
       let capture = store.capture(saved.id, saved.revision);
       let commits = await impl.readSourceCommits(capture.commitIds);
-      expect(() => store.publish(saved.id, saved.revision, capture, commits)).toThrow(/over 458752 bytes published/);
+      expect(() => store.publish(saved.id, saved.revision, capture, commits)).toThrow(/over 720896 bytes published/);
       expect(Array.from(impl.storage.gadgets.list())).toEqual(gadgets);
       expect(impl.storage.gadgets.byBindingName.get("WIDGET_PUBLISHED")).toBeUndefined();
       expect(impl.storage.nextGatekeeperId.get()).toBe(nextId);

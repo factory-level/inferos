@@ -1,5 +1,6 @@
 import type { WorkpieceId } from "./api.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
+import type { WidgetToolDeclaration } from "./widget-tools.js";
 
 // An authored console: everything one operator role works in, as a menu of views over one
 // workspace's screens (canvas ids), stored in that workspace beside its screens and flows. Opening
@@ -76,6 +77,19 @@ export type ConsoleWidgetFreeze = {
   sourceGadgetId: WorkpieceId;
   /** The commit, of the registered gadget at publication, that the frozen install runs. */
   commitId: string;
+  /**
+   * Whether that commit has a UI (`client.js`). A widget with none (a tools-only callable widget)
+   * is never placed on a screen, and its frozen install refuses `getUiBundle` and
+   * `connectToGadget`. Absent on entries published before publication recorded it, which all
+   * had one.
+   */
+  ui?: boolean;
+  /**
+   * The tools that commit's `tools.json` declares, snapshotted at publication, so later edits
+   * change nothing until the next publication. Present only for a callable widget published
+   * while console tools are on (`CONSOLE_TOOLS`).
+   */
+  tools?: WidgetToolDeclaration[];
 };
 
 /**
@@ -97,7 +111,7 @@ export type ConsoleWidgetEntry = {
   label: string;
   /** The builder's declaration about the widget's local state. */
   state: ConsoleWidgetState;
-  /** Set by publication only; a client-supplied value is dropped. */
+  /** Set by publication only, `ui` and `tools` included; a client-supplied value is dropped. */
   frozen?: ConsoleWidgetFreeze;
 };
 
