@@ -41,6 +41,8 @@ import {
 } from "./git-store";
 import { GitCacheImpl, WorkspaceGitCache, gitObjectMetadataCollection } from "./git-cache";
 import { migrateCodeLogToGit } from "./git-migration";
+import { consoleToolTaintsCollection, dropStubsIfTainted, isConsoleToolTainted, usableWhileTainted }
+  from "./chat-taint";
 import * as Y from "yjs";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
@@ -1493,6 +1495,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       chatCompactions: collection<CompactionCheckpoint>()({
         primaryKey: (checkpoint) => compactionKey(checkpoint.chatId, checkpoint.compactedTo),
       }),
+
+      // Chats whose agent has read console tool output, by chat id (see chat-taint.ts). Kept out of
+      // chatMeta, which is rewritten wholesale, so no rewrite can drop the mark; only deleteChat
+      // (or deleting the workspace) removes a row.
+      consoleToolTaints: consoleToolTaintsCollection(),
 
       // Tracks in-progress agent turns so they can be resumed after a server restart. See
       // `ActiveAgentRecord`.
@@ -3891,6 +3898,7 @@ class OverseerImpl implements AgentHooks {
                  executionId: string): object {
     let caller: GatekeeperCaller = {from: "agent", chatId};
     let bound = this.storage.operateSession.get() ? {executionId} : {};
+    let tainted = isConsoleToolTainted(this.storage, chatId);
     // This must be a *plain* object: it becomes the loaded worker's `env`, and the loader's
     // serializer rejects anything else (including a null-prototype object) with DataCloneError.
     // So prototype-pollution safety comes from validation instead: names from before name
@@ -3899,8 +3907,9 @@ class OverseerImpl implements AgentHooks {
     let env: Record<string, any> = {};
 
     // Before the chat's bindings, so a chat binding named GIT shadows it -- matching
-    // describeBinding (see describeBinding in agent.ts).
-    env[GIT_BINDING_NAME] = this.makeBindingLoopback({type: "git", ...bound}, caller);
+    // describeBinding (see describeBinding in agent.ts). Left out of a tainted chat's env: its
+    // reads can pull objects from a gatekeeper with no observation (see #pullGitObjects).
+    if (!tainted) env[GIT_BINDING_NAME] = this.makeBindingLoopback({type: "git", ...bound}, caller);
 
     for (let [name, entry] of Object.entries(bindings)) {
       try {
@@ -3932,13 +3941,14 @@ class OverseerImpl implements AgentHooks {
         case "value": {
           // Agent callback arguments — embed the stored args array directly in env. Any stubs
           // inside are persistent stubs (that is what made the record storable), so they work
-          // directly in env.
+          // directly in env -- except in a tainted chat, which gets only their data: a stub could
+          // have been minted by any execution holding this chat's `self`, even one still running.
           let stored = this.storage.agentCallbackArgs.get(
               `${keyString(chatId)}.${keyString(entry.messageSequence)}`);
           if (!stored) {
             throw new Error("missing agentCallbackArgs value");
           }
-          env[name] = stored.args;
+          env[name] = dropStubsIfTainted(stored.args, tainted);
           break;
         }
         default:
@@ -6099,6 +6109,9 @@ class OverseerImpl implements AgentHooks {
 
   // Open the session behind a binding loopback.
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+    // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
+    // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
+    if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
@@ -6186,6 +6199,26 @@ class OverseerImpl implements AgentHooks {
   // the currently-running execution resolve. See executeCodeMode.
   #activeWorktreeTurns = new Map<number,
       {access: WorktreeTurnAccess, initiator: AiChatAuthorInfo, executionId: string}>();
+
+  // Refuses chat `chatId`'s agent the binding `target` while the chat carries the console tool
+  // taint: every gadget, worktree and env.GIT, and every connection whose vendor is not on the
+  // strict first-party allowlist (see chat-taint.ts). Runs before any gadget, gatekeeper or git
+  // code. Gadgets are refused because their code can reach anything their own bindings can, and
+  // worktrees and env.GIT because their reads fault-pull objects from a connection.
+  #assertUsableWhileTainted(chatId: number,
+                            target: {type: "gatekeeper", id: WorkpieceId} |
+                                {type: "gadget" | "worktree" | "git"}): void {
+    if (!isConsoleToolTainted(this.storage, chatId)) return;
+    if (target.type === "gatekeeper" &&
+        usableWhileTainted(gatekeeperVendorId(this.storage.gatekeepers.get(target.id)))) {
+      return;
+    }
+    let refused = {gatekeeper: "this connection", gadget: "gadget bindings",
+      worktree: "worktree bindings", git: "env.GIT"}[target.type];
+    throw new Error(
+        `This chat has read console tool output, so it can no longer use ${refused}. Start a ` +
+        `new chat to use it.`);
+  }
 
   // Every running executeCodeMode execution, by its executionId, mapped to its chat. Registered
   // for exactly the run (see executeCodeMode).
@@ -7564,8 +7597,9 @@ class OverseerImpl implements AgentHooks {
 
   // Describe a workpiece -- a gadget or a gatekeeper -- reachable as `envName` in a chat's env,
   // for the agent's describeBinding tool.
-  async describeBinding(envName: string, id: WorkpieceId): Promise<string> {
+  async describeBinding(chatId: number, envName: string, id: WorkpieceId): Promise<string> {
     let gadget = this.storage.gadgets.get(id);
+    if (gadget) this.#assertUsableWhileTainted(chatId, {type: gadget.type});
     if (gadget?.type === "worktree") {
       return `Binding: ${envName}\n` +
           `\n` +
@@ -7592,11 +7626,13 @@ class OverseerImpl implements AgentHooks {
       throw new Error(`The resource behind ${envName} no longer exists.`);
     }
     if (this.storage.operateSession.get()) await this.#assertUsableInOperateChat(id, envName);
+    this.#assertUsableWhileTainted(chatId, {type: "gatekeeper", id});
     return this.describeGatekeeper(envName, gatekeeper);
   }
 
   // Describe the env.GIT binding, for the agent's describeBinding tool.
-  describeGitBinding(envName: string): string {
+  describeGitBinding(chatId: number, envName: string): string {
+    this.#assertUsableWhileTainted(chatId, {type: "git"});
     return `Binding: ${envName}\n` +
         `\n` +
         `This binding provides access to the workspace's git objects. It is present in your ` +
@@ -9358,6 +9394,7 @@ class OverseerImpl implements AgentHooks {
                         worktreeTurn?: WorktreeTurnAccess)
       : Promise<string> {
     if (this.storage.operateSession.get()) bindings = await this.#operateChatBindings(bindings);
+    if (isConsoleToolTainted(this.storage, chatId)) bindings = this.#taintedChatBindings(bindings);
     let bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     let executionId: string = bytes.toBase64();
@@ -9525,6 +9562,10 @@ class OverseerImpl implements AgentHooks {
     return this.storage.operateSession.get();
   }
 
+  isConsoleToolTainted(chatId: number): boolean {
+    return isConsoleToolTainted(this.storage, chatId);
+  }
+
   // Whether the operate chat must not use connection `id`: its resource is of a type its vendor
   // marks `excludeFromOperateChat` (see SupportedResource). A connection with no recorded vendor or
   // URL predates both being recorded and matches no type.
@@ -9558,6 +9599,16 @@ class OverseerImpl implements AgentHooks {
       kept[name] = entry;
     }
     return kept;
+  }
+
+  // A tainted chat's bindings with only allowlisted connections and callback arguments left (see
+  // #assertUsableWhileTainted), so nothing else reaches its executeCode env: gadget and worktree
+  // bindings are dropped with every other connection.
+  #taintedChatBindings(bindings: Record<string, ChatBindingEntry>)
+      : Record<string, ChatBindingEntry> {
+    return Object.fromEntries(Object.entries(bindings).filter(([, entry]) =>
+        entry.type !== "workpiece" ||
+        usableWhileTainted(gatekeeperVendorId(this.storage.gatekeepers.get(entry.id)))));
   }
 
   // The owner's user DO holds the session (one per person, and only the owner opens this
@@ -9649,6 +9700,13 @@ class OverseerImpl implements AgentHooks {
     // The agent loop already validated the binding name against the chat's scope; re-validate
     // its shape here defensively (this is the boundary that persists it).
     validateBindingName(input.bindingName);
+
+    // A new connection would let a tainted chat reach a resource of its choosing after one click.
+    if (isConsoleToolTainted(this.storage, chatId)) {
+      return { requested: false, message:
+          "Cannot request a connection: this chat has read console tool output. Start a new " +
+          "chat to connect a resource." };
+    }
 
     // Resolve the vendor's display name (and validate it exists).
     let vendors = await this.#listGatekeeperVendorsCached();
@@ -10541,6 +10599,8 @@ class OverseerImpl implements AgentHooks {
       throw new Error(
           `[restore] is only available on Gadget bindings; "${bindingName}" is not a Gadget.`);
     }
+    // A tainted chat's env holds no gadget; this covers a mark that lands mid-execution.
+    this.#assertUsableWhileTainted(chatId, {type: "gadget"});
     let gadgetId = entry.id;
 
     // Wacky hack: Load the one-off "forger" worker through `ctx.restore()`, so that it gets
@@ -13296,6 +13356,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // and provisional binding edges.
     await this.impl.removeChatWorkpieces(chatId);
     this.impl.storage.chatMeta.delete(chatId);
+    this.impl.storage.consoleToolTaints.delete(chatId);
     this.impl.storage.chatContext.delete(chatId);
     // Buffer the keys first: deleting invalidates the list cursor.
     let checkpoints = Array.from(

@@ -383,7 +383,7 @@ describe("env.GIT presence", () => {
   });
 
   it("describeBinding serves the Git and Worktree API", () => withImpl(async impl => {
-    let description = impl.describeGitBinding("env.GIT");
+    let description = impl.describeGitBinding(1, "env.GIT");
     expect(description).toContain("Binding: env.GIT");
     expect(description).toContain("export interface Git");
     expect(description).toContain("newWorktree(commitId: string): Promise<Worktree>");

@@ -361,11 +361,11 @@ async function describeBinding(
   if (gadget === undefined) {
     let envName = `env.${name}`;
     let entry = chatBindings.get(name);
-    if (!entry && name === GIT_BINDING_NAME) return hooks.describeGitBinding(envName);
+    if (!entry && name === GIT_BINDING_NAME) return hooks.describeGitBinding(chatId, envName);
     if (!entry) throw new Error(`There is no binding named "${name}" in your env.`);
     switch (entry.type) {
       case "workpiece":
-        return hooks.describeBinding(envName, entry.id);
+        return hooks.describeBinding(chatId, envName, entry.id);
       case "value":
         return `${envName} is the arguments array of a call delivered to this agent (one ` +
             `element per parameter of the call). Any RPC stubs among them may be called directly.`;
@@ -382,9 +382,9 @@ async function describeBinding(
   if (!info) throw new Error(`There is no gadget named "${gadget}" in your env.`);
   // Mirrors the env getEnvForLoader builds: the gadget's own edges shadow GIT and GADGET.
   let edge = info.bindings.find(binding => binding.name === name);
-  if (edge) return hooks.describeBinding(envName, edge.target);
-  if (name === GIT_BINDING_NAME) return hooks.describeGitBinding(envName);
-  if (name === "GADGET") return hooks.describeBinding(envName, info.id);
+  if (edge) return hooks.describeBinding(chatId, envName, edge.target);
+  if (name === GIT_BINDING_NAME) return hooks.describeGitBinding(chatId, envName);
+  if (name === "GADGET") return hooks.describeBinding(chatId, envName, info.id);
   throw new Error(`Gadget ${gadget} has no binding named "${name}".`);
 }
 
@@ -552,6 +552,13 @@ export interface AgentHooks {
   isOperateSession(): boolean;
 
   /**
+   * Whether chat `chatId` has read console tool output (see chat-taint.ts). While it has, the
+   * agent's egress tools refuse: webFetch here, and the connection, GIT and connection-request
+   * gates in the Overseer.
+   */
+  isConsoleToolTainted(chatId: number): boolean;
+
+  /**
    * The owner's operate page (see OperateSession), after first applying `event`, if given, as the
    * agent's: it goes through the same reducer as a person's and is logged with actor "agent".
    * Throws an agent-readable error for an event that doesn't apply to the current page. An
@@ -633,14 +640,17 @@ export interface AgentHooks {
                 path?: string): Promise<GrepScan>;
 
   /**
-   * Describe a workpiece (a gadget or a gatekeeper) reachable as `envName` in the chat's env,
-   * for the agent's describeBinding tool. (`envName` is provided here only so that it can be
+   * Describe a workpiece (a gadget or a gatekeeper) reachable as `envName` in chat `chatId`'s
+   * env, for the agent's describeBinding tool. (`envName` is provided here only so that it can be
    * incorporated into the returned description.)
    */
-  describeBinding(envName: string, id: WorkpieceId): Promise<string>;
+  describeBinding(chatId: number, envName: string, id: WorkpieceId): Promise<string>;
 
-  /** Describe the env.GIT binding (see GIT_BINDING_NAME), for the describeBinding tool. */
-  describeGitBinding(envName: string): string;
+  /**
+   * Describe the env.GIT binding (see GIT_BINDING_NAME) for chat `chatId`, for the describeBinding
+   * tool.
+   */
+  describeGitBinding(chatId: number, envName: string): string;
 
   /**
    * Add a binding to the given gadget, pointing at the given workpiece. The binding is provisional
@@ -3355,6 +3365,13 @@ async function runAgentPass(
       }),
       execute: async (toolCallId, {url, raw}) => {
         try {
+          // A chat that has read console tool output never fetches: the URL could carry its
+          // context out (see chat-taint.ts).
+          if (hooks.isConsoleToolTainted(chatId)) {
+            throw new Error(
+                "webFetch is unavailable: this chat has read console tool output. Start a new " +
+                "chat to fetch web pages.");
+          }
           let result = await webFetchImpl(hooks.getWebFetchEnv(), {url, raw});
           // Cut the body, not the formatted result, so the frontmatter's `truncated` stays true
           // to the text and the recorded output is what the model saw. The header counts against
