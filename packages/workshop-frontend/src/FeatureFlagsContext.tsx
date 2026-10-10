@@ -9,6 +9,10 @@ import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from './AuthContext'
 
 type FeatureFlagsContextValue = {
+  /**
+   * The flags. While `loading` is true they may be stale: the last ones loaded for this account,
+   * kept while a reconnect's replacement stub reloads them, or else the defaults.
+   */
   flags: UiFeatureFlags
   loading: boolean
 }

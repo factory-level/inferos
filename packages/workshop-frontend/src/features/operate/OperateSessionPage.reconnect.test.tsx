@@ -28,6 +28,11 @@ const kernel = vi.hoisted(() => ({
 }))
 
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: kernel.current.api, accountKey: kernel.current.account }) }))
+// The default flags as one mutable object, so a test can turn `operate-mode` on by default.
+vi.mock('@gadgets/workshop-shared/feature-flags', async importOriginal => {
+  const original = await importOriginal<typeof import('@gadgets/workshop-shared/feature-flags')>()
+  return { ...original, DEFAULT_UI_FEATURE_FLAGS: { ...original.DEFAULT_UI_FEATURE_FLAGS } }
+})
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true, composableViews: true }, hostBoards: true }) }))
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => () => {}, useSearch: () => ({}), useRouterState: () => '/inferops-canvas',
@@ -56,6 +61,7 @@ vi.mock('./OperateChatPanel', () => ({
     consoleActions?.onOpenHostBoard ? <button type="button" onClick={() => consoleActions.onOpenHostBoard!('hb1')}>Open Team board</button> : null,
 }))
 
+import { DEFAULT_UI_FEATURE_FLAGS } from '@gadgets/workshop-shared/feature-flags'
 import { useOperateModeAvailable } from './useAppMode'
 import { FeatureFlagsProvider } from '../../FeatureFlagsContext'
 import { OperateSessionProvider } from './OperateSessionContext'
@@ -156,7 +162,10 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
 })
-afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
+afterEach(() => {
+  act(() => root.unmount()); container.remove(); vi.unstubAllGlobals()
+  DEFAULT_UI_FEATURE_FLAGS['operate-mode'] = false
+})
 
 const settle = () => act(async () => { for (let i = 0; i < 20; i++) await Promise.resolve() })
 const text = () => document.body.textContent ?? ''
@@ -323,4 +332,47 @@ it('unmounts operate at once when the replacement stub is for another account', 
   expect(dialogOpen()).toBe(false)
   expect(text()).not.toContain('Before the blip')
   expect(other.handles).toHaveLength(0)
+})
+
+// Nothing of one account's operate session may outlive a switch to another, even where the
+// defaults keep Operate on, so the flags never unmount it: the session snapshot and the open
+// board's dialog belong to the account they were opened under.
+it('drops the session and its open board on an account switch even with Operate on by default', async () => {
+  DEFAULT_UI_FEATURE_FLAGS['operate-mode'] = true
+  await openBoard()
+  const other = connect('other account', {})
+  kernel.current = other
+  await act(async () => root.render(<App />))
+  await settle()
+  expect(dialogOpen()).toBe(false)
+  expect(text()).not.toContain('Before the blip')
+  expect(text()).toContain('Opening your operate session')
+  expect(button('Open Team board')).toBeUndefined()
+  // The other account's session has the same console revision open: the first account's dialog
+  // must not open on it.
+  await act(async () => other.restore())
+  await settle()
+  expect(button('Open Team board')).toBeDefined()
+  expect(dialogOpen()).toBe(false)
+  expect(other.handles).toHaveLength(0)
+})
+
+// A republish notice just before a blip: the reconnected session repeats the run unchanged and the
+// kernel does not send the notice again, so the stale revision must stay marked across the swap.
+it('still offers no board for a revision found stale just before a reconnect', async () => {
+  await openBoard()
+  kernel.published = '5'
+  await act(async () => kernel.subscriber!({ ...kernel.page,
+    consoleRevision: { workspaceId: 'ws1', consoleId: 'c1', revision: '5' } }))
+  await settle()
+  expect(dialogOpen()).toBe(false)
+  expect(button('Open Team board')).toBeUndefined()
+  const second = connect('second')
+  kernel.current = second
+  await act(async () => root.render(<App />))
+  await act(async () => second.restore())
+  await settle()
+  expect(kernel.page.state.console?.revision).toBe('3')
+  expect(button('Open Team board')).toBeUndefined()
+  expect(second.handles).toHaveLength(0)
 })
