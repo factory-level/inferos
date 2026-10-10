@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
 
+# A newer PR revision supersedes its older CI run. Keep every main push independent so
+# cancellation and pending-run replacement apply only to PRs, never to landed revisions.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
