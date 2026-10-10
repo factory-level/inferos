@@ -14,12 +14,12 @@ import type { HostBoardConnectionFence, HostBoardReader } from "@gadgets/gatekee
 import type { ArtifactPublishRequest, ArtifactPublisherProps } from "./artifact-publisher";
 import {
   artifactRefusalError, diffManifests, qualificationFindings, requireNameAndNumber, requireQualification,
-  revisionKey, revisionOf, WorkspaceArtifactStore, type ArtifactRevisionRecord,
+  revisionKey, revisionOf, verifyArchivedRevision, WorkspaceArtifactStore, type ArtifactRevisionRecord,
 } from "./artifact-store";
 import {
   artifactRef, parseArtifactRef, type ArtifactChange, type ArtifactDigest, type ArtifactKind,
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
-  type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
+  type ArtifactArchiveRevision, type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
 import { consoleScreens, type ConsoleSource, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
@@ -63,7 +63,7 @@ import WORKTREE_BINDING_TYPES from "./worktree-binding.txt";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import { chatChangeStatuses, foldProposedChanges, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
-import { blueprintSnapshotFiles, blueprintVersionKeys, blueprintVersionMetadata, checkDataContract, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings, sanitizeBlueprintOutput, writeBlueprintVersionBindings } from "./blueprint-archive";
+import { ARTIFACT_ARCHIVE_VERSION, blueprintSnapshotFiles, buildBlueprintArchiveStream, parseArtifactArchive, blueprintVersionKeys, blueprintVersionMetadata, checkDataContract, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings, sanitizeBlueprintOutput, writeBlueprintVersionBindings } from "./blueprint-archive";
 import { assertUpgradeCompatible, createBlueprintBindings, readBlueprintVersionToInstall } from "./blueprint-install";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
@@ -11770,6 +11770,53 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         {type: "artifactPublisher"}, this.clientUserId, this.#mintedCapabilityKind());
   }
 
+  async exportArtifactRevision(ref: ArtifactRef): Promise<ReadableStream<Uint8Array>> {
+    let record = this.#artifactRevision(ref);
+    if (!record) throw new Error(`No such revision: ${ref}`);
+    let snapshot = await this.impl.snapshotCode(record.commitId);
+    let revision: ArtifactArchiveRevision = {name: record.name, number: record.number, digest: record.digest,
+      manifest: record.manifest, qualification: record.qualification};
+    let metadata = {
+      title: record.ref, description: "", author: record.publishedBy, created: record.publishedAt,
+      version: record.number, lastUpdated: record.publishedAt, bindings: record.bindingTemplates, revision,
+    };
+    return buildBlueprintArchiveStream(metadata, new Response(snapshot).body!, snapshot.byteLength,
+        ARTIFACT_ARCHIVE_VERSION);
+  }
+
+  async importArtifactRevision(archive: ReadableStream<Uint8Array>): Promise<ArtifactPublishResult> {
+    let store = this.impl.artifactStore();
+    let {rawMetadata, contentLength, content} = await parseArtifactArchive(archive);
+    let compressed = new Uint8Array(await new Response(content).arrayBuffer());
+    if (compressed.byteLength !== contentLength) {
+      return {ok: false, refusal: "digest_mismatch", detail: "the archive's content is truncated"};
+    }
+    let files: Map<string, string>;
+    try {
+      let code = await new Response(new Response(compressed).body!.pipeThrough(new DecompressionStream("gzip")))
+          .arrayBuffer();
+      files = blueprintSnapshotFiles(new Uint8Array(code));
+    } catch {
+      return {ok: false, refusal: "digest_mismatch", detail: "the archive's content does not decode"};
+    }
+    let verified = await verifyArchivedRevision(store, rawMetadata, files);
+    if ("refusal" in verified) return {ok: false, ...verified};
+    let {draft, name, number, qualification} = verified;
+    // The importer is the publisher of record here: the source's publisher cannot be verified.
+    let profile = await this.#getClientProfile();
+    let ref = artifactRef(draft.manifest.kind, name, number);
+    let commitId = await this.impl.gitStore.writeFilesAsCommit(files, {
+      parents: [], author: commitIdentityForAuthor(profile), message: `Import ${ref}`, timestamp: new Date(),
+    });
+    let result = store.publish({
+      ref, kind: draft.manifest.kind, name, number, digest: draft.digest, manifest: draft.manifest,
+      qualification, publishedBy: {type: "user", id: profile.id, name: profile.name}, publishedAt: new Date(),
+      commitId, bindingTemplates: draft.bindingTemplates,
+    });
+    if ("refusal" in result) return {ok: false, ...result};
+    return {ok: true, created: result.created, revision: revisionOf(result.record)};
+  }
+
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,
@@ -13701,6 +13748,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async bindArtifactRevision(_ref: ArtifactRef, _bindings: Record<string, BlueprintBindingAssignment>)
       : Promise<WorkpieceId> { this.#deny(); }
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async exportArtifactRevision(_ref: ArtifactRef): Promise<ReadableStream<Uint8Array>> { this.#deny(); }
+  async importArtifactRevision(_archive: ReadableStream<Uint8Array>): Promise<ArtifactPublishResult> { this.#deny(); }
 
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -14219,6 +14268,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async bindArtifactRevision(_ref: ArtifactRef, _bindings: Record<string, BlueprintBindingAssignment>)
       : Promise<WorkpieceId> { this.#deny(); }
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async exportArtifactRevision(_ref: ArtifactRef): Promise<ReadableStream<Uint8Array>> { this.#deny(); }
+  async importArtifactRevision(_archive: ReadableStream<Uint8Array>): Promise<ArtifactPublishResult> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)

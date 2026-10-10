@@ -2664,6 +2664,24 @@ export interface Overseer extends RpcTarget {
    */
   newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>>;
 
+  /**
+   * Export an exact published revision as a `.gadget` format version 2 archive: its files as a
+   * snapshot, its binding display text, and the revision block (ArtifactArchiveRevision).
+   * Credentials, connections, history and runtime state are never in it.
+   */
+  exportArtifactRevision(ref: ArtifactRef): Promise<ReadableStream<Uint8Array>>;
+
+  /**
+   * Import a `.gadget` format version 2 archive as a published revision of this workspace. The
+   * receiver decodes the files, rebuilds the manifest and recomputes the digest (`digest_mismatch`
+   * on any difference), refuses an unknown manifest format (`unsupported_format`), and applies
+   * every publish rule (secrets, pins resolved here, qualification, immutability and increasing
+   * numbers). The calling person is recorded as `publishedBy`. Nothing is bound: choose
+   * destination resources with bindArtifactRevision(). A version 1 archive is refused; import it
+   * with AuthenticatedApi.importBlueprint().
+   */
+  importArtifactRevision(archive: ReadableStream<Uint8Array>): Promise<ArtifactPublishResult>;
+
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
 
