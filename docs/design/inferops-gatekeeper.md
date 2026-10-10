@@ -252,7 +252,7 @@ InferOps' section `PATCH` takes no expected version and does not replay an idemp
 - An empty list means no readable match. InferOS never reports how many results were hidden, and InferOps returns no such count.
 
 **Snippets.**
-- A snippet is an excerpt of the section's **markdown source**, not rendered text.
+- A snippet is an excerpt of the section's **markdown source**, not rendered text. InferOps highlights it with `ts_headline` over the section `body`, while full-text matching runs on the normalized text (`normalized_body`), so a highlight can occasionally miss a word that matched, or mark one inside markdown syntax.
 - Matched words are wrapped in highlight markers ([decision 6](#decisions-for-the-owner)). Because the source is markdown, text the author wrote can look like a highlight under the current `<b>` markers. InferOS treats the snippet as text, never as HTML.
 - A snippet is at most 300 characters. The cut can fall inside a highlight, so InferOS must tolerate an opening marker with no closing one.
 - A hit found by the vector leg alone has no matched words, so its snippet is the section's first words.
