@@ -25,7 +25,7 @@ export const Route = createRootRoute({
 function RootComponent() {
   const rpcStub = useRpcStub()
   const connectionLost = useConnectionLost()
-  const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
+  const { isAuthenticated, authenticatedApi, accountKey, isLoading, error, logout, login } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
   // Routes that don't require auth (public routes)
@@ -113,7 +113,7 @@ function RootComponent() {
   // !isAuthenticated branches all return early above.
   if (!authenticatedApi) return null
   return (
-    <AuthProvider authenticatedApi={authenticatedApi} onLogout={logout}>
+    <AuthProvider authenticatedApi={authenticatedApi} accountKey={accountKey} onLogout={logout}>
       <FeatureFlagsProvider>
         <TooltipProvider>
           <Toasty>

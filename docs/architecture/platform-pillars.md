@@ -53,6 +53,15 @@ Nothing in the repository reads `window.opener`. Connect and sign-in popups are 
 
 Verification: `router.test.ts` covers the router rewrite; `vite.config.test.ts` covers the dev and preview config and the `_headers` rule; and `router-parity.test.ts` runs the production router over real HTTP with a fixture `_headers` that must equal the shipped one. That run checks the shell, deep links, the fallback for a missing asset, the router's 404s, the gatekeeper's invalid-link page and handoff page, and `/api`. `pnpm run-local` serves `dist/` through the same Wrangler asset worker. `scripts/preview/smoke.ts` checks the header on a deployed instance (`opener-policy`). The popup behaviour was checked in Chromium 153 only (Playwright, outside the repository, which has no browser tests). Firefox and WebKit are unverified: the connect flow relies on the popup's sessionStorage surviving the browsing-context-group switch, which has not been checked there, and who runs that check is not yet decided.
 
+### Changes to upstream frontend files
+
+This fork changes some Cloudflare OS files in place, which an upstream merge has to carry over:
+
+- `packages/workshop-frontend/src/FeatureFlagsContext.tsx`: while a replacement authenticated stub reloads the UI feature flags, the provider keeps the flags it last loaded when the stub is for the same account, so a reconnect does not switch flag-gated surfaces off and on (unmounting the Operate shell and closing an open host board). For another or an unknown account it uses the defaults at once, as upstream does for every replacement. Upstream always used the defaults until the new stub answered.
+- `packages/workshop-frontend/src/useAuth.ts`, `AuthContext.tsx`, `ProtectedRoute.tsx` and `routes/__root.tsx`: `useAuth` returns `accountKey`, an opaque object that is the same while the stub is re-authenticated with the same token and null without one (CF Access), and `AuthProvider` exposes it to the flags provider.
+
+See *Reconnect* under [InferOps canvas](inferops-canvas.md#host-rendered-board) for why.
+
 ## Configuration
 
 Worker cloudflare.config.ts files generate committed wrangler.jsonc files. Router/backend service bindings and deployment input metadata determine installability. The development runner uses Wrangler/workerd; see [local development](local-development.md).

@@ -17,17 +17,17 @@ import type { HostBoardSelectionUpdate, HostBoardView, OperateConsole } from '@g
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, type OperateEvent, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session'
 
 type Handle = { revision: string; reads: Array<(view: HostBoardView) => void>; deliver: ((update: HostBoardSelectionUpdate) => void) | null; disposed: boolean }
-type Connection = { name: string; restore: () => void; handles: Handle[]; api: object }
+type Connection = { name: string; account: object; restore: () => void; handles: Handle[]; api: object }
 
 const kernel = vi.hoisted(() => ({
   page: null as unknown as OperateSessionSnapshot,
   subscriber: null as ((update: OperateSessionUpdate) => void) | null,
   // The console's published revision as listed, or null once it is deleted.
   published: '3' as string | null,
-  current: null as unknown as { api: object },
+  current: null as unknown as { api: object; account: object },
 }))
 
-vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: kernel.current.api }) }))
+vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: kernel.current.api, accountKey: kernel.current.account }) }))
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true, composableViews: true }, hostBoards: true }) }))
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => () => {}, useSearch: () => ({}), useRouterState: () => '/inferops-canvas',
@@ -78,7 +78,10 @@ const view = (title: string, revision = '3'): HostBoardView => ({ status: 'ok', 
  * One WebSocket connection's authenticated stub. Until `restore`, it answers nothing: capnweb
  * queues what is pipelined onto the replacement stub and delivers it once the socket is proven.
  */
-const connect = (name: string): Connection => {
+// The signed-in account: a reconnect keeps it; another stored token replaces it.
+const SIGNED_IN = {}
+
+const connect = (name: string, account: object = SIGNED_IN): Connection => {
   let restore!: () => void
   const up = new Promise<void>(resolve => { restore = resolve })
   const handles: Handle[] = []
@@ -128,7 +131,7 @@ const connect = (name: string): Connection => {
       return Object.assign(Promise.resolve({}), { [Symbol.dispose]: () => {} })
     },
   }
-  return { name, restore, handles, api }
+  return { name, account, restore, handles, api }
 }
 
 // Operate is offered only while the `operate-mode` flag is on, as in `AuthenticatedShell`.
@@ -298,4 +301,26 @@ it('drops a failed subscribe of the dead connection once the replacement deliver
   await settle()
   expect(text()).not.toContain('Could not reach your operate session')
   expect(button('Open Console A')).toBeDefined()
+})
+
+// A replacement stub for another account (useAuth retrying with a different stored token) is not a
+// reconnect: nothing of the previous account's operate page, board or flags may stay on screen.
+it('unmounts operate at once when the replacement stub is for another account', async () => {
+  await openBoard()
+  const other = connect('other account', {})
+  kernel.current = other
+  await act(async () => root.render(<App />))
+  await settle()
+  expect(dialogOpen()).toBe(false)
+  expect(text()).not.toContain('Before the blip')
+  expect(button('Open Team board')).toBeUndefined()
+  expect(button('Open Console A')).toBeUndefined()
+  expect(first.handles.every(handle => handle.disposed)).toBe(true)
+  // Once that account's session answers, it starts from its own page, with no dialog.
+  kernel.page = { seq: 0, state: INITIAL_OPERATE_PAGE }
+  await act(async () => other.restore())
+  await settle()
+  expect(dialogOpen()).toBe(false)
+  expect(text()).not.toContain('Before the blip')
+  expect(other.handles).toHaveLength(0)
 })

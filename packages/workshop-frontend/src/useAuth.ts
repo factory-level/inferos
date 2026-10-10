@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
@@ -180,8 +180,19 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     localStorage.removeItem('authToken')
   }
 
+  /**
+   * An opaque key for the signed-in account, equal across two authenticated stubs only when both
+   * were authenticated with the same token (so for the same account), and null when that is not
+   * known (CF Access, which has no token here, or signed out). Unlike `whoami`, it is known as soon
+   * as the stub is, so a reconnect can be told from an account switch before anything is read on
+   * the new stub. It never carries the token. A new key, even for the same account (another token,
+   * or React discarding this memo), only fails closed.
+   */
+  const accountKey = useMemo(() => (authState.token ? {} : null), [authState.token])
+
   return {
     ...authState,
+    accountKey,
     login,
     logout,
     isAuthenticated: !!authState.authenticatedApi
