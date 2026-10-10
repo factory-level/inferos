@@ -374,10 +374,16 @@ export interface WikiSearchHit {
   /** Page title. */
   documentTitle: string;
   /**
-   * Plain text around the match, cut from this section only. Matched words are wrapped in
-   * <b>…</b>; treat the text as text, never as HTML.
+   * At most 300 characters of this section's markdown source around the match (its first words
+   * when it matched by meaning only), with the matched words highlighted. Treat it as text, never
+   * as HTML.
    */
   snippet: string;
+  /**
+   * Set when an edit of this section requested through this connection has not taken effect yet;
+   * the snippet is still the committed text. Absent otherwise.
+   */
+  pending?: "update";
 }
 
 /**
@@ -397,9 +403,11 @@ export interface InferOpsWikiSession {
    */
   readDocumentText(slugOrId: string): Promise<string>;
   /**
-   * The sections you can read that best match a text query, best first: at most `limit` (1–50,
-   * default 20) hits. There is no next page; refine the query to find more. A query of 1–500
-   * characters. No match, and nothing you can read, are both an empty list.
+   * The sections you can read that best match a text query, best first: at most `limit` (an
+   * integer 1–50, default 20) hits, possibly fewer, equal matches in a stable order. There is no
+   * next page; refine the query to find more. The query is 1–500 characters after trimming;
+   * anything else fails with INVALID_REQUEST. No match, and nothing you can read, are both an
+   * empty list. Matching is English-language full text (plus meaning, where configured).
    */
   searchWiki(query: string, options?: { limit?: number }): Promise<WikiSearchHit[]>;
   /**
