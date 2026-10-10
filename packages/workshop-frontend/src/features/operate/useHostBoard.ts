@@ -41,19 +41,26 @@ let lastContextToken = 0
 // selectHostBoardConnection, :725 getConsoleHostBoard and :769 #subscribeHostBoardSelection, and
 // "has no requirement" at :733 readRequirement), so they are matched by text
 // until a coded OperateSessionError exists. Anything unmatched is an ordinary failure (fail closed).
-const isGuardRefusal = (caught: unknown) =>
+// A bound view's description (`getConsoleBoundView`) is refused with the same "is not open" text.
+/** Whether `caught` is the kernel refusing a console context that is no longer open (see above). */
+export const isGuardRefusal = (caught: unknown): boolean =>
   getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.consoleChanged
   || (caught instanceof Error && /is not open in your operate session|has no requirement/.test(caught.message))
+
+/** What a read was sent under (see {@link HostBoardOptions.onRequest}). */
+export type HostBoardReadSent = { contextToken: number; generation: number; changeSeq: number | null }
 
 /** Options for {@link useHostBoard}. */
 export type HostBoardOptions = {
   /**
    * Called with the read's token where each read is issued, before its answer can arrive, so a
    * caller can tag the read (for example with its own epoch) and match the `ok` view's
-   * `read.token` against it later. It sees no board data. A throw from it is dropped, and the
-   * read is still issued.
+   * `read.token` against it later. `sent` is what the read was sent under: its context token,
+   * its generation and the selection's `changeSeq` (null while none is known), so a caller can
+   * also require them unchanged when the answer is shown. It sees no board data. A throw from it
+   * is dropped, and the read is still issued.
    */
-  onRequest?: (readToken: number) => void
+  onRequest?: (readToken: number, sent: HostBoardReadSent) => void
   /**
    * Called once when the kernel refuses the handle because that console revision is no longer
    * open (a guard refusal of a read or of the selection subscription); it is never read again.
@@ -79,7 +86,7 @@ export type HostBoardOptions = {
  * reason reaches window `error` or `unhandledrejection`.
  */
 export const useHostBoard = (session: RpcStub<OperateSession> | null, target: HostBoardTarget, requirement: string, options?: HostBoardOptions)
-  : { view: HostBoardViewState; dispatch: (event: HostBoardInput) => void } => {
+  : { view: HostBoardViewState; changeSeq: number | null; dispatch: (event: HostBoardInput) => void } => {
   const machine = useRef(initialHostBoardState(document.visibilityState === 'visible'))
   const onRequest = useRef(options?.onRequest)
   onRequest.current = options?.onRequest
@@ -124,7 +131,11 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
         if (command.type === 'read') {
           if (!handle) continue
           const { token } = command
-          try { onRequest.current?.(token) } catch { /* dropped: the read is issued regardless */ }
+          const inFlight = machine.current.inFlight
+          const sent: HostBoardReadSent = { contextToken: command.contextToken,
+            generation: inFlight?.token === token ? inFlight.generation : machine.current.generation,
+            changeSeq: machine.current.selection?.changeSeq ?? null }
+          try { onRequest.current?.(token, sent) } catch { /* dropped: the read is issued regardless */ }
           handle.readRequirement(requirement)
             .then(read => {
               // Only a current read's answer says anything about the console now.
@@ -227,5 +238,8 @@ export const useHostBoard = (session: RpcStub<OperateSession> | null, target: Ho
     }
   }, [session, consoleId, source, revision, entryId, requirement])
 
-  return { view: hostBoardView(machine.current, now()), dispatch: event => run.current(event) }
+  // `changeSeq` is the latest selection delivery's, so a caller can tell whether the selection
+  // changed since a read was sent (see `HostBoardReadSent`) even when that did not invalidate.
+  return { view: hostBoardView(machine.current, now()), changeSeq: machine.current.selection?.changeSeq ?? null,
+    dispatch: event => run.current(event) }
 }
