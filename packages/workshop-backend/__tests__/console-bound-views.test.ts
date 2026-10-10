@@ -495,11 +495,12 @@ describe("delivering a bound view", () => {
     let ref = (source: "published" | "draft" = "published"): ConsoleRef =>
       ({ consoleId: stored.id, source, revision: source === "published" ? published.revision : stored.revision });
     let shown: OperateConsole | null = published;
+    let sessionSeq = 1;
     let enabled = true;
     let draftReads: (string | undefined)[] = [];
     let ports = (overrides: Partial<BoundViewPorts> = {}): BoundViewPorts => ({
       enabled: () => enabled,
-      run: async () => shown && { workspaceId: "ws", console: shown },
+      run: async () => shown && { workspaceId: "ws", console: shown, sessionSeq },
       readDraft: async (_workspaceId, commitId) => {
         draftReads.push(commitId);
         return { commitId: commitId ?? "viewEdited", specText: COMMITS[commitId ?? "viewEdited"]!["view.json"]! };
@@ -507,7 +508,9 @@ describe("delivering a bound view", () => {
       ...overrides,
     });
     return { t, stored, published, entryId, ref, ports, draftReads,
-      show: (console: OperateConsole | null) => { shown = console; }, turn: (on: boolean) => { enabled = on; } };
+      show: (console: OperateConsole | null) => { shown = console; }, turn: (on: boolean) => { enabled = on; },
+      // The session left the console and came back: the same console, at a new session sequence.
+      revisit: () => { sessionSeq += 2; } };
   }
   const refused = /not open in your operate session with bound view/;
 
@@ -571,6 +574,15 @@ describe("delivering a bound view", () => {
       return ports.readDraft(workspaceId, commitId);
     } });
     await expect(describeBoundView(d.ref("draft"), d.entryId, {}, changed)).rejects.toThrow(refused);
+    // The session left the console and returned to it (A, B, A) meanwhile: the same console, but a
+    // different visit.
+    d.show(d.stored);
+    let returned = d.ports({ readDraft: async (workspaceId, commitId) => {
+      d.revisit();
+      return ports.readDraft(workspaceId, commitId);
+    } });
+    await expect(describeBoundView(d.ref("draft"), d.entryId, {}, returned)).rejects.toThrow(refused);
+    expect(await describeBoundView(d.ref("draft"), d.entryId, {}, d.ports())).toMatchObject({ commitId: "viewEdited" });
     // The switch turned off meanwhile.
     d.show(d.stored);
     let off = d.ports({ readDraft: async (workspaceId, commitId) => {

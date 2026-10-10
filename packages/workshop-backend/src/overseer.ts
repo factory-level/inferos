@@ -1668,6 +1668,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 export type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
 
 // Validates a client-supplied commit oid before it reaches the git store.
+// How many commits of a draft bound view's source history a preview may pin (see
+// getConsoleBoundViewDraft): a walk of commit headers only, no trees or blobs.
+const BOUND_VIEW_PIN_DEPTH = 64;
+
 function validateOid(oid: string): string {
   if (!/^[0-9a-f]{40}$/.test(oid)) {
     throw new Error("Invalid commit id.");
@@ -11779,13 +11783,25 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Build access may already open any gadget, so its capability is the ordinary one.
     return this.getGadget(gadgetId);
   }
-  // The pinned commit is any this workspace holds, as `readFilesAtCommit` reads; it must still be a
-  // view-only spec reading the entry's requirements, and the entry's source a valid install.
+  // A pinned commit must be the source's current commit or one of its ancestors within
+  // BOUND_VIEW_PIN_DEPTH commits of it (git log order), so another gadget's view, or one the
+  // source's history no longer reaches, is refused; a preview pinned further back refreshes. It
+  // must still be a view-only spec reading the entry's requirements, and the entry's source a
+  // valid install. Build clients may call this directly rather than through their operate session:
+  // that is acceptable, because build access can already read the source's files.
   async getConsoleBoundViewDraft(consoleId: string, revision: string, entryId: string, commitId?: string)
       : Promise<Pick<BoundViewDescription, "commitId" | "specText">> {
     if (!boundViewsEnabled(this.impl.env)) throw new Error(BOUND_VIEWS_OFF);
     let store = this.#consoleStore();
-    let read = commitId === undefined ? store.draftBoundViewCommit(consoleId, revision, entryId) : validateOid(commitId);
+    let current = store.draftBoundViewCommit(consoleId, revision, entryId);
+    let read = commitId === undefined ? current : validateOid(commitId);
+    if (read !== current) {
+      // A history the walk cannot finish (an ancestor not held here) refuses: fail closed.
+      let history = await this.impl.gitStore.readCommitLog(current, {depth: BOUND_VIEW_PIN_DEPTH}).catch(() => []);
+      if (!history.some(entry => entry.oid === read)) {
+        throw new Error(`Commit ${read} is not in the recent history of bound view ${entryId}'s source.`);
+      }
+    }
     let commit = (await this.impl.readSourceCommits([read])).get(read)!;
     return { commitId: read, specText: store.draftBoundViewSpec(consoleId, revision, entryId, commit) };
   }

@@ -2636,9 +2636,13 @@ export interface Overseer extends RpcTarget {
   /**
    * The spec a builder's preview of draft bound view `entryId` of console `consoleId` at `revision`
    * shows: its source's `view.json` at `commitId`, or else at the source's current commit, read
-   * strictly and checked as publication checks it. Reach it through
-   * `OperateSession.getConsoleBoundView`, which checks the caller's session around it. Needs build
-   * access; denied to the use role and the operate session. Refused while bound views are off.
+   * strictly and checked as publication checks it. A pinned `commitId` must be the source's
+   * current commit or one of its recent ancestors (the last 64 commits of its history), so another
+   * gadget's commit is refused. The preview reaches it through
+   * `OperateSession.getConsoleBoundView`, which checks the caller's session around it, but a build
+   * client can also call it directly, with no operate session: that is acceptable, because build
+   * access can already read the source's files. Needs build access; denied to the use role and the
+   * operate session. Refused while bound views are off.
    */
   getConsoleBoundViewDraft(consoleId: string, revision: string, entryId: string, commitId?: string)
       : Promise<Pick<BoundViewDescription, "commitId" | "specText">>;

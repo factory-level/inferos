@@ -238,6 +238,17 @@ describe("delivering a console's bound views", () => {
     await expect(preview.getConsoleBoundView(refOf(draft, "draft"), entryId, { commitId: "0".repeat(40) })).rejects.toThrow();
     expect(await preview.getConsoleBoundView(refOf(draft, "draft"), entryId, { commitId: again }))
       .toMatchObject({ commitId: again, specText: spec("Again") });
+    // A pin must be in the source's own history: an older ancestor reads, while another gadget's
+    // view-only commit in this workspace, reading the same requirement, is refused.
+    expect(await preview.getConsoleBoundView(refOf(draft, "draft"), entryId, { commitId: head }))
+      .toMatchObject({ commitId: head, specText: spec("Open") });
+    const stranger = await space.createGadget("Stranger", undefined, "STRANGER").getId();
+    await commit(space, watched, stranger, {}, { "view.json": spec("Stranger") });
+    const strangerHead = await watched.head(stranger);
+    await expect(preview.getConsoleBoundView(refOf(draft, "draft"), entryId, { commitId: strangerHead }))
+      .rejects.toThrow(/not in the recent history of bound view/);
+    await expect(space.getConsoleBoundViewDraft(draft.id, draft.revision, entryId, strangerHead))
+      .rejects.toThrow(/not in the recent history of bound view/);
     // The operator cannot open the draft in their session, so cannot preview it.
     await expect(openConsole(session, workspaceId, draft, "draft")).rejects.toThrow(/no longer available to you/);
     await expect(session.getConsoleBoundView(refOf(draft, "draft"), entryId)).rejects.toThrow(refused);

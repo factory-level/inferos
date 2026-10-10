@@ -390,9 +390,10 @@ export type BoundViewPorts = {
   /**
    * The console as the caller's own operate session shows it, from the requested source at the
    * requested revision and re-read through the caller's own access, with the workspace holding
-   * it; null when that does not hold.
+   * it and the session's sequence number (which every session change raises); null when that
+   * does not hold.
    */
-  run(): Promise<{ workspaceId: string; console: OperateConsole } | null>;
+  run(): Promise<{ workspaceId: string; console: OperateConsole; sessionSeq: number } | null>;
   /**
    * The draft entry's spec, read from its source at `commitId`, or else at its current commit,
    * through the caller's own build access (`Overseer.getConsoleBoundViewDraft`).
@@ -405,8 +406,9 @@ export type BoundViewPorts = {
  * Refused while bound views are off, and unless `ports.run` shows the console with that entry and
  * a host board for each of its requirements. A publication delivers only its frozen spec, and only
  * at the frozen commit when `options.commitId` names one. A draft reads its source through
- * `ports.readDraft` and then runs the guard again, refusing a context that moved meanwhile. The
- * spec is re-parsed with the v1 parser and must read exactly the entry's requirements.
+ * `ports.readDraft` and then runs the guard again, refusing a context that moved meanwhile, even
+ * one that left and came back (a new `sessionSeq`). The spec is re-parsed with the v1 parser and
+ * must read exactly the entry's requirements.
  */
 export async function describeBoundView(ref: ConsoleRef, entryId: string, options: { commitId?: string },
     ports: BoundViewPorts): Promise<BoundViewDescription> {
@@ -419,7 +421,9 @@ export async function describeBoundView(ref: ConsoleRef, entryId: string, option
     let boards = new Map((run?.console.hostBoards ?? []).map(board => [board.requirement.name, board.id]));
     let requirements = (entry?.requirements ?? []).map(name => ({ name, hostBoardEntryId: boards.get(name) ?? "" }));
     if (!run || !entry || requirements.some(requirement => !requirement.hostBoardEntryId)) throw refused();
-    return { workspaceId: run.workspaceId, entry, requirements };
+    // `sessionSeq` too, as the host boards' guard compares it: leaving the console and returning
+    // to it during the draft read shows the same console but is a different visit.
+    return { workspaceId: run.workspaceId, sessionSeq: run.sessionSeq, entry, requirements };
   };
   let before = await context();
   let source: Pick<BoundViewDescription, "commitId" | "specText"> | undefined = before.entry.frozen;
