@@ -834,10 +834,12 @@ class Checker {
 }
 
 // Whether `key` is the canonical string of a value of `field`. A string field's key is the exact
-// string, so `"null"` there is the four-letter string; length and text rules are checked apart.
+// string, except `"null"`: no string field is nullable, and v1 is frozen, so the key that would
+// read as null is refused rather than taken as the four-letter string. Length and text rules are
+// checked apart.
 function badgeKeyFits(key: string, field: BoundViewFieldType): boolean {
   switch (field.type) {
-    case "string": return true;
+    case "string": return key !== "null";
     case "enum": return field.members.includes(key);
     case "boolean": return key === "true" || key === "false";
     case "date": return key === "null" || DATE.test(key);
@@ -867,8 +869,14 @@ export function parseBoundViewSpec(text: string): BoundViewParseResult {
   if (text.charCodeAt(0) === 0xfeff) return { ok: false, problems: [{ code: "bom", path: "$" }] };
   let tokenizer = new Tokenizer(text);
   if (!tokenizer.scan() || tokenizer.problems.length > 0) return { ok: false, problems: tokenizer.problems };
-  let tree = JSON.parse(text, (_key, value: unknown) =>
-    isObject(value) ? Object.assign(Object.create(null) as JsonObject, value) : value) as Json;
+  let tree: Json;
+  try {
+    tree = JSON.parse(text, (_key, value: unknown) =>
+      isObject(value) ? Object.assign(Object.create(null) as JsonObject, value) : value) as Json;
+  } catch {
+    // Unreachable after the tokenizer accepts; kept so the parser stays total.
+    return { ok: false, problems: [{ code: "syntax", path: "$" }] };
+  }
   let checker = new Checker();
   checker.spec(tree);
   if (checker.problems.length > 0) return { ok: false, problems: checker.problems };

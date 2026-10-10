@@ -476,7 +476,7 @@ describe("parseBoundViewSpec: badge keys, parsed per field", () => {
 
   test.each([
     ["blocked", "true"], ["blocked", "false"], ["priority", "urgent"], ["priority", "none"], ["group", "cancelled"],
-    ["targetDate", "null"], ["targetDate", "2026-10-09"], ["column", "In progress"], ["column", "null"], ["title", ""],
+    ["targetDate", "null"], ["targetDate", "2026-10-09"], ["column", "In progress"], ["column", "Null"], ["title", ""],
   ])("accepts %s key %j", (field, key) => {
     expect(badge(field, key)).toEqual([]);
   });
@@ -484,6 +484,7 @@ describe("parseBoundViewSpec: badge keys, parsed per field", () => {
   test.each([
     ["blocked", "True"], ["blocked", "1"], ["blocked", "null"], ["priority", "Urgent"], ["priority", "null"],
     ["priority", "toString"], ["group", "done"], ["targetDate", "2026-1-9"], ["targetDate", "None"],
+    ["column", "null"], ["title", "null"],
   ])("refuses %s key %j", (field, key) => {
     expect(badge(field, key)).toEqual(["badgeKey"]);
   });
