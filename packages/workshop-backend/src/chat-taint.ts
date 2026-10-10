@@ -29,6 +29,7 @@ export function consoleToolTaintsCollection() {
 }
 
 type TaintStorage = Pick<OverseerStorage, "consoleToolTaints">;
+type MarkStorage = Pick<OverseerStorage, "consoleToolTaints" | "operateSession">;
 
 /** Whether chat `chatId` carries the console tool taint mark. */
 export function isConsoleToolTainted(storage: TaintStorage, chatId: number): boolean {
@@ -38,8 +39,18 @@ export function isConsoleToolTainted(storage: TaintStorage, chatId: number): boo
 /**
  * Marks chat `chatId` as having read console tool output. Idempotent: the first mark's time is
  * kept. Called at the start of a console tool call, before the widget is invoked.
+ *
+ * Throws outside an operate workspace, before marking anything. The gates assume operate's tool
+ * set: Build's tools change gadgets without a loopback (writing gadget code, `setGadgetBinding`,
+ * `createGadget`, `createWorktree`), and code written into a gadget could later carry the chat's
+ * context out through that gadget's own bindings, which no gate here sees.
  */
-export function markConsoleToolTainted(storage: TaintStorage, chatId: number): void {
+export function markConsoleToolTainted(storage: MarkStorage, chatId: number): void {
+  if (!storage.operateSession.get()) {
+    throw new Error(
+        "Console tool output can only be read in an operate workspace: the chat taint's egress " +
+        "gates assume the operate tool set.");
+  }
   if (isConsoleToolTainted(storage, chatId)) return;
   storage.consoleToolTaints.put({chatId, markedAt: new Date()});
 }

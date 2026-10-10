@@ -196,10 +196,22 @@ function deliverArgs(impl: any, chatId: number, args: unknown[]): object {
   return { ARGS: { type: "value", messageSequence: sequence } };
 }
 
+// A taint row written directly. markConsoleToolTainted refuses outside an operate workspace, but the
+// gates read the row wherever it is, so the Build-workspace tests below check them that way.
+function writeTaintRow(impl: any, chatId: number): void {
+  impl.storage.consoleToolTaints.put({ chatId, markedAt: new Date() });
+}
+
 const TAINT_REFUSAL = /read console tool output/;
 const NOT_LIVE = /no longer live/;
 
 describe("the mark", () => {
+  it("is refused outside an operate workspace, leaving the chat unmarked", () => withImpl(false, async impl => {
+    expect(() => markConsoleToolTainted(impl.storage, A)).toThrow(/only be read in an operate workspace/);
+    expect(isConsoleToolTainted(impl.storage, A)).toBe(false);
+    expect(impl.storage.consoleToolTaints.get(A)).toBeUndefined();
+  }));
+
   it("is its own row, set once, keyed by chat", () => withImpl(true, async impl => {
     expect(isConsoleToolTainted(impl.storage, A)).toBe(false);
     markConsoleToolTainted(impl.storage, A);
@@ -358,7 +370,7 @@ describe("gate 1: a tainted chat's executeCode env", () => {
 
   it("applies in a Build workspace too", () => withImpl(false, async impl => {
     let sent = intercept(impl);
-    markConsoleToolTainted(impl.storage, A);
+    writeTaintRow(impl, A);
     let run = startExecution(impl, A, TOUCH_EVERYTHING);
     expect(Object.keys(await run.env).toSorted()).toEqual([...ALLOWED].toSorted());
     await run.done;
@@ -621,7 +633,7 @@ describe("webFetch", () => {
   it("refuses while tainted, on every later turn and after compaction, with nothing fetched",
       () => withImpl(false, async impl => {
     let sent = intercept(impl);
-    markConsoleToolTainted(impl.storage, A);
+    writeTaintRow(impl, A);
 
     let first = await runScriptedTurn(impl, fetchTurn("1"));
     expect(toolResultTexts(first[1]).at(-1)).toMatch(TAINT_REFUSAL);
@@ -632,6 +644,40 @@ describe("webFetch", () => {
     let third = await runScriptedTurn(impl, fetchTurn("3"));
     expect(toolResultTexts(third[1]).at(-1)).toMatch(TAINT_REFUSAL);
     expect(sent.filter(entry => entry.includes("attacker.example"))).toEqual([]);
+  }));
+});
+
+describe("file tools", () => {
+  // The git cache's fault pull (#pullGitObjects) reaches a connection's gitPull, which the gates do
+  // not see. In an operate workspace the agent's only file tools are readFile and grep, it can
+  // create no worktree, and a gadget there (a blueprint install) has only local content, so they
+  // read without pulling. (In Build, the file tools and createWorktree can pull; Build chats are
+  // never marked.)
+  it("readFile and grep in a tainted operate chat reach no gitPull", () => withImpl(true, async impl => {
+    let sent = intercept(impl);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    impl.storage.gadgets.put({ type: "gadget", id: 100, title: "App", created: new Date(0),
+      bindingName: "APP", bindings: {}, commitId: c1 });
+    // An object Slack advertised, which nothing local references.
+    let advertised = "1".repeat(40);
+    impl.storage.gitObjectMetadata.put({ oid: advertised, type: "blob", onRemote: [],
+      pullableFrom: [SLACK], pendingPush: [] });
+    markConsoleToolTainted(impl.storage, A);
+
+    let contexts = await runScriptedTurn(impl, [
+      fauxAssistantMessage([
+        fauxToolCall("readFile", { workpiece: "APP", filename: "a.txt" }),
+        fauxToolCall("grep", { workpiece: "APP", pattern: "one" }),
+      ], { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxText("Done.")),
+    ]);
+    let results = toolResultTexts(contexts[1]);
+    expect(results).toEqual(["one\n", "a.txt:1:one"]);
+    expect(sent.filter(entry => entry === "gitPull" || entry.startsWith("facet:"))).toEqual([]);
+
+    // The interceptor does see a fault pull when one happens.
+    await impl.gitCache.ensureGitObjects([advertised], { type: "blob" }).catch(() => {});
+    expect(sent).toContain("gitPull");
   }));
 });
 
@@ -656,7 +702,7 @@ describe("the mark survives chatMeta rewrites", () => {
     let c1 = await commitFiles(impl, { "a.txt": "one\n" });
     impl.storage.gadgets.put({ type: "gadget", id: 100, title: "App", created: new Date(0),
       bindingName: "APP", bindings: {}, commitId: c1 });
-    markConsoleToolTainted(impl.storage, A);
+    writeTaintRow(impl, A);
     let stillGated = () => {
       expect(isConsoleToolTainted(impl.storage, A)).toBe(true);
       expect(() => impl.describeGitBinding(A, "env.GIT")).toThrow(TAINT_REFUSAL);
@@ -704,8 +750,8 @@ describe("deleteChat", () => {
     impl.markOutputsDirty = () => {};
     let client: Overseer = await instance.open(
         ownerId, "owner-profile", new NativeRpcStub<() => void>(() => {}));
-    markConsoleToolTainted(impl.storage, A);
-    markConsoleToolTainted(impl.storage, B);
+    writeTaintRow(impl, A);
+    writeTaintRow(impl, B);
 
     await client.deleteChat(A);
     expect(impl.storage.consoleToolTaints.get(A)).toBeUndefined();
