@@ -211,6 +211,30 @@ describe('showing a bound view', () => {
     expect(parentText()).toContain('Triage')
   })
 
+  it('fetches again after a reconnect that failed the old session\'s request before the swap, and shows the new answer', async () => {
+    onRefused.mockClear()
+    getConsoleBoundView.mockRejectedValueOnce(new Error('connection lost'))
+    await render()
+    expect(parentText()).toContain('This view is unavailable right now')
+    descriptions.push(description(REF))
+    const swapped = { ...session } as unknown as RpcStub<OperateSession>
+    await act(async () => root.render(<ConsoleBoundView session={swapped} console={REF} entry={ENTRY} hostBoards={BOARDS}
+      onClose={() => {}} onRefused={onRefused} onStaleOrUnavailable={() => {}} />))
+    expect(getConsoleBoundView).toHaveBeenCalledTimes(2)
+    expect(parentText()).not.toContain('This view is unavailable right now')
+    expect(parentText()).toContain('Triage')
+    expect(onRefused).not.toHaveBeenCalled()
+  })
+
+  it('keeps a failure of the current session\'s request', async () => {
+    getConsoleBoundView.mockRejectedValueOnce(new Error('connection lost'))
+    await render()
+    await act(async () => root.render(<ConsoleBoundView session={session} console={REF} entry={ENTRY} hostBoards={BOARDS}
+      onClose={() => {}} onRefused={onRefused} onStaleOrUnavailable={() => {}} />))
+    expect(getConsoleBoundView).toHaveBeenCalledTimes(1)
+    expect(parentText()).toContain('This view is unavailable right now')
+  })
+
   it('says it is waiting, and reads again at once when a read was sent under an older changeSeq', async () => {
     descriptions.push(description(REF))
     await render()

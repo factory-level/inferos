@@ -251,6 +251,17 @@ export class BoundViewCohort {
     return { status: 'ready', commitId: description.commitId, spec: parsed.spec, requirements }
   }
 
+  /**
+   * A new request for the description under `token` is starting (a new session after a reconnect):
+   * an `unavailable` description, which the old session's failure set, goes back to `loading` so
+   * the new answer is accepted. A failure of the new request sets it again and sticks.
+   */
+  retryDescription(token: number): void {
+    if (this.#disposed || token !== this.#contextToken || this.#description.status !== 'unavailable') return
+    this.#description = { status: 'loading' }
+    this.#notify()
+  }
+
   /** The description requested under `token` could not be had. */
   descriptionFailed(token: number): void {
     if (this.#disposed || token !== this.#contextToken || this.#description.status !== 'loading') return
@@ -439,6 +450,10 @@ export const useBoundViewCohort = (session: RpcStub<OperateSession>, context: Bo
     // ignored, answer or refusal, so it can neither mark the description unavailable nor close the
     // view while the current session's request is in flight.
     let superseded = false
+    // On a reconnect the old session usually fails its pending request before the stub is swapped,
+    // so that failure is not superseded and leaves the description `unavailable`; the new session's
+    // request starts over from `loading`.
+    contain(cohort.site, () => cohort.retryDescription(token))()
     contain(cohort.site, () => session.getConsoleBoundView(context.console, context.entryId)
       .then(description => { if (!superseded) cohort.setDescription(token, description, ids.current) }, (caught: unknown) => {
         if (superseded) return

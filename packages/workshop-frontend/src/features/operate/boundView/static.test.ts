@@ -46,7 +46,10 @@ describe('bound-view code reaches no network, storage or history sink', () => {
     ['XMLHttpRequest', /\bXMLHttpRequest\b/],
     ['WebSocket', /\bWebSocket\b/],
     ['EventSource', /\bEventSource\b/],
-    ['window.open', /(?<![.\w$])(?:window\s*\.\s*)?open\s*\(/],
+    // `window.open` itself, or `open` destructured from the window (`const { open } = window`), so a
+    // local function or prop named `open` is not taken for it.
+    ['window.open', /\b(?:window|globalThis|self)\s*\.\s*open\b/],
+    ['destructured open', /\{[^}]*\bopen\b[^}]*\}\s*=\s*(?:window|globalThis|self)\b/],
     ['new Image', /\bnew\s+Image\b/],
     ['localStorage', /\blocalStorage\b/],
     ['sessionStorage', /\bsessionStorage\b/],
@@ -61,9 +64,13 @@ describe('bound-view code reaches no network, storage or history sink', () => {
   })
 
   it('would catch each sink', () => {
-    const samples: Record<string, string> = { 'window.open': 'window.open(url)', 'new Image': 'new Image()', fetch: 'fetch(url)', 'document.cookie': 'document.cookie' }
+    const samples: Record<string, string> = { 'window.open': 'window.open(url)', 'destructured open': 'const { open, close } = window',
+      'new Image': 'new Image()', fetch: 'fetch(url)', 'document.cookie': 'document.cookie' }
     const missed = SINKS.filter(([name, sink]) => !sink.test(samples[name] ?? `${name}.x`)).map(([name]) => name)
     expect(missed).toEqual([])
+    // A local `open` is not a sink.
+    const local = 'const open = () => {}; open(); onOpenChange={open => { if (!open) onClose() }}; dialog.open(x)'
+    expect(SINKS.filter(([, sink]) => sink.test(local)).map(([name]) => name)).toEqual([])
   })
 })
 

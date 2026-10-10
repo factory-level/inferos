@@ -265,6 +265,24 @@ describe('the description', () => {
     expect(cohort.shown().status).toBe('invalid')
   })
 
+  it('fetches again from unavailable only for a new request under the current context, and a new failure sticks', () => {
+    const cohort = new BoundViewCohort({ console: CONSOLE, entryId: 'bv1' })
+    const token = cohort.contextToken
+    cohort.descriptionFailed(token)
+    cohort.retryDescription(token - 1)
+    expect(cohort.description.status).toBe('unavailable')
+    cohort.retryDescription(token)
+    expect(cohort.description.status).toBe('loading')
+    cohort.setDescription(token, describeView(), IDS)
+    expect(cohort.description.status).toBe('ready')
+    cohort.retryDescription(token)
+    expect(cohort.description.status).toBe('ready')
+    const failing = new BoundViewCohort({ console: CONSOLE, entryId: 'bv1' })
+    failing.retryDescription(failing.contextToken)
+    failing.descriptionFailed(failing.contextToken)
+    expect(failing.description.status).toBe('unavailable')
+  })
+
   it('keeps the description across epochs', () => {
     const cohort = ready()
     cohort.invalidate(cohort.epoch, 'callback')
