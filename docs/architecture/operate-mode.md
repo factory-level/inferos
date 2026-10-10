@@ -307,7 +307,7 @@ The classifier's default `view.json` parser is `parseBoundViewSpec`, which throw
 
   `sharing.test.ts` checks that nothing rises while `redeemShareKey` awaits the profile, that a refusal during the profile fetch or the key mint leaves it unchanged, and that an `addCollaborator` which changes nothing leaves it unchanged. `authz-generation-guard.test.ts` covers what would bypass the subscribers:
   - each input in the Overseer schema rises on a change and not on an identical rewrite;
-  - no source names an input's storage key in a string (raw kv access), apart from two reviewed literals;
+  - no source names an input's storage key in a string (raw kv access), apart from three reviewed literals (the schema's rename and two `Pick<>` property names, one of them chat-taint's `operateSession`, read only to refuse the mark outside operate);
   - `makeOverseerStorage` is the only typed-storage view of the Overseer's storage;
   - `storage.deleteAll()` runs only in `deleteSelf`;
   - only the helper and `deleteSelf` write the generation;

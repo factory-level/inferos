@@ -144,9 +144,12 @@ describe("authorization inputs", () => {
   });
 
   it("are written nowhere by their raw storage key", () => {
-    // The two reviewed literals: the schema's own rename, and a property name in a `Pick<>` type.
+    // The three reviewed literals: the schema's own rename, and property names in `Pick<>` types
+    // (analytics' `workspaceIds`, and chat-taint's `MarkStorage`, which reads `operateSession` only
+    // to refuse the taint mark outside an operate workspace).
     expect(allSitesOf(KEY_LITERAL, true)).toEqual([
       "analytics.ts:(module).workspaceIds",
+      "chat-taint.ts:(module).consoleToolTaintsCollection",
       "overseer.ts:(module).makeOverseerStorage",
     ]);
   });
