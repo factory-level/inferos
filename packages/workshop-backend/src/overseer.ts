@@ -3,7 +3,10 @@ import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-sha
 import { readCanvasCatalog } from "./canvas-catalog";
 import { WorkspaceCanvasStore } from "./canvas-store";
 import { consoleScreenKey, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls } from "./console-store";
-import { checkWorkspaceKind } from "@gadgets/workshop-shared/workspace-kind";
+import {
+  GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
+  isGadgetModule,
+} from "@gadgets/workshop-shared/workspace-kind";
 import { WorkspaceFlowStore } from "./flow-store";
 import { HostBoardDesk, hostBoardsEnabled, type HostBoardContext, type HostBoardGuard, type HostBoardMint, type HostBoardReadRecord, type HostBoardReadRequest, type HostBoardRequestRecord, type HostBoardSelectionPayload, type HostBoardSelectionRecord, type HostBoardSelectionState } from "./host-boards";
 import type { HostBoardConnectionFence, HostBoardReader } from "@gadgets/gatekeeper-kit/host-board";
@@ -32,8 +35,9 @@ import {
 } from "cloudflare:workers";
 import { createTypedStorage, collection, singleton, keyString } from "@gadgets/typed-storage";
 import type { ListOptions } from "@gadgets/typed-storage";
-import { GitStore, commitIdentityForAuthor, filesEqual, gitObjectsCollection, threeWayMerge }
-  from "./git-store";
+import {
+  BlobTextError, GitStore, commitIdentityForAuthor, filesEqual, gitObjectsCollection, threeWayMerge,
+} from "./git-store";
 import { GitCacheImpl, WorkspaceGitCache, gitObjectMetadataCollection } from "./git-cache";
 import { migrateCodeLogToGit } from "./git-migration";
 import * as Y from "yjs";
@@ -3016,14 +3020,25 @@ class OverseerImpl implements AgentHooks {
     };
   }
 
-  // Refuse publishing a blueprint version whose files don't fit the workspace's kind, for a
-  // widget: what a console registers as a widget must have the widget's UI and server.
+  // Refuse publishing a blueprint version whose files don't fit the workspace's kind (see
+  // blueprintPublishRefusals): a widget on any violation, since what a console registers must be
+  // the widget its files make; an app or workflow only on a view.json or tools.json. A widget's
+  // view.json and tools.json are classified from their strict UTF-8 text.
   async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string): Promise<void> {
-    if (kind !== "widget") return;
-    let violations = checkWorkspaceKind(kind, (await this.gitStore.readCommitFiles(commitId)).keys());
-    if (violations.length > 0) {
-      throw new Error(`This gadget cannot be published as a widget: ` +
-          violations.map(violation => violation.message).join(" "));
+    kind ??= DEFAULT_WORKSPACE_KIND;
+    let files: Map<string, string | null> = await this.gitStore.readCommitFiles(commitId);
+    let parsed = kind === "widget" ? [GADGET_VIEW_FILE, GADGET_TOOLS_FILE] : [];
+    for (let path of parsed.filter(name => files.has(name))) {
+      files.set(path, await this.gitStore.readCommitBlob(commitId, path, "text").catch(error => {
+        if (error instanceof BlobTextError) return null;
+        throw error;
+      }));
+    }
+    let refusals = blueprintPublishRefusals(kind, classifyGadgetFiles(kind, files).violations);
+    if (refusals.length > 0) {
+      let article = kind === "app" ? "an" : "a";
+      throw new Error(`This gadget cannot be published as ${article} ${kind}: ` +
+          refusals.map(violation => violation.message).join(" "));
     }
   }
 
@@ -5363,7 +5378,7 @@ class OverseerImpl implements AgentHooks {
 
       let modules: Record<string, string> = {};
       for (let [file, content] of files) {
-        if (file.endsWith(".js")) {
+        if (isGadgetModule(file)) {
           modules[file] = content;
         }
       }

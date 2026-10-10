@@ -444,4 +444,56 @@ describe("a console's widget registry", () => {
     await workspace.setKind("widget");
     await expect(workspace.updateBlueprint(app.id, { updateCode: true })).rejects.toThrow(/cannot be published as a widget/);
   });
+
+  it("publishes an app or workflow as before, unless it ships a view.json or tools.json", async () => {
+    const author = await signUp(publicApi, nextUsernames("kindcompat")[0]!);
+    const server = { "server.js": widgetFiles("v1")["server.js"]! };
+    const client = { "client.js": widgetFiles("v1")["client.js"]! };
+
+    // An app with no client.js publishes today, and still does; with a tools.json it is refused
+    // on both publication paths, and told to rename the file.
+    const app = await author.newGadget("app");
+    const appWatched = await watch(app);
+    const appGadget = app.createGadget("Server only", undefined, "SERVERONLY");
+    const appId = await appGadget.getId();
+    await commit(app, appWatched, appId, {}, server);
+    const appBlueprint = await appGadget.createBlueprint("Server only");
+    await commit(app, appWatched, appId, server, { ...server, "tools.json": "[]" });
+    const renameTools = /cannot be published as an app: An App does not use tools\.json; rename this gadget's tools\.json to publish it\./;
+    await expect(app.updateBlueprint(appBlueprint.id, { updateCode: true })).rejects.toThrow(renameTools);
+    await expect(appGadget.createBlueprint("Tools")).rejects.toThrow(renameTools);
+
+    // A workflow with a client.js publishes today, and still does; with a view.json it is refused.
+    const workflow = await author.newGadget("workflow");
+    const flowWatched = await watch(workflow);
+    const flowGadget = workflow.createGadget("With UI", undefined, "WITHUI");
+    const flowId = await flowGadget.getId();
+    await commit(workflow, flowWatched, flowId, {}, { ...server, ...client });
+    const flowBlueprint = await flowGadget.createBlueprint("With UI");
+    await commit(workflow, flowWatched, flowId, { ...server, ...client }, { ...server, ...client, "view.json": "{}" });
+    const renameView = /cannot be published as a workflow: A Workflow does not use view\.json; rename this gadget's view\.json/;
+    await expect(workflow.updateBlueprint(flowBlueprint.id, { updateCode: true })).rejects.toThrow(renameView);
+    await expect(flowGadget.createBlueprint("View")).rejects.toThrow(renameView);
+
+    // Renamed, both publish again.
+    await commit(app, appWatched, appId, { ...server, "tools.json": "[]" }, { ...server, "tools.data.json": "[]" });
+    await app.updateBlueprint(appBlueprint.id, { updateCode: true });
+    await commit(workflow, flowWatched, flowId, { ...server, ...client, "view.json": "{}" },
+        { ...server, ...client, "view.data.json": "{}" });
+    await workflow.updateBlueprint(flowBlueprint.id, { updateCode: true });
+  });
+
+  it("refuses a widget's view.json or tools.json until their parsers land", async () => {
+    const author = await signUp(publicApi, nextUsernames("kindpending")[0]!);
+    const workspace = await author.newGadget("widget");
+    const watched = await watch(workspace);
+    const gadget = workspace.createGadget("Pending", undefined, "PENDING");
+    const gadgetId = await gadget.getId();
+    await commit(workspace, watched, gadgetId, {}, { "view.json": "{}" });
+    await expect(gadget.createBlueprint("View")).rejects.toThrow(
+        /cannot be published as a widget: This gadget's view\.json is not a valid view: view-only widgets are not supported yet; if view\.json is a data file, rename it to publish this gadget\.$/);
+    await commit(workspace, watched, gadgetId, { "view.json": "{}" }, { ...widgetFiles("v1"), "tools.json": "[]" });
+    await expect(gadget.createBlueprint("Tools")).rejects.toThrow(
+        /cannot be published as a widget: This gadget's tools\.json is not a valid tool list: callable widgets are not supported yet; if tools\.json is a data file, rename it to publish this gadget\.$/);
+  });
 });

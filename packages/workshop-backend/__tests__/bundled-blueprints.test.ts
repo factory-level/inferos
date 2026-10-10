@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { parseBlueprintArchive, parseBlueprintKvRecord, sanitizeBlueprintOutput } from "../src/blueprint-archive.js";
+import { DEFAULT_WORKSPACE_KIND } from "@gadgets/workshop-shared/api";
+import { blueprintPublishRefusals, classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
+import {
+  parseBlueprintArchive, parseBlueprintKvRecord, sanitizeBlueprintOutput, sanitizeWorkspaceKind,
+} from "../src/blueprint-archive.js";
 import { bundledBlueprintsManifestVersion, installBundledBlueprints } from "../src/bundled-blueprints.js";
 import { BUNDLED_BLUEPRINTS } from "../src/generated/bundled-blueprints.js";
 
@@ -87,6 +91,22 @@ describe("bundled blueprints", () => {
       let content = r2.get(`${entry.blueprintId}/${record.metadata.version}`);
       expect(content, `${entry.blueprintId} content`).toBeDefined();
       expect(content!.byteLength).toBeGreaterThan(0);
+    }
+  });
+
+  it("still republishes every bundled blueprint under the kind check", async () => {
+    for (let entry of BUNDLED_BLUEPRINTS) {
+      let archive = new Response(Uint8Array.fromBase64(entry.archive) as BufferSource).body!;
+      let {metadata, content} = await parseBlueprintArchive(archive);
+      let decompressed = content.pipeThrough(new DecompressionStream("gzip"));
+      let doc = new Y.Doc();
+      Y.applyUpdateV2(doc, new Uint8Array(await new Response(decompressed).arrayBuffer()));
+      // Content stored without a kind installs as an app, which is what a republish checks.
+      let kind = sanitizeWorkspaceKind(metadata.kind) ?? DEFAULT_WORKSPACE_KIND;
+      let files = new Map([...doc.getMap<Y.Text>().keys()].map(path => [path, null]));
+      expect(files.has("client.js"), entry.blueprintId).toBe(true);
+      expect(blueprintPublishRefusals(kind, classifyGadgetFiles(kind, files).violations),
+        entry.blueprintId).toEqual([]);
     }
   });
 

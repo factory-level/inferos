@@ -17,6 +17,7 @@ covers:
   - packages/workshop-shared/src/workspace-kind.ts
   - scripts/consumer/views.ts
   - packages/workshop-backend/src/overseer.ts
+  - packages/workshop-backend/src/git-store.ts
   - packages/workshop-backend/src/canvas-store.ts
   - packages/workshop-backend/src/canvas-catalog.ts
   - packages/workshop-backend/src/deployment-config.ts
@@ -332,11 +333,24 @@ Each workspace stores an explicit kind, `WorkspaceKind` in `workshop-shared/src/
 
 The kind is deterministic. The Overseer's `kind` singleton changes only through `Overseer.setKind()`, which is build-role only (the use-role capability denies it). Nothing infers it from the workspace's code. Workspaces stored before kinds existed read the default `app`. The Overseer sends the kind in `getMetadata()` and `subscribeToMetadata()` to both roles, because it decides how a use-role viewer is shown the workspace. `setKind` also mirrors the kind into the owner's workspace list (`User.updateKind`), so `listGadgets()` can group workspaces by kind without opening each one. Older list records have no `kind`, which also means `app`.
 
-The kind decides what the workspace builds, through three pure functions in `workshop-shared/src/workspace-kind.ts` that the kernel, the agent and the UI share:
+The kind decides what the workspace builds, through pure functions in `workshop-shared/src/workspace-kind.ts` that the kernel, the agent and the UI share:
 
 - `workspaceKindContract(kind)` is the kind's rules as a section of the builder agent's system prompt. It goes in the project-specific slot, so the cached static slot is unchanged. An app has no contract: it is what the agent builds by default.
 - `workspaceKindStarter(kind)` is the files a new gadget starts from. The agent's `createGadget` copies them in when no blueprint is given, as one change that rides the chat's proposed changes like a blueprint copy, and reports them as `starterNotes`. A widget starts from `client.js` and `server.js`; a workflow from `server.js` with a `run(input)` method. An app starts empty, as before.
-- `checkWorkspaceKind(kind, filenames)` returns how a gadget's files fail to fit the kind: an app or widget with no `client.js`, a widget or workflow with no `server.js`, a workflow with a `client.js`. Nothing in the kernel calls it yet; it is there for the UI.
+- `classifyGadgetFiles(kind, files)` classifies a gadget's files for the kind and reports every rule they fail. It implements the shared classification matrix of the bound-view and callable-widget contracts. Its codes are:
+  - the existing ones: `missingUi` (an app, or a widget with no `view.json` or `tools.json`, has no `client.js`), `missingServer` (a workflow, or such a widget, has no `server.js`) and `unexpectedUi` (a workflow has `client.js`);
+  - in a widget: `mixedView` (`view.json` with any JavaScript module, a path ending in `.js` as `isGadgetModule` decides for both the classifier and the gadget loader, or `tools.json`), `invalidView` and `invalidTools` (the file is present and does not parse, whatever else the gadget has), and `toolsWithoutServer` (in place of `missingServer`);
+  - in an app or workflow: `unexpectedView` and `unexpectedTools`, on the file's presence alone, since nothing is parsed outside a widget.
+
+  When nothing fails it also names the class: `app`, `workflow`, or a widget that is `visualWidget`, `callableTools`, `callableCombined` or `viewOnly`. The parsers are injected. Until `bound-view.ts` and `widget-tools.ts` land, the defaults (`parseBoundViewSpecPending` and `parseWidgetToolsPending`) refuse every file, so no view-only or callable widget can be published yet.
+
+  A widget's `view.json` or `tools.json` stands in for `client.js` once it is **present**, not only when it is valid: an invalid one is reported as `invalidView` or `invalidTools` alone, never also as `missingUi` or `missingServer`. The contracts' "Rules behind the matrix" say "a *valid* `view.json` … stands in", but their matrix rows for an invalid file require this reading.
+
+  **Compatibility.** A widget that ships a root `view.json` or `tools.json` as a data file is now refused at blueprint publish, as `invalidView` or `invalidTools`, with a message telling the author to rename the file. Files with these names in subdirectories are not affected.
+- `checkWorkspaceKind(kind, filenames)` is the classifier given filenames alone. It is unchanged for gadgets with no `view.json` or `tools.json`.
+- `blueprintPublishRefusals(kind, violations)` is what blueprint publish enforces: every violation for a widget, and only `unexpectedView` and `unexpectedTools` for an app or workflow. Their other codes were never enforced at publish (see [Operate mode](operate-mode.md#console-widget-registry)).
+
+`GitStore.readCommitBlob(commitId, path)` (`git-store.ts`) reads one file of a commit as raw bytes. With `"text"`, it decodes them as strict UTF-8 and throws `BlobTextError` on invalid UTF-8 or a leading byte order mark. It returns `null` only when nothing is there, the path names a directory, or it runs through a file. A symlink or submodule anywhere on the path throws `UnsupportedTreeEntryError`, which `readCommitFiles` now throws too, so it is never read as absent. It has no size cap, so callers must cap the bytes before parsing. `readCommitFiles` still decodes non-fatally. Blueprint publish reads a widget's `view.json` and `tools.json` through it, so a file that is not strict UTF-8 is classified as not parsing.
 
 The agent's `writeFile` and `editFile` refuse `client.js` in a workflow workspace's gadgets (`workspaceKindAllowsFile`), so a workflow cannot gain a UI through the agent. Worktrees are exempt. The agent reads the kind once per turn through the `getWorkspaceKind` hook.
 
