@@ -17,27 +17,84 @@ function code(source: string): string {
       match => match.replace(/[^\n]/g, " "));
 }
 
-// `<file>:<Class>.<method>` for every call of `name(` in src/, excluding its definitions.
-function callers(name: string): string[] {
+// `<file>:<Class>.<member>` for every call of `name(` in `sources`, excluding its method
+// definitions. A call is credited to the nearest class member header above it at two-space
+// indentation -- a method (getters and setters included) or a class field, so a call inside an
+// arrow-function field is not credited to the method before it -- or to the enclosing top-level
+// function.
+//
+// Known blind spots, each of which a reviewer adding a call site still has to catch: a call through
+// an alias (`let f = this.nextChatId; f()`), `.call`/`.apply`/`.bind`, optional calls (`?.(`),
+// bracket access (`this["nextChatId"]()`), callers outside this package's src/ (another package
+// reaching the method over RPC), and template literals containing nested backticks, which `code()`
+// blanks wrongly. Members indented other than by two spaces are not recognised either.
+function callersIn(sources: Record<string, string>, name: string): string[] {
   let found: string[] = [];
   let call = new RegExp(`(?<![\\w#])${name}\\(`);
-  let definition = new RegExp(`^\\s*(?:async\\s+)?${name}\\(`);
-  for (let [path, source] of Object.entries(SOURCES)) {
+  // A member header: in a class body, nothing else starts at two spaces.
+  let definition = new RegExp(`^ {2}(?:static\\s+)?(?:async\\s+)?${name}\\(`);
+  for (let [path, source] of Object.entries(sources)) {
     let file = path.replace("../src/", "");
     let className = "(module)";
     let method = "(top level)";
     for (let line of code(source).split("\n")) {
-      let classMatch = /^(?:export\s+)?class\s+(\w+)/.exec(line);
+      let classMatch = /^(?:export\s+)?(?:abstract\s+)?class\s+(\w+)/.exec(line);
       if (classMatch) { className = classMatch[1]; method = "(class body)"; }
-      let methodMatch = /^ {2}(?:static\s+)?(?:async\s+)?(#?\w+)\s*(?:<[^>]*>)?\(/.exec(line);
-      if (methodMatch && !/^ {2}(?:if|for|while|switch|return)\b/.test(line)) method = methodMatch[1];
-      let functionMatch = /^(?:export\s+)?(?:async\s+)?function\s+(\w+)/.exec(line);
+      if (line.startsWith("}")) { className = "(module)"; method = "(top level)"; }
+      if (className !== "(module)") {
+        let methodMatch =
+            /^ {2}(?:static\s+)?(?:async\s+)?(?:[gs]et\s+)?\*?(#?\w+)\s*(?:<[^>]*>)?\(/.exec(line);
+        if (methodMatch && !/^ {2}(?:if|for|while|switch|return)\b/.test(line)) method = methodMatch[1];
+        let fieldMatch =
+            /^ {2}(?:(?:static|readonly|private|protected|public)\s+)*(#?\w+)\s*(?::[^=]+)?=(?!=)/
+                .exec(line);
+        if (fieldMatch) method = fieldMatch[1];
+      }
+      let functionMatch = /^(?:export\s+)?(?:async\s+)?function\*?\s+(\w+)/.exec(line);
       if (functionMatch) { className = "(module)"; method = functionMatch[1]; }
-      if (call.test(line) && !definition.test(line)) found.push(`${file}:${className}.${method}`);
+      let defined = className !== "(module)" && definition.test(line);
+      if (call.test(line) && !defined) found.push(`${file}:${className}.${method}`);
     }
   }
   return found.toSorted();
 }
+
+function callers(name: string): string[] {
+  return callersIn(SOURCES, name);
+}
+
+describe("the call-site scan", () => {
+  it("credits each call to its own member, including arrow-function class fields", () => {
+    let source = [
+      "export class Host {",
+      "  #pending = new Map<number, string>();",
+      "  allowed() {",
+      "    nextChatId();",
+      "  }",
+      "  #sneaky = () => nextChatId();",
+      "  handler: (n: number) => void = n => {",
+      "    nextChatId();",
+      "  };",
+      "  get value() { return nextChatId(); }",
+      "  nextChatId() {",
+      "    return 1;",
+      "  }",
+      "}",
+      "function helper() {",
+      "  nextChatId();",
+      "}",
+      "nextChatId();",
+    ].join("\n");
+    expect(callersIn({ "../src/fake.ts": source }, "nextChatId")).toEqual([
+      "fake.ts:(module).(top level)",
+      "fake.ts:(module).helper",
+      "fake.ts:Host.#sneaky",
+      "fake.ts:Host.allowed",
+      "fake.ts:Host.handler",
+      "fake.ts:Host.value",
+    ]);
+  });
+});
 
 describe("chat-creating and delivering call sites", () => {
   it("nextChatId() is called only by OverseerImpl.newChat and #createSpawnedChat", () => {

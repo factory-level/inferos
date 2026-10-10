@@ -1,7 +1,9 @@
 // Sticky chat taint and its egress gates (callable-widget contract §4.8.4-§4.8.5, §4.8.9). Once a
 // chat carries the console tool taint mark, nothing its agent controls may carry its context out:
-//   - gate 1: executeCode's env holds only first-party (allowlisted) connections, and no env.GIT;
-//   - gate 2: an agent session to any other connection, or to git, is refused before it opens;
+//   - gate 1: executeCode's env holds only first-party (allowlisted) connections: no gadget,
+//     worktree or env.GIT;
+//   - gate 2: an agent session to any other connection, a gadget, a worktree or git is refused
+//     before it opens, and [restore] forging is refused;
 //   - Measure B: stubs delivered into the chat (callback arguments) reach its env as data only;
 //   - describeBinding, requestConnection and webFetch refuse.
 // Nothing writes the mark yet (the console tools will), so these tests set it directly in storage.
@@ -24,8 +26,8 @@ import { diffFiles, type CodeContent, type CodeChange } from "@gadgets/workshop-
 import type { OverseerDurableObject } from "../src/overseer.js";
 import { runAgent } from "../src/agent";
 import {
-  dropStubsIfTainted, isConsoleToolTainted, markConsoleToolTainted, TAINTED_CHAT_VENDOR_IDS,
-  usableWhileTainted,
+  dropStubsIfTainted, isConsoleToolTainted, markConsoleToolTainted, STUB_WALK_MAX_DEPTH,
+  TAINTED_CHAT_VENDOR_IDS, usableWhileTainted,
 } from "../src/chat-taint";
 
 declare module "cloudflare:workers" {
@@ -50,6 +52,22 @@ const BINDINGS = {
   OLD: { type: "workpiece", id: LEGACY },
 } as const;
 const ALLOWED = ["BOARD", "LIBRARY", "TASKS"];
+
+// A gadget and one of chat A's worktrees, bound beside the connections where a test adds them.
+const GADGET = 20, TREE = 21;
+const WITH_WORKPIECES = {
+  ...BINDINGS,
+  WIDGET: { type: "workpiece", id: GADGET },
+  TREE: { type: "workpiece", id: TREE },
+} as const;
+
+function addWorkpieces(impl: any): void {
+  impl.storage.gadgets.put({ type: "gadget", id: GADGET, title: "Widget", created: new Date(0),
+    bindingName: "WIDGET", bindings: {} });
+  let commit = "0".repeat(40);
+  impl.storage.gadgets.put({ type: "worktree", id: TREE, title: "Tree", chatId: A,
+    baseCommit: commit, headCommit: commit, pinBase: commit });
+}
 
 function connection(id: number, vendorId: string) {
   // An empty resource URL matches no operate-excluded type (see #excludedFromOperateChat).
@@ -89,6 +107,10 @@ function seed(impl: any, operate: boolean): void {
 // Every way a request could leave the Workshop, recorded rather than performed.
 function intercept(impl: any): string[] {
   let sent: string[] = [];
+  impl.getGadgetFacet = async (id: number) => {
+    sent.push(`gadget:${id}`);
+    return {};
+  };
   impl.getGatekeeperFacet = (id: number) => {
     sent.push(`facet:${id}`);
     return { gitPull: async () => { sent.push("gitPull"); return []; } };
@@ -226,6 +248,64 @@ describe("dropStubsIfTainted (Measure B's walk)", () => {
     // Unmarked, the value is returned untouched.
     expect(dropStubsIfTainted(args, false)).toBe(args);
   }));
+
+  it("drops a self-cycle's back edge and keeps the rest", () => {
+    let node: any = { n: 1 };
+    node.self = node;
+    let list: any[] = [1];
+    list.push(list);
+    expect(dropStubsIfTainted([node, list], true)).toEqual([{ n: 1 }, [1, undefined]]);
+  });
+
+  it("drops a mutual cycle's back edge and walks each object once", () => {
+    let a: any = { name: "a" };
+    let b: any = { name: "b", a };
+    a.b = b;
+    // Walked through `a` first, `b` loses its edge back to `a`; reached again as `root.b`, it is not
+    // walked again, so it stays without it.
+    expect(dropStubsIfTainted({ a, b }, true)).toEqual({ a: { name: "a", b: { name: "b" } }, b: { name: "b" } });
+
+    // Shared references cannot make the walk exponential: 2^200 paths, 200 objects.
+    let shared: any = { leaf: true };
+    for (let i = 0; i < 200; i++) shared = [shared, shared];
+    expect(() => dropStubsIfTainted(shared, true)).not.toThrow();
+  });
+
+  it("drops everything below the depth cap, without exhausting the stack", () => {
+    let deep: any = { leaf: new NativeRpcStub(new NativeRpcTarget()) };
+    for (let i = 0; i < 100; i++) deep = { next: deep };
+    let walked: any = dropStubsIfTainted(deep, true);
+    let levels = 0;
+    for (let node = walked; node.next !== undefined; node = node.next) levels++;
+    expect(levels).toBe(STUB_WALK_MAX_DEPTH - 1);
+
+    let veryDeep: any = [];
+    for (let i = 0; i < 200_000; i++) veryDeep = [veryDeep];
+    expect(() => dropStubsIfTainted(veryDeep, true)).not.toThrow();
+  });
+
+  it("copies an own __proto__ key as data, never as the prototype", () => {
+    let hostile = JSON.parse('{"__proto__": {"polluted": true}, "ok": 1}');
+    let [walked] = dropStubsIfTainted([hostile], true) as any[];
+    expect(Object.getPrototypeOf(walked)).toBe(Object.prototype);
+    expect(walked.polluted).toBeUndefined();
+    expect(Object.hasOwn(walked, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(walked, "__proto__")!.value).toEqual({ polluted: true });
+    expect(walked.ok).toBe(1);
+  });
+
+  it("lets a chat with a stored cyclic value keep running executeCode", () => withImpl(true, async impl => {
+    intercept(impl);
+    let cyclic: any = { n: 1 };
+    cyclic.self = cyclic;
+    let args = deliverArgs(impl, A, [cyclic]);
+    markConsoleToolTainted(impl.storage, A);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let run = startExecution(impl, A, wait(0), { ...BINDINGS, ...args });
+      expect((await run.env).ARGS).toEqual([{ n: 1 }]);
+      await run.done;
+    }
+  }));
 });
 
 describe("gate 1: a tainted chat's executeCode env", () => {
@@ -259,6 +339,23 @@ describe("gate 1: a tainted chat's executeCode env", () => {
     expect(sent).toContain("git");
   }));
 
+  it("holds no gadget or worktree binding, and no gadget is reached",
+      () => withImpl(true, async impl => {
+    let sent = intercept(impl);
+    addWorkpieces(impl);
+    markConsoleToolTainted(impl.storage, A);
+    let run = startExecution(impl, A, TOUCH_EVERYTHING, WITH_WORKPIECES);
+    expect(Object.keys(await run.env).toSorted()).toEqual([...ALLOWED].toSorted());
+    await run.done;
+    expect(sent.filter(entry => entry.startsWith("gadget:"))).toEqual([]);
+
+    // Unmarked, chat B gets both, and reaches the gadget.
+    let control = startExecution(impl, B, TOUCH_EVERYTHING, WITH_WORKPIECES);
+    expect(Object.keys(await control.env)).toEqual(expect.arrayContaining(["WIDGET", "TREE"]));
+    await control.done;
+    expect(sent).toContain(`gadget:${GADGET}`);
+  }));
+
   it("applies in a Build workspace too", () => withImpl(false, async impl => {
     let sent = intercept(impl);
     markConsoleToolTainted(impl.storage, A);
@@ -290,6 +387,28 @@ describe("gate 2: a tainted chat's agent sessions", () => {
     // The allowlisted connections still open.
     for (let name of ALLOWED) await open(name);
     expect(sent).toEqual([BOARD, CONTEXT, SCHEDULER].flatMap(id => [`facet:${id}`, `session:${id}`]));
+    await run.done;
+  }));
+
+  it("refuses gadget and worktree sessions and [restore] forging, whenever the mark lands",
+      () => withImpl(true, async impl => {
+    let sent = intercept(impl);
+    addWorkpieces(impl);
+    // Minted inside a live execution of A, before the mark.
+    let run = startExecution(impl, A, wait(500), WITH_WORKPIECES);
+    let built = await run.env;
+    markConsoleToolTainted(impl.storage, A);
+    for (let name of ["WIDGET", "TREE"]) {
+      let { target, caller } = run.minted.get(built[name])!;
+      expect(() => impl.startGatekeeperSession(target, caller)).toThrow(TAINT_REFUSAL);
+    }
+    await expect(impl.forgeRestoreStubForBinding(A, WITH_WORKPIECES, "WIDGET", {}))
+        .rejects.toThrow(TAINT_REFUSAL);
+    expect(sent).toEqual([]);
+
+    // A gadget's own caller still reaches the gadget.
+    await impl.startGatekeeperSession({ type: "gadget", id: GADGET }, { from: "gadget", gadgetId: 100 });
+    expect(sent).toEqual([`gadget:${GADGET}`]);
     await run.done;
   }));
 
@@ -433,9 +552,13 @@ describe("the cross-chat invariant", () => {
 });
 
 describe("refusals", () => {
-  it("describeBinding and describeGitBinding refuse while tainted", () => withImpl(true, async impl => {
+  it("describeBinding and describeGitBinding refuse while tainted, gadgets and worktrees included", () => withImpl(true, async impl => {
     impl.describeGatekeeper = async (name: string) => `${name} described`;
+    addWorkpieces(impl);
     markConsoleToolTainted(impl.storage, A);
+    await expect(impl.describeBinding(A, "env.WIDGET", GADGET)).rejects.toThrow(TAINT_REFUSAL);
+    await expect(impl.describeBinding(A, "env.TREE", TREE)).rejects.toThrow(TAINT_REFUSAL);
+    expect(await impl.describeBinding(B, "env.WIDGET", GADGET)).toContain("Binding: env.WIDGET");
     await expect(impl.describeBinding(A, "env.SLACK", SLACK)).rejects.toThrow(TAINT_REFUSAL);
     await expect(impl.describeBinding(A, "env.AGENT_SPAWNER", SPAWNER)).rejects.toThrow(TAINT_REFUSAL);
     expect(() => impl.describeGitBinding(A, "env.GIT")).toThrow(TAINT_REFUSAL);

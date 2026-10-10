@@ -6109,6 +6109,9 @@ class OverseerImpl implements AgentHooks {
 
   // Open the session behind a binding loopback.
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+    // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
+    // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
+    if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
@@ -6119,7 +6122,6 @@ class OverseerImpl implements AgentHooks {
       }
 
       case "gatekeeper":
-        if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target.id);
         if (caller.from === "agent" && this.storage.operateSession.get()) {
           this.#assertExecutionLive(target, caller);
           return this.#assertUsableInOperateChat(target.id).then(() =>
@@ -6157,7 +6159,6 @@ class OverseerImpl implements AgentHooks {
       }
 
       case "git":
-        if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId);
         if (caller.from === "agent" && this.storage.operateSession.get()) {
           this.#assertExecutionLive(target, caller);
         }
@@ -6199,19 +6200,24 @@ class OverseerImpl implements AgentHooks {
   #activeWorktreeTurns = new Map<number,
       {access: WorktreeTurnAccess, initiator: AiChatAuthorInfo, executionId: string}>();
 
-  // Refuses chat `chatId`'s agent the connection `gatekeeperId` -- or env.GIT, when absent -- while
-  // the chat carries the console tool taint, unless the connection's vendor is on the strict
-  // first-party allowlist (see chat-taint.ts). Runs before any gatekeeper or git code.
-  #assertUsableWhileTainted(chatId: number, gatekeeperId?: WorkpieceId): void {
+  // Refuses chat `chatId`'s agent the binding `target` while the chat carries the console tool
+  // taint: every gadget, worktree and env.GIT, and every connection whose vendor is not on the
+  // strict first-party allowlist (see chat-taint.ts). Runs before any gadget, gatekeeper or git
+  // code. Gadgets are refused because their code can reach anything their own bindings can, and
+  // worktrees and env.GIT because their reads fault-pull objects from a connection.
+  #assertUsableWhileTainted(chatId: number,
+                            target: {type: "gatekeeper", id: WorkpieceId} |
+                                {type: "gadget" | "worktree" | "git"}): void {
     if (!isConsoleToolTainted(this.storage, chatId)) return;
-    if (gatekeeperId !== undefined &&
-        usableWhileTainted(gatekeeperVendorId(this.storage.gatekeepers.get(gatekeeperId)))) {
+    if (target.type === "gatekeeper" &&
+        usableWhileTainted(gatekeeperVendorId(this.storage.gatekeepers.get(target.id)))) {
       return;
     }
+    let refused = {gatekeeper: "this connection", gadget: "gadget bindings",
+      worktree: "worktree bindings", git: "env.GIT"}[target.type];
     throw new Error(
-        "This chat has read console tool output, so it can no longer use " +
-        (gatekeeperId === undefined ? "env.GIT" : "this connection") +
-        ". Start a new chat to use it.");
+        `This chat has read console tool output, so it can no longer use ${refused}. Start a ` +
+        `new chat to use it.`);
   }
 
   // Every running executeCodeMode execution, by its executionId, mapped to its chat. Registered
@@ -7593,6 +7599,7 @@ class OverseerImpl implements AgentHooks {
   // for the agent's describeBinding tool.
   async describeBinding(chatId: number, envName: string, id: WorkpieceId): Promise<string> {
     let gadget = this.storage.gadgets.get(id);
+    if (gadget) this.#assertUsableWhileTainted(chatId, {type: gadget.type});
     if (gadget?.type === "worktree") {
       return `Binding: ${envName}\n` +
           `\n` +
@@ -7619,13 +7626,13 @@ class OverseerImpl implements AgentHooks {
       throw new Error(`The resource behind ${envName} no longer exists.`);
     }
     if (this.storage.operateSession.get()) await this.#assertUsableInOperateChat(id, envName);
-    this.#assertUsableWhileTainted(chatId, id);
+    this.#assertUsableWhileTainted(chatId, {type: "gatekeeper", id});
     return this.describeGatekeeper(envName, gatekeeper);
   }
 
   // Describe the env.GIT binding, for the agent's describeBinding tool.
   describeGitBinding(chatId: number, envName: string): string {
-    this.#assertUsableWhileTainted(chatId);
+    this.#assertUsableWhileTainted(chatId, {type: "git"});
     return `Binding: ${envName}\n` +
         `\n` +
         `This binding provides access to the workspace's git objects. It is present in your ` +
@@ -9594,13 +9601,13 @@ class OverseerImpl implements AgentHooks {
     return kept;
   }
 
-  // A tainted chat's bindings without the connections it must not use (see
-  // #assertUsableWhileTainted), so they never reach its executeCode env. Gadget and worktree
-  // bindings are kept.
+  // A tainted chat's bindings with only allowlisted connections and callback arguments left (see
+  // #assertUsableWhileTainted), so nothing else reaches its executeCode env: gadget and worktree
+  // bindings are dropped with every other connection.
   #taintedChatBindings(bindings: Record<string, ChatBindingEntry>)
       : Record<string, ChatBindingEntry> {
     return Object.fromEntries(Object.entries(bindings).filter(([, entry]) =>
-        entry.type !== "workpiece" || !this.storage.gatekeepers.get(entry.id) ||
+        entry.type !== "workpiece" ||
         usableWhileTainted(gatekeeperVendorId(this.storage.gatekeepers.get(entry.id)))));
   }
 
@@ -10592,6 +10599,8 @@ class OverseerImpl implements AgentHooks {
       throw new Error(
           `[restore] is only available on Gadget bindings; "${bindingName}" is not a Gadget.`);
     }
+    // A tainted chat's env holds no gadget; this covers a mark that lands mid-execution.
+    this.#assertUsableWhileTainted(chatId, {type: "gadget"});
     let gadgetId = entry.id;
 
     // Wacky hack: Load the one-off "forger" worker through `ctx.restore()`, so that it gets
