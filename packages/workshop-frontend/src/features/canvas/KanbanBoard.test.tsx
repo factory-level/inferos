@@ -62,9 +62,12 @@ beforeEach(() => {
   onCreate.mockClear().mockResolvedValue({ ok: true })
   onUpdate.mockClear().mockResolvedValue({ ok: true })
 })
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 it('renders the given columns with their cards: identifier, title, priority, assignee, due date and blocked reason', async () => {
+  // The fixture's target date is 2026-10-09: pin "today" before it, or the card reads "Overdue".
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-10-01T12:00:00Z'))
   await render(basic, [], 'embedded', basic.columns.slice(0, 3))
   expect([...container.querySelectorAll('h3')].map(heading => heading.textContent)).toEqual(['Todo1', 'Doing0', 'Done1'])
   expect(column('doing').textContent).toContain('No issues')
