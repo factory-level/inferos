@@ -35,7 +35,10 @@ export interface Registry {
   worktrees: WorktreeEntry[];
 }
 
-/** Ports per worktree: backend, Vite, and spares for whatever else a stack grows. */
+/**
+ * Ports per worktree: the backend, Vite, Wrangler's inspector and seven spares, at the offsets
+ * layout.ts's `portLayout` assigns.
+ */
 export const PORT_BLOCK_SIZE = 10;
 
 /** `$XDG_CONFIG_HOME/inferos/worktrees.json`, defaulting to `~/.config`. */

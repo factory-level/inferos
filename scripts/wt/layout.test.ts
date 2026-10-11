@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { getDevServerConfig } from "../dev-server-config.ts";
 import { DEV_INSPECTOR_PORT, devClientServerOptions, inspectorPortArgs, readWorktreeEnv, WORKTREE_ENV_FILE } from "../worktree-env.ts";
 import {
-  allocatePortBlock, blockPorts, clashesWithInferOps, concurrencyShare, LINKED_SECRET_FILES, overlayContents, PORT_BLOCK_COUNT,
+  allocatePortBlock, blockPorts, checkOverlay, clashesWithInferOps, concurrencyShare, LINKED_SECRET_FILES, overlayContents, PORT_BLOCK_COUNT,
   PORT_BLOCK_START, portLayout, validWorktreeName,
 } from "./layout.ts";
 
@@ -79,14 +79,67 @@ describe("every port a dev server pins is the worktree's own", () => {
           Number(inspectorPortArgs(overlay)[1]),
         ];
         assert.equal(new Set(pinned).size, pinned.length, `block ${base} reuses a port`);
+        const [spareFrom, spareTo] = portLayout(base).spare;
         for (const port of pinned) {
           assert.ok(blockPorts(base).includes(port), `${port} is outside block ${base}`);
+          // A spare is unassigned by definition, so a pinned port there is one wt could hand out twice.
+          assert.ok(port < spareFrom || port > spareTo, `${port} is pinned but inside block ${base}'s spares ${spareFrom}-${spareTo}`);
           assert.equal(seen.get(port), undefined, `${port} is shared by blocks ${seen.get(port)} and ${base}`);
           seen.set(port, base);
         }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    }
+  });
+});
+
+describe("portLayout", () => {
+  it("gives each role its own port and leaves the rest of the block, and only that, spare", () => {
+    for (const base of [8810, 8830, 9170]) {
+      const { backend, devClient, inspector, spare: [from, to] } = portLayout(base);
+      const spares = blockPorts(base).filter(port => port >= from && port <= to);
+      assert.deepEqual([backend, devClient, inspector, ...spares].toSorted((a, b) => a - b), blockPorts(base), `block ${base}`);
+    }
+  });
+});
+
+describe("checkOverlay", () => {
+  const entry = { name: "probe", path: "/w", mainCheckout: "/m", branch: "probe", portBase: 8830, createdAt: "" };
+  const written = () => {
+    const dir = mkdtempSync(join(tmpdir(), "wt-check-"));
+    try {
+      writeFileSync(join(dir, WORKTREE_ENV_FILE), overlayContents(entry, 2));
+      return readWorktreeEnv(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("accepts the overlay wt writes", () => {
+    assert.deepEqual(checkOverlay(entry, written()), { level: "ok", message: `probe: ${WORKTREE_ENV_FILE} matches ports 8830-8839` });
+  });
+
+  it("is an error when the backend is another block's", () => {
+    const check = checkOverlay(entry, { ...written(), VITE_BACKEND_HOST: "localhost:8840" });
+    assert.equal(check.level, "error");
+    assert.match(check.message, /names localhost:8840, registry says localhost:8830/);
+  });
+
+  it("warns when the inspector port is missing", () => {
+    const { [DEV_INSPECTOR_PORT]: _, ...old } = written();
+    for (const overlay of [old, { ...old, [DEV_INSPECTOR_PORT]: "" }, { ...old, [DEV_INSPECTOR_PORT]: " " }]) {
+      const check = checkOverlay(entry, overlay);
+      assert.equal(check.level, "warn");
+      assert.match(check.message, /sets no DEV_INSPECTOR_PORT=8832;/);
+    }
+  });
+
+  it("warns, naming both, when the inspector port is not base + 2", () => {
+    for (const wrong of ["8839", "9229", "8842", "8831"]) {
+      const check = checkOverlay(entry, { ...written(), [DEV_INSPECTOR_PORT]: wrong });
+      assert.equal(check.level, "warn", wrong);
+      assert.match(check.message, new RegExp(`sets DEV_INSPECTOR_PORT=${wrong}, but its block's inspector is 8832 \\(ports 8830-8839\\)`), wrong);
     }
   });
 });

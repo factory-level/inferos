@@ -476,10 +476,25 @@ export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps 
   return { ...result, json: parsed.json };
 }
 
+/** Where {@link main} writes: the console, or a test's capture. */
+export interface CliOutput {
+  log(line: string): void;
+  error(line: string): void;
+}
+
+/**
+ * The CLI: runs `argv`, prints the headline (to stderr for a usage error) and then the report, as
+ * one JSON line with `--json`, and returns the exit code. `deps` and `out` are injectable so the
+ * entry can be tested against a fixture root instead of this checkout and its `.env.worktree`.
+ */
+export async function main(argv: readonly string[], deps: LifecycleDeps = defaultDeps, out: CliOutput = console): Promise<number> {
+  const { exitCode, report, headline, json } = await runLifecycle(argv, deps);
+  if (exitCode === EXIT_USAGE) out.error(headline);
+  else if (!json) out.log(headline);
+  out.log(json ? JSON.stringify(report) : JSON.stringify(report, null, 2));
+  return exitCode;
+}
+
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { exitCode, report, headline, json } = await runLifecycle(process.argv.slice(2));
-  if (exitCode === EXIT_USAGE) console.error(headline);
-  else if (!json) console.log(headline);
-  console.log(json ? JSON.stringify(report) : JSON.stringify(report, null, 2));
-  process.exitCode = exitCode;
+  process.exitCode = await main(process.argv.slice(2));
 }
