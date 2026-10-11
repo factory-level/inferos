@@ -101,6 +101,14 @@ const decidedBy = (session: WorkshopAgentSession, state: ActionState) =>
 const agentSaid = (history: AiChatMessage[], text: string) => history.filter(message =>
   message.type === "message" && message.author.type === "agent" && message.message === text).length;
 
+// The note an approval posts when it resumes a turn that suspended on the action: the prefix of the
+// summary built in `#maybeResumeAfterActionDecision` (workshop-backend src/overseer.ts). The resume
+// test below asserts it is found once, so a reworded note fails there instead of counting 0 here.
+const APPROVAL_RESUME_NOTE = "The changes you submitted have been approved and applied";
+const approvalResumeNotes = (history: AiChatMessage[]) => history.filter(message =>
+  message.type === "message" && message.author.type !== "agent" &&
+  message.message.startsWith(APPROVAL_RESUME_NOTE)).length;
+
 it.concurrent("rejecting an action discards it and leaves the agent stopped", async () => {
   const model = models.script([writeValues(7), { text: "This must not run." }]);
   await using session = await openSession(model, "agentreject");
@@ -153,6 +161,8 @@ it.concurrent("approving every held write applies each and resumes the agent onc
   expect(model.requests).toHaveLength(2);
   expect(model.remainingSteps()).toBe(0);
   expect(agentSaid(resumed.history, "Both values are applied.")).toBe(1);
+  // Positive control for the mid-tool test's "no resume note" check.
+  expect(approvalResumeNotes(resumed.history)).toBe(1);
 
   await withOwnerWorkspace(harness.url, session.username, ws =>
     expect(ws.approveAction(first.id)).rejects.toThrow("Action is not pending"));
@@ -162,18 +172,31 @@ it.concurrent("approving every held write applies each and resumes the agent onc
 it.concurrent("approving a held write while its code runs lets the agent carry on", async () => {
   const model = models.script([
     { toolCall: { id: "write-then-wait", name: "executeCode", arguments: {
-      // The wait keeps the tool running while the test approves the write.
+      // The code stays running until the test releases it, which it does only once the approval
+      // has returned -- so the approval always lands mid-tool, however slow the run is.
       code: "export default async function(self, env) { " +
-          "await env.TEST_AMBIENT.writeValue(7); await scheduler.wait(2000); }",
+          "await env.TEST_AMBIENT.writeValue(7); await env.TEST_AMBIENT.waitForRelease(); }",
     } } },
     { text: "The value is applied." },
   ]);
   await using session = await openSession(model, "agentmidtool");
+  const label = labelOf(session);
 
   const turn = session.runTurn("Set the test value to 7.");
   const [action] = await waitForPendingActions(session, 1);
   await withOwnerWorkspace(harness.url, session.username, ws => ws.approveAction(action.id));
-  expect(agentSaid((await turn).history, "The value is applied.")).toBe(1);
+  await control("release-code", { label });
+  const { history } = await turn;
+  // A release that never came surfaces here, as the code's own timeout error in its output; the
+  // code logs nothing, so a clean run's output is exactly executeCode's empty-success marker.
+  const [call] = history.flatMap(message =>
+    message.type === "message" ? message.toolCalls ?? [] : []);
+  if (call?.toolName !== "executeCode") throw new Error("Expected the turn's executeCode call");
+  expect(call.output).toBe("(function succeeded with no output)");
+  expect((await actionState(label)).value).toBe(7);
+  expect(agentSaid(history, "The value is applied.")).toBe(1);
+  // The agent carried on in this turn; it was never suspended and resumed by the approval.
+  expect(approvalResumeNotes(history)).toBe(0);
 });
 
 it.concurrent("always approving a held write's kind applies it and resumes the agent", async () => {

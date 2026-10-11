@@ -53,6 +53,8 @@ interface TestThing {
   search(query: string): Promise<number>;
   writeValue(value: number): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
+  /** Resolves once the integration test calls \`/control/release-code\`. */
+  waitForRelease(): Promise<void>;
   /** Binds a hook the integration test fires through \`/control/fire-hook\`. */
   watch(key: string, callback: ValueHook): Promise<void>;
 }
@@ -236,6 +238,15 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 
   releaseApply(label: string): void {
     this.ctx.storage.kv.put(`release-apply:${label}`, true);
+  }
+
+  /** Lets agent code parked in `TestSession.waitForRelease()` for `label` finish. */
+  releaseCode(label: string): void {
+    this.ctx.storage.kv.put(`release-code:${label}`, true);
+  }
+
+  isCodeReleased(label: string): boolean {
+    return this.ctx.storage.kv.get<boolean>(`release-code:${label}`) ?? false;
   }
 
   /** Parks the next rejectAction() for `label` until releaseReject(), so a test can race it. */
@@ -594,6 +605,11 @@ export interface TestSession {
   /** `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would. */
   writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
+  /**
+   * Parks the calling code until `/control/release-code` for this account, so a test can act while
+   * the code is still running. Throws after 30s, so a missing release fails instead of hanging.
+   */
+  waitForRelease(): Promise<void>;
   watch(key: string, callback: RpcStub<ValueHook>): Promise<void>;
 }
 
@@ -660,6 +676,13 @@ class TestSessionTarget extends RpcTarget implements TestSession {
 
   async writeValues(values: number[]): Promise<number[]> {
     return Promise.all(values.map(value => this.writeValue(value)));
+  }
+
+  async waitForRelease(): Promise<void> {
+    for (const deadline = Date.now() + 30_000; !await this.state.isCodeReleased(this.label);) {
+      if (Date.now() > deadline) throw new Error("The held test code was never released.");
+      await scheduler.wait(25);
+    }
   }
 
   async watch(key: string, callback: RpcStub<ValueHook>): Promise<void> {
@@ -986,6 +1009,15 @@ export default {
       const { label } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       await control(ctx.exports).releaseApply(label);
+      return new Response(null, { status: 204 });
+    }
+
+    // Lets agent code parked in `TestSession.waitForRelease()` for `label` finish.
+    // Body: {"label": "..."}
+    if (url.pathname === "/control/release-code" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      await control(ctx.exports).releaseCode(label);
       return new Response(null, { status: 204 });
     }
 
