@@ -158,18 +158,43 @@ The connection is found through the native action log rather than a file: every 
 
 ## Check tiers
 
-`pnpm check:fast` is the per-change check. It takes the files changed since the branch's merge-base with `origin/main` (`--base` overrides it), including staged, unstaged and untracked files, or the paths given. It maps each file to the narrowest check:
+`pnpm check:fast` is the per-change check. Its input is one of:
 
-- A workspace package's file runs that package's `vp run -F <package> --cache build` type-check, which is the per-package step `pnpm lint` runs through `types:check`. It also runs `vitest related <files> --run --passWithNoTests` once for each `vitest run` in the package's `test:run` script, with that segment's arguments, after the script's other `&&` segments: the codegen in workshop-backend, the prebuild in integration-tests.
-- A `scripts/**` file runs the `node --test` suites that are its `.test.ts` sibling or import it directly, plus `pnpm types:scripts`. A non-TypeScript file runs the suites in its nearest directory that has any.
-- `scripts/consumer/*`, `scripts/dev-server-config.ts`, any `env.d.ts` and settings sources also run `scripts/consumer/settings.test.ts`, which compares the generated configuration reference with its source.
-- `docs/**` runs `pnpm docs:check`.
+- the files changed since the branch's merge-base with `origin/main` (or `--base <ref>`), including staged, unstaged and untracked files;
+- with `--uncommitted`, only the working-tree changes against HEAD;
+- the paths given, where a directory stands for every non-ignored file in it.
 
-Packages run in parallel. Within a package, the prelude runs first and the checks then run side by side. That is safe because the backend's codegen scripts rewrite their output only when it changed, so the type-check's second run of them writes nothing. Failed steps print their full output, every step prints its time, and any failure exits non-zero. Files it cannot check, such as root configs, the lockfile and vitest configs, are listed instead of passing silently. It does not check dependent packages.
+Diffs use `--no-renames`, so a rename checks both the old and the new path's package. A base whose merge-base cannot be found, a `--base` with no value and an unknown option exit 2 rather than reporting no changes.
 
-`pnpm check:full` runs `pnpm lint`, `pnpm docs:check`, every `scripts/` suite and `pnpm test` in order, stops at the first failure, and prints a timing summary. It is the once-per-hand-off run. CI remains the final gate.
+Each file maps to a check:
 
-Measured on 2026-10-11 on a shared 14-core machine, a one-file change to a workshop-backend test takes about 17 s: the 3-program type-check takes 16 s, in parallel with the test. A change to `src/sharing.ts` takes about 73 s, because `vitest related` reaches 17 unit and 4 integration files that load the backend.
+- **A workspace package's file** runs that package's `vp run -F <package> --cache build` type-check. That is the per-package step `pnpm lint` runs through `types:check`. Type-checks running at the same time share one `vp run` concurrency budget (`vpRunEnv`'s `concurrentRuns`).
+- **Tests:** for each `vitest run` in the package's `test:run` script, with that segment's arguments, checks run after the script's other `&&` segments (the codegen in workshop-backend, the prebuild in integration-tests):
+  - Changed test files run directly.
+  - Other changed files run `vitest related --passWithNoTests`. If that finds no test file, the config runs in full instead: fixtures, Worker `main` modules and files read at runtime have no static import edge, so "no related tests" proves nothing.
+  - A deleted non-test file, or a changed vitest or Vite config, runs every config in full.
+- **A package whose tests aren't vitest, or that has tests but no `test:run`,** gets the type-check only, and its files are listed as not checked.
+- **Any `scripts/**` file** runs every `scripts/` `node --test` suite, plus `pnpm types:scripts` for TypeScript.
+- **`scripts/consumer/*`, `scripts/dev-server-config.ts`, any `env.d.ts`, settings sources and the configuration reference** run `scripts/consumer/settings.test.ts`, which compares the generated configuration reference with its source.
+- **`docs/**`** runs `pnpm docs:check`.
+
+Packages run in parallel. Within a package, the prelude runs first and the checks then run side by side. That is safe because the backend's codegen scripts rewrite their output only when it changed, so the type-check's second run of them writes nothing.
+
+Failed steps print their full output, every step prints its time, and any failure exits non-zero. A `NOT CHECKED` list then names everything the run did not verify:
+
+- files outside every package check (root configs, the lockfile, skills);
+- deleted test suites;
+- changed test files that no config ran;
+- packages without vitest tests or a `build` task.
+
+When that list is not empty, the verdict says so. The last line always says that dependent packages and full suites are left to `pnpm check:full`.
+
+`pnpm check:full` runs `pnpm lint`, `pnpm docs:check`, every `scripts/` suite (tracked or new) and `pnpm test` in order, stops at the first failure, and prints a timing summary. It is the once-per-hand-off run. CI remains the final gate.
+
+Measured on 2026-10-11 on a shared 14-core machine:
+
+- **A workshop-backend test file:** a one-file change takes about 17 s. Most of that is the three-program type-check, which runs in parallel with the test.
+- **`src/sharing.ts`:** a change takes about 73 s, because `vitest related` reaches 17 unit and 4 integration files that load the backend.
 
 ## Configuration
 

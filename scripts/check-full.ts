@@ -10,16 +10,20 @@
 // broken one stops the run before the long workerd suites start.
 
 import { execFileSync, spawn } from "node:child_process";
-import { dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pnpmCommand } from "./pnpm-command.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
-// A git pathspec `*` matches across `/` already, so this is every suite under `scripts/`;
-// `scripts/**/*.test.ts` would skip the top-level ones, since its `/` after `**` must match.
-const scriptSuites = execFileSync("git", ["ls-files", "scripts/*.test.ts"], { cwd: ROOT, encoding: "utf8" })
-  .split("\n").filter(Boolean);
+// Every suite under `scripts/`, tracked or new, that is still on disk. A git pathspec `*` matches
+// across `/` already; `scripts/**/*.test.ts` would skip the top-level ones, since its `/` after `**`
+// must match.
+const scriptSuites = execFileSync("git",
+  ["ls-files", "--cached", "--others", "--exclude-standard", "--", "scripts/*.test.ts"],
+  { cwd: ROOT, encoding: "utf8" })
+  .split("\n").filter(file => file && existsSync(join(ROOT, file)));
 
 const steps: [label: string, command: string, args: string[]][] = [
   ["pnpm lint", ...pnpmCommand(["run", "lint"])],
