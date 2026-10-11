@@ -99,7 +99,7 @@ Each round ran two worktrees made by `pnpm wt new` through the whole loop at the
 
 - **Round 4** (2026-10-11, main `404a0cb5`): worktrees E and F, load average 0.8–4.7.
 - **Round 6** (2026-10-11, main `a6c0ca64`, after [#238](https://github.com/factory-level/inferos/pull/238)): two worktrees started together with no bind failure (inspector ports 8862 and 8872). The load average (1/5/15 min) was 5.15 / 25.7 / 34.0 at the start and 11.5 / 20.0 / 30.5 at the end.
-- **Before this work** (measured 2026-10-11 at main `3bc6420b`, same 14 cores).
+- **Before this work** (measured 2026-10-11 at main `3bc6420b`, same 14 cores, except the `check:fast` figure: `check:fast` arrived with #234, so it was measured after that and before #236).
 
 Each round's cell gives both worktrees.
 
@@ -108,15 +108,15 @@ Each round's cell gives both worktrees.
 | `pnpm wt new` | 20.0 / 20.4 s | 20.2 / 20.2 s | — |
 | One backend test file | 2.5 / 2.2 s | 2.2 / 2.1 s | 19–23 s |
 | Dev server cold start | 12.7 / 12.5 s | — | — |
-| Backend edit until live | 5.1–5.5 / 5.0–5.6 s | 4.0–4.4 / 4.0–4.4 s | about 6.5 s |
+| Backend edit until live | 5.1–5.5 / 5.0–5.6 s | 4.0–4.2 / 4.1–4.4 s | about 6.5 s |
 | `check:fast`, test-file change | 17.9 / 18.3 s | 14.8 / 16.2 s | — |
-| `check:fast`, backend `src` change | 77.8 / 77.0 s | 52 / 42 s | 88 s (`check:fast` before [#236](https://github.com/factory-level/inferos/pull/236)); 130–180 s (backend suite) |
+| `check:fast`, backend `src` change | 77.8 / 77.0 s | 52 / 42 s | 88 s (`check:fast` after [#234](https://github.com/factory-level/inferos/pull/234) `6d5be95c`, before [#236](https://github.com/factory-level/inferos/pull/236)); 130–180 s (backend suite, `3bc6420b`) |
 
 The backend `src` row compares different operations. Before this work, the figures are `check:fast` as it was before #236 and a full backend suite run; after, `check:fast` runs only the related tests.
 
 Round 6's backend `src` change was slower than round 4's. In round 6, `VP_RUN_CONCURRENCY_LIMIT` was 2 (14 cores divided by 5 registered `wt` worktrees), against 7 in round 4. That the lower share caused the slowdown is an inference, not a measurement: a 2-against-7 comparison run under a load average of about 50 was inconclusive.
 
-Known limit, now fixed: two dev servers started at the same instant could collide on Wrangler's inspector port, and one failed with workerd's `bind(): Address already in use` (in round 4, worktree E's first start). [#238](https://github.com/factory-level/inferos/pull/238) gives each worktree its own `DEV_INSPECTOR_PORT`. Its race harness saw 2 bind failures in 20 starts before the change and 0 in 25 after, and round 6 started both servers together without one.
+Known limit, now fixed: two dev servers started at the same instant could collide on Wrangler's inspector port, and one failed with workerd's `bind(): Address already in use` (in round 4, worktree E's first start). [#238](https://github.com/factory-level/inferos/pull/238) gives each worktree its own `DEV_INSPECTOR_PORT`. #238's before runs (one with a bash `ss` sampler, one with its race harness) saw 2 bind failures in 20 starts, and its after runs 0 in 25, and round 6 started both servers together without one.
 
 ## Fewer Workers, faster reloads
 
