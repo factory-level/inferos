@@ -7,7 +7,7 @@ import {
 /** The `test` task below, before its `cache.env` gains `BACKEND_TEST_WORKERS`. */
 const unitTask = vitestTask([
   { command: 'vitest run', idleSeconds: 120 },
-  'vitest run --config vitest.integration.config.ts',
+  { command: 'vitest run --config vitest.integration.config.ts', idleSeconds: 120 },
 ])
 
 /**
@@ -95,7 +95,9 @@ export default {
        * `BACKEND_TEST_WORKERS` sets the `backend` project's worker count (see vitest.config.ts), so
        * it is declared here: a cached run strips undeclared variables.
        *
-       * The integration config is one file and keeps the default.
+       * The integration config gets the same threshold. Its four `__integration__` files share one
+       * cold start -- transforming and importing the backend, then booting workerd -- before any of
+       * them reports, and on CI that silence ran 35-56 s on passing runs and past 60 s once.
        */
       test: {
         ...unitTask,
