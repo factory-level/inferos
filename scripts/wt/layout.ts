@@ -2,7 +2,7 @@
 // `.env.worktree` overlay that carries both (scripts/worktree-env.ts), and which of the main
 // checkout's secret files it links. Pure functions, so the rules are testable without git.
 
-import { DEV_CLIENT_PORT } from "../worktree-env.ts";
+import { DEV_CLIENT_PORT, DEV_INSPECTOR_PORT } from "../worktree-env.ts";
 import { PORT_BLOCK_SIZE, type WorktreeEntry } from "./registry.ts";
 
 /** The first port block, above the main checkout's 8787. */
@@ -30,12 +30,14 @@ export interface PortLayout {
   backend: number;
   /** `pnpm dev-client` (Vite), and therefore the default `PUBLIC_BASE_URL`. */
   devClient: number;
+  /** Wrangler's inspector (`--inspector-port`), which it would otherwise race other servers for. */
+  inspector: number;
   /** Unassigned, reserved for this worktree. */
   spare: [number, number];
 }
 
 export function portLayout(base: number): PortLayout {
-  return { backend: base, devClient: base + 1, spare: [base + 2, base + PORT_BLOCK_SIZE - 1] };
+  return { backend: base, devClient: base + 1, inspector: base + 2, spare: [base + 3, base + PORT_BLOCK_SIZE - 1] };
 }
 
 /** Every port in the block starting at `base`. */
@@ -80,6 +82,7 @@ export function overlayContents(entry: WorktreeEntry, concurrency: number): stri
     "# the shell still wins. See docs/wiki/local-development.md.",
     `VITE_BACKEND_HOST=localhost:${ports.backend}`,
     `${DEV_CLIENT_PORT}=${ports.devClient}`,
+    `${DEV_INSPECTOR_PORT}=${ports.inspector}`,
     `VP_RUN_CONCURRENCY_LIMIT=${concurrency}`,
     "",
   ].join("\n");

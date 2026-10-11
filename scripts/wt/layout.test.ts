@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { getDevServerConfig } from "../dev-server-config.ts";
-import { devClientServerOptions, readWorktreeEnv, WORKTREE_ENV_FILE } from "../worktree-env.ts";
+import { DEV_INSPECTOR_PORT, devClientServerOptions, inspectorPortArgs, readWorktreeEnv, WORKTREE_ENV_FILE } from "../worktree-env.ts";
 import {
   allocatePortBlock, blockPorts, clashesWithInferOps, concurrencyShare, LINKED_SECRET_FILES, overlayContents, PORT_BLOCK_COUNT,
   PORT_BLOCK_START, portLayout, validWorktreeName,
@@ -76,6 +76,10 @@ describe("overlayContents", () => {
       writeFileSync(join(dir, WORKTREE_ENV_FILE), overlayContents(entry, 7));
       const overlay = readWorktreeEnv(dir);
       assert.equal(overlay.VP_RUN_CONCURRENCY_LIMIT, "7");
+      // Each worktree's own Wrangler inspector, inside its block, so concurrent servers never race.
+      assert.equal(overlay[DEV_INSPECTOR_PORT], "8832");
+      assert.deepEqual(inspectorPortArgs(overlay), ["--inspector-port", "8832"]);
+      assert.deepEqual(portLayout(8830).spare, [8833, 8839]);
       assert.deepEqual(getDevServerConfig([], overlay.VITE_BACKEND_HOST), { backendHost: "localhost:8830", wranglerPort: "8830" });
       assert.deepEqual(devClientServerOptions(dir, {}), { port: portLayout(8830).devClient, strictPort: true });
     } finally {
