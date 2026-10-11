@@ -136,6 +136,16 @@ test("status probes only the gatekeepers a --gatekeepers server recorded startin
   assert.deepEqual(probed.toSorted(), ["/", "/api", "/gatekeeper/inferops"]);
 });
 
+test("status reports, rather than throws on, a recorded selection naming an unknown gatekeeper", async () => {
+  const fetchImpl: typeof fetch = async () => new Response(null, { status: 200 });
+  const record = { ...ours(), gatekeepers: ["gatekeeper-renamed-away"] };
+  const result = await runLifecycle(["status", "--json"],
+    offlineDeps({ isPortListening: async () => true, devServerRecord: () => record, fetchImpl }));
+  assert.equal(result.exitCode, EXIT_FAILED);
+  assert.match(String(result.report.selectionError), /Unknown gatekeeper gatekeeper-renamed-away/);
+  assert.match(result.headline, /^degraded: The dev server's recorded gatekeeper selection is invalid/);
+});
+
 test("status reports a listener this checkout did not start as port-in-use-by-other and never probes it", async () => {
   const root = tempRoot();
   const { port, close } = await listen();

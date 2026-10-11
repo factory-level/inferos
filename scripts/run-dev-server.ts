@@ -204,10 +204,17 @@ const codingWorkbenchRepos = consumerConfig?.schemaVersion === 2
   ? codingRepoIds(consumerConfig) : process.env.CODING_WORKBENCH_REPOS ?? "";
 // Narrowed by `--gatekeepers` when given: a gatekeeper left out runs no Worker and gets no router or
 // backend service binding, since both binding lists below are built from this one.
-const gatekeepers = selectDevGatekeepers([
-  ...discoverDevGatekeepers(ROOT, enabledCustomGatekeepers),
-  ...consumerGatekeepers.map(({ name, directory }) => ({ name, dir: directory })),
-], requestedGatekeepers);
+let gatekeepers: { name: string; dir: string }[];
+try {
+  gatekeepers = selectDevGatekeepers([
+    ...discoverDevGatekeepers(ROOT, enabledCustomGatekeepers),
+    ...consumerGatekeepers.map(({ name, directory }) => ({ name, dir: directory })),
+  ], requestedGatekeepers);
+} catch (err) {
+  // An unknown name is a usage error: one line, no stack, before anything is generated.
+  console.error((err as Error).message);
+  process.exit(1);
+}
 if (requestedGatekeepers !== null) {
   console.log(`gatekeepers: ${gatekeepers.map(({ name }) => name).join(", ") || "(none)"} ` +
     `(narrowed by --gatekeepers/${DEV_GATEKEEPERS_ENV}; the router and backend always run)`);

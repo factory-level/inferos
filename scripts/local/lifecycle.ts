@@ -39,7 +39,7 @@ import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
   probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack, stackOwnership,
-  wranglerLogDir, type DevServerRecord, type LocalStack, type StackOwnership,
+  wranglerLogDir, type ConfiguredWorker, type DevServerRecord, type LocalStack, type StackOwnership,
 } from "./stack.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -284,24 +284,35 @@ async function status(stack: LocalStack, deps: LifecycleDeps): Promise<Lifecycle
   const { listening, devServer, ownership } = await inspectStack(stack, deps);
   // The Workers the running server actually started: its record says when `--gatekeepers` narrowed
   // them, so a deliberately absent gatekeeper is not reported as down.
-  const workers = configuredWorkers(deps.root, ownership === "running" ? devServer?.gatekeepers ?? null : null);
+  // A record naming a gatekeeper this checkout no longer has (renamed, or a hand-edited record) is
+  // reported, not thrown: status must still describe the stack.
+  let workers: ConfiguredWorker[];
+  let selectionError: string | undefined;
+  try {
+    workers = configuredWorkers(deps.root, ownership === "running" ? devServer?.gatekeepers ?? null : null);
+  } catch (error) {
+    selectionError = `The dev server's recorded gatekeeper selection is invalid: ${(error as Error).message}`;
+    workers = configuredWorkers(deps.root);
+  }
   // A foreign listener is not probed: its answers would describe some other server as this stack.
   const probes = ownership === "running"
     ? await probeWorkers(stack.url, workers, deps.fetchImpl)
     : workers.map(worker => ({ ...worker, state: "down" as const }));
   const inferops = inferOpsConfiguration(localEnv(deps.root, deps.env));
   const down = probes.filter(probe => probe.state !== "up").map(probe => probe.name);
-  const ok = ownership === "running" && down.length === 0 && inferops.missing.length === 0;
+  const ok = ownership === "running" && down.length === 0 && inferops.missing.length === 0 && !selectionError;
   const report = {
     ok, command: "status", url: stack.url, port: stack.port, listening, stack: ownership,
     ...(ownership === "port-in-use-by-other" ? { error: foreignListener(stack) } : {}),
     devServer: devServer ? { pid: devServer.pid, port: devServer.port, mode: devServer.mode, startedAt: devServer.startedAt } : null,
     workers: probes, inferops,
+    ...(selectionError ? { selectionError } : {}),
     state: { directory: stack.stateDir, present: existsSync(stack.stateDir) },
     logs: deps.wranglerLogDir(),
   };
   const headline = !listening ? `down: nothing listens on ${stack.backendHost}`
     : ownership === "port-in-use-by-other" ? `port-in-use-by-other: ${stack.backendHost} answers, but not with this checkout's dev server`
+    : selectionError ? `degraded: ${selectionError}`
     : down.length ? `degraded: ${down.join(", ")} not answering on ${stack.url}`
     : inferops.missing.length ? `misconfigured: INFEROPS_BASE_URL is set but ${inferops.missing.join(", ")} is not`
     : `up: ${probes.length} workers answering on ${stack.url} (InferOps ${inferops.mode})`;

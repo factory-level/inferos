@@ -79,7 +79,10 @@ describe("devClientServerOptions", () => {
   });
 
   it("rejects a port that is not one", () => {
-    assert.throws(() => devClientServerOptions(root({}), { [DEV_CLIENT_PORT]: "80a" }), /between 1 and 65535/);
+    for (const bad of ["80a", "1.5", "80", "1023", "65536", "-1"]) {
+      assert.throws(() => devClientServerOptions(root({}), { [DEV_CLIENT_PORT]: bad }), /between 1024 and 65535/, bad);
+    }
+    assert.deepEqual(devClientServerOptions(root({}), { [DEV_CLIENT_PORT]: "1024" }), { port: 1024, strictPort: true });
   });
 });
 

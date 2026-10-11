@@ -76,8 +76,8 @@ export function devClientServerOptions(
   const raw = env[DEV_CLIENT_PORT] ?? overlay[DEV_CLIENT_PORT];
   if (raw === undefined || raw.trim() === "") return { port: 3000, strictPort: false };
   const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`${DEV_CLIENT_PORT} must be an integer between 1 and 65535, got "${raw}".`);
+  if (!/^\d+$/.test(raw.trim()) || port < 1024 || port > 65535) {
+    throw new Error(`${DEV_CLIENT_PORT} must be an integer between 1024 and 65535, got "${raw}".`);
   }
   return { port, strictPort: true };
 }

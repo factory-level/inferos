@@ -9,7 +9,7 @@
 // change, so fewer Workers is a faster edit-to-live loop. The router and backend are not
 // gatekeepers and always run; a gatekeeper left out simply loses its service bindings.
 
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
 
@@ -24,6 +24,14 @@ export interface DevGatekeeper {
   dir: string;
 }
 
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Every gatekeeper Worker in `root`: a `gatekeeper-*` package with a `wrangler.jsonc` (one without
  * is a library), keeping a `custom-gatekeepers/` one only when `enabledCustom` names it.
@@ -31,7 +39,7 @@ export interface DevGatekeeper {
 export function discoverDevGatekeepers(root: string, enabledCustom: ReadonlySet<string>): DevGatekeeper[] {
   return workerPackageDirs(root)
     .map(dir => ({ name: basename(dir), dir }))
-    .filter(({ name, dir }) => name.startsWith("gatekeeper-") && existsSync(join(dir, "wrangler.jsonc")))
+    .filter(({ name, dir }) => name.startsWith("gatekeeper-") && isFile(join(dir, "wrangler.jsonc")))
     .filter(({ name, dir }) => basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustom.has(name));
 }
 

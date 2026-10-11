@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,7 +92,25 @@ describe("one selection for the dev server and pnpm local status", () => {
   // (router and backend) and its Worker list come from the one selected `gatekeepers` array.
   it("run-dev-server discovers through the shared helper", () => {
     const source = readFileSync(join(REPO, "scripts", "run-dev-server.ts"), "utf8");
-    assert.match(source, /const gatekeepers = selectDevGatekeepers\(\[\s*\.\.\.discoverDevGatekeepers\(ROOT/);
+    assert.match(source, /gatekeepers = selectDevGatekeepers\(\[\s*\.\.\.discoverDevGatekeepers\(ROOT/);
     assert.doesNotMatch(source, /function findGatekeepers/);
   });
+});
+
+describe("run-dev-server rejects a bad selection cleanly", () => {
+  // Both fail before Wrangler or any build starts; config generation writes only changed files, so
+  // a clean checkout is left untouched.
+  const run = (...args: string[]) => spawnSync(process.execPath, [join(REPO, "scripts", "run-dev-server.ts"), ...args],
+    { cwd: REPO, encoding: "utf8", timeout: 120_000, env: { ...process.env, INFEROS_DEV_GATEKEEPERS: "" } });
+
+  for (const args of [["--gatekeepers", "no-such-gatekeeper"], ["--gatekeepers"]]) {
+    it(`exits 1 with one line for ${args.join(" ")}`, () => {
+      const result = run(...args);
+      assert.equal(result.status, 1, result.stderr);
+      const lines = result.stderr.trim().split("\n");
+      assert.equal(lines.length, 1, result.stderr);
+      assert.match(lines[0]!, args.length > 1 ? /^Unknown gatekeeper gatekeeper-no-such-gatekeeper .*Available: / : /comma-separated/);
+      assert.doesNotMatch(result.stderr, /\n\s+at /);
+    });
+  }
 });
