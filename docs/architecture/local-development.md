@@ -189,7 +189,7 @@ Failed steps print their full output, every step prints its time, and any failur
 
 When that list is not empty, the verdict says so. The last line always says that dependent packages and full suites are left to `pnpm check:full`.
 
-`pnpm check:full` runs `pnpm lint`, `pnpm docs:check`, every `scripts/` suite (tracked or new) and `pnpm test` in order, stops at the first failure, and prints a timing summary. It is the once-per-hand-off run. CI remains the final gate.
+`pnpm check:full` runs `pnpm lint`, `pnpm docs:check`, every `scripts/` suite (tracked or new) and `pnpm test` in order, stops at the first failure, and prints a timing summary. Every step gets `VP_RUN_CONCURRENCY_LIMIT` from `vpRunEnv({ cap: 4 })`: a value from the shell, `.env.worktree` or `.env` is used as set, and otherwise the machine default is capped at 4, CI's effective value. Other commands keep the whole-machine default. It is the once-per-hand-off run. CI remains the final gate.
 
 Measured on 2026-10-11 on a shared 14-core machine:
 

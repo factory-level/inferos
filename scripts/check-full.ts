@@ -8,12 +8,18 @@
 // the end. The root scripts' suites run on their own before `pnpm test` (which also runs them, as
 // `@gadgets/scripts`'s cached `test` task) because they take seconds and fail most often, so a
 // broken one stops the run before the long workerd suites start.
+//
+// Every step runs with `VP_RUN_CONCURRENCY_LIMIT` capped at 4, CI's effective value, unless the
+// shell, `.env.worktree` or `.env` sets it (vp/concurrency.ts). At the whole-machine default (14 on
+// a 14-core box) `pnpm test` starts every workerd fleet at once, and on 2026-10-11 that starved the
+// backend suite past its 120 s watchdog twice. Capped at 4, it passed under a load average of about 40.
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pnpmCommand } from "./pnpm-command.ts";
+import { vpRunEnv } from "./vp/concurrency.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -32,9 +38,14 @@ const steps: [label: string, command: string, args: string[]][] = [
   ["pnpm test", ...pnpmCommand(["run", "test"])],
 ];
 
+/** `check:full`'s default `vp run` concurrency; see the header. */
+const CHECK_FULL_CONCURRENCY = 4;
+
+const env = vpRunEnv({ cap: CHECK_FULL_CONCURRENCY });
+
 function run(command: string, args: string[]): Promise<number> {
   return new Promise(done => {
-    const child = spawn(command, args, { cwd: ROOT, stdio: "inherit" });
+    const child = spawn(command, args, { cwd: ROOT, env, stdio: "inherit" });
     child.on("error", () => done(1));
     child.on("close", code => done(code ?? 1));
   });

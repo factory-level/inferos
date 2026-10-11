@@ -83,13 +83,11 @@ It is read by `pnpm dev-server`/`run-local`, `pnpm local`, `pnpm dev-client` and
 
 ## The edit loop
 
-Today:
-
-- **While iterating**, run one package's tests directly with `pnpm --filter <pkg> test:run`, or the matching `node --test scripts/…test.ts` for root scripts. Type-check that package with `vp run -F <pkg> build`. Don't run full suites after every edit.
-- **Before hand-off**, run `pnpm lint`, `pnpm docs:check`, the root scripts tests (`node --test $(git ls-files 'scripts/**/*.test.ts')`) and `pnpm test` for the affected packages.
+- **While iterating**, run `pnpm check:fast` after each change. It type-checks and tests only the packages your changed files are in. It runs every `scripts/` suite for a `scripts/**` change and `pnpm docs:check` for `docs/`. It ends with a `NOT CHECKED` list of what it skipped. A single test file is `npx vitest run <file>` in its package, once that package's codegen has run. Don't run full suites after every edit.
+- **Before hand-off**, run `pnpm check:full` once: `pnpm lint`, `pnpm docs:check`, every `scripts/` suite and `pnpm test`. It caps `vp run` at 4 tasks unless your shell, `.env.worktree` or `.env` sets `VP_RUN_CONCURRENCY_LIMIT`. A worktree's own share from `wt new` therefore applies.
 - **CI** is the final gate.
 
-Coming: `pnpm check:fast` and `pnpm check:full` will wrap these two tiers. They are not on `main` yet; this page will switch to them when that change merges.
+The `iterate` skill and the [check tiers](../architecture/local-development.md#check-tiers) have the details.
 
 ## Fewer Workers, faster reloads
 

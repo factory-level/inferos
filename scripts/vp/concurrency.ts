@@ -32,8 +32,9 @@
 // is never validated or rewritten here: vite-task's own parser reports a bad value. Precedence is
 // `--concurrency-limit` > `process.env.VP_RUN_CONCURRENCY_LIMIT` > a `pnpm wt` worktree's
 // `.env.worktree` (its share of the machine, see worktree-env.ts) > the repo-root `.env` > this
-// formula, and the note says which of the sources the number came from, since a value that silently
-// failed to apply is the whole problem being avoided. That is also why a `--concurrency-limit` or
+// formula, which a caller may cap without overriding any source before it (`check:full` caps it at
+// 4). The note says which of the sources the number came from, since a value that silently failed
+// to apply is the whole problem being avoided. That is also why a `--concurrency-limit` or
 // `--parallel` on the command line prints nothing at all (`overridesConcurrency`): vite-task gives
 // the flag priority over the variable, so a note naming our number would contradict the run.
 //
@@ -320,9 +321,15 @@ export function measureMachine(): Machine {
  * other two both print, naming their source -- for `.env` that confirmation *is* the feature, since
  * the failure it replaces was a value that looked set and silently was not. `envFileName` is the
  * file the value came from, for the note.
+ *
+ * `cap` lowers only the machine formula's answer, never a value someone set: a caller that wants a
+ * gentler default than the whole machine (`check:full` uses CI's effective 4, because every workerd
+ * fleet in `pnpm test` at once can starve a suite into the watchdog) still yields to the shell,
+ * `.env.worktree` and `.env`.
  */
 export function concurrencyEnv(
   env: NodeJS.ProcessEnv, machine: Machine, envFileValue: string | null = null, envFileName = ".env",
+  cap: number | null = null,
 ): { env: NodeJS.ProcessEnv; note: string | null } {
   if (env[VP_RUN_CONCURRENCY_LIMIT] !== undefined) return { env: { ...env }, note: null };
 
@@ -335,12 +342,16 @@ export function concurrencyEnv(
     };
   }
 
-  const limit = defaultConcurrencyLimit(machine.cpus, machine.memoryBytes);
+  const machineLimit = defaultConcurrencyLimit(machine.cpus, machine.memoryBytes);
+  const limit = cap !== null && cap < machineLimit ? cap : machineLimit;
   const gib = (machine.memoryBytes / 1024 ** 3).toFixed(1);
   const memory = machine.cgroupLimited ? `${gib} GiB cgroup limit` : `${gib} GiB`;
+  const source = limit === machineLimit
+    ? `${machine.cpus} cpus, ${memory}`
+    : `capped from ${machineLimit} (${machine.cpus} cpus, ${memory})`;
   return {
     env: { ...env, [VP_RUN_CONCURRENCY_LIMIT]: String(limit) },
-    note: `vp run: concurrency ${limit} (${machine.cpus} cpus, ${memory}) -- ` +
+    note: `vp run: concurrency ${limit} (${source}) -- ` +
       `set ${VP_RUN_CONCURRENCY_LIMIT} in the environment or the repo-root .env to override`,
   };
 }
@@ -411,6 +422,12 @@ export interface VpRunEnvOptions {
   concurrentRuns?: number;
   /** The environment to resolve against. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * An upper bound on the machine-derived default only (see `concurrencyEnv`); a value from the
+   * shell, `.env.worktree` or `.env` is used as set. Defaults to none, so other commands keep the
+   * whole-machine default.
+   */
+  cap?: number;
 }
 
 /**
@@ -426,12 +443,12 @@ export interface VpRunEnvOptions {
  * set to override it; with `concurrentRuns > 1` each child then gets its share of it.
  */
 export function vpRunEnv(
-  { vpArgs = [], concurrentRuns = 1, env = process.env }: VpRunEnvOptions = {},
+  { vpArgs = [], concurrentRuns = 1, env = process.env, cap }: VpRunEnvOptions = {},
 ): NodeJS.ProcessEnv {
   const worktreeValue = envFileConcurrencyLimit(ROOT_WORKTREE_ENV_FILE);
   const result = worktreeValue !== null
-    ? concurrencyEnv(env, measureMachine(), worktreeValue, WORKTREE_ENV_FILE)
-    : concurrencyEnv(env, measureMachine(), envFileConcurrencyLimit());
+    ? concurrencyEnv(env, measureMachine(), worktreeValue, WORKTREE_ENV_FILE, cap ?? null)
+    : concurrencyEnv(env, measureMachine(), envFileConcurrencyLimit(), ".env", cap ?? null);
   if (result.note && !overridesConcurrency(vpArgs)) console.error(result.note);
   return splitConcurrencyLimit(result.env, concurrentRuns);
 }
