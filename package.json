@@ -25,6 +25,8 @@
     "dev:mock-model": "node scripts/dev/scripted-model.ts",
     "clean": "node scripts/vp/run.ts --filter=!cloudflare-os clean",
     "docs:check": "scripts/check-docs.sh",
+    "check:fast": "node scripts/check-fast.ts",
+    "check:full": "node scripts/check-full.ts",
     "check:dev-secrets": "node scripts/check-gatekeeper-dev-secrets.ts",
     "lint:check": "vp lint",
     "lint:fix": "vp lint --fix",
