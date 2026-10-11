@@ -33,8 +33,15 @@ const DEFAULT_GRACE_MS = 10_000;
  * Deliberately adds no `error` listener, so a spawn that fails keeps Node's loud uncaught-error
  * behaviour instead of hanging on an `exit` event that will never arrive.
  */
-export function relayTermination(child: ChildProcess, { graceMs = DEFAULT_GRACE_MS }: {
+export function relayTermination(child: ChildProcess, { graceMs = DEFAULT_GRACE_MS, beforeExit }: {
   graceMs?: number;
+  /**
+   * Awaited after the tree is gone and before this process exits or re-raises: for a caller that
+   * forwards the child's output and must not let `process.exit()` truncate it (`vp/own-output.ts`).
+   * `force` aborts on a second signal, which must end the wait at once. The hook should bound its
+   * own wait otherwise.
+   */
+  beforeExit?: (force: AbortSignal) => Promise<void>;
 } = {}): void {
   const force = new AbortController();
   let escalation: Promise<void> | null = null;
@@ -79,6 +86,7 @@ export function relayTermination(child: ChildProcess, { graceMs = DEFAULT_GRACE_
         // one thing entitled to cut it short, on a real second signal.
         await escalation;
       }
+      await beforeExit?.(force.signal);
 
       // The forwarded signal takes priority over the child's: the child may well have died from our
       // own escalation's SIGKILL, and reporting *that* to the shell in place of the SIGINT the user
