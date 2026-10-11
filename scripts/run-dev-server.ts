@@ -4,20 +4,31 @@
 // then launches `wrangler dev` with all discovered workers.
 //
 // Flags:
-//   --use-workers-ai-binding   Include the Workers AI binding in
-//                               workshop-backend (requires Cloudflare login).
 //   --port PORT                 Listen on PORT instead of 8787. Overrides VITE_BACKEND_HOST.
+//   --gatekeepers A,B           Start only these gatekeeper Workers (names with or without the
+//                               `gatekeeper-` prefix, or `none`); the router and backend always run.
+//                               Fewer Workers means a faster restart on every edit. Overrides
+//                               INFEROS_DEV_GATEKEEPERS. See dev-gatekeepers.ts.
+//   --use-workers-ai-binding    Include the Workers AI binding in
+//                               workshop-backend (requires Cloudflare login).
+//   --serve-frontend-assets     Serve the prebuilt frontend from the router instead of expecting
+//                               Vite (`pnpm run-local` passes this).
+//   --no-ui-watchers            Skip the per-gatekeeper configurator and app UI watchers (for
+//                               machines near the inotify instance limit).
+//   --consumer-root DIR         Run for a consumer wrapper: its inferos.config.json, canvas config,
+//                               gatekeepers/ and workers/ join the stack.
 //
-// Env:
+// Env (the shell wins, then .dev.vars, then .env):
 //   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
+//   INFEROS_DEV_GATEKEEPERS=inferops  As --gatekeepers.
 
 import {
-  existsSync, readFileSync, writeFileSync, statSync,
+  existsSync, readFileSync, writeFileSync,
 } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import { constants } from "node:os";
-import { basename, join, dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
@@ -39,7 +50,7 @@ import { unsupportedCapabilities } from "./consumer/runtime.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { prepareConsumerGatekeepers } from "./consumer/gatekeepers.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
-import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
+import { DEV_GATEKEEPERS_ENV, discoverDevGatekeepers, requestedDevGatekeepers, selectDevGatekeepers } from "./dev-gatekeepers.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
 import { startOpenAiCompanion } from './openai-companion.ts';
 import { installDevVarsSecrets, installLocalSecrets } from './local-secrets.ts';
@@ -51,14 +62,6 @@ const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SCRIPTS_DIR, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
 const WORKSHOP_BACKEND_DIR = join(PACKAGES_DIR, "workshop-backend");
-
-/** A gatekeeper package as {@link findGatekeepers} discovers it. */
-interface Gatekeeper {
-  /** Package directory name, which is also the worker name. */
-  name: string;
-  /** Absolute path to the package directory. */
-  dir: string;
-}
 
 // Load a root `.dev.vars` file (KEY=VALUE lines) into process.env for local development. Existing
 // shell environment values take precedence. This file is gitignored and may hold local secrets.
@@ -111,20 +114,14 @@ try {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Discover gatekeeper packages.
-// ---------------------------------------------------------------------------
-function findGatekeepers(root: string): Gatekeeper[] {
-  return workerPackageDirs(root)
-      .map(dir => ({ name: basename(dir), dir }))
-      .filter(({ name }) => name.startsWith("gatekeeper-"))
-      .filter(({ dir }) => {
-    try {
-      return statSync(join(dir, "wrangler.jsonc")).isFile();
-    } catch {
-      return false;
-    }
-  });
+// The developer's `--gatekeepers` / INFEROS_DEV_GATEKEEPERS selection, validated before anything
+// is generated; applied to the discovered set below (dev-gatekeepers.ts).
+let requestedGatekeepers: string[] | null;
+try {
+  requestedGatekeepers = requestedDevGatekeepers(process.argv.slice(2), process.env[DEV_GATEKEEPERS_ENV]);
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(1);
 }
 
 // The committed wrangler.jsonc files are generated from cloudflare.config.ts; regenerate them so a
@@ -197,11 +194,16 @@ const publicationFlags = Object.fromEntries((["PUBLISH_CLOUDFLAREOS_WIDGET", "PU
   })]));
 const codingWorkbenchRepos = consumerConfig?.schemaVersion === 2
   ? codingRepoIds(consumerConfig) : process.env.CODING_WORKBENCH_REPOS ?? "";
-const gatekeepers = [
-  ...findGatekeepers(ROOT).filter(({ dir, name }) =>
-    basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustomGatekeepers.has(name)),
+// Narrowed by `--gatekeepers` when given: a gatekeeper left out runs no Worker and gets no router or
+// backend service binding, since both binding lists below are built from this one.
+const gatekeepers = selectDevGatekeepers([
+  ...discoverDevGatekeepers(ROOT, enabledCustomGatekeepers),
   ...consumerGatekeepers.map(({ name, directory }) => ({ name, dir: directory })),
-];
+], requestedGatekeepers);
+if (requestedGatekeepers !== null) {
+  console.log(`gatekeepers: ${gatekeepers.map(({ name }) => name).join(", ") || "(none)"} ` +
+    `(narrowed by --gatekeepers/${DEV_GATEKEEPERS_ENV}; the router and backend always run)`);
+}
 // In-repo there is no inferos.config.json to carry feature flags, so a canvas config is the switch
 // that turns composition (with saved views) on. A wrapper's own flags always take precedence.
 const canvasFeatures = consumerConfig?.features
@@ -802,8 +804,10 @@ const [wranglerCommand, wranglerArgv]: [string, string[]] = wranglerEntry
   : pnpmCommand(["exec", "wrangler", "dev", ...args]);
 
 // Recorded so `pnpm local status|stop` (scripts/local/lifecycle.ts) can find this server.
-process.on("exit", recordDevServer(ROOT,
-    { port: Number(wranglerPort ?? DEFAULT_WRANGLER_PORT), mode: serveFrontendAssets ? "run-local" : "dev-server" }));
+process.on("exit", recordDevServer(ROOT, {
+  port: Number(wranglerPort ?? DEFAULT_WRANGLER_PORT), mode: serveFrontendAssets ? "run-local" : "dev-server",
+  ...(requestedGatekeepers === null ? {} : { gatekeepers: gatekeepers.map(({ name }) => name) }),
+}));
 
 // `spawn`, not `execFileSync`, so the deferred watchers can start once the server is up. It stays in
 // this process group with the terminal attached, so Ctrl-C reaches it as before.

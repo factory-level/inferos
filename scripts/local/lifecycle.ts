@@ -280,7 +280,9 @@ async function requireOwnStack(stack: LocalStack, deps: LifecycleDeps, command: 
 
 async function status(stack: LocalStack, deps: LifecycleDeps): Promise<LifecycleResult> {
   const { listening, devServer, ownership } = await inspectStack(stack, deps);
-  const workers = configuredWorkers(deps.root);
+  // The Workers the running server actually started: its record says when `--gatekeepers` narrowed
+  // them, so a deliberately absent gatekeeper is not reported as down.
+  const workers = configuredWorkers(deps.root, ownership === "running" ? devServer?.gatekeepers ?? null : null);
   // A foreign listener is not probed: its answers would describe some other server as this stack.
   const probes = ownership === "running"
     ? await probeWorkers(stack.url, workers, deps.fetchImpl)

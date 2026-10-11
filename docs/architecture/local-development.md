@@ -12,6 +12,7 @@ covers:
   - scripts/local
   - packages/workshop-shared/src/password-salt.ts
   - scripts/dev-server-config.ts
+  - scripts/dev-gatekeepers.ts
   - cloudflare.config.ts
   - scripts/worker-config.ts
   - scripts/worker-dirs.ts
@@ -21,7 +22,7 @@ covers:
   - packages/integration-tests
   - scripts/preview/smoke.ts
   - scripts/preview/smoke.test.ts
-updated: 2026-10-09
+updated: 2026-10-11
 ---
 
 # Cloudflare-like local development
@@ -34,7 +35,8 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 
 | Path | Responsibility |
 | --- | --- |
-| `scripts/run-dev-server.ts` | Discovers configured workers, generates dev wiring, builds gatekeeper UIs and starts Wrangler/watchers. `--no-ui-watchers` (also through `pnpm local start -- --no-ui-watchers`) skips the per-gatekeeper configurator and app UI watcher processes, each of which holds an inotify instance, for machines near `fs.inotify.max_user_instances`; the UIs are still built once at startup. |
+| `scripts/run-dev-server.ts` | Discovers configured workers, generates dev wiring, builds gatekeeper UIs and starts Wrangler/watchers. Its header comment lists every flag. `--no-ui-watchers` (also through `pnpm local start -- --no-ui-watchers`) skips the per-gatekeeper configurator and app UI watcher processes, each of which holds an inotify instance, for machines near `fs.inotify.max_user_instances`; the UIs are still built once at startup. `--gatekeepers a,b` narrows which gatekeeper Workers run (see [fewer Workers](#fewer-workers)). |
+| `scripts/dev-gatekeepers.ts` | The one gatekeeper discovery and `--gatekeepers`/`INFEROS_DEV_GATEKEEPERS` selection rule, shared by the dev server and `pnpm local status`. |
 | `scripts/run-local.ts` | Convenience local install/build/run flow. |
 | `scripts/local/lifecycle.ts`, `scripts/local/stack.ts` | `pnpm local <command>`: status, start, stop, seed, verify, reset and logs for this checkout's stack, with JSON reports and stable exit codes. |
 | `scripts/local/coding.ts`, `scripts/local/runner.ts` | `pnpm local runner start\|status\|stop` and `pnpm local coding doctor`: the InferOps coding runner for a wrapper (see [local coding workflows](local-coding-workflows.md#runner-lifecycle)). |
@@ -96,7 +98,13 @@ Every step is idempotent. The JSON report includes the session token, which a br
 
 A generated wrapper's `pnpm local` runs this operator from its pinned submodule, with the wrapper's `local.port`; `start` adds `--consumer-root <wrapper>` after the wrapper's own startup refusals, and `seed` defaults `--screen` to the wrapper's first screen template, and `runner`/`coding` get `--consumer-root <wrapper>` ([consumer configuration](consumer-configuration.md#data-and-control-flow), [walkthrough](../wiki/consumer-bootstrap.md#wrapper-pnpm-local)).
 
-`stack.ts` holds the inspection: port probing, Worker discovery mirroring `run-dev-server.ts` (every `gatekeeper-*` package with a `wrangler.jsonc`, the fork's own gatekeepers filtered by `inferos.canvas.json`), the record file and the ownership rule built on it (`stackOwnership`), the state directory and the log location. `lifecycle.ts` takes its process, network and subprocess access as an injectable `LifecycleDeps`, so `scripts/local/lifecycle.test.ts` covers usage errors, the status JSON shape, a stopped and a degraded stack, an occupied port, a listener this checkout did not start (a real socket with no record, and with a record for another port), repeated seeding, failure attribution, reset boundaries, stop, record ownership and log tailing without a running Workshop.
+`stack.ts` holds the inspection: port probing, Worker discovery through the same `dev-gatekeepers.ts` helper `run-dev-server.ts` uses (every `gatekeeper-*` package with a `wrangler.jsonc`, the fork's own gatekeepers filtered by `inferos.canvas.json`, narrowed to the gatekeepers a `--gatekeepers` server recorded starting), the record file and the ownership rule built on it (`stackOwnership`), the state directory and the log location. `lifecycle.ts` takes its process, network and subprocess access as an injectable `LifecycleDeps`, so `scripts/local/lifecycle.test.ts` covers usage errors, the status JSON shape, a stopped and a degraded stack, an occupied port, a listener this checkout did not start (a real socket with no record, and with a record for another port), repeated seeding, failure attribution, reset boundaries, stop, record ownership and log tailing without a running Workshop.
+
+## Fewer Workers
+
+Wrangler's multi-Worker dev session restarts every Worker it runs on any change, so the edit-to-live time of a backend edit grows with the number of gatekeepers. `pnpm dev-server --gatekeepers a,b` (or `INFEROS_DEV_GATEKEEPERS=a,b`; the flag wins) starts only the named gatekeepers. Names may drop the `gatekeeper-` prefix, `none` starts none, and a name that matches no discovered gatekeeper stops startup with the list of available ones. The selection applies after discovery and the canvas filter, to pinned, custom and wrapper gatekeepers alike (`selectDevGatekeepers`). The router and backend always run. A gatekeeper left out runs no Worker, gets no `GatekeeperVendor` binding on the backend and no binding on the dev router (both are built from the one selected list), and starts no UI watcher; its route then falls through like any unbound gatekeeper's. Without the flag or variable, nothing changes.
+
+The dev server writes the selection into its `.wrangler/local/dev-server.json` record, and `pnpm local status` probes only those Workers, so a deliberately absent gatekeeper is not reported as down. `scripts/dev-gatekeepers.test.ts` covers parsing, selection, discovery and that `run-dev-server.ts` discovers through the helper; `lifecycle.test.ts` covers the narrowed status.
 
 ## Readiness as an agent sees it
 
