@@ -22,6 +22,8 @@
 //   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
 //   INFEROS_DEV_GATEKEEPERS=inferops  As --gatekeepers.
 //   DEV_CLIENT_PORT=3001              Where Vite listens, for the default PUBLIC_BASE_URL.
+//   DEV_INSPECTOR_PORT=9300           Pass --inspector-port 9300 to wrangler dev instead of letting
+//                                     it probe from 9229, which races a dev server starting beside it.
 
 import {
   existsSync, readFileSync, writeFileSync,
@@ -57,7 +59,7 @@ import { startOpenAiCompanion } from './openai-companion.ts';
 import { installDevVarsSecrets, installLocalSecrets } from './local-secrets.ts';
 import { splitGatekeeperSecrets, withoutLocalOverrides } from './gatekeeper-dev-secrets.ts';
 import { recordDevServer } from "./local/stack.ts";
-import { DEV_CLIENT_PORT, readWorktreeEnv } from "./worktree-env.ts";
+import { DEV_CLIENT_PORT, inspectorPortArgs, readWorktreeEnv } from "./worktree-env.ts";
 import { parseEnv } from 'node:util';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -797,6 +799,14 @@ const configs = [
 ];
 
 const args = configs.flatMap(c => ["-c", c]);
+// A fixed inspector port when one is configured (a `pnpm wt` overlay sets it): Wrangler's own
+// choice is a probe-then-bind race between dev servers that start together.
+try {
+  args.push(...inspectorPortArgs(process.env));
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(1);
+}
 if (wranglerPort) {
   args.push("--port", wranglerPort);
 } else {

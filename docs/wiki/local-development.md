@@ -50,7 +50,10 @@ InferOps worktrees on the same machine shift InferOps' ports (8080, 8000, 8001, 
 | --- | --- |
 | base | Wrangler's public origin (router, `/api`, `/gatekeeper/*`): `VITE_BACKEND_HOST` |
 | base + 1 | Vite (`pnpm dev-client`), and the backend's default `PUBLIC_BASE_URL` |
-| base + 2 … base + 9 | Spare, reserved for the worktree |
+| base + 2 | Wrangler's inspector (`--inspector-port`, from `DEV_INSPECTOR_PORT`) |
+| base + 3 … base + 9 | Spare, reserved for the worktree |
+
+Wrangler picks its inspector port itself by probing 9229 upwards, then hands it to workerd a moment later. Two dev servers starting together can both pick 9229, and the second one's workerd then dies with `bind(): Address already in use (os error 98)`. With its own inspector port, a worktree never races another one. A main checkout without an overlay keeps Wrangler's probing. Wrangler's other dev ports are kernel-assigned (port 0), so they cannot collide.
 
 Vite runs with `strictPort` whenever a port was assigned, so a busy port fails at startup instead of drifting to another port that the backend's `PUBLIC_BASE_URL` does not name.
 
@@ -63,6 +66,7 @@ The block is recorded in the per-user registry `$XDG_CONFIG_HOME/inferos/worktre
 ```dotenv
 VITE_BACKEND_HOST=localhost:8810
 DEV_CLIENT_PORT=8811
+DEV_INSPECTOR_PORT=8812
 VP_RUN_CONCURRENCY_LIMIT=7
 ```
 

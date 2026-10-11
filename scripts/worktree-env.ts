@@ -24,6 +24,28 @@ export const WORKTREE_ENV_FILE = ".env.worktree";
  */
 export const DEV_CLIENT_PORT = "DEV_CLIENT_PORT";
 
+/**
+ * The variable naming the port Wrangler's inspector listens on (`wrangler dev --inspector-port`).
+ * Without it Wrangler probes 9229 upwards for the first free port and hands it to workerd a moment
+ * later, so two dev servers starting together can both pick the same one, and the second workerd
+ * dies on `bind(): Address already in use`. A `pnpm wt` worktree gets its own from its port block.
+ */
+export const DEV_INSPECTOR_PORT = "DEV_INSPECTOR_PORT";
+
+/**
+ * `--inspector-port <p>` for `wrangler dev` when `DEV_INSPECTOR_PORT` is set, else nothing, which
+ * keeps Wrangler's own probing. Throws unless the value is an integer from 1024 to 65535.
+ */
+export function inspectorPortArgs(env: NodeJS.ProcessEnv): string[] {
+  const raw = env[DEV_INSPECTOR_PORT];
+  if (raw === undefined || raw.trim() === "") return [];
+  const port = Number(raw);
+  if (!/^\d+$/.test(raw.trim()) || port < 1024 || port > 65535) {
+    throw new Error(`${DEV_INSPECTOR_PORT} must be an integer between 1024 and 65535, got "${raw}".`);
+  }
+  return ["--inspector-port", String(port)];
+}
+
 /** The repo root this module belongs to: scripts → root. */
 export const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 

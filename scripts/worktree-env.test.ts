@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { localEnv } from "./local/stack.ts";
 import { concurrencyEnv } from "./vp/concurrency.ts";
 import {
-  DEV_CLIENT_PORT, devClientServerOptions, readEnvFile, readWorktreeEnv, withWorktreeEnv, WORKTREE_ENV_FILE,
+  DEV_CLIENT_PORT, DEV_INSPECTOR_PORT, devClientServerOptions, inspectorPortArgs, readEnvFile, readWorktreeEnv, withWorktreeEnv, WORKTREE_ENV_FILE,
 } from "./worktree-env.ts";
 
 const fixtures = mkdtempSync(join(tmpdir(), "worktree-env-"));
@@ -91,5 +91,30 @@ describe("concurrency note", () => {
     const { env, note } = concurrencyEnv({}, { cpus: 14, memoryBytes: 64 * 1024 ** 3 }, "3", WORKTREE_ENV_FILE);
     assert.equal(env.VP_RUN_CONCURRENCY_LIMIT, "3");
     assert.equal(note, "vp run: concurrency 3 (from .env.worktree)");
+  });
+});
+
+describe("inspectorPortArgs", () => {
+  it("leaves Wrangler's own probing alone without the variable", () => {
+    assert.deepEqual(inspectorPortArgs({}), []);
+    assert.deepEqual(inspectorPortArgs({ [DEV_INSPECTOR_PORT]: " " }), []);
+  });
+
+  it("passes a configured port as --inspector-port", () => {
+    assert.deepEqual(inspectorPortArgs({ [DEV_INSPECTOR_PORT]: "8812" }), ["--inspector-port", "8812"]);
+  });
+
+  it("rejects a value that is not a port Wrangler can bind", () => {
+    for (const bad of ["9229a", "80", "70000", "1.5"]) {
+      assert.throws(() => inspectorPortArgs({ [DEV_INSPECTOR_PORT]: bad }), /between 1024 and 65535/, bad);
+    }
+  });
+
+  // run-dev-server.ts is a top-level script, so the wiring is pinned at the source: the overlay is
+  // loaded into process.env first, and the flag joins the wrangler dev arguments.
+  it("is what run-dev-server hands wrangler dev", () => {
+    const source = readFileSync(join(import.meta.dirname, "run-dev-server.ts"), "utf8");
+    assert.match(source, /args\.push\(\.\.\.inspectorPortArgs\(process\.env\)\)/);
+    assert.ok(source.indexOf("readWorktreeEnv(ROOT)") < source.indexOf("inspectorPortArgs(process.env)"));
   });
 });
