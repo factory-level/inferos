@@ -137,6 +137,15 @@ export default defineConfig({
       },
     }),
   ],
+  resolve: {
+    // `@gadgets/typed-storage`'s `exports` point at its emitted `dist/`, which only its `build`
+    // writes. Resolve it from source instead, as `tsconfig.json`'s `paths` already does, so a bare
+    // `vitest run <file>` works in a fresh checkout before anything is built.
+    alias: [{
+      find: /^@gadgets\/typed-storage$/,
+      replacement: path.resolve(import.meta.dirname, '../typed-storage/src/index.ts'),
+    }],
+  },
   define: {
     __WORKSHOP_SOURCE_LENGTHS__: JSON.stringify(sourceLengths),
     __WORKSHOP_GUARDED_SOURCE_LENGTHS__: JSON.stringify(guardedSourceLengths),
