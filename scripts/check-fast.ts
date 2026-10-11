@@ -163,11 +163,12 @@ const configName = (args: string[]) => {
 
 /**
  * True for a docs file of `pkg`: a `*.md` or `README*` at the package root, or any file under the
- * package's `docs/`. It runs `pnpm docs:check` (which fails when an architecture doc's `covers:` names
- * a file that is gone) instead of the package's tests. Only those places: deeper Markdown can be runtime content (a blueprint's
- * `files/README.md` is bundled into its Gadget). Configs are never docs, even when they mostly hold
- * data: `wrangler.jsonc` sets the Worker's `main`, bindings and compatibility flags, which change
- * what runs, so it keeps the full-config fallback like any other non-test file.
+ * package's `docs/`. It runs `pnpm docs:check` (which fails when an architecture doc's `covers:`
+ * names a file that is gone) instead of the package's tests. Only those places: deeper Markdown can
+ * be runtime content (a blueprint's `files/README.md` is bundled into its Gadget). Configs are never
+ * docs, even when they mostly hold data: `wrangler.jsonc` sets the Worker's `main`, bindings and
+ * compatibility flags, which change what runs, so it keeps the full-config fallback like any other
+ * non-test file.
  */
 export function isPackageDoc(file: string, pkg: WorkspacePackage): boolean {
   const inside = file.slice(pkg.dir.length + 1);

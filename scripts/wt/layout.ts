@@ -115,7 +115,10 @@ export function checkOverlay(entry: WorktreeEntry, overlay: Readonly<Record<stri
   if (actual === undefined || actual.trim() === "") {
     return { level: "warn", message: `${entry.name}: ${WORKTREE_ENV_FILE} sets no ${DEV_INSPECTOR_PORT}=${inspector}; ${rewrite}` };
   }
-  if (actual !== inspector) {
+  // Compared as inspectorPortArgs reads it, so "08832" or " 8832" is the right port. Only decimal
+  // digits count: Number would also read "0x2280" as 8832, which inspectorPortArgs refuses.
+  const trimmed = actual.trim();
+  if (!/^\d+$/.test(trimmed) || Number(trimmed) !== ports.inspector) {
     return { level: "warn", message: `${entry.name}: ${WORKTREE_ENV_FILE} sets ${DEV_INSPECTOR_PORT}=${actual}, but its block's inspector is ${inspector} (${block}); ${rewrite}` };
   }
   return { level: "ok", message: `${entry.name}: ${WORKTREE_ENV_FILE} matches ${block}` };

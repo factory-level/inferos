@@ -53,7 +53,7 @@ InferOps worktrees on the same machine shift InferOps' ports (8080, 8000, 8001, 
 | base + 2 | Wrangler's inspector (`--inspector-port`, from `DEV_INSPECTOR_PORT`) |
 | base + 3 … base + 9 | Spare, reserved for the worktree |
 
-Wrangler picks its inspector port itself by probing 9229 upwards, then hands it to workerd a moment later. Two dev servers starting together can both pick 9229, and the second one's workerd then dies with `bind(): Address already in use (os error 98)`. With its own inspector port, a worktree never races another one. A main checkout without an overlay keeps Wrangler's probing. Wrangler's other dev ports are kernel-assigned (port 0), so they cannot collide. Every worktree also shares Wrangler's dev registry (`~/.config/.wrangler/registry`) under the same Worker names. That is safe: the dev server binds only Workers its own `wrangler dev` runs, and those bindings never go through the registry ([details](../architecture/local-development.md#parallel-worktrees)).
+Wrangler picks its inspector port itself by probing 9229 upwards, then hands it to workerd a moment later. Two dev servers starting together can both pick 9229, and the second one's workerd then dies with `bind(): Address already in use (os error 98)`. With its own inspector port, a worktree never races another one. A main checkout without an overlay keeps Wrangler's probing. Wrangler's other dev ports are kernel-assigned (port 0), so they cannot collide. Every worktree also shares Wrangler's dev registry (`~/.config/.wrangler/registry`) under the same Worker names. That is safe: the dev server binds only Workers its own `wrangler dev` runs, and only Workers it does not run go through the registry ([details](../architecture/local-development.md#parallel-worktrees)).
 
 Vite runs with `strictPort` whenever a port was assigned, so a busy port fails at startup instead of drifting to another port that the backend's `PUBLIC_BASE_URL` does not name.
 
@@ -87,7 +87,7 @@ It is read by `pnpm dev-server`/`run-local`, `pnpm local`, `pnpm dev-client` and
 
 ## The edit loop
 
-- **While iterating**, run `pnpm check:fast` after each change. It type-checks and tests only the packages your changed files are in. It runs every `scripts/` suite for a `scripts/**` change and `pnpm docs:check` for `docs/`. It ends with a `NOT CHECKED` list of what it skipped. A single test file is `npx vitest run <file>` in its package, once that package's codegen has run. Don't run full suites after every edit.
+- **While iterating**, run `pnpm check:fast` after each change. It type-checks and tests only the packages your changed files are in. It runs every `scripts/` suite for a `scripts/**` change and `pnpm docs:check` for `docs/`. Anything under a package's `docs/` counts as documentation by path alone, so a `.ts` file placed there would be misclassified and its tests skipped. It ends with a `NOT CHECKED` list of what it skipped. A single test file is `npx vitest run <file>` in its package, once that package's codegen has run. Don't run full suites after every edit.
 - **Before hand-off**, run `pnpm check:full` once: `pnpm lint`, `pnpm docs:check`, every `scripts/` suite and `pnpm test`. It caps `vp run` at 4 tasks unless your shell, `.env.worktree` or `.env` sets `VP_RUN_CONCURRENCY_LIMIT`. A worktree's own share from `wt new` therefore applies.
 - **CI** is the final gate.
 
@@ -95,17 +95,28 @@ The `iterate` skill and the [check tiers](../architecture/local-development.md#c
 
 ### Measured
 
-On 2026-10-11, at main `404a0cb5`, two worktrees made by `pnpm wt new` ran the whole loop at the same time, each with its own dev server (`--gatekeepers inferops`). The load average was 0.8–4.7 on 14 cores.
+Each round ran two worktrees made by `pnpm wt new` through the whole loop at the same time, each with its own dev server (`--gatekeepers inferops`), on a 14-core machine. Round 6 is the current proof.
 
-| Step | Worktree E | Worktree F | Before this work |
+- **Round 4** (2026-10-11, main `404a0cb5`): worktrees E and F, load average 0.8–4.7.
+- **Round 6** (2026-10-11, main `a6c0ca64`, after [#238](https://github.com/factory-level/inferos/pull/238)): two worktrees started together with no bind failure (inspector ports 8862 and 8872). The load average (1/5/15 min) was 5.15 / 25.7 / 34.0 at the start and 11.5 / 20.0 / 30.5 at the end.
+- **Before this work** (measured 2026-10-11 at main `3bc6420b`, same 14 cores).
+
+Each round's cell gives both worktrees.
+
+| Step | Round 6 (current) | Round 4 (E / F) | Before this work |
 | --- | --- | --- | --- |
-| `pnpm wt new` | 20.2 s | 20.2 s | — |
-| One backend test file | 2.2 s | 2.1 s | 19–23 s |
-| Backend edit until live | 4.0–4.4 s | 4.0–4.4 s | about 6.5 s |
-| `check:fast`, test-file change | 14.8 s | 16.2 s | — |
-| `check:fast`, backend `src` change | 52 s | 42 s | 130–180 s (backend suite) |
+| `pnpm wt new` | 20.0 / 20.4 s | 20.2 / 20.2 s | — |
+| One backend test file | 2.5 / 2.2 s | 2.2 / 2.1 s | 19–23 s |
+| Dev server cold start | 12.7 / 12.5 s | — | — |
+| Backend edit until live | 5.1–5.5 / 5.0–5.6 s | 4.0–4.4 / 4.0–4.4 s | about 6.5 s |
+| `check:fast`, test-file change | 17.9 / 18.3 s | 14.8 / 16.2 s | — |
+| `check:fast`, backend `src` change | 77.8 / 77.0 s | 52 / 42 s | 88 s (`check:fast` before [#236](https://github.com/factory-level/inferos/pull/236)); 130–180 s (backend suite) |
 
-Known limit: two dev servers started at the same instant can collide on an internal port, and one fails with workerd's `bind(): Address already in use` (in this run, worktree E's first start). A fix is in progress on branch `dx/wt-dev-ports`.
+The backend `src` row compares different operations. Before this work, the figures are `check:fast` as it was before #236 and a full backend suite run; after, `check:fast` runs only the related tests.
+
+Round 6's backend `src` change was slower than round 4's. In round 6, `VP_RUN_CONCURRENCY_LIMIT` was 2 (14 cores divided by 5 registered `wt` worktrees), against 7 in round 4. That the lower share caused the slowdown is an inference, not a measurement: a 2-against-7 comparison run under a load average of about 50 was inconclusive.
+
+Known limit, now fixed: two dev servers started at the same instant could collide on Wrangler's inspector port, and one failed with workerd's `bind(): Address already in use` (in round 4, worktree E's first start). [#238](https://github.com/factory-level/inferos/pull/238) gives each worktree its own `DEV_INSPECTOR_PORT`. Its race harness saw 2 bind failures in 20 starts before the change and 0 in 25 after, and round 6 started both servers together without one.
 
 ## Fewer Workers, faster reloads
 
