@@ -105,18 +105,36 @@ const DETACHED_GRANDCHILD_VP = `
   setTimeout(() => process.exit(0), 300);
 `;
 
+/** What the fast writer appends once the wrapper has seen vp exit: never part of vp's output. */
+const LATE_BYTE = "L";
+
 // The review's second case: a detached grandchild of an uncached task writing to vp's stdout
-// continuously, faster than the tail reads, after vp has exited: `timeout 3 yes`, in effect, as
-// unthrottled 1 MiB writes for 3s. vp waits until the file holds 1 MiB, records the time and the
-// size it saw, and exits 5.
-const FAST_WRITER_VP = (exitFile: string) => `
+// continuously, faster than the tail reads, after vp has exited: `yes`, in effect, as unthrottled
+// 1 MiB writes. vp waits until the file holds 1 MiB, records the time and the size it saw, and
+// exits 5.
+//
+// The writer runs until the test kills it, not for a fixed time: a deadline of its own raced the
+// wrapper's exit and the test's checks, and under load the writer lost. Its output is `z` until
+// `exitSeenFile` exists and `LATE_BYTE` after: the wrapper fixture creates that file in its own
+// `exit` listener, which runs after `spawnWithOwnOutput`'s has taken `endAt`, so every `LATE_BYTE`
+// lands past `endAt` and none may be forwarded. (vp's own `size` is no bound for that: the writer
+// keeps going between vp's last check and the wrapper seeing the exit, by tens of MiB under load.)
+// It stops by itself if the test process is gone or after 120s, so a test killed mid-case cannot
+// leave it filling the disk.
+const FAST_WRITER_VP = (exitFile: string, exitSeenFile: string) => `
   const { spawn } = require("node:child_process");
   const { fstatSync, writeFileSync } = require("node:fs");
   const writer = spawn(process.execPath, ["-e", [
-    "const { writeSync } = require('node:fs');",
-    "const chunk = Buffer.alloc(1024 * 1024, 'z');",
-    "const stopAt = Date.now() + 3_000;",
-    "while (Date.now() < stopAt) writeSync(1, chunk);",
+    "const { existsSync, writeSync } = require('node:fs');",
+    "const early = Buffer.alloc(1024 * 1024, 'z');",
+    "const late = Buffer.alloc(1024 * 1024, " + ${JSON.stringify(JSON.stringify(LATE_BYTE))} + ");",
+    "const giveUpAt = Date.now() + 120_000;",
+    "let seen = false;",
+    "while (Date.now() < giveUpAt) {",
+    "  try { process.kill(${process.pid}, 0); } catch { break; }",
+    "  seen ||= existsSync(" + ${JSON.stringify(JSON.stringify(exitSeenFile))} + ");",
+    "  writeSync(1, seen ? late : early);",
+    "}",
   ].join("\\n")], { stdio: "inherit", detached: true });
   writer.unref();
   process.stdout.write("writer " + writer.pid + "\\n");
@@ -145,6 +163,8 @@ interface Run {
   stdout: () => string;
   /** Every byte of stdout received, including any `keepStdoutBytes` discarded. */
   stdoutBytes: () => number;
+  /** Whether any stdout chunk received, kept or not, contained `watchByte`. */
+  sawWatchByte: () => boolean;
   stderr: () => string;
   startReading: () => void;
   /** Resolves once both of the wrapper's output streams have closed. */
@@ -158,9 +178,12 @@ interface Run {
  * After the spawn the wrapper also makes its own stdout non-blocking explicitly: an ancestor
  * sharing the description flipping it to O_NONBLOCK, the hazard with inherited stdio. It must not
  * reach the child either way.
+ *
+ * `exitSeenFile`, when given, is created by the wrapper once it has seen the child exit, from an
+ * `exit` listener registered after `spawnWithOwnOutput`'s own, so `endAt` is already set by then.
  */
-function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs, keepStdoutBytes = Infinity }:
-    { readDelayMs?: number; drainIdleMs?: number; keepStdoutBytes?: number } = {}): Run {
+function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs, keepStdoutBytes = Infinity, exitSeenFile, watchByte }:
+    { readDelayMs?: number; drainIdleMs?: number; keepStdoutBytes?: number; exitSeenFile?: string; watchByte?: string } = {}): Run {
   const dir = join(fixtureRoot, `case-${++caseCount}`);
   const tmp = join(dir, "tmp");
   mkdirSync(tmp, { recursive: true });
@@ -168,9 +191,12 @@ function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs, keepStdou
   writeFileSync(child, childBody);
   const wrapper = join(dir, "wrapper.mjs");
   writeFileSync(wrapper, `
+    import { writeFileSync } from "node:fs";
     import { spawnWithOwnOutput } from ${JSON.stringify(OWN_OUTPUT.href)};
-    spawnWithOwnOutput(process.execPath, [${JSON.stringify(child)}],
+    const child = spawnWithOwnOutput(process.execPath, [${JSON.stringify(child)}],
         { graceMs: 2_000, finalDrainIdleMs: ${drainIdleMs ?? "undefined"} });
+    const exitSeenFile = ${JSON.stringify(exitSeenFile ?? null)};
+    if (exitSeenFile) child.on("exit", () => writeFileSync(exitSeenFile, ""));
     process.stdout._handle?.setBlocking?.(false);
   `);
 
@@ -185,6 +211,8 @@ function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs, keepStdou
   const out: Buffer[] = [];
   let kept = 0;
   let received = 0;
+  let sawWatchByte = false;
+  const watched = watchByte === undefined ? undefined : Buffer.from(watchByte)[0];
   const err: Buffer[] = [];
   let reading = false;
   const startReading = () => {
@@ -192,6 +220,7 @@ function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs, keepStdou
     reading = true;
     proc.stdout.on("data", (chunk: Buffer) => {
       received += chunk.length;
+      if (watched !== undefined && !sawWatchByte) sawWatchByte = chunk.includes(watched);
       // Counted, not kept, past the limit: the uncapped tail a test guards against can forward GBs.
       if (kept < keepStdoutBytes) {
         out.push(chunk);
@@ -213,6 +242,7 @@ function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs, keepStdou
     exit,
     stdout: () => Buffer.concat(out).toString(),
     stdoutBytes: () => received,
+    sawWatchByte: () => sawWatchByte,
     stderr: () => Buffer.concat(err).toString(),
     startReading,
     closed,
@@ -337,25 +367,29 @@ describe("spawnWithOwnOutput", {
 
   it("stops at the output's size when the child exited, though a descendant keeps writing", async () => {
     const exitFile = join(fixtureRoot, `vp-exit-${++caseCount}`);
-    const run = runWrapper(FAST_WRITER_VP(exitFile), { keepStdoutBytes: 64 * 1024 });
+    const exitSeenFile = join(fixtureRoot, `vp-exit-seen-${caseCount}`);
+    const run = runWrapper(FAST_WRITER_VP(exitFile, exitSeenFile),
+        { keepStdoutBytes: 64 * 1024, exitSeenFile, watchByte: LATE_BYTE });
     let writerPid = 0;
     try {
       assert.ok(await waitFor(() => /^writer \d+$/m.test(run.stdout())), "no writer reported");
       writerPid = Number(/^writer (\d+)$/m.exec(run.stdout())?.[1]);
-      assert.deepEqual(await run.exit, { code: 5, signal: null });
+      // The writer never stops on its own, so a wrapper that follows it never exits: raced, so that
+      // fails here instead of hanging the suite. Unref'd, so a pass does not keep the file alive.
+      const timedOut = new Promise(resolve => setTimeout(() => resolve("still running after 20s"), 20_000).unref());
+      assert.deepEqual(await Promise.race([run.exit, timedOut]), { code: 5, signal: null });
       const wrapperExitedAt = Date.now();
-      // Checked first, so the timing below is meaningful: an uncapped tail ends with the writer.
-      assert.ok(isAlive(writerPid), "the wrapper outlived the writer it should have stopped following");
+      assert.ok(isAlive(writerPid), "fixture error: the writer stopped before the wrapper exited");
       const vpExit = JSON.parse(readFileSync(exitFile, "utf8")) as { at: number; size: number };
-      assert.ok(wrapperExitedAt - vpExit.at < 2_000,
+      // Measured from vp's exit, with headroom for a loaded machine: unloaded it is well under 1s.
+      assert.ok(wrapperExitedAt - vpExit.at < 10_000,
           `the wrapper exited ${wrapperExitedAt - vpExit.at}ms after the child`);
       await run.closed;
       const forwarded = run.stdoutBytes();
-      // Everything up to the child's exit arrived, and little beyond it: at the writer's rate, an
-      // uncapped tail forwards GBs before the writer stops.
+      // Everything up to the child's exit arrived, and nothing written after the wrapper saw it.
       assert.ok(forwarded >= vpExit.size, `forwarded ${forwarded} bytes, below the ${vpExit.size} at exit`);
-      assert.ok(forwarded < vpExit.size + 32 * 1024 * 1024,
-          `forwarded ${forwarded} bytes, far past the ${vpExit.size} at exit`);
+      assert.ok(!run.sawWatchByte(),
+          `forwarded output the writer appended after the wrapper saw the child exit (${forwarded} bytes in all)`);
       assert.deepEqual(readdirSync(run.tmp), [], "the temp output files were left behind");
     } finally {
       // Its own process group (`detached`), so the group kill reaches it and nothing it started.
