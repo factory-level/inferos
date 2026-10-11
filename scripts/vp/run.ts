@@ -12,12 +12,15 @@
 // concurrency note, never to alter what `vp run` receives. `--concurrency-limit N` and `--parallel`
 // still work if passed, since vite-task gives a flag priority over the env var; in that case the
 // note is suppressed, because it would announce a number the run is not using (concurrency.ts).
+//
+// vp's stdout and stderr are pipes of its own whenever ours are not TTYs, forwarded here with
+// backpressure: on a shared, non-blocking CI pipe vp aborts the run on EAGAIN (own-pipes.ts). Exit
+// codes and signals pass through unchanged (relay-termination.ts).
 
-import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { relayTermination } from "../relay-termination.ts";
 import { vpRunEnv } from "./concurrency.ts";
+import { spawnWithOwnPipes } from "./own-pipes.ts";
 
 // Three hops: scripts/vp → scripts → repo root, where `vite-plus` is a devDependency.
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -25,7 +28,4 @@ const VP = join(ROOT, "node_modules", "vite-plus", "bin", "vp");
 
 const vpArgs = process.argv.slice(2);
 
-const child = spawn(process.execPath, [VP, "run", ...vpArgs],
-    { stdio: "inherit", env: vpRunEnv({ vpArgs }) });
-
-relayTermination(child);
+spawnWithOwnPipes(process.execPath, [VP, "run", ...vpArgs], { env: vpRunEnv({ vpArgs }) });

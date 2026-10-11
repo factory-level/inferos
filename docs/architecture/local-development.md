@@ -5,6 +5,8 @@ covers:
   - scripts/gatekeeper-dev-secrets.ts
   - scripts/check-gatekeeper-dev-secrets.ts
   - scripts/run-local.ts
+  - scripts/relay-termination.ts
+  - scripts/vp
   - scripts/dev
   - packages/workshop-backend/scripts/dev-setup.ts
   - packages/workshop-backend/scripts/dev-verify.ts
@@ -48,6 +50,7 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `scripts/wt/` | `pnpm wt new\|ls\|rm\|ports\|doctor`: worktrees under `.worktrees/` with a port block, an overlay, a seeded vp cache and linked secrets (see [parallel worktrees](#parallel-worktrees)). |
 | `scripts/worktree-env.ts` | Reads a worktree's `.env.worktree` overlay for the dev server, `pnpm local`, `vp run` concurrency and Vite's dev port. |
 | `scripts/run-local.ts` | Convenience local install/build/run flow. |
+| `scripts/vp/run.ts`, `scripts/vp/own-pipes.ts`, `scripts/vp/concurrency.ts` | The root `pnpm build`/`test`/`clean` runner: `vp run` with a machine-derived concurrency limit, its own output pipes, and termination relayed through `scripts/relay-termination.ts`. |
 | `scripts/local/lifecycle.ts`, `scripts/local/stack.ts` | `pnpm local <command>`: status, start, stop, seed, verify, reset and logs for this checkout's stack, with JSON reports and stable exit codes. |
 | `scripts/local/coding.ts`, `scripts/local/runner.ts` | `pnpm local runner start\|status\|stop` and `pnpm local coding doctor`: the InferOps coding runner for a wrapper (see [local coding workflows](local-coding-workflows.md#runner-lifecycle)). |
 | `packages/workshop-backend/scripts/dev-setup.ts` | `pnpm dev:setup`: prepares a running local Workshop (account, onboarding, mock model, InferOps, demo screen). |
@@ -67,6 +70,10 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 The repository already has multi-worker Wrangler development and a Vite frontend. Discovery requires a wrangler.jsonc, so gatekeeper-kit is not a Worker. The dev runner scans this repository’s `packages/` and `custom-gatekeepers/` (the fork’s own gatekeepers), both listed once in `scripts/worker-dirs.ts`, which config generation, worker types, the release manifest and previews also use; a package name present in both is rejected. A wrapper's own `gatekeepers/` directory is a third root only when a caller passes the wrapper explicitly (see [wrapper topology](#wrapper-topology)); nothing infers one from the working directory. The integration harness exercises real RPC and Workers, but is not a consuming-repository bootstrap product. `run-local` assigns frontend assets to the public router, deriving the ASSETS binding, SPA fallback and worker-first paths from the generated production router configuration, and the backend receives no second assets configuration. Normal Vite development (`pnpm dev-server` plus `pnpm dev-client`) still serves the frontend on its separate port.
 
 Before starting Wrangler, `run-dev-server.ts` also resolves the InferOps switches and optional local integrations described under [Configuration](#configuration), and records its pid for `pnpm local stop`.
+
+## Root task runner output
+
+`pnpm build`, `pnpm test` and `pnpm clean` run `vp run` through `scripts/vp/run.ts`, which gives vp its own stdout and stderr pipes whenever this process's are not TTYs (always in CI) and forwards them with Node streams (`scripts/vp/own-pipes.ts`). Inherited stdio made vp share one open file description with `pnpm` and the wrapper; Node puts a pipe stdout into O_NONBLOCK, so when GitHub's log reader fell behind a multi-MB burst (workshop-backend's vitest stderr), vp's write returned EAGAIN and vp aborted the run with "Failed to forward task process output: Resource temporarily unavailable (os error 11)" instead of retrying. On its own pipe a full buffer just blocks vp, and the wrapper's libuv writes queue and retry on EAGAIN, with `pipe()` turning a slow reader into backpressure on vp; the shared fd's mode is not forced either way. Each stream's order is exact, but a stdout line and a stderr line written close together may now appear in either order. A stream that is a TTY is still inherited, which keeps vp's colours and progress locally and cannot hit the bug, since Node makes a TTY stdout blocking. Exit codes and SIGINT/SIGTERM handling are unchanged (`relayTermination`), except that the wrapper now drains the forwarded output before it exits or re-raises; `scripts/vp/own-pipes.test.ts` checks a 4 MiB-per-stream burst against a paused reader, and the signal paths.
 
 ## Wrapper topology
 
