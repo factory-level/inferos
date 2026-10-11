@@ -529,7 +529,9 @@ describe("vpRunEnv concurrentRuns", () => {
   for (const [label, value, runs, expected] of SPLITS) {
     it(`${label}: ${value} / ${runs} -> ${expected}`, () => {
       const { env, err } = captureStderr(() =>
-          vpRunEnv({ envFiles: NO_ENV_FILES, env: { [VP_RUN_CONCURRENCY_LIMIT]: value }, concurrentRuns: runs }));
+          vpRunEnv({
+            envFiles: NO_ENV_FILES, env: { [VP_RUN_CONCURRENCY_LIMIT]: value }, concurrentRuns: runs,
+          }));
       assert.equal(env[VP_RUN_CONCURRENCY_LIMIT], expected);
       assert.equal(err, "");
     });
@@ -586,7 +588,8 @@ describe("concurrency cap", () => {
     assert.equal(capped.env[VP_RUN_CONCURRENCY_LIMIT], "1");
     assert.match(capped.err, /capped from/);
     assert.doesNotMatch(whole.err, /capped/);
-    const preset = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: { [VP_RUN_CONCURRENCY_LIMIT]: "6" }, cap: 2 }));
+    const preset = captureStderr(
+        () => vpRunEnv({ envFiles: NO_ENV_FILES, env: { [VP_RUN_CONCURRENCY_LIMIT]: "6" }, cap: 2 }));
     assert.equal(preset.env[VP_RUN_CONCURRENCY_LIMIT], "6");
     assert.equal(preset.err, "");
   });

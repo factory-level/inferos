@@ -432,6 +432,8 @@ export interface VpRunEnvOptions {
    * The `.env.worktree` overlay and `.env` read for a limit, in that order. Defaults to the repo
    * root's. Tests point both at files that do not exist, so the machine formula is what they see
    * even inside a `pnpm wt` worktree whose overlay sets the variable.
+   *
+   * @internal A test seam: production callers leave it unset.
    */
   envFiles?: { worktree: string; env: string };
 }
