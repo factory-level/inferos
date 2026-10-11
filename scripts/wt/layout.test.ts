@@ -142,6 +142,19 @@ describe("checkOverlay", () => {
       assert.match(check.message, new RegExp(`sets DEV_INSPECTOR_PORT=${wrong}, but its block's inspector is 8832 \\(ports 8830-8839\\)`), wrong);
     }
   });
+
+  it("accepts any spelling of the inspector port that inspectorPortArgs reads as it", () => {
+    for (const spelling of ["08832", " 8832", "8832 ", "008832"]) {
+      assert.deepEqual(inspectorPortArgs({ [DEV_INSPECTOR_PORT]: spelling }), ["--inspector-port", "8832"], spelling);
+      assert.equal(checkOverlay(entry, { ...written(), [DEV_INSPECTOR_PORT]: spelling }).level, "ok", spelling);
+    }
+  });
+
+  it("still warns on a padded wrong port and on spellings inspectorPortArgs refuses", () => {
+    for (const wrong of ["08833", " 8839 ", "0x2280", "8832.0", "8832e0"]) {
+      assert.equal(checkOverlay(entry, { ...written(), [DEV_INSPECTOR_PORT]: wrong }).level, "warn", wrong);
+    }
+  });
 });
 
 describe("concurrencyShare", () => {
