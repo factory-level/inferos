@@ -101,10 +101,13 @@ const decidedBy = (session: WorkshopAgentSession, state: ActionState) =>
 const agentSaid = (history: AiChatMessage[], text: string) => history.filter(message =>
   message.type === "message" && message.author.type === "agent" && message.message === text).length;
 
-// The note an approval posts when it resumes a turn that suspended on the action.
+// The note an approval posts when it resumes a turn that suspended on the action: the prefix of the
+// summary built in `#maybeResumeAfterActionDecision` (workshop-backend src/overseer.ts). The resume
+// test below asserts it is found once, so a reworded note fails there instead of counting 0 here.
+const APPROVAL_RESUME_NOTE = "The changes you submitted have been approved and applied";
 const approvalResumeNotes = (history: AiChatMessage[]) => history.filter(message =>
   message.type === "message" && message.author.type !== "agent" &&
-  message.message.startsWith("The changes you submitted have been approved and applied")).length;
+  message.message.startsWith(APPROVAL_RESUME_NOTE)).length;
 
 it.concurrent("rejecting an action discards it and leaves the agent stopped", async () => {
   const model = models.script([writeValues(7), { text: "This must not run." }]);
@@ -158,6 +161,8 @@ it.concurrent("approving every held write applies each and resumes the agent onc
   expect(model.requests).toHaveLength(2);
   expect(model.remainingSteps()).toBe(0);
   expect(agentSaid(resumed.history, "Both values are applied.")).toBe(1);
+  // Positive control for the mid-tool test's "no resume note" check.
+  expect(approvalResumeNotes(resumed.history)).toBe(1);
 
   await withOwnerWorkspace(harness.url, session.username, ws =>
     expect(ws.approveAction(first.id)).rejects.toThrow("Action is not pending"));
@@ -182,11 +187,13 @@ it.concurrent("approving a held write while its code runs lets the agent carry o
   await withOwnerWorkspace(harness.url, session.username, ws => ws.approveAction(action.id));
   await control("release-code", { label });
   const { history } = await turn;
-  // A release that never came surfaces here, as the code's own timeout error in its output.
+  // A release that never came surfaces here, as the code's own timeout error in its output; the
+  // code logs nothing, so a clean run's output is exactly executeCode's empty-success marker.
   const [call] = history.flatMap(message =>
     message.type === "message" ? message.toolCalls ?? [] : []);
   if (call?.toolName !== "executeCode") throw new Error("Expected the turn's executeCode call");
-  expect(call.output ?? "").not.toContain("Uncaught exception");
+  expect(call.output).toBe("(function succeeded with no output)");
+  expect((await actionState(label)).value).toBe(7);
   expect(agentSaid(history, "The value is applied.")).toBe(1);
   // The agent carried on in this turn; it was never suspended and resumed by the approval.
   expect(approvalResumeNotes(history)).toBe(0);
