@@ -6,9 +6,10 @@
 //   pnpm wt new <name> [--from <ref>] [--branch <b>]   create <main>/.worktrees/<name>, ready to run
 //               [--no-cache-seed | --seed-from <dir>]  (vp cache: skip seeding, or seed from another checkout)
 //   pnpm wt ls                                          registered worktrees: branch, ports, state
-//   pnpm wt rm <name> [--force]                         remove one (refuses unpushed/uncommitted work)
+//   pnpm wt rm <name> [--force]                         remove one (refuses unpushed/uncommitted work
+//                                                       and ignored local state without --force)
 //   pnpm wt ports                                       the port table
-//   pnpm wt doctor [--fix]                              registry drift, secrets links, cache hits
+//   pnpm wt doctor [--fix] [--build]                    registry drift, secrets links, cache hit here
 //
 // Worktrees live inside the main checkout's ignored `.worktrees/`, never as siblings, so nothing
 // that cleans up sibling directories reaches them; `wt rm` is the supported way to remove one.
@@ -17,7 +18,7 @@
 // (../worktree-env.ts). See docs/wiki/local-development.md.
 
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -26,22 +27,36 @@ import { isPortListening } from "../local/stack.ts";
 import { pnpmCommand } from "../pnpm-command.ts";
 import { defaultConcurrencyLimit, measureMachine, splitConcurrencyLimit, VP_RUN_CONCURRENCY_LIMIT } from "../vp/concurrency.ts";
 import { readWorktreeEnv, REPO_ROOT, WORKTREE_ENV_FILE } from "../worktree-env.ts";
-import { parseVpStatistics, seedTaskCache, taskCacheDir, type VpStatistics } from "./cache.ts";
+import { parseVpStatistics, seedTaskCache, type VpStatistics } from "./cache.ts";
 import {
   allocatePortBlock, concurrencyShare, LINKED_SECRET_FILES, overlayContents, portLayout, validWorktreeName,
 } from "./layout.ts";
 import { readRegistry, registryPath, updateRegistry, type Registry, type WorktreeEntry } from "./registry.ts";
+import { containedWorktreePath, listedWorktreePaths, precious } from "./safety.ts";
 
 const USAGE = `Usage: pnpm wt <command>
   new <name> [--from <ref>] [--branch <b>] [--no-cache-seed | --seed-from <checkout>]
                                             Create .worktrees/<name> (default: --from origin/main, --branch <name>,
                                             vp cache seeded from the main checkout)
   ls                                        List registered worktrees
-  rm <name> [--force]                       Remove a worktree; --force discards uncommitted/unpushed work
+  rm <name> [--force]                       Remove a registered worktree via git worktree remove. Refuses
+                                            uncommitted or unpushed work, and ignored local state (.wrangler/state,
+                                            a real .env/.dev.vars, other ignored non-build files) or an
+                                            unregistered .worktrees/<name>, unless --force
   ports                                     Show the port table
-  doctor [--fix]                            Check registry, secrets links and the vp cache; --fix prunes stale entries`;
+  doctor [--fix] [--build]                  Check registry, overlays and secrets links; --fix prunes stale entries;
+                                            --build also runs one cached vp task in this checkout for a hit/miss`;
 
 class UsageError extends Error {}
+
+/** Where `wt` acts. Injectable so the tests run against a throwaway clone and registry. */
+export interface WtContext {
+  /** A checkout of the repository (any worktree); the main checkout is derived from it. */
+  repoRoot: string;
+  registryPath: string;
+}
+
+let context: WtContext = { repoRoot: REPO_ROOT, registryPath: registryPath() };
 
 // ---------------------------------------------------------------------------
 // git
@@ -53,7 +68,7 @@ function git(cwd: string, args: string[]): string {
 
 /** The main checkout: the directory holding the `.git` every worktree of this repo shares. */
 function mainCheckout(): string {
-  const common = git(REPO_ROOT, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const common = git(context.repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   if (basename(common) !== ".git") throw new Error(`Unsupported repository layout: ${common} is not a .git directory.`);
   return dirname(common);
 }
@@ -105,11 +120,33 @@ function machineConcurrency(): number {
  * worktrees. Ports never change once allocated.
  */
 function writeOverlays(registry: Registry): void {
-  const share = concurrencyShare(machineConcurrency(), registry.worktrees.length);
-  for (const entry of registry.worktrees) {
-    if (!existsSync(entry.path)) continue;
-    writeFileSync(join(entry.path, WORKTREE_ENV_FILE), overlayContents(entry, share));
-  }
+  const live = liveEntries(registry);
+  const share = concurrencyShare(machineConcurrency(), live.length);
+  for (const entry of live) writeFileSync(join(entry.path, WORKTREE_ENV_FILE), overlayContents(entry, share));
+}
+
+/**
+ * Registry entries that are still git worktrees of their repository, at a path inside its
+ * `.worktrees/`. Only these count towards the concurrency share and get an overlay written: a
+ * stale entry is not using the machine, and a tampered one must not steer a write elsewhere.
+ */
+function liveEntries(registry: Registry): WorktreeEntry[] {
+  const listed = new Map<string, Set<string>>();
+  return registry.worktrees.filter(entry => {
+    try {
+      const paths = listed.get(entry.mainCheckout) ?? listedWorktreePaths(entry.mainCheckout);
+      listed.set(entry.mainCheckout, paths);
+      return paths.has(containedWorktreePath(entry.mainCheckout, entry.path));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Whether anything accepts connections on `port` over IPv4 or IPv6 loopback. */
+async function portBusy(port: number): Promise<boolean> {
+  const [v4, v6] = await Promise.all([isPortListening(port, "127.0.0.1", 300), isPortListening(port, "::1", 300)]);
+  return v4 || v6;
 }
 
 /** Whether git ignores `path` in the checkout at `root`: secrets must never be stageable. */
@@ -206,8 +243,9 @@ async function commandNew(
   if (!validWorktreeName(name)) throw new UsageError(`Invalid worktree name "${name}": use letters, digits, ".", "_" and "-".`);
   const started = performance.now();
   const main = mainCheckout();
-  const path = join(main, ".worktrees", name);
-  const regPath = registryPath();
+  mkdirSync(join(main, ".worktrees"), { recursive: true });
+  const path = containedWorktreePath(main, join(main, ".worktrees", name));
+  const regPath = context.registryPath;
   if (existsSync(path)) throw new Error(`${path} already exists.`);
   if (readRegistry(regPath).worktrees.some(entry => entry.path === path)) {
     throw new Error(`${name} is still registered; run pnpm wt doctor --fix first.`);
@@ -236,7 +274,7 @@ async function commandNew(
   const entry = await timed(steps, "allocate ports and write .env.worktree", () => updateRegistry(regPath, async registry => {
     const created: WorktreeEntry = {
       name, path, mainCheckout: main, branch: options.branch,
-      portBase: await allocatePortBlock(registry.worktrees.map(({ portBase }) => portBase), port => isPortListening(port, "127.0.0.1", 300)),
+      portBase: await allocatePortBlock(registry.worktrees.map(({ portBase }) => portBase), portBusy),
       createdAt: new Date().toISOString(),
     };
     registry.worktrees.push(created);
@@ -298,7 +336,7 @@ async function commandNew(
 
 async function commandLs(): Promise<void> {
   const main = mainCheckout();
-  const entries = readRegistry(registryPath()).worktrees.filter(entry => entry.mainCheckout === main);
+  const entries = readRegistry(context.registryPath).worktrees.filter(entry => entry.mainCheckout === main);
   if (!entries.length) {
     console.log("No registered worktrees. Create one with: pnpm wt new <name>");
     return;
@@ -317,36 +355,55 @@ async function commandLs(): Promise<void> {
 }
 
 async function commandRm(name: string, force: boolean): Promise<void> {
+  // The name is input: it may only ever name a direct child of `.worktrees/`.
+  if (!validWorktreeName(name)) throw new UsageError(`Invalid worktree name "${name}": use letters, digits, ".", "_" and "-".`);
   const main = mainCheckout();
-  const regPath = registryPath();
+  const regPath = context.registryPath;
   const entry = readRegistry(regPath).worktrees.find(candidate => candidate.mainCheckout === main && candidate.name === name);
-  const path = entry?.path ?? join(main, ".worktrees", name);
-  if (!entry && !existsSync(path)) throw new Error(`No worktree named ${name}.`);
-  const state = worktreeState(path);
-  if (state.exists && !force) {
-    const problems = [state.dirty ? "uncommitted changes" : "", state.unpushed ? `${state.unpushed} unpushed commit(s)` : ""].filter(Boolean);
-    if (problems.length) throw new Error(`Refusing to remove ${name}: ${problems.join(" and ")}. Push or commit first, or pass --force to discard.`);
+  const expected = containedWorktreePath(main, join(main, ".worktrees", name));
+  // The registry is a file anyone can edit: its path must be the very directory the name names.
+  if (entry && containedWorktreePath(main, entry.path) !== expected) {
+    throw new Error(`Refusing: the registry entry for ${name} points at ${entry.path}, not ${expected}. Fix or remove it in ${regPath}.`);
   }
-  if (resolve(path) === resolve(REPO_ROOT)) throw new Error(`Run pnpm wt rm ${name} from another checkout; this command runs from inside it.`);
-  if (state.exists) git(main, ["worktree", "remove", ...(force ? ["--force"] : []), path]);
-  // node_modules and other ignored files keep the directory alive after `git worktree remove` only
-  // when git refused; on success it is gone.
+  const path = expected;
+  if (path === realpathSync(context.repoRoot)) throw new Error(`Run pnpm wt rm ${name} from another checkout; this command runs from inside it.`);
+  const listed = listedWorktreePaths(main).has(path);
+  if (!entry && !listed) throw new Error(`No worktree named ${name}.`);
+  if (!entry && !force) {
+    throw new Error(`Refusing: ${relative(main, path)} is a git worktree that pnpm wt did not create. Pass --force to remove it anyway.`);
+  }
+  if (listed) {
+    if (!force) {
+      const state = worktreeState(path);
+      const problems = [
+        state.dirty ? "uncommitted changes" : "",
+        state.unpushed ? `${state.unpushed} unpushed commit(s)` : "",
+      ].filter(Boolean);
+      const local = precious(path);
+      if (local.length) problems.push(`ignored local state that removal would delete: ${local.join(", ")}`);
+      if (problems.length) throw new Error(`Refusing to remove ${name}: ${problems.join("; ")}. Push, commit or move it first, or pass --force to discard.`);
+    }
+    // The only deletion `wt` ever performs, and git's own: of a path git lists as its worktree.
+    git(main, ["worktree", "remove", ...(force ? ["--force"] : []), path]);
+  } else {
+    console.log(`${relative(main, path)} is not a git worktree; nothing deleted, only its registration.`);
+  }
   await updateRegistry(regPath, registry => {
-    registry.worktrees = registry.worktrees.filter(candidate => candidate.path !== path);
+    registry.worktrees = registry.worktrees.filter(candidate => !(candidate.mainCheckout === main && candidate.name === name));
     writeOverlays(registry);
   });
   console.log(`Removed ${name}${entry ? ` and freed ports ${entry.portBase}-${entry.portBase + 9}` : ""}.`);
 }
 
 async function commandPorts(): Promise<void> {
-  const entries = readRegistry(registryPath()).worktrees.toSorted((a, b) => a.portBase - b.portBase);
+  const entries = readRegistry(context.registryPath).worktrees.toSorted((a, b) => a.portBase - b.portBase);
   if (!entries.length) {
     console.log("No ports allocated.");
     return;
   }
   const rows = await Promise.all(entries.map(async entry => {
     const ports = portLayout(entry.portBase);
-    const [backendUp, viteUp] = await Promise.all([ports.backend, ports.devClient].map(port => isPortListening(port, "127.0.0.1", 300)));
+    const [backendUp, viteUp] = await Promise.all([ports.backend, ports.devClient].map(portBusy));
     return [
       entry.name, String(ports.backend), String(ports.devClient), `${ports.spare[0]}-${ports.spare[1]}`,
       [backendUp ? "backend up" : "", viteUp ? "vite up" : ""].filter(Boolean).join(", ") || "idle",
@@ -356,9 +413,9 @@ async function commandPorts(): Promise<void> {
   printTable(["NAME", "BACKEND", "VITE", "SPARE", "LISTENING", "PATH"], rows);
 }
 
-async function commandDoctor(fix: boolean): Promise<number> {
+async function commandDoctor(fix: boolean, build: boolean): Promise<number> {
   const main = mainCheckout();
-  const regPath = registryPath();
+  const regPath = context.registryPath;
   const registry = readRegistry(regPath);
   const ours = registry.worktrees.filter(entry => entry.mainCheckout === main);
   const gitPaths = new Set(gitWorktrees(main).map(({ path }) => path));
@@ -370,8 +427,10 @@ async function commandDoctor(fix: boolean): Promise<number> {
 
   console.log(`registry: ${regPath}`);
   // Registry vs git.
-  const stale = ours.filter(entry => !gitPaths.has(entry.path) || !existsSync(entry.path));
-  for (const entry of stale) report(fix ? "warn" : "error", `${entry.name}: registered (ports ${entry.portBase}-${entry.portBase + 9}) but ${entry.path} is not a git worktree${fix ? " -- pruned" : "; pnpm wt doctor --fix prunes it"}`);
+  // Live means: still listed by git, at a path inside `.worktrees/` (a tampered entry is stale).
+  const liveSet = new Set(liveEntries({ version: 1, worktrees: ours }));
+  const stale = ours.filter(entry => !liveSet.has(entry));
+  for (const entry of stale) report(fix ? "warn" : "error", `${entry.name}: registered (ports ${entry.portBase}-${entry.portBase + 9}) but ${entry.path} is not a git worktree inside .worktrees/${fix ? " -- pruned" : "; pnpm wt doctor --fix prunes it"}`);
   const worktreesDir = join(main, ".worktrees");
   for (const path of gitPaths) {
     if (dirname(path) === worktreesDir && !ours.some(entry => entry.path === path)) {
@@ -415,20 +474,18 @@ async function commandDoctor(fix: boolean): Promise<number> {
     }
   }
 
-  // vp cache: run one cheap cached task in each live worktree and report hit or miss.
-  for (const entry of live) {
-    if (!existsSync(taskCacheDir(entry.path))) {
-      report("warn", `${entry.name}: no vp task cache yet`);
-      continue;
-    }
+  // vp cache: only on request, and only in this checkout -- building writes `dist/`, and another
+  // worktree's outputs belong to whoever is working there.
+  if (build) {
+    const here = context.repoRoot;
     try {
       const [command, argv] = pnpmCommand(["exec", "vp", "run", "--cache", "@gadgets/typed-storage#build"]);
-      execFileSync(command, argv, { cwd: entry.path, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-      const stats = lastRunStatistics(entry.path);
-      if (stats && stats.hits === stats.tasks) report("ok", `${entry.name}: vp cache hit (@gadgets/typed-storage#build)`);
-      else report("warn", `${entry.name}: vp cache miss on @gadgets/typed-storage#build (${formatStats(stats)}); vp run --last-details says why`);
+      execFileSync(command, argv, { cwd: here, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const stats = lastRunStatistics(here);
+      if (stats && stats.hits === stats.tasks) report("ok", `this checkout: vp cache hit (@gadgets/typed-storage#build)`);
+      else report("warn", `this checkout: vp cache miss on @gadgets/typed-storage#build (${formatStats(stats)}); vp run --last-details says why`);
     } catch (error) {
-      report("error", `${entry.name}: vp run failed: ${(error as Error).message.split("\n")[0]}`);
+      report("error", `this checkout: vp run failed: ${(error as Error).message.split("\n")[0]}`);
     }
   }
 
@@ -451,7 +508,8 @@ function printTable(header: string[], rows: string[][]): void {
 // entry
 // ---------------------------------------------------------------------------
 
-export async function main(argv: readonly string[]): Promise<number> {
+export async function runWt(argv: readonly string[], options: Partial<WtContext> = {}): Promise<number> {
+  context = { repoRoot: options.repoRoot ?? REPO_ROOT, registryPath: options.registryPath ?? registryPath() };
   const { values, positionals } = parseArgs({
     args: [...argv],
     allowPositionals: true,
@@ -460,6 +518,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       branch: { type: "string" },
       force: { type: "boolean", default: false },
       fix: { type: "boolean", default: false },
+      build: { type: "boolean", default: false },
       "no-cache-seed": { type: "boolean", default: false },
       "seed-from": { type: "string" },
       help: { type: "boolean", short: "h", default: false },
@@ -479,14 +538,14 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "ls": await commandLs(); return 0;
     case "rm": await commandRm(name!, values.force); return 0;
     case "ports": await commandPorts(); return 0;
-    case "doctor": return commandDoctor(values.fix);
+    case "doctor": return commandDoctor(values.fix, values.build);
     default: throw new UsageError(USAGE);
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    process.exitCode = await main(process.argv.slice(2));
+    process.exitCode = await runWt(process.argv.slice(2));
   } catch (error) {
     console.error(error instanceof UsageError || (error as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION"
       ? (error as Error).message : `wt: ${(error as Error).message}`);

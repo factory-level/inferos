@@ -19,21 +19,32 @@ pnpm dev-server                         # on this worktree's own backend port
 pnpm dev-client                         # Vite on this worktree's own frontend port
 ```
 
-`wt new` runs `git worktree add`, `pnpm install --frozen-lockfile` (hardlinked from the shared pnpm store), seeds the vp task cache, links the main checkout's secrets, allocates ports, and runs the builds the dev server's pre-flight needs (`@gadgets/typed-storage#build`, the bundled blueprints, `build:configurator --dev` and `build:app:dev`). It prints the time each step took and the worktree's URLs.
+`wt new` runs, in order:
+
+1. `git worktree add`;
+2. port allocation and the `.env.worktree` overlay;
+3. links to the main checkout's secrets;
+4. `pnpm install --frozen-lockfile`, hardlinked from the shared pnpm store;
+5. vp task cache seeding;
+6. the builds the dev server's pre-flight needs: `@gadgets/typed-storage#build`, then the bundled blueprints, `build:configurator --dev` and `build:app:dev` together.
+
+It prints the time each step took and the worktree's URLs.
 
 | Command | What it does |
 | --- | --- |
 | `pnpm wt new <name> [--from <ref>] [--branch <b>]` | Create `<main checkout>/.worktrees/<name>`. Defaults: `--from origin/main` (fetched first), `--branch <name>`. `--no-cache-seed` skips the cache copy; `--seed-from <checkout>` copies another checkout's cache instead of the main checkout's. |
 | `pnpm wt ls` | Registered worktrees of this repo with their live branch, ports, and whether they have uncommitted changes or commits no remote has. |
-| `pnpm wt rm <name> [--force]` | `git worktree remove` and free the ports. Refuses while there are uncommitted changes or unpushed commits; `--force` discards them. |
+| `pnpm wt rm <name> [--force]` | `git worktree remove` and free the ports. Without `--force` it refuses uncommitted changes, unpushed commits, ignored local state the removal would delete, and a `.worktrees/` entry `wt` did not create. Local state means `.wrangler/state` (local D1, KV and Durable Object data), a real (non-symlink) `.env`/`.dev.vars`, or any other ignored file that is not a build output (`node_modules`, `dist`, `src/generated`, `.wrangler/tmp`/`validate`). `--force` discards all of it. |
 | `pnpm wt ports` | The port table, with which ports are listening right now. |
-| `pnpm wt doctor [--fix]` | Registry vs `git worktree list` drift, overlay vs registry, missing secrets links, world-readable secrets, port-block clashes, and a cached `vp run` in each worktree reporting hit or miss. `--fix` prunes registry entries whose worktree is gone. Exit 1 on an error. |
+| `pnpm wt doctor [--fix] [--build]` | Registry vs `git worktree list` drift, overlay vs registry, missing secrets links, world-readable secrets and port-block clashes. Read-only unless asked: `--fix` prunes registry entries whose worktree is gone (only the registry is edited), and `--build` runs one cached `vp run` in the current checkout only, reporting hit or miss. It never builds in other worktrees, whose `dist/` belongs to whoever works there. Exit 1 on an error. |
 
-Worktrees live inside the main checkout's `.worktrees/` (gitignored), never as sibling directories: tooling that sweeps sibling `inferOS-wt-*` directories cannot reach them, and `pnpm wt rm` is the supported way to remove one. A git worktree created by hand under `.worktrees/` still works, but has no ports or overlay; `wt doctor` lists it.
+Worktrees live inside the main checkout's `.worktrees/` (gitignored), never as sibling directories: tooling that sweeps sibling `inferOS-wt-*` directories cannot reach them, and `pnpm wt rm` is the supported way to remove one. `wt rm` only ever acts on a direct child of `.worktrees/` that git lists as a worktree. A name with `/`, `\` or `..`, an absolute path, a symlink, or a registry entry pointing elsewhere is refused, even with `--force`. It removes only through `git worktree remove`. A git worktree created by hand under `.worktrees/` still works, but has no ports or overlay; `wt doctor` lists it, and `wt rm` removes it only with `--force`.
 
 ## Ports
 
-Each worktree gets a block of 10 ports from 8800 upward: the first free block that no registered worktree holds and in which nothing is listening. The main checkout keeps 8787 and 3000.
+Each worktree gets a block of 10 ports between 8800 and 9199. It is the first block that no registered worktree holds and in which nothing listens on IPv4 or IPv6 loopback. The main checkout keeps 8787 and 3000.
+
+InferOps worktrees on the same machine shift InferOps' ports (8080, 8000, 8001, 8090, 3000–3002) by `offset × 100`, which reaches this range from offset 8. So a block containing any port ending in 00, 01, 02, 80 or 90 is never used: 28 blocks remain, the x10–x79 ports of each hundred, starting at 8810.
 
 | Port | Use |
 | --- | --- |
@@ -50,14 +61,14 @@ The block is recorded in the per-user registry `$XDG_CONFIG_HOME/inferos/worktre
 `wt new` writes `.env.worktree` at the worktree root:
 
 ```dotenv
-VITE_BACKEND_HOST=localhost:8800
-DEV_CLIENT_PORT=8801
+VITE_BACKEND_HOST=localhost:8810
+DEV_CLIENT_PORT=8811
 VP_RUN_CONCURRENCY_LIMIT=7
 ```
 
 It is read by `pnpm dev-server`/`run-local`, `pnpm local`, `pnpm dev-client` and every `vp run` the repo's scripts start. Precedence is the shell, then `.env.worktree`, then `.dev.vars`, then `.env`. So a one-off `VITE_BACKEND_HOST=… pnpm dev-server` still wins, and the overlay beats the secrets files the worktree shares with the main checkout. `wt` rewrites every registered worktree's overlay on each `new`/`rm`, so don't edit it by hand; set an override in the shell instead.
 
-`VP_RUN_CONCURRENCY_LIMIT` is the machine's `vp run` budget divided by the number of registered worktrees, never below 2. Without it, N worktrees each claim the whole machine.
+`VP_RUN_CONCURRENCY_LIMIT` is the machine's `vp run` budget divided by the number of registered worktrees that git still lists, never below 2. `DEV_CLIENT_PORT` must be an integer from 1024 to 65535. Without it, N worktrees each claim the whole machine.
 
 ## Caches
 
@@ -72,11 +83,13 @@ It is read by `pnpm dev-server`/`run-local`, `pnpm local`, `pnpm dev-client` and
 
 ## The edit loop
 
-- **Per change:** run the recommended fast tier, `pnpm check:fast`: type checks and the tests related to what changed. Don't run full suites after every edit.
-- **Before hand-off:** run `pnpm check:full` once: `pnpm lint`, `pnpm docs:check`, the root scripts tests and the affected packages' suites.
+Today:
+
+- **While iterating**, run one package's tests directly with `pnpm --filter <pkg> test:run`, or the matching `node --test scripts/…test.ts` for root scripts. Type-check that package with `vp run -F <pkg> build`. Don't run full suites after every edit.
+- **Before hand-off**, run `pnpm lint`, `pnpm docs:check`, the root scripts tests (`node --test $(git ls-files 'scripts/**/*.test.ts')`) and `pnpm test` for the affected packages.
 - **CI** is the final gate.
 
-`check:fast` and `check:full` arrive with the iteration-loop change. Until then, use `pnpm --filter <pkg> test:run` while iterating and `pnpm lint` / `pnpm test` before hand-off (see AGENTS.md).
+Coming: `pnpm check:fast` and `pnpm check:full` will wrap these two tiers. They are not on `main` yet; this page will switch to them when that change merges.
 
 ## Fewer Workers, faster reloads
 

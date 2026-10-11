@@ -6,23 +6,45 @@ import { describe, it } from "node:test";
 import { getDevServerConfig } from "../dev-server-config.ts";
 import { devClientServerOptions, readWorktreeEnv, WORKTREE_ENV_FILE } from "../worktree-env.ts";
 import {
-  allocatePortBlock, blockPorts, concurrencyShare, LINKED_SECRET_FILES, overlayContents, PORT_BLOCK_COUNT,
+  allocatePortBlock, blockPorts, clashesWithInferOps, concurrencyShare, LINKED_SECRET_FILES, overlayContents, PORT_BLOCK_COUNT,
   PORT_BLOCK_START, portLayout, validWorktreeName,
 } from "./layout.ts";
 
 const nothingListens = async () => false;
 
 describe("allocatePortBlock", () => {
-  it("starts at 8800 and skips blocks the registry holds", async () => {
-    assert.equal(await allocatePortBlock([], nothingListens), PORT_BLOCK_START);
-    assert.equal(await allocatePortBlock([8800, 8810], nothingListens), 8820);
+  it("starts at 8810 and skips blocks the registry holds", async () => {
+    assert.equal(await allocatePortBlock([], nothingListens), 8810);
+    assert.equal(await allocatePortBlock([8810, 8820], nothingListens), 8830);
     // A freed block in the middle is reused before a new one is opened.
-    assert.equal(await allocatePortBlock([8800, 8820], nothingListens), 8810);
+    assert.equal(await allocatePortBlock([8810, 8830], nothingListens), 8820);
   });
 
   it("skips a block in which anything listens, spares included", async () => {
-    const listening = new Set([8800, 8817]);
-    assert.equal(await allocatePortBlock([], async port => listening.has(port)), 8820);
+    const listening = new Set([8810, 8827]);
+    assert.equal(await allocatePortBlock([], async port => listening.has(port)), 8830);
+  });
+
+  // InferOps shifts 8080/8000/8001/8090 and 3000-3002 by offset x 100 per worktree.
+  it("never hands out a block holding a port an InferOps worktree could use", async () => {
+    const handed: number[] = [];
+    for (;;) {
+      try {
+        handed.push(await allocatePortBlock(handed, nothingListens));
+      } catch {
+        break;
+      }
+    }
+    const inferOps = new Set<number>();
+    for (let offset = 0; offset < 20; offset++) {
+      for (const base of [8080, 8000, 8001, 8090, 3000, 3001, 3002]) inferOps.add(base + 100 * offset);
+    }
+    for (const base of handed) {
+      assert.equal(blockPorts(base).some(port => inferOps.has(port)), false, `block ${base}`);
+      assert.equal(clashesWithInferOps(base), false);
+    }
+    assert.equal(handed.length, 28);
+    assert.ok(clashesWithInferOps(8880) && clashesWithInferOps(8800) && clashesWithInferOps(8890));
   });
 
   it("fails loudly when every block is taken", async () => {
@@ -72,7 +94,7 @@ describe("secrets", () => {
 describe("validWorktreeName", () => {
   it("accepts one branch-safe path segment", () => {
     for (const name of ["probe-a", "feat_1", "v2.3"]) assert.ok(validWorktreeName(name), name);
-    for (const name of ["", "../x", "a/b", "-x", ".hidden", "x.lock", "a..b", "x".repeat(65)]) {
+    for (const name of ["", "..", ".", "../x", "../../x", "a/b", "a\\b", "/abs", "/tmp/x", "-x", ".hidden", "x.lock", "a..b", "x".repeat(65)]) {
       assert.equal(validWorktreeName(name), false, name);
     }
   });

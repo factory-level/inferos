@@ -5,11 +5,24 @@
 import { DEV_CLIENT_PORT } from "../worktree-env.ts";
 import { PORT_BLOCK_SIZE, type WorktreeEntry } from "./registry.ts";
 
-/** The first port block. Clear of the main checkout's 8787 and InferOps' 8080 / 3000-3002 (+100s). */
+/** The first port block, above the main checkout's 8787. */
 export const PORT_BLOCK_START = 8800;
 
 /** How many blocks to try: 8800-9199, stopping short of Node's 9229 inspector port. */
 export const PORT_BLOCK_COUNT = 40;
+
+/**
+ * InferOps runs beside InferOS on the same machine, and shifts its base ports (API 8080, agentic
+ * 8000, MCP 8001, worker 8090, clients 3000-3002) by `offset × 100` per worktree (inferops
+ * CLAUDE.md). Offsets 8-11 land inside 8800-9199, always on these last two digits, so a block
+ * holding any of them is never handed out: within each hundred only x10-x79 are used.
+ */
+export const INFEROPS_PORT_RESIDUES: ReadonlySet<number> = new Set([0, 1, 2, 80, 90]);
+
+/** Whether a block could collide with some InferOps worktree's ports. */
+export function clashesWithInferOps(base: number): boolean {
+  return blockPorts(base).some(port => INFEROPS_PORT_RESIDUES.has(port % 100));
+}
 
 /** The ports in a block, by role. */
 export interface PortLayout {
@@ -40,7 +53,7 @@ export async function allocatePortBlock(
   const held = new Set(taken);
   for (let i = 0; i < PORT_BLOCK_COUNT; i++) {
     const base = PORT_BLOCK_START + i * PORT_BLOCK_SIZE;
-    if (held.has(base)) continue;
+    if (held.has(base) || clashesWithInferOps(base)) continue;
     const busy = await Promise.all(blockPorts(base).map(isListening));
     if (!busy.some(Boolean)) return base;
   }
