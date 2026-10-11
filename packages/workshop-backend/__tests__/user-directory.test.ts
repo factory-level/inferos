@@ -1,9 +1,6 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { UserDirectoryDurableObject } from "../src/user-directory.js";
-// Load the whole backend (the pool's `main`) up front. Otherwise the pool loads it on the first
-// RPC into the Durable Object, and that slow load counts against the first test's timeout.
-import "./test-worker.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {

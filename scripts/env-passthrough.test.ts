@@ -78,6 +78,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
     injected: ["NODE_ENV"],
   },
   "packages/workshop-backend": {
+    // The `backend` vitest project's worker count, declared on the `test` task.
+    forwarded: ["BACKEND_TEST_WORKERS"],
     uncached: ["BUNDLED_BLUEPRINTS_DIR"],
     // Operator commands invoked directly (the consumer runtime's profile init, `pnpm dev:setup`),
     // never inside a cached build. dev:setup reads the VITE_DEV_* login defaults and backend host so

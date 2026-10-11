@@ -42,7 +42,11 @@ type UserInternals = UserDurableObject & {
   };
 };
 
-type FakeAccountProps = { name: string; failRevoke?: boolean; failDescribe?: boolean };
+type FakeAccountProps = { scope: string; name: string; failRevoke?: boolean; failDescribe?: boolean };
+
+// The fake accounts' call log outlives this file (see test-worker.ts), so this file's accounts are
+// recorded under a scope of its own.
+const ACCOUNT_SCOPE = `connect-handoff-${crypto.randomUUID()}`;
 
 let userCounter = 0;
 function freshUser() {
@@ -57,8 +61,9 @@ function freshUser() {
 
 // An account stub the DO can persist (a WorkerEntrypoint reached through ctx.exports, like a real
 // gatekeeper's), viewed as the GatekeeperUser the kernel expects.
-function fakeAccount(user: UserInternals, name: string, failing?: Omit<FakeAccountProps, "name">) {
-  const account = user.ctx.exports.FakeGatekeeperAccount({ props: { name, ...failing } });
+function fakeAccount(
+    user: UserInternals, name: string, failing?: Omit<FakeAccountProps, "scope" | "name">) {
+  const account = user.ctx.exports.FakeGatekeeperAccount({ props: { scope: ACCOUNT_SCOPE, name, ...failing } });
   return { account: account as unknown as Fetcher<GatekeeperUser>, calls: () => account.calls() };
 }
 

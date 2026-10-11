@@ -1,10 +1,12 @@
 import { readdirSync, readFileSync } from 'node:fs'
+import { availableParallelism } from 'node:os'
 import path from 'node:path'
 import type { Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { COMPATIBILITY_DATE } from '@gadgets/scripts/worker-config'
 import capnwebValidate from 'capnweb-validate/vite'
+import { BACKEND, UNIT_NODE, WORKERD_LIGHT } from './__tests__/test-projects.ts'
 
 // Wrangler ships `*.txt` imports as Text modules (its default module rules; see
 // src/text-modules.d.ts), but this config drives the pool from inline miniflare settings, and
@@ -96,63 +98,150 @@ export default {
 };
 `
 
-/**
- * Tests run inside workerd (via vitest-pool-workers) so they exercise the same runtime APIs as
- * production -- e.g. Uint8Array.toHex/fromHex and crypto.subtle used by the sharing module. Most
- * tests import modules directly; the main Worker and a test-only SQLite DO binding support the
- * Overseer cost-persistence integration test without loading the full deployment configuration.
- */
-export default defineConfig({
-  plugins: [
-    textModules,
-    rpcValidation(),
-    cloudflareTest({
-      // The production Worker plus test-only entrypoints (see __tests__/test-worker.ts).
-      main: './__tests__/test-worker.ts',
-      miniflare: {
-        compatibilityDate: COMPATIBILITY_DATE,
-        // `allow_irrevocable_stub_storage` as in cloudflare.config.ts: the user DO persists account stubs.
-        compatibilityFlags: ['experimental', 'nodejs_compat', 'allow_irrevocable_stub_storage'],
-        streamingTails: ['span-recorder'],
-        serviceBindings: { SPAN_RECORDER: { name: 'span-recorder', entrypoint: 'SpanRecorder' } },
-        workers: [{
-          name: 'span-recorder',
-          modules: true,
-          script: spanRecorder,
-          compatibilityDate: COMPATIBILITY_DATE,
-          compatibilityFlags: ['experimental', 'streaming_tail_worker'],
-        }],
-        bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
-        // The overseer loads gadget code through this, so a test can run a real gadget facet.
-        workerLoaders: { LOADER: {} },
-        durableObjects: {
-          TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
-          TEST_USER: { className: 'UserDurableObject', useSQLite: true },
-          TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
-          // Never addressed by name: a binding is what puts the class in `ctx.exports`, from
-          // which the overseer instantiates it (with props) as one of its own facets.
-          TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
-          TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
-        },
-      },
-    }),
-  ],
+const here = import.meta.dirname
+const tests = (files: readonly string[]) => files.map(file => `__tests__/${file}`)
+
+/** What every project shares: the module transforms, the source-length defines, and resolution. */
+const shared = {
   resolve: {
     // `@gadgets/typed-storage`'s `exports` point at its emitted `dist/`, which only its `build`
     // writes. Resolve it from source instead, as `tsconfig.json`'s `paths` already does, so a bare
     // `vitest run <file>` works in a fresh checkout before anything is built.
     alias: [{
       find: /^@gadgets\/typed-storage$/,
-      replacement: path.resolve(import.meta.dirname, '../typed-storage/src/index.ts'),
+      replacement: path.resolve(here, '../typed-storage/src/index.ts'),
     }],
   },
   define: {
     __WORKSHOP_SOURCE_LENGTHS__: JSON.stringify(sourceLengths),
     __WORKSHOP_GUARDED_SOURCE_LENGTHS__: JSON.stringify(guardedSourceLengths),
   },
+}
+const plugins = () => [textModules, rpcValidation()]
+
+// `allow_irrevocable_stub_storage` as in cloudflare.config.ts: the user DO persists account stubs.
+const compatibilityFlags = ['experimental', 'nodejs_compat', 'allow_irrevocable_stub_storage']
+
+/**
+ * The `backend` project's pool workers: `BACKEND_TEST_WORKERS` when set (a positive integer, or the
+ * config refuses to load), otherwise four, or one fewer than the cores when there are fewer.
+ */
+function backendWorkers(): number {
+  let value = process.env.BACKEND_TEST_WORKERS
+  if (value === undefined || value === '') return Math.max(1, Math.min(4, availableParallelism() - 1))
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw new Error(`BACKEND_TEST_WORKERS must be a positive integer, not ${JSON.stringify(value)}`)
+  }
+  return Number(value)
+}
+
+/**
+ * Three projects, cheapest first; `__tests__/test-projects.ts` says which file runs where, and
+ * `vitest run` runs all three (`--project <name>` picks one).
+ *
+ * - `unit-node`: pure logic under Node. No workerd start, so a file costs milliseconds.
+ * - `workerd-light`: needs workerd's runtime APIs but not the backend, so the pool's `main` is a
+ *   few-line Worker with the one Durable Object it addresses.
+ * - `backend`: drives the production Worker (`__tests__/test-worker.ts`) through `cloudflare:test`.
+ *   Importing `cloudflare:test` evaluates that whole module graph -- about 1,700 modules, 10-15 s
+ *   under load -- so these run with `isolate: false`: each pool worker keeps one Miniflare and one
+ *   module graph for every file it runs, rather than a fresh one per file. The price is that a file
+ *   must not leave state another can see: its Durable Object names carry its own prefix, a stubbed
+ *   global or a patched prototype is put back when the test or file ends, module-level state in
+ *   `test-worker.ts` is keyed by names the file mints itself, and an overseer's alarm runs only for
+ *   the file that made it (`__tests__/workerd/backend-file-boundary.ts`).
+ *
+ * The two workerd projects load `@gadgets/scripts/assert-workerd`, which fails the run unless the
+ * pool actually started, rather than trusting a green run to mean workerd.
+ */
+export default defineConfig({
   test: {
-    include: ['__tests__/*.test.ts'],
-    // Asserts the pool actually started, rather than trusting a green run to mean workerd.
-    setupFiles: ['@gadgets/scripts/assert-workerd'],
+    projects: [
+      {
+        ...shared,
+        plugins: plugins(),
+        resolve: {
+          alias: [
+            ...shared.resolve.alias,
+            {
+              find: /^cloudflare:workers$/,
+              replacement: path.resolve(here, '__tests__/stubs/cloudflare-workers.ts'),
+            },
+          ],
+        },
+        test: { name: 'unit-node', include: tests(UNIT_NODE), environment: 'node' },
+      },
+      {
+        ...shared,
+        plugins: [
+          ...plugins(),
+          cloudflareTest({
+            main: './__tests__/workerd/light-worker.ts',
+            miniflare: {
+              compatibilityDate: COMPATIBILITY_DATE,
+              compatibilityFlags,
+              durableObjects: {
+                TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
+              },
+            },
+          }),
+        ],
+        test: {
+          name: 'workerd-light',
+          include: tests(WORKERD_LIGHT),
+          setupFiles: ['@gadgets/scripts/assert-workerd'],
+        },
+      },
+      {
+        ...shared,
+        plugins: [
+          ...plugins(),
+          cloudflareTest({
+            // The production Worker plus test-only entrypoints (see __tests__/test-worker.ts).
+            main: './__tests__/test-worker.ts',
+            miniflare: {
+              compatibilityDate: COMPATIBILITY_DATE,
+              compatibilityFlags,
+              streamingTails: ['span-recorder'],
+              serviceBindings: { SPAN_RECORDER: { name: 'span-recorder', entrypoint: 'SpanRecorder' } },
+              workers: [{
+                name: 'span-recorder',
+                modules: true,
+                script: spanRecorder,
+                compatibilityDate: COMPATIBILITY_DATE,
+                compatibilityFlags: ['experimental', 'streaming_tail_worker'],
+              }],
+              bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
+              // The overseer loads gadget code through this, so a test can run a real gadget facet.
+              workerLoaders: { LOADER: {} },
+              durableObjects: {
+                TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
+                TEST_USER: { className: 'UserDurableObject', useSQLite: true },
+                TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
+                // Never addressed by name: a binding is what puts the class in `ctx.exports`, from
+                // which the overseer instantiates it (with props) as one of its own facets.
+                TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
+                TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
+              },
+            },
+          }),
+        ],
+        test: {
+          name: 'backend',
+          include: tests(BACKEND),
+          isolate: false,
+          // Each worker evaluates the backend once, so a few cover the 30-odd files; more only adds
+          // evaluations competing for the same cores. A project's own `maxWorkers` needs its own
+          // `groupOrder`, so these run after the other two projects. The CLI's `--maxWorkers` does
+          // not reach a project's own value, so `BACKEND_TEST_WORKERS` is the override.
+          maxWorkers: backendWorkers(),
+          sequence: { groupOrder: 1 },
+          // Module state outlives a file here, so undo what a test stubs as soon as it ends.
+          unstubGlobals: true,
+          restoreMocks: true,
+          setupFiles: ['@gadgets/scripts/assert-workerd', './__tests__/workerd/backend-file-boundary.ts'],
+        },
+      },
+    ],
   },
 })
