@@ -7,7 +7,10 @@
 // lock left behind by a dead process is reclaimed once its owner is gone or it is old enough that
 // no live writer could still hold it (writers hold it for milliseconds, never across a build).
 
-import { mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync, closeSync } from "node:fs";
+import {
+  closeSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync,
+  type BigIntStats,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -65,10 +68,23 @@ export function writeRegistry(path: string, registry: Registry): void {
   const fd = openSync(temp, "wx", 0o600);
   try {
     writeSync(fd, JSON.stringify(registry, null, 2) + "\n");
+    // On disk before the rename makes it visible, so a crash cannot leave a renamed, empty file.
+    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   renameSync(temp, path);
+  // And the rename itself, where the platform lets a directory be opened and synced.
+  try {
+    const dir = openSync(dirname(path), "r");
+    try {
+      fsyncSync(dir);
+    } finally {
+      closeSync(dir);
+    }
+  } catch {
+    // Not supported here (Windows); the rename is still atomic.
+  }
 }
 
 /** Lock tuning, injectable for tests. */
@@ -95,12 +111,47 @@ function ownerAlive(lockPath: string): boolean {
   }
 }
 
-function tryReclaim(lockPath: string, staleMs: number): void {
+/**
+ * Whether two stats describe the same file. Inode numbers alone are not enough: a lock deleted and
+ * immediately re-created routinely gets the freed inode back, so the modification time
+ * (nanoseconds) is compared too. Not the change time: the reclaiming rename itself updates that.
+ */
+const sameFile = (a: BigIntStats, b: BigIntStats) => a.ino === b.ino && a.dev === b.dev && a.mtimeNs === b.mtimeNs;
+const statBig = (path: string) => statSync(path, { bigint: true });
+
+/**
+ * Remove the lock at `lockPath` if it is stale. Two waiters can judge the same stale lock at once;
+ * a plain unlink would let the slower one delete the lock the faster one has just created. So the
+ * lock is first renamed to a name only this process uses -- rename moves whatever is there at that
+ * instant -- and only deleted if it is the very file that was judged stale. A live lock moved by
+ * mistake is linked back into place. Exported for its tests.
+ */
+export function tryReclaim(lockPath: string, staleMs: number, beforeRename?: () => void): void {
+  let judged: BigIntStats;
   try {
-    const age = Date.now() - statSync(lockPath).mtimeMs;
-    if (age > staleMs || (age > 1_000 && !ownerAlive(lockPath))) unlinkSync(lockPath);
+    judged = statBig(lockPath);
   } catch {
-    // Released (or reclaimed by someone else) in the meantime: just retry.
+    return; // Released meanwhile.
+  }
+  const age = Date.now() - Number(judged.mtimeMs);
+  if (!(age > staleMs || (age > 1_000 && !ownerAlive(lockPath)))) return;
+  const aside = `${lockPath}.stale.${process.pid}.${Math.random().toString(36).slice(2)}`;
+  beforeRename?.(); // Test hook: lets a test land another waiter in exactly this window.
+  try {
+    renameSync(lockPath, aside);
+  } catch {
+    return; // Someone else reclaimed (or released) it first.
+  }
+  try {
+    if (!sameFile(statBig(aside), judged)) {
+      try {
+        linkSync(aside, lockPath);
+      } catch {
+        // A third process holds the name now; the moved holder's release will not touch it.
+      }
+    }
+  } finally {
+    unlinkSync(aside);
   }
 }
 
@@ -124,15 +175,22 @@ export async function withRegistryLock<T>(path: string, fn: () => T | Promise<T>
       await new Promise(resolve => setTimeout(resolve, Math.min(200, 10 * 2 ** Math.min(attempt, 4)) * (0.5 + Math.random())));
     }
   }
+  let mine: BigIntStats;
   try {
     writeSync(fd, `${process.pid}\n${new Date().toISOString()}\n`);
+    mine = fstatSync(fd, { bigint: true });
+  } finally {
     closeSync(fd);
+  }
+  try {
     return await fn();
   } finally {
+    // Only our own lock: if it was reclaimed as stale while we held it, the file now at
+    // `lockPath` belongs to another process.
     try {
-      unlinkSync(lockPath);
+      if (sameFile(statBig(lockPath), mine)) unlinkSync(lockPath);
     } catch {
-      // Reclaimed as stale while we held it (we were slower than `staleMs`); nothing to release.
+      // Already gone.
     }
   }
 }

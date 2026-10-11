@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { readRegistry, registryPath, updateRegistry, withRegistryLock, writeRegistry } from "./registry.ts";
+import { readRegistry, registryPath, tryReclaim, updateRegistry, withRegistryLock, writeRegistry } from "./registry.ts";
 
 const fixtures = mkdtempSync(join(tmpdir(), "wt-registry-"));
 after(() => rmSync(fixtures, { recursive: true, force: true }));
@@ -61,6 +61,80 @@ describe("withRegistryLock", () => {
     const path = freshPath();
     await assert.rejects(withRegistryLock(path, () => { throw new Error("boom"); }), /boom/);
     assert.equal(existsSync(`${path}.lock`), false);
+  });
+});
+
+describe("tryReclaim", () => {
+  // The race: this waiter judged the lock stale, but before it acts another waiter has already
+  // reclaimed it and taken a fresh one. A plain unlink would delete that live lock.
+  it("never removes a lock that replaced the one it judged stale", () => {
+    const path = freshPath();
+    writeRegistry(path, { version: 1, worktrees: [] });
+    const lock = `${path}.lock`;
+    writeFileSync(lock, "2147483646\n");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lock, old, old);
+    tryReclaim(lock, 60_000, () => {
+      rmSync(lock);
+      writeFileSync(lock, `${process.pid}\nfresh\n`);
+    });
+    assert.equal(readFileSync(lock, "utf8"), `${process.pid}\nfresh\n`);
+    assert.deepEqual(readdirSync(join(path, "..")).filter(name => name.includes(".stale.")), []);
+    rmSync(lock);
+  });
+
+  it("removes the stale lock it judged", () => {
+    const path = freshPath();
+    writeRegistry(path, { version: 1, worktrees: [] });
+    writeFileSync(`${path}.lock`, "2147483646\n");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(`${path}.lock`, old, old);
+    tryReclaim(`${path}.lock`, 60_000);
+    assert.equal(existsSync(`${path}.lock`), false);
+  });
+
+  it("leaves a holder's release from deleting a lock that replaced its own", async () => {
+    const path = freshPath();
+    await withRegistryLock(path, () => {
+      rmSync(`${path}.lock`);
+      writeFileSync(`${path}.lock`, "someone else\n");
+    });
+    assert.equal(readFileSync(`${path}.lock`, "utf8"), "someone else\n");
+    rmSync(`${path}.lock`);
+  });
+});
+
+describe("stale-lock reclaim under contention", () => {
+  // Several waiters judge the same abandoned lock stale at once. Each may reclaim it, but only the
+  // stale file may be removed: the first waiter's fresh lock must survive the others' reclaims, so
+  // no two processes are ever inside the critical section together.
+  it("never lets two processes hold the lock", async () => {
+    for (let round = 0; round < 4; round++) {
+      const path = freshPath();
+      writeRegistry(path, { version: 1, worktrees: [] });
+      writeFileSync(`${path}.lock`, "2147483646\n");
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(`${path}.lock`, old, old);
+      const inside = `${path}.inside`;
+      const script = `
+        import { openSync, closeSync, unlinkSync, appendFileSync } from "node:fs";
+        import { withRegistryLock } from ${JSON.stringify(new URL("./registry.ts", import.meta.url).href)};
+        const [path, inside] = process.argv.slice(1);
+        await withRegistryLock(path, async () => {
+          let fd;
+          try { fd = openSync(inside, "wx"); } catch { appendFileSync(path + ".violations", "x"); return; }
+          await new Promise(resolve => setTimeout(resolve, 20));
+          closeSync(fd);
+          unlinkSync(inside);
+        });`;
+      await Promise.all(Array.from({ length: 8 }, () => new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, ["--input-type=module", "-e", script, path, inside], { stdio: "inherit" });
+        child.on("exit", code => code === 0 ? resolve() : reject(new Error(`exited ${code}`)));
+      })));
+      assert.equal(existsSync(`${path}.violations`), false, `round ${round}: two holders at once`);
+      assert.equal(existsSync(`${path}.lock`), false);
+      assert.deepEqual(readdirSync(join(path, "..")).filter(name => name.includes(".stale.")), []);
+    }
   });
 });
 
