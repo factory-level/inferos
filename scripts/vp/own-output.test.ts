@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -105,6 +105,31 @@ const DETACHED_GRANDCHILD_VP = `
   setTimeout(() => process.exit(0), 300);
 `;
 
+// The review's second case: a detached grandchild of an uncached task writing to vp's stdout
+// continuously, faster than the tail reads, after vp has exited: `timeout 3 yes`, in effect, as
+// unthrottled 1 MiB writes for 3s. vp waits until the file holds 1 MiB, records the time and the
+// size it saw, and exits 5.
+const FAST_WRITER_VP = (exitFile: string) => `
+  const { spawn } = require("node:child_process");
+  const { fstatSync, writeFileSync } = require("node:fs");
+  const writer = spawn(process.execPath, ["-e", [
+    "const { writeSync } = require('node:fs');",
+    "const chunk = Buffer.alloc(1024 * 1024, 'z');",
+    "const stopAt = Date.now() + 3_000;",
+    "while (Date.now() < stopAt) writeSync(1, chunk);",
+  ].join("\\n")], { stdio: "inherit", detached: true });
+  writer.unref();
+  process.stdout.write("writer " + writer.pid + "\\n");
+  const started = Date.now();
+  const tick = setInterval(() => {
+    const size = fstatSync(1).size;
+    if (size < 1024 * 1024 && Date.now() - started < 10_000) return;
+    clearInterval(tick);
+    writeFileSync(${JSON.stringify(exitFile)}, JSON.stringify({ at: Date.now(), size }));
+    process.exit(5);
+  }, 5);
+`;
+
 // Leaves 2 MiB the reader will never take, then exits: the wrapper is left in its final drain.
 const EXITS_INTO_STALLED_DRAIN = (exitedFile: string) => `
   require("node:fs").writeSync(1, Buffer.alloc(2 * 1024 * 1024, "y"));
@@ -118,6 +143,8 @@ interface Run {
   tmp: string;
   exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   stdout: () => string;
+  /** Every byte of stdout received, including any `keepStdoutBytes` discarded. */
+  stdoutBytes: () => number;
   stderr: () => string;
   startReading: () => void;
   /** Resolves once both of the wrapper's output streams have closed. */
@@ -132,8 +159,8 @@ interface Run {
  * sharing the description flipping it to O_NONBLOCK, the hazard with inherited stdio. It must not
  * reach the child either way.
  */
-function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs }:
-    { readDelayMs?: number; drainIdleMs?: number } = {}): Run {
+function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs, keepStdoutBytes = Infinity }:
+    { readDelayMs?: number; drainIdleMs?: number; keepStdoutBytes?: number } = {}): Run {
   const dir = join(fixtureRoot, `case-${++caseCount}`);
   const tmp = join(dir, "tmp");
   mkdirSync(tmp, { recursive: true });
@@ -156,12 +183,21 @@ function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs }:
 
   // Buffers, decoded once at the end, so a chunk boundary splitting a character cannot garble it.
   const out: Buffer[] = [];
+  let kept = 0;
+  let received = 0;
   const err: Buffer[] = [];
   let reading = false;
   const startReading = () => {
     if (reading) return;
     reading = true;
-    proc.stdout.on("data", (chunk: Buffer) => { out.push(chunk); });
+    proc.stdout.on("data", (chunk: Buffer) => {
+      received += chunk.length;
+      // Counted, not kept, past the limit: the uncapped tail a test guards against can forward GBs.
+      if (kept < keepStdoutBytes) {
+        out.push(chunk);
+        kept += chunk.length;
+      }
+    });
     proc.stderr.on("data", (chunk: Buffer) => { err.push(chunk); });
   };
   // Not reading at all is the slow reader: the streams stay paused until a listener attaches, so
@@ -176,6 +212,7 @@ function runWrapper(childBody: string, { readDelayMs = 0, drainIdleMs }:
     tmp,
     exit,
     stdout: () => Buffer.concat(out).toString(),
+    stdoutBytes: () => received,
     stderr: () => Buffer.concat(err).toString(),
     startReading,
     closed,
@@ -295,6 +332,35 @@ describe("spawnWithOwnOutput", {
       assert.ok(isAlive(grandchildPid), "fixture error: the grandchild should still be running");
     } finally {
       kill(run.wrapperPid, grandchildPid);
+    }
+  });
+
+  it("stops at the output's size when the child exited, though a descendant keeps writing", async () => {
+    const exitFile = join(fixtureRoot, `vp-exit-${++caseCount}`);
+    const run = runWrapper(FAST_WRITER_VP(exitFile), { keepStdoutBytes: 64 * 1024 });
+    let writerPid = 0;
+    try {
+      assert.ok(await waitFor(() => /^writer \d+$/m.test(run.stdout())), "no writer reported");
+      writerPid = Number(/^writer (\d+)$/m.exec(run.stdout())?.[1]);
+      assert.deepEqual(await run.exit, { code: 5, signal: null });
+      const wrapperExitedAt = Date.now();
+      // Checked first, so the timing below is meaningful: an uncapped tail ends with the writer.
+      assert.ok(isAlive(writerPid), "the wrapper outlived the writer it should have stopped following");
+      const vpExit = JSON.parse(readFileSync(exitFile, "utf8")) as { at: number; size: number };
+      assert.ok(wrapperExitedAt - vpExit.at < 2_000,
+          `the wrapper exited ${wrapperExitedAt - vpExit.at}ms after the child`);
+      await run.closed;
+      const forwarded = run.stdoutBytes();
+      // Everything up to the child's exit arrived, and little beyond it: at the writer's rate, an
+      // uncapped tail forwards GBs before the writer stops.
+      assert.ok(forwarded >= vpExit.size, `forwarded ${forwarded} bytes, below the ${vpExit.size} at exit`);
+      assert.ok(forwarded < vpExit.size + 32 * 1024 * 1024,
+          `forwarded ${forwarded} bytes, far past the ${vpExit.size} at exit`);
+      assert.deepEqual(readdirSync(run.tmp), [], "the temp output files were left behind");
+    } finally {
+      // Its own process group (`detached`), so the group kill reaches it and nothing it started.
+      if (writerPid) try { process.kill(-writerPid, "SIGKILL"); } catch { /* already gone */ }
+      kill(run.wrapperPid);
     }
   });
 

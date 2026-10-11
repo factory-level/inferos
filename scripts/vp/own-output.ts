@@ -35,7 +35,7 @@
 // terminal width, and a TTY cannot hit this bug, because Node puts a TTY stdout into *blocking* mode.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, closeSync, constants, mkdtempSync, openSync, read, rmSync, rmdirSync, unlinkSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, mkdtempSync, openSync, read, rmSync, rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -50,7 +50,7 @@ export const POLL_MS = 50;
  * for, and a second signal abandons it at once.
  *
  * Not the ~5s first proposed: that was for descendants holding the output open, which the tail no
- * longer waits on at all (it stops at the files' end as of the child's exit). What is left is a
+ * longer waits on at all (it stops at each file's size when the child exited). What is left is a
  * stalled reader, and GitHub's has been seen stalling for 6s; giving up then drops the end of the
  * CI log -- the failure summary. 30s is half `with-timeout.ts`'s idle bound for a task.
  */
@@ -90,6 +90,11 @@ interface Capture {
   readFd: number;
   path: string;
   sink: Sink;
+  /**
+   * The file's size when the child exited: the tail stops here. `null` while the child runs.
+   * Taken from the read descriptor, which works after the file is unlinked.
+   */
+  endAt: number | null;
 }
 
 /**
@@ -98,9 +103,10 @@ interface Capture {
  * whole process tree, and this process exits with the child's code, or re-raises the signal that
  * ended it, once the tail has caught up with everything the child wrote before it exited.
  *
- * The tail stops at the end of the files as they stood when the child exited, so a descendant that
- * outlives the child while holding them (a detached grandchild of an uncached task) cannot keep
- * this process alive; whatever it writes later is discarded with the files.
+ * The tail stops at each file's size as `fstat` reports it in the child's `exit` handler, so a
+ * descendant that outlives the child while still writing to the files (a detached grandchild of an
+ * uncached task) can neither keep this process alive nor add to the forwarded output: anything
+ * written after that point is dropped with the files.
  */
 export function spawnWithOwnOutput(
   command: string,
@@ -138,7 +144,7 @@ export function spawnWithOwnOutput(
       // O_APPEND: vp and the uncached tasks it hands this descriptor to all write at the end.
       const writeFd = openSync(path,
           constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_APPEND, 0o600);
-      captures.push({ name, writeFd, readFd: openSync(path, "r"), path, sink: sinks[name] });
+      captures.push({ name, writeFd, readFd: openSync(path, "r"), path, sink: sinks[name], endAt: null });
     }
   }
 
@@ -158,21 +164,30 @@ export function spawnWithOwnOutput(
     }
   }
 
-  const state = { childExited: false, stopped: false, progressAt: Date.now() };
-  // Registered before `relayTermination`'s own `exit` listener, so the flag is set by the time its
-  // `beforeExit` runs.
+  const state = { stopped: false, progressAt: Date.now() };
+  // Registered before `relayTermination`'s own `exit` listener, so every `endAt` is set by the time
+  // its `beforeExit` runs. Everything the child wrote is in the files by now: a write to a regular
+  // file is complete when the call returns.
   child.on("exit", () => {
-    state.childExited = true;
+    for (const capture of captures) {
+      try {
+        capture.endAt = fstatSync(capture.readFd).size;
+      } catch {
+        capture.endAt = 0;
+      }
+    }
     state.progressAt = Date.now();
   });
-  const tails = captures.map(capture => tail(capture.readFd, capture.sink, state));
+  const tails = captures.map(capture => tail(capture, state));
 
   relayTermination(child, {
     graceMs,
     beforeExit: async force => {
       await Promise.race([Promise.all(tails), abandoned(state, force, finalDrainIdleMs)]);
       state.stopped = true;
-      cleanUp();
+      // Never allowed to turn the child's exit status into this process's crash: a removal that
+      // fails (Windows, with a descendant still holding a file) only leaves a temp file behind.
+      try { cleanUp(); } catch { /* left for the OS's temp cleanup */ }
       process.off("exit", cleanUp);
     },
   });
@@ -180,12 +195,12 @@ export function spawnWithOwnOutput(
 }
 
 /**
- * Copies `fd` into `sink` from the start, polling at end-of-file, until it reaches end-of-file
- * after the child has exited. Waits for `drain` whenever `sink` asks it to, so the file, not this
- * process's memory, absorbs a slow reader.
+ * Copies the capture's file into its sink from the start, polling at end-of-file while the child
+ * runs, and stopping at `endAt` once the child has exited. Waits for `drain` whenever the sink asks
+ * it to, so the file, not this process's memory, absorbs a slow reader.
  */
-async function tail(fd: number, sink: Sink,
-  state: { childExited: boolean; stopped: boolean; progressAt: number }): Promise<void> {
+async function tail(capture: Capture, state: { stopped: boolean; progressAt: number }): Promise<void> {
+  const { readFd: fd, sink } = capture;
   // A property rather than a local, since only the `error` listener sets it.
   const sinkState = { broken: false };
   // A reader that goes away makes our write fail with EPIPE; unhandled, that would kill this wrapper
@@ -194,12 +209,13 @@ async function tail(fd: number, sink: Sink,
   const buffer = Buffer.allocUnsafe(64 * 1024);
   let position = 0;
   while (!state.stopped && !sinkState.broken) {
-    // Read *before* checking for EOF-after-exit, with the flag sampled first: an `exit` that lands
-    // during the read must not end the tail on a read that started before the child's last write.
-    const exitedBeforeRead = state.childExited;
+    const { endAt } = capture;
+    if (endAt !== null && position >= endAt) break;
+    // Never past `endAt`: a descendant may still be appending, and that is not the child's output.
+    const length = endAt === null ? buffer.length : Math.min(buffer.length, endAt - position);
     let bytesRead: number;
     try {
-      ({ bytesRead } = await readAsync(fd, buffer, 0, buffer.length, position));
+      ({ bytesRead } = await readAsync(fd, buffer, 0, length, position));
     } catch {
       // Only once `cleanUp` has closed the descriptor under an abandoned drain; nothing is waiting.
       return;
@@ -211,7 +227,8 @@ async function tail(fd: number, sink: Sink,
       state.progressAt = Date.now();
       continue;
     }
-    if (exitedBeforeRead) break;
+    // End-of-file while the child is still running: wait for more. (After its exit the file only
+    // grows, so a short read below `endAt` cannot happen; the idle bound would cover it if it did.)
     await new Promise(resolve => setTimeout(resolve, POLL_MS));
   }
   if (sinkState.broken) return;
