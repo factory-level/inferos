@@ -7,7 +7,7 @@ import {
 /** The `test` task below, before its `cache.env` gains `BACKEND_TEST_WORKERS`. */
 const unitTask = vitestTask([
   { command: 'vitest run', idleSeconds: 120 },
-  { command: 'vitest run --config vitest.integration.config.ts', idleSeconds: 120 },
+  { command: 'vitest run --config vitest.integration.config.ts', idleSeconds: 180 },
 ])
 
 /**
@@ -95,9 +95,12 @@ export default {
        * `BACKEND_TEST_WORKERS` sets the `backend` project's worker count (see vitest.config.ts), so
        * it is declared here: a cached run strips undeclared variables.
        *
-       * The integration config gets the same threshold. Its four `__integration__` files share one
+       * The integration config needs a longer one still. Its four `__integration__` files share one
        * cold start -- transforming and importing the backend, then booting workerd -- before any of
-       * them reports, and on CI that silence ran 35-56 s on passing runs and past 60 s once.
+       * them reports. On CI, `RUN` to the first file took 61-107 s on passing runs; they stayed under
+       * the default only because two incidental Vite sourcemap warnings (standardwebhooks,
+       * @google/genai) land mid-silence and reset the timer, which a dependency or Vite upgrade can
+       * remove. 180 s covers that; the wall-clock backstop still bounds a real hang.
        */
       test: {
         ...unitTask,
