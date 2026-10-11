@@ -89,6 +89,20 @@ It is read by `pnpm dev-server`/`run-local`, `pnpm local`, `pnpm dev-client` and
 
 The `iterate` skill and the [check tiers](../architecture/local-development.md#check-tiers) have the details.
 
+### Measured
+
+On 2026-10-11, at main `404a0cb5`, two worktrees made by `pnpm wt new` ran the whole loop at the same time, each with its own dev server (`--gatekeepers inferops`). The load average was 0.8–4.7 on 14 cores.
+
+| Step | Worktree E | Worktree F | Before this work |
+| --- | --- | --- | --- |
+| `pnpm wt new` | 20.2 s | 20.2 s | — |
+| One backend test file | 2.2 s | 2.1 s | 19–23 s |
+| Backend edit until live | 4.0–4.4 s | 4.0–4.4 s | about 6.5 s |
+| `check:fast`, test-file change | 14.8 s | 16.2 s | — |
+| `check:fast`, backend `src` change | 52 s | 42 s | 130–180 s (backend suite) |
+
+Known limit: two dev servers started at the same instant can collide on an internal port, and one fails with workerd's `bind(): Address already in use` (in this run, worktree E's first start). A fix is in progress on branch `dx/wt-dev-ports`.
+
 ## Fewer Workers, faster reloads
 
 Wrangler restarts every Worker on any change, so each backend edit waits on all of them. Start only the gatekeepers you need:

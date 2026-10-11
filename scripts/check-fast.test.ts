@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
-  FOOTER, type Group, type Step, type Workspace, changedFiles, expandPaths, packageFor, parseArgs,
+  FOOTER, type Group, type Step, type Workspace, changedFiles, expandPaths, isPackageDoc, packageFor, parseArgs,
   planChecks, report, runGroups, splitTestRun, touchesSettings, workspaceGlobs,
 } from "./check-fast.ts";
 
@@ -129,6 +129,37 @@ describe("planChecks", () => {
         [`${VITEST} run`, `${VITEST} run --config vitest.integration.config.ts`], file);
       assert.match(group.checks[1].label, /in full/);
     }
+  });
+
+  it("runs docs:check, not the package's tests, for a package's docs files", () => {
+    const docs = ["packages/workshop-backend/README.md", "packages/workshop-backend/AGENTS.md",
+      "packages/workshop-backend/README", "packages/workshop-backend/docs/diagram.svg",
+      "packages/workshop-backend/deleted-notes.md"];
+    const plan = planChecks(docs, workspace);
+    assert.deepEqual(plan.unchecked, []);
+    assert.deepEqual(plan.groups.map(group => group.name), ["repo"]);
+    assert.deepEqual(plan.groups[0].checks.map(step => step.label), ["pnpm docs:check"]);
+  });
+
+  it("keeps the full-config fallback for wrangler.jsonc and nested Markdown (runtime content)", () => {
+    for (const file of ["packages/workshop-backend/wrangler.jsonc",
+      "packages/workshop-backend/blueprints/kanban/files/README.md"]) {
+      const [group, ...rest] = planChecks([file], workspace).groups;
+      assert.equal(group.name, BACKEND.name, file);
+      assert.deepEqual(rest, [], `${file} runs no docs:check`);
+      const related = group.checks.filter(step => step.args.includes("related"));
+      assert.deepEqual(related.map(step => step.fallback && commandLine(step.fallback)),
+        [`${VITEST} run`, `${VITEST} run --config vitest.integration.config.ts`], file);
+    }
+  });
+
+  it("classifies only root-level Markdown, README* and docs/ as package docs", () => {
+    assert.equal(isPackageDoc("packages/workshop-backend/README.md", BACKEND), true);
+    assert.equal(isPackageDoc("packages/workshop-backend/README.txt", BACKEND), true);
+    assert.equal(isPackageDoc("packages/workshop-backend/docs/a/b.png", BACKEND), true);
+    assert.equal(isPackageDoc("packages/workshop-backend/src/docs/a.ts", BACKEND), false);
+    assert.equal(isPackageDoc("packages/workshop-backend/wrangler.jsonc", BACKEND), false);
+    assert.equal(isPackageDoc("packages/workshop-backend/src/README.md", BACKEND), false);
   });
 
   it("lists a deleted test suite rather than dropping it", () => {

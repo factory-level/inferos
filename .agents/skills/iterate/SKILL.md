@@ -17,6 +17,8 @@ description: The edit-check loop for changing this repository - `pnpm check:fast
        - the changed test files directly;
        - `vitest related` for the other changed files.
      - When nothing relates to them, or a file was deleted, or a vitest or Vite config changed, that config runs in full.
+     - `vitest related` follows static imports only, so a test reached only through a vitest config's `main` or a file read at runtime can be missed even when some related tests run; the footer it always prints and `pnpm check:full` cover that.
+     - A package's own docs (`*.md` and `README*` at its root, files under its `docs/`) run `pnpm docs:check` instead of its tests. Other files, `wrangler.jsonc` included, can change what runs, so they keep the full-config fallback.
    - **For `scripts/**`:** it runs every `scripts/` `node --test` suite and `pnpm types:scripts`.
    - **For settings and consumer sources and `env.d.ts`:** it runs `scripts/consumer/settings.test.ts`, which fails when the generated configuration reference is stale.
    - **For `docs/**`:** it runs `pnpm docs:check`.
@@ -30,7 +32,7 @@ description: The edit-check loop for changing this repository - `pnpm check:fast
    - packages with no `build` task.
 
    The last line always reminds you that dependent packages and full suites are left to `pnpm check:full`.
-3. Run one test file directly with `npx vitest run <file>` in its package (`node --test <file>` under `scripts/`). This works once the package's codegen has run: one `pnpm check:fast`, or the codegen segments of its `test:run`. For example, workshop-backend's backend-loading tests need the generated bundled-blueprints module. `@gadgets/typed-storage` does not need building first.
+3. Run one test file directly with `npx vitest run <file>` in its package (`node --test <file>` under `scripts/`). This works once the package's codegen has run: one `pnpm check:fast` that tests the package, or the codegen segments of its `test:run`. For example, workshop-backend's backend-loading tests need the generated bundled-blueprints module. `@gadgets/typed-storage` does not need building first.
 4. Before hand-off, run `pnpm check:full` once: `pnpm lint`, `pnpm docs:check`, the `scripts/` suites and `pnpm test`, which includes integration. It stops at the first failure and prints a timing summary. CI is the final gate.
 5. Never run full suites after every edit, and never edit generated output. `docs/wiki/configuration-reference.md`'s settings table comes from `scripts/consumer/settings.ts`: edit that source, then run `node scripts/consumer/settings.ts` to regenerate the table.
 
