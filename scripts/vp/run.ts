@@ -13,14 +13,15 @@
 // still work if passed, since vite-task gives a flag priority over the env var; in that case the
 // note is suppressed, because it would announce a number the run is not using (concurrency.ts).
 //
-// vp's stdout and stderr are pipes of its own whenever ours are not TTYs, forwarded here with
-// backpressure: on a shared, non-blocking CI pipe vp aborts the run on EAGAIN (own-pipes.ts). Exit
-// codes and signals pass through unchanged (relay-termination.ts).
+// vp's stdout and stderr are regular temp files whenever ours are not TTYs, tailed here with
+// backpressure: on any pipe, which its uncached tasks can make non-blocking under it, vp aborts the
+// run on EAGAIN (own-output.ts). Exit codes and signals pass through unchanged
+// (relay-termination.ts).
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { vpRunEnv } from "./concurrency.ts";
-import { spawnWithOwnPipes } from "./own-pipes.ts";
+import { spawnWithOwnOutput } from "./own-output.ts";
 
 // Three hops: scripts/vp → scripts → repo root, where `vite-plus` is a devDependency.
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -28,4 +29,4 @@ const VP = join(ROOT, "node_modules", "vite-plus", "bin", "vp");
 
 const vpArgs = process.argv.slice(2);
 
-spawnWithOwnPipes(process.execPath, [VP, "run", ...vpArgs], { env: vpRunEnv({ vpArgs }) });
+spawnWithOwnOutput(process.execPath, [VP, "run", ...vpArgs], { env: vpRunEnv({ vpArgs }) });
