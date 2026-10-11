@@ -19,6 +19,7 @@ import { getDevServerConfig } from "./dev-server-config.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import { relayTermination } from "./relay-termination.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
+import { readWorktreeEnv } from "./worktree-env.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -30,7 +31,10 @@ const env = vpRunEnv();
 const passthroughArgs = process.argv.slice(2);
 let backendHost: string;
 try {
-  ({ backendHost } = getDevServerConfig(passthroughArgs, process.env.VITE_BACKEND_HOST));
+  // The dev server loads a `pnpm wt` worktree's overlay itself; read it here too so the URL printed
+  // below is the one it will listen on.
+  ({ backendHost } = getDevServerConfig(passthroughArgs,
+      process.env.VITE_BACKEND_HOST ?? readWorktreeEnv(ROOT).VITE_BACKEND_HOST));
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);

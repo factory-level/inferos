@@ -9,6 +9,19 @@ export function getDevRouterAssets(router: WranglerConfig, routerDirectory: stri
   return { ...router.assets, directory: resolve(routerDirectory, router.assets.directory) };
 }
 
+/**
+ * The `vp run` builds the dev server's pre-flight runs concurrently before starting Wrangler (see
+ * run-dev-server.ts for why these two and why `build:app:dev`), as `pnpm` arguments. Shared with
+ * `pnpm wt new`, which warms the same outputs in a fresh worktree.
+ */
+export const DEV_PREFLIGHT_VP_BUILDS: readonly { label: string; args: readonly string[] }[] = [
+  {
+    label: "configurator UIs",
+    args: ["exec", "vp", "run", "-r", "--cache", "build:configurator", "--dev"],
+  },
+  { label: "gatekeeper app UIs", args: ["exec", "vp", "run", "-r", "--cache", "build:app:dev"] },
+];
+
 /** The backend and router binding of a gatekeeper Worker: "gatekeeper-github" -> "GATEKEEPER_GITHUB". */
 export function gatekeeperBinding(name: string): string {
   return name.toUpperCase().replaceAll("-", "_");

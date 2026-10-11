@@ -30,7 +30,8 @@
 //
 // An explicit value always wins -- including a deliberately low one for an OOM-prone machine -- and
 // is never validated or rewritten here: vite-task's own parser reports a bad value. Precedence is
-// `--concurrency-limit` > `process.env.VP_RUN_CONCURRENCY_LIMIT` > the repo-root `.env` > this
+// `--concurrency-limit` > `process.env.VP_RUN_CONCURRENCY_LIMIT` > a `pnpm wt` worktree's
+// `.env.worktree` (its share of the machine, see worktree-env.ts) > the repo-root `.env` > this
 // formula, and the note says which of the sources the number came from, since a value that silently
 // failed to apply is the whole problem being avoided. That is also why a `--concurrency-limit` or
 // `--parallel` on the command line prints nothing at all (`overridesConcurrency`): vite-task gives
@@ -53,6 +54,7 @@ import { availableParallelism, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
+import { WORKTREE_ENV_FILE } from "../worktree-env.ts";
 
 /** vite-task's `DEFAULT_CONCURRENCY_LIMIT`: what `vp run` uses when nothing overrides it. */
 export const VP_DEFAULT_CONCURRENCY_LIMIT = 4;
@@ -71,6 +73,9 @@ export const VP_RUN_CONCURRENCY_LIMIT = "VP_RUN_CONCURRENCY_LIMIT";
  */
 export const ROOT_ENV_FILE =
     join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), ".env");
+
+/** The repo-root `.env.worktree` overlay that `pnpm wt` writes, read ahead of `.env`. */
+export const ROOT_WORKTREE_ENV_FILE = join(dirname(ROOT_ENV_FILE), WORKTREE_ENV_FILE);
 
 /**
  * `VP_RUN_CONCURRENCY_LIMIT` as spelled in `envFile`, or `null` when the file is absent or does not
@@ -313,10 +318,11 @@ export function measureMachine(): Machine {
  * Precedence is `env` > `envFileValue` > `machine`. A value already in `env` leaves the copy
  * byte-identical and prints nothing: the caller set it in the environment and needs no telling. The
  * other two both print, naming their source -- for `.env` that confirmation *is* the feature, since
- * the failure it replaces was a value that looked set and silently was not.
+ * the failure it replaces was a value that looked set and silently was not. `envFileName` is the
+ * file the value came from, for the note.
  */
 export function concurrencyEnv(
-  env: NodeJS.ProcessEnv, machine: Machine, envFileValue: string | null = null,
+  env: NodeJS.ProcessEnv, machine: Machine, envFileValue: string | null = null, envFileName = ".env",
 ): { env: NodeJS.ProcessEnv; note: string | null } {
   if (env[VP_RUN_CONCURRENCY_LIMIT] !== undefined) return { env: { ...env }, note: null };
 
@@ -325,7 +331,7 @@ export function concurrencyEnv(
   if (envFileValue !== null) {
     return {
       env: { ...env, [VP_RUN_CONCURRENCY_LIMIT]: envFileValue },
-      note: `vp run: concurrency ${envFileValue} (from .env)`,
+      note: `vp run: concurrency ${envFileValue} (from ${envFileName})`,
     };
   }
 
@@ -422,7 +428,10 @@ export interface VpRunEnvOptions {
 export function vpRunEnv(
   { vpArgs = [], concurrentRuns = 1, env = process.env }: VpRunEnvOptions = {},
 ): NodeJS.ProcessEnv {
-  const result = concurrencyEnv(env, measureMachine(), envFileConcurrencyLimit());
+  const worktreeValue = envFileConcurrencyLimit(ROOT_WORKTREE_ENV_FILE);
+  const result = worktreeValue !== null
+    ? concurrencyEnv(env, measureMachine(), worktreeValue, WORKTREE_ENV_FILE)
+    : concurrencyEnv(env, measureMachine(), envFileConcurrencyLimit());
   if (result.note && !overridesConcurrency(vpArgs)) console.error(result.note);
   return splitConcurrencyLimit(result.env, concurrentRuns);
 }

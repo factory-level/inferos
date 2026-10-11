@@ -9,6 +9,7 @@ Create documents from [`_template.md`](_template.md).
 | Page | Summary |
 | --- | --- |
 | [Choosing an InferOS extension](extension-capabilities.md) | A code-backed decision guide for choosing the smallest extension surface. |
+| [Fast local iteration and parallel worktrees](local-development.md) | `pnpm wt` worktrees with their own ports, overlay, seeded cache and linked secrets; the check tiers; `--gatekeepers`. |
 | [Local development and Cloudflare parity](local-cloud-parity.md) | Wrapper commands, the `pnpm local` lifecycle of the in-repo stack, and the limits of emulation. |
 | [Configuration ownership and required settings](configuration-reference.md) | A starting settings inventory for the setup skills, grounded in current code. |
 | [ChatGPT subscription feasibility findings](chatgpt-feasibility.md) | Official protocol evidence and the unresolved personal Cloudflare deployment question. |

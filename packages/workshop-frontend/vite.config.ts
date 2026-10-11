@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 import tsconfigPaths from 'vite-tsconfig-paths'
 import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
 import { vitestTask } from '@gadgets/scripts/vitest-task'
+import { devClientServerOptions } from '@gadgets/scripts/worktree-env'
 
 // `dist/` is this package's own build output, excluded from the inputs of the bundle and test
 // tasks: vp declines to cache a task that reads a path it also wrote. Package-relative rather than
@@ -71,7 +72,12 @@ const runConfig = {
   },
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
+  // A `pnpm wt` worktree's own Vite port and backend host (scripts/worktree-env.ts). `pnpm dev-client`
+  // only: a build must not inline a `VITE_*` value its task fingerprint does not see, and vitest
+  // (`serve` in mode `test`) must not see a worktree's backend host where the tests expect none.
+  const devServer = command === 'serve' && mode === 'development'
+    ? devClientServerOptions() : { port: 3000, strictPort: false }
   const env = loadEnv(mode, process.cwd())
   const backendHost = env.VITE_BACKEND_HOST?.trim() || 'localhost:8787'
   const frontendErrorReporting = env.VITE_FRONTEND_ERROR_REPORTING === 'true'
@@ -86,7 +92,7 @@ export default defineConfig(({ mode }) => {
       tsconfigPaths(),
     ],
     server: {
-      port: 3000,
+      ...devServer,
       host: true,
       headers: documentHeaders,
       proxy: {

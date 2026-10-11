@@ -4,20 +4,32 @@
 // then launches `wrangler dev` with all discovered workers.
 //
 // Flags:
-//   --use-workers-ai-binding   Include the Workers AI binding in
-//                               workshop-backend (requires Cloudflare login).
 //   --port PORT                 Listen on PORT instead of 8787. Overrides VITE_BACKEND_HOST.
+//   --gatekeepers A,B           Start only these gatekeeper Workers (names with or without the
+//                               `gatekeeper-` prefix, or `none`); the router and backend always run.
+//                               Fewer Workers means a faster restart on every edit. Overrides
+//                               INFEROS_DEV_GATEKEEPERS. See dev-gatekeepers.ts.
+//   --use-workers-ai-binding    Include the Workers AI binding in
+//                               workshop-backend (requires Cloudflare login).
+//   --serve-frontend-assets     Serve the prebuilt frontend from the router instead of expecting
+//                               Vite (`pnpm run-local` passes this).
+//   --no-ui-watchers            Skip the per-gatekeeper configurator and app UI watchers (for
+//                               machines near the inotify instance limit).
+//   --consumer-root DIR         Run for a consumer wrapper: its inferos.config.json, canvas config,
+//                               gatekeepers/ and workers/ join the stack.
 //
-// Env:
+// Env (the shell wins, then a `pnpm wt` worktree's .env.worktree, then .dev.vars, then .env):
 //   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
+//   INFEROS_DEV_GATEKEEPERS=inferops  As --gatekeepers.
+//   DEV_CLIENT_PORT=3001              Where Vite listens, for the default PUBLIC_BASE_URL.
 
 import {
-  existsSync, readFileSync, writeFileSync, statSync,
+  existsSync, readFileSync, writeFileSync,
 } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import { constants } from "node:os";
-import { basename, join, dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
@@ -27,7 +39,7 @@ import {
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
   resolveInferOpsBoundViews,
-  resolvePublicationFlag,
+  resolvePublicationFlag, DEV_PREFLIGHT_VP_BUILDS,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
@@ -39,12 +51,13 @@ import { unsupportedCapabilities } from "./consumer/runtime.ts";
 import { prepareConsumerWorkers } from "./consumer/extensions.ts";
 import { prepareConsumerGatekeepers } from "./consumer/gatekeepers.ts";
 import { vpRunEnv } from "./vp/concurrency.ts";
-import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "./worker-dirs.ts";
+import { DEV_GATEKEEPERS_ENV, discoverDevGatekeepers, requestedDevGatekeepers, selectDevGatekeepers } from "./dev-gatekeepers.ts";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "./consumer/canvas.ts";
 import { startOpenAiCompanion } from './openai-companion.ts';
 import { installDevVarsSecrets, installLocalSecrets } from './local-secrets.ts';
 import { splitGatekeeperSecrets, withoutLocalOverrides } from './gatekeeper-dev-secrets.ts';
 import { recordDevServer } from "./local/stack.ts";
+import { DEV_CLIENT_PORT, readWorktreeEnv } from "./worktree-env.ts";
 import { parseEnv } from 'node:util';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -52,12 +65,10 @@ const ROOT = join(SCRIPTS_DIR, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
 const WORKSHOP_BACKEND_DIR = join(PACKAGES_DIR, "workshop-backend");
 
-/** A gatekeeper package as {@link findGatekeepers} discovers it. */
-interface Gatekeeper {
-  /** Package directory name, which is also the worker name. */
-  name: string;
-  /** Absolute path to the package directory. */
-  dir: string;
+// A `pnpm wt` worktree's own ports and concurrency share (worktree-env.ts). Loaded first, so it
+// beats the `.dev.vars` and `.env` it shares with the main checkout; the shell still wins.
+for (const [key, value] of Object.entries(readWorktreeEnv(ROOT))) {
+  if (process.env[key] === undefined) process.env[key] = value;
 }
 
 // Load a root `.dev.vars` file (KEY=VALUE lines) into process.env for local development. Existing
@@ -111,20 +122,14 @@ try {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Discover gatekeeper packages.
-// ---------------------------------------------------------------------------
-function findGatekeepers(root: string): Gatekeeper[] {
-  return workerPackageDirs(root)
-      .map(dir => ({ name: basename(dir), dir }))
-      .filter(({ name }) => name.startsWith("gatekeeper-"))
-      .filter(({ dir }) => {
-    try {
-      return statSync(join(dir, "wrangler.jsonc")).isFile();
-    } catch {
-      return false;
-    }
-  });
+// The developer's `--gatekeepers` / INFEROS_DEV_GATEKEEPERS selection, validated before anything
+// is generated; applied to the discovered set below (dev-gatekeepers.ts).
+let requestedGatekeepers: string[] | null;
+try {
+  requestedGatekeepers = requestedDevGatekeepers(process.argv.slice(2), process.env[DEV_GATEKEEPERS_ENV]);
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(1);
 }
 
 // The committed wrangler.jsonc files are generated from cloudflare.config.ts; regenerate them so a
@@ -197,11 +202,23 @@ const publicationFlags = Object.fromEntries((["PUBLISH_CLOUDFLAREOS_WIDGET", "PU
   })]));
 const codingWorkbenchRepos = consumerConfig?.schemaVersion === 2
   ? codingRepoIds(consumerConfig) : process.env.CODING_WORKBENCH_REPOS ?? "";
-const gatekeepers = [
-  ...findGatekeepers(ROOT).filter(({ dir, name }) =>
-    basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustomGatekeepers.has(name)),
-  ...consumerGatekeepers.map(({ name, directory }) => ({ name, dir: directory })),
-];
+// Narrowed by `--gatekeepers` when given: a gatekeeper left out runs no Worker and gets no router or
+// backend service binding, since both binding lists below are built from this one.
+let gatekeepers: { name: string; dir: string }[];
+try {
+  gatekeepers = selectDevGatekeepers([
+    ...discoverDevGatekeepers(ROOT, enabledCustomGatekeepers),
+    ...consumerGatekeepers.map(({ name, directory }) => ({ name, dir: directory })),
+  ], requestedGatekeepers);
+} catch (err) {
+  // An unknown name is a usage error: one line, no stack, before anything is generated.
+  console.error((err as Error).message);
+  process.exit(1);
+}
+if (requestedGatekeepers !== null) {
+  console.log(`gatekeepers: ${gatekeepers.map(({ name }) => name).join(", ") || "(none)"} ` +
+    `(narrowed by --gatekeepers/${DEV_GATEKEEPERS_ENV}; the router and backend always run)`);
+}
 // In-repo there is no inferos.config.json to carry feature flags, so a canvas config is the switch
 // that turns composition (with saved views) on. A wrapper's own flags always take precedence.
 const canvasFeatures = consumerConfig?.features
@@ -432,20 +449,14 @@ function runBuild(
 // this output is rebuilt regardless, and unless the bytes match Wrangler sees `src/generated/app.txt`
 // change and restarts the worker. Same build, unminified.
 //
-// The two `vp` runs, listed so the concurrency split below is derived from their number rather than
+// The two `vp` runs (DEV_PREFLIGHT_VP_BUILDS, kept in dev-server-config.ts so `pnpm wt new` warms
+// the same builds), listed so the concurrency split below is derived from their number rather than
 // from a literal that a third would silently invalidate. Both share the one machine-aware limit
 // (vp/concurrency.ts), divided between them: each run alone would otherwise claim the whole budget,
 // and the two together twice it. Floored at vp's default of 4, so a small machine is unchanged and a
 // big one stops double-claiming. Computed once, so the note prints once, and after `loadDevVars()`
 // so a `.dev.vars` override is honoured.
-const VP_PREFLIGHT_BUILDS = [
-  {
-    label: "configurator UIs",
-    args: ["exec", "vp", "run", "-r", "--cache", "build:configurator", "--dev"],
-  },
-  { label: "gatekeeper app UIs", args: ["exec", "vp", "run", "-r", "--cache", "build:app:dev"] },
-];
-const vpEnv = vpRunEnv({ concurrentRuns: VP_PREFLIGHT_BUILDS.length });
+const vpEnv = vpRunEnv({ concurrentRuns: DEV_PREFLIGHT_VP_BUILDS.length });
 try {
   await Promise.all([
     runBuild(
@@ -454,8 +465,8 @@ try {
       [join(WORKSHOP_BACKEND_DIR, "scripts", "build-bundled-blueprints.ts")],
       WORKSHOP_BACKEND_DIR,
     ),
-    ...VP_PREFLIGHT_BUILDS.map(({ label, args }) =>
-        runBuild(label, ...pnpmCommand(args), ROOT, vpEnv)),
+    ...DEV_PREFLIGHT_VP_BUILDS.map(({ label, args }) =>
+        runBuild(label, ...pnpmCommand([...args]), ROOT, vpEnv)),
   ]);
 } catch (err) {
   // The SIGTERM handler killing the builds also lands here, as the rejection of whichever build
@@ -723,10 +734,11 @@ for (const gk of gatekeepers) {
   // Account connect flows post their completion ticket to the Workshop *origin* named here (see
   // packages/workshop-backend/src/connect-handoff.ts), so the backend refuses to complete one without
   // it. Default to wherever the frontend is served from: Vite in normal dev, the public router in
-  // run-local mode.
+  // run-local mode. Vite's port is `DEV_CLIENT_PORT` when set (a `pnpm wt` worktree's overlay sets
+  // it, see worktree-env.ts), so the two stay in step without a per-mode PUBLIC_BASE_URL.
   if (config.vars.PUBLIC_BASE_URL === undefined) {
-    config.vars.PUBLIC_BASE_URL =
-        serveFrontendAssets ? `http://${backendHost}` : "http://localhost:3000";
+    config.vars.PUBLIC_BASE_URL = serveFrontendAssets
+        ? `http://${backendHost}` : `http://localhost:${process.env[DEV_CLIENT_PORT] || 3000}`;
   }
 
   if (process.env.ENABLE_OPENAI_ASSISTANT_PLUGIN === 'true') {
@@ -802,8 +814,10 @@ const [wranglerCommand, wranglerArgv]: [string, string[]] = wranglerEntry
   : pnpmCommand(["exec", "wrangler", "dev", ...args]);
 
 // Recorded so `pnpm local status|stop` (scripts/local/lifecycle.ts) can find this server.
-process.on("exit", recordDevServer(ROOT,
-    { port: Number(wranglerPort ?? DEFAULT_WRANGLER_PORT), mode: serveFrontendAssets ? "run-local" : "dev-server" }));
+process.on("exit", recordDevServer(ROOT, {
+  port: Number(wranglerPort ?? DEFAULT_WRANGLER_PORT), mode: serveFrontendAssets ? "run-local" : "dev-server",
+  ...(requestedGatekeepers === null ? {} : { gatekeepers: gatekeepers.map(({ name }) => name) }),
+}));
 
 // `spawn`, not `execFileSync`, so the deferred watchers can start once the server is up. It stays in
 // this process group with the terminal attached, so Ctrl-C reaches it as before.

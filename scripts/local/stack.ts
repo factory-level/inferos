@@ -6,11 +6,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "../consumer/canvas.ts";
 import { getDevServerConfig } from "../dev-server-config.ts";
-import { WORKER_PACKAGE_ROOTS, workerPackageDirs } from "../worker-dirs.ts";
+import { discoverDevGatekeepers, selectDevGatekeepers } from "../dev-gatekeepers.ts";
+import { WORKTREE_ENV_FILE } from "../worktree-env.ts";
 
 /** Where the local stack of a checkout lives: the origin plus the files Wrangler keeps for it. */
 export interface LocalStack {
@@ -69,16 +70,15 @@ export interface ConfiguredWorker {
 
 /**
  * The Workers `pnpm dev-server` would start from this checkout, discovered the way it discovers
- * them: every `gatekeeper-*` package with a `wrangler.jsonc`, with the fork's own gatekeepers
- * filtered by `inferos.canvas.json` when one exists. The router and backend are always present.
+ * them (dev-gatekeepers.ts): every `gatekeeper-*` package with a `wrangler.jsonc`, with the fork's
+ * own gatekeepers filtered by `inferos.canvas.json` when one exists, then narrowed to `requested`
+ * (a `--gatekeepers` selection; `null` is all). The router and backend are always present.
  */
-export function configuredWorkers(root: string): ConfiguredWorker[] {
+export function configuredWorkers(root: string, requested: readonly string[] | null = null): ConfiguredWorker[] {
   const inventory = canvasInventory(root);
   const enabledCustom = new Set(selectedCustomGatekeepers(readCanvasConfig(root, inventory)?.config, inventory));
-  const gatekeepers = workerPackageDirs(root)
-    .filter(dir => basename(dir).startsWith("gatekeeper-") && existsSync(join(dir, "wrangler.jsonc")))
-    .filter(dir => basename(dirname(dir)) !== WORKER_PACKAGE_ROOTS[1] || enabledCustom.has(basename(dir)))
-    .map(dir => basename(dir));
+  const gatekeepers = selectDevGatekeepers(discoverDevGatekeepers(root, enabledCustom), requested)
+    .map(({ name }) => name);
   return [
     { name: "router", role: "router", path: "/" },
     { name: "workshop-backend", role: "backend", path: "/api" },
@@ -118,12 +118,13 @@ export async function probeWorkers(
 }
 
 /**
- * The dev server's environment as it loads it: the shell wins over `.dev.vars`, which wins over
- * `.env`. Only presence of keys is reported anywhere; values stay in the returned object.
+ * The dev server's environment as it loads it: the shell wins over a `pnpm wt` worktree's
+ * `.env.worktree` (scripts/worktree-env.ts), which wins over `.dev.vars`, which wins over `.env`.
+ * Only presence of keys is reported anywhere; values stay in the returned object.
  */
 export function localEnv(root: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const merged: NodeJS.ProcessEnv = { ...env };
-  for (const file of [".dev.vars", ".env"]) {
+  for (const file of [WORKTREE_ENV_FILE, ".dev.vars", ".env"]) {
     const path = join(root, file);
     if (!existsSync(path)) continue;
     for (const [key, value] of Object.entries(parseEnv(readFileSync(path, "utf8")))) {
@@ -172,6 +173,8 @@ export interface DevServerRecord {
   /** `run-local` serves the built frontend from the router; `dev-server` expects Vite beside it. */
   mode: "run-local" | "dev-server";
   startedAt: string;
+  /** The gatekeeper Workers it started, when `--gatekeepers` narrowed them; absent means all. */
+  gatekeepers?: string[];
 }
 
 /**
