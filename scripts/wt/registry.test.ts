@@ -9,6 +9,21 @@ import { readRegistry, registryPath, tryReclaim, updateRegistry, withRegistryLoc
 const fixtures = mkdtempSync(join(tmpdir(), "wt-registry-"));
 after(() => rmSync(fixtures, { recursive: true, force: true }));
 let count = 0;
+
+/**
+ * Run a child Node script to completion. Its stdio is never the test runner's: stdout is
+ * discarded and stderr captured (bounded) for the failure message, so no child can touch the fds
+ * the runner shares with its parent.
+ */
+function runChild(script: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script, ...args], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", chunk => { if (stderr.length < 4096) stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", code => code === 0 ? resolve() : reject(new Error(`child exited ${code}: ${stderr.slice(0, 4096)}`)));
+  });
+}
 const freshPath = () => join(fixtures, `case-${++count}`, "inferos", "worktrees.json");
 
 describe("registryPath", () => {
@@ -127,10 +142,7 @@ describe("stale-lock reclaim under contention", () => {
           closeSync(fd);
           unlinkSync(inside);
         });`;
-      await Promise.all(Array.from({ length: 8 }, () => new Promise<void>((resolve, reject) => {
-        const child = spawn(process.execPath, ["--input-type=module", "-e", script, path, inside], { stdio: "inherit" });
-        child.on("exit", code => code === 0 ? resolve() : reject(new Error(`exited ${code}`)));
-      })));
+      await Promise.all(Array.from({ length: 8 }, () => runChild(script, [path, inside])));
       assert.equal(existsSync(`${path}.violations`), false, `round ${round}: two holders at once`);
       assert.equal(existsSync(`${path}.lock`), false);
       assert.deepEqual(readdirSync(join(path, "..")).filter(name => name.includes(".stale.")), []);
@@ -155,10 +167,7 @@ describe("updateRegistry under concurrent writers", () => {
             branch: "b", portBase: 0, createdAt: "" });
         });
       }`;
-    await Promise.all(Array.from({ length: writers }, (_, id) => new Promise<void>((resolve, reject) => {
-      const child = spawn(process.execPath, ["--input-type=module", "-e", script, path, `w${id}`, String(perWriter)], { stdio: "inherit" });
-      child.on("exit", code => code === 0 ? resolve() : reject(new Error(`writer ${id} exited ${code}`)));
-    })));
+    await Promise.all(Array.from({ length: writers }, (_, id) => runChild(script, [path, `w${id}`, String(perWriter)])));
     const names = readRegistry(path).worktrees.map(({ name }) => name);
     assert.equal(names.length, writers * perWriter);
     assert.equal(new Set(names).size, writers * perWriter);

@@ -101,7 +101,11 @@ describe("run-dev-server rejects a bad selection cleanly", () => {
   // Both fail before Wrangler or any build starts; config generation writes only changed files, so
   // a clean checkout is left untouched.
   const run = (...args: string[]) => spawnSync(process.execPath, [join(REPO, "scripts", "run-dev-server.ts"), ...args],
-    { cwd: REPO, encoding: "utf8", timeout: 120_000, env: { ...process.env, INFEROS_DEV_GATEKEEPERS: "" } });
+    {
+      cwd: REPO, encoding: "utf8", timeout: 120_000, env: { ...process.env, INFEROS_DEV_GATEKEEPERS: "" },
+      // Captured, never the runner's own fds, and bounded.
+      stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1024 * 1024,
+    });
 
   for (const args of [["--gatekeepers", "no-such-gatekeeper"], ["--gatekeepers"]]) {
     it(`exits 1 with one line for ${args.join(" ")}`, () => {
