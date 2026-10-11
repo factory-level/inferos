@@ -107,6 +107,13 @@ const DETACHED_GRANDCHILD_VP = `
 
 /** What the fast writer appends once the wrapper has seen vp exit: never part of vp's output. */
 const LATE_BYTE = "L";
+/**
+ * The fast writer's budgets, in MiB: `z` up to the first, then `LATE_BYTE` up to the second, then it
+ * idles until killed. A tail that regressed into following the writer must not fill the disk (a
+ * runner's `/tmp` included) while the case waits out its 20s race; the late bytes only have to exist.
+ */
+const FAST_WRITER_EARLY_MIB = 2048;
+const FAST_WRITER_LATE_MIB = 64;
 
 // The review's second case: a detached grandchild of an uncached task writing to vp's stdout
 // continuously, faster than the tail reads, after vp has exited: `yes`, in effect, as unthrottled
@@ -119,8 +126,9 @@ const LATE_BYTE = "L";
 // `exit` listener, which runs after `spawnWithOwnOutput`'s has taken `endAt`, so every `LATE_BYTE`
 // lands past `endAt` and none may be forwarded. (vp's own `size` is no bound for that: the writer
 // keeps going between vp's last check and the wrapper seeing the exit, by tens of MiB under load.)
-// It stops by itself if the test process is gone or after 120s, so a test killed mid-case cannot
-// leave it filling the disk.
+// It writes at most FAST_WRITER_EARLY_MIB + FAST_WRITER_LATE_MIB, and stops by itself if the test
+// process is gone or after 120s, so neither a regressed tail nor a test killed mid-case can leave it
+// filling the disk.
 const FAST_WRITER_VP = (exitFile: string, exitSeenFile: string) => `
   const { spawn } = require("node:child_process");
   const { fstatSync, writeFileSync } = require("node:fs");
@@ -129,11 +137,15 @@ const FAST_WRITER_VP = (exitFile: string, exitSeenFile: string) => `
     "const early = Buffer.alloc(1024 * 1024, 'z');",
     "const late = Buffer.alloc(1024 * 1024, " + ${JSON.stringify(JSON.stringify(LATE_BYTE))} + ");",
     "const giveUpAt = Date.now() + 120_000;",
-    "let seen = false;",
+    "const pause = new Int32Array(new SharedArrayBuffer(4));",
+    "let seen = false, earlyMib = 0, lateMib = 0;",
     "while (Date.now() < giveUpAt) {",
     "  try { process.kill(${process.pid}, 0); } catch { break; }",
     "  seen ||= existsSync(" + ${JSON.stringify(JSON.stringify(exitSeenFile))} + ");",
-    "  writeSync(1, seen ? late : early);",
+    "  if (seen ? lateMib < ${FAST_WRITER_LATE_MIB} : earlyMib < ${FAST_WRITER_EARLY_MIB}) {",
+    "    writeSync(1, seen ? late : early);",
+    "    if (seen) lateMib++; else earlyMib++;",
+    "  } else Atomics.wait(pause, 0, 0, 50);",
     "}",
   ].join("\\n")], { stdio: "inherit", detached: true });
   writer.unref();
@@ -355,7 +367,7 @@ describe("spawnWithOwnOutput", {
       grandchildPid = Number(/^grandchild (\d+)$/m.exec(run.stdout())?.[1]);
       const started = Date.now();
       // Raced so a wrapper that does wait on the grandchild fails here instead of hanging the suite.
-      const timedOut = new Promise(resolve => setTimeout(() => resolve("still running after 10s"), 10_000));
+      const timedOut = new Promise(resolve => setTimeout(() => resolve("still running after 10s"), 10_000).unref());
       assert.deepEqual(await Promise.race([run.exit, timedOut]), { code: 0, signal: null });
       // The child exits after 300ms; a wrapper waiting on the grandchild would take its full 30s.
       assert.ok(Date.now() - started < 3_000, `the wrapper took ${Date.now() - started}ms to exit`);
@@ -379,6 +391,8 @@ describe("spawnWithOwnOutput", {
       const timedOut = new Promise(resolve => setTimeout(() => resolve("still running after 20s"), 20_000).unref());
       assert.deepEqual(await Promise.race([run.exit, timedOut]), { code: 5, signal: null });
       const wrapperExitedAt = Date.now();
+      // Without the marker the writer never switches to LATE_BYTE, and the check below tests nothing.
+      assert.ok(existsSync(exitSeenFile), "fixture error: the wrapper's exit listener left no marker");
       assert.ok(isAlive(writerPid), "fixture error: the writer stopped before the wrapper exited");
       const vpExit = JSON.parse(readFileSync(exitFile, "utf8")) as { at: number; size: number };
       // Measured from vp's exit, with headroom for a loaded machine: unloaded it is well under 1s.
