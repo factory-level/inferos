@@ -58,6 +58,39 @@ describe("allocatePortBlock", () => {
   });
 });
 
+describe("every port a dev server pins is the worktree's own", () => {
+  // What wrangler dev binds at a fixed number: the public origin (--port, from VITE_BACKEND_HOST)
+  // and the inspector (--inspector-port, from DEV_INSPECTOR_PORT); Vite binds DEV_CLIENT_PORT. Its
+  // other listeners (miniflare loopback, the proxy workers' entry sockets) are port 0, and the dev
+  // registry is a directory, not a port -- nothing else to pin.
+  it("gives any two worktrees disjoint ports, each inside its own block", async () => {
+    const bases: number[] = [];
+    for (let i = 0; i < 6; i++) bases.push(await allocatePortBlock(bases, nothingListens));
+    const seen = new Map<number, number>();
+    for (const base of bases) {
+      const dir = mkdtempSync(join(tmpdir(), "wt-ports-"));
+      try {
+        writeFileSync(join(dir, WORKTREE_ENV_FILE), overlayContents(
+          { name: `w${base}`, path: dir, mainCheckout: "/m", branch: "b", portBase: base, createdAt: "" }, 2));
+        const overlay = readWorktreeEnv(dir);
+        const pinned = [
+          Number(getDevServerConfig([], overlay.VITE_BACKEND_HOST).wranglerPort),
+          devClientServerOptions(dir, {}).port,
+          Number(inspectorPortArgs(overlay)[1]),
+        ];
+        assert.equal(new Set(pinned).size, pinned.length, `block ${base} reuses a port`);
+        for (const port of pinned) {
+          assert.ok(blockPorts(base).includes(port), `${port} is outside block ${base}`);
+          assert.equal(seen.get(port), undefined, `${port} is shared by blocks ${seen.get(port)} and ${base}`);
+          seen.set(port, base);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
 describe("concurrencyShare", () => {
   it("divides the machine and never goes below 2", () => {
     assert.equal(concurrencyShare(14, 1), 14);
