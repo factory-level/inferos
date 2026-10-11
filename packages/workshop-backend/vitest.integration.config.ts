@@ -1,5 +1,6 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import capnwebValidate from "capnweb-validate/vite";
+import path from "node:path";
 import { defineConfig } from "vitest/config";
 
 const EXPECTED_OPEN_ERROR_CODES = new Set([
@@ -10,6 +11,13 @@ const EXPECTED_OPEN_ERROR_CODES = new Set([
 export default defineConfig({
   esbuild: {
     target: "es2022",
+  },
+  // `@gadgets/typed-storage` from source rather than its built `dist/`, as in vitest.config.ts.
+  resolve: {
+    alias: [{
+      find: /^@gadgets\/typed-storage$/,
+      replacement: path.resolve(import.meta.dirname, "../typed-storage/src/index.ts"),
+    }],
   },
   plugins: [
     capnwebValidate(),

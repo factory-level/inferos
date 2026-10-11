@@ -62,7 +62,7 @@ covers:
   - packages/integration-tests/__tests__/operate-console-tools-off.test.ts
   - packages/integration-tests/fixtures/gatekeeper-test/src/test-gatekeeper.ts
   - packages/workshop-frontend/src/features/chat/activity/toolCallLabels.ts
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # Operate mode
@@ -389,7 +389,7 @@ Step C6 of the callable-widget contract (§3, §4.6, §4.8): the operate agent's
   - only the helper and `deleteSelf` write the generation;
   - direct bumps are limited to the watchers, `scheduleAccessRestart` and `deleteSelf`, and the restart bumps before its first await.
 
-  Both guard tests read `src/` through `import.meta.glob(…, {query: "?raw"})`. capnweb-validate picks the modules it transforms by the id without its query, so it would also edit those string modules, applying offsets taken from the TypeScript source to vite's `export default "<source>"` and splicing `__cw.__validateRpcClass(…)` into the scanned text. `vitest.config.ts` therefore wraps the plugin (`rpcValidation`) to leave `?raw`, `?url` and `?inline` ids untransformed, and `raw-sources.test.ts` checks that every `?raw` source has its on-disk length (passed in through `define` as `__WORKSHOP_SOURCE_LENGTHS__`, since workerd cannot read the disk) and contains none of the transform's names. It checks chat-taint-guard's three agent-API sources outside `src/` the same way (`__WORKSHOP_GUARDED_SOURCE_LENGTHS__`); today the transform leaves `library-gatekeeper.ts` alone even unwrapped, as it is outside workshop-backend's TypeScript program, so that case guards against a change. The wrapper keeps an object-form hook's `filter`. The lengths are computed when the config loads, so a `--watch` run needs a restart after a `src/` edit.
+  Both guard tests read `src/` through `import.meta.glob(…, {query: "?raw"})`. capnweb-validate picks the modules it transforms by the id without its query, so it would also edit those string modules, applying offsets taken from the TypeScript source to vite's `export default "<source>"` and splicing `__cw.__validateRpcClass(…)` into the scanned text. `vitest.config.ts` therefore wraps the plugin (`rpcValidation`) to leave `?raw`, `?url` and `?inline` ids untransformed, and `raw-sources.test.ts` checks that every `?raw` source has its on-disk length (passed in through `define` as `__WORKSHOP_SOURCE_LENGTHS__`, since workerd cannot read the disk) and contains none of the transform's names. It checks chat-taint-guard's three agent-API sources outside `src/` the same way (`__WORKSHOP_GUARDED_SOURCE_LENGTHS__`); today the transform leaves `library-gatekeeper.ts` alone even unwrapped, as it is outside workshop-backend's TypeScript program, so that case guards against a change. The wrapper keeps an object-form hook's `filter`. The lengths are computed when the config loads, so a `--watch` run needs a restart after a `src/` edit. Like `tsconfig.json`'s `paths`, both of the package's vitest configs resolve `@gadgets/typed-storage` from its `src/` rather than its built `dist/`, so a single test file runs in a fresh checkout before anything is built.
 
 ## Configuration
 

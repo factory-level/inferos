@@ -6,7 +6,7 @@ covers:
   - scripts/release/manifest-lib.ts
   - .agents/skills
   - packages/workshop-backend/scripts/upload-consumer-skills.ts
-updated: 2026-10-03
+updated: 2026-10-11
 ---
 
 # InferOS repository setup skills
@@ -28,6 +28,7 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | `scripts/consumer` | Atomic scaffolding, profile resolution, preflight, fixture/view/extension/skill-pack validation, intake application ([customer onboarding](customer-onboarding.md)), and the `.inferos/files.json` record with verify, upgrade (three-way reconciliation and reviewed branches) and recover (`wrapper-files.ts`, `maintenance.ts`, `upgrade.ts`, `reconcile.ts`, `upgrade-review.ts`). |
 | `scripts/consumer/settings.ts` | The executable settings table for the selected private customer, validated by wrapper `doctor` and generating the [configuration reference](../wiki/configuration-reference.md#selected-customer-settings) section; `settings.test.ts` fails on drift ([details](consumer-configuration.md#data-and-control-flow)). |
 | `scripts/consumer/skill-packs` | Starter `operate`, `build` and `shared` runtime skills that bootstrap copies to `skills/`. `build/coding-dispatch` drives coding dispatch through the InferOps gatekeeper and reports only the runner's patch and test evidence. |
+| `.agents/skills/iterate` | The edit-check loop for this repository itself: `pnpm check:fast` per change, `pnpm check:full` before hand-off (see [check tiers](local-development.md#check-tiers)). Not copied to wrappers. |
 | `.agents/skills/local-coding` | Setup, operation and recovery of the local coding runner; see [local coding workflows](local-coding-workflows.md). |
 | `scripts/consumer/skills.ts`, `skill-manifest.ts` | Read `inferos.skills.json`, collect pack files (excludes, includes, limits, no links) and validate `SKILL.md` frontmatter. |
 | `packages/workshop-backend/scripts/upload-consumer-skills.ts` | Local administrator upload of packs into public Context Library collections. |

@@ -27,6 +27,9 @@ covers:
   - packages/integration-tests
   - scripts/preview/smoke.ts
   - scripts/preview/smoke.test.ts
+  - scripts/check-fast.ts
+  - scripts/check-fast.test.ts
+  - scripts/check-full.ts
 updated: 2026-10-11
 ---
 
@@ -56,6 +59,7 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `scripts/consumer/gatekeepers.ts` | Validates, generates and drift-checks a wrapper's own gatekeepers for local development. |
 | `packages/router` | Public routing and frontend assets/backend fallback. |
 | `packages/integration-tests` | Real Workers and RPC test harness with external network interception; optionally boots the production router as the primary Worker. |
+| `scripts/check-fast.ts`, `scripts/check-full.ts` | `pnpm check:fast` and `pnpm check:full`, the two check tiers of the agent iteration loop (see [check tiers](#check-tiers)). |
 | `scripts/preview/smoke.ts` | Opt-in, read-only smoke check of a deployed instance's public origin (app shell and its opener policy, `/api` handshake, gatekeeper routes, OAuth redirect origins). |
 
 ## Data and Control Flow
@@ -151,6 +155,46 @@ The connection is found through the native action log rather than a file: every 
 `__tests__/router-parity.test.ts` sends every request to that origin over real HTTP: static assets and the SPA fallback, `Cross-Origin-Opener-Policy: same-origin` on Workshop documents ([platform baseline](platform-pillars.md#cross-origin-opener-policy)), `/api` worker-first, the gatekeeper and unbound gatekeeper routes, the Cap'n Web WebSocket, the InferOps gatekeeper's InferLab sign-in legs (asserting the provider `redirect_uri` is on the public origin), a board read recorded as an observation, one approval applied once, a restart of all three Workers via `server.update` with Durable Object state kept, and a reconnect. Reloads wait with `settled()` and retry side-effect-free phases with `overFreshConnection()`, now exported from `src/rpc-client.ts` and shared with `inferops-isolation.test.ts`, because a WebSocket opened just after a reload can be dropped.
 
 `scripts/preview/smoke.ts` is the cloud half: given a deployed base URL and an optional Access service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`), it checks the app shell and SPA fallback, their `Cross-Origin-Opener-Policy: same-origin` header (`opener-policy`), a `/api` WebSocket handshake (upgraded or auth-challenged, never 404 or 5xx), each gatekeeper route answering from a gatekeeper rather than the shell, and, for connect URLs passed with `--connect-url`, the provider `redirect_uri` origin. It only sends GETs and closes the handshake at once, prints a JSON report and exits 0, 1 or 2. Its checks are pure classifiers over a response, which `smoke.test.ts` drives against a local fake server under `node --test`. The [parity wiki](../wiki/local-cloud-parity.md) holds the matrix, the recorded runtime versions and the recipe.
+
+## Check tiers
+
+`pnpm check:fast` is the per-change check. Its input is one of:
+
+- the files changed since the branch's merge-base with `origin/main` (or `--base <ref>`), including staged, unstaged and untracked files;
+- with `--uncommitted`, only the working-tree changes against HEAD;
+- the paths given, where a directory stands for every non-ignored file in it.
+
+Diffs use `--no-renames`, so a rename checks both the old and the new path's package. A base whose merge-base cannot be found, a `--base` with no value and an unknown option exit 2 rather than reporting no changes.
+
+Each file maps to a check:
+
+- **A workspace package's file** runs that package's `vp run -F <package> --cache build` type-check. That is the per-package step `pnpm lint` runs through `types:check`. Type-checks running at the same time share one `vp run` concurrency budget (`vpRunEnv`'s `concurrentRuns`).
+- **Tests:** for each `vitest run` in the package's `test:run` script, with that segment's arguments, checks run after the script's other `&&` segments (the codegen in workshop-backend, the prebuild in integration-tests):
+  - Changed test files run directly.
+  - Other changed files run `vitest related --passWithNoTests`. If that finds no test file, the config runs in full instead: fixtures, Worker `main` modules and files read at runtime have no static import edge, so "no related tests" proves nothing.
+  - A deleted non-test file, or a changed vitest or Vite config, runs every config in full.
+- **A package whose tests aren't vitest, or that has tests but no `test:run`,** gets the type-check only, and its files are listed as not checked.
+- **Any `scripts/**` file** runs every `scripts/` `node --test` suite, plus `pnpm types:scripts` for TypeScript.
+- **`scripts/consumer/*`, `scripts/dev-server-config.ts`, any `env.d.ts`, settings sources and the configuration reference** run `scripts/consumer/settings.test.ts`, which compares the generated configuration reference with its source.
+- **`docs/**`** runs `pnpm docs:check`.
+
+Packages run in parallel. Within a package, the prelude runs first and the checks then run side by side. That is safe because the backend's codegen scripts rewrite their output only when it changed, so the type-check's second run of them writes nothing.
+
+Failed steps print their full output, every step prints its time, and any failure exits non-zero. A `NOT CHECKED` list then names everything the run did not verify:
+
+- files outside every package check (root configs, the lockfile, skills);
+- deleted test suites;
+- changed test files that no config ran;
+- packages without vitest tests or a `build` task.
+
+When that list is not empty, the verdict says so. The last line always says that dependent packages and full suites are left to `pnpm check:full`.
+
+`pnpm check:full` runs `pnpm lint`, `pnpm docs:check`, every `scripts/` suite (tracked or new) and `pnpm test` in order, stops at the first failure, and prints a timing summary. Every step gets `VP_RUN_CONCURRENCY_LIMIT` from `vpRunEnv({ cap: 4 })`: a value from the shell, `.env.worktree` or `.env` is used as set, and otherwise the machine default is capped at 4, CI's effective value. Other commands keep the whole-machine default. It is the once-per-hand-off run. CI remains the final gate.
+
+Measured on 2026-10-11 on a shared 14-core machine:
+
+- **A workshop-backend test file:** a one-file change takes about 17 s. Most of that is the three-program type-check, which runs in parallel with the test.
+- **`src/sharing.ts`:** a change takes about 73 s, because `vitest related` reaches 17 unit and 4 integration files that load the backend.
 
 ## Configuration
 

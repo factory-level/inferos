@@ -532,3 +532,49 @@ describe("vpRunEnv concurrentRuns", () => {
     assert.match(split.err, /^vp run: concurrency \d+ /);
   });
 });
+
+// `check:full` caps the machine default at CI's effective 4: every workerd fleet in `pnpm test` at
+// once starved the backend suite into the watchdog on a 14-core machine. The cap is a default only.
+describe("concurrency cap", () => {
+  const machine = { cpus: 14, memoryBytes: 62 * GiB };
+
+  it("lowers the machine default and says what it was capped from", () => {
+    const { env, note } = concurrencyEnv({}, machine, null, ".env", 4);
+    assert.equal(env[VP_RUN_CONCURRENCY_LIMIT], "4");
+    assert.equal(note,
+        "vp run: concurrency 4 (capped from 14 (14 cpus, 62.0 GiB)) -- " +
+          "set VP_RUN_CONCURRENCY_LIMIT in the environment or the repo-root .env to override");
+  });
+
+  it("never raises a machine default below it", () => {
+    const { env, note } = concurrencyEnv({}, { cpus: 4, memoryBytes: 16 * GiB }, null, ".env", 6);
+    assert.equal(env[VP_RUN_CONCURRENCY_LIMIT], "4");
+    assert.doesNotMatch(note ?? "", /capped/);
+  });
+
+  it("yields to the shell, .env.worktree and .env", () => {
+    assert.equal(concurrencyEnv({ [VP_RUN_CONCURRENCY_LIMIT]: "12" }, machine, null, ".env", 4)
+      .env[VP_RUN_CONCURRENCY_LIMIT], "12");
+    const worktree = concurrencyEnv({}, machine, "7", ".env.worktree", 4);
+    assert.equal(worktree.env[VP_RUN_CONCURRENCY_LIMIT], "7");
+    assert.equal(worktree.note, "vp run: concurrency 7 (from .env.worktree)");
+    assert.equal(concurrencyEnv({}, machine, "9", ".env", 4).env[VP_RUN_CONCURRENCY_LIMIT], "9");
+  });
+
+  it("is applied by vpRunEnv only when asked, and an environment value still wins", () => {
+    const capped = captureStderr(() => vpRunEnv({ env: {}, cap: 1 }));
+    const whole = captureStderr(() => vpRunEnv({ env: {} }));
+    // Without a repo-root `.env`/`.env.worktree` setting the variable, the cap applies; with one,
+    // both runs agree because the file wins. Either way the uncapped default is untouched.
+    if (!/from \.env/.test(capped.err)) {
+      assert.equal(capped.env[VP_RUN_CONCURRENCY_LIMIT], "1");
+      assert.match(capped.err, /capped from/);
+      assert.doesNotMatch(whole.err, /capped/);
+    } else {
+      assert.equal(capped.env[VP_RUN_CONCURRENCY_LIMIT], whole.env[VP_RUN_CONCURRENCY_LIMIT]);
+    }
+    const preset = captureStderr(() => vpRunEnv({ env: { [VP_RUN_CONCURRENCY_LIMIT]: "6" }, cap: 2 }));
+    assert.equal(preset.env[VP_RUN_CONCURRENCY_LIMIT], "6");
+    assert.equal(preset.err, "");
+  });
+});
