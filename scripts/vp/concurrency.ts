@@ -428,6 +428,12 @@ export interface VpRunEnvOptions {
    * whole-machine default.
    */
   cap?: number;
+  /**
+   * The `.env.worktree` overlay and `.env` read for a limit, in that order. Defaults to the repo
+   * root's. Tests point both at files that do not exist, so the machine formula is what they see
+   * even inside a `pnpm wt` worktree whose overlay sets the variable.
+   */
+  envFiles?: { worktree: string; env: string };
 }
 
 /**
@@ -443,12 +449,15 @@ export interface VpRunEnvOptions {
  * set to override it; with `concurrentRuns > 1` each child then gets its share of it.
  */
 export function vpRunEnv(
-  { vpArgs = [], concurrentRuns = 1, env = process.env, cap }: VpRunEnvOptions = {},
+  {
+    vpArgs = [], concurrentRuns = 1, env = process.env, cap,
+    envFiles = { worktree: ROOT_WORKTREE_ENV_FILE, env: ROOT_ENV_FILE },
+  }: VpRunEnvOptions = {},
 ): NodeJS.ProcessEnv {
-  const worktreeValue = envFileConcurrencyLimit(ROOT_WORKTREE_ENV_FILE);
+  const worktreeValue = envFileConcurrencyLimit(envFiles.worktree);
   const result = worktreeValue !== null
     ? concurrencyEnv(env, measureMachine(), worktreeValue, WORKTREE_ENV_FILE, cap ?? null)
-    : concurrencyEnv(env, measureMachine(), envFileConcurrencyLimit(), ".env", cap ?? null);
+    : concurrencyEnv(env, measureMachine(), envFileConcurrencyLimit(envFiles.env), ".env", cap ?? null);
   if (result.note && !overridesConcurrency(vpArgs)) console.error(result.note);
   return splitConcurrencyLimit(result.env, concurrentRuns);
 }

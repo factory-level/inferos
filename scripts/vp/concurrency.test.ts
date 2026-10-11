@@ -426,12 +426,17 @@ function captureStderr(run: () => NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; 
   }
 }
 
+// Files that do not exist, so `vpRunEnv` sees no `.env.worktree` or `.env` setting: these cases
+// test the machine formula, and a `pnpm wt` worktree's overlay (or a developer's `.env`) must not
+// change what they see.
+const NO_ENV_FILES = { worktree: join(ABSENT, ".env.worktree"), env: join(ABSENT, ".env") };
+
 // The bug: `node scripts/vp/run.ts --concurrency-limit 2 ... build` announced the machine's number
 // and then ran at 2, because the note printed unconditionally.
 describe("vpRunEnv", () => {
   it("stays silent but still sets the variable when a flag overrides it", () => {
     for (const args of [["--concurrency-limit", "2"], ["--concurrency-limit=2"], ["--parallel"]]) {
-      const { env, err } = captureStderr(() => vpRunEnv({ env: {}, vpArgs: args }));
+      const { env, err } = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: {}, vpArgs: args }));
       // Set regardless: the flag wins in vp either way, and leaving it set is what preserves
       // behaviour if the flag turns out to be malformed.
       assert.match(env[VP_RUN_CONCURRENCY_LIMIT] ?? "", /^\d+$/,
@@ -442,15 +447,28 @@ describe("vpRunEnv", () => {
 
   it("prints the note when no flag overrides it", () => {
     const { env, err } = captureStderr(
-        () => vpRunEnv({ env: {}, vpArgs: ["--filter=!cloudflare-os", "build"] }));
+        () => vpRunEnv({ envFiles: NO_ENV_FILES, env: {}, vpArgs: ["--filter=!cloudflare-os", "build"] }));
     assert.match(env[VP_RUN_CONCURRENCY_LIMIT] ?? "", /^\d+$/);
     assert.match(err, /^vp run: concurrency \d+ /);
+  });
+
+  it("reads .env.worktree ahead of .env, from the files it is given", () => {
+    const env = envFileWith("VP_RUN_CONCURRENCY_LIMIT=9\n");
+    const worktree = join(dirname(env), ".env.worktree");
+    writeFileSync(worktree, "VP_RUN_CONCURRENCY_LIMIT=3\n");
+    const both = captureStderr(() => vpRunEnv({ envFiles: { worktree, env }, env: {} }));
+    assert.equal(both.env[VP_RUN_CONCURRENCY_LIMIT], "3");
+    assert.equal(both.err, "vp run: concurrency 3 (from .env.worktree)\n");
+    const envOnly = captureStderr(
+        () => vpRunEnv({ envFiles: { worktree: NO_ENV_FILES.worktree, env }, env: {} }));
+    assert.equal(envOnly.env[VP_RUN_CONCURRENCY_LIMIT], "9");
+    assert.equal(envOnly.err, "vp run: concurrency 9 (from .env)\n");
   });
 
   // The default: callers that build their own fixed `vp run` invocation pass no args, and their own
   // argv must not be mistaken for vp flags.
   it("prints the note when given no arguments at all", () => {
-    const { err } = captureStderr(() => vpRunEnv({ env: {} }));
+    const { err } = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: {} }));
     assert.match(err, /^vp run: concurrency \d+ /);
   });
 
@@ -459,7 +477,7 @@ describe("vpRunEnv", () => {
   it("stays silent for an environment value, flag or no flag", () => {
     for (const args of [[], ["--parallel"]]) {
       const { env, err } = captureStderr(
-          () => vpRunEnv({ env: { [VP_RUN_CONCURRENCY_LIMIT]: "3" }, vpArgs: args }));
+          () => vpRunEnv({ envFiles: NO_ENV_FILES, env: { [VP_RUN_CONCURRENCY_LIMIT]: "3" }, vpArgs: args }));
       assert.equal(env[VP_RUN_CONCURRENCY_LIMIT], "3");
       assert.equal(err, "");
     }
@@ -511,7 +529,7 @@ describe("vpRunEnv concurrentRuns", () => {
   for (const [label, value, runs, expected] of SPLITS) {
     it(`${label}: ${value} / ${runs} -> ${expected}`, () => {
       const { env, err } = captureStderr(() =>
-          vpRunEnv({ env: { [VP_RUN_CONCURRENCY_LIMIT]: value }, concurrentRuns: runs }));
+          vpRunEnv({ envFiles: NO_ENV_FILES, env: { [VP_RUN_CONCURRENCY_LIMIT]: value }, concurrentRuns: runs }));
       assert.equal(env[VP_RUN_CONCURRENCY_LIMIT], expected);
       assert.equal(err, "");
     });
@@ -520,8 +538,8 @@ describe("vpRunEnv concurrentRuns", () => {
   // The machine-derived number is divided too, and the note still names the undivided budget: that
   // is the number a user would set to override it.
   it("divides the machine-derived limit and prints the whole budget once", () => {
-    const whole = captureStderr(() => vpRunEnv({ env: {} }));
-    const split = captureStderr(() => vpRunEnv({ env: {}, concurrentRuns: 2 }));
+    const whole = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: {} }));
+    const split = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: {}, concurrentRuns: 2 }));
     const total = Number(whole.env[VP_RUN_CONCURRENCY_LIMIT]);
     const perRun = Number(split.env[VP_RUN_CONCURRENCY_LIMIT]);
     assert.match(split.env[VP_RUN_CONCURRENCY_LIMIT] ?? "", /^\d+$/);
@@ -562,18 +580,13 @@ describe("concurrency cap", () => {
   });
 
   it("is applied by vpRunEnv only when asked, and an environment value still wins", () => {
-    const capped = captureStderr(() => vpRunEnv({ env: {}, cap: 1 }));
-    const whole = captureStderr(() => vpRunEnv({ env: {} }));
-    // Without a repo-root `.env`/`.env.worktree` setting the variable, the cap applies; with one,
-    // both runs agree because the file wins. Either way the uncapped default is untouched.
-    if (!/from \.env/.test(capped.err)) {
-      assert.equal(capped.env[VP_RUN_CONCURRENCY_LIMIT], "1");
-      assert.match(capped.err, /capped from/);
-      assert.doesNotMatch(whole.err, /capped/);
-    } else {
-      assert.equal(capped.env[VP_RUN_CONCURRENCY_LIMIT], whole.env[VP_RUN_CONCURRENCY_LIMIT]);
-    }
-    const preset = captureStderr(() => vpRunEnv({ env: { [VP_RUN_CONCURRENCY_LIMIT]: "6" }, cap: 2 }));
+    const capped = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: {}, cap: 1 }));
+    const whole = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: {} }));
+    // No `.env`/`.env.worktree` is read, so the cap applies and the uncapped default is untouched.
+    assert.equal(capped.env[VP_RUN_CONCURRENCY_LIMIT], "1");
+    assert.match(capped.err, /capped from/);
+    assert.doesNotMatch(whole.err, /capped/);
+    const preset = captureStderr(() => vpRunEnv({ envFiles: NO_ENV_FILES, env: { [VP_RUN_CONCURRENCY_LIMIT]: "6" }, cap: 2 }));
     assert.equal(preset.env[VP_RUN_CONCURRENCY_LIMIT], "6");
     assert.equal(preset.err, "");
   });
