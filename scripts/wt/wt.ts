@@ -26,10 +26,10 @@ import { DEV_PREFLIGHT_VP_BUILDS } from "../dev-server-config.ts";
 import { isPortListening } from "../local/stack.ts";
 import { pnpmCommand } from "../pnpm-command.ts";
 import { defaultConcurrencyLimit, measureMachine, splitConcurrencyLimit, VP_RUN_CONCURRENCY_LIMIT } from "../vp/concurrency.ts";
-import { DEV_INSPECTOR_PORT, readWorktreeEnv, REPO_ROOT, WORKTREE_ENV_FILE } from "../worktree-env.ts";
+import { readWorktreeEnv, REPO_ROOT, WORKTREE_ENV_FILE } from "../worktree-env.ts";
 import { parseVpStatistics, seedTaskCache, type VpStatistics } from "./cache.ts";
 import {
-  allocatePortBlock, concurrencyShare, LINKED_SECRET_FILES, overlayContents, portLayout, validWorktreeName,
+  allocatePortBlock, checkOverlay, concurrencyShare, LINKED_SECRET_FILES, overlayContents, portLayout, validWorktreeName,
 } from "./layout.ts";
 import { readRegistry, registryPath, updateRegistry, type Registry, type WorktreeEntry } from "./registry.ts";
 import { containedWorktreePath, listedWorktreePaths, precious } from "./safety.ts";
@@ -404,10 +404,10 @@ async function commandPorts(): Promise<void> {
   }
   const rows = await Promise.all(entries.map(async entry => {
     const ports = portLayout(entry.portBase);
-    const [backendUp, viteUp] = await Promise.all([ports.backend, ports.devClient].map(portBusy));
+    const [backendUp, viteUp, inspectorUp] = await Promise.all([ports.backend, ports.devClient, ports.inspector].map(portBusy));
     return [
       entry.name, String(ports.backend), String(ports.devClient), String(ports.inspector), `${ports.spare[0]}-${ports.spare[1]}`,
-      [backendUp ? "backend up" : "", viteUp ? "vite up" : ""].filter(Boolean).join(", ") || "idle",
+      [backendUp ? "backend up" : "", viteUp ? "vite up" : "", inspectorUp ? "inspector up" : ""].filter(Boolean).join(", ") || "idle",
       relative(process.cwd(), entry.path) || ".",
     ];
   }));
@@ -448,14 +448,8 @@ async function commandDoctor(fix: boolean, build: boolean): Promise<number> {
   const live = ours.filter(entry => !stale.includes(entry));
   for (const entry of live) {
     // Overlay agrees with the registry.
-    const overlay = readWorktreeEnv(entry.path);
-    const expected = `localhost:${portLayout(entry.portBase).backend}`;
-    const inspector = String(portLayout(entry.portBase).inspector);
-    if (overlay.VITE_BACKEND_HOST !== expected) report("error", `${entry.name}: ${WORKTREE_ENV_FILE} names ${overlay.VITE_BACKEND_HOST ?? "no backend"}, registry says ${expected}`);
-    else if (overlay[DEV_INSPECTOR_PORT] !== inspector) {
-      // Written before the inspector port existed: two such worktrees race for Wrangler's 9229.
-      report("warn", `${entry.name}: ${WORKTREE_ENV_FILE} sets no ${DEV_INSPECTOR_PORT}=${inspector}; any pnpm wt new or rm rewrites it`);
-    } else report("ok", `${entry.name}: ${WORKTREE_ENV_FILE} matches ports ${entry.portBase}-${entry.portBase + 9}`);
+    const overlay = checkOverlay(entry, readWorktreeEnv(entry.path));
+    report(overlay.level, overlay.message);
     // Secrets links.
     for (const file of LINKED_SECRET_FILES) {
       const target = join(main, file);

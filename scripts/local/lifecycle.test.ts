@@ -5,8 +5,9 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { withWorktreeEnv } from "../worktree-env.ts";
 import {
-  defaultDeps, EXIT_FAILED, EXIT_OK, EXIT_USAGE, runLifecycle, seedScreenTemplate,
+  defaultDeps, EXIT_FAILED, EXIT_OK, EXIT_USAGE, main, runLifecycle, seedScreenTemplate,
   type LifecycleDeps, type OperatorResult,
 } from "./lifecycle.ts";
 import {
@@ -462,13 +463,36 @@ test("the seed screen template comes from an explicit id or the first configured
   }
 });
 
-test("the CLI entry prints one JSON object with --json and exits with the command's code", () => {
-  const result = spawnSync(process.execPath, [join(REPO, "scripts", "local", "lifecycle.ts"), "status", "--json", "--port", "1"],
-    { cwd: REPO, encoding: "utf8", env: { ...process.env, VITE_BACKEND_HOST: "" } });
-  assert.equal(result.status, EXIT_FAILED);
-  const report = JSON.parse(result.stdout);
-  assert.equal(report.listening, false);
-  assert.equal(report.port, 1);
+test("the CLI entry prints one JSON object with --json and exits with the command's code", async () => {
+  // In process, against a fixture root: the spawned entry would read this checkout's own
+  // `.env.worktree`, so in a `pnpm wt` worktree its ports would decide what the CLI reports.
+  const root = tempRoot();
+  try {
+    const deps: LifecycleDeps = { ...defaultDeps, root, env: withWorktreeEnv(root, { VITE_BACKEND_HOST: "" }) };
+    const run = async (argv: string[]) => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const exitCode = await main(argv, deps, { log: line => stdout.push(line), error: line => stderr.push(line) });
+      return { exitCode, stdout, stderr };
+    };
+    const result = await run(["status", "--json", "--port", "1"]);
+    assert.equal(result.exitCode, EXIT_FAILED);
+    assert.equal(result.stdout.length, 1);
+    const report = JSON.parse(result.stdout[0]!);
+    assert.equal(report.listening, false);
+    assert.equal(report.port, 1);
+    const usage = await run(["--json"]);
+    assert.equal(usage.exitCode, EXIT_USAGE);
+    assert.match(usage.stderr.join("\n"), /Usage: pnpm local/);
+    assert.equal(JSON.parse(usage.stdout.join("\n")).ok, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CLI entry runs main and sets its exit code", () => {
+  // Only a usage error goes through the real entry: it fails in argument parsing, so nothing it
+  // prints depends on the environment or on this checkout's overlay.
   const usage = spawnSync(process.execPath, [join(REPO, "scripts", "local", "lifecycle.ts"), "--json"], { cwd: REPO, encoding: "utf8" });
   assert.equal(usage.status, EXIT_USAGE);
   assert.match(usage.stderr, /Usage: pnpm local/);

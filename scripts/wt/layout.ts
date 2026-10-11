@@ -2,7 +2,7 @@
 // `.env.worktree` overlay that carries both (scripts/worktree-env.ts), and which of the main
 // checkout's secret files it links. Pure functions, so the rules are testable without git.
 
-import { DEV_CLIENT_PORT, DEV_INSPECTOR_PORT } from "../worktree-env.ts";
+import { DEV_CLIENT_PORT, DEV_INSPECTOR_PORT, WORKTREE_ENV_FILE } from "../worktree-env.ts";
 import { PORT_BLOCK_SIZE, type WorktreeEntry } from "./registry.ts";
 
 /** The first port block, above the main checkout's 8787. */
@@ -86,6 +86,39 @@ export function overlayContents(entry: WorktreeEntry, concurrency: number): stri
     `VP_RUN_CONCURRENCY_LIMIT=${concurrency}`,
     "",
   ].join("\n");
+}
+
+/** One finding of {@link checkOverlay}. */
+export interface OverlayCheck {
+  level: "ok" | "warn" | "error";
+  message: string;
+}
+
+/**
+ * Whether the `.env.worktree` read back from `entry`'s worktree still names the ports its registry
+ * entry holds. A wrong backend is an error, since the dev server would bind another worktree's
+ * port. A missing or wrong `DEV_INSPECTOR_PORT` is a warning: the first is an overlay written
+ * before the inspector port existed, the second a hand edit, and either way that server races
+ * others for its inspector (worktree-env.ts). Any `wt new` or `wt rm` rewrites the overlay.
+ */
+export function checkOverlay(entry: WorktreeEntry, overlay: Readonly<Record<string, string>>): OverlayCheck {
+  const ports = portLayout(entry.portBase);
+  const block = `ports ${entry.portBase}-${entry.portBase + PORT_BLOCK_SIZE - 1}`;
+  const backend = `localhost:${ports.backend}`;
+  const inspector = String(ports.inspector);
+  const rewrite = "any pnpm wt new or rm rewrites it";
+  if (overlay.VITE_BACKEND_HOST !== backend) {
+    return { level: "error", message: `${entry.name}: ${WORKTREE_ENV_FILE} names ${overlay.VITE_BACKEND_HOST ?? "no backend"}, registry says ${backend}` };
+  }
+  const actual = overlay[DEV_INSPECTOR_PORT];
+  // Blank counts as unset, as it does for inspectorPortArgs: Wrangler falls back to probing.
+  if (actual === undefined || actual.trim() === "") {
+    return { level: "warn", message: `${entry.name}: ${WORKTREE_ENV_FILE} sets no ${DEV_INSPECTOR_PORT}=${inspector}; ${rewrite}` };
+  }
+  if (actual !== inspector) {
+    return { level: "warn", message: `${entry.name}: ${WORKTREE_ENV_FILE} sets ${DEV_INSPECTOR_PORT}=${actual}, but its block's inspector is ${inspector} (${block}); ${rewrite}` };
+  }
+  return { level: "ok", message: `${entry.name}: ${WORKTREE_ENV_FILE} matches ${block}` };
 }
 
 /**
