@@ -13,6 +13,11 @@ covers:
   - packages/workshop-shared/src/password-salt.ts
   - scripts/dev-server-config.ts
   - scripts/dev-gatekeepers.ts
+  - scripts/wt
+  - scripts/worktree-env.ts
+  - scripts/worktree-env.test.ts
+  - scripts/vp/concurrency.ts
+  - packages/workshop-frontend/vite.config.ts
   - cloudflare.config.ts
   - scripts/worker-config.ts
   - scripts/worker-dirs.ts
@@ -37,6 +42,8 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | --- | --- |
 | `scripts/run-dev-server.ts` | Discovers configured workers, generates dev wiring, builds gatekeeper UIs and starts Wrangler/watchers. Its header comment lists every flag. `--no-ui-watchers` (also through `pnpm local start -- --no-ui-watchers`) skips the per-gatekeeper configurator and app UI watcher processes, each of which holds an inotify instance, for machines near `fs.inotify.max_user_instances`; the UIs are still built once at startup. `--gatekeepers a,b` narrows which gatekeeper Workers run (see [fewer Workers](#fewer-workers)). |
 | `scripts/dev-gatekeepers.ts` | The one gatekeeper discovery and `--gatekeepers`/`INFEROS_DEV_GATEKEEPERS` selection rule, shared by the dev server and `pnpm local status`. |
+| `scripts/wt/` | `pnpm wt new\|ls\|rm\|ports\|doctor`: worktrees under `.worktrees/` with a port block, an overlay, a seeded vp cache and linked secrets (see [parallel worktrees](#parallel-worktrees)). |
+| `scripts/worktree-env.ts` | Reads a worktree's `.env.worktree` overlay for the dev server, `pnpm local`, `vp run` concurrency and Vite's dev port. |
 | `scripts/run-local.ts` | Convenience local install/build/run flow. |
 | `scripts/local/lifecycle.ts`, `scripts/local/stack.ts` | `pnpm local <command>`: status, start, stop, seed, verify, reset and logs for this checkout's stack, with JSON reports and stable exit codes. |
 | `scripts/local/coding.ts`, `scripts/local/runner.ts` | `pnpm local runner start\|status\|stop` and `pnpm local coding doctor`: the InferOps coding runner for a wrapper (see [local coding workflows](local-coding-workflows.md#runner-lifecycle)). |
@@ -106,6 +113,18 @@ Wrangler's multi-Worker dev session restarts every Worker it runs on any change,
 
 The dev server writes the selection into its `.wrangler/local/dev-server.json` record, and `pnpm local status` probes only those Workers, so a deliberately absent gatekeeper is not reported as down. `scripts/dev-gatekeepers.test.ts` covers parsing, selection, discovery and that `run-dev-server.ts` discovers through the helper; `lifecycle.test.ts` covers the narrowed status.
 
+## Parallel worktrees
+
+`pnpm wt` (`scripts/wt/wt.ts`) makes a worktree runnable beside the main checkout and other worktrees. The [wiki page](../wiki/local-development.md) is the how-to; this is what it does.
+
+- **Location.** `wt new <name>` adds `<main checkout>/.worktrees/<name>`. The main checkout is the directory holding the shared `.git`, found with `git rev-parse --git-common-dir`, so `wt` works from any worktree. `/.worktrees/` is in `.gitignore`. Before that entry existed, `.worktrees/` was ignored only through `info/exclude`, and the main checkout's `build:app:dev` fingerprints recorded directory reads under `.worktrees/*` (most likely Tailwind's source scan, which honours `.gitignore` but not `info/exclude`). Those tasks then missed whenever any nested worktree changed, and their entries could not hit in a worktree. With `--from origin/<branch>` that branch is fetched first. A new branch is created with `--no-track`; an existing local branch is checked out as is.
+- **Registry.** `scripts/wt/registry.ts` keeps `$XDG_CONFIG_HOME/inferos/worktrees.json` (default `~/.config`), per user and shared by every clone, since ports are machine-wide. Each mutation holds an `O_EXCL` lock file (`worktrees.json.lock`, retried with jittered backoff and reclaimed when its pid is dead or it is older than 60 s), then writes a temp file and renames it over the registry. `registry.test.ts` runs six processes appending at once and loses no entry.
+- **Ports.** `allocatePortBlock` (`layout.ts`) takes the first block of 10 from 8800 (up to 9199, short of Node's 9229 inspector port) that no entry holds and in which no port accepts a connection. Base is the backend, base + 1 is Vite, and the rest are spares. Allocation happens under the lock right after `git worktree add`, before the slow steps, so concurrent `wt new` runs cannot collide.
+- **Overlay.** `.env.worktree` (gitignored; on an older branch `wt new` adds it to `info/exclude`) holds `VITE_BACKEND_HOST`, `DEV_CLIENT_PORT` and `VP_RUN_CONCURRENCY_LIMIT`. `worktree-env.ts` defines the precedence: the shell, then `.env.worktree`, then `.dev.vars`, then `.env`. `run-dev-server.ts` loads it ahead of its `.dev.vars`/`.env` loading. `localEnv` (`stack.ts`) lists it first. `pnpm local`'s default environment fills it in, so `status`/`stop` find the worktree's port. `run-local.ts` reads it for the URL it prints. `vpRunEnv` (`vp/concurrency.ts`) takes `VP_RUN_CONCURRENCY_LIMIT` from it ahead of the root `.env` and names the file in its note. The frontend's `vite.config.ts` calls `devClientServerOptions` only for `vite serve` in `development` mode. That gives `server.port` from `DEV_CLIENT_PORT` with `strictPort`, and copies `VITE_BACKEND_HOST` into the process environment so `import.meta.env` sees it. Builds and vitest never read the overlay, because a build would inline a `VITE_*` value its task fingerprint does not include. The dev server derives the default `PUBLIC_BASE_URL` from `DEV_CLIENT_PORT` (3000 without it), so connect hand-offs target the worktree's own Vite. The overlay does not set `PUBLIC_BASE_URL`, which keeps `run-local`'s router-origin default intact. The concurrency value is the machine's limit (`defaultConcurrencyLimit`) divided by the registered worktree count, at least 2. Every overlay is rewritten on each `new`/`rm`.
+- **Secrets.** The main checkout's root `.env` and `.dev.vars` are symlinked (absolute targets) when present and ignored by the worktree's branch. `packages/workshop-backend/.dev.vars` is not linked, because `installDevVarsSecrets` refuses a symlink and appends per-run secrets to that file.
+- **Cache seeding.** `seedTaskCache` (`cache.ts`) copies `node_modules/.vite/task-cache/<version>/`, skipping `db_open.lock` and `last-summary.json`. It copies `cache.db` through `node:sqlite`'s online `backup()`, then the archives. It never overwrites an existing cache. No seeded entry hits yet: vp fingerprints the pnpm `node_modules/.bin/*` shim a task runs through, and pnpm writes the checkout's absolute path into each shim. So every entry misses on the shim being "modified", even when it was seeded from a checkout at the same commit. A trial that excluded `**/node_modules/.bin/**` from `@gadgets/typed-storage#build`'s cache input got a seeded hit (see Open Questions). The pre-flight builds then run through `pnpm exec vp run --cache` with the worktree's concurrency share. Their list is `DEV_PREFLIGHT_VP_BUILDS` in `dev-server-config.ts`, the same constant `run-dev-server.ts` uses, plus `@gadgets/typed-storage#build` and the bundled-blueprints generator. `wt new` prints the hit counts it parsed (`parseVpStatistics`).
+- **Removal and checks.** `wt rm` refuses when `git status --porcelain` is non-empty or `git rev-list HEAD --not --remotes` counts commits, unless `--force`, then runs `git worktree remove` and drops the entry. `wt doctor` compares the registry with `git worktree list`, flags `.worktrees/` entries `wt` did not create, checks each overlay against its registry block and each secrets link against its target, warns on secrets readable by other users and reports duplicate blocks. It runs `vp run --cache @gadgets/typed-storage#build` in each worktree and reads `vp run --last-details` for hit or miss.
+
 ## Readiness as an agent sees it
 
 `pnpm dev:verify` (`dev-verify.ts`) treats an open port as nothing: readiness is an authenticated RPC plus a board read through a gatekeeper connection. It signs in as the same local user (`login` only; it never creates an account), confirms the InferOps account among the connected accounts, opens the `InferOps Canvas demo` workspace, finds the connection to the board URL (default `inferops://demo.local/project/board/DEMO`), opens a session on it, reads the board (which the gatekeeper records as an observation) and lists the pending actions. The report's `agentView` is what an agent would find: `inferops` (connected, account id, display name, `mock` for the demo host or `live` otherwise), `board` (connection id, `suggestedBindingName` `INFEROPS_BOARD`, `tsType`, project, host, state and issue counts) and `approvalQueue` (reachable, pending count). A failed step is reported as `{ ok: false, step, error }` with the hint to run `pnpm local seed`.
@@ -124,7 +143,7 @@ The connection is found through the native action log rather than a file: every 
 
 ## Configuration
 
-cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.jsonc. The default frontend and backend ports are 3000 and 8787. A root `.dev.vars`, then a root `.env`, fill variables the shell has not set. Remote Workers AI requires account access. See the [settings](../wiki/configuration-reference.md) and [parity](../wiki/local-cloud-parity.md) wiki pages.
+cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.jsonc. The default frontend and backend ports are 3000 and 8787; a `pnpm wt` worktree's own come from its `.env.worktree` (see [parallel worktrees](#parallel-worktrees)). That overlay, then a root `.dev.vars`, then a root `.env`, fill variables the shell has not set. Remote Workers AI requires account access. See the [settings](../wiki/configuration-reference.md) and [parity](../wiki/local-cloud-parity.md) wiki pages.
 
 The dev server resolves these before it writes the per-Worker dev configs:
 
@@ -144,6 +163,8 @@ The dev server resolves these before it writes the per-Worker dev configs:
 - `seed` creates the demo canvas screen only when `inferos.canvas.json` declares one; the synthetic board itself comes from the InferOps gatekeeper's mock data, which is the "mock business operations" the MVP note on #10 excludes from the final walkthrough.
 
 ## Open Questions
+
+- Whether the shared vp task inputs (`scripts/vitest-task-vite-config.ts` and the per-package `cache.input` lists) should exclude `**/node_modules/.bin/**`. pnpm's shims embed the checkout's absolute path, which makes every task entry checkout-specific and defeats `pnpm wt`'s cache seeding. The shims' targets under `node_modules/.pnpm` are still tracked as reads.
 
 - Choose the wrapper configuration schema after comparing the upstream starter contract with this fork.
 - Whether wrapper gatekeepers should stay behind `features.customCloudflareCode`, which the design describes only for the extension manifest, or get their own switch.

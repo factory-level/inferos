@@ -34,6 +34,7 @@ import { parseArgs } from "node:util";
 import { readCanvasConfig } from "../consumer/canvas.ts";
 import { assertLocalPortAvailable } from "../consumer/runtime.ts";
 import { relayTermination } from "../relay-termination.ts";
+import { withWorktreeEnv } from "../worktree-env.ts";
 import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
@@ -148,7 +149,8 @@ function launchDetached(argv: string[], env: Record<string, string>, logPath: st
 
 export const defaultDeps: LifecycleDeps = {
   root: ROOT,
-  env: process.env,
+  // With a `pnpm wt` worktree's ports filled in, so `status`/`stop` find that worktree's stack.
+  env: withWorktreeEnv(ROOT, process.env),
   isPortListening: port => isPortListening(port),
   devServerRecord: readDevServerRecord,
   fetchImpl: fetch,

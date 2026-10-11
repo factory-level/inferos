@@ -11,6 +11,7 @@ import { parseEnv } from "node:util";
 import { canvasInventory, readCanvasConfig, selectedCustomGatekeepers } from "../consumer/canvas.ts";
 import { getDevServerConfig } from "../dev-server-config.ts";
 import { discoverDevGatekeepers, selectDevGatekeepers } from "../dev-gatekeepers.ts";
+import { WORKTREE_ENV_FILE } from "../worktree-env.ts";
 
 /** Where the local stack of a checkout lives: the origin plus the files Wrangler keeps for it. */
 export interface LocalStack {
@@ -117,12 +118,13 @@ export async function probeWorkers(
 }
 
 /**
- * The dev server's environment as it loads it: the shell wins over `.dev.vars`, which wins over
- * `.env`. Only presence of keys is reported anywhere; values stay in the returned object.
+ * The dev server's environment as it loads it: the shell wins over a `pnpm wt` worktree's
+ * `.env.worktree` (scripts/worktree-env.ts), which wins over `.dev.vars`, which wins over `.env`.
+ * Only presence of keys is reported anywhere; values stay in the returned object.
  */
 export function localEnv(root: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const merged: NodeJS.ProcessEnv = { ...env };
-  for (const file of [".dev.vars", ".env"]) {
+  for (const file of [WORKTREE_ENV_FILE, ".dev.vars", ".env"]) {
     const path = join(root, file);
     if (!existsSync(path)) continue;
     for (const [key, value] of Object.entries(parseEnv(readFileSync(path, "utf8")))) {

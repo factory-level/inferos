@@ -18,9 +18,10 @@
 //   --consumer-root DIR         Run for a consumer wrapper: its inferos.config.json, canvas config,
 //                               gatekeepers/ and workers/ join the stack.
 //
-// Env (the shell wins, then .dev.vars, then .env):
+// Env (the shell wins, then a `pnpm wt` worktree's .env.worktree, then .dev.vars, then .env):
 //   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
 //   INFEROS_DEV_GATEKEEPERS=inferops  As --gatekeepers.
+//   DEV_CLIENT_PORT=3001              Where Vite listens, for the default PUBLIC_BASE_URL.
 
 import {
   existsSync, readFileSync, writeFileSync,
@@ -38,7 +39,7 @@ import {
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
   resolveInferOpsBoundViews,
-  resolvePublicationFlag,
+  resolvePublicationFlag, DEV_PREFLIGHT_VP_BUILDS,
 } from "./dev-server-config.ts";
 import { generateWorkerConfigs } from "./generate-worker-configs.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
@@ -56,12 +57,19 @@ import { startOpenAiCompanion } from './openai-companion.ts';
 import { installDevVarsSecrets, installLocalSecrets } from './local-secrets.ts';
 import { splitGatekeeperSecrets, withoutLocalOverrides } from './gatekeeper-dev-secrets.ts';
 import { recordDevServer } from "./local/stack.ts";
+import { DEV_CLIENT_PORT, readWorktreeEnv } from "./worktree-env.ts";
 import { parseEnv } from 'node:util';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SCRIPTS_DIR, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
 const WORKSHOP_BACKEND_DIR = join(PACKAGES_DIR, "workshop-backend");
+
+// A `pnpm wt` worktree's own ports and concurrency share (worktree-env.ts). Loaded first, so it
+// beats the `.dev.vars` and `.env` it shares with the main checkout; the shell still wins.
+for (const [key, value] of Object.entries(readWorktreeEnv(ROOT))) {
+  if (process.env[key] === undefined) process.env[key] = value;
+}
 
 // Load a root `.dev.vars` file (KEY=VALUE lines) into process.env for local development. Existing
 // shell environment values take precedence. This file is gitignored and may hold local secrets.
@@ -434,20 +442,14 @@ function runBuild(
 // this output is rebuilt regardless, and unless the bytes match Wrangler sees `src/generated/app.txt`
 // change and restarts the worker. Same build, unminified.
 //
-// The two `vp` runs, listed so the concurrency split below is derived from their number rather than
+// The two `vp` runs (DEV_PREFLIGHT_VP_BUILDS, kept in dev-server-config.ts so `pnpm wt new` warms
+// the same builds), listed so the concurrency split below is derived from their number rather than
 // from a literal that a third would silently invalidate. Both share the one machine-aware limit
 // (vp/concurrency.ts), divided between them: each run alone would otherwise claim the whole budget,
 // and the two together twice it. Floored at vp's default of 4, so a small machine is unchanged and a
 // big one stops double-claiming. Computed once, so the note prints once, and after `loadDevVars()`
 // so a `.dev.vars` override is honoured.
-const VP_PREFLIGHT_BUILDS = [
-  {
-    label: "configurator UIs",
-    args: ["exec", "vp", "run", "-r", "--cache", "build:configurator", "--dev"],
-  },
-  { label: "gatekeeper app UIs", args: ["exec", "vp", "run", "-r", "--cache", "build:app:dev"] },
-];
-const vpEnv = vpRunEnv({ concurrentRuns: VP_PREFLIGHT_BUILDS.length });
+const vpEnv = vpRunEnv({ concurrentRuns: DEV_PREFLIGHT_VP_BUILDS.length });
 try {
   await Promise.all([
     runBuild(
@@ -456,8 +458,8 @@ try {
       [join(WORKSHOP_BACKEND_DIR, "scripts", "build-bundled-blueprints.ts")],
       WORKSHOP_BACKEND_DIR,
     ),
-    ...VP_PREFLIGHT_BUILDS.map(({ label, args }) =>
-        runBuild(label, ...pnpmCommand(args), ROOT, vpEnv)),
+    ...DEV_PREFLIGHT_VP_BUILDS.map(({ label, args }) =>
+        runBuild(label, ...pnpmCommand([...args]), ROOT, vpEnv)),
   ]);
 } catch (err) {
   // The SIGTERM handler killing the builds also lands here, as the rejection of whichever build
@@ -725,10 +727,11 @@ for (const gk of gatekeepers) {
   // Account connect flows post their completion ticket to the Workshop *origin* named here (see
   // packages/workshop-backend/src/connect-handoff.ts), so the backend refuses to complete one without
   // it. Default to wherever the frontend is served from: Vite in normal dev, the public router in
-  // run-local mode.
+  // run-local mode. Vite's port is `DEV_CLIENT_PORT` when set (a `pnpm wt` worktree's overlay sets
+  // it, see worktree-env.ts), so the two stay in step without a per-mode PUBLIC_BASE_URL.
   if (config.vars.PUBLIC_BASE_URL === undefined) {
-    config.vars.PUBLIC_BASE_URL =
-        serveFrontendAssets ? `http://${backendHost}` : "http://localhost:3000";
+    config.vars.PUBLIC_BASE_URL = serveFrontendAssets
+        ? `http://${backendHost}` : `http://localhost:${process.env[DEV_CLIENT_PORT] || 3000}`;
   }
 
   if (process.env.ENABLE_OPENAI_ASSISTANT_PLUGIN === 'true') {

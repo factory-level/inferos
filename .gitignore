@@ -25,6 +25,10 @@ packages/workshop-backend/src/generated/browser-export-page.js
 .wrangler
 .env
 
+# `pnpm wt` worktrees (scripts/wt/) and each one's port/concurrency overlay (scripts/worktree-env.ts).
+/.worktrees/
+.env.worktree
+
 # Local dev secrets (loaded by run-dev-server.ts)
 .dev.vars*
 
