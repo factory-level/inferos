@@ -28,11 +28,36 @@ function bridgedRestore(this: DurableObject, params: unknown): unknown {
 }
 (DurableObject.prototype as unknown as Record<symbol, unknown>)[restore] = bridgedRestore;
 
-/** The overseer, registered for the bridge above so tests can exercise `ctx.restore()`. */
+/**
+ * The test file now running, counted by `workerd/backend-file-boundary.ts`. The `backend` project
+ * runs several files in one Miniflare (see vitest.config.ts), and a Durable Object's storage --
+ * alarm included -- outlives the file that made it.
+ */
+let currentTestFile = 0;
+/** The test file that first constructed each overseer, by id. */
+const overseerTestFile = new Map<string, number>();
+
+/** Called as each test file starts (see `workerd/backend-file-boundary.ts`). */
+export function beginTestFile(): void {
+  currentTestFile++;
+}
+
+/**
+ * The overseer, registered for the bridge above so tests can exercise `ctx.restore()`. Its alarm
+ * runs only for the file that made it: an alarm a finished file left armed would otherwise wake its
+ * overseer while a later file runs, resuming persisted agent calls through that file's `fetch` stub.
+ */
 export class OverseerDurableObject extends RealOverseerDurableObject {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     restoreTargets.set(ctx, this);
+    let id = ctx.id.toString();
+    if (!overseerTestFile.has(id)) overseerTestFile.set(id, currentTestFile);
+  }
+
+  override async alarm(): Promise<void> {
+    if (overseerTestFile.get(this.ctx.id.toString()) !== currentTestFile) return;
+    await super.alarm();
   }
 }
 /**
@@ -53,20 +78,29 @@ export class TestConnectCallback extends GatekeeperConnectCallbackImpl {}
 /** The sign-in callback, reachable the same way. */
 export class TestLoginCallback extends LoginConnectCallbackImpl {}
 
-/** What each FakeGatekeeperAccount has been asked to do, by its `name` prop. */
+/**
+ * What each FakeGatekeeperAccount has been asked to do, by its `scope` and `name` props. This module
+ * outlives a test file: the `backend` project shares one module graph across the files a pool worker
+ * runs (see vitest.config.ts), so the key carries a scope the file mints for itself, and two files
+ * that both name an account "octocat" never read each other's calls.
+ */
 const accountCalls = new Map<string, string[]>();
 
 /**
  * A gatekeeper account as the Workshop sees one: a persistent stub it can store and call back into.
- * Records calls by `props.name` so a test can ask any instance what happened (`calls()`); with
- * `failRevoke` / `failDescribe`, that method rejects after being recorded.
+ * Records calls by `props.scope` and `props.name` so a test can ask any instance what happened
+ * (`calls()`); with `failRevoke` / `failDescribe`, that method rejects after being recorded.
  */
-export class FakeGatekeeperAccount
-    extends WorkerEntrypoint<unknown, { name: string; failRevoke?: boolean; failDescribe?: boolean }> {
+export class FakeGatekeeperAccount extends WorkerEntrypoint<
+    unknown, { scope: string; name: string; failRevoke?: boolean; failDescribe?: boolean }> {
+  get #key(): string {
+    return JSON.stringify([this.ctx.props.scope, this.ctx.props.name]);
+  }
+
   #record(call: string) {
-    const calls = accountCalls.get(this.ctx.props.name) ?? [];
+    const calls = accountCalls.get(this.#key) ?? [];
     calls.push(call);
-    accountCalls.set(this.ctx.props.name, calls);
+    accountCalls.set(this.#key, calls);
   }
 
   async describe(): Promise<AccountDescription> {
@@ -100,6 +134,6 @@ export class FakeGatekeeperAccount
   }
 
   async calls(): Promise<string[]> {
-    return accountCalls.get(this.ctx.props.name) ?? [];
+    return accountCalls.get(this.#key) ?? [];
   }
 }

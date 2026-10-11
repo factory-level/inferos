@@ -26,7 +26,7 @@ type UserInternals = UserDurableObject & {
   };
   ctx: DurableObjectState & {
     exports: {
-      FakeGatekeeperAccount(options: { props: { name: string } }): Fetcher<FakeGatekeeperAccount>;
+      FakeGatekeeperAccount(options: { props: { scope: string; name: string } }): Fetcher<FakeGatekeeperAccount>;
       TestLoginCallback(options: { props: { pendingId: string; vendorId: string } })
         : Fetcher<LoginConnectCallbackImpl>;
     };
@@ -259,7 +259,7 @@ describe("LoginConnectCallbackImpl", () => {
       const user = instance as UserInternals;
       user.storage.nextAccountId.put(1);
       user.storage.connectedAccounts.put({
-        id: 0, account: user.ctx.exports.FakeGatekeeperAccount({ props: { name: "cf" } }),
+        id: 0, account: user.ctx.exports.FakeGatekeeperAccount({ props: { scope: `pending-login-${crypto.randomUUID()}`, name: "cf" } }),
         vendorId: "cloudflare", description: { displayName: "cf" },
       });
       const callback = callbackFor(user, pendingId);

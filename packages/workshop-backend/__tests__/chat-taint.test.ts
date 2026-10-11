@@ -15,7 +15,7 @@
 // (see GatekeeperLoopback.prototype.ping below), then fails on the recorded session, which has
 // no methods.
 
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub, RpcTarget as NativeRpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import {
@@ -140,14 +140,21 @@ function intercept(impl: any): string[] {
 // open: the request the constructor sent can land after the execution has ended, when an operate
 // workspace refuses it as no longer live, or be cancelled with the refused call. Declaring the
 // method the loaded code calls on the prototype, forwarding to the Proxy, restores the production
-// path.
-Object.defineProperty(GatekeeperLoopback.prototype, "ping", {
-  configurable: true,
-  value(this: Record<string, (...args: unknown[]) => unknown>, ...args: unknown[]) {
-    return this.ping(...args);
-  },
+// path. The prototype belongs to a module the `backend` project shares with the files that run after
+// this one (see vitest.config.ts), so the declaration is put back as it was once this file is done.
+const pingBefore = Object.getOwnPropertyDescriptor(GatekeeperLoopback.prototype, "ping");
+beforeAll(() => {
+  Object.defineProperty(GatekeeperLoopback.prototype, "ping", {
+    configurable: true,
+    value(this: Record<string, (...args: unknown[]) => unknown>, ...args: unknown[]) {
+      return this.ping(...args);
+    },
+  });
 });
-afterAll(() => { delete (GatekeeperLoopback.prototype as any).ping; });
+afterAll(() => {
+  if (pingBefore === undefined) delete (GatekeeperLoopback.prototype as any).ping;
+  else Object.defineProperty(GatekeeperLoopback.prototype, "ping", pingBefore);
+});
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
