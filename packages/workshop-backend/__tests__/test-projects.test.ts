@@ -10,11 +10,26 @@ const here = import.meta.dirname;
 const PROJECTS = { "unit-node": UNIT_NODE, "workerd-light": WORKERD_LIGHT, backend: BACKEND };
 const onDisk = readdirSync(here).filter(file => file.endsWith(".test.ts"));
 
-/** A file that reaches the backend Worker: `cloudflare:test` evaluates it as the pool's `main`. */
-function loadsBackend(file: string): boolean {
-  let source = readFileSync(path.join(here, file), "utf-8");
-  return /from ["']cloudflare:test["']|["']\.\/test-worker(\.js)?["']/u.test(source);
+/**
+ * Whether `source` reaches the backend Worker: a static or dynamic import of `cloudflare:test`
+ * (which evaluates `test-worker.ts` as the pool's `main`) or of `test-worker` itself.
+ */
+function loadsBackend(source: string): boolean {
+  return /(?:from\s*|import\s+|import\s*\(\s*)["'](?:cloudflare:test|\.\/test-worker(?:\.[jt]s)?)["']/u.test(source);
 }
+
+/**
+ * Whether `source` replaces a module or the clock, which the `backend` project's shared module graph
+ * and isolate would carry into the next file (`vi.mock` is never undone between files there).
+ */
+function replacesModulesOrClock(source: string): boolean {
+  return /\bvi\.(?:mock|doMock|useFakeTimers|setSystemTime)\b/u.test(source);
+}
+
+/** `backend` files allowed to use `vi.mock`, fake timers or system time, each with its reason. */
+const BACKEND_MODULE_OR_CLOCK_EXCEPTIONS: Readonly<Record<string, string>> = {};
+
+const read = (file: string) => readFileSync(path.join(here, file), "utf-8");
 
 describe("test projects", () => {
   it("place every test file in exactly one project", () => {
@@ -29,6 +44,31 @@ describe("test projects", () => {
   });
 
   it("keep every file that loads the backend in the backend project", () => {
-    expect(onDisk.filter(file => loadsBackend(file) && !BACKEND.includes(file))).toEqual([]);
+    expect(onDisk.filter(file => loadsBackend(read(file)) && !BACKEND.includes(file))).toEqual([]);
+  });
+
+  it("keep module mocks, fake timers and system time out of the backend project", () => {
+    expect(BACKEND.filter(file =>
+      replacesModulesOrClock(read(file)) && !(file in BACKEND_MODULE_OR_CLOCK_EXCEPTIONS))).toEqual([]);
+  });
+
+  // The fixtures are assembled from pieces so that this file's own source matches neither check.
+  it("recognize what the checks above look for", () => {
+    let cfTest = ["cloudflare", "test"].join(":");
+    let worker = ["./test", "worker"].join("-");
+    let vi = "vi";
+    expect(loadsBackend(`import { env } from "${cfTest}";`)).toBe(true);
+    expect(loadsBackend(`const t = await import("${cfTest}");`)).toBe(true);
+    expect(loadsBackend(`import "${worker}.js";`)).toBe(true);
+    expect(loadsBackend(`import  '${worker}';`)).toBe(true);
+    expect(loadsBackend(`import type { X } from "${worker}.ts";`)).toBe(true);
+    expect(loadsBackend(`import { y } from "${worker}";`)).toBe(true);
+    expect(loadsBackend(`import { env } from "cloudflare:workers";`)).toBe(false);
+    expect(loadsBackend(`import { z } from "./test-projects.js";`)).toBe(false);
+    expect(replacesModulesOrClock(`${vi}.mock("jose", () => ({}));`)).toBe(true);
+    expect(replacesModulesOrClock(`${vi}.doMock(path);`)).toBe(true);
+    expect(replacesModulesOrClock(`${vi}.useFakeTimers();`)).toBe(true);
+    expect(replacesModulesOrClock(`${vi}.setSystemTime(0);`)).toBe(true);
+    expect(replacesModulesOrClock("vi.stubGlobal('fetch', f); vi.useRealTimers();")).toBe(false);
   });
 });

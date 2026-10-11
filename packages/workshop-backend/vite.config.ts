@@ -4,6 +4,12 @@ import {
   TESTS_WITH_TIMEOUT_ENV, vitestTask, withTestTimeout,
 } from '@gadgets/scripts/vitest-task'
 
+/** The `test` task below, before its `cache.env` gains `BACKEND_TEST_WORKERS`. */
+const unitTask = vitestTask([
+  { command: 'vitest run', idleSeconds: 120 },
+  'vitest run --config vitest.integration.config.ts',
+])
+
 /**
  * Codegen steps stay separate commands rather than one `&&` string so each caches on its own.
  */
@@ -79,18 +85,21 @@ export default {
         cache: false,
       },
       /**
-       * The unit suite needs a longer idle threshold than the watchdog's default. Import dominates
-       * its runtime (`import 261s, tests 19s` on a 4-vCPU runner, alongside three other workerd
-       * fleets), and vitest prints only as files complete, so a healthy run's silences stretch past
-       * the default once the machine is contended. The wall-clock backstop still bounds a real hang.
+       * The unit suite needs a longer idle threshold than the watchdog's default. Evaluating the
+       * backend dominates its runtime -- about 165-220 s of summed import+setup against 45 s of tests
+       * on a 14-core machine, since the `backend` project evaluates it once per pool worker -- and
+       * vitest prints only as files complete, so a worker's first file is a 15-25 s silence that
+       * stretches past the default once the machine is contended. The wall-clock backstop still
+       * bounds a real hang.
+       *
+       * `BACKEND_TEST_WORKERS` sets the `backend` project's worker count (see vitest.config.ts), so
+       * it is declared here: a cached run strips undeclared variables.
        *
        * The integration config is one file and keeps the default.
        */
       test: {
-        ...vitestTask([
-          { command: 'vitest run', idleSeconds: 120 },
-          'vitest run --config vitest.integration.config.ts',
-        ]),
+        ...unitTask,
+        cache: { ...unitTask.cache, env: [...unitTask.cache.env, 'BACKEND_TEST_WORKERS'] },
         dependsOn: [
           '@gadgets/typed-storage#build', 'build:bundled-blueprints', 'build:browser-runtime',
         ],

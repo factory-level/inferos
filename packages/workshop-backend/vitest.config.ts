@@ -123,6 +123,19 @@ const plugins = () => [textModules, rpcValidation()]
 const compatibilityFlags = ['experimental', 'nodejs_compat', 'allow_irrevocable_stub_storage']
 
 /**
+ * The `backend` project's pool workers: `BACKEND_TEST_WORKERS` when set (a positive integer, or the
+ * config refuses to load), otherwise four, or one fewer than the cores when there are fewer.
+ */
+function backendWorkers(): number {
+  let value = process.env.BACKEND_TEST_WORKERS
+  if (value === undefined || value === '') return Math.max(1, Math.min(4, availableParallelism() - 1))
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw new Error(`BACKEND_TEST_WORKERS must be a positive integer, not ${JSON.stringify(value)}`)
+  }
+  return Number(value)
+}
+
+/**
  * Three projects, cheapest first; `__tests__/test-projects.ts` says which file runs where, and
  * `vitest run` runs all three (`--project <name>` picks one).
  *
@@ -219,8 +232,9 @@ export default defineConfig({
           isolate: false,
           // Each worker evaluates the backend once, so a few cover the 30-odd files; more only adds
           // evaluations competing for the same cores. A project's own `maxWorkers` needs its own
-          // `groupOrder`, so these run after the other two projects.
-          maxWorkers: Math.max(1, Math.min(4, availableParallelism() - 1)),
+          // `groupOrder`, so these run after the other two projects. The CLI's `--maxWorkers` does
+          // not reach a project's own value, so `BACKEND_TEST_WORKERS` is the override.
+          maxWorkers: backendWorkers(),
           sequence: { groupOrder: 1 },
           // Module state outlives a file here, so undo what a test stubs as soon as it ends.
           unstubGlobals: true,
