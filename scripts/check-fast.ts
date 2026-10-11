@@ -25,7 +25,8 @@
 //     and take seconds), plus `pnpm types:scripts` for TypeScript.
 //   - `env.d.ts` files and the generated configuration reference also run
 //     `scripts/consumer/settings.test.ts`, which fails when that reference is stale.
-//   - A file under `docs/` runs `pnpm docs:check`.
+//   - A file under `docs/` runs `pnpm docs:check`, and so does a package's own docs file (see
+//     `isPackageDoc`), which is never a source change and so never runs a config in full.
 //
 // Anything else (root configs, the lockfile, skills) is listed as not checked, as is a test file no
 // config ran, a deleted test suite and a package with no `build` task. The footer always names what
@@ -160,6 +161,20 @@ const configName = (args: string[]) => {
   return index === -1 ? "default config" : args[index + 1];
 };
 
+/**
+ * True for a docs file of `pkg`: a `*.md` or `README*` at the package root, or any file under the
+ * package's `docs/`. It runs `pnpm docs:check` (which fails when an architecture doc's `covers:` names
+ * a file that is gone) instead of the package's tests. Only those places: deeper Markdown can be runtime content (a blueprint's
+ * `files/README.md` is bundled into its Gadget). Configs are never docs, even when they mostly hold
+ * data: `wrangler.jsonc` sets the Worker's `main`, bindings and compatibility flags, which change
+ * what runs, so it keeps the full-config fallback like any other non-test file.
+ */
+export function isPackageDoc(file: string, pkg: WorkspacePackage): boolean {
+  const inside = file.slice(pkg.dir.length + 1);
+  if (inside.startsWith("docs/")) return true;
+  return !inside.includes("/") && (inside.endsWith(".md") || inside.startsWith("README"));
+}
+
 /** Plans one package's checks for its changed files. */
 function planPackage(pkg: WorkspacePackage, changed: string[], workspace: Workspace, unchecked: Unchecked[]): Group {
   const cwd = join(workspace.root, pkg.dir);
@@ -247,7 +262,10 @@ export function planChecks(files: string[], workspace: Workspace): Plan {
       docs = true;
     } else {
       const pkg = packageFor(file, workspace.packages);
-      if (pkg) {
+      if (pkg && isPackageDoc(file, pkg)) {
+        covered = true;
+        docs = true;
+      } else if (pkg) {
         covered = true;
         byPackage.set(pkg, [...byPackage.get(pkg) ?? [], file]);
       }

@@ -180,10 +180,11 @@ Each file maps to a check:
   - Changed test files run directly.
   - Other changed files run `vitest related --passWithNoTests`. If that finds no test file, the config runs in full instead: fixtures, Worker `main` modules and files read at runtime have no static import edge, so "no related tests" proves nothing.
   - A deleted non-test file, or a changed vitest or Vite config, runs every config in full.
+  - `vitest related` follows static imports only, so a test reached only through a vitest config's `main` or a file read at runtime can be missed even when some related tests run; the footer it always prints and `pnpm check:full` cover that.
 - **A package whose tests aren't vitest, or that has tests but no `test:run`,** gets the type-check only, and its files are listed as not checked.
 - **Any `scripts/**` file** runs every `scripts/` `node --test` suite, plus `pnpm types:scripts` for TypeScript.
 - **`scripts/consumer/*`, `scripts/dev-server-config.ts`, any `env.d.ts`, settings sources and the configuration reference** run `scripts/consumer/settings.test.ts`, which compares the generated configuration reference with its source.
-- **`docs/**`** runs `pnpm docs:check`.
+- **`docs/**`, and a package's own docs** (`*.md` and `README*` at the package root, files under its `docs/`) run `pnpm docs:check`. A package's docs are never a source change, so they never run its configs in full. Deeper Markdown is not exempt, because some of it is runtime content (a blueprint's `files/README.md` is bundled into its Gadget), and neither is `wrangler.jsonc`, whose `main`, bindings and flags change what runs.
 
 Packages run in parallel. Within a package, the prelude runs first and the checks then run side by side. That is safe because the backend's codegen scripts rewrite their output only when it changed, so the type-check's second run of them writes nothing.
 
