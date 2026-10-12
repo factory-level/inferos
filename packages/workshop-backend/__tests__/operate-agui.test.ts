@@ -41,6 +41,8 @@ it("keeps thread/run uniqueness across restart and person isolation", async () =
   await runInDurableObject(user, instance => expect(storeOf(instance).operateReadGenerationRuns.get(pair.threadId).chatId).toBe(17));
 });
 
+// Four full 256-reservation generations and four DO restarts took 5.4s under measured contention.
+// Give this invariant test a bounded 30s budget; it does not assert a 5s product latency SLO.
 it("rotates bounded generations after failed setup, fences late binds and never re-admits retired identities", async () => {
   const name = crypto.randomUUID();
   let user = env.TEST_USER.getByName(name);
@@ -77,7 +79,7 @@ it("rotates bounded generations after failed setup, fences late binds and never 
     });
   }
   await reserve(user, await user.prepareOperateReadRun());
-});
+}, 30_000);
 
 it("rolls back boundary and every deleted row/index on a real storage transaction failure", async () => {
   const name = crypto.randomUUID();
