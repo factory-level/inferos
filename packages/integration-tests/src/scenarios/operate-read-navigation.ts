@@ -95,9 +95,21 @@ export type ScenarioReport = {
   target: "wrangler createTestHarness on loopback";
   boundaries: { mocked: string[]; real: string[] };
   fixtures: Record<string, unknown>;
+  /** Outbound requests nothing answered in process; any one, or an unchecked run, fails the verdict. */
+  isolation: { checked: boolean; unmockedRequests: number | null; origins: string[] };
   cases: ScenarioCase[];
   verdict: "PASS" | "FAIL";
 };
+
+/** The case names a complete run records, in order. */
+export const CASE_NAMES = ["loopback-only", "read-navigation", "read-navigation-repeat", "refusal", "interrupted"] as const;
+
+/** PASS only for every case passing and an isolation check that ran and found no unanswered request. */
+export function scenarioVerdict(cases: readonly ScenarioCase[], isolation: ScenarioReport["isolation"])
+    : ScenarioReport["verdict"] {
+  return cases.map(entry => entry.name).join() === CASE_NAMES.join() && cases.every(entry => entry.outcome === "PASS")
+    && isolation.checked && isolation.unmockedRequests === 0 ? "PASS" : "FAIL";
+}
 
 /** Which parts of the run are programmed and which are the real code paths. */
 export const BOUNDARIES = {

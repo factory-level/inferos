@@ -19,7 +19,9 @@ answered in process; an unanswered one fails the run. The same file runs in `pnp
 It writes a JSON report to `packages/integration-tests/.wrangler/tmp/scenario-reports/operate-read-navigation-v1.json`
 (or the path in `OPERATE_SCENARIO_REPORT`), and prints a one-line summary. The report names the
 scenario version, the tested commit and whether the tree was dirty, the fixtures, the mocked and real
-boundaries, each case's observed results and a PASS/FAIL verdict. It holds no bearer token (the run
+boundaries, the isolation check (how many outbound requests nothing answered in process, and their
+origins only), each case's observed results and a PASS/FAIL verdict. The verdict is PASS only when
+all five cases pass and the isolation check ran and found no such request. It holds no bearer token (the run
 fails rather than write one), credential or real personal data. `source` is always `mock` and
 `liveProviderProof` always `false`: a mock result never closes a live acceptance criterion.
 

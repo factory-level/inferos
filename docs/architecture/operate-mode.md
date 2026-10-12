@@ -270,7 +270,7 @@ the wire, the stock client reports its own local `RUN_ERROR` with code `abort`, 
 completes, and the same selectors are refused 409 `RUN_ALREADY_RESERVED` with no resubmission. The
 local helper refuses non-loopback targets. Each run writes a token-free JSON report
 (`source: "mock"`, `liveProviderProof: false`) naming the scenario version, commit, boundaries, cases
-and verdict. It is not a general scenario runner, nor UI, approval, widget or live provider proof.
+and verdict; an unanswered outbound request, or a run whose isolation could not be checked, fails it. It is not a general scenario runner, nor UI, approval, widget or live provider proof.
 
 ## Components
 

@@ -13,7 +13,7 @@ import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, listConnectedAccounts, nextUsernames, waitFor } from "../src/rpc-client.js";
 import {
   assertLoopbackTarget, BOUNDARIES, EXPECTED_INTERRUPTION, EXPECTED_READ, EXPECTED_REFUSAL, INITIAL_STATE,
-  INTERRUPTED_STEPS, PROMPT, READ_STEPS, SCENARIO, SCENARIO_BOARD, SCENARIO_WORKSPACE,
+  INTERRUPTED_STEPS, PROMPT, READ_STEPS, SCENARIO, SCENARIO_BOARD, SCENARIO_WORKSPACE, scenarioVerdict, CASE_NAMES,
   type ScenarioCase, type ScenarioReport,
 } from "../src/scenarios/operate-read-navigation.js";
 
@@ -54,12 +54,14 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  let unmocked: string[] | undefined;
   try {
     await harness?.server.close();
-    expect(network.getUnmockedCalls()).toEqual([]);
+    unmocked = network.getUnmockedCalls();
+    expect(unmocked).toEqual([]);
   } finally {
     network.uninstall();
-    writeReport();
+    writeReport(unmocked);
   }
 });
 
@@ -69,21 +71,26 @@ function revision(): ScenarioReport["revision"] {
   catch { return {commit: process.env.GITHUB_SHA ?? "unknown", dirty: null}; }
 }
 
-function writeReport() {
-  const verdict = cases.length === 5 && cases.every(entry => entry.outcome === "PASS") ? "PASS" : "FAIL";
+/** `unmocked` is undefined when the harness did not shut down cleanly enough to check isolation. */
+function writeReport(unmocked: string[] | undefined) {
+  // Only the count and origins: a request's full URL could carry query data.
+  const isolation = unmocked === undefined ? {checked: false, unmockedRequests: null, origins: []}
+    : {checked: true, unmockedRequests: unmocked.length,
+      origins: [...new Set(unmocked.map(call => new URL(call.slice(call.indexOf(" ") + 1)).origin))]};
+  const verdict = scenarioVerdict(cases, isolation);
   const report: ScenarioReport = {
     scenario: SCENARIO, revision: revision(), source: "mock", liveProviderProof: false,
     target: "wrangler createTestHarness on loopback", boundaries: BOUNDARIES,
     fixtures: {board: SCENARIO_BOARD, inferopsWorkspace: SCENARIO_WORKSPACE, prompt: PROMPT.content,
       readSteps: READ_STEPS.length, interruptedSteps: INTERRUPTED_STEPS.length, initialState: INITIAL_STATE},
-    cases, verdict,
+    isolation, cases, verdict,
   };
   const text = `${JSON.stringify(report, null, 2)}\n`;
   if (tokens.some(token => text.includes(token))) throw new Error("The scenario report would contain a session token");
   mkdirSync(dirname(REPORT_PATH), {recursive: true});
   writeFileSync(REPORT_PATH, text);
   console.info(`Scenario ${SCENARIO.id} v${SCENARIO.version} (mock, not live provider proof): ${verdict} ` +
-    `[${cases.map(entry => `${entry.name}=${entry.outcome}`).join(", ")}] -> ${REPORT_PATH}`);
+    `[${cases.map(entry => `${entry.name}=${entry.outcome}`).join(", ")}; unmocked requests ${isolation.unmockedRequests}] -> ${REPORT_PATH}`);
 }
 
 /** Record a case's outcome for the report, failing the test as usual on any wrong result. */
@@ -194,6 +201,16 @@ async function readNavigation() {
     history, offeredTools: offeredTools(f.model), modelRequests: f.model.requests.length,
     replay: {status: replay.status, error: EXPECTED_READ.replayError}};
 }
+
+it("passes the report only with every case passing and a clean, checked isolation", () => {
+  const passed = CASE_NAMES.map(name => ({name, outcome: "PASS" as const, observed: {}}));
+  const clean = {checked: true, unmockedRequests: 0, origins: []};
+  expect(scenarioVerdict(passed, clean)).toBe("PASS");
+  expect(scenarioVerdict(passed, {checked: true, unmockedRequests: 1, origins: ["https://unmocked.invalid"]})).toBe("FAIL");
+  expect(scenarioVerdict(passed, {checked: false, unmockedRequests: null, origins: []})).toBe("FAIL");
+  expect(scenarioVerdict(passed.slice(1), clean)).toBe("FAIL");
+  expect(scenarioVerdict([...passed.slice(0, 4), {...passed[4], outcome: "FAIL"}], clean)).toBe("FAIL");
+});
 
 it("refuses a non-loopback target for the local scenario", () => record("loopback-only", async () => {
   for (const url of ["https://workshop.example", "http://10.0.0.8:8787", "http://workshop.test", "https://127.0.0.1"]) {
