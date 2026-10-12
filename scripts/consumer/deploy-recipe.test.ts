@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync as makeTemp, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { canonical, validateDeployRecipe, type DeployPlan, type RecipeProblem } from "./deploy-recipe.ts";
+
+/** Temporary directories this file makes, removed when it finishes (synthetic files only). */
+const temps: string[] = [];
+const mkdtempSync = (prefix: string) => {
+  const dir = makeTemp(prefix);
+  temps.push(dir);
+  return dir;
+};
+after(() => { for (const dir of temps) rmSync(dir, { recursive: true, force: true }); });
 
 const here = new URL(".", import.meta.url).pathname;
 const RECIPE_PATH = join(here, "fixtures/deploy-recipe/disposable.json");
@@ -343,4 +352,45 @@ test("refusals never repeat an input-derived key: unsafe or credential-looking p
   const indexed = decided();
   indexed.target.oauthOrigins = ["http://x"];
   assert.ok(problemsOf(indexed).some(p => p.field === "target.oauthOrigins[0]"));
+});
+
+test("a credential marker spanning key segments (JWT-shaped) is never re-assembled in a refusal", () => {
+  const jwt = "eyJQASYNTHETIC0123.eyJQASYNTHETIC4567.c2lnUUE";
+  for (const mutate of [
+    (r: Record<string, any>) => { r.target.bindings[jwt] = { type: "kv", resource: "synthetic" }; },
+    (r: Record<string, any>) => { r[jwt] = true; },
+    (r: Record<string, any>) => { r.extensions[jwt] = true; },
+  ]) {
+    const r = decided();
+    mutate(r);
+    const problems = problemsOf(r);
+    const text = JSON.stringify(problems);
+    for (const piece of ["eyJQASYNTHETIC0123", "eyJQASYNTHETIC4567", "c2lnUUE"]) assert.ok(!text.includes(piece), text);
+  }
+  const dir = mkdtempSync(join(tmpdir(), "deploy-recipe-jwt-"));
+  const r = decided();
+  r.target.bindings[jwt] = { type: "kv", resource: "synthetic" };
+  writeFileSync(join(dir, "bad.json"), JSON.stringify(r));
+  for (const args of [[join(dir, "bad.json"), "--config", CONFIG_PATH], [join(dir, "bad.json"), "--config", CONFIG_PATH, "--json"]]) {
+    const run = cli(args);
+    assert.equal(run.status, 1);
+    const out = `${run.stdout}${run.stderr}`;
+    assert.ok(!out.includes("eyJQ") && !out.includes("c2lnUUE"), out);
+    assert.match(out, /target\.bindings\.<key>/u);
+  }
+});
+
+test("the CLI runs, and reports, from a path that contains a space", () => {
+  const dir = mkdtempSync(join(tmpdir(), "deploy recipe space-"));
+  const scripts = join(dir, "with space", "consumer");
+  mkdirSync(scripts, { recursive: true });
+  for (const file of ["deploy-recipe.ts", "config.ts"]) cpSync(join(here, file), join(scripts, file));
+  cpSync(join(here, "fixtures"), join(scripts, "fixtures"), { recursive: true });
+  const run = (args: string[]) => spawnSync(process.execPath, [join(scripts, "deploy-recipe.ts"), ...args], { encoding: "utf8" });
+  const ok = run([join(scripts, "fixtures/deploy-recipe/disposable.json"), "--config", join(scripts, "fixtures/deploy-recipe/inferos.config.json")]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /^NOT DEPLOYED -- local preflight/u);
+  const missing = run(["/nonexistent/recipe.json", "--config", "/nonexistent/config.json"]);
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /cannot read the recipe file/u);
 });

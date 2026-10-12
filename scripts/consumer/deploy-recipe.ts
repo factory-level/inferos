@@ -14,6 +14,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { parseConsumerConfig, type ConsumerConfig } from "./config.ts";
 
 /** The recipe format this preflight reads. */
@@ -348,6 +349,13 @@ export function safeProblems(problems: readonly RecipeProblem[]): RecipeProblem[
   return problems.map(({ field, rule }) => {
     const segments = field.replace(/^wrapperConfig:\.?/u, "wrapperConfig:.").split(/\.|(?=\[)/u).filter(Boolean);
     const safe = segments.map(segment => (SAFE_SEGMENT.test(segment) && !SECRET_VALUE.test(segment) ? segment : "<key>"));
+    // A marker can span segments (a JWT is dot-separated, so each piece passes alone). Search the
+    // re-joined path; from the segment where a marker starts, everything is `<key>`.
+    for (let joined = safe.join("."), at = joined.search(SECRET_VALUE); at >= 0; joined = safe.join("."), at = joined.search(SECRET_VALUE)) {
+      let offset = 0;
+      const index = safe.findIndex(segment => (offset += segment.length + 1) > at);
+      safe.splice(index, safe.length - index, "<key>");
+    }
     return {
       field: safe.join(".").replaceAll(".[", "[").replace("wrapperConfig:.", "wrapperConfig:"),
       rule: SECRET_VALUE.test(rule) ? "is invalid (details withheld: they would contain a credential-looking value)" : rule,
@@ -426,4 +434,4 @@ function main(argv: string[]): number {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exit(main(process.argv.slice(2)));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exit(main(process.argv.slice(2)));
