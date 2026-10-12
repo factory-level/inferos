@@ -18,6 +18,10 @@ covers:
   - packages/integration-tests/__tests__/operate-read-scenario.test.ts
   - packages/integration-tests/src/scenarios/operate-read-navigation.ts
   - packages/integration-tests/src/scenarios/operate-read-navigation.md
+  - packages/integration-tests/src/scenarios/scenario-report.ts
+  - packages/integration-tests/src/scenarios/operate-explicit-approval.ts
+  - packages/integration-tests/src/scenarios/operate-explicit-approval.md
+  - packages/integration-tests/__tests__/operate-approval-scenario.test.ts
   - packages/workshop-shared/src/operate-read-run.ts
   - packages/workshop-shared/src/operate-session.ts
   - packages/workshop-shared/src/api.ts
@@ -271,6 +275,15 @@ completes, and the same selectors are refused 409 `RUN_ALREADY_RESERVED` with no
 local helper refuses non-loopback targets. Each run writes a token-free JSON report
 (`source: "mock"`, `liveProviderProof: false`) naming the scenario version, commit, boundaries, cases
 and verdict; an unanswered outbound request, or a run whose isolation could not be checked, fails it. It is not a general scenario runner, nor UI, approval, widget or live provider proof.
+
+`operate-explicit-approval` version 1 is the same kind of example for the [explicit approval bridge](#explicit-ag-ui-approval-bridge), run with `pnpm --filter @gadgets/integration-tests exec vitest run __tests__/operate-approval-scenario.test.ts`. Its [contract](../../packages/integration-tests/src/scenarios/operate-explicit-approval.md) and data sit beside the read scenario's. Both share `scenario-report.ts`: the loopback-only target rule, the isolation check, the verdict and a report writer that refuses any minted token.
+
+- **Fixture.** A fresh person's real board session proposes one `ENG` transition against the fake InferOps.
+- **Approve.** The stock client gets one `inferos.gatekeeper.approval.v1` interrupt naming that pending action, with nothing written. An explicit approval applies it with exactly one provider write as that person. An identical answer and a reload recover `applied` with no further write. This is repeated from a fresh fixture with identical id-free results.
+- **Deny.** An explicit denial is `rejected` with no provider write.
+- **Refusals.** Another person's answer is refused 403 `APPROVAL_REFUSED` before any effect, and a conflicting answer after the decision is refused 403 with nothing changed.
+
+No model, implicit approval, new role or UI is involved. The bridge's other paths remain in `operate-agui-approval.test.ts`.
 
 ## Components
 

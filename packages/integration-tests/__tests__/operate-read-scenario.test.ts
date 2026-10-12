@@ -1,9 +1,7 @@
 // Runs scenario `operate-read-navigation` v1 (src/scenarios/operate-read-navigation.md) against a
 // real Workshop and InferOps gatekeeper on loopback, and writes a credential-free report.
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { HttpAgent } from "@ag-ui/client";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { startHarness, type Harness } from "../src/harness.js";
@@ -16,6 +14,7 @@ import {
   INTERRUPTED_STEPS, PROMPT, READ_STEPS, SCENARIO, SCENARIO_BOARD, SCENARIO_WORKSPACE, scenarioVerdict, CASE_NAMES,
   type ScenarioCase, type ScenarioReport,
 } from "../src/scenarios/operate-read-navigation.js";
+import { isolationOf, scenarioRevision, writeScenarioReport } from "../src/scenarios/scenario-report.js";
 
 const REPORT_PATH = process.env.OPERATE_SCENARIO_REPORT
   ?? resolve(import.meta.dirname, `../.wrangler/tmp/scenario-reports/${SCENARIO.id}-v${SCENARIO.version}.json`);
@@ -65,32 +64,17 @@ afterAll(async () => {
   }
 });
 
-function revision(): ScenarioReport["revision"] {
-  const git = (...args: string[]) => execFileSync("git", args, {cwd: import.meta.dirname, encoding: "utf8"}).trim();
-  try { return {commit: git("rev-parse", "HEAD"), dirty: git("status", "--porcelain").length > 0}; }
-  catch { return {commit: process.env.GITHUB_SHA ?? "unknown", dirty: null}; }
-}
-
 /** `unmocked` is undefined when the harness did not shut down cleanly enough to check isolation. */
 function writeReport(unmocked: string[] | undefined) {
-  // Only the count and origins: a request's full URL could carry query data.
-  const isolation = unmocked === undefined ? {checked: false, unmockedRequests: null, origins: []}
-    : {checked: true, unmockedRequests: unmocked.length,
-      origins: [...new Set(unmocked.map(call => new URL(call.slice(call.indexOf(" ") + 1)).origin))]};
-  const verdict = scenarioVerdict(cases, isolation);
+  const isolation = isolationOf(unmocked);
   const report: ScenarioReport = {
-    scenario: SCENARIO, revision: revision(), source: "mock", liveProviderProof: false,
+    scenario: SCENARIO, revision: scenarioRevision(import.meta.dirname), source: "mock", liveProviderProof: false,
     target: "wrangler createTestHarness on loopback", boundaries: BOUNDARIES,
     fixtures: {board: SCENARIO_BOARD, inferopsWorkspace: SCENARIO_WORKSPACE, prompt: PROMPT.content,
       readSteps: READ_STEPS.length, interruptedSteps: INTERRUPTED_STEPS.length, initialState: INITIAL_STATE},
-    isolation, cases, verdict,
+    isolation, cases, verdict: scenarioVerdict(cases, isolation),
   };
-  const text = `${JSON.stringify(report, null, 2)}\n`;
-  if (tokens.some(token => text.includes(token))) throw new Error("The scenario report would contain a session token");
-  mkdirSync(dirname(REPORT_PATH), {recursive: true});
-  writeFileSync(REPORT_PATH, text);
-  console.info(`Scenario ${SCENARIO.id} v${SCENARIO.version} (mock, not live provider proof): ${verdict} ` +
-    `[${cases.map(entry => `${entry.name}=${entry.outcome}`).join(", ")}; unmocked requests ${isolation.unmockedRequests}] -> ${REPORT_PATH}`);
+  writeScenarioReport(REPORT_PATH, report, tokens);
 }
 
 /** Record a case's outcome for the report, failing the test as usual on any wrong result. */
