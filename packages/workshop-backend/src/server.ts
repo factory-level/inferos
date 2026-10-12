@@ -1251,7 +1251,7 @@ export default {
       return handleClientErrorRequest(req, env, ctx);
     }
 
-    if (url.pathname === "/api" || url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/console" || url.pathname === "/api/operate/agui/prepare") {
+    if (url.pathname === "/api" || url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/console" || url.pathname === "/api/operate/agui/approval" || url.pathname === "/api/operate/agui/prepare") {
       // Fail closed on a sign-in allowlist the deployment cannot honour, with the reason.
       try {
         await (authGatekeepersChecked ??= assertAuthGatekeepersConfigured(env));
@@ -1302,7 +1302,7 @@ export default {
         accessPayload = payload;
       }
 
-      if (url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/console" || url.pathname === "/api/operate/agui/prepare") {
+      if (url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/console" || url.pathname === "/api/operate/agui/approval" || url.pathname === "/api/operate/agui/prepare") {
         return handleOperateAgui(req, async () => {
           const api = new PublicApiImpl(ctx, env, () => {}, accessPayload);
           const authorization = req.headers.get("Authorization");

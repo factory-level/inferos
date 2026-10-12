@@ -1,3 +1,4 @@
+import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-approval";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
 // The UI is a good old "fat client" SPA. Why not use SSR? Because:
@@ -3013,6 +3014,9 @@ export interface Overseer extends RpcTarget {
    * approval.
    */
   approveAction(id: number): Promise<void>;
+
+  /** Open, answer or reconcile one explicit caller-bound AG-UI approval in this action journal. */
+  operateApproval(request: OperateApprovalRequest): Promise<OperateApprovalSnapshot>;
 
   /**
    * Reject an action that is in the "pending" state. This notifies the gatekeeper that it will not

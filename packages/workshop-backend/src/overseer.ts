@@ -1,3 +1,5 @@
+import type { ActionApprovalCorrelation, OperateApprovalRequest, OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
+import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
@@ -811,6 +813,8 @@ export type ActionRecord = {
   // Written, durably, before an apply is dispatched and cleared with its outcome, so an apply a
   // restart interrupted is recovered as an unknown outcome (see #recoverInterruptedApplies).
   applyStartedAt?: Date;
+  /** One explicit AG-UI conversation, persisted with its existing action rather than a second queue. */
+  aguiApproval?: ActionApprovalCorrelation;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1459,6 +1463,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           // Resume-replay index (see subscribeToActions): keyed by last state-change time so a
           // reconnect replays only the records changed during the gap.
           byLastChanged: actionLastChangedKey,
+          // Sparse: only new bridge records carry this field, so legacy actions need no backfill.
+          byApprovalThread(record: ActionRecord) {
+            return record.type === "action" && record.aguiApproval && record.aguiApproval.replacement === undefined
+              ? JSON.stringify([record.aguiApproval.person, record.aguiApproval.threadId]) : null;
+          },
         },
 
         nonUniqueIndexes: {
@@ -6616,9 +6625,9 @@ class OverseerImpl implements AgentHooks {
     this.#associateAction(caller, actionId);
   }
 
-  async submitAction(gatekeeperId: number, action: number,
+  submitAction(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
-      : Promise<void> {
+      : void {
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
@@ -13104,7 +13113,126 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     };
   }
 
-  async approveAction(id: number): Promise<void> {
+  async operateApproval(raw: OperateApprovalRequest): Promise<OperateApprovalSnapshot> {
+    const input = validateApprovalRequest(raw);
+    const actions = this.impl.storage.actions;
+    const read = () => {
+      const record = actions.get(input.actionId);
+      if (record?.type !== "action") throw new Error("Approval refused");
+      return record;
+    };
+    const facet = (gatekeeperId: number) => this.impl.getGatekeeperFacet(gatekeeperId) as
+      Fetcher<Gatekeeper<unknown> & Required<Pick<Gatekeeper<unknown>, "getApprovalProposal" | "editApprovalProposal">>>;
+    let record = read();
+    if (!record.aguiApproval) {
+      if (input.answer || record.state !== "pending") throw new Error("Approval refused");
+      const proposal = await facet(record.gatekeeperId).getApprovalProposal(record.action);
+      record = read();
+      const key = JSON.stringify([this.clientUserId, input.threadId]);
+      if (actions.byApprovalThread.get(key) && !record.aguiApproval) throw new Error("Thread already has an action");
+      if (record.state !== "pending") throw new Error("Approval refused");
+      record.aguiApproval ??= approvalCorrelation(this.clientUserId, input, proposal);
+      actions.put(record);
+    }
+    const correlation = record.aguiApproval;
+    if (correlation.person !== this.clientUserId || correlation.threadId !== input.threadId) {
+      throw new Error("Approval refused");
+    }
+    if (input.answer) {
+      if (input.answer.interruptId !== correlation.interruptId || input.runId === correlation.runId) {
+        throw new Error("Approval refused");
+      }
+      const payload = input.answer.payload;
+      if (correlation.decision && JSON.stringify(correlation.decision) !== JSON.stringify(payload)) {
+        throw new Error("Conflicting approval answer");
+      }
+      if (!correlation.decision) {
+        // Another authorized surface may have decided it while this client was disconnected.
+        if (!payload.editedArgs && ((record.state === "approved" && payload.approved) ||
+            (record.state === "rejected" && !payload.approved) || record.state === "failed")) {
+          return approvalSnapshot(record);
+        }
+        if (record.state !== "pending" || record.applyStartedAt || Date.now() >= correlation.expiresAt) {
+          throw new Error("Approval is no longer pending");
+        }
+        // Reserve the answer before awaits, so concurrent/contradictory replies cannot both win.
+        correlation.decision = payload;
+        actions.put(record);
+      }
+    }
+    if (correlation.replacement !== undefined) {
+      // Old interrupt retries recover the new proposal without reusing the old approval for it.
+      const next = actions.get(correlation.replacement);
+      if (next?.type !== "action") throw new Error("Replacement unavailable");
+      return approvalSnapshot(next);
+    }
+    const decision = correlation.decision;
+    if (decision?.editedArgs && record.state === "pending") {
+      if (Date.now() >= correlation.expiresAt) return approvalSnapshot(record);
+      // The existing claim also excludes decisions from other authorized surfaces during editing.
+      await this.impl.withActionClaim(record.id, async () => {
+        const profile = await this.#getClientProfile();
+        let replacement;
+        try {
+          replacement = await facet(record.gatekeeperId)
+            .editApprovalProposal(record.action, decision.editedArgs!);
+        } catch (error) {
+          // A definite validation refusal has not changed either proposal; allow a corrected edit.
+          // Transport loss retains the intent so the facet's durable replacement can be recovered.
+          if (String(error).includes("[INVALID_APPROVAL_EDIT]")) {
+            record = read();
+            delete record.aguiApproval!.decision;
+            actions.put(record);
+          }
+          throw error;
+        }
+        // The facet retains a durable replacement link. No external effect occurs in this step.
+        // submitAction writes synchronously before returning, within the same journal transaction.
+        this.impl.storage.transaction(() => {
+          const nextId = this.impl.storage.nextActionId.get();
+          this.impl.submitAction(record.gatekeeperId, replacement.action,
+            replacement.description, record.caller);
+          const next = actions.get(nextId);
+          if (next?.type !== "action") throw new Error("Replacement was not journaled");
+          // Move the sparse conversation key to its replacement; the old record remains addressable.
+          record = read();
+          record.state = "rejected";
+          record.appliedAt = new Date();
+          record.resolvedBy = profile;
+          record.aguiApproval!.replacement = nextId;
+          actions.put(record);
+          next.aguiApproval = approvalCorrelation(this.clientUserId, input, replacement.proposal);
+          actions.put(next);
+        });
+      });
+      const next = actions.get(read().aguiApproval!.replacement!);
+      if (next?.type !== "action") throw new Error("Replacement unavailable");
+      return approvalSnapshot(next);
+    }
+    if (input.answer && decision && record.state === "pending" && !record.applyStartedAt) {
+      if (Date.now() >= correlation.expiresAt) throw new Error("Approval expired");
+      try {
+        if (decision.approved) {
+          const current = await facet(record.gatekeeperId).getApprovalProposal(record.action);
+          if (JSON.stringify(current) !== JSON.stringify(correlation.proposal)) throw new Error("Approval changed");
+          await this.#approveAction(record.id, () => {
+            if (Date.now() >= correlation.expiresAt) throw new Error("Approval expired");
+          });
+        }
+        else await this.rejectAction(record.id);
+      } catch {
+        // applyPendingAction records the provider's known refusal/unknown result before throwing.
+        // A concurrent decision may still be running; that too must not be reported as applied.
+        record = read();
+        if (!record.lastAttempt && !record.applyStartedAt && record.state === "pending") throw new Error("Approval refused");
+      }
+    }
+    return approvalSnapshot(read());
+  }
+
+  async approveAction(id: number): Promise<void> { return this.#approveAction(id); }
+
+  async #approveAction(id: number, beforeApply?: () => void): Promise<void> {
     let action = this.impl.storage.actions.get(id);
     if (!action) {
       throw new Error(`No such action: ${id}`);
@@ -13123,6 +13251,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Resolve the approver's identity before applying, so a failed profile fetch can't leave the
     // action applied in the world but still "pending" in storage.
     let profile = await this.#getClientProfile();
+    beforeApply?.();
     try {
       await this.impl.applyPendingAction(action, profile, false);
     } catch (error) {
@@ -14556,6 +14685,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return {entries: []};
   }
   async approveAction(_id: number): Promise<void> { this.#deny(); }
+  async operateApproval(_request: OperateApprovalRequest): Promise<OperateApprovalSnapshot> { this.#deny(); }
   async rejectAction(_id: number): Promise<void> { this.#deny(); }
   async listHooks(): Promise<BoundHookInfo[]> { this.#deny(); }
   async enableHook(_id: number): Promise<void> { this.#deny(); }
@@ -14775,6 +14905,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
     return this.owner.listActions(options);
   }
   async approveAction(id: number): Promise<void> { return this.owner.approveAction(id); }
+  async operateApproval(request: OperateApprovalRequest): Promise<OperateApprovalSnapshot> {
+    return this.owner.operateApproval(request);
+  }
   async rejectAction(id: number): Promise<void> { return this.owner.rejectAction(id); }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> {
     return this.owner.listPreApprovableActions();
@@ -15466,9 +15599,9 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
     return new GitCacheImpl(this.impl.gitCache, this.gatekeeperId);
   }
 
-  submitAction(action: number, description: ActionDescription): Promise<void> {
+  async submitAction(action: number, description: ActionDescription): Promise<void> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    return this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
+    this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
   }
 
   bindHook<Hook extends RpcTarget>(
