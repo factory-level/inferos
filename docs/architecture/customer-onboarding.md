@@ -6,7 +6,10 @@ covers:
   - scripts/consumer/intake.schema.json
   - scripts/consumer/intake.test.ts
   - scripts/consumer/fixtures/intake
-updated: 2026-10-06
+  - scripts/consumer/metric-declarations.ts
+  - scripts/consumer/metric-declarations.test.ts
+  - scripts/consumer/fixtures/metric-declarations
+updated: 2026-10-12
 ---
 
 # Customer OS onboarding
@@ -24,6 +27,9 @@ Steps 6 and 7 of the [onboarding sequence](../design/customer-onboarding.md) hav
 | `scripts/consumer/intake-inferops.ts` | The InferOps side of `--inferops`: the binding from the environment (`inferOpsBindingFromEnv`), the binding proof (`proveInferOpsBinding`: a dry run in operations, a Wiki read in InferMind), the Wiki memberships an intake asks for (`pillarMembers`), and the three reported steps (`applyIntakeToInferOps`) through an injectable `fetch` |
 | `scripts/consumer/fixtures/intake/acme-field-ops.json` | The synthetic Acme Field Operations sample: tenant `acme`, workspace `operations`, a software project `ENG` and a content project `OPS`, three pillars, four operations and eight requirements |
 | `scripts/consumer/intake.test.ts` | Parser and schema agreement, rejection without echo, the sample against a stand-in pin, rerun and conflict handling, rollback, issue drafting and filing, the wrapper commands, and `--inferops` against an in-memory InferOps: the happy path and rerun, refused bindings, a partial failure and its retry, failed and incomplete readbacks, a denied write, binding errors without echo, and SOP membership |
+| `scripts/consumer/metric-declarations.ts` | The custom metric declaration contract (MVP-34, fixture proof only): `parseMetricDeclarations` against a parsed v1 intake, `buildDeclarationReport` (`NOT REGISTERED`), and the `metric-declarations.ts <declarations.json> --intake <intake.json> [--json]` entry point. It registers, proposes and writes nothing |
+| `scripts/consumer/fixtures/metric-declarations/acme-field-ops.json` | Synthetic Acme declarations: two derived metrics, one recorded metric, and two well-formed metrics outside the subset (a ratio and a distribution) |
+| `scripts/consumer/metric-declarations.test.ts` | A pinned deterministic digest, the per-metric dispositions, every unsupported construct, one refusal per invalid rule without echo, code and SQL refused at any depth, the module's imports, and the CLI exit codes under Node's permission model (read only) |
 | `scripts/consumer/runtime.ts` | The wrapper's `intake` command (delegates to the pinned `intake.ts`) and `config migrate` (`migrateWrapperConfig`) |
 
 ## Data and Control Flow
@@ -69,6 +75,36 @@ The JSON report holds the intake identity (wrapper-relative path, SHA-256, synth
 
 `pnpm inferos config migrate` rewrites a version 1 file as version 2 in place. It refuses, writing nothing, when the pin would not honour the result: a capability it would carry over is unsupported, or the pin's own parser rejects version 2. A version 2 file is left untouched.
 
+## Custom metric declarations (fixture contract)
+
+MVP-34 has vertical bootstraps declare their own metrics. This revision has only the contract and a local check, `node scripts/consumer/metric-declarations.ts <declarations.json> --intake <intake.json> [--json]` (exit 0 valid, 1 invalid, 2 usage). It reads a separate declaration file (`kind: "metric-declarations"`, `schemaVersion` 1). The intake format stays at version 1 and `intake apply` does not read declarations. The check proposes, approves, registers and records nothing, because no metrics store, producer registry, deriver or approval path exists here. Every metric in the report therefore says `approval: "unavailable"` and `registration: "none"`. A recorded metric says `producer: "unresolved"`, and a derived one says `deriver: "unavailable"`. `scope.isolation` is `"not-enforced"`: tenant and workspace are the intake's labels, and nothing here proves tenant isolation.
+
+**Sources.** The vault draft "InferLab custom metrics and vertical analytics" (2026-10-06 revision) and "InferOps Metrics", read at vision-manager `e844801e`, set the fields, the templates and the no-code rule. The store contract reviewed so far, MVP-19 rev2 (factory-level/inferops#2383, unmerged), is the narrowest interface. Where the two differ, this revision follows MVP-19 and reports the difference as `unsupported` instead of settling it.
+
+| Field | Rule |
+| --- | --- |
+| `key` | `custom.<lowercase_name>`. Any other prefix is refused, so a custom key cannot shadow a built-in. Built-ins are declared in code by their domain |
+| `kind`, `aggregation`, `grain` | Closed enumerations from the draft. `distribution`, and every aggregation except `sum`, `min` and `max`, are `unsupported` |
+| `dimensions` | At most 4. An enum dimension `{name, values}` has 1 to 32 lowercase values. An opaque reference `{name, cardinalityCap}` is `unsupported`, and so is any dimension on a derived metric |
+| `source` | `derived` names one of `project.issues_in_state`, `project.entered_state`, `project.time_between_states` or `project.age_in_state`. Its closed parameters are `project` (a key from the intake), the state groups, and optional `labels`. The template's kind must match the metric's kind. `recorded` names a producer slug. `live` is `unsupported` for custom metrics |
+| `attribution` | An operation id from the intake and a role that owns an operation there |
+| (none) | There is no `version` field. InferOps assigns versions to approved definitions |
+
+A field named `sql`, `query`, `expression`, `formula`, `code`, `script`, `deriver`, `function` (and similar), at any depth, is refused with "code or SQL is not accepted". Every other malformed or unknown field, or bound overrun, is refused by field and rule, never by value. The report is sorted and has no clock. Its `declarationsDigest` is the SHA-256 of the canonical normalized declarations.
+
+**Not here, and still owed** (each needs an owner or interface decision, or the MVP-19 merge):
+- intake version 2 with an `analytics` section and a `metrics` requirement category;
+- `intake apply` writing `metrics/<id>.json` and dashboards as console drafts;
+- `metrics:check` against an InferOps-generated schema;
+- `metrics propose` through the `metrics/catalog` and `metrics/producer` gatekeeper resources;
+- the `inferops.metric` widget kind;
+- example declarations for the three synthetic recipes;
+- the producer-registration grant and the derivers;
+- a `priority` template parameter (no source defines its values);
+- thresholds.
+
+No command installs, copies or upgrades a named vertical metric set (InferOps ADR-0018).
+
 ## Configuration
 
 The intake file is the input. Keeping it in the wrapper (for example `intake/<customer>.json`) records its path in the report. Commit `.inferos/intake-managed.json` so reruns on another machine know what the intake manages. The reports are generated and can be committed as review evidence. The command never deploys or starts a server. It contacts InferOps only with `--inferops`, through the four `INFEROPS_*` variables above (keep the token in the environment, not in a committed file). Only `--file-issues` reaches GitHub, through the operator's `gh` login.
@@ -80,6 +116,7 @@ The intake file is the input. Keeping it in the wrapper (for example `intake/<cu
 - Branding is not derived: `styling` stays as written.
 - Without `--inferops`, the operational inventory and pillars are recorded in the report only. The InferOS Wiki widget and gatekeeper still read documents, not the root, pillars or Masters ([#87](https://github.com/factory-level/inferos/issues/87)), and coverage is [factory-level/inferops#2325](https://github.com/factory-level/inferops/issues/2325).
 - Upgrade and deploy have no command.
+- The metrics design keeps kind naming open: the draft says `distribution` and InferOps Metrics says `histogram`. Both are reported `unsupported` here.
 
 ## Open Questions
 

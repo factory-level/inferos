@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "kind": "metric-declarations",
+  "synthetic": true,
+  "metrics": [
+    {
+      "key": "custom.work_orders_closed", "name": "Work orders closed", "unit": "work orders",
+      "kind": "counter", "aggregation": "sum", "grain": "day", "dimensions": [],
+      "source": { "kind": "derived", "template": "project.entered_state", "parameters": { "project": "OPS", "stateGroup": "completed" } },
+      "attribution": { "operation": "close-work-order", "accountable": "Field supervisor" }
+    },
+    {
+      "key": "custom.open_safety_checks", "name": "Open safety checks", "unit": "checks",
+      "kind": "gauge", "aggregation": "max", "grain": "hour", "dimensions": [],
+      "source": { "kind": "derived", "template": "project.issues_in_state", "parameters": { "project": "OPS", "stateGroup": "started", "labels": ["safety-check"] } },
+      "attribution": { "operation": "site-safety-check", "accountable": "Safety officer" }
+    },
+    {
+      "key": "custom.crew_dispatches", "name": "Crew dispatches", "unit": "dispatches",
+      "kind": "counter", "aggregation": "sum", "grain": "day",
+      "dimensions": [{ "name": "region", "values": ["north", "south", "east"] }],
+      "source": { "kind": "recorded", "producer": "acme-erp-sync" },
+      "attribution": { "operation": "dispatch-crew", "accountable": "Dispatch lead" }
+    },
+    {
+      "key": "custom.first_time_fix_rate", "name": "First-time fix rate", "unit": "ratio",
+      "kind": "gauge", "aggregation": "ratio", "grain": "day", "dimensions": [],
+      "source": { "kind": "recorded", "producer": "acme-erp-sync" },
+      "attribution": { "operation": "close-work-order", "accountable": "Dispatch lead" }
+    },
+    {
+      "key": "custom.work_order_lead_time", "name": "Work order lead time", "unit": "hours",
+      "kind": "distribution", "aggregation": "p90", "grain": "day", "dimensions": [],
+      "source": { "kind": "derived", "template": "project.time_between_states", "parameters": { "project": "OPS", "from": "unstarted", "to": "completed" } },
+      "attribution": { "operation": "close-work-order", "accountable": "Field supervisor" }
+    }
+  ]
+}
