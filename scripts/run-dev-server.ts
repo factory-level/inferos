@@ -38,6 +38,7 @@ import { resolveBinEntry } from "./bin-entry.ts";
 import {
   INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, gatekeeperBaseUrl, gatekeeperBinding, getDevRouterAssets,
   getDevRouterConfig, getDevServerConfig, getInferLabLoginVars, inferLabLoginStartupError, resolveCodingWorkbenchEnabled, resolveInferOpsEnabled,
+  resolveInferOpsMembersEnabled,
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
   resolveInferOpsBoundViews,
@@ -180,6 +181,12 @@ const inferOpsTablesEnabled = resolveInferOpsTablesEnabled({
   capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_TABLES_ENABLED : null,
   inferOpsEnabled,
   shell: process.env.INFEROPS_TABLES_ENABLED,
+});
+// Workspace members through the gatekeeper (MVP-18), resolved as custom tables are: off by default.
+const inferOpsMembersEnabled = resolveInferOpsMembersEnabled({
+  capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_MEMBERS_ENABLED : null,
+  inferOpsEnabled,
+  shell: process.env.INFEROPS_MEMBERS_ENABLED,
 });
 // Host boards (proposed), resolved as custom tables are: off by default. Both the backend, which
 // owns the host-board kernel path, and the gatekeeper's board facet enforce the resulting var.
@@ -641,6 +648,7 @@ const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined
     CODING_WORKBENCH_ENABLED: codingWorkbenchEnabled,
     CODING_WORKBENCH_REPOS: codingWorkbenchRepos,
     INFEROPS_TABLES_ENABLED: inferOpsTablesEnabled,
+    INFEROPS_MEMBERS_ENABLED: inferOpsMembersEnabled,
     INFEROPS_HOST_BOARDS: inferOpsHostBoards,
   },
 };

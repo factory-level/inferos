@@ -70,7 +70,7 @@ function jwt(expiresAt: number): string {
 }
 
 /** The routes whose answers a test can hold in flight. */
-type HeldRoute = "embed" | "snapshot";
+type HeldRoute = "embed" | "snapshot" | "members";
 
 /**
  * One InferOps request. `issuer` is the test whose fake minted the request's access token (null for
@@ -110,6 +110,8 @@ class FakeInferLab {
   infermind = new Set<string>([MIND]);
   /** Whether the person lacks `knowledge:read`. */
   knowledgeDenied = false;
+  /** Whether the person lacks `member:read` (or holds an explicit deny on it). */
+  memberReadDenied = false;
   /** The handbook page's body and version, and the page body writes InferOps took. */
   page = { body: "The handbook.", version: 3 };
   pageWrites: Array<{ body: string; idempotencyKey: string | null }> = [];
@@ -135,7 +137,7 @@ class FakeInferLab {
   /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
   snapshotAnswer: (() => Response) | null = null;
   /** Requests that have reached a gate, by route. */
-  held: Record<HeldRoute, number> = { embed: 0, snapshot: 0 };
+  held: Record<HeldRoute, number> = { embed: 0, snapshot: 0, members: 0 };
   /** The open gate per route: a request reaching it waits there, after reading its answer. */
   #gates: Partial<Record<HeldRoute, { arrive: (path: string) => void; released: Promise<void> }>> = {};
   /** Releases every gate this fake has opened, whether or not anything reached it. */
@@ -333,6 +335,23 @@ class FakeInferLab {
         return Response.json({ widget: "record-card", type: TABLE_TYPE, record: TABLE_RECORD });
       }
       return Response.json({ success: false, error: { code: "NOT_FOUND", message: "no such widget target" } }, { status: 404 });
+    }
+    if (url.pathname === "/workspace/members") {
+      // InferOps' member.list: the X-Workspace-Id workspace only, under member:read.
+      if (this.memberReadDenied) {
+        return Response.json({ error: { code: "FORBIDDEN", message: "Missing permission: member:read" } }, { status: 403 });
+      }
+      const answer = Response.json({
+        workspace: { workspaceId, workspaceName: "Ops", product: "inferops" },
+        members: [
+          { principalId: "00000000-0000-4000-8000-000000000101", type: "user", name: "Ada Admin",
+            email: "ada@acme.test", role: "admin", deniedPermissions: [] },
+          { principalId: "00000000-0000-4000-8000-000000000022", type: "service_account", name: "sre-agent",
+            email: null, role: "operations", deniedPermissions: ["billing:*"] },
+        ],
+      });
+      await this.#pass("members", url.pathname + url.search);
+      return answer;
     }
     if (url.pathname === "/object/types") return Response.json({ types: [TABLE_TYPE] });
     if (url.pathname === "/project/projects") return Response.json({ projects: [DEMO] });
@@ -1038,6 +1057,128 @@ describe("custom tables as the person", () => {
     expect(await hooks().bindAccount("t-shared", owner, TABLE_URL)).toBeNull();
     const member = await connect("table-member");
     expect(await hooks().addTableObserverFrom("t-shared", member)).toContain("cannot be shared");
+  });
+});
+
+describe("workspace members as the person", () => {
+  const vars = env as unknown as { INFEROPS_MEMBERS_ENABLED?: string };
+  beforeEach(() => { vars.INFEROPS_MEMBERS_ENABLED = "true"; });
+  afterEach(() => { delete vars.INFEROPS_MEMBERS_ENABLED; });
+  const MEMBERS_URL = "inferops://acme.operations/portal/members";
+  const unavailable = (host: string) => `No InferOps member list is available to you on ${host}.`;
+
+  it("reads member.list with the person's own token in the bound workspace, GET only, no email", async () => {
+    const account = await connect("members");
+    expect(await hooks().bindAccount("members", account, MEMBERS_URL)).toBeNull();
+    const result = await hooks().startBoundMembersSession("members").listMembers();
+    expect(result.workspace).toEqual({ workspaceId: OPS, workspaceName: "Ops", product: "inferops" });
+    expect(result.members.map(m => [m.name, m.role])).toEqual([["Ada Admin", "admin"], ["sre-agent", "operations"]]);
+    expect(JSON.stringify(result)).not.toContain("ada@acme.test");
+    expect(JSON.stringify(result)).not.toContain("email");
+    const reads = inferlab.apiCalls.filter(c => c.path.startsWith("/workspace/members"));
+    // The binding's probe and the session's read: nothing else, and nothing outside the workspace.
+    expect(reads.map(c => c.path)).toEqual(["/workspace/members", "/workspace/members"]);
+    for (const call of reads) {
+      expect(call.workspaceId).toBe(OPS);
+      expect(call.token).toBe(inferlab.accessOf("refresh-1"));
+    }
+    expect(await hooks().listWorkspaces(account)).toEqual([expect.objectContaining({ value: "operations" })]);
+  });
+
+  it("refuses every unavailable list with one message per host, whatever the cause", async () => {
+    // No member:read (or an explicit deny): InferOps' 403.
+    const denied = await connect("members-denied");
+    inferlab.memberReadDenied = true;
+    const noPermission = await hooks().bindAccount("m-denied", denied, MEMBERS_URL);
+    inferlab.memberReadDenied = false;
+    // Membership lost in InferOps since the sign-in: InferOps' 403 for the workspace.
+    const gone = await connect("members-gone");
+    inferlab.memberships.delete(OPS);
+    const notMember = await hooks().bindAccount("m-gone", gone, MEMBERS_URL);
+    inferlab.memberships.add(OPS);
+    expect(noPermission).toBe(unavailable("acme.operations"));
+    expect(notMember).toBe(noPermission);
+
+    // A workspace the person does not hold, and an InferMind one: refused before any request.
+    const outside = await connect("members-outside");
+    const before = inferlab.apiCalls.filter(c => c.path.startsWith("/workspace/members")).length;
+    expect(await hooks().bindAccount("m-outside", outside, "inferops://acme.sales/portal/members"))
+      .toBe(unavailable("acme.sales"));
+    inferlab.workspaces.push({ workspaceId: MIND, workspaceName: "Mind", product: "infermind" });
+    inferlab.memberships.add(MIND);
+    const mind = await connect("members-mind");
+    expect(await hooks().bindAccount("m-mind", mind, "inferops://acme.mind/portal/members"))
+      .toBe(unavailable("acme.mind"));
+    expect(inferlab.apiCalls.filter(c => c.path.startsWith("/workspace/members")).length).toBe(before);
+  });
+
+  it("treats the tenant label as inert, as boards do: it only ever reads the person's own workspace", async () => {
+    // `operations` is the person's slug; `globex` is not their tenant. The label never reaches
+    // InferOps (member.list takes no reference), so the binding reads their own workspace only.
+    const account = await connect("members-label");
+    expect(await hooks().bindAccount("m-label", account, "inferops://globex.operations/portal/members")).toBeNull();
+    const result = await hooks().startBoundMembersSession("m-label").listMembers();
+    expect(result.workspace.workspaceId).toBe(OPS);
+    expect(inferlab.apiCalls.filter(c => c.path.startsWith("/workspace/members")).every(c => c.workspaceId === OPS))
+      .toBe(true);
+  });
+
+  it("refuses reads once the session has ended, and once the account is revoked", async () => {
+    const ended = await connect("members-ended");
+    expect(await hooks().bindAccount("m-ended", ended, MEMBERS_URL)).toBeNull();
+    inferlab.endSession("refresh-1");
+    expect(await failure(hooks().startBoundMembersSession("m-ended").listMembers())).toContain("UNAUTHORIZED");
+
+    const revoked = await connect("members-revoked");
+    expect(await hooks().bindAccount("m-revoked", revoked, MEMBERS_URL)).toBeNull();
+    const session = hooks().startBoundMembersSession("m-revoked");
+    await session.listMembers();
+    await hooks().revokeAccount(revoked);
+    expect(await failure(session.listMembers())).toContain("not connected");
+  });
+
+  /** Starts a members read whose InferOps answer is held until `settle()`, which gives its failure. */
+  const heldMembersRead = (name: string) =>
+    heldRead("members", () => failure(hooks().startBoundMembersSession(name).listMembers()));
+
+  const membersObservations = async () =>
+    (await hooks().log()).observations.filter(title => title === "List InferOps workspace members").length;
+
+  it("discards an answer that arrives after a reconnect committed while it was in flight", async () => {
+    const account = await connect("members-fence-reconnect");
+    expect(await hooks().bindAccount("m-fence-reconnect", account, MEMBERS_URL)).toBeNull();
+    const observed = await membersObservations();
+    const read = await heldMembersRead("m-fence-reconnect");
+
+    expect((await finish(await hooks().reconnectAccount(account))).status).toBe(200);
+    const stageId = reconnects.find(r => r.label === "members-fence-reconnect")!.stageId;
+    expect(await hooks().commitReconnect(account, stageId)).toBeNull();
+
+    expect(await read.settle()).toBe("InferOpsError: UNAVAILABLE: This InferOps connection changed. Try again.");
+    expect(await membersObservations()).toBe(observed);
+    expect((await hooks().startBoundMembersSession("m-fence-reconnect").listMembers()).members).toHaveLength(2);
+    expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-2"));
+  });
+
+  it("discards an answer that arrives after the account was revoked while it was in flight", async () => {
+    const account = await connect("members-fence-revoke");
+    expect(await hooks().bindAccount("m-fence-revoke", account, MEMBERS_URL)).toBeNull();
+    const observed = await membersObservations();
+    const read = await heldMembersRead("m-fence-revoke");
+
+    await hooks().revokeAccount(account);
+
+    const outcome = await read.settle();
+    expect(outcome).toMatch(/^InferOpsError: (UNAVAILABLE|UNAUTHORIZED): /);
+    expect(outcome).not.toContain("Ada");
+    expect(await membersObservations()).toBe(observed);
+  });
+
+  it("never admits a collaborator, even one who holds the workspace", async () => {
+    const owner = await connect("members-owner");
+    expect(await hooks().bindAccount("m-shared", owner, MEMBERS_URL)).toBeNull();
+    const member = await connect("members-member");
+    expect(await hooks().addMembersObserverFrom("m-shared", member)).toContain("cannot be shared");
   });
 });
 

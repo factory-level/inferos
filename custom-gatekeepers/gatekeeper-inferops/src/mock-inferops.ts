@@ -48,6 +48,7 @@ import { createLogger } from "@gadgets/observability/logger";
 import SEED from "./fixtures/demo-board.json";
 import WIKI_SEED from "./fixtures/demo-wiki.json";
 import TABLE_SEED from "./fixtures/demo-table.json";
+import MEMBERS_SEED from "./fixtures/demo-members.json";
 import {
   InferOpsError, atStage, inferOpsErrorCode, type DispatchRequest, type InferOpsClient,
   type IssueChanges, type NewIssueRequest,
@@ -55,7 +56,7 @@ import {
   type TableReadOptions, type TableRecordSchema, type TableRowRecord, type TableSummary,
   type WikiDocumentHead,
   type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord,
-  type WikiStructureRecord,
+  type WikiStructureRecord, type WorkspaceMembersRead,
 } from "./inferops-client";
 import type { Issue, Revision, RunResult, RunStatus } from "./types";
 import { composeDocumentText, masterStructureText } from "./wiki";
@@ -70,6 +71,7 @@ const IDEMPOTENCY_PREFIX = "idem:";
 const WIKI_KEY = "wiki:v2";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
 const TABLES_KEY = "tables:v1";
+const MEMBERS_KEY = "members:v1";
 const REVOKED_KEY = "revoked";
 
 /** A demo page: its listed fields, its body, version and Master role, and its last write's receipt. */
@@ -636,6 +638,17 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return this.#tableRead(table, [row]);
   }
 
+  /** The demo workspace's members, seeded on first use; `members:v1` is what tests rewrite. */
+  async listWorkspaceMembers(): Promise<WorkspaceMembersRead> {
+    this.#assertLive();
+    let members = this.ctx.storage.kv.get<WorkspaceMembersRead>(MEMBERS_KEY);
+    if (!members) {
+      members = structuredClone(MEMBERS_SEED) as WorkspaceMembersRead;
+      this.ctx.storage.kv.put(MEMBERS_KEY, members);
+    }
+    return members;
+  }
+
   /** Deletes the account's data and refuses every later call (see the header). */
   async forget(): Promise<void> {
     await this.ctx.storage.deleteAll();
@@ -697,6 +710,7 @@ export function openInferOpsClient(
       ? stub.readTable(tableId, options) : Promise.reject(tableNotFound()),
     readTableRow: (host, recordId) => host === account.host
       ? stub.readTableRow(recordId) : Promise.reject(tableNotFound()),
+    listWorkspaceMembers: () => stub.listWorkspaceMembers(),
     forget: () => stub.forget(),
   };
 }

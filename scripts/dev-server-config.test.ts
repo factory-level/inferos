@@ -14,6 +14,7 @@ import {
   isInferLabAuthOrigin,
   resolveCodingWorkbenchEnabled,
   resolveInferOpsEnabled,
+  resolveInferOpsMembersEnabled,
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
   resolveInferOpsBoundViews,
@@ -197,6 +198,16 @@ describe("resolveInferOpsTablesEnabled", () => {
       /INFEROPS_TABLES_ENABLED must be "true" or "false"/);
     assert.throws(() => resolveInferOpsTablesEnabled({ capability: true, inferOpsEnabled: "false", shell: undefined }),
       /INFEROPS_TABLES_ENABLED is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
+  });
+
+  it("resolves the workspace-members switch like custom tables: off by default, never without InferOps", () => {
+    assert.equal(resolveInferOpsMembersEnabled({ capability: null, inferOpsEnabled: "true", shell: undefined }), "false");
+    assert.equal(resolveInferOpsMembersEnabled({ capability: null, inferOpsEnabled: "true", shell: "true" }), "true");
+    assert.equal(resolveInferOpsMembersEnabled({ capability: true, inferOpsEnabled: "true", shell: "false" }), "true");
+    assert.throws(() => resolveInferOpsMembersEnabled({ capability: null, inferOpsEnabled: "true", shell: "yes" }),
+      /INFEROPS_MEMBERS_ENABLED must be "true" or "false"/);
+    assert.throws(() => resolveInferOpsMembersEnabled({ capability: true, inferOpsEnabled: "false", shell: undefined }),
+      /INFEROPS_MEMBERS_ENABLED is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
   });
 });
 

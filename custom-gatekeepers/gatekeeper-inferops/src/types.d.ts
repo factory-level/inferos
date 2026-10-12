@@ -567,3 +567,33 @@ export interface InferOpsTableSession {
   listRecords(options?: ListRecordsOptions): Promise<{ table: TableDescription; records: TableRecord[] }>;
   getRecord(id: string): Promise<{ table: TableDescription; record: TableRecord }>;
 }
+
+/** One member of the workspace: a person or agent holding access there. */
+export interface WorkspaceMember {
+  principalId: string;
+  /** "user" for a person, "service_account" for an agent. */
+  type: "user" | "service_account";
+  name: string;
+  /** Their role in this workspace, such as "owner", "admin", "member" or "viewer". */
+  role: string;
+  /** Permissions explicitly denied to them in this workspace; a deny wins over the role. */
+  deniedPermissions: string[];
+}
+
+/** The members of one workspace. Email addresses are not included. */
+export interface WorkspaceMembers {
+  workspace: { workspaceId: string; workspaceName: string; product: "inferops" | "infermind" };
+  members: WorkspaceMember[];
+}
+
+/**
+ * Read-only access to the member list of one InferOps workspace, fixed when this capability was
+ * created; it takes no account, host or workspace argument. Fails with NOT_FOUND when the list is
+ * not available to you, with DISABLED while workspace members are turned off, with UNAUTHORIZED
+ * when your InferOps sign-in has ended, and with UNAVAILABLE when InferOps could not answer (try
+ * again).
+ */
+export interface InferOpsMembersSession {
+  /** Everyone holding access to the workspace, with their role and explicit denies there. */
+  listMembers(): Promise<WorkspaceMembers>;
+}

@@ -9,15 +9,18 @@ import type {
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsProjectGatekeeper,
-  InferOpsTableGatekeeper, InferOpsWikiGatekeeper, MockInferOps as BaseMockInferOps,
+  InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
+  InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
 import type { RejectionVerdict } from "@gadgets/gatekeeper-kit/credentials";
-import { InferOpsError, type IssueChanges, type NewIssueRequest } from "../src/inferops-client.js";
+import {
+  InferOpsError, type IssueChanges, type NewIssueRequest, type WorkspaceMembersRead,
+} from "../src/inferops-client.js";
 import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
 import type {
-  InferOpsDispatchSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession,
+  InferOpsDispatchSession, InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession,
+  InferOpsWikiSession,
 } from "../src/types.js";
 
 export { default } from "../src/inferops.js";
@@ -25,7 +28,7 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsDispatchGatekeeper,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
 } from "../src/inferops.js";
 
@@ -42,6 +45,11 @@ export class MockInferOps extends BaseMockInferOps {
   /** Replaces this account's demo tables, to change one behind the gatekeeper's back. */
   async setTables(tables: MockTables): Promise<void> {
     this.ctx.storage.kv.put("tables:v1", tables);
+  }
+
+  /** Replaces this account's demo member list, to change it behind the gatekeeper's back. */
+  async setMembers(members: WorkspaceMembersRead): Promise<void> {
+    this.ctx.storage.kv.put("members:v1", members);
   }
 
   /** This account's demo tables as stored (seeded by the first table read). */
@@ -147,6 +155,9 @@ export class TestWikiGatekeeper extends InferOpsWikiGatekeeper {
 export type TableProps = {
   accountId: string; host: string; tableId: string; connected?: boolean; workspaceId?: string;
 };
+
+/** The props the Workshop bakes into one workspace-members binding. */
+export type MembersProps = { accountId: string; host: string; connected?: boolean; workspaceId?: string };
 
 /** The props the Workshop bakes into one Wiki binding. */
 export type WikiProps = { accountId: string; host: string; connected?: boolean; workspaceId?: string };
@@ -279,6 +290,7 @@ type TestExports = {
   TestDispatchGatekeeper(options: { props: BindingProps }): DurableObjectClass<TestDispatchGatekeeper>;
   TestWikiGatekeeper(options: { props: WikiProps }): DurableObjectClass<TestWikiGatekeeper>;
   InferOpsTableGatekeeper(options: { props: TableProps }): DurableObjectClass<InferOpsTableGatekeeper>;
+  InferOpsMembersGatekeeper(options: { props: MembersProps }): DurableObjectClass<InferOpsMembersGatekeeper>;
 };
 
 /** The project configurator's capability, as the picker iframe receives it. */
@@ -449,6 +461,76 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** The resource description of a table binding. */
   async describeTable(props: TableProps) {
     return this.#tableGatekeeper(props).describe();
+  }
+
+  /** A members session over a workspace-members binding `bindAccount` made under `name`. */
+  async startBoundMembersSession(name: string): Promise<InferOpsMembersSession> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsMembersGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsMembersGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Admission of a collaborator to a bound members binding; the failure message, or null. */
+  async addMembersObserverFrom(name: string, observer: AccountProps): Promise<string | null> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsMembersGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    try {
+      await this.ctx.facets.get<InferOpsMembersGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+        .addObserver("observer-2", await this.#account(observer).getVerifier());
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  #membersGatekeeper(props: MembersProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<InferOpsMembersGatekeeper>(
+      `${props.accountId}/members/${props.host}`,
+      () => ({ class: exports.InferOpsMembersGatekeeper({ props }) }));
+  }
+
+  /** A members session over a workspace-members binding with these props. */
+  async startMembersSession(props: MembersProps): Promise<InferOpsMembersSession> {
+    return this.#membersGatekeeper(props).startSession(
+      new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Admission of a collaborator who could read the list; the failure message, or null. */
+  async addMembersObserver(props: MembersProps): Promise<string | null> {
+    try {
+      await this.#membersGatekeeper(props).addObserver("observer-1",
+        new RpcStub(new TestVerifier(true)) as unknown as Fetcher<GatekeeperUserVerifier>);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Each action call on a members binding; their failure messages, or null for one that ran. */
+  async membersActions(props: MembersProps): Promise<Array<string | null>> {
+    const gatekeeper = this.#membersGatekeeper(props);
+    const calls = [
+      () => gatekeeper.applyAction(1, new RpcStub(new TestGitCache())),
+      () => gatekeeper.rejectAction(1),
+      () => gatekeeper.revertAction(1),
+    ];
+    const results: Array<string | null> = [];
+    for (const call of calls) {
+      try {
+        await call();
+        results.push(null);
+      } catch (error) {
+        results.push(messageOf(error));
+      }
+    }
+    return results;
+  }
+
+  /** The resource description of a members binding. */
+  async describeMembers(props: MembersProps) {
+    return this.#membersGatekeeper(props).describe();
   }
 
   /** What `bindAccount` minted under `name`, by the resource description it gives. */

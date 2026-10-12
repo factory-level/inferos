@@ -88,7 +88,7 @@ test("version 1 resolves without capabilities and rejects the version 2 section"
 });
 
 test("version 2 accepts the eleven capability names, defaulting each to off with provenance", () => {
-  assert.equal(CAPABILITY_NAMES.length, 11);
+  assert.equal(CAPABILITY_NAMES.length, 12);
   const inherited = resolveConsumerConfig(v2());
   assert.equal(inherited.config.schemaVersion, 2);
   assert.deepEqual(inherited.config.schemaVersion === 2 && inherited.config.capabilities, allOff);

@@ -45,6 +45,12 @@
 //   matches the workspace slug only). Personal columns are projected out (table.ts). A connected
 //   person's own sign-in or the demo mock only: the stopgap connection never serves a table.
 //   `addObserver` refuses every collaborator.
+// - Workspace members are a fifth kind, `inferops://<tenant>.<workspace>/portal/members`, bound into
+//   an `InferOpsMembersGatekeeper` facet whose props fix the account, host and InferOps workspace id,
+//   and offered only while `INFEROPS_MEMBERS_ENABLED` is on (members.ts). Read-only and private-only,
+//   like a table: `InferOpsMembersSession.listMembers` reads InferOps' `member.list` with the person's
+//   own sign-in in the bound workspace, so InferOps' `member:read`, explicit denies and RLS decide;
+//   the email is projected out (members.ts). InferOps workspaces only; never the stopgap connection.
 // - Host boards (host-board.ts) are a kernel-only read of a board binding's fixed target:
 //   `readHostBoardSnapshot` and `connectionIdentity` on the board facet itself, never on a session
 //   or in the agent types, so only the overseer, which alone holds facet stubs, can call them. Off
@@ -119,12 +125,16 @@ import {
   assertTablesEnabled, describeTable, projectRows, tableReadOptions, tablesEnabled, whileTablesEnabled,
 } from "./table";
 import {
+  assertMembersEnabled, membersEnabled, membersNotFound, projectMembers, whileMembersEnabled,
+} from "./members";
+import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
 } from "./inferlab-login";
 import {
-  DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE, PROJECT_BOARD_RESOURCE,
-  PROJECT_DISPATCH_RESOURCE, parseHost, parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl,
-  parseWikiUrl, projectBoardUrl, projectDispatchUrl, resourceKind, tableUrl, wikiUrl,
+  DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE, PORTAL_MEMBERS_RESOURCE,
+  PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, membersUrl, parseHost, parseMembersUrl,
+  parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl, parseWikiUrl, projectBoardUrl,
+  projectDispatchUrl, resourceKind, tableUrl, wikiUrl,
 } from "./resources";
 import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
@@ -144,8 +154,9 @@ import {
 } from "./board-discovery";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
-  Board, BoardCandidate, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession, InferOpsProjectSession,
-  InferOpsTableSession, InferOpsWikiSession, Issue, IssueChanges, ListRecordsOptions, NewIssue, Repo,
+  Board, BoardCandidate, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession,
+  InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession, Issue,
+  IssueChanges, ListRecordsOptions, NewIssue, Repo, WorkspaceMembers,
   Revision, Run, TableDescription, TableRecord, WikiDocument,
   WikiDocumentNode, WikiSection, WikiStructure,
 } from "./types";
@@ -155,6 +166,7 @@ import PROJECT_CONFIGURATOR_HTML from "./generated/project-ui.txt";
 import DISPATCH_CONFIGURATOR_HTML from "./generated/dispatch-ui.txt";
 import WIKI_CONFIGURATOR_HTML from "./generated/wiki-ui.txt";
 import TABLE_CONFIGURATOR_HTML from "./generated/table-ui.txt";
+import MEMBERS_CONFIGURATOR_HTML from "./generated/members-ui.txt";
 
 export { InferLabLogin, InferOpsCredentials, MockInferOps };
 
@@ -221,6 +233,12 @@ type WikiGatekeeperProps = AccountRef & { host: string; workspaceId?: string };
  * id and, for a connected account, the InferOps workspace the host's slug resolved to.
  */
 type TableGatekeeperProps = AccountRef & { host: string; tableId: string; workspaceId?: string };
+
+/**
+ * One workspace-members binding, fixed when the Workshop mints it: the workspace's `host` and, for
+ * a connected account, the InferOps workspace the host's slug resolved to.
+ */
+type MembersGatekeeperProps = AccountRef & { host: string; workspaceId?: string };
 
 type ExportsWithStores = {
   MockInferOps: DurableObjectNamespace<MockInferOps>;
@@ -394,6 +412,26 @@ function tableClientFor(
 }
 
 /**
+ * The data source for a workspace-members binding, refused with `DISABLED` on every call while
+ * InferOps or workspace members are off. The mock for the demo host, or a connected person's own
+ * authority in `workspaceId`; never the stopgap connection. Anything else reads as no member list.
+ */
+function membersClientFor(
+  env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
+  workspaceId?: string,
+): InferOpsClient {
+  return whileMembersEnabled(env, () => {
+    if (host === DEMO_HOST) {
+      return openInferOpsClient(exports.MockInferOps, { accountId: account.accountId, host });
+    }
+    const endpoint = account.connected ? inferOpsApiEndpoint(env) : null;
+    if (!endpoint || !workspaceId) throw membersNotFound();
+    // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
+    return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
+  });
+}
+
+/**
  * Who a host-board read may run as: only a connected person, against the configured API, in the
  * workspace the binding resolved. The demo host, the stopgap connection, an account without an
  * identity and a binding without a resolved workspace are `not-connected`; there is no fallback to
@@ -502,7 +540,13 @@ function supportedResources(env: Cloudflare.Env): SupportedResource[] {
     ...(codingWorkbenchEnabled(env) ? [PROJECT_DISPATCH_RESOURCE] : []),
     KNOWLEDGE_WIKI_RESOURCE,
     ...(tablesEnabled(env) ? [OBJECT_TABLE_RESOURCE] : []),
+    ...(membersEnabled(env) ? [PORTAL_MEMBERS_RESOURCE] : []),
   ];
+}
+
+/** The message every refused members binding gets, whatever was missing or refused. */
+function unavailableMembers(host: string): string {
+  return `No InferOps member list is available to you on ${host}.`;
 }
 
 /** The message every refused table binding gets, whatever was missing: workspace, host or table. */
@@ -691,6 +735,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     const kind = resourceKind(url);
     if (kind === "wiki") return this.#wikiClassFor(url);
     if (kind === "table") return this.#tableClassFor(url);
+    if (kind === "members") return this.#membersClassFor(url);
     const dispatch = kind === "dispatch";
     if (dispatch) assertCodingWorkbenchEnabled(this.env);
     const { host, projectKey } = dispatch ? parseProjectDispatchUrl(url) : parseProjectBoardUrl(url);
@@ -761,6 +806,37 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     };
   }
 
+  /**
+   * Bind one workspace's member list: workspace members must be on; the URL's workspace slug must
+   * be one of the person's InferOps workspaces; and InferOps' `member.list` must answer one read for
+   * that person there, under their own `member:read`. A workspace the person lacks (or an InferMind
+   * one), an account with no sign-in, the stopgap connection, and a list that is missing or not
+   * readable are all refused with one message. The probe returns nothing to anyone.
+   */
+  async #membersClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+    mock: boolean;
+  }> {
+    assertMembersEnabled(this.env);
+    const { host } = parseMembersUrl(url);
+    const { accountId, connected } = this.ctx.props;
+    const workspaceId = host === DEMO_HOST ? undefined : await this.#workspaceFor(host);
+    if (workspaceId === null) throw new Error(unavailableMembers(host));
+    try {
+      await membersClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId)
+        .listWorkspaceMembers(workspaceId);
+    } catch (error) {
+      if (inferOpsErrorCode(error) === "NOT_FOUND") throw new Error(unavailableMembers(host), { cause: error });
+      throw error;
+    }
+    const props: MembersGatekeeperProps = { accountId, connected, host, workspaceId };
+    return {
+      class: this.ctx.exports.InferOpsMembersGatekeeper({ props }), resource: PORTAL_MEMBERS_RESOURCE,
+      mock: host === DEMO_HOST,
+    };
+  }
+
   @skipRpcValidation()
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     const wiki = resourceUrlPattern === KNOWLEDGE_WIKI_RESOURCE.urlPattern;
@@ -770,7 +846,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
         ? DISPATCH_CONFIGURATOR_HTML
         : resourceUrlPattern === OBJECT_TABLE_RESOURCE.urlPattern && tablesEnabled(this.env)
           ? TABLE_CONFIGURATOR_HTML
-          : wiki ? WIKI_CONFIGURATOR_HTML : null;
+          : resourceUrlPattern === PORTAL_MEMBERS_RESOURCE.urlPattern && membersEnabled(this.env)
+            ? MEMBERS_CONFIGURATOR_HTML
+            : wiki ? WIKI_CONFIGURATOR_HTML : null;
     if (!iframeHtml) {
       throw new Error(`Unsupported InferOps resource configurator type: ${resourceUrlPattern}`);
     }
@@ -2912,5 +2990,97 @@ class TableSessionImpl extends RpcTarget implements InferOpsTableSession {
       description: `Read one row of the custom table ${plainInline(table.label)} on ${host}.`,
     });
     return { table, record };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-members gatekeeper (a facet of the Overseer, one per binding)
+
+/** Why every action call on a members binding is refused: it never submits one. */
+const MEMBERS_READ_ONLY = "An InferOps workspace members binding is read-only and has no actions.";
+
+@validateRpc()
+export class InferOpsMembersGatekeeper
+    extends DurableObject<Cloudflare.Env, MembersGatekeeperProps>
+    implements Gatekeeper<InferOpsMembersSession> {
+  async describe(): Promise<ResourceDescription> {
+    const { host } = this.ctx.props;
+    return {
+      url: membersUrl({ host }),
+      title: `InferOps workspace members on ${host}`,
+      snippet: `Who has access to the InferOps workspace on ${host}: their role and explicit denies, without email.`,
+      suggestedBindingName: "INFEROPS_MEMBERS",
+      tsType: "InferOpsMembersSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsMembersSession> {
+    const { accountId, connected, host, workspaceId } = this.ctx.props;
+    const client = membersClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId);
+    return new MembersSessionImpl({ client, host, workspaceId }, approvalQueue.dup());
+  }
+
+  /**
+   * Private only, as a table binding is: no collaborator is admitted to a gadget that holds this
+   * binding, so sharing a workspace whose gadget uses it is refused.
+   */
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    throw new Error(
+      "An InferOps workspace members binding is private to the person who connected it, so this " +
+      "gadget cannot be shared.");
+  }
+
+  /** Nothing is tracked: no observer is ever admitted. */
+  async removeObserver(_id: string): Promise<void> {}
+
+  async applyAction(_actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+    throw new Error(MEMBERS_READ_ONLY);
+  }
+
+  async rejectAction(_actionId: number): Promise<void> {
+    throw new Error(MEMBERS_READ_ONLY);
+  }
+
+  async revertAction(_actionId: number): Promise<void> {
+    throw new Error(MEMBERS_READ_ONLY);
+  }
+}
+
+/** What a members session reads with: its data source, the bound host and workspace. */
+type MembersScope = { client: InferOpsClient; host: string; workspaceId?: string };
+
+@validateRpc()
+class MembersSessionImpl extends RpcTarget implements InferOpsMembersSession {
+  #scope: MembersScope;
+  #queue: RpcStub<ApprovalQueue>;
+
+  constructor(scope: MembersScope, queue: RpcStub<ApprovalQueue>) {
+    super();
+    this.#scope = scope;
+    this.#queue = queue;
+  }
+
+  [Symbol.dispose]() {
+    this.#queue[Symbol.dispose]();
+  }
+
+  async listMembers(): Promise<WorkspaceMembers> {
+    const { client, host, workspaceId } = this.#scope;
+    const result = projectMembers(await client.listWorkspaceMembers(workspaceId));
+    await this.#queue.authorizeObservation({
+      title: "List InferOps workspace members",
+      // A count and the workspace, never a member's name, id or email.
+      description: `Read ${result.members.length} members of the workspace ` +
+        `${plainInline(result.workspace.workspaceName)} on ${host}.`,
+    });
+    return result;
   }
 }
