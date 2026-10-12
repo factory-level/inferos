@@ -92,6 +92,9 @@ export const capabilitySources: Record<CapabilityName, string | null> = {
   // The gatekeeper's custom-table switch (MVP-20): off withholds the resource kind and refuses new
   // table bindings and every call on existing ones (DISABLED).
   INFEROPS_TABLES_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/table.ts",
+  // The gatekeeper's workspace-members switch (MVP-18): off withholds the resource kind and refuses
+  // new members bindings and every call on existing ones (DISABLED).
+  INFEROPS_MEMBERS_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/members.ts",
   // The kernel's host-board switch (proposed): off refuses host-board registration and
   // publication, selection, acquisition and every read; the gatekeeper's facet checks it too.
   INFEROPS_HOST_BOARDS: "packages/workshop-backend/src/host-boards.ts",

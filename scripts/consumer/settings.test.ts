@@ -96,6 +96,14 @@ test("contradictions are errors, and shell values a version 2 wrapper overrides 
     ["INFEROPS_TABLES_ENABLED:contradictory"]);
   assert.ok(codes(validateSettings(v1(), { INFEROPS_ENABLED: "false", INFEROPS_TABLES_ENABLED: "true" }))
     .includes("INFEROPS_TABLES_ENABLED:contradictory"));
+  assert.deepEqual(codes(validateSettings(v1(), { INFEROPS_MEMBERS_ENABLED: "maybe" })), ["INFEROPS_MEMBERS_ENABLED:invalid"]);
+  assert.deepEqual(codes(validateSettings(v2(["INFEROPS_ENABLED"]), { INFEROPS_MEMBERS_ENABLED: "true" })),
+    ["INFEROPS_MEMBERS_ENABLED:contradictory"]);
+  assert.ok(codes(validateSettings(v1(), { INFEROPS_ENABLED: "false", INFEROPS_MEMBERS_ENABLED: "true" }))
+    .includes("INFEROPS_MEMBERS_ENABLED:contradictory"));
+  const membersOn = validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_MEMBERS_ENABLED"]), {});
+  assert.equal(membersOn.ok, true);
+  assert.equal(membersOn.settings.find(setting => setting.name === "INFEROPS_MEMBERS_ENABLED")?.state, "set");
   const tablesOn = validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_TABLES_ENABLED"]), {});
   assert.equal(tablesOn.ok, true);
   assert.equal(tablesOn.settings.find(setting => setting.name === "INFEROPS_TABLES_ENABLED")?.state, "set");

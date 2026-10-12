@@ -16,6 +16,7 @@
       "InferOpsDispatchGatekeeper",
       "InferOpsWikiGatekeeper",
       "InferOpsTableGatekeeper",
+      "InferOpsMembersGatekeeper",
       "InferLabLogin",
       "InferOpsCredentials"
     ]
@@ -90,6 +91,19 @@
         { "method": "getRecord", "notes": "One row of the bound table, with the definition from the same read; a row of another table is NOT_FOUND." }
       ],
       "writes": []
+    },
+    {
+      "kind": "portal/members",
+      "urlPattern": "inferops://*/portal/members",
+      "gatekeeper": "InferOpsMembersGatekeeper",
+      "session": "InferOpsMembersSession",
+      "scope": "The member list of one InferOps workspace the signed-in person holds (InferOps workspaces only); per-person sign-in only (no stopgap connection), or the mock's demo list. Every read is InferOps' member.list (GET /workspace/members) with the person's own token in the bound workspace, so InferOps' member:read, explicit denies and RLS decide. Read-only: no writes. Email is projected out of every read; names and ids remain.",
+      "enabledBy": ["INFEROPS_ENABLED", "INFEROPS_MEMBERS_ENABLED"],
+      "observers": "admission",
+      "reads": [
+        { "method": "listMembers", "notes": "The bound workspace's grant holders in InferOps' order: principal id, kind, name, role and explicit denies there; no email." }
+      ],
+      "writes": []
     }
   ],
   "approval": {
@@ -131,6 +145,7 @@
     { "name": "INFEROPS_ENABLED", "kind": "var", "purpose": "Capability switch for the whole integration, checked on every call.", "default": "Unset counts as on." },
     { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
     { "name": "INFEROPS_TABLES_ENABLED", "kind": "var", "purpose": "Capability switch for object/table, checked on every call.", "default": "Unset counts as off." },
+    { "name": "INFEROPS_MEMBERS_ENABLED", "kind": "var", "purpose": "Capability switch for portal/members, checked on every call.", "default": "Unset counts as off." },
     { "name": "INFEROPS_HOST_BOARDS", "kind": "var", "purpose": "Proposed switch for the board facet's kernel-only host-board read (project.board_snapshot), checked on every call. Adds no resource kind.", "default": "Unset counts as off." },
     { "name": "CODING_WORKBENCH_REPOS", "kind": "var", "purpose": "Comma-separated InferOps repository ids a dispatch may target.", "default": "Unset allows no repository." }
   ],

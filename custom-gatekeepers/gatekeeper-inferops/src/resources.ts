@@ -4,7 +4,9 @@
 // The two kinds are separate grants: a board binding can never dispatch. A third kind,
 // `inferops://<tenant>.<workspace>/knowledge/wiki`, grants one person's read of the workspace's
 // InferMind Wiki and proposed section edits; `…/knowledge/document/<slug>` names one page of it and
-// is a reference only, never bound. A URL names a target; it never grants
+// is a reference only, never bound. `inferops://<tenant>.<workspace>/portal/members` grants one
+// person's private read of the workspace's member list (never shared with observers, never offered
+// to Operate chat). A URL names a target; it never grants
 // anything by itself, and it never names a deployment: the API base URL and the credentials come
 // from the account and the deployment's configuration. The gatekeeper resolves the workspace slug
 // against the person's own workspaces, binds the result into its props when the Workshop mints the
@@ -59,6 +61,18 @@ export const OBJECT_TABLE_RESOURCE: SupportedResource = {
   urlPattern: "inferops://*/object/table/*",
   title: "InferOps custom table",
   description: "Read the rows of one InferOps custom table. Personal columns are left out.",
+  excludeFromOperateChat: true,
+};
+
+/**
+ * The members of one InferOps workspace, read-only: who holds a grant there, with their role and
+ * explicit denies, and no email. Offered only while the deployment has `INFEROPS_MEMBERS_ENABLED`
+ * on. Never shared: a gadget that read it admits no collaborator.
+ */
+export const PORTAL_MEMBERS_RESOURCE: SupportedResource = {
+  urlPattern: "inferops://*/portal/members",
+  title: "InferOps workspace members",
+  description: "Read who has access to one InferOps workspace: their role and explicit denies, without email.",
   excludeFromOperateChat: true,
 };
 
@@ -132,12 +146,13 @@ export function projectResourceKind(url: string): ProjectResourceKind | null {
 }
 
 /** Every resource kind, by what its URL's path names. */
-export type ResourceKind = ProjectResourceKind | "wiki" | "table";
+export type ResourceKind = ProjectResourceKind | "wiki" | "table" | "members";
 
 /** The kind a resource URL names, or null when it names none (the parsers explain why). */
 export function resourceKind(url: string): ResourceKind | null {
   if (/^inferops:\/\/[^/?#]+\/knowledge\/wiki\/?$/.test(url.trim())) return "wiki";
   if (/^inferops:\/\/[^/?#]+\/object\/table\//.test(url.trim())) return "table";
+  if (/^inferops:\/\/[^/?#]+\/portal\/members\/?$/.test(url.trim())) return "members";
   return projectResourceKind(url);
 }
 
@@ -167,6 +182,31 @@ export function parseTableUrl(url: string): TableRef {
 /** The canonical URL of a custom table. Inverse of `parseTableUrl`. */
 export function tableUrl({ host, tableId }: Pick<TableRef, "host" | "tableId">): string {
   return `inferops://${host}/object/table/${tableId}`;
+}
+
+/** A parsed workspace-members URL: the workspace's `<tenant>.<workspace>` host and its labels. */
+export type MembersRef = { host: string; tenant: string; workspace: string };
+
+/**
+ * Parse a workspace-members URL, `inferops://<tenant>.<workspace>/portal/members`, or throw a
+ * message naming the expected form. Syntax only; whether the workspace is the caller's is decided
+ * by the account, and InferOps decides whether they may read its members.
+ */
+export function parseMembersUrl(url: string): MembersRef {
+  const host = /^inferops:\/\/([^/?#]+)\/portal\/members\/?$/.exec(url.trim())?.[1];
+  const labels = host ? parseHost(host) : null;
+  if (!host || !labels) {
+    throw new Error(
+      "Not an InferOps workspace members URL: expected inferops://<tenant>.<workspace>/portal/members, " +
+      `for example inferops://acme.operations/portal/members, or inferops://${DEMO_HOST}/portal/members ` +
+      "for demo data.");
+  }
+  return { host, ...labels };
+}
+
+/** The canonical URL of a workspace's member list. Inverse of `parseMembersUrl`. */
+export function membersUrl({ host }: Pick<MembersRef, "host">): string {
+  return `inferops://${host}/portal/members`;
 }
 
 /** A parsed Wiki resource URL: the workspace's `<tenant>.<workspace>` host and its labels. */

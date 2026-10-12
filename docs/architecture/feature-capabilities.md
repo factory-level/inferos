@@ -22,7 +22,7 @@ covers:
   - packages/workshop-frontend/src/hooks/useBlueprintScreenshotSrc.ts
   - packages/workshop-frontend/src/components/BlueprintPreviewImage.tsx
   - packages/workshop-frontend/src/BlueprintsPage.tsx
-updated: 2026-10-09
+updated: 2026-10-12
 ---
 
 # Customer feature capabilities
@@ -30,6 +30,8 @@ updated: 2026-10-09
 ## Overview
 
 The eight-name capability vocabulary of [ADR 0001](../adr/0001-customer-capability-flag-vocabulary.md), plus `INFEROPS_TABLES_ENABLED` (read-only custom tables, MVP-20), is accepted by `inferos.config.json` schema version 2 ([#84](https://github.com/factory-level/inferos/pull/84), closing [#67](https://github.com/factory-level/inferos/issues/67)). Six capabilities have runtime code: `INFEROPS_ENABLED` ([#103](https://github.com/factory-level/inferos/pull/103)), `INFEROPS_AUTH` ([#94](https://github.com/factory-level/inferos/pull/94)), `CODING_WORKBENCH_ENABLED` (coding dispatch through the InferOps gatekeeper, [#69](https://github.com/factory-level/inferos/issues/69)/[#70](https://github.com/factory-level/inferos/issues/70)), `PUBLISH_CLOUDFLAREOS_WIDGET` and `PUBLISH_CLOUDFLAREOS_APP` (publication records, [#68](https://github.com/factory-level/inferos/issues/68)), and `INFEROPS_TABLES_ENABLED` (read-only custom-table bindings through the InferOps gatekeeper, see [custom tables](inferops-gatekeeper.md#custom-tables)). The other three are accepted as configuration, reported `unsupported`, and refused when switched on. Resolution across the CLI, deployment, server, tools and UI ([#33](https://github.com/factory-level/inferos/issues/33)) is unfinished.
+
+`INFEROPS_MEMBERS_ENABLED` (read-only, private workspace-member bindings through the InferOps gatekeeper, MVP-18, see [workspace members](inferops-gatekeeper.md#workspace-members)) is a **proposed** extension recorded as `INFEROPS_TABLES_ENABLED` was, and wired the same way: version 2 accepts it, requiring `INFEROPS_ENABLED`, and the dev server resolves it (off by default) and sets it on the gatekeeper only.
 
 `INFEROPS_HOST_BOARDS` (host boards: the kernel path in [operate mode](operate-mode.md#host-boards) and the gatekeeper's [board facet read](inferops-gatekeeper.md#host-boards)) is a **proposed** extension of ADR 0001's vocabulary, recorded here as `INFEROPS_TABLES_ENABLED` was. It is wired the same way: version 2 accepts it, requiring `INFEROPS_ENABLED`, and the dev server resolves it (off by default) and sets it on both the Workshop backend and the gatekeeper (see [the enforcement inventory](#host-boards-enforcement-inventory)).
 
@@ -43,7 +45,7 @@ The detailed current state lives in [consumer configuration](consumer-configurat
 | --- | --- |
 | `scripts/consumer/config.ts` | `CAPABILITY_NAMES`, the version 2 parser, `CAPABILITY_REQUIREMENTS`, `LEGACY_FLAG_COMPATIBILITY`, `migrateConsumerConfig` and `inferOpsAuthRequested`. |
 | `scripts/consumer/runtime.ts` | `capabilitySources` (the pinned file that makes an installation honour each capability), `unsupportedCapabilities`, the `inferos:check` capability report and `migrateWrapperConfig` (`pnpm inferos config migrate`). |
-| `scripts/dev-server-config.ts` | `resolveInferOpsEnabled`, `resolveCodingWorkbenchEnabled`, `resolveInferOpsTablesEnabled`, `resolveInferOpsHostBoards`, `resolveInferOpsBoundViews`, `resolvePublicationFlag` and the InferLab sign-in variables, used by `run-dev-server.ts`. |
+| `scripts/dev-server-config.ts` | `resolveInferOpsEnabled`, `resolveCodingWorkbenchEnabled`, `resolveInferOpsTablesEnabled`, `resolveInferOpsMembersEnabled`, `resolveInferOpsHostBoards`, `resolveInferOpsBoundViews`, `resolvePublicationFlag` and the InferLab sign-in variables, used by `run-dev-server.ts`. |
 | `packages/workshop-frontend/src/features/publication` | The publication UI: `PublicationReview` (Build's request step), `AdminPublicationsPanel` (the admin review list), and the shared record summary and withdraw form. See [publication records](#publication-records). |
 | `packages/workshop-backend/src/publication.ts` | Server enforcement of both publication flags: the flag checks, each record's derived status, the reach check and the KV snapshot it reads. See [publication records](#publication-records). |
 | `custom-gatekeepers/gatekeeper-inferops/src/enablement.ts` | Server enforcement of `INFEROPS_ENABLED`: every data-source call is refused with `DISABLED` while it is off. |
@@ -53,10 +55,11 @@ The detailed current state lives in [consumer configuration](consumer-configurat
 | `packages/workshop-backend/src/console-store.ts` | Kernel enforcement of the proposed `INFEROPS_BOUND_VIEWS` (`boundViewsEnabled`, which also needs host boards on). While it is off, new bound-view entries, the first publication of an entry and every delivery (`describeBoundView`, `getConsoleBoundViewDraft`) are refused. Saved entries stay editable, and entries already published can be republished, but nothing delivers them. |
 | `packages/workshop-backend/src/host-boards.ts` | Kernel enforcement of the proposed `INFEROPS_HOST_BOARDS` (`hostBoardsEnabled`, which also needs `INFEROPS_ENABLED` not off): new host-board entries and the first publication of an entry are refused while it is off, and so are selection, acquisition and every read; saved entries are kept, stay editable, and entries already published can be republished, inert until it is on again. |
 | `custom-gatekeepers/gatekeeper-inferops/src/table.ts` | Server enforcement of `INFEROPS_TABLES_ENABLED`: the custom-table resource kind is withheld and refused, and every call of a table binding fails `DISABLED`, while it is off. |
+| `custom-gatekeepers/gatekeeper-inferops/src/members.ts` | Server enforcement of `INFEROPS_MEMBERS_ENABLED`: the workspace-members resource kind is withheld and refused, and every call of a members binding fails `DISABLED`, while it is off. |
 
 ## Data and Control Flow
 
-A version 2 file resolves each capability from its default (off), then its profile (none sets one), then an explicit override, with per-field provenance. The parser validates that `INFEROPS_CANVAS_STATE_MACHINE`, `CODING_WORKBENCH_ENABLED`, `INFEROPS_TABLES_ENABLED` and `INFEROPS_HOST_BOARDS` each require `INFEROPS_ENABLED`, and never turns a flag on by itself. `inferos:check`, `doctor`, the wrapper `dev` command and `run-dev-server.ts --consumer-root` all refuse a switched-on capability whose `capabilitySources` file is absent from the pin. See [capability flags and schema version 2](consumer-configuration.md#capability-flags-and-schema-version-2).
+A version 2 file resolves each capability from its default (off), then its profile (none sets one), then an explicit override, with per-field provenance. The parser validates that `INFEROPS_CANVAS_STATE_MACHINE`, `CODING_WORKBENCH_ENABLED`, `INFEROPS_TABLES_ENABLED`, `INFEROPS_MEMBERS_ENABLED` and `INFEROPS_HOST_BOARDS` each require `INFEROPS_ENABLED`, and never turns a flag on by itself. `inferos:check`, `doctor`, the wrapper `dev` command and `run-dev-server.ts --consumer-root` all refuse a switched-on capability whose `capabilitySources` file is absent from the pin. See [capability flags and schema version 2](consumer-configuration.md#capability-flags-and-schema-version-2).
 
 | Capability | State at `main` | Where it is enforced |
 | --- | --- | --- |
@@ -69,6 +72,7 @@ A version 2 file resolves each capability from its default (off), then its profi
 | `AGENT_DEPLOYMENTS` | Unsupported | None. |
 | `CODING_WORKBENCH_ENABLED` | Supported | The gatekeeper refuses dispatch bindings and every call through existing ones, and dispatches only allowlisted repositories; see [local coding workflows](local-coding-workflows.md). |
 | `INFEROPS_TABLES_ENABLED` | Supported | The gatekeeper withholds the custom-table resource kind and its picker, refuses table bindings and every call through existing ones; see [custom tables](inferops-gatekeeper.md#custom-tables). |
+| `INFEROPS_MEMBERS_ENABLED` | Proposed; in the version 2 schema, supported | The gatekeeper withholds the workspace-members resource kind and its picker, refuses members bindings and every call through existing ones; see [workspace members](inferops-gatekeeper.md#workspace-members). |
 | `INFEROPS_HOST_BOARDS` | Proposed; in the version 2 schema | In the Workshop backend, new host-board entries and the first publication of an entry are refused while it is off, and so are selection, acquisition and every read; saved entries are kept, stay editable, and entries already published can be republished, inert until it is on again; and the gatekeeper's kernel-only facet methods refuse every call, while it is off (or `INFEROPS_ENABLED` is); see [host boards](operate-mode.md#host-boards). No UI yet. |
 | `INFEROPS_BOUND_VIEWS` | Proposed; in the version 2 schema | In the Workshop backend, while it is off (or host boards are), new bound-view entries, the first publication of an entry and every delivery are refused. Saved entries stay editable, and entries already published can be republished. See [bound views](operate-mode.md#bound-views). No UI yet. |
 
@@ -89,6 +93,8 @@ Where `INFEROPS_TABLES_ENABLED` is resolved, and what is done with `INFEROPS_HOS
 | Dev server (`dev-server-config.ts`, `run-dev-server.ts`, `env-passthrough.test.ts`) | `resolveInferOpsTablesEnabled`, always set on the gatekeeper | `resolveInferOpsHostBoards`, always set on the gatekeeper and the backend (with the resolved `INFEROPS_ENABLED`) | `resolveInferOpsBoundViews` (from the resolved host-board switch), always set on the backend only |
 | Release manifest | Not set (cloud installs off) | Not set (off) | Not set (off) |
 | Effective frontend capability (`ServerConfig`) | None | `ServerConfig.hostBoards`, read only; no UI reads it yet | `ServerConfig.boundViews`, read only; no UI reads it yet |
+
+`INFEROPS_MEMBERS_ENABLED` is resolved at the same places as `INFEROPS_TABLES_ENABLED`, with `members.ts` as its enforcement and capability source, `resolveInferOpsMembersEnabled` in the dev server, and `connection.json` listing it as the `portal/members` kind's switch; the release manifest does not set it (off).
 
 The trusted host renderer and its freshness rules (refresh, expiry and resume) belong to the later UI change.
 

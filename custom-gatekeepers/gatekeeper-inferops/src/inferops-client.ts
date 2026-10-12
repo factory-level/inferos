@@ -211,6 +211,26 @@ export type TableRead = { table: TableRecordSchema; rows: TableRowRecord[] };
 /** What a table read may narrow by. */
 export type TableReadOptions = { relatedTo?: string; limit: number };
 
+/**
+ * One member of a workspace exactly as InferOps' `member.list` answers it (`GET /workspace/members`):
+ * a principal holding a live grant there, with that grant's role and explicit denies only.
+ */
+export type WorkspaceMemberRecord = {
+  principalId: string;
+  type: "user" | "service_account";
+  name: string;
+  /** null for a service account. The gatekeeper never passes it on (members.ts). */
+  email: string | null;
+  role: string;
+  deniedPermissions: string[];
+};
+
+/** The answer of `member.list`: the workspace it is about, and its members. */
+export type WorkspaceMembersRead = {
+  workspace: { workspaceId: string; workspaceName: string; product: "inferops" | "infermind" };
+  members: WorkspaceMemberRecord[];
+};
+
 /** One custom table an account can open, as listed for the resource picker. */
 export type TableSummary = { id: string; label: string };
 
@@ -357,6 +377,14 @@ export interface InferOpsClient {
    * The caller checks that the row belongs to its table; `rows` holds exactly that row.
    */
   readTableRow(host: string, recordId: string): Promise<TableRead>;
+
+  /**
+   * The members of the client's own workspace, as InferOps' `member.list` answers it under the
+   * account's `member:read` there. `workspaceId`, when given, is the workspace the answer must be
+   * about; an answer about any other is refused. NOT_FOUND when the list is missing or not readable
+   * (no grant, no `member:read`, an explicit deny), without saying which.
+   */
+  listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead>;
 
   /** Whether the account can open the project; used to admit observers of a shared gadget. */
   hasProject(projectKey: string): Promise<boolean>;

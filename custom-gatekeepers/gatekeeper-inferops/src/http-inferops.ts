@@ -53,8 +53,10 @@ import {
   type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
   type TableColumnRecord, type TableRead, type TableReadOptions, type TableRecordSchema,
   type TableRowRecord, type TableSummary, type WikiPageChanges, type WikiPageWrite,
+  type WorkspaceMemberRecord, type WorkspaceMembersRead,
   type WikiSectionRecord, type WikiStructureRecord,
 } from "./inferops-client";
+import { membersNotFound } from "./members";
 import { isSlug } from "./resources";
 import type {
   Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
@@ -670,6 +672,38 @@ function parsed<T>(operation: string, body: unknown, parse: (body: unknown) => T
     });
     throw new InferOpsError("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
   }
+}
+
+const MEMBER_TYPES = ["user", "service_account"] as const;
+const PRODUCTS = ["inferops", "infermind"] as const;
+
+/** One `member.list` member: exactly the provider's strict fields, the email only to be dropped. */
+function parseWorkspaceMember(value: unknown): WorkspaceMemberRecord {
+  const member = exactly(value, ["principalId", "type", "name", "email", "role", "deniedPermissions"], "member");
+  return {
+    principalId: text(member.principalId, "member.principalId", UUID).toLowerCase(),
+    type: oneOf(member.type, MEMBER_TYPES, "member.type"),
+    name: text(member.name, "member.name"),
+    email: nullable(member.email, "member.email"),
+    role: text(member.role, "member.role"),
+    deniedPermissions: list(member.deniedPermissions, "member.deniedPermissions")
+      .map(permission => text(permission, "member.deniedPermissions[]")),
+  };
+}
+
+/** A `member.list` answer, strict like the provider's schema. */
+function parseWorkspaceMembers(value: unknown): WorkspaceMembersRead {
+  // Strict like the provider's schema: exactly its fields, so an added field is refused.
+  const body = exactly(value, ["workspace", "members"], "response");
+  const workspace = exactly(body.workspace, ["workspaceId", "workspaceName", "product"], "workspace");
+  return {
+    workspace: {
+      workspaceId: text(workspace.workspaceId, "workspace.workspaceId", UUID).toLowerCase(),
+      workspaceName: text(workspace.workspaceName, "workspace.workspaceName"),
+      product: oneOf(workspace.product, PRODUCTS, "workspace.product"),
+    },
+    members: list(body.members, "members").map(parseWorkspaceMember),
+  };
 }
 
 /** One workspace of the caller's tenant, as `GET /workspaces` lists it: its id and its slug. */
@@ -1443,6 +1477,28 @@ export function openHttpInferOpsClient(
       return embed("object.table.read",
         `inferops://${host}/object/table-view/${tableId.toLowerCase()}?${query}`, "table-view",
         read => read.table.id === tableId.toLowerCase() && read.rows.length <= options.limit);
+    },
+
+    async listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead> {
+      // A plain GET, not the embed lane: `member.list` reads the X-Workspace-Id workspace only. Its
+      // refusals (no grant, no member:read, an explicit deny, missing) read as one NOT_FOUND, as
+      // `embed` does for tables, so the binding cannot be used to tell them apart.
+      let body: unknown;
+      try {
+        body = await request("member.list", { method: "GET", path: "/workspace/members" });
+      } catch (error) {
+        const code = inferOpsCode(error);
+        if (code === "NOT_FOUND" || code === "FORBIDDEN") throw membersNotFound();
+        throw error;
+      }
+      // An answer about another workspace than the one asked for is not trusted.
+      return parsed("member.list", body, raw => {
+        const read = parseWorkspaceMembers(raw);
+        if (workspaceId !== undefined && read.workspace.workspaceId !== workspaceId.toLowerCase()) {
+          throw new Malformed("not the workspace asked for");
+        }
+        return read;
+      });
     },
 
     async readTableRow(host: string, recordId: string): Promise<TableRead> {

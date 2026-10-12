@@ -117,6 +117,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "CODING_WORKBENCH_ENABLED", "CODING_WORKBENCH_REPOS",
       // ...and the custom-tables switch.
       "INFEROPS_TABLES_ENABLED",
+      // ...and the workspace-members switch.
+      "INFEROPS_MEMBERS_ENABLED",
       // ...and the host-boards switch, set on the backend and the gatekeeper alike.
       "INFEROPS_HOST_BOARDS",
       // ...and the bound-views switch, set on the backend only.

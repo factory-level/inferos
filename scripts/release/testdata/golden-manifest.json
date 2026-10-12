@@ -508,6 +508,12 @@
             "InferOpsTableGatekeeper"
           ],
           "tag": "v4"
+        },
+        {
+          "new_sqlite_classes": [
+            "InferOpsMembersGatekeeper"
+          ],
+          "tag": "v5"
         }
       ],
       "modules": [

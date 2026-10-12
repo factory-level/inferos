@@ -3,9 +3,11 @@ import dispatchUi from "../src/configurator/dispatch-ui";
 import wikiUi from "../src/configurator/wiki-ui";
 import projectUi from "../src/configurator/project-ui";
 import tableUi from "../src/configurator/table-ui";
+import membersUi from "../src/configurator/members-ui";
 import type { InferOpsProjectConfiguratorRpc } from "../src/configurator/project-configurator-types";
 import {
-  parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl, parseWikiUrl, projectBoardUrl,
+  parseMembersUrl, parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl, parseWikiUrl,
+  projectBoardUrl,
 } from "../src/resources";
 
 const URL = "inferops://acme.operations/project/board/ENG";
@@ -123,6 +125,33 @@ describe("Wiki URLs", () => {
     expect(await wikiUi.resourceUrl({ values: wikiUi.initial, ui: uiWith("demo.local") })).toBe(DEMO_WIKI);
     await expect(wikiUi.resourceUrl({ values: wikiUi.initial, ui: uiWith(null) }))
       .rejects.toThrow("choose an InferMind workspace");
+  });
+});
+
+describe("workspace members URLs", () => {
+  const MEMBERS = "inferops://acme.operations/portal/members";
+  const DEMO_MEMBERS = "inferops://demo.local/portal/members";
+  const PATTERN = "inferops://*/portal/members";
+
+  // The members picker duplicates the grammar too; keep it in step.
+  it.each([MEMBERS, DEMO_MEMBERS])("round-trips %s through the members picker", async url => {
+    const values = await membersUi.initialValuesFromResourceUrl({
+      resourceUrl: url, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    });
+    const { tenant, workspace } = parseMembersUrl(url);
+    expect(values).toEqual({ tenant, workspace });
+    const built = await membersUi.resourceUrl({ values: { ...membersUi.initial, ...values }, ui: uiWith(null) });
+    expect(parseMembersUrl(built)).toEqual(parseMembersUrl(url));
+    // A Wiki URL does not prefill the members picker.
+    expect(await membersUi.initialValuesFromResourceUrl({
+      resourceUrl: "inferops://acme.knowledge/knowledge/wiki", resourceUrlPattern: PATTERN, ui: uiWith(null),
+    })).toEqual({});
+  });
+
+  it("builds the demo list with no organization or workspace only when the account offers it", async () => {
+    expect(await membersUi.resourceUrl({ values: membersUi.initial, ui: uiWith("demo.local") })).toBe(DEMO_MEMBERS);
+    await expect(membersUi.resourceUrl({ values: membersUi.initial, ui: uiWith(null) }))
+      .rejects.toThrow("choose an InferOps workspace");
   });
 });
 
