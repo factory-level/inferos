@@ -15,6 +15,8 @@
 // reads as its one NOT_FOUND (`members-http.test.ts`). Observations name the workspace and a
 // count, never a member.
 //
+// The installed `inferops.members` gadget is read the same way, through its own Durable Object.
+//
 // What it does NOT prove: InferLab sign-in. As in `inferops-tables-live.test.ts`, the InferLab legs
 // (`/authorize`, `/auth/token`, `/auth/refresh`, `/auth/logout`) are answered by a fixture in this
 // file. The token and memberships it hands out are the real ones InferOps' stub login
@@ -42,6 +44,7 @@ import type { AuthenticatedApi } from "@gadgets/workshop-shared/api";
 import type {
   InferOpsMembersSession, WorkspaceMembers,
 } from "../../../custom-gatekeepers/gatekeeper-inferops/src/types.js";
+import type { LoadMembersResult } from "../../bundled-blueprints/blueprints/inferops-members/files/lib/protocol.js";
 import { startHarness, type Harness } from "../src/harness.js";
 import { NetworkInterceptor, type Handler } from "../src/network-interceptor.js";
 import { connect, listConnectedAccounts, nextUsernames, signUp, waitFor, type ConnectedAccount } from "../src/rpc-client.js";
@@ -183,6 +186,8 @@ describe.skipIf(!LIVE.baseUrl)("workspace members against a live InferOps", () =
 
     network.install();
     harness = await startHarness({
+      // The installed gadget's server runs in the Workshop's Worker loader.
+      enableGadgetExecution: true,
       gatekeepers: [{
         binding: "INFEROPS",
         dir: INFEROPS_GATEKEEPER_DIR,
@@ -242,6 +247,30 @@ describe.skipIf(!LIVE.baseUrl)("workspace members against a live InferOps", () =
     const said = JSON.stringify(observed);
     for (const member of owner.read.members) expect(said).not.toContain(member.name);
     evidence.push(`owner+viewer bind+listMembers: ${owner.read.members.length} members of ${workspaceId}, equal to member.list minus email; viewer list equals owner list`);
+  });
+
+  it("the installed inferops.members gadget loads the same projection through its own Durable Object", async () => {
+    const workspaceId = opsOf(people.owner.person);
+    for (const who of ["owner", "viewer"] as const) {
+      const { api, account, person } = people[who];
+      using installed = await api.newGadgetFromBlueprint("inferops.members", {
+        members: { type: "gatekeeper", accountId: account.id, resourceUrl: MEMBERS_URL },
+      });
+      const { defaultGadgetId } = await installed.getMetadata();
+      if (defaultGadgetId === undefined) throw new Error("Installed workspace has no default Gadget");
+      using gadget = await installed.getGadget(defaultGadgetId);
+      using facet = await gadget.connectToGadget() as RpcStub<{ loadMembers(): Promise<LoadMembersResult> }>;
+      const result = await facet.loadMembers();
+      if (!result.ok) throw new Error(`loadMembers as ${who}: ${result.reason}`);
+      const direct = await membersDirect(person, workspaceId);
+      expect(direct.status).toBe(200);
+      expect({ workspace: result.workspace, members: result.members }).toEqual(withoutEmail(direct.body));
+      const shown = JSON.stringify(result);
+      for (const member of direct.body.members) {
+        if (typeof member.email === "string" && member.email) expect(shown).not.toContain(member.email);
+      }
+      evidence.push(`gadget loadMembers as ${who}: ${result.members.length} members of ${result.workspace.workspaceId}, equal to member.list minus email`);
+    }
   });
 
   it("attack: a workspace the person does not hold is refused at bind, with one message", async () => {
