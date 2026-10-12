@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TestProject } from "vitest/node";
 import { pnpmCommand } from "@gadgets/scripts/pnpm-command";
+import { PHASE_LOG } from "./phase-log-path.js";
 import { isWorkerInput } from "./worker-inputs.js";
 
 const PACKAGE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,6 +26,11 @@ export default function setup(project: TestProject): () => void {
     throw new Error(`Integration-test builds did not produce: ${missingEntries.join(", ")}`);
   }
   process.env.WORKSHOP_INTEGRATION_PREBUILT = "1";
+  // One run's phases per file (see phase-log.ts); a failed write only loses the diagnostic.
+  try {
+    mkdirSync(dirname(PHASE_LOG), { recursive: true });
+    writeFileSync(PHASE_LOG, "");
+  } catch {}
 
   const { vitest } = project;
 

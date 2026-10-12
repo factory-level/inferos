@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "kind": "disposable-deploy-recipe",
+  "purpose": "SYNTHETIC example: one disposable smoke deployment of a customer fork, to check Access, OAuth origins and real bindings once an owner opts in. Not approval to deploy.",
+  "owner": "named-operator (synthetic)",
+  "created": "2026-10-12",
+  "expires": "2026-10-15",
+  "source": {
+    "repository": "https://github.com/factory-level/inferos",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "wrapperConfig": { "schemaVersion": 1 },
+  "target": {
+    "environment": "disposable",
+    "name": "inferos-disposable-smoke-20261015",
+    "account": { "unresolved": "owner: which Cloudflare account hosts disposable deployments" },
+    "publicOrigin": { "unresolved": "owner: hostname/domain for the disposable origin" },
+    "oauthOrigins": { "unresolved": "owner: OAuth app registration for the disposable origin" },
+    "access": { "unresolved": "owner: Access mode (staff-only or all-users) and policy" },
+    "admins": { "unresolved": "owner: who is ADMINS on the disposable deployment" },
+    "bindings": {
+      "BLUEPRINTS": { "type": "kv", "resource": { "unresolved": "operator: KV namespace created for this deployment" } },
+      "AVATARS": { "type": "kv", "resource": { "unresolved": "operator: KV namespace created for this deployment" } },
+      "BLUEPRINT_CONTENT": { "type": "r2", "resource": "inferos-disposable-smoke-20261015-blueprints" }
+    },
+    "secrets": [{ "secretRef": "CLIENT_SECRET" }]
+  },
+  "inferops": { "mode": "mock" },
+  "extensions": { "wrapperGatekeepers": false, "customWorkers": false }
+}

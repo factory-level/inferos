@@ -12,6 +12,8 @@ export default defineConfig({
   test: {
     include: ["__tests__/**/*.test.ts"],
     globalSetup: ["./src/global-setup.ts"],
+    // File-only phase timestamps for failed-run diagnosis; nothing is printed (src/phase-log.ts).
+    setupFiles: ["./src/phase-log.ts"],
     // Absolute source globs over the same set, so a change rebuilds the Worker before rerunning.
     // Deletions are handled in `src/global-setup.ts`: vitest's unlink path never consults these.
     forceRerunTriggers: FORCE_RERUN_TRIGGERS,

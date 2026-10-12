@@ -100,5 +100,18 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Touched just before the tests so the failure report below can tell this step's vp summary and
+      # phase log from an earlier invocation's (scripts/vp/last-run-report.ts).
+      - name: Mark the test step start
+        run: touch "$RUNNER_TEMP/test-step-started"
+
       - name: Test
+        id: test
         run: pnpm test
+
+      # Diagnosis only, and only after the Test step itself failed: that same run's per-task outcomes
+      # and the integration suite's file-only phase timings. Read only; it always exits 0, so the job
+      # keeps the Test step's failure and gains no new one.
+      - name: Report the failed test run
+        if: failure() && steps.test.outcome == 'failure'
+        run: node scripts/vp/last-run-report.ts --since "$RUNNER_TEMP/test-step-started"
