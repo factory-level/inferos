@@ -1,3 +1,4 @@
+import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import { EventType, omitOptionalNulls, type Event, type Message } from "@ag-ui/core";
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { z } from "zod";
@@ -12,7 +13,7 @@ const navigation = z.object({
   expectedSeq: z.number().int().nonnegative(),
 }).strict();
 const policy = z.object({
-  threadId: id, runId: id, protocolVersion: z.literal("1.0").optional(),
+  threadId: z.string().max(128), runId: z.string().max(128), protocolVersion: z.literal("1.0").optional(),
   messages: z.array(z.object({id, role: z.literal("user"),
     content: z.union([z.string(), z.array(z.object({type: z.literal("text"), text: z.string()}).strict())]),
   }).strict()).length(1),
@@ -25,6 +26,7 @@ const policy = z.object({
 export function parseOperateReadRun(value: unknown): OperateReadRun {
   RunAgentInputSchema.parse(value);
   const input = policy.parse(value);
+  parseReadRunSelectors(input.threadId, input.runId);
   const content = input.messages[0].content;
   const message = typeof content === "string" ? content : content.map(part => part.text).join("");
   if (!message.trim() || message.length > 16_384) throw new Error("Invalid message");

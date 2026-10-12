@@ -1,11 +1,24 @@
 // Test-only entrypoint over the unchanged validated production Worker. Wrangler's eviction API
 // waits for active references, so it cannot model a crash while an SSE subscription is alive.
 // This explicit fault seam aborts only the selected native DO, retaining its durable storage.
-import worker, { OverseerDurableObject as ProductionOverseer } from "../../../workshop-backend/.wrangler/validate/src/server.ts";
+import worker, { OverseerDurableObject as ProductionOverseer, UserDurableObject as ProductionUser } from "../../../workshop-backend/.wrangler/validate/src/server.ts";
 export * from "../../../workshop-backend/.wrangler/validate/src/server.ts";
 
 export class OverseerDurableObject extends ProductionOverseer {
   abortForTest() { this.ctx.abort("AG-UI test workspace loss"); }
+}
+
+// Only this local fixture can delay a bind or abort a user's native DO.
+export class UserDurableObject extends ProductionUser {
+  holdBindForTest() {
+    this.bindGate = new Promise(resolve => {this.releaseBind = resolve;});
+  }
+  releaseBindForTest() { this.releaseBind?.(); this.bindGate = undefined; }
+  async bindOperateReadRun(threadId, chatId) {
+    if (this.bindGate) await this.bindGate;
+    return super.bindOperateReadRun(threadId, chatId);
+  }
+  abortForTest() { this.ctx.abort("AG-UI test user loss"); }
 }
 
 export default {
@@ -15,6 +28,15 @@ export default {
       const namespace = ctx.exports.OverseerDurableObject;
       const stub = namespace.get(namespace.idFromString(url.searchParams.get("id")));
       try { await stub.abortForTest(); } catch { /* The aborted RPC is expected. */ }
+      return new Response(null, {status: 204});
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/__test/user/")) {
+      const stub = ctx.exports.UserDurableObject.getByName(url.searchParams.get("name"));
+      const action = url.pathname.slice("/__test/user/".length);
+      if (action === "hold-bind") await stub.holdBindForTest();
+      else if (action === "release-bind") await stub.releaseBindForTest();
+      else if (action === "abort") {try { await stub.abortForTest(); } catch { /* Expected lost RPC. */ }}
+      else return new Response(null, {status: 404});
       return new Response(null, {status: 204});
     }
     return worker.fetch(request, env, ctx);

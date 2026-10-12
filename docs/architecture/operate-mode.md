@@ -8,6 +8,7 @@ covers:
   - packages/workshop-backend/__tests__/operate-agui.test.ts
   - packages/integration-tests/__tests__/operate-agui.test.ts
   - packages/integration-tests/fixtures/operate-agui-loss-worker.js.txt
+  - packages/workshop-shared/src/operate-read-run.ts
   - packages/workshop-shared/src/operate-session.ts
   - packages/workshop-shared/src/api.ts
   - packages/workshop-backend/src/user.ts
@@ -92,19 +93,63 @@ one new user text message, empty state/tools/context, no parent run or resume, a
 `forwardedProps.operate = {event: {type: "openBoard", board: {workspaceId, boardRef}}, expectedSeq}`.
 Text content may be a string or text parts. Unknown fields, client-authored trusted history and
 other navigation kinds are refused before work. Input is limited to 64 KiB and 16,384 text
-characters; thread/run ids are 1–128 alphanumeric, underscore or hyphen characters. The person's
+characters; message IDs remain 1–128 alphanumeric, underscore or hyphen characters.
+Thread/run selectors use the prepared generation format described below. The person's
 configured model selection is resolved server-side. This first increment does not continue a
 previous AG-UI thread or accept client-supplied tools, provider credentials or approval answers.
 
-`OperateSession.startReadRun` reserves thread and run selectors in the person's User DO before
-navigation or model work. Both are one-shot within that person; a duplicate is refused, including
-after partial setup, disconnect or a restart. The reservation is retained and associated with the
-new chat once created. Admission is limited to 256 lifetime reservations per person, including
-failed setup. At capacity, new selectors receive HTTP 429 `RUN_CAPACITY_EXHAUSTED` before navigation
-or model work; existing selectors still receive 409. Capacity does not reset on restart or completion.
-Reservations have no automatic expiry or eviction; retrying an uncertain operation is not an
-implicit replay. Navigation and chat creation are separate commits: a later setup failure
-does not roll back an authorized navigation; callers recover actual state through the session log.
+Before a new explicit read, call authenticated `POST /api/operate/agui/prepare` (or
+`OperateSession.prepareReadRun()`). It returns `{threadId, runId}` without navigation, chat, model
+work or a reservation. Give those values to an unmodified `@ag-ui/client` 1.0.2 HttpAgent:
+
+```ts
+const preparation = await fetch("/api/operate/agui/prepare", {
+  method: "POST", headers: {Authorization: `Bearer ${token}`},
+});
+if (!preparation.ok) throw new Error("Read preparation refused");
+const {threadId, runId} = await preparation.json();
+const agent = new HttpAgent({url: "/api/operate/agui", threadId,
+  headers: {Authorization: `Bearer ${token}`},
+  initialMessages: [{id: "prompt", role: "user", content: "Read my page"}]});
+await agent.runAgent({runId});
+```
+
+Use a fresh agent for each new one-shot intent, keeping empty input state and only the new user
+message. This is additional application setup, not a replacement RunAgentInput envelope or a new
+AG-UI protocol version. Selectors are ordinary strings `or2:<generation>:t:<uuid>` and
+`or2:<generation>:r:<uuid>`, with the same positive canonical uint64 decimal generation (maximum
+18446744073709551615) and lowercase UUID-shaped suffixes. IDs grant no authority. Preparation uses
+the same Bearer/CF Access, sign-in configuration and Origin boundaries as run submission, and its
+response is not cacheable. Unknown external callers may exist; the cutover is explicit: old bare-ID
+requests receive 409 `READ_RUN_UPGRADE_REQUIRED`, with no fallback execution or ID rewriting.
+
+`OperateSession.startReadRun` atomically reserves both selectors in the person's User DO before
+navigation or model work. A generation admits 256 attempts, including failed setup; current duplicate
+selectors receive 409 `RUN_ALREADY_RESERVED`, a full generation 429 `RUN_CAPACITY_EXHAUSTED` without
+a time-based Retry-After. Preparation at capacity atomically increments the durable boundary and
+deletes all retired rows and uniqueness indexes. Non-full preparation does not rotate or consume a
+slot. Concurrent preparation sees that same new generation unless another full batch intervenes;
+crash recovery exposes old-full or new-empty state. A prepared but unsubmitted request may therefore
+become stale. Old-generation selectors are permanently refused 409 `RUN_GENERATION_RETIRED`, even
+after their rows are removed. Future/mixed generations receive 409 `RUN_GENERATION_INVALID`;
+malformed selectors 400 `UNSUPPORTED_READ_INPUT`. Shared parsing also applies to direct RPC.
+
+Bookkeeping is bounded by 256 current rows, at most 256 retained closed legacy rows and fixed
+monotonic generation metadata. Legacy binds may finish only existing reservations. Oversized legacy
+storage, invalid persisted generation or exhausted generation rollover fails closed 503
+`READ_RUN_STORAGE_REFUSED`; there is no silent cleanup, generation reset, wrap or supported downgrade
+that re-enables legacy admission. This bounds admission metadata, not provider concurrency or chat
+storage. Successful, failed and uncertain runs all have the same permanent identity refusal.
+Retirement does not cancel admitted work: a retired late bind is a no-op, so an already-created chat
+can still complete through the HTTP adapter's returned chatId. Current binds still require an
+unbound reservation. Chat records/history, read-only context and the session event log/page are never
+deleted by retirement; authorized RPC recovery remains available, without a permanent selector
+lookup or a resumable AG-UI thread service.
+
+Keep the original selectors and request on transport retries; never automatically prepare fresh IDs
+and resubmit uncertain work. An explicit new caller intent may prepare a new read. Navigation and
+chat creation are separate commits: a later setup failure does not roll back committed navigation.
+Callers recover actual outcomes from authorized history and the session log, not from an HTTP timeout.
 A stale expectedSeq returns a conflict without appending the navigation;
 clients resubscribe/read the existing session log and submit a new run with the current sequence.
 The existing session dispatch checks current access to the board connection. This does not promise

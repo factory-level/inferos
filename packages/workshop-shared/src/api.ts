@@ -447,9 +447,13 @@ export type OperateReadRun = {
  * the shared `applyOperateEvent`. The session holds references only and grants no access.
  */
 export interface OperateSession extends RpcTarget {
-  /** Reserve a new run, dispatch navigation and start a durable read-only chat in getWorkspace().
-   * Repeated selectors fail without repeating work. A person has 256 lifetime reservations,
-   * including failed setup; exhaustion refuses new runs before navigation or model work.
+  /** Prepare selectors for a new explicit read intent, without starting work. A full generation
+   * retires atomically; older selectors then refuse permanently. Preparation grants no authority.
+   * Keep returned IDs on retries; never automatically resubmit uncertain work with fresh IDs. */
+  prepareReadRun(): Promise<{threadId: string; runId: string}>;
+  /** Reserve a prepared run, dispatch navigation and start a durable read-only chat in getWorkspace().
+   * Repeated/retired selectors fail without repeating work. Each generation admits 256 attempts,
+   * including failed setup. Legacy bare selectors require upgrade; history remains in the workspace.
    */
   startReadRun(input: OperateReadRun): Promise<number>;
 

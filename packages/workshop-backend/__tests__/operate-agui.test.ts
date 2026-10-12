@@ -1,3 +1,4 @@
+import { MAX_READ_GENERATION, newReadRunSelectors, parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import { expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
@@ -14,59 +15,143 @@ declare module "cloudflare:workers" {
   }
 }
 
-it("reserves both selectors per person, rejects concurrent/restarted retries and retains binding", async () => {
-  const name = crypto.randomUUID();
-  let a = env.TEST_USER.getByName(name);
-  const reserve = async (thread: string, run: string) => {
-    try { await a.reserveOperateReadRun(thread, run); return "reserved"; }
-    catch (error) {
-      if (error instanceof Error && error.message === "OPERATE_READ_DUPLICATE") return "duplicate";
-      throw error;
-    }
-  };
-  expect(await Promise.all([reserve("thread", "run"), reserve("thread", "run")]))
-    .toEqual(["reserved", "duplicate"]);
-  await a.bindOperateReadRun("thread", 17);
-  expect(await reserve("other", "run")).toBe("duplicate");
-  expect(await reserve("thread", "other")).toBe("duplicate");
-  await env.TEST_USER.getByName(`${name}-other`).reserveOperateReadRun("thread", "run");
-  await abortAllDurableObjects();
-  a = env.TEST_USER.getByName(name);
-  expect(await reserve("thread", "run")).toBe("duplicate");
-});
+// The actual User DO/storage is exercised; only inspection/fault injection uses this test seam.
+const storeOf = (instance: UserDurableObject) => (instance as unknown as {storage: any}).storage;
+const refusal = async (operation: PromiseLike<unknown>) => {
+  try { await operation; return "accepted"; } catch (error) { return (error as Error).message; }
+};
+const ids = (generation = 1n) => newReadRunSelectors(generation);
+const reserve = async (user: DurableObjectStub<UserDurableObject>, pair: ReturnType<typeof ids>) =>
+  user.reserveOperateReadRun(pair.threadId, pair.runId);
 
-it("bounds lifetime reservations including unbound setup failures, atomically and across restart", async () => {
-  const name = `agui-capacity-${crypto.randomUUID()}`;
+it("keeps thread/run uniqueness across restart and person isolation", async () => {
+  const name = crypto.randomUUID();
   let user = env.TEST_USER.getByName(name);
-  // Unbound reservations represent setup failing after admission. None may be evicted for reuse.
-  await runInDurableObject(user, async instance => {
-    for (let i = 0; i < 255; ++i) await instance.reserveOperateReadRun(`thread-${i}`, `run-${i}`);
-  });
-  const final = await Promise.allSettled([
-    user.reserveOperateReadRun("last-a", "last-a"), user.reserveOperateReadRun("last-b", "last-b"),
-  ]);
-  expect(final.filter(result => result.status === "fulfilled")).toHaveLength(1);
-  expect(final.find(result => result.status === "rejected")).toMatchObject({
-    reason: {message: "OPERATE_READ_CAPACITY"},
-  });
-  await user.bindOperateReadRun("thread-0", 17);
+  const pair = await user.prepareOperateReadRun();
+  const outcomes = await Promise.allSettled([reserve(user, pair), reserve(user, pair)]);
+  expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
+  expect(outcomes.find(result => result.status === "rejected")).toMatchObject({reason: {message: "RUN_ALREADY_RESERVED"}});
+  await user.bindOperateReadRun(pair.threadId, 17);
+  expect(await refusal(reserve(user, {...ids(), runId: pair.runId}))).toBe("RUN_ALREADY_RESERVED");
+  expect(await refusal(reserve(user, {...ids(), threadId: pair.threadId}))).toBe("RUN_ALREADY_RESERVED");
+  await reserve(env.TEST_USER.getByName(`${name}-other`), pair);
   await abortAllDurableObjects();
   user = env.TEST_USER.getByName(name);
-  const refusal = async (thread: string, run: string) => {
-    try { await user.reserveOperateReadRun(thread, run); return "accepted"; }
-    catch (error) { return (error as Error).message; }
-  };
-  expect(await refusal("new", "new")).toBe("OPERATE_READ_CAPACITY");
-  expect(await refusal("thread-0", "new")).toBe("OPERATE_READ_DUPLICATE");
-  expect(await refusal("new", "run-1")).toBe("OPERATE_READ_DUPLICATE");
+  expect(await refusal(reserve(user, pair))).toBe("RUN_ALREADY_RESERVED");
+  await runInDurableObject(user, instance => expect(storeOf(instance).operateReadGenerationRuns.get(pair.threadId).chatId).toBe(17));
+});
+
+it("rotates bounded generations after failed setup, fences late binds and never re-admits retired identities", async () => {
+  const name = crypto.randomUUID();
+  let user = env.TEST_USER.getByName(name);
+  const retired: ReturnType<typeof ids>[] = [];
+  for (let generation = 1n; generation <= 4n; ++generation) {
+    const first = await user.prepareOperateReadRun();
+    expect(parseReadRunSelectors(first.threadId, first.runId)).toBe(generation);
+    retired.push(first);
+    await reserve(user, first);
+    await runInDurableObject(user, async instance => {
+      for (let i = 1; i < 255; ++i) {
+        const pair = ids(generation); await instance.reserveOperateReadRun(pair.threadId, pair.runId);
+      }
+    });
+    const final = await Promise.allSettled([reserve(user, ids(generation)), reserve(user, ids(generation))]);
+    expect(final.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(final.find(result => result.status === "rejected")).toMatchObject({reason: {message: "RUN_CAPACITY_EXHAUSTED"}});
+    const prepared = await Promise.all([user.prepareOperateReadRun(), user.prepareOperateReadRun()]);
+    for (const pair of prepared) expect(parseReadRunSelectors(pair.threadId, pair.runId)).toBe(generation + 1n);
+    // An already admitted call can finish after retirement, without resurrecting the reservation.
+    await user.bindOperateReadRun(first.threadId, 17);
+    await abortAllDurableObjects(); user = env.TEST_USER.getByName(name);
+    for (const pair of retired) expect(await refusal(reserve(user, pair))).toBe("RUN_GENERATION_RETIRED");
+    await runInDurableObject(user, (instance, state) => {
+      const storage = storeOf(instance);
+      // Underlying KV includes primary rows and unique indexes: no retired tombstones accumulate.
+      expect([...state.storage.kv.list({prefix: "operateRead"})].map(([key]) => key)).toEqual(["operateReadGeneration"]);
+      expect([...storage.operateReadGenerationRuns.list()]).toEqual([]);
+      for (const pair of retired) {
+        expect(storage.operateReadGenerationRuns.get(pair.threadId)).toBeUndefined();
+        expect(storage.operateReadGenerationRuns.byRun.get(pair.runId)).toBeUndefined();
+      }
+      expect(storage.operateReadGeneration.get()).toBe(String(generation + 1n));
+    });
+  }
+  await reserve(user, await user.prepareOperateReadRun());
+});
+
+it("rolls back boundary and every deleted row/index on a real storage transaction failure", async () => {
+  const name = crypto.randomUUID();
+  let user = env.TEST_USER.getByName(name);
+  const first = ids();
+  await reserve(user, first);
   await runInDurableObject(user, async instance => {
-    const storage = (instance as unknown as {storage: any}).storage;
-    const rows = [...storage.operateReadRuns.list()];
-    expect(rows).toHaveLength(256);
-    expect(rows.filter(row => row.chatId === undefined)).toHaveLength(255);
-    expect(storage.operateReadRuns.get("thread-0").chatId).toBe(17);
+    for (let i = 1; i < 256; ++i) {const pair = ids(); await instance.reserveOperateReadRun(pair.threadId, pair.runId);}
+    const storage = storeOf(instance);
+    const put = storage.operateReadGeneration.put;
+    storage.operateReadGeneration.put = (value: string) => {put(value); throw new Error("injected before commit");};
+    try { expect(await refusal(instance.prepareOperateReadRun())).toBe("injected before commit"); }
+    finally {storage.operateReadGeneration.put = put;}
   });
-  await env.TEST_USER.getByName(`${name}-other`).reserveOperateReadRun("new", "new");
+  await abortAllDurableObjects(); user = env.TEST_USER.getByName(name);
+  await runInDurableObject(user, instance => {
+    const storage = storeOf(instance);
+    expect(storage.operateReadGeneration.get()).toBe("1");
+    const rows = [...storage.operateReadGenerationRuns.list()];
+    expect(rows).toHaveLength(256);
+    for (const row of rows) expect(storage.operateReadGenerationRuns.byRun.get(row.runId)).toEqual(row);
+  });
+  expect(await refusal(reserve(user, first))).toBe("RUN_ALREADY_RESERVED");
+  const next = await user.prepareOperateReadRun();
+  await abortAllDurableObjects(); user = env.TEST_USER.getByName(name);
+  await reserve(user, next);
+  expect(await refusal(reserve(user, first))).toBe("RUN_GENERATION_RETIRED");
+});
+
+it("retains only existing legacy bindings and refuses legacy/mixed/future/malformed selectors", async () => {
+  const user = env.TEST_USER.getByName(crypto.randomUUID());
+  await runInDurableObject(user, instance => storeOf(instance).operateReadRuns.put({threadId: "legacy", runId: "legacy"}));
+  await user.bindOperateReadRun("legacy", 42);
+  expect(await refusal(user.bindOperateReadRun("missing", 42))).toBe("RUN_ALREADY_RESERVED");
+  expect(await refusal(user.reserveOperateReadRun("legacy", "legacy"))).toBe("READ_RUN_UPGRADE_REQUIRED");
+  expect(await refusal(user.reserveOperateReadRun("unused", "unused"))).toBe("READ_RUN_UPGRADE_REQUIRED");
+  expect(await refusal(reserve(user, ids(2n)))).toBe("RUN_GENERATION_INVALID");
+  expect(await refusal(reserve(user, {...ids(), runId: ids(2n).runId}))).toBe("RUN_GENERATION_INVALID");
+  expect(await refusal(reserve(user, {...ids(), threadId: "or2:01:t:invalid"}))).toBe("UNSUPPORTED_READ_INPUT");
+  expect(await refusal(user.bindOperateReadRun(ids().threadId, 42))).toBe("RUN_ALREADY_RESERVED");
+  await runInDurableObject(user, instance => {
+    expect([...storeOf(instance).operateReadGenerationRuns.list()]).toEqual([]);
+    expect([...storeOf(instance).operateReadRuns.list()]).toEqual([{threadId: "legacy", runId: "legacy", chatId: 42}]);
+  });
+});
+
+it("uses exact uint64 boundaries above Number precision and fails closed on overflow/oversized legacy state", async () => {
+  for (const generation of [9_007_199_254_740_993n, MAX_READ_GENERATION]) {
+    const user = env.TEST_USER.getByName(crypto.randomUUID());
+    await runInDurableObject(user, async instance => {
+      storeOf(instance).operateReadGeneration.put(String(generation));
+      for (let i = 0; i < 256; ++i) {const pair = ids(generation); await instance.reserveOperateReadRun(pair.threadId, pair.runId);}
+    });
+    if (generation === MAX_READ_GENERATION) expect(await refusal(user.prepareOperateReadRun())).toBe("READ_RUN_STORAGE_REFUSED");
+    else {
+      const next = await user.prepareOperateReadRun();
+      expect(parseReadRunSelectors(next.threadId, next.runId)).toBe(generation + 1n);
+      await reserve(user, next);
+      expect(await refusal(reserve(user, ids(generation)))).toBe("RUN_GENERATION_RETIRED");
+    }
+  }
+  const user = env.TEST_USER.getByName(crypto.randomUUID());
+  await runInDurableObject(user, instance => {
+    for (let i = 0; i < 257; ++i) storeOf(instance).operateReadRuns.put({threadId: `legacy-${i}`, runId: `legacy-${i}`});
+  });
+  expect(await refusal(user.prepareOperateReadRun())).toBe("READ_RUN_STORAGE_REFUSED");
+  expect(await refusal(reserve(user, ids()))).toBe("READ_RUN_STORAGE_REFUSED");
+});
+
+it.each(["0", "01", "18446744073709551616", "corrupt", 1])("refuses invalid persisted generation %j", async value => {
+  const user = env.TEST_USER.getByName(crypto.randomUUID());
+  await runInDurableObject(user, instance => storeOf(instance).operateReadGeneration.put(value));
+  expect(await refusal(user.prepareOperateReadRun())).toBe("READ_RUN_STORAGE_REFUSED");
+  expect(await refusal(reserve(user, ids()))).toBe("READ_RUN_STORAGE_REFUSED");
 });
 
 it("offers only page read and refuses hostile tools and navigation at execution in the real agent loop", async () => {

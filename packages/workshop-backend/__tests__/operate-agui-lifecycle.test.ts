@@ -1,3 +1,4 @@
+import { newReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AuthenticatedApi, AiChatSubscriber, OperateSession, Overseer } from "@gadgets/workshop-shared/api";
 import { INITIAL_OPERATE_PAGE, type OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
@@ -45,7 +46,7 @@ function fixture() {
   // Only the methods consumed by this adapter are present; their payloads derive from the public API.
   const authenticate = async () => ({getOperateSession: async () => session}) as AuthenticatedApi;
   const request = new Request("http://localhost/api/operate/agui", {method: "POST", body: JSON.stringify({
-    threadId: "thread", runId: "run", messages: [{id: "prompt", role: "user", content: "Read"}],
+    ...newReadRunSelectors(1n), messages: [{id: "prompt", role: "user", content: "Read"}],
     tools: [], context: [], state: {},
   })});
   const lateCallbacks = () => {
@@ -107,4 +108,16 @@ it("reader cancellation disposes both timers and every owned capability without 
   f.cleaned();
   expect(f.history).not.toHaveBeenCalled();
   expect(f.session.startReadRun).toHaveBeenCalledTimes(1);
+});
+
+it("prepares through a local session target without requiring a disposable RPC stub", async () => {
+  const ids = newReadRunSelectors(1n);
+  const prepareReadRun = vi.fn<OperateSession["prepareReadRun"]>().mockResolvedValue(ids);
+  // HTTP authentication returns a local target; only a remote stub is disposable.
+  const authenticate = async () => ({getOperateSession: async () => ({prepareReadRun})}) as AuthenticatedApi;
+  const response = await handleOperateAgui(new Request("http://localhost/api/operate/agui/prepare", {method: "POST"}), authenticate);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual(ids);
+  expect(prepareReadRun).toHaveBeenCalledTimes(1);
+  expect(response.headers.get("Cache-Control")).toBe("no-store");
 });

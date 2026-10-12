@@ -1,3 +1,4 @@
+import { readRunError, READ_RUN_ERROR_STATUS } from "@gadgets/workshop-shared/operate-read-run";
 import { RpcStub as NativeRpcStub, RpcTarget } from "cloudflare:workers";
 import { EventType } from "@ag-ui/core";
 import type { RpcStub } from "capnweb";
@@ -44,8 +45,21 @@ export async function handleOperateAgui(request: Request,
   }
   let api: AuthenticatedApi;
   try { api = await authenticate(); } catch { return error(401, "AUTHENTICATION_REQUIRED"); }
+  if (new URL(request.url).pathname === "/api/operate/agui/prepare") {
+    try {
+      const session = await api.getOperateSession();
+      try { return Response.json(await session.prepareReadRun(), {headers: {"Cache-Control": "no-store"}}); }
+      finally { if (Symbol.dispose in session) session[Symbol.dispose](); }
+    } catch (cause) {
+      const code = readRunError(cause);
+      return error(code ? READ_RUN_ERROR_STATUS[code] : 403, code ?? "READ_RUN_REFUSED");
+    }
+  }
   let input: OperateReadRun;
-  try { input = await readInput(request); } catch { return error(400, "UNSUPPORTED_READ_INPUT"); }
+  try { input = await readInput(request); } catch (cause) {
+    const code = readRunError(cause);
+    return error(code ? READ_RUN_ERROR_STATUS[code] : 400, code ?? "UNSUPPORTED_READ_INPUT");
+  }
 
   const owned: Disposable[] = [];
   let ended = false;
@@ -146,8 +160,8 @@ export async function handleOperateAgui(request: Request,
     cleanup();
     const code = getOperateSessionErrorCode(cause);
     if (code === OPERATE_SESSION_ERROR_CODES.conflict) return error(409, "OPERATE_SEQUENCE_CONFLICT");
-    if (cause instanceof Error && cause.message === "OPERATE_READ_DUPLICATE") return error(409, "RUN_ALREADY_RESERVED");
-    if (cause instanceof Error && cause.message === "OPERATE_READ_CAPACITY") return error(429, "RUN_CAPACITY_EXHAUSTED");
+    const readCode = readRunError(cause);
+    if (readCode) return error(READ_RUN_ERROR_STATUS[readCode], readCode);
     return error(403, "READ_RUN_REFUSED");
   }
 }

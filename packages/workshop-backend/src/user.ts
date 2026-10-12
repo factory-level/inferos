@@ -1,3 +1,4 @@
+import { MAX_READ_GENERATION, isLegacyReadSelector, newReadRunSelectors, parseReadRunSelectors, parseReadSelector } from "@gadgets/workshop-shared/operate-read-run";
 import { RpcStub } from "capnweb";
 import { openAiCommand } from './openai-plugin.js';
 import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
@@ -312,8 +313,13 @@ function makeUserStorage(storage: DurableObjectStorage) {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
       }),
-      // Permanent reservations prevent retry after an ambiguous failure from repeating work.
+      // Closed legacy ledger: existing binds may finish, but no new legacy admission.
       operateReadRuns: collection<{threadId: string; runId: string; chatId?: number}>()({
+        primaryKey: "threadId",
+        uniqueIndexes: {byRun: (record: {runId: string}) => record.runId},
+      }),
+      // Only the current generation needs detailed replay records; the boundary rejects all older IDs.
+      operateReadGenerationRuns: collection<{threadId: string; runId: string; chatId?: number}>()({
         primaryKey: "threadId",
         uniqueIndexes: {byRun: (record: {runId: string}) => record.runId},
       }),
@@ -324,6 +330,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       }),
     },
     singletons: {
+      operateReadGeneration: "1",
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
       // null until a Cloudflare account is connected and resolved.
       cloudflareBilling: <CloudflareBilling | null>null,
@@ -1111,24 +1118,60 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.#operatePage();
   }
 
-  /** Reserve both selectors synchronously before work, with a permanent 256-run admission bound. */
-  async reserveOperateReadRun(threadId: string, runId: string): Promise<void> {
-    if (this.storage.operateReadRuns.get(threadId) || this.storage.operateReadRuns.byRun.get(runId)) {
-      throw new Error("OPERATE_READ_DUPLICATE");
+  #readGeneration(): bigint {
+    const value = this.storage.operateReadGeneration.get();
+    if (typeof value !== "string" || !/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > MAX_READ_GENERATION ||
+        [...this.storage.operateReadRuns.list({limit: 257})].length > 256) {
+      throw new Error("READ_RUN_STORAGE_REFUSED");
     }
-    // Never evict a selector: doing so would silently replay an uncertain operation. A bounded
-    // scan also fails closed for an older store already above capacity, without a drifting counter.
-    if (Array.from(this.storage.operateReadRuns.list({limit: 256})).length >= 256) {
-      throw new Error("OPERATE_READ_CAPACITY");
-    }
-    this.storage.operateReadRuns.put({threadId, runId});
+    return BigInt(value);
   }
 
-  /** Bind only an already reserved run to its session chat. */
+  /** Prepare fresh selectors; rotate only a full generation, atomically with all row/index deletion. */
+  async prepareOperateReadRun(): Promise<{threadId: string; runId: string}> {
+    return this.storage.transaction(() => {
+      let generation = this.#readGeneration();
+      const rows = [...this.storage.operateReadGenerationRuns.list({limit: 257})];
+      if (rows.length > 256) throw new Error("READ_RUN_STORAGE_REFUSED");
+      if (rows.length === 256) {
+        if (generation === MAX_READ_GENERATION) throw new Error("READ_RUN_STORAGE_REFUSED");
+        ++generation;
+        for (const row of rows) this.storage.operateReadGenerationRuns.delete(row.threadId);
+      }
+      this.storage.operateReadGeneration.put(generation.toString());
+      return newReadRunSelectors(generation);
+    });
+  }
+
+  /** Reserve before work. Deleting retired detail never re-enables its generation's identities. */
+  async reserveOperateReadRun(threadId: string, runId: string): Promise<void> {
+    const requested = parseReadRunSelectors(threadId, runId);
+    this.storage.transaction(() => {
+      const current = this.#readGeneration();
+      if (requested < current) throw new Error("RUN_GENERATION_RETIRED");
+      if (requested > current) throw new Error("RUN_GENERATION_INVALID");
+      const runs = this.storage.operateReadGenerationRuns;
+      if (runs.get(threadId) || runs.byRun.get(runId)) throw new Error("RUN_ALREADY_RESERVED");
+      if ([...runs.list({limit: 256})].length >= 256) throw new Error("RUN_CAPACITY_EXHAUSTED");
+      runs.put({threadId, runId});
+    });
+  }
+
+  /** Bind only a reservation; retired late binds must neither resurrect rows nor fail created chats. */
   async bindOperateReadRun(threadId: string, chatId: number): Promise<void> {
-    const record = this.storage.operateReadRuns.get(threadId);
-    if (!record || record.chatId !== undefined) throw new Error("OPERATE_READ_DUPLICATE");
-    this.storage.operateReadRuns.put({...record, chatId});
+    this.storage.transaction(() => {
+      const legacy = isLegacyReadSelector(threadId);
+      if (!legacy) {
+        const requested = parseReadSelector(threadId, "t");
+        const current = this.#readGeneration();
+        if (requested < current) return;
+        if (requested > current) throw new Error("RUN_GENERATION_INVALID");
+      }
+      const runs = legacy ? this.storage.operateReadRuns : this.storage.operateReadGenerationRuns;
+      const record = runs.get(threadId);
+      if (!record || record.chatId !== undefined) throw new Error("RUN_ALREADY_RESERVED");
+      runs.put({...record, chatId});
+    });
   }
 
   /**
