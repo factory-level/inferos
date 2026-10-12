@@ -256,8 +256,8 @@ describe("readCommitBlob", () => {
     let { store, oid } = await commitSpecialEntries();
     expect(await store.readCommitBlob(oid, "dir/view.json", "text")).toBe("{}");
     await expect(store.readCommitFiles(oid)).rejects.toBeInstanceOf(UnsupportedTreeEntryError);
-    for (let read of [store.readCommitBlob(oid, path), store.readCommitBlob(oid, path, "text")]) {
-      let error = await read.then(() => null, (thrown: unknown) => thrown);
+    for (let read of [() => store.readCommitBlob(oid, path), () => store.readCommitBlob(oid, path, "text")]) {
+      let error = await read().then(() => null, (thrown: unknown) => thrown);
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe(`unsupported tree entry at ${at}: mode ${mode}`);
       expect((error as Error).name).toBe("UnsupportedTreeEntryError");
