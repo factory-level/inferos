@@ -132,6 +132,8 @@ export function getToolCallSummary(
       return { verb: "Listed console tools" };
     case "callConsoleTool":
       return { verb: "Called console tool", target: tc.input.tool };
+    case "operatePage":
+      return { verb: tc.input.action ? "Updated page" : "Read page" };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
@@ -231,6 +233,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return "Listed console tools";
     case "callConsoleTool":
       return count === 1 ? "Called a console tool" : `Called ${count} console tools`;
+    case "operatePage":
+      return `Used page ${formatTimes(count)}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -267,6 +271,7 @@ export function getToolIcon(
       return Blueprint;
     case "listCanvases":
     case "editCanvas":
+    case "operatePage":
       return SquaresFour;
     case "observeUserChanges":
       return MagnifyingGlass;
@@ -305,6 +310,8 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Fetching web page";
     case "observeUserChanges":
       return "Observing user changes";
+    case "operatePage":
+      return "Using page";
     case "giveUp":
       return "Stopping";
     default:
@@ -340,6 +347,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "editCanvas": return "Editing canvas";
     case "listConsoleTools": return "Listing console tools";
     case "callConsoleTool": return "Calling console tool";
+    case "operatePage": return "Using page";
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -370,6 +378,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "editCanvas": return `Making ${pluralize(count, "canvas edit")}`;
     case "listConsoleTools": return "Listing console tools";
     case "callConsoleTool": return `Calling ${pluralize(count, "console tool")}`;
+    case "operatePage": return `Using page ${formatTimes(count)}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
