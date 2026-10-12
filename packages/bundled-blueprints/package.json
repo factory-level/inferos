@@ -11,7 +11,8 @@
   },
   "scripts": {
     "test:run": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:example": "node src/cli/build-example.ts"
   },
   "dependencies": {
     "yjs": "^13.6.33"

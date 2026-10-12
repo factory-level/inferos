@@ -33,6 +33,6 @@
     "noEmit": true
   },
   "files": [],
-  "include": ["blueprints/*/__tests__/**/*.ts", "libraries/*/__tests__/**/*.ts"],
+  "include": ["blueprints/*/__tests__/**/*.ts", "examples/*/__tests__/**/*.ts", "libraries/*/__tests__/**/*.ts"],
   "exclude": ["**/server.test.ts", "**/*.server.test.ts"]
 }

@@ -1,0 +1,22 @@
+{
+  "$comment": "An EXAMPLE, not a bundled blueprint: it lives outside blueprints/, so no deployment installs or promotes it. Build its archive with `pnpm --filter @gadgets/bundled-blueprints build:example` and import it by hand. Its data is a synthetic fixture in its own files.",
+  "blueprintId": "example.model-usage",
+  "title": "Model usage (demo data)",
+  "description": "Use to preview a read-only model-usage view on SYNTHETIC demo data: tokens and cost per model and provider for one demo workspace over a fixed window, each cost labelled estimated, provider-reported or billed, with freshness. It reads no real usage, bill or provider, has no bindings, and enforces no budget.",
+  "output": {
+    "id": "model-usage",
+    "noun": "Model usage view",
+    "plural": "Model usage views",
+    "icon": "chartBar"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "revision": 1,
+  "created": "2026-10-12T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-10-12T00:00:00.000Z",
+  "bindings": {}
+}

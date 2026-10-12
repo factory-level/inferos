@@ -40,5 +40,5 @@
     "noEmit": true
   },
   "files": [],
-  "include": ["blueprints/*/files/server.ts", "libraries/*/server.ts"]
+  "include": ["blueprints/*/files/server.ts", "examples/*/files/server.ts", "libraries/*/server.ts"]
 }

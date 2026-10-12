@@ -37,6 +37,8 @@
   "include": [
     "blueprints/*/__tests__/**/server.test.ts",
     "blueprints/*/__tests__/**/*.server.test.ts",
+    "examples/*/__tests__/**/server.test.ts",
+    "examples/*/__tests__/**/*.server.test.ts",
     "libraries/*/__tests__/**/server.test.ts",
     "libraries/*/__tests__/**/*.server.test.ts"
   ]
