@@ -1,6 +1,13 @@
 ---
 title: Operate mode
 covers:
+  - packages/workshop-backend/src/operate-agui.ts
+  - packages/workshop-backend/src/operate-agui-protocol.ts
+  - packages/workshop-backend/__tests__/operate-agui-protocol.test.ts
+  - packages/workshop-backend/__tests__/operate-agui-lifecycle.test.ts
+  - packages/workshop-backend/__tests__/operate-agui.test.ts
+  - packages/integration-tests/__tests__/operate-agui.test.ts
+  - packages/integration-tests/fixtures/operate-agui-loss-worker.js.txt
   - packages/workshop-shared/src/operate-session.ts
   - packages/workshop-shared/src/api.ts
   - packages/workshop-backend/src/user.ts
@@ -62,7 +69,7 @@ covers:
   - packages/integration-tests/__tests__/operate-console-tools-off.test.ts
   - packages/integration-tests/fixtures/gatekeeper-test/src/test-gatekeeper.ts
   - packages/workshop-frontend/src/features/chat/activity/toolCallLabels.ts
-updated: 2026-10-11
+updated: 2026-10-12
 ---
 
 # Operate mode
@@ -70,6 +77,83 @@ updated: 2026-10-11
 ## Overview
 
 The operate session is implemented in the kernel: one per person, holding a page state that is the replay of an ordered event log, plus an owner-only workspace for its operate chat. Clients reach it through `AuthenticatedApi.getOperateSession()`. The session workspace is operate-only, enforced in its Overseer: its capability denies every authoring method, and its chats' agents get a tool set with no authoring tools plus `operatePage`, which changes the page as the agent.
+
+## AG-UI read/navigation producer
+
+`POST /api/operate/agui` is a bounded AG-UI 1.0 producer alongside the unchanged Cap'n Web
+`/api` endpoint. It reuses sign-in configuration checks and configured CF Access validation.
+An existing session token may be carried in `Authorization: Bearer ...`; when CF Access is
+configured its JWT and same-origin checks still apply. Without a token, a verified CF Access
+identity may authenticate through the existing person lookup. An Origin header naming another
+origin is refused. IDs in JSON are selectors, never credentials.
+
+The endpoint validates the canonical `@ag-ui/core` 1.0.2 RunAgentInput, then its supported subset:
+one new user text message, empty state/tools/context, no parent run or resume, and optional
+`forwardedProps.operate = {event: {type: "openBoard", board: {workspaceId, boardRef}}, expectedSeq}`.
+Text content may be a string or text parts. Unknown fields, client-authored trusted history and
+other navigation kinds are refused before work. Input is limited to 64 KiB and 16,384 text
+characters; thread/run ids are 1–128 alphanumeric, underscore or hyphen characters. The person's
+configured model selection is resolved server-side. This first increment does not continue a
+previous AG-UI thread or accept client-supplied tools, provider credentials or approval answers.
+
+`OperateSession.startReadRun` reserves thread and run selectors in the person's User DO before
+navigation or model work. Both are one-shot within that person; a duplicate is refused, including
+after partial setup, disconnect or a restart. The reservation is retained and associated with the
+new chat once created. Admission is limited to 256 lifetime reservations per person, including
+failed setup. At capacity, new selectors receive HTTP 429 `RUN_CAPACITY_EXHAUSTED` before navigation
+or model work; existing selectors still receive 409. Capacity does not reset on restart or completion.
+Reservations have no automatic expiry or eviction; retrying an uncertain operation is not an
+implicit replay. Navigation and chat creation are separate commits: a later setup failure
+does not roll back an authorized navigation; callers recover actual state through the session log.
+A stale expectedSeq returns a conflict without appending the navigation;
+clients resubscribe/read the existing session log and submit a new run with the current sequence.
+The existing session dispatch checks current access to the board connection. This does not promise
+immediate downstream permission revocation beyond the underlying capability's behavior.
+In particular, disconnecting an account does not remove its workspace connection entry, so this
+reference-only navigation may still succeed; removing that connection makes navigation fail.
+
+The chat lives in the person's existing owner-only Operate workspace. Its `chatContext` is marked
+`operateReadOnly` in the transaction creating the chat, before the agent starts. The restricted
+chat receives no ambient binding catalogs and offers only `operatePage`; execution also rejects
+other tools and any arguments to that read tool. Later ordinary RPC text messages retain this
+policy; resources, attachments, formats and slash-command requests cannot be added to the chat.
+The page tool returns the same explicit projection as the wire. The existing chat transcript
+labels its durable `operatePage` records as page reads or updates and gives provisional calls a
+neutral page label; the AG-UI client introduces no new UI route. Ordinary Operate chats retain their
+existing tools and the Wiki exclusion is unchanged. No approvals, writes or connection requests
+are made available by this producer.
+
+HTTP owns subscriptions to the selected chat and the per-person page, set up before starting the
+run. Subscriptions span all workspace chats internally, so callbacks are filtered to the reserved
+chat. Committed chat steps produce canonical text/tool lifecycle events and authoritative message
+snapshots; tool ids are retained and message ids derive from chat and log sequence. Duplicate
+history rows are reconciled by id. Provisional tokens are deliberately withheld until the durable
+step commits: this is step streaming, not token streaming. Existing caller-visible reasoning is
+included in history snapshots. Unsupported activity and custom payloads are not serialized. A tool
+input-complete callback is never presented as successful execution.
+
+An initial state snapshot contains `operate`; subsequent authoritative changes replace only that
+subtree with a JSON Patch. The projection enumerates sequence, references, subject and layout
+fields; it excludes entity bodies, handover notes, approval outcomes and capability data. Incoming
+state is never restored. An unchanged revision hint does not invent a session sequence or log row.
+
+Each complete writable stream starts once with protocolVersion 1.0 and ends once. Successful
+completion closes all spans first; output exhaustion may abort an open span with RUN_ERROR.
+Observed kernel errors produce a generic RUN_ERROR without raw exception text. HTTP setup
+failures return bounded codes; sequence and duplicate conflicts use 409. Native subscription leases
+have no broken-connection callback, so silent failure reaches RUN_ERROR at the 60-second deadline.
+Heartbeats are SSE comments at 15 seconds. Disconnect disposes subscriptions/timers but does not
+promise to cancel a kernel turn or deliver a terminal event over a broken connection. Clients may
+read existing RPC history/session state to recover; resubmission of the same selectors is refused.
+An output limit of 4 MiB emits a safe RUN_ERROR and closes the stream instead of buffering indefinitely.
+
+The schema, license and all 68 upstream fixtures are vendored under backend test fixtures with
+PROVENANCE.json, at upstream e776b21027bef590905fb75f004e995dbe0941f4. Schema SHA-256 is
+4b5c93226838a0e72d88e6c5df20633c686c49fcb75d9be2815c6cbf9e48e71a. Tests independently validate
+wire frames with Ajv and exercise selected upstream fixture semantics with the pinned standard
+client. Fixture presence is not full semantic conformance. Scripted local HTTP tests establish
+only the bounded read/navigation contract, not live model/sign-in proof, approval interrupts,
+widget actions or full MVP-33. ADR-0020 remains proposed; #231/#232 and #66 are separate follow-ons.
 
 ## Components
 

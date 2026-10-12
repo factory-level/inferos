@@ -48,6 +48,8 @@ export const UNIT_NODE: readonly string[] = [
   "mock-storage.test.ts",
   "open-gadget-errors.test.ts",
   "operate-console.test.ts",
+  "operate-agui-protocol.test.ts",
+  "operate-agui-lifecycle.test.ts",
   "operate-session.test.ts",
   "publication.test.ts",
   "raw-sources.test.ts",
@@ -86,6 +88,7 @@ export const WORKERD_LIGHT: readonly string[] = [
  * worker instead of once per file; a file here must not leave state another file can see.
  */
 export const BACKEND: readonly string[] = [
+  "operate-agui.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
   "authorize-observation-flags.test.ts",
