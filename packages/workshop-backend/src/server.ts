@@ -1,3 +1,4 @@
+import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
 import { handleOperateAgui } from "./operate-agui.js";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
@@ -939,14 +940,17 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     };
   }
 
+  async prepareReadRun(): Promise<{threadId: string; runId: string}> {
+    return this.user().prepareOperateReadRun();
+  }
+
   async startReadRun(input: OperateReadRun): Promise<number> {
-    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.threadId) ||
-        !/^[a-zA-Z0-9_-]{1,128}$/.test(input.runId) ||
-        !input.message.trim() || input.message.length > 16_384) {
-      throw new Error("OPERATE_READ_INVALID");
+    parseReadRunSelectors(input.threadId, input.runId);
+    if (typeof input.message !== "string" || !input.message.trim() || input.message.length > 16_384) {
+      throw new Error("UNSUPPORTED_READ_INPUT");
     }
     if (input.navigation && (!Number.isSafeInteger(input.navigation.expectedSeq) ||
-        input.navigation.expectedSeq < 0)) throw new Error("OPERATE_READ_INVALID");
+        input.navigation.expectedSeq < 0)) throw new Error("UNSUPPORTED_READ_INPUT");
     await this.user().reserveOperateReadRun(input.threadId, input.runId);
     if (input.navigation) await this.dispatch(input.navigation.event, input.navigation.expectedSeq);
     using workspace = await this.openWorkspace();
@@ -1246,7 +1250,7 @@ export default {
       return handleClientErrorRequest(req, env, ctx);
     }
 
-    if (url.pathname === "/api" || url.pathname === "/api/operate/agui") {
+    if (url.pathname === "/api" || url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/prepare") {
       // Fail closed on a sign-in allowlist the deployment cannot honour, with the reason.
       try {
         await (authGatekeepersChecked ??= assertAuthGatekeepersConfigured(env));
@@ -1297,7 +1301,7 @@ export default {
         accessPayload = payload;
       }
 
-      if (url.pathname === "/api/operate/agui") {
+      if (url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/prepare") {
         return handleOperateAgui(req, async () => {
           const api = new PublicApiImpl(ctx, env, () => {}, accessPayload);
           const authorization = req.headers.get("Authorization");

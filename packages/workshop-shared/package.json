@@ -67,6 +67,10 @@
       "types": "./src/password-salt.ts",
       "import": "./src/password-salt.ts"
     },
+    "./operate-read-run": {
+      "types": "./src/operate-read-run.ts",
+      "import": "./src/operate-read-run.ts"
+    },
     "./operate-session": {
       "types": "./src/operate-session.ts",
       "import": "./src/operate-session.ts"
