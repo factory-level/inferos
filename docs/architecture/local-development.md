@@ -221,6 +221,15 @@ Measured on 2026-10-11 on a shared 14-core machine:
 - **A workshop-backend test file:** a one-file change takes about 17 s. Most of that is the three-program type-check, which runs in parallel with the test.
 - **`src/sharing.ts`:** a change takes about 73 s, because `vitest related` reaches 17 unit and 4 integration files that load the backend.
 
+## Failed-test diagnostics in CI
+
+When the CI Test step fails, the job's last step, `node scripts/vp/last-run-report.ts --since "$RUNNER_TEMP/test-step-started"`, prints that same run's evidence. It runs only after a Test failure. The step before Test touches the marker file.
+
+- **Task outcomes.** One line per task from vp's `last-summary.json`, which vp writes after every run, failed ones included. Each line gives the outcome kind and exit code, so a watchdog's 124 is separated from the siblings it took down when vp cancelled them. Commands, read paths, environment and error messages are never printed.
+- **Integration phases.** The tail of `packages/integration-tests/node_modules/.vite/integration-phases.jsonl`, with the phases still open when it stopped, the longest gaps between events, and the gap from the last event to the end of the run. `src/phase-log.ts`, a setup file, appends the suite-start, test-start, test-end and suite-end timestamps per worker pid. It writes them to that file only: the idle watchdog resets on any output, so printing them would change which silences it catches. `__tests__/phase-log.test.ts` guards that.
+- **Same run only.** A summary or phase log older than the marker came from an earlier invocation, such as Build, and is withheld.
+- **No change to the job's result.** The report always exits 0, so the job keeps the Test step's status and gains no second failure. It changes no command, timeout, concurrency, permission or trigger.
+
 ## Configuration
 
 cloudflare.config.ts is authoritative; pnpm configs:generate emits wrangler.jsonc. The default frontend and backend ports are 3000 and 8787; a `pnpm wt` worktree's own come from its `.env.worktree` (see [parallel worktrees](#parallel-worktrees)). That overlay, then a root `.dev.vars`, then a root `.env`, fill variables the shell has not set. Remote Workers AI requires account access. See the [settings](../wiki/configuration-reference.md) and [parity](../wiki/local-cloud-parity.md) wiki pages.
