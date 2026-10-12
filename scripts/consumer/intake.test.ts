@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { z } from "zod";
 import { bootstrapConsumer } from "./bootstrap.ts";
 import { CAPABILITY_NAMES } from "./config.ts";
-import { inferOpsBindingFromEnv, pillarMembers, type FetchSeam } from "./intake-inferops.ts";
+import { inferOpsBindingFromEnv, inferOpsComplete, pillarMembers, type FetchSeam } from "./intake-inferops.ts";
 import {
   applyIntake, applyIntakeWithInferOps, CUSTOMER_VIEW_FILE, INTAKE_MAX_BYTES, MANAGED_RECORD_FILE, parseIntake, readIntakeFile, REPORT_FILES,
   type ExecSeam,
@@ -331,7 +331,11 @@ const providerError = (status: number, code: string) => reply(status, { success:
  * An in-memory InferOps with the five calls `--inferops` makes. Ids are stable across calls, like the
  * real provider's idempotent applies; `fail` makes one step answer with an error or an incomplete body.
  */
-function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake" | "pillars" | "readback" | "incomplete" | "keep", number | true>> = {}) {
+function fakeInferOps(
+  fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake" | "pillars" | "readback" | "incomplete" | "keep", number | true>> = {},
+  /** Fields merged into both intake responses, e.g. a provider's `intakeSha256` and `requirementReport`. */
+  intakeResponse: Record<string, unknown> = {},
+) {
   const requests: RequestInit[] = [];
   const calls: { method: string; path: string; workspace: string | null; idempotencyKey: string | null; authorization: string | null; dryRun: boolean }[] = [];
   let intakeApplied = false;
@@ -349,7 +353,7 @@ function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake
     const step = (name: keyof typeof fail) => fail[name] === undefined ? null : providerError(fail[name] === true ? 500 : fail[name] as number, "FAKE_FAILURE");
     if (pathname === "/project/intake" && JSON.parse(String(init.body)).dryRun === true) {
       // The provider's dry run checks the intake's tenant and workspace against the workspace it runs in.
-      return step("opsRead") ?? (workspace === OPS ? reply(200, { intakeSha256: "c".repeat(64), dryRun: true, alreadyApplied: intakeApplied, changes: [], pillars: [] }) : providerError(403, "FORBIDDEN"));
+      return step("opsRead") ?? (workspace === OPS ? reply(200, { intakeSha256: "c".repeat(64), dryRun: true, alreadyApplied: intakeApplied, changes: [], pillars: [], ...intakeResponse }) : providerError(403, "FORBIDDEN"));
     }
     if (pathname === "/knowledge/wiki/structure" && !structureBuilt) return step("knowledgeRead") ?? (workspace === KNOWLEDGE ? reply(200, { root: null, pillars: [], unfiled: [] }) : providerError(403, "FORBIDDEN"));
     if (pathname === "/project/intake") {
@@ -358,7 +362,7 @@ function fakeInferOps(fail: Partial<Record<"opsRead" | "knowledgeRead" | "intake
       if (failed) return failed;
       const already = intakeApplied;
       intakeApplied = true;
-      return reply(200, { intakeSha256: "c".repeat(64), dryRun: false, alreadyApplied: already, changes: [{ kind: "project", key: "OPS", action: already ? "unchanged" : "create" }], pillars: [] });
+      return reply(200, { intakeSha256: "c".repeat(64), dryRun: false, alreadyApplied: already, changes: [{ kind: "project", key: "OPS", action: already ? "unchanged" : "create" }], pillars: [], ...intakeResponse });
     }
     if (pathname === "/knowledge/wiki/pillars") {
       if (workspace !== KNOWLEDGE) return providerError(403, "FORBIDDEN");
@@ -574,4 +578,124 @@ test("a pillar InferOps still holds outside the selection reads back as incomple
   assert.equal(report.inferops?.readback, "incomplete");
   assert.deepEqual(report.inferops?.leftoverPillars, ["dispatch"]);
   assert.match(report.inferops?.error ?? "", /no longer selects are still live: dispatch/);
+});
+
+// ── InferOps' requirement report (inferops #2324/#2380) ───────────────────────────────────────────
+
+/**
+ * What InferOps' own code returns for the Acme sample: `requirementReport` and the canonical
+ * `intakeSha256`, produced by running inferops `domains/project/backend/intake.ts` `requirementReport`
+ * and `shared/intake-canonical.ts` `intakeSha256` at develop b64d08f9e1e6501275b2c8dd65ba34ded58da350,
+ * and validated by its `IntakeRequirementReportSchema`. Provider code output, not a live HTTP call.
+ */
+const PROVIDER = readJson(join(import.meta.dirname, "fixtures/intake/acme-field-ops.inferops-requirement-report.json")) as {
+  intakeSha256: string; requirementReport: { intakeSha256: string; requirements: Record<string, unknown>[] };
+};
+const providerResponse = (mutate: (report: { intakeSha256: string; requirements: Record<string, unknown>[] }) => unknown = report => report) => ({
+  intakeSha256: PROVIDER.intakeSha256,
+  requirementReport: mutate(structuredClone(PROVIDER.requirementReport)),
+});
+
+test("InferOps' requirement report is carried as its own disposition, apart from the wrapper's", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-inferops-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = wrapper(dir);
+  const intake = readJson(intakePath) as { requirements: { id: string; category: string }[] };
+  const fake = fakeInferOps({}, providerResponse());
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  const provider = report.inferops!.requirementReport;
+  assert.equal(provider.status, "reported");
+  assert.equal(provider.problem, null);
+  assert.equal(provider.intakeSha256, PROVIDER.intakeSha256);
+  assert.deepEqual(provider.requirements.map(r => [r.id, r.category]), intake.requirements.map(r => [r.id, r.category]));
+  assert.ok(provider.requirements.every(r => r.disposition === "unresolved" && r.needsReview && r.reason === "fulfillment-not-assessed"));
+  // The wrapper's Wiki requirement is `supported` (its capability applied); InferOps still says unresolved.
+  const wiki = report.requirements.find(requirement => requirement.category === "wiki")!;
+  assert.equal(wiki.disposition, "supported");
+  assert.equal(provider.requirements.find(r => r.id === wiki.id)?.disposition, "unresolved");
+  // Reporting reads the response already received: the calls are exactly those without a report.
+  assert.deepEqual(fake.calls.map(call => call.path), fakeCallsWithoutReport);
+  const markdown = readFileSync(join(target, REPORT_FILES.markdown), "utf8");
+  assert.match(markdown, /### InferOps requirement report/);
+  assert.match(markdown, /\| REQ-04 \| wiki \| unresolved \| yes \| fulfillment-not-assessed \|/);
+  assert.equal(readJson(join(target, REPORT_FILES.json)).inferops.requirementReport.status, "reported");
+
+  // A replay reports the same thing, byte for byte (the rest of the report legitimately says "already applied").
+  const section = (text: string) => text.slice(text.indexOf("### InferOps requirement report"), text.indexOf("## Operational inventory"));
+  const again = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.equal(again.inferops!.alreadyApplied, true);
+  assert.deepEqual(again.inferops!.requirementReport, provider);
+  assert.equal(section(readFileSync(join(target, REPORT_FILES.markdown), "utf8")), section(markdown));
+  assert.ok(section(markdown).length > 200);
+});
+
+const fakeCallsWithoutReport = ["/project/intake", "/knowledge/wiki/structure", "/project/intake", "/knowledge/wiki/pillars", "/knowledge/wiki/structure"];
+
+test("a provider without a requirement report is reported unavailable, never as complete", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-inferops-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = wrapper(dir);
+  const fake = fakeInferOps();
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.deepEqual(report.inferops!.requirementReport, { status: "unavailable", problem: null, intakeSha256: null, requirements: [] });
+  assert.ok(inferOpsComplete(report.inferops!), "the apply itself still completed");
+  assert.deepEqual(fake.calls.map(call => call.path), fakeCallsWithoutReport);
+  assert.match(readFileSync(join(target, REPORT_FILES.markdown), "utf8"), /Unavailable: this InferOps did not return a requirement report/);
+});
+
+test("an untrustworthy requirement report is invalid, names no reported value, and changes no step", async t => {
+  const SECRET = "planted-provider-value-0xFEED";
+  const cases: [string, (report: { intakeSha256: string; requirements: Record<string, unknown>[] }) => unknown, RegExp][] = [
+    ["not an object", () => [SECRET], /^requirementReport: expected exactly intakeSha256, requirements$/],
+    ["extra key", report => ({ ...report, [SECRET]: true }), /^requirementReport: expected exactly/],
+    ["hash mismatch", report => ({ ...report, intakeSha256: "d".repeat(64) }), /does not match the apply response's intakeSha256/],
+    ["malformed hash", report => ({ ...report, intakeSha256: SECRET }), /intakeSha256: expected a sha-256 hex digest/],
+    ["requirements not an array", report => ({ ...report, requirements: SECRET }), /requirements: expected an array/],
+    ["missing requirement", report => ({ ...report, requirements: report.requirements.slice(1) }), /expected 8 entries, one per intake requirement, got 7/],
+    ["extra requirement", report => ({ ...report, requirements: [...report.requirements, { ...report.requirements[0], id: SECRET }] }), /expected 8 entries/],
+    ["duplicate id", report => ({ ...report, requirements: [report.requirements[0], ...report.requirements.slice(0, 7)] }), /an id appears more than once/],
+    ["foreign id", report => { report.requirements[2]!.id = SECRET; return report; }, /^requirementReport\.requirements\[2\]\.id: not a requirement of this intake$/],
+    ["reordered", report => ({ ...report, requirements: [report.requirements[1], report.requirements[0], ...report.requirements.slice(2)] }), /requirements\[0\]\.id: out of intake order/],
+    ["category mismatch", report => { report.requirements[0]!.category = "wiki"; return report; }, /requirements\[0\]\.category: differs from intake requirement REQ-01/],
+    ["text mismatch", report => { report.requirements[3]!.text = SECRET; return report; }, /requirements\[3\]\.text: differs from intake requirement REQ-04/],
+    ["fulfilled disposition", report => { report.requirements[0]!.disposition = "fulfilled"; return report; }, /disposition: expected one of unresolved/],
+    ["unknown reason", report => { report.requirements[0]!.reason = SECRET; return report; }, /reason: expected one of fulfillment-not-assessed/],
+    ["needsReview not boolean", report => { report.requirements[0]!.needsReview = "yes"; return report; }, /needsReview: expected boolean/],
+    ["control character in detail", report => { report.requirements[0]!.detail = `line\n${SECRET}`; return report; }, /detail: expected a single-line string/],
+    ["extra entry key", report => { report.requirements[0]![SECRET] = 1; return report; }, /requirements\[0\]: expected exactly id, category, text/],
+  ];
+  for (const [name, mutate, problem] of cases) {
+    const dir = mkdtempSync(join(tmpdir(), "intake-inferops-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const { target, intakePath, upstream } = wrapper(dir);
+    const fake = fakeInferOps({}, providerResponse(mutate));
+    const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+    const provider = report.inferops!.requirementReport;
+    assert.equal(provider.status, "invalid", name);
+    assert.match(provider.problem ?? "", problem, name);
+    assert.deepEqual(provider.requirements, [], name);
+    assert.equal(report.inferops!.intake, "applied", name);
+    assert.equal(report.inferops!.error, null, name);
+    assert.ok(inferOpsComplete(report.inferops!), name);
+    assert.deepEqual(fake.calls.map(call => call.path), fakeCallsWithoutReport, `${name}: no retry or extra call`);
+    for (const file of [REPORT_FILES.json, REPORT_FILES.markdown]) {
+      assert.ok(!readFileSync(join(target, file), "utf8").includes(SECRET), `${name}: ${file} echoes a reported value`);
+    }
+  }
+});
+
+test("the requirement report survives a partial apply and is not-run when the intake step fails", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-inferops-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = wrapper(dir);
+  const partial = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fakeInferOps({ pillars: 503 }, providerResponse()).fetch });
+  assert.equal(partial.inferops!.pillars, "failed");
+  assert.equal(partial.inferops!.requirementReport.status, "reported");
+  assert.equal(partial.inferops!.requirementReport.requirements.length, 8);
+  const denied = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fakeInferOps({ intake: 403 }, providerResponse()).fetch });
+  assert.equal(denied.inferops!.intake, "failed");
+  assert.deepEqual(denied.inferops!.requirementReport, { status: "not-run", problem: null, intakeSha256: null, requirements: [] });
+  assert.match(readFileSync(join(target, REPORT_FILES.markdown), "utf8"), /Not received: the intake step did not succeed/);
+  // Without --inferops nothing about InferOps is reported at all.
+  assert.equal(applyIntake(target, intakePath, { upstream, exec: neverExec }).inferops, null);
 });
