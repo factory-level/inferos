@@ -22,6 +22,9 @@ covers:
   - packages/integration-tests/src/scenarios/operate-explicit-approval.ts
   - packages/integration-tests/src/scenarios/operate-explicit-approval.md
   - packages/integration-tests/__tests__/operate-approval-scenario.test.ts
+  - packages/integration-tests/src/scenarios/operate-console-read.ts
+  - packages/integration-tests/src/scenarios/operate-console-read.md
+  - packages/integration-tests/__tests__/operate-console-scenario.test.ts
   - packages/workshop-shared/src/operate-read-run.ts
   - packages/workshop-shared/src/operate-session.ts
   - packages/workshop-shared/src/api.ts
@@ -284,6 +287,14 @@ and verdict; an unanswered outbound request, or a run whose isolation could not 
 - **Refusals.** Another person's answer is refused 403 `APPROVAL_REFUSED` before any effect, and a conflicting answer after the decision is refused 403 with nothing changed.
 
 No model, implicit approval, new role or UI is involved. The bridge's other paths remain in `operate-agui-approval.test.ts`.
+
+`operate-console-read` version 1 is the third such example, for the console-read endpoint: `pnpm --filter @gadgets/integration-tests exec vitest run __tests__/operate-console-scenario.test.ts`. Its [contract](../../packages/integration-tests/src/scenarios/operate-console-read.md) and data sit beside the others, and its report uses the same shared rules. It follows `operate-console-tools.test.ts`'s fixture: a builder publishes tools-only widgets on two consoles, and a fresh `use` collaborator's page opens console A. The model is scripted.
+
+- **Discovery and call.** Through the stock client, `consoleRead` describes only console A's widget and its one read tool, with the board activity. The tool's framed output and correlated `TOOL_CALL_*` events match the committed history record. Console B's widget is refused (`does not offer widget`) before it runs.
+- **Repeat and replay.** The read repeats from a fresh operator with identical id-free results. Resubmitting the same selectors is refused 409, with no new model request or tool invocation and the history unchanged.
+- **Stale boundary.** A republish while the model call is held clears the projection and activity, and the old call is refused (`has changed since it was opened`).
+
+No widget write, approval, new role or UI is involved.
 
 ## Components
 
