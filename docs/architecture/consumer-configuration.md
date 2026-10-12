@@ -201,17 +201,21 @@ Bootstrap creates a disabled public hello example, manifest, validation command 
 There is still no deploy command: `inferos.config.json` has no deploy-target fields, and the settings reference reports "Cloud deployment target" as unsupported (#11). `scripts/consumer/deploy-recipe.ts` adds the reviewable half of #11's "opt-in disposable deployment smoke recipe": a recipe file and a pure local preflight. It is not a deploy path.
 
 **The recipe** (schema version 1, `kind: "disposable-deploy-recipe"`; example `scripts/consumer/fixtures/deploy-recipe/disposable.json`) names:
-- the owner, the creation and expiry dates (at most 7 days apart), and the purpose;
+- the owner, the creation and expiry dates (real calendar dates, at most 7 days apart), and the purpose;
 - `source.repository` and `source.revision`, which must equal the wrapper config's `upstream`, and `wrapperConfig.schemaVersion`;
 - the target:
   - `environment` must be `disposable`; there is no production, shared or default target;
   - `name` follows `inferos-disposable-<slug>-<yyyymmdd>`, with the expiry date, and no production, live, main, shared or customer word;
   - `account`, `publicOrigin` (https origin only, no wildcard or local host, first host label = the name), `oauthOrigins` (equal to the public origin), `access` (`staff-only` / `all-users`) and `admins` (`{count}`; identities stay out of the file);
   - `bindings` (known kinds, UPPER_SNAKE names, unique resources) and `secrets`, which may only be `{secretRef}` names;
-- `inferops`, which is `mock` unless `mode: "live"` *and* `live: true` with an https `baseUrl`;
+- `inferops`, which is `mock` unless `mode: "live"` *and* `live: true` with an https `baseUrl`. A wrapper config that reads a remote InferOps is never planned as mock: the recipe must be explicitly live, with the wrapper's own base URL;
 - `extensions`, where `wrapperGatekeepers` and `customWorkers` must be `false`, because the release manifest does not deploy them.
 
-Any value an owner has not decided is `{"unresolved": "<who decides>"}`: listed, never guessed, never defaulted. An absent field is an error. A credential-looking literal anywhere, or a non-reference value under a credential key, is refused, and a problem never echoes the rejected value.
+Any value an owner has not decided is `{"unresolved": "<who decides>"}`: listed, never guessed, never defaulted. An absent field is an error. These are refused, and a problem never echoes the rejected value:
+- a credential marker anywhere inside any string, in the recipe or in the wrapper config;
+- a non-reference value under a credential key.
+
+Unreadable or malformed JSON is reported by file name only, never with the parser's message, which quotes the input. A plan that would still print a credential-looking string is not printed.
 
 **The preflight** (`node scripts/consumer/deploy-recipe.ts <recipe.json> --config <inferos.config.json> [--json]`, exit 0 valid / 1 invalid / 2 usage) validates the wrapper config with `parseConsumerConfig`. It prints a deterministic plan:
 - whose first word is `NOT DEPLOYED`;

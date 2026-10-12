@@ -230,3 +230,70 @@ try { await fetch("https://example.invalid"); } catch {}
     assert.ok(!code.some(line => forbidden.test(line) && !line.includes("evidence") && !line.includes("readyReason")), `${forbidden}`);
   }
 });
+
+// Repairs from independent QA (proof/02): credential markers inside a value, malformed JSON input,
+// a remote wrapper config planned as mock, and dates that are not on the calendar.
+
+test("a credential marker anywhere in a value is refused and never reaches the plan", () => {
+  const planted = "ghp_QA_SYNTHETIC_TOKEN_0123456789";
+  refuses(r => { r.owner = `operator: ${planted}`; }, "owner", /looks like a credential/u, planted);
+  refuses(r => { r.purpose = `see sk-SYNTHETIC0123 for access`; }, "purpose", /looks like a credential/u, "sk-SYNTHETIC0123");
+  refuses(r => { r.target.bindings.BLUEPRINTS.resource = { unresolved: `ask ${planted}` }; }, "target.bindings.BLUEPRINTS.resource.unresolved", /looks like a credential/u, planted);
+  const c = config();
+  c.inferops.targetRef = `inferops://t.w/project/board/KEY`;
+  c.styling = { ...c.styling, siteName: `InferOS ${planted}` };
+  const problems = problemsOf(decided(), c);
+  assert.ok(problems.some(p => p.field.startsWith("wrapperConfig:") && /looks like a credential/u.test(p.rule)), JSON.stringify(problems));
+  assert.ok(!JSON.stringify(problems).includes(planted));
+});
+
+test("malformed recipe or wrapper config JSON exits 2 without reflecting its contents", () => {
+  const dir = mkdtempSync(join(tmpdir(), "deploy-recipe-json-"));
+  for (const body of ["sk-QA", "{\"owner\": \"ghp_QA_SYNTHETIC_TOKEN_0123456789\"", "{ not json sk-QA-SYNTHETIC }"]) {
+    writeFileSync(join(dir, "bad.json"), body);
+    for (const args of [[join(dir, "bad.json"), "--config", CONFIG_PATH], [RECIPE_PATH, "--config", join(dir, "bad.json")]]) {
+      const run = cli(args);
+      assert.equal(run.status, 2);
+      const out = `${run.stdout}${run.stderr}`;
+      assert.match(out, /^NOT DEPLOYED -- deploy-recipe: the (recipe|wrapper config) file is not valid JSON\n$/u);
+      for (const fragment of ["sk-QA", "ghp_QA", "SYNTHETIC", "not json"]) assert.ok(!out.includes(fragment), `${fragment} echoed`);
+    }
+  }
+  const missing = cli([join(dir, "absent.json"), "--config", CONFIG_PATH]);
+  assert.equal(missing.status, 2);
+  assert.equal(missing.stderr, "NOT DEPLOYED -- deploy-recipe: cannot read the recipe file\n");
+});
+
+test("a wrapper config that reads a remote InferOps is never planned as mock", () => {
+  const remote = config();
+  remote.inferops = { mode: "remote", baseUrl: "https://api.example.invalid", targetRef: remote.inferops.targetRef };
+  const asMock = decided();
+  assert.ok(problemsOf(asMock, remote).some(p => p.field === "inferops.mode" && /remote InferOps/u.test(p.rule)));
+  const otherBase = decided();
+  otherBase.inferops = { mode: "live", live: true, baseUrl: "https://other.example.invalid" };
+  assert.ok(problemsOf(otherBase, remote).some(p => p.field === "inferops.baseUrl" && /equal the wrapper config/u.test(p.rule)));
+  const coherent = decided();
+  coherent.inferops = { mode: "live", live: true, baseUrl: "https://api.example.invalid" };
+  const result = validateDeployRecipe(coherent, remote);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const plan = (result as { plan: DeployPlan }).plan;
+  assert.deepEqual([plan.wrapperConfig.inferopsMode, plan.inferops.mode, plan.inferops.baseUrl], ["remote", "live", "https://api.example.invalid"]);
+});
+
+test("dates must exist on the calendar before the lifetime is computed", () => {
+  refuses(r => {
+    r.created = "2026-02-30"; r.expires = "2026-03-03"; r.target.name = "inferos-disposable-smoke-20260303";
+    r.target.publicOrigin = "https://inferos-disposable-smoke-20260303.example.invalid";
+    r.target.oauthOrigins = [r.target.publicOrigin];
+  }, "created", /real calendar date/u);
+  refuses(r => { r.expires = "2026-10-32"; }, "expires", /real calendar date/u);
+  refuses(r => { r.created = "2026-13-01"; }, "created", /real calendar date/u);
+  const leap = decided();
+  leap.created = "2028-02-27"; leap.expires = "2028-02-29"; leap.target.name = "inferos-disposable-smoke-20280229";
+  leap.target.publicOrigin = "https://inferos-disposable-smoke-20280229.example.invalid";
+  leap.target.oauthOrigins = [leap.target.publicOrigin];
+  leap.target.bindings.BLUEPRINT_CONTENT.resource = "inferos-disposable-smoke-20280229-blueprints";
+  leap.target.bindings.BLUEPRINTS.resource = "inferos-disposable-smoke-20280229-kv-blueprints";
+  leap.target.bindings.AVATARS.resource = "inferos-disposable-smoke-20280229-kv-avatars";
+  assert.equal(planOf(leap).target.expires, "2028-02-29");
+});

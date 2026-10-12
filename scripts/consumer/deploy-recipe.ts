@@ -88,8 +88,8 @@ const isSecretRef = (v: unknown): v is SecretRef =>
 
 /** Keys whose literal value would be a credential. Only `{secretRef}` may stand there. */
 const SECRET_KEY = /secret|token|password|passwd|api[-_]?key|private[-_]?key|credential/iu;
-/** Values that look like a credential wherever they appear. */
-const SECRET_VALUE = /^(?:eyJ[\w-]{10,}\.|ghp_|gho_|github_pat_|sk-[A-Za-z0-9]|xox[abpr]-|AKIA[0-9A-Z]{12}|iex_[a-z]+_)|-----BEGIN [A-Z ]*PRIVATE KEY/u;
+/** Credential markers, matched ANYWHERE in a string (not only at its start). */
+const SECRET_VALUE = /eyJ[\w-]{10,}\.|gh[opsu]_|github_pat_|\bsk-[A-Za-z0-9]|xox[abpr]-|AKIA[0-9A-Z]{12}|\biex_[a-z]+_|-----BEGIN [A-Z ]*PRIVATE KEY/u;
 /** A target that names production or a shared environment, in a name, host or label. */
 const PRODUCTION_WORD = /(?:^|[^a-z])(?:prod|production|live|main|shared|primary|customer)(?:[^a-z]|$)/iu;
 
@@ -120,6 +120,10 @@ export function validateDeployRecipe(recipe: unknown, wrapperConfig: unknown): P
     }
   };
   scan(recipe, "");
+  // The wrapper config's values reach the plan too (repository, revision, InferOps mode).
+  const configProblems = problems.length;
+  scan(wrapperConfig, "(wrapper config)");
+  for (const p of problems.slice(configProblems)) p.field = p.field.replace(/^\(wrapper config\)\.?/u, "wrapperConfig:");
 
   if (!isObject(recipe)) return { ok: false, problems: [{ field: "(recipe)", rule: "must be a JSON object" }] };
   for (const key of Object.keys(recipe)) if (!ALLOWED_KEYS.has(key)) bad(key, "unknown field");
@@ -139,10 +143,10 @@ export function validateDeployRecipe(recipe: unknown, wrapperConfig: unknown): P
 
   text("purpose", recipe.purpose, 500);
   const owner = text("owner", recipe.owner);
-  const created = typeof recipe.created === "string" && /^\d{4}-\d{2}-\d{2}$/u.test(recipe.created) ? recipe.created : null;
-  if (!created) bad("created", "must be a date, YYYY-MM-DD");
-  const expires = typeof recipe.expires === "string" && /^\d{4}-\d{2}-\d{2}$/u.test(recipe.expires) ? recipe.expires : null;
-  if (!expires) bad("expires", "must be a date, YYYY-MM-DD");
+  const created = calendarDate(recipe.created);
+  if (!created) bad("created", "must be a real calendar date, YYYY-MM-DD");
+  const expires = calendarDate(recipe.expires);
+  if (!expires) bad("expires", "must be a real calendar date, YYYY-MM-DD");
   if (created && expires) {
     const days = (Date.parse(`${expires}T00:00:00Z`) - Date.parse(`${created}T00:00:00Z`)) / 86_400_000;
     if (!(days >= 0 && days <= MAX_LIFETIME_DAYS)) bad("expires", `must be on or within ${MAX_LIFETIME_DAYS} days after created`);
@@ -265,6 +269,17 @@ export function validateDeployRecipe(recipe: unknown, wrapperConfig: unknown): P
     bad("inferops", "a mock target takes no live or baseUrl");
   }
 
+  // The wrapper config decides where InferOps is read from: a remote wrapper is live, and only an
+  // explicit live recipe naming the same base URL may plan it. Never downgraded to mock.
+  if (config?.inferops.mode === "remote") {
+    const wrapperBase = new URL(config.inferops.baseUrl).origin;
+    if (inferops.mode !== "live") {
+      bad("inferops.mode", "the wrapper config reads a remote InferOps; the recipe must say \"mode\": \"live\" and \"live\": true");
+    } else if (inferops.baseUrl !== wrapperBase) {
+      bad("inferops.baseUrl", "must equal the wrapper config's remote InferOps base URL");
+    }
+  }
+
   // Extensions the release manifest cannot deploy are refused, not silently dropped.
   if (recipe.extensions !== undefined) {
     if (!isObject(recipe.extensions)) bad("extensions", "must be an object");
@@ -313,7 +328,18 @@ export function validateDeployRecipe(recipe: unknown, wrapperConfig: unknown): P
       ? `${unresolved.length} input(s) unresolved; and no apply command exists (factory-level/inferos#11)`
       : "No apply command exists (factory-level/inferos#11); an explicit operator decision is still required",
   };
+  // Last line of defence: a plan that would print a credential-looking string is not printed.
+  if (SECRET_VALUE.test(canonical(plan))) {
+    return { ok: false, problems: [{ field: "(plan)", rule: "would contain a credential-looking value; nothing is printed" }] };
+  }
   return { ok: true, plan };
+}
+
+/** A real calendar date, YYYY-MM-DD (2026-02-30 is not one), or null. */
+function calendarDate(value: unknown): string | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value ? null : value;
 }
 
 /** Key-order-independent JSON, so the digest names the recipe's content, not its formatting. */
@@ -353,15 +379,23 @@ function main(argv: string[]): number {
     process.stderr.write("usage: deploy-recipe <recipe.json> --config <inferos.config.json> [--json]\n");
     return 2;
   }
-  let recipe: unknown;
-  let config: unknown;
-  try {
-    recipe = JSON.parse(readFileSync(recipePath, "utf8"));
-    config = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch (error) {
-    process.stderr.write(`deploy-recipe: cannot read input: ${error instanceof Error ? error.message : String(error)}\n`);
-    return 2;
-  }
+  // A parse error quotes the input, which may hold a secret: report only which file failed.
+  const read = (label: string, path: string): { value: unknown } | null => {
+    let text: string;
+    try { text = readFileSync(path, "utf8"); } catch {
+      process.stderr.write(`NOT DEPLOYED -- deploy-recipe: cannot read the ${label} file\n`);
+      return null;
+    }
+    try { return { value: JSON.parse(text) }; } catch {
+      process.stderr.write(`NOT DEPLOYED -- deploy-recipe: the ${label} file is not valid JSON\n`);
+      return null;
+    }
+  };
+  const recipeInput = read("recipe", recipePath);
+  const configInput = recipeInput && read("wrapper config", configPath);
+  if (!recipeInput || !configInput) return 2;
+  const recipe = recipeInput.value;
+  const config = configInput.value;
   const result = validateDeployRecipe(recipe, config);
   if (!result.ok) {
     if (json) process.stdout.write(`${JSON.stringify({ status: "NOT DEPLOYED", ok: false, problems: result.problems }, null, 2)}\n`);
