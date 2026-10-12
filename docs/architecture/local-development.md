@@ -32,7 +32,7 @@ covers:
   - scripts/check-fast.ts
   - scripts/check-fast.test.ts
   - scripts/check-full.ts
-updated: 2026-10-11
+updated: 2026-10-12
 ---
 
 # Cloudflare-like local development
@@ -56,7 +56,7 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `packages/workshop-backend/scripts/dev-setup.ts` | `pnpm dev:setup`: prepares a running local Workshop (account, onboarding, mock model, InferOps, demo screen). |
 | `packages/workshop-backend/scripts/dev-verify.ts` | `pnpm dev:verify`: readiness over the authenticated RPC, reported as what an agent sees (InferOps account, board read, approval queue). |
 | `packages/workshop-backend/scripts/dev-workshop.ts` | What the two operator scripts share: local-only URL check, the browser's password hash, the RPC connection, and finding the seeded workspace and board connection. |
-| `scripts/dev/scripted-model.ts` | `pnpm dev:mock-model`: a scripted, credential-free stand-in model for local agent flows. |
+| `scripts/dev/scripted-model.ts` | `pnpm dev:mock-model [--scenario kanban\|operate-read]`: a scripted, credential-free stand-in model for local agent flows, listening on 127.0.0.1 only. |
 | `scripts/worker-config.ts` | Shared canonical Worker configuration factory. |
 | `scripts/worker-dirs.ts` | Worker discovery roots: this checkout's `packages/` and `custom-gatekeepers/`, plus a wrapper's `gatekeepers/` when a consumer root is passed. |
 | `scripts/consumer/gatekeepers.ts` | Validates, generates and drift-checks a wrapper's own gatekeepers for local development. |
@@ -92,11 +92,21 @@ A consumer wrapper ([consumer configuration](consumer-configuration.md)) runs th
 
 `pnpm dev:setup` drives a running local Workshop over the same Cap'n Web API the browser uses, so neither a person nor an agent clicks through signup, onboarding and settings before testing. It signs in as `dev`/`devpassword` (the `VITE_DEV_AUTO_LOGIN` defaults; `--user`/`--password` override), creating the account on first run. The password hash is derived exactly as the browser derives it (Argon2id over `SERVICE_SALT` plus the username, via Node's `crypto.argon2Sync`), so the same credentials work on the login page; `SERVICE_SALT` lives in its own import-free `password-salt.ts` so Node tooling can import it. It then marks onboarding complete and, on request:
 
-- `--mock-model [url]` registers the scripted model as an Ollama model (default `http://localhost:11434`), marked `mock` (re-marking an existing registration), and makes it the preferred model. The mark makes an install into a space that is not test-only refuse it (see [Operate mode](operate-mode.md#pinned-installs-and-upgrades)). `pnpm dev:mock-model` serves it: it answers in the OpenAI-compatible format and plays the agent's side of "add an InferOps Kanban to this canvas", choosing each step from the conversation so far. Every action it triggers runs through the real Workshop and gatekeepers.
+- `--mock-model [url]` registers the scripted model as an Ollama model (default `http://localhost:11434`), marked `mock` (re-marking an existing registration), and makes it the preferred model. The mark makes an install into a space that is not test-only refuse it (see [Operate mode](operate-mode.md#pinned-installs-and-upgrades)). `pnpm dev:mock-model` serves it: it answers in the OpenAI-compatible format, under the same model id for every scenario. By default (`--scenario kanban`) it plays the agent's side of "add an InferOps Kanban to this canvas", choosing each step from the conversation so far. `--scenario operate-read` plays an Operate chat that reads the user's page: for each question it calls `operatePage` once and replies, labelled `[mock model]`, with the board that read returned (`board.boardRef`), or no board. It never reuses an earlier turn's read, and a widget shown full-page is not the page's board. An unknown scenario or option exits 2. It logs only the scenario and each reply's kind. Every action it triggers runs through the real Workshop and gatekeepers.
 - `--inferops` opts into the auto-provisioned InferOps gatekeeper (mock data).
 - `--screen <templateId>` ensures an "InferOps Canvas demo" workspace with a screen from that catalog template, and reports its URL.
 
 Every step is idempotent. The JSON report includes the session token, which a browser (or a browser-driving agent) adopts with `localStorage.setItem("authToken", token)`. The command refuses any host but localhost or 127.0.0.1.
+
+To read an Operate page through the real UI with no model credentials:
+
+1. Run `pnpm canvas init` once, if there is no `inferos.canvas.json`.
+2. Start the stack with `INFEROPS_ENABLED=true pnpm local start`, and the model with `pnpm dev:mock-model --scenario operate-read`.
+3. Run `pnpm dev:setup --mock-model --console`. It creates the mock DEMO board connection and the published "Operations lead" console. The report's `browserLogin` carries the session token, so keep it out of logs.
+4. At `/inferops-canvas`, ask the Operate chat "What is on my page?". It reads the page and answers that it shows no board.
+5. Open "Operations lead" and its Board screen, then the board card's **Open** (the session's `openBoard`; the URL gains `?board=…`). Ask again: it answers that the page shows the DEMO board.
+
+This is the Workshop's Cap'n Web Operate chat, not an AG-UI client. The model and the InferOps data are mocks, and the browser is driven by hand.
 
 ## Lifecycle commands
 
