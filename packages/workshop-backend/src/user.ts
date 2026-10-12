@@ -1111,10 +1111,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.#operatePage();
   }
 
-  /** Reserve both selectors synchronously before navigation or model work. */
+  /** Reserve both selectors synchronously before work, with a permanent 256-run admission bound. */
   async reserveOperateReadRun(threadId: string, runId: string): Promise<void> {
     if (this.storage.operateReadRuns.get(threadId) || this.storage.operateReadRuns.byRun.get(runId)) {
       throw new Error("OPERATE_READ_DUPLICATE");
+    }
+    // Never evict a selector: doing so would silently replay an uncertain operation. A bounded
+    // scan also fails closed for an older store already above capacity, without a drifting counter.
+    if (Array.from(this.storage.operateReadRuns.list({limit: 256})).length >= 256) {
+      throw new Error("OPERATE_READ_CAPACITY");
     }
     this.storage.operateReadRuns.put({threadId, runId});
   }

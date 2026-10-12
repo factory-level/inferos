@@ -448,7 +448,8 @@ export type OperateReadRun = {
  */
 export interface OperateSession extends RpcTarget {
   /** Reserve a new run, dispatch navigation and start a durable read-only chat in getWorkspace().
-   * Repeated selectors fail without repeating work.
+   * Repeated selectors fail without repeating work. A person has 256 lifetime reservations,
+   * including failed setup; exhaustion refuses new runs before navigation or model work.
    */
   startReadRun(input: OperateReadRun): Promise<number>;
 

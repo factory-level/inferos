@@ -147,6 +147,7 @@ export async function handleOperateAgui(request: Request,
     const code = getOperateSessionErrorCode(cause);
     if (code === OPERATE_SESSION_ERROR_CODES.conflict) return error(409, "OPERATE_SEQUENCE_CONFLICT");
     if (cause instanceof Error && cause.message === "OPERATE_READ_DUPLICATE") return error(409, "RUN_ALREADY_RESERVED");
+    if (cause instanceof Error && cause.message === "OPERATE_READ_CAPACITY") return error(429, "RUN_CAPACITY_EXHAUSTED");
     return error(403, "READ_RUN_REFUSED");
   }
 }

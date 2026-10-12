@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { HttpAgent } from "@ag-ui/client";
 import { startHarness, type Harness } from "../src/harness.js";
 import { scriptedChatCompletions, SCRIPTED_MODEL_CONFIG, SCRIPTED_MODEL_ID, SCRIPTED_MODEL_PROFILE } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { connect, listConnectedAccounts, nextUsernames, waitFor } from "../src/rpc-client.js";
+import { connect, listConnectedAccounts, nextUsernames, streamGeneration, waitFor } from "../src/rpc-client.js";
 import { InferOpsFake, INFERLAB_ORIGIN, INFEROPS_ORIGIN, boardUrl } from "../src/inferops-fake.js";
 
 const BOARD = boardUrl("operations", "ENG");
@@ -22,7 +22,13 @@ const model = scriptedChatCompletions([
 const fake = new InferOpsFake();
 let gate: Promise<void> | undefined;
 let release: (() => void) | undefined;
+let lostProvider: Promise<Response> | undefined;
+let lostProviderCalls = 0;
 const network = new NetworkInterceptor({handlers: [async url => {
+  if (lostProvider && url.pathname.endsWith("/chat/completions")) {
+    ++lostProviderCalls;
+    return lostProvider;
+  }
   if (gate && url.pathname.endsWith("/chat/completions")) await gate;
   return null;
 }, fake.handler, model.handler]});
@@ -30,6 +36,12 @@ let harness: Harness;
 
 beforeAll(async () => {
   network.install();
+  // Like gadget Worker source fixtures, this is compiled by Wrangler in its own Worker context.
+  // Importing the generated backend into this Node test's TS project would check it under the
+  // wrong Env/ctx.exports types and treat generated runtime modules as Node source.
+  const lossWorker = resolve(import.meta.dirname, "../.wrangler/tmp/operate-agui-loss-worker.js");
+  mkdirSync(resolve(import.meta.dirname, "../.wrangler/tmp"), {recursive: true});
+  copyFileSync(resolve(import.meta.dirname, "../fixtures/operate-agui-loss-worker.js.txt"), lossWorker);
   harness = await startHarness({
     gatekeepers: [{binding: "INFEROPS", dir: resolve(import.meta.dirname, "../../../custom-gatekeepers/gatekeeper-inferops"),
       patch(config) {
@@ -37,7 +49,10 @@ beforeAll(async () => {
         config.vars = {...config.vars, INFERLAB_AUTH_ORIGIN: INFERLAB_ORIGIN, INFEROPS_BASE_URL: INFEROPS_ORIGIN,
           BASE_URL: "http://workshop.test/gatekeeper/inferops"};
       }}],
-    patchWorkshop(config) { config.vars = {...config.vars, COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true"}; },
+    patchWorkshop(config) {
+      config.vars = {...config.vars, COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true"};
+      config.main = lossWorker;
+    },
   });
 });
 afterAll(async () => {
@@ -213,6 +228,80 @@ it("ends a failed kernel run once with a safe error, without exposing provider d
   expect(text).not.toContain("RUN_FINISHED");
   expect(text).not.toContain("PRIVATE");
   expect((await post(a.token, wire("failed", "failed"))).status).toBe(409);
+});
+
+it("refuses exhausted lifetime admission before navigation or a model, retaining failed reservations", async () => {
+  using a = await person();
+  const before = model.requests.length;
+  // Valid shape, inaccessible board: reservation succeeds but navigation/setup fails.
+  const failed = (i: number) => ({...wire(`capacity-${i}`, `capacity-${i}`), forwardedProps: {
+    operate: {event: {type: "openBoard", board: {workspaceId: a.workspaceId, boardRef: BOARD}}, expectedSeq: 0},
+  }});
+  for (let i = 0; i < 256; ++i) expect((await post(a.token, failed(i))).status).toBe(403);
+  const full = await post(a.token, failed(256));
+  expect(full.status).toBe(429);
+  expect(await full.json()).toEqual({error: "RUN_CAPACITY_EXHAUSTED"});
+  expect((await post(a.token, failed(0))).status).toBe(409);
+  expect(await a.workspace.listChats()).toEqual([]);
+  expect(await a.session.listEvents(0, 20)).toEqual([]);
+  expect(model.requests.length).toBe(before);
+});
+
+it("keeps HTTP writable through native workspace loss, errors at the deadline and refuses replay", async () => {
+  using a = await person();
+  const generation = await streamGeneration(a.workspace);
+  let releaseLost!: (response: Response) => void;
+  lostProvider = new Promise(resolve => {releaseLost = resolve;});
+  const before = lostProviderCalls;
+  try {
+    const response = await post(a.token, wire("lost", "lost"));
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let seen = decoder.decode((await reader.read()).value);
+    expect(seen).toContain("RUN_STARTED");
+    await waitFor("held native read turn", async () => lostProviderCalls > before ? true : null);
+    const started = Date.now();
+    const aborted = await fetch(new URL(`/__test/abort-overseer?id=${a.workspaceId}`, harness.url), {method: "POST"});
+    expect(aborted.status).toBe(204);
+    await expect(a.workspace.getMetadata()).rejects.toThrow();
+    // Workspace loss also closes its existing RPC WebSocket. Recover through a fresh sign-in
+    // capability while the independent HTTP response remains writable.
+    using recoveredPublic = connect(harness.url);
+    using recoveredApi = await recoveredPublic.authenticate(a.token);
+    using recoveredSession = await recoveredApi.getOperateSession();
+    using reopened = await recoveredSession.getWorkspace();
+    expect(await streamGeneration(reopened)).not.toBe(generation);
+    // Read real elapsed-time heartbeats, keeping the outer HTTP request open after DO eviction.
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value);
+      seen += chunk;
+      if (chunk.includes(": ping")) console.info("AG-UI native-loss stream heartbeat received");
+    }
+    const events = seen.split("\n\n").filter(line => line.startsWith("data: "))
+      .map(line => JSON.parse(line.slice(6)));
+    expect(events.filter(event => event.type === "RUN_STARTED")).toHaveLength(1);
+    expect(events.filter(event => event.type === "RUN_ERROR")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({type: "RUN_ERROR", code: "OPERATE_READ_FAILED"});
+    expect(seen).not.toContain("RUN_FINISHED");
+    expect(seen).not.toContain("PRIVATE");
+    expect(Date.now() - started).toBeGreaterThan(50_000);
+    const requestsBeforeRetry = lostProviderCalls;
+    const retry = await post(a.token, wire("lost", "lost"));
+    expect(retry.status).toBe(409);
+    expect(await retry.json()).toEqual({error: "RUN_ALREADY_RESERVED"});
+    expect(lostProviderCalls).toBe(requestsBeforeRetry);
+    const chats = await reopened.listChats();
+    expect(chats).toHaveLength(1);
+    const history = await reopened.getChatHistory(chats[0].id);
+    expect(history.messages.filter(message => message.type === "message" && message.author.type === "user")).toHaveLength(1);
+    expect(await recoveredSession.listEvents(0, 20)).toEqual([]);
+  } finally {
+    releaseLost(new Response(JSON.stringify({error: {message: "PRIVATE lost provider"}}), {status: 400}));
+    lostProvider = undefined;
+  }
 });
 
 it.each(["triad-assembles-message", "tool-call-triad-assembles", "state-delta-applies",

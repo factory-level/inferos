@@ -1,0 +1,22 @@
+// Test-only entrypoint over the unchanged validated production Worker. Wrangler's eviction API
+// waits for active references, so it cannot model a crash while an SSE subscription is alive.
+// This explicit fault seam aborts only the selected native DO, retaining its durable storage.
+import worker, { OverseerDurableObject as ProductionOverseer } from "../../../workshop-backend/.wrangler/validate/src/server.ts";
+export * from "../../../workshop-backend/.wrangler/validate/src/server.ts";
+
+export class OverseerDurableObject extends ProductionOverseer {
+  abortForTest() { this.ctx.abort("AG-UI test workspace loss"); }
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/__test/abort-overseer") {
+      const namespace = ctx.exports.OverseerDurableObject;
+      const stub = namespace.get(namespace.idFromString(url.searchParams.get("id")));
+      try { await stub.abortForTest(); } catch { /* The aborted RPC is expected. */ }
+      return new Response(null, {status: 204});
+    }
+    return worker.fetch(request, env, ctx);
+  },
+};

@@ -49,6 +49,7 @@ export const UNIT_NODE: readonly string[] = [
   "open-gadget-errors.test.ts",
   "operate-console.test.ts",
   "operate-agui-protocol.test.ts",
+  "operate-agui-lifecycle.test.ts",
   "operate-session.test.ts",
   "publication.test.ts",
   "raw-sources.test.ts",

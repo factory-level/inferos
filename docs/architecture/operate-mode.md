@@ -4,8 +4,10 @@ covers:
   - packages/workshop-backend/src/operate-agui.ts
   - packages/workshop-backend/src/operate-agui-protocol.ts
   - packages/workshop-backend/__tests__/operate-agui-protocol.test.ts
+  - packages/workshop-backend/__tests__/operate-agui-lifecycle.test.ts
   - packages/workshop-backend/__tests__/operate-agui.test.ts
   - packages/integration-tests/__tests__/operate-agui.test.ts
+  - packages/integration-tests/fixtures/operate-agui-loss-worker.js.txt
   - packages/workshop-shared/src/operate-session.ts
   - packages/workshop-shared/src/api.ts
   - packages/workshop-backend/src/user.ts
@@ -97,8 +99,11 @@ previous AG-UI thread or accept client-supplied tools, provider credentials or a
 `OperateSession.startReadRun` reserves thread and run selectors in the person's User DO before
 navigation or model work. Both are one-shot within that person; a duplicate is refused, including
 after partial setup, disconnect or a restart. The reservation is retained and associated with the
-new chat once created. Reservations have no automatic expiry; retrying an uncertain operation is
-not an implicit replay. Navigation and chat creation are separate commits: a later setup failure
+new chat once created. Admission is limited to 256 lifetime reservations per person, including
+failed setup. At capacity, new selectors receive HTTP 429 `RUN_CAPACITY_EXHAUSTED` before navigation
+or model work; existing selectors still receive 409. Capacity does not reset on restart or completion.
+Reservations have no automatic expiry or eviction; retrying an uncertain operation is not an
+implicit replay. Navigation and chat creation are separate commits: a later setup failure
 does not roll back an authorized navigation; callers recover actual state through the session log.
 A stale expectedSeq returns a conflict without appending the navigation;
 clients resubscribe/read the existing session log and submit a new run with the current sequence.
@@ -132,8 +137,9 @@ subtree with a JSON Patch. The projection enumerates sequence, references, subje
 fields; it excludes entity bodies, handover notes, approval outcomes and capability data. Incoming
 state is never restored. An unchanged revision hint does not invent a session sequence or log row.
 
-Each complete writable stream starts once with protocolVersion 1.0 and ends once, after all spans
-close. Observed kernel errors produce a generic RUN_ERROR without raw exception text. HTTP setup
+Each complete writable stream starts once with protocolVersion 1.0 and ends once. Successful
+completion closes all spans first; output exhaustion may abort an open span with RUN_ERROR.
+Observed kernel errors produce a generic RUN_ERROR without raw exception text. HTTP setup
 failures return bounded codes; sequence and duplicate conflicts use 409. Native subscription leases
 have no broken-connection callback, so silent failure reaches RUN_ERROR at the 60-second deadline.
 Heartbeats are SSE comments at 15 seconds. Disconnect disposes subscriptions/timers but does not

@@ -16,10 +16,13 @@ declare module "cloudflare:workers" {
 
 it("reserves both selectors per person, rejects concurrent/restarted retries and retains binding", async () => {
   const name = crypto.randomUUID();
-  const a = env.TEST_USER.getByName(name);
+  let a = env.TEST_USER.getByName(name);
   const reserve = async (thread: string, run: string) => {
     try { await a.reserveOperateReadRun(thread, run); return "reserved"; }
-    catch { return "duplicate"; }
+    catch (error) {
+      if (error instanceof Error && error.message === "OPERATE_READ_DUPLICATE") return "duplicate";
+      throw error;
+    }
   };
   expect(await Promise.all([reserve("thread", "run"), reserve("thread", "run")]))
     .toEqual(["reserved", "duplicate"]);
@@ -28,7 +31,42 @@ it("reserves both selectors per person, rejects concurrent/restarted retries and
   expect(await reserve("thread", "other")).toBe("duplicate");
   await env.TEST_USER.getByName(`${name}-other`).reserveOperateReadRun("thread", "run");
   await abortAllDurableObjects();
+  a = env.TEST_USER.getByName(name);
   expect(await reserve("thread", "run")).toBe("duplicate");
+});
+
+it("bounds lifetime reservations including unbound setup failures, atomically and across restart", async () => {
+  const name = `agui-capacity-${crypto.randomUUID()}`;
+  let user = env.TEST_USER.getByName(name);
+  // Unbound reservations represent setup failing after admission. None may be evicted for reuse.
+  await runInDurableObject(user, async instance => {
+    for (let i = 0; i < 255; ++i) await instance.reserveOperateReadRun(`thread-${i}`, `run-${i}`);
+  });
+  const final = await Promise.allSettled([
+    user.reserveOperateReadRun("last-a", "last-a"), user.reserveOperateReadRun("last-b", "last-b"),
+  ]);
+  expect(final.filter(result => result.status === "fulfilled")).toHaveLength(1);
+  expect(final.find(result => result.status === "rejected")).toMatchObject({
+    reason: {message: "OPERATE_READ_CAPACITY"},
+  });
+  await user.bindOperateReadRun("thread-0", 17);
+  await abortAllDurableObjects();
+  user = env.TEST_USER.getByName(name);
+  const refusal = async (thread: string, run: string) => {
+    try { await user.reserveOperateReadRun(thread, run); return "accepted"; }
+    catch (error) { return (error as Error).message; }
+  };
+  expect(await refusal("new", "new")).toBe("OPERATE_READ_CAPACITY");
+  expect(await refusal("thread-0", "new")).toBe("OPERATE_READ_DUPLICATE");
+  expect(await refusal("new", "run-1")).toBe("OPERATE_READ_DUPLICATE");
+  await runInDurableObject(user, async instance => {
+    const storage = (instance as unknown as {storage: any}).storage;
+    const rows = [...storage.operateReadRuns.list()];
+    expect(rows).toHaveLength(256);
+    expect(rows.filter(row => row.chatId === undefined)).toHaveLength(255);
+    expect(storage.operateReadRuns.get("thread-0").chatId).toBe(17);
+  });
+  await env.TEST_USER.getByName(`${name}-other`).reserveOperateReadRun("new", "new");
 });
 
 it("offers only page read and refuses hostile tools and navigation at execution in the real agent loop", async () => {
