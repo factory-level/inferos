@@ -19,7 +19,10 @@ import { relative } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, expect } from "vitest";
 import { PACKAGE_DIR, PHASE_LOG } from "./phase-log-path.js";
 
-/** Per worker process, so one runaway file cannot grow the log without bound. */
+/**
+ * Per test file: vitest's default isolation evaluates this module afresh for each file, so one
+ * runaway file cannot grow the log without bound.
+ */
 const MAX_EVENTS = 2_000;
 const MAX_NAME = 160;
 
