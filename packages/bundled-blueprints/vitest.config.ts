@@ -26,6 +26,7 @@ export default defineConfig({
           name: "gadgets",
           include: [
             "blueprints/*/__tests__/**/*.test.ts",
+            "examples/*/__tests__/**/*.test.ts",
             "libraries/*/__tests__/**/*.test.ts",
           ],
           environment: "jsdom",
