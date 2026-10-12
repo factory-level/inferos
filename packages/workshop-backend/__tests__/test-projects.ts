@@ -72,6 +72,7 @@ export const UNIT_NODE: readonly string[] = [
 export const WORKERD_LIGHT: readonly string[] = [
   "access.test.ts",
   "action-log-pagination.test.ts",
+  "operate-approval.test.ts",
   "ai-models.test.ts",
   "bundled-blueprints.test.ts",
   "commit-reads.test.ts",
