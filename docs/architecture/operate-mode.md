@@ -3,6 +3,7 @@ title: Operate mode
 covers:
   - packages/workshop-backend/src/operate-agui.ts
   - packages/workshop-backend/src/operate-agui-protocol.ts
+  - packages/workshop-backend/src/operate-agui-console.md
   - packages/workshop-backend/__tests__/operate-agui-protocol.test.ts
   - packages/workshop-backend/__tests__/operate-agui-lifecycle.test.ts
   - packages/workshop-backend/__tests__/operate-agui.test.ts
@@ -168,13 +169,57 @@ neutral page label; the AG-UI client introduces no new UI route. Ordinary Operat
 existing tools and the Wiki exclusion is unchanged. No approvals, writes or connection requests
 are made available by this producer.
 
+`POST /api/operate/agui/console` explicitly selects a separate persisted
+`operateConsoleRead` policy. The original endpoint stays page-only, even with
+`CONSOLE_TOOLS` enabled. Console-read chats add only the existing C6
+`listConsoleTools`/`callConsoleTool` gateways while that flag is on; they retain
+empty bindings, no navigation from the agent, and the same later-turn restrictions.
+The short [wire contract](../../packages/workshop-backend/src/operate-agui-console.md)
+is adjacent to the adapter. This is the read-only subset of #232, not approval or
+write support, and enabling this endpoint does not enable the deployment flag.
+
+The `consoleRead` state subtree contains a version-1 authorized registry projection,
+a bounded subject-presence snapshot, and a pinned AG-UI `AgentCapabilities` object.
+The capabilities advertise SSE/state and only the currently available kernel read
+gateways, with client tools, resume, multi-agent and approval/interrupt support false.
+A descriptor names the frozen widget and declared tool/input schema; all authored
+labels/descriptions remain in C5b's untrusted frame. `getReadConsole` first marks the
+selected console-read chat's durable taint, then reuses C5b's caller/page/publication
+checks and synchronous authorized registry walk. Invocation remains C6 → C5b → the
+isolated read lane. The wire never registers a second executable catalog.
+
+The same authorized walk projects only placed `inferops.project-board` widgets from
+the published current screen, including the single-screen view's screen when no
+explicit screen selection exists. A stable run-local `inferos.console-boards.v1`
+activity replaces versioned reference/layout content; no domain records, credentials,
+Wiki or authored widget UI is hydrated. A consumer resolves data with its own
+existing authority. Activity messages remain in subsequent message snapshots.
+
+Before releasing each durable message and final history, and once a second while
+waiting, the adapter rechecks the console projection. Page updates immediately clear
+the old catalog/activity; sequence fencing discards reads overtaken by an update.
+Republish, deletion or revoked workspace access returns an unavailable projection,
+clearing descriptors and board activity. This is a bounded snapshot, not a permanent
+capability or an instantaneous remote revocation subscription. Existing subject
+presence is read through a short authorized `subscribeToSubjectPresence` lease,
+disposed after the initial roster. Only up to 64 participant keys/issue references
+and a truncation bit are projected; no board means no roster. The temporary join
+includes the caller, exactly as the existing API specifies.
+
+Console tool events retain C6 names, JSON arguments and correlated durable results
+or framed errors. Previously committed results remain historical records after a
+selection changes; they do not re-advertise a callable descriptor. Recorded replay
+never invokes a widget again. A crash after a read but before its step's commit may
+rerun the read; no exactly-once claim is made. Existing taint/egress/image/binding/stub
+controls and Build/spawn exclusions continue to apply.
+
 HTTP owns subscriptions to the selected chat and the per-person page, set up before starting the
 run. Subscriptions span all workspace chats internally, so callbacks are filtered to the reserved
 chat. Committed chat steps produce canonical text/tool lifecycle events and authoritative message
 snapshots; tool ids are retained and message ids derive from chat and log sequence. Duplicate
 history rows are reconciled by id. Provisional tokens are deliberately withheld until the durable
 step commits: this is step streaming, not token streaming. Existing caller-visible reasoning is
-included in history snapshots. Unsupported activity and custom payloads are not serialized. A tool
+included in history snapshots. The page-only endpoint does not serialize activity or custom payloads. A tool
 input-complete callback is never presented as successful execution.
 
 An initial state snapshot contains `operate`; subsequent authoritative changes replace only that

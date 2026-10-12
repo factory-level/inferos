@@ -1,6 +1,45 @@
 import type { WorkpieceId } from "./api.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
 import type { WidgetToolDeclaration } from "./widget-tools.js";
+import type { CanvasProjectBoardWidget } from "./canvas.js";
+
+/** Authorized presentation of a published console for the version-1 AG-UI read adapter. */
+export type OperateConsoleRead = {
+  /** Projection schema version, independent of the console publication revision. */
+  version: 1;
+  /** Console workspace reference; never a capability. */
+  workspaceId: string;
+  /** Published console reference. */
+  consoleId: string;
+  /** Publication used for every descriptor and placed reference below. */
+  revision: string;
+  /** Current menu selection, derived from the owner's page. */
+  viewId: string;
+  /** Current screen selection, or null for a rollup without a selected screen. */
+  screenId: string | null;
+  /** Registered frozen widgets; descriptions remain framed untrusted data. */
+  widgets: {
+    /** Frozen install accepted by the existing callConsoleTool gateway. */
+    widgetId: WorkpieceId;
+    /** Existing invocation gateway; descriptors do not register client tools. */
+    gateway: "callConsoleTool";
+    /** C5b's complete untrusted descriptor frame, including version and commit. */
+    untrusted: string;
+    /** Declared tool names and validated flat input schemas. */
+    tools: Pick<WidgetToolDeclaration, "name" | "input">[];
+  }[];
+  /** Placed board references and layout only; viewers resolve data using their own access. */
+  boards: {
+    /** Stable section reference, without authored title. */
+    sectionId: string;
+    /** Existing layout column count. */
+    columns: 1 | 2 | 3;
+    /** Position in the section, including gaps occupied by unsupported widgets. */
+    index: number;
+    /** Versioned board reference and display parameters, without hydrated domain records. */
+    widget: CanvasProjectBoardWidget;
+  }[];
+};
 
 // An authored console: everything one operator role works in, as a menu of views over one
 // workspace's screens (canvas ids), stored in that workspace beside its screens and flows. Opening

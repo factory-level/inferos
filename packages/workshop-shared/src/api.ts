@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { ConsoleRef, ConsoleSource, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
@@ -454,8 +454,9 @@ export interface OperateSession extends RpcTarget {
   /** Reserve a prepared run, dispatch navigation and start a durable read-only chat in getWorkspace().
    * Repeated/retired selectors fail without repeating work. Each generation admits 256 attempts,
    * including failed setup. Legacy bare selectors require upgrade; history remains in the workspace.
+   * consoleRead selects the separate C6 read policy; it never accepts client authority or tools.
    */
-  startReadRun(input: OperateReadRun): Promise<number>;
+  startReadRun(input: OperateReadRun, consoleRead?: boolean): Promise<number>;
 
   /**
    * Calls `subscriber` with the current snapshot, then again after every event, with the event that
@@ -3149,8 +3150,13 @@ export interface Overseer extends RpcTarget {
    */
   listSlashCommands(): Promise<SlashCommandChoice[]>;
 
-  /** Start a durable page-read-only chat in the owner's Operate workspace, using their model. */
-  newOperateReadChat(message: string): Promise<number>;
+  /** Start a durable read-only chat in the owner's Operate workspace, using their model.
+   * consoleRead explicitly adds the flag-gated C6 read tools; omission remains page-only. */
+  newOperateReadChat(message: string, consoleRead?: boolean): Promise<number>;
+
+  /** Fresh authorized console projection for a console-read chat; marks taint before discovery.
+   * Null means disabled, unavailable or no longer authorized. It grants no capabilities. */
+  getReadConsole(chatId: number): Promise<OperateConsoleRead | null>;
 
   /**
    * Starts a new chat with the given initial message or slash-command request. A slash command

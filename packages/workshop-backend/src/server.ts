@@ -944,7 +944,8 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     return this.user().prepareOperateReadRun();
   }
 
-  async startReadRun(input: OperateReadRun): Promise<number> {
+  async startReadRun(input: OperateReadRun, consoleRead = false): Promise<number> {
+    if (typeof consoleRead !== "boolean") throw new Error("UNSUPPORTED_READ_INPUT");
     parseReadRunSelectors(input.threadId, input.runId);
     if (typeof input.message !== "string" || !input.message.trim() || input.message.length > 16_384) {
       throw new Error("UNSUPPORTED_READ_INPUT");
@@ -954,7 +955,7 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     await this.user().reserveOperateReadRun(input.threadId, input.runId);
     if (input.navigation) await this.dispatch(input.navigation.event, input.navigation.expectedSeq);
     using workspace = await this.openWorkspace();
-    const chatId = await workspace.newOperateReadChat(input.message);
+    const chatId = await workspace.newOperateReadChat(input.message, consoleRead);
     await this.user().bindOperateReadRun(input.threadId, chatId);
     return chatId;
   }
@@ -1250,7 +1251,7 @@ export default {
       return handleClientErrorRequest(req, env, ctx);
     }
 
-    if (url.pathname === "/api" || url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/prepare") {
+    if (url.pathname === "/api" || url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/console" || url.pathname === "/api/operate/agui/prepare") {
       // Fail closed on a sign-in allowlist the deployment cannot honour, with the reason.
       try {
         await (authGatekeepersChecked ??= assertAuthGatekeepersConfigured(env));
@@ -1301,7 +1302,7 @@ export default {
         accessPayload = payload;
       }
 
-      if (url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/prepare") {
+      if (url.pathname === "/api/operate/agui" || url.pathname === "/api/operate/agui/console" || url.pathname === "/api/operate/agui/prepare") {
         return handleOperateAgui(req, async () => {
           const api = new PublicApiImpl(ctx, env, () => {}, accessPayload);
           const authorization = req.headers.get("Authorization");

@@ -166,6 +166,8 @@ export interface WorktreeTurnAccess {
 export type AiChatAgentContext = {
   /** Server-owned restriction, persisted before the first turn and retained on reopen. */
   operateReadOnly?: true;
+  /** Explicit console-read policy; page-only chats never acquire C6 tools on reopen. */
+  operateConsoleRead?: true;
   /** Chat ID, corresponds to `chatMeta`. */
   chatId: number;
 
@@ -2082,7 +2084,8 @@ async function runAgentPass(
   let workspaceKind = hooks.getWorkspaceKind();
   let operateSession = hooks.isOperateSession();
   // Offered only in operate chats, and only while the installation turns them on.
-  let consoleTools = operateSession && hooks.consoleToolsEnabled();
+  let consoleTools = operateSession && hooks.consoleToolsEnabled() &&
+      (!agentContext.operateReadOnly || agentContext.operateConsoleRead === true);
   let assertKindAllowsFile = (workpieceId: WorkpieceId, filename: string) => {
     if (!hooks.isWorktree(workpieceId) && !workspaceKindAllowsFile(workspaceKind, filename)) {
       throw new Error(`This workspace's kind is ${workspaceKind}, which has no UI, so ` +
@@ -4107,15 +4110,16 @@ async function runAgentPass(
   }
 
   if (agentContext.operateReadOnly) {
+    const allowed = new Set(["operatePage", ...(consoleTools ? ["listConsoleTools", "callConsoleTool"] : [])]);
     // Guard execution as well as advertisement; model-supplied catalogs cannot widen this.
     for (const tool of Object.values(tools)) {
       const execute = tool.execute;
       tool.execute = (...args) => {
-        if (tool.name !== "operatePage") throw new Error("This chat can only read the current page.");
+        if (!allowed.has(tool.name)) throw new Error("This chat can only use its authorized read tools.");
         return execute(...args);
       };
     }
-    tools = {operatePage: tools.operatePage};
+    tools = Object.fromEntries(Object.entries(tools).filter(([name]) => allowed.has(name)));
   }
 
   // Calls that reached a tool's execute(), so tool_execution_end can tell the ones pi rejected.

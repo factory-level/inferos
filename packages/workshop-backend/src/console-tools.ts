@@ -10,7 +10,7 @@
 // as parseWidgetTools admits them), and never any other authored text or an exception's text.
 
 import type { WorkpieceId } from "@gadgets/workshop-shared/api";
-import type { ConsoleWidgetEntry } from "@gadgets/workshop-shared/operate-console";
+import type { ConsoleWidgetEntry, OperateConsoleRead } from "@gadgets/workshop-shared/operate-console";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { ToolLaneRefusal } from "./tool-lane";
 
@@ -61,7 +61,7 @@ export type ConsoleToolCallRequest = ConsoleToolListRequest & {
  * which may name a declared tool or input property identifier, and no other authored text.
  */
 export type ConsoleToolOutcome =
-  | { status: "ok"; text: string }
+  | { status: "ok"; text: string; consoleRead?: OperateConsoleRead }
   | { status: "error"; text: string }
   | { status: "failed"; reason: string };
 

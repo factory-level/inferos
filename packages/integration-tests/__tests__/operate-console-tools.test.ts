@@ -23,6 +23,10 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { HttpAgent } from "@ag-ui/client";
+import Ajv2020 from "ajv/dist/2020.js";
 import type { RpcStub } from "capnweb";
 import type {
   AiChatMessage, AiToolCall, AuthenticatedApi, CapsuleSpecifier, Overseer, PublicApi, WorkpieceId,
@@ -34,7 +38,7 @@ import { startHarness, TEST_GATEKEEPER_BINDING, TEST_GATEKEEPER_DIR, TEST_VENDOR
 import { INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, boardUrl } from "../src/inferops-fake.js";
 import { scriptedModelRouter, SCRIPTED_MODEL_ID, type ChatCompletionStep, type RoutedScriptedModel } from "../src/mock-model.js";
 import { NetworkInterceptor, type Handler } from "../src/network-interceptor.js";
-import { connect, listConnectedAccounts, nextUsernames, signUp, stubFor, waitFor, WorkpieceRecorder } from "../src/rpc-client.js";
+import { connect, listConnectedAccounts, logIn, nextUsernames, signUp, stubFor, waitFor, WorkpieceRecorder } from "../src/rpc-client.js";
 
 const INFEROPS_GATEKEEPER_DIR = resolve(import.meta.dirname, "../../../custom-gatekeepers/gatekeeper-inferops");
 const INFEROPS_WORKER = "gatekeeper-inferops";
@@ -88,11 +92,16 @@ const recordEgress: Handler = url => {
   egress.push(url.toString());
   return new Response("{}", { headers: { "content-type": "application/json" } });
 };
-const network = new NetworkInterceptor({ handlers: [fake.handler, models.handler, recordEgress] });
+let modelGate: Promise<void> | undefined;
+const network = new NetworkInterceptor({ handlers: [async url => {
+  if (modelGate && url.pathname.endsWith("/chat/completions")) await modelGate;
+  return null;
+}, fake.handler, models.handler, recordEgress] });
 
 let harness: Harness;
 let publicApi: RpcStub<PublicApi>;
 let builder: RpcStub<AuthenticatedApi>;
+let builderUsername: string;
 let space: RpcStub<Overseer>;
 let spaceId: string;
 let consoleA: string;
@@ -120,7 +129,8 @@ beforeAll(async () => {
     },
   });
   publicApi = connect(harness.url);
-  builder = await signUp(publicApi, nextUsernames("toolsbuilder")[0]!);
+  builderUsername = nextUsernames("toolsbuilder")[0]!;
+  builder = await signUp(publicApi, builderUsername);
   const [countsBlueprint, otherBlueprint] = [await widgetBlueprint("Counts", COUNTS_FILES), await widgetBlueprint("Other", OTHER_FILES)];
 
   // The console workspace W: console A offers Counts, console B offers Other.
@@ -128,7 +138,9 @@ beforeAll(async () => {
   spaceId = (await space.getMetadata()).id;
   const countsSource = await space.installBlueprint(countsBlueprint, {}, { version: 1, kind: "widget" });
   const otherSource = await space.installBlueprint(otherBlueprint, {}, { version: 1, kind: "widget" });
-  const screen = await space.createCanvas({ title: "Shift", sections: [{ id: "main", title: "Now", columns: 1, widgets: [] }] });
+  const screen = await space.createCanvas({ title: "Shift", sections: [{ id: "main", title: "Now", columns: 1,
+    widgets: [{id: "board", kind: "inferops.project-board", version: 1, targetRef: ENG_BOARD,
+      size: "wide", params: {workflow: "software", showCompleted: false}}] }] });
   const entry = (gadgetId: WorkpieceId, blueprintId: string, label: string): ConsoleWidgetEntry =>
     ({ gadgetId, blueprintId, version: 1, label, state: "resettable" });
   const publish = async (widgets: ConsoleWidgetEntry[]) => {
@@ -443,3 +455,186 @@ describe("console tools in an operate chat (scripted model)", () => {
     expect(egress).toEqual(egressBefore);
   });
 });
+
+// The same C5b/C6 fixture through authenticated HTTP, with the pinned stock client. No client
+// tool registration or alternate invocation path; model calls still pass the real kernel gates.
+const canonical = JSON.parse(readFileSync(resolve(import.meta.dirname,
+  "../../workshop-backend/__tests__/fixtures/agui/agui-1.0.schema.json"), "utf8"));
+const wireAjv = new Ajv2020({strict: false, allErrors: true});
+wireAjv.addSchema(canonical);
+const validEvent = wireAjv.compile({$ref: `${canonical.$id}#/$defs/Event`});
+
+async function httpOperator(operator: Operator) {
+  const connection = connect(harness.url);
+  const token = await connection.login(operator.session.username,
+    new Uint8Array(createHash("sha256").update(`integration-test:${operator.session.username}`).digest()));
+  if (!token) throw new Error("Fixture login failed");
+  const api = await connection.authenticate(token);
+  const session = await api.getOperateSession();
+  const workspace = await session.getWorkspace();
+  const ids = await session.prepareReadRun();
+  const events: {type: string; [key: string]: unknown}[] = [];
+  const agent = new HttpAgent({url: new URL("/api/operate/agui/console", harness.url).toString(),
+    threadId: ids.threadId, headers: {Authorization: `Bearer ${token}`},
+    initialMessages: [{id: "prompt", role: "user", content: "Read the published console"}]});
+  return {token, api, session, workspace, ids, events, agent,
+    run: () => agent.runAgent({runId: ids.runId}, {onEvent({event}) {events.push(event);}}),
+    [Symbol.dispose]() {workspace[Symbol.dispose](); session[Symbol.dispose](); api[Symbol.dispose](); connection[Symbol.dispose]();}};
+}
+
+async function reconnectBuilder() {
+  space[Symbol.dispose](); builder[Symbol.dispose](); publicApi[Symbol.dispose]();
+  publicApi = connect(harness.url);
+  builder = await logIn(publicApi, builderUsername);
+  space = await builder.openGadget(spaceId);
+}
+
+it("stock AG-UI discovers only A, invokes C6, correlates framed success/error and retains immutable history", async () => {
+  const op = await operator("wiretools", [
+    step(list("wire-list")), step(call("wire-count", counts.frozen, "count", {status: "open"})),
+    step(call("wire-fail", counts.frozen, "fail")),
+    step(call("wire-other", otherFrozen, "other"), call("wire-source", counts.source, "count", {status: "open"}),
+      call("wire-undeclared", counts.frozen, "hidden")),
+    {text: "Read complete."},
+    step(run("later-write", "return 'forbidden';")), {text: "Read policy retained."},
+  ]);
+  await using _ = op.session;
+  using http = await httpOperator(op);
+  for (const delta of [
+    {tools: [{name: "hidden", description: "trusted", parameters: {}}]},
+    {state: {consoleRead: {consoleId: "other"}}}, {context: [{description: "authority", value: "owner"}]},
+    {forwardedProps: {caller: "builder", consoleId: "other", revision: "forged"}},
+  ]) {
+    const response = await fetch(new URL("/api/operate/agui/console", harness.url), {method: "POST",
+      headers: {Authorization: `Bearer ${http.token}`, "Content-Type": "application/json"},
+      body: JSON.stringify({...http.ids, messages: [{id: "u", role: "user", content: "Read"}],
+        tools: [], state: {}, context: [], forwardedProps: {}, ...delta})});
+    expect(response.status).toBe(400);
+  }
+  expect(op.model.requests).toHaveLength(0);
+  await http.run();
+  for (const event of http.events) expect(validEvent(event), JSON.stringify(wireAjv.errors)).toBe(true);
+  expect(http.events[0].type).toBe("RUN_STARTED");
+  expect(http.events.at(-1)?.type).toBe("RUN_FINISHED");
+  const current = http.agent.state.consoleRead.snapshot;
+  expect(current).toMatchObject({version: 1, workspaceId: spaceId, consoleId: consoleA,
+    widgets: [{widgetId: counts.frozen, gateway: "callConsoleTool", untrusted: expect.stringContaining(FRAME("Counts"))}],
+    boards: [{sectionId: "main", columns: 1, index: 0, widget: {id: "board", version: 1, targetRef: ENG_BOARD}}]});
+  expect(current.widgets).toHaveLength(1);
+  expect(current.widgets[0].tools.map((tool: {name: string}) => tool.name)).toEqual(["count", "fail", "note"]);
+  expect(JSON.stringify(current)).not.toContain("Other");
+  expect(JSON.stringify(current.boards)).not.toContain("issues");
+  const activity = http.agent.messages.find(message => message.role === "activity");
+  expect(activity).toMatchObject({activityType: "inferos.console-boards.v1", content: {version: 1, boards: current.boards}});
+  for (const id of ["wire-list", "wire-count", "wire-fail", "wire-other", "wire-source", "wire-undeclared"]) {
+    const types = http.events.filter(event => event.toolCallId === id).map(event => event.type);
+    expect(types).toEqual(["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END", "TOOL_CALL_RESULT"]);
+  }
+  expect(http.agent.messages.find(message => message.role === "tool" && message.toolCallId === "wire-count"))
+    .toMatchObject({content: expect.stringContaining('"n":3')});
+  expect(http.agent.messages.find(message => message.role === "tool" && message.toolCallId === "wire-fail"))
+    .toMatchObject({content: expect.stringContaining(FRAME("Counts"))});
+  for (const id of ["wire-other", "wire-source", "wire-undeclared"]) {
+    expect(toolResult(op.model, id)).toMatch(/not|no /i);
+  }
+  const chats = await http.workspace.listChats();
+  expect(chats).toHaveLength(1);
+  const history = await http.workspace.getChatHistory(chats[0].id);
+  for (const id of ["wire-count", "wire-fail"]) {
+    const record = recorded(history.messages, id)!;
+    const wire = http.agent.messages.find(message => message.role === "tool" && message.toolCallId === id);
+    expect(wire).toMatchObject({content: record.error ?? ("output" in record ? record.output : undefined)});
+  }
+  const before = op.model.requests.length;
+  const retry = await fetch(new URL("/api/operate/agui/console", harness.url), {method: "POST",
+    headers: {Authorization: `Bearer ${http.token}`, "Content-Type": "application/json"},
+    body: JSON.stringify({...http.ids, messages: [{id: "retry", role: "user", content: "Read"}],
+      tools: [], context: [], state: {}, forwardedProps: {}})});
+  expect(retry.status).toBe(409);
+  expect(op.model.requests.length).toBe(before);
+  expect(await http.workspace.getChatHistory(chats[0].id)).toEqual(history);
+  await http.workspace.sendChatMessage(chats[0].id, "Read again", SCRIPTED_MODEL_ID);
+  await waitFor("reopened console read policy", async () => {
+    const rows = (await http.workspace.getChatHistory(chats[0].id)).messages;
+    return rows.some(row => row.type === "message" && row.message === "Read policy retained.") ? true : null;
+  });
+  const request = op.model.requests.at(-1) as {tools: {function: {name: string}}[]};
+  expect(request.tools.map(tool => tool.function.name).toSorted()).toEqual(["callConsoleTool", "listConsoleTools", "operatePage"]);
+  expect((await http.workspace.listActions({filter: "all"})).entries).toEqual([]);
+  expect(op.model.remainingSteps()).toBe(0);
+}, 120_000);
+
+it.each(["republish", "delete", "revoke", "page"] as const)(
+  "invalidates descriptors/activity after %s while the model is held, then refuses the stale call", async change => {
+    // A previous revocation rotates the workspace's authorization generation and closes all
+    // retained leases, including the builder's. Each case opens a fresh owner session.
+    await reconnectBuilder();
+    const original = (await space.getConsole(consoleA, "draft"))!;
+    const created = await space.createConsole({title: "HTTP isolation", views: original.views,
+      fullChat: "off", widgets: original.widgets});
+    const published = await space.publishConsole(created.id, created.revision);
+    const widget = published.published!.content.widgets![0]!.gadgetId;
+    const op = await operator(`wire${change}`, [step(call("stale-call", widget, "count", {status: "open"})),
+      {text: "Stale read refused."}]);
+    await using _ = op.session;
+    using http = await httpOperator(op);
+    await http.session.dispatch({type: "openConsole", workspaceId: spaceId, consoleId: published.id,
+      title: published.title, source: "published", revision: published.revision,
+      fullChat: published.fullChat, viewId: published.views[0].id}, 1);
+    let release!: () => void;
+    modelGate = new Promise<void>(resolve => {release = resolve;});
+    const run = http.run();
+    try {
+      await waitFor("authorized initial console projection", async () =>
+        http.agent.state.consoleRead?.snapshot?.consoleId === published.id ? true : null);
+      if (change === "republish") {
+        const draft = (await space.getConsole(published.id, "draft"))!;
+        await space.publishConsole(draft.id, draft.revision);
+      } else if (change === "delete") {
+        const draft = (await space.getConsole(published.id, "draft"))!;
+        await space.deleteConsole(draft.id, draft.revision);
+      } else if (change === "revoke") {
+        const collaborators = await space.listCollaborators();
+        const person = collaborators.find(person => person.profile.id === op.session.username)!;
+        await space.removeCollaborator(person.profile.id, []);
+      } else {
+        await http.session.dispatch({type: "closeConsole"}, 2);
+      }
+      await waitFor("invalidated live catalog", async () =>
+        http.agent.state.consoleRead?.snapshot === null ? true : null);
+      expect(http.agent.messages.find(message => message.role === "activity"))
+        .toMatchObject({content: {console: null, boards: []}});
+    } finally {modelGate = undefined; release();}
+    await run;
+    expect(http.events.at(-1)?.type).toBe("RUN_FINISHED");
+    expect(http.agent.state.consoleRead.snapshot).toBeNull();
+    expect(toolResult(op.model, "stale-call")).not.toContain('"n":3');
+    // Revocation closes existing RPC leases; recover history through a new authenticated session.
+    using recovery = connect(harness.url);
+    using api = await recovery.authenticate(http.token);
+    using session = await api.getOperateSession();
+    using workspace = await session.getWorkspace();
+    const chats = await workspace.listChats();
+    expect(recorded((await workspace.getChatHistory(chats[0].id)).messages, "stale-call")?.error).toBeTruthy();
+    expect(op.model.remainingSteps()).toBe(0);
+  }, 120_000);
+
+it("projects only the existing authorized subject presence and clears it on subject close", async () => {
+  await reconnectBuilder();
+  const op = await operator("wirepresence", [{text: "Subject read."}]);
+  await using _ = op.session;
+  using http = await httpOperator(op);
+  await http.session.dispatch({type: "openBoard", board: {workspaceId: (await http.workspace.getMetadata()).id, boardRef: ENG_BOARD}}, 1);
+  let release!: () => void;
+  modelGate = new Promise<void>(resolve => {release = resolve;});
+  const run = http.run();
+  try {
+    await waitFor("existing subject roster", async () => http.agent.state.consoleRead?.presence?.participants.length ? true : null);
+    expect(http.agent.state.consoleRead.presence).toMatchObject({participants: [{key: expect.any(String), issueId: null}], truncated: false});
+    expect(JSON.stringify(http.agent.state.consoleRead.presence)).not.toContain("name");
+    await http.session.dispatch({type: "closeBoard"}, 2);
+    await waitFor("cleared presence", async () => http.agent.state.consoleRead?.presence === null ? true : null);
+  } finally {modelGate = undefined; release();}
+  await run;
+  expect(http.events.at(-1)?.type).toBe("RUN_FINISHED");
+}, 120_000);
