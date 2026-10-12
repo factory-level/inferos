@@ -6625,7 +6625,13 @@ class OverseerImpl implements AgentHooks {
     this.#associateAction(caller, actionId);
   }
 
-  submitAction(gatekeeperId: number, action: number,
+  async submitAction(gatekeeperId: number, action: number,
+                     description: ActionDescription, caller: GatekeeperCaller): Promise<void> {
+    this.submitActionNow(gatekeeperId, action, description, caller);
+  }
+
+  // Synchronous journal write for callers already inside a storage transaction.
+  submitActionNow(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
       : void {
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
@@ -13187,10 +13193,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           throw error;
         }
         // The facet retains a durable replacement link. No external effect occurs in this step.
-        // submitAction writes synchronously before returning, within the same journal transaction.
+        // submitActionNow writes synchronously within the same journal transaction.
         this.impl.storage.transaction(() => {
           const nextId = this.impl.storage.nextActionId.get();
-          this.impl.submitAction(record.gatekeeperId, replacement.action,
+          this.impl.submitActionNow(record.gatekeeperId, replacement.action,
             replacement.description, record.caller);
           const next = actions.get(nextId);
           if (next?.type !== "action") throw new Error("Replacement was not journaled");
@@ -15601,7 +15607,7 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
 
   async submitAction(action: number, description: ActionDescription): Promise<void> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
+    this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
   }
 
   bindHook<Hook extends RpcTarget>(
