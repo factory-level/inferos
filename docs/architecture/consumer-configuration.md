@@ -22,7 +22,7 @@ covers:
   - .agents/skills/verify-inferos
   - .agents/skills/upgrade-inferos
   - .agents/skills/recover-inferos
-updated: 2026-10-09
+updated: 2026-10-12
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -195,6 +195,33 @@ With custom code enabled, the wrapper's `gatekeepers/gatekeeper-<slug>/` directo
 A custom Worker under `workers/` is never a gatekeeper: no discovery path reads `workers/` for gatekeepers, its binding is the router-only `CONSUMER_<ID>`, and `extensions.ts` refuses a listed Worker directory that holds a `connection.json`, since a connection package belongs in `gatekeepers/`.
 
 Bootstrap creates a disabled public hello example, manifest, validation command and generated-file ignore. The wrapper runtime accepts the custom code flag only on a supporting pin; doctor validates the manifest without importing custom config modules. `extensions:check` additionally renders canonical configs. Remote InferOps remains blocked; view features require a supporting pin. Cloud consumer manifest composition and deployment remain unimplemented; no feature flag grants resource access or triggers deployment.
+
+## Disposable deployment recipe (local preflight only)
+
+There is still no deploy command: `inferos.config.json` has no deploy-target fields, and the settings reference reports "Cloud deployment target" as unsupported (#11). `scripts/consumer/deploy-recipe.ts` adds the reviewable half of #11's "opt-in disposable deployment smoke recipe": a recipe file and a pure local preflight. It is not a deploy path.
+
+**The recipe** (schema version 1, `kind: "disposable-deploy-recipe"`; example `scripts/consumer/fixtures/deploy-recipe/disposable.json`) names:
+- the owner, the creation and expiry dates (at most 7 days apart), and the purpose;
+- `source.repository` and `source.revision`, which must equal the wrapper config's `upstream`, and `wrapperConfig.schemaVersion`;
+- the target:
+  - `environment` must be `disposable`; there is no production, shared or default target;
+  - `name` follows `inferos-disposable-<slug>-<yyyymmdd>`, with the expiry date, and no production, live, main, shared or customer word;
+  - `account`, `publicOrigin` (https origin only, no wildcard or local host, first host label = the name), `oauthOrigins` (equal to the public origin), `access` (`staff-only` / `all-users`) and `admins` (`{count}`; identities stay out of the file);
+  - `bindings` (known kinds, UPPER_SNAKE names, unique resources) and `secrets`, which may only be `{secretRef}` names;
+- `inferops`, which is `mock` unless `mode: "live"` *and* `live: true` with an https `baseUrl`;
+- `extensions`, where `wrapperGatekeepers` and `customWorkers` must be `false`, because the release manifest does not deploy them.
+
+Any value an owner has not decided is `{"unresolved": "<who decides>"}`: listed, never guessed, never defaulted. An absent field is an error. A credential-looking literal anywhere, or a non-reference value under a credential key, is refused, and a problem never echoes the rejected value.
+
+**The preflight** (`node scripts/consumer/deploy-recipe.ts <recipe.json> --config <inferos.config.json> [--json]`, exit 0 valid / 1 invalid / 2 usage) validates the wrapper config with `parseConsumerConfig`. It prints a deterministic plan:
+- whose first word is `NOT DEPLOYED`;
+- with a canonical recipe digest, the source revision and config version, and the redacted target;
+- with the local checks it ran, and the cloud-only steps (provision bindings, register OAuth origins, Access policy, deploy Workers, smoke, owner-selected deployed-only checks, teardown), each `not run` with a `pending` evidence slot;
+- with the unresolved inputs, and `readyToApply: false` always, since no apply command exists.
+
+It imports no process, network or provider client, reads no secret, and calls neither `wrangler` nor `gh`. `deploy-recipe.test.ts` proves that with a subprocess spy (fake tools on `PATH`, plus a preload that records spawns, sockets, DNS and fetch, with a control that the spy catches them).
+
+A recipe, a passing preflight or local green is not approval to deploy. None of them proves Access, OAuth, subscription support, real bindings or quotas; those remain cloud-only.
 
 ## Durable-view server boundary
 

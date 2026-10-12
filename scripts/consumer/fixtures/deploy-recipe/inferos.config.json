@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/factory-level/inferos",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "profile": "inferops-operations",
+  "features": {
+    "composableViews": true,
+    "durableViews": true,
+    "customCloudflareCode": false,
+    "inferlabLogin": false
+  },
+  "styling": {
+    "siteName": "InferOS",
+    "density": "compact",
+    "theme": "system"
+  },
+  "local": {
+    "port": 8787
+  },
+  "inferops": {
+    "mode": "fixture",
+    "fixture": "fixtures/project-board.json",
+    "targetRef": "inferops://demo.local/project/board/DEMO"
+  }
+}
