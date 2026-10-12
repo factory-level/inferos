@@ -602,8 +602,12 @@ it.each(["republish", "delete", "revoke", "page"] as const)(
       }
       await waitFor("invalidated live catalog", async () =>
         http.agent.state.consoleRead?.snapshot === null ? true : null);
-      expect(http.agent.messages.find(message => message.role === "activity"))
-        .toMatchObject({content: {console: null, boards: []}});
+      // The client applies the state and activity events separately. Observe both boundedly.
+      const activity = await waitFor("invalidated board activity", async () => {
+        const current = http.agent.messages.find(message => message.role === "activity");
+        return current?.content.console === null ? current : null;
+      });
+      expect(activity).toMatchObject({content: {console: null, boards: []}});
     } finally {modelGate = undefined; release();}
     await run;
     expect(http.events.at(-1)?.type).toBe("RUN_FINISHED");
