@@ -15,6 +15,9 @@ covers:
   - packages/workshop-backend/__tests__/operate-agui.test.ts
   - packages/integration-tests/__tests__/operate-agui.test.ts
   - packages/integration-tests/fixtures/operate-agui-loss-worker.js.txt
+  - packages/integration-tests/__tests__/operate-read-scenario.test.ts
+  - packages/integration-tests/src/scenarios/operate-read-navigation.ts
+  - packages/integration-tests/src/scenarios/operate-read-navigation.md
   - packages/workshop-shared/src/operate-read-run.ts
   - packages/workshop-shared/src/operate-session.ts
   - packages/workshop-shared/src/api.ts
@@ -250,6 +253,24 @@ wire frames with Ajv and exercise selected upstream fixture semantics with the p
 client. Fixture presence is not full semantic conformance. Scripted local HTTP tests establish
 only the bounded read/navigation contract, not live model/sign-in proof, approval interrupts,
 widget actions or full MVP-33. ADR-0020 remains proposed; #231/#232 and #66 are separate follow-ons.
+
+### Programmed local read/navigation scenario
+
+`operate-read-navigation` version 1 (MVP-31) is one programmed example of this producer, played by
+the stock client against the real Workshop and InferOps gatekeeper Worker on loopback:
+`pnpm --filter @gadgets/integration-tests exec vitest run __tests__/operate-read-scenario.test.ts`.
+Its [contract](../../packages/integration-tests/src/scenarios/operate-read-navigation.md) fixes the
+stable id and version, fixtures, initial state and expected results; its data lives in
+`operate-read-navigation.ts` beside it. Model replies (labelled `[mock model]`) and InferOps/InferLab
+answers are scripted; sign-in, preparation, admission, the board permission check, navigation, the
+session log and history are real. From fresh fixtures it plays an authorized navigation/read twice
+with identical observed results, an unconnected board refused 403 `READ_RUN_REFUSED` before any chat
+or model request, and a client abort after `RUN_STARTED`. In that abort no terminal event crosses
+the wire, the stock client reports its own local `RUN_ERROR` with code `abort`, the kernel turn still
+completes, and the same selectors are refused 409 `RUN_ALREADY_RESERVED` with no resubmission. The
+local helper refuses non-loopback targets. Each run writes a token-free JSON report
+(`source: "mock"`, `liveProviderProof: false`) naming the scenario version, commit, boundaries, cases
+and verdict; an unanswered outbound request, or a run whose isolation could not be checked, fails it. It is not a general scenario runner, nor UI, approval, widget or live provider proof.
 
 ## Components
 
