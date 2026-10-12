@@ -9,6 +9,10 @@
 
 import { boardUrl } from "../inferops-fake.js";
 import type { ChatCompletionStep } from "../mock-model.js";
+import {
+  assertLoopbackTarget as assertLoopback, scenarioVerdict as verdictFor,
+  type ScenarioCase, type ScenarioIsolation, type ScenarioReport as Report,
+} from "./scenario-report.js";
 
 /** Bump `version` whenever a fixture input or an expected result below changes. */
 export const SCENARIO = { id: "operate-read-navigation", version: 1 } as const;
@@ -68,47 +72,22 @@ export const EXPECTED_INTERRUPTION = {
   replayError: "RUN_ALREADY_RESERVED",
 } as const;
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
 /** Refuse any target that is not a plain-HTTP loopback Workshop. */
 export function assertLoopbackTarget(target: URL): URL {
-  if (target.protocol !== "http:" || !LOOPBACK_HOSTS.has(target.hostname)) {
-    throw new Error(`Scenario ${SCENARIO.id} runs only against a loopback Workshop, not ${target.origin}`);
-  }
-  return target;
+  return assertLoopback(target, SCENARIO.id);
 }
 
-/** One case's outcome as the report records it. */
-export type ScenarioCase = {
-  name: string;
-  outcome: "PASS" | "FAIL";
-  observed: Record<string, unknown>;
-  failure?: string;
-};
+export type { ScenarioCase };
 
 /** The bounded, credential-free report a run writes. */
-export type ScenarioReport = {
-  scenario: typeof SCENARIO;
-  revision: { commit: string; dirty: boolean | null };
-  source: "mock";
-  liveProviderProof: false;
-  target: "wrangler createTestHarness on loopback";
-  boundaries: { mocked: string[]; real: string[] };
-  fixtures: Record<string, unknown>;
-  /** Outbound requests nothing answered in process; any one, or an unchecked run, fails the verdict. */
-  isolation: { checked: boolean; unmockedRequests: number | null; origins: string[] };
-  cases: ScenarioCase[];
-  verdict: "PASS" | "FAIL";
-};
+export type ScenarioReport = Report<typeof SCENARIO.id>;
 
 /** The case names a complete run records, in order. */
 export const CASE_NAMES = ["loopback-only", "read-navigation", "read-navigation-repeat", "refusal", "interrupted"] as const;
 
 /** PASS only for every case passing and an isolation check that ran and found no unanswered request. */
-export function scenarioVerdict(cases: readonly ScenarioCase[], isolation: ScenarioReport["isolation"])
-    : ScenarioReport["verdict"] {
-  return cases.map(entry => entry.name).join() === CASE_NAMES.join() && cases.every(entry => entry.outcome === "PASS")
-    && isolation.checked && isolation.unmockedRequests === 0 ? "PASS" : "FAIL";
+export function scenarioVerdict(cases: readonly ScenarioCase[], isolation: ScenarioIsolation): ScenarioReport["verdict"] {
+  return verdictFor(CASE_NAMES, cases, isolation);
 }
 
 /** Which parts of the run are programmed and which are the real code paths. */
