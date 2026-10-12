@@ -181,7 +181,14 @@ async function operator(script: readonly ChatCompletionStep[], consoleId: string
   const shown = await space.getConsole(consoleId, "published") as OperateConsole;
   await session.dispatch({type: "openConsole", workspaceId: spaceId, consoleId, title: shown.title,
     source: "published", revision: shown.revision, fullChat: shown.fullChat, viewId: shown.views[0]!.id}, 0);
-  const ids = await session.prepareReadRun();
+  // The selectors come from the authenticated HTTP preparation endpoint, as a stock client's app would get them.
+  const prepared = await fetch(new URL("/api/operate/agui/prepare", target), {method: "POST",
+    headers: {Authorization: `Bearer ${token}`}});
+  expect(prepared.status).toBe(200);
+  expect(prepared.headers.get("Cache-Control")).toBe("no-store");
+  const ids = await prepared.json() as {threadId: string; runId: string};
+  expect(ids.threadId).toMatch(EXPECTED_READ.preparedThread);
+  expect(ids.runId).toMatch(EXPECTED_READ.preparedRun);
   const events: {type: string; [key: string]: unknown}[] = [];
   const url = new URL("/api/operate/agui/console", target).toString();
   const agent = new HttpAgent({url, threadId: ids.threadId, headers: {Authorization: `Bearer ${token}`},

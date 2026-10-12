@@ -63,7 +63,8 @@ They go on two consoles, each with one view of the same screen, which places the
 `Other`.
 
 Each read case adds a fresh `use` collaborator whose Operate page opens console A at its current
-published revision, then prepares one console read. The user message is always
+published revision, then prepares one console read with `POST /api/operate/agui/prepare` (checked: 200,
+`Cache-Control: no-store`, `or2:<generation>:t|r:<uuid>` selectors). The user message is always
 `Read the published console.`
 
 ## Cases and expected results

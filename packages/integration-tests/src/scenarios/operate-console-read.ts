@@ -72,6 +72,9 @@ export const EXPECTED_READ = {
   reply: `${MOCK_PREFIX} Three are open; the other console's tool is not offered here.`,
   policyTools: ["callConsoleTool", "listConsoleTools", "operatePage"],
   replayStatus: 409,
+  /** Prepared selectors from `POST /api/operate/agui/prepare`, in the `or2:<generation>:<t|r>:<uuid>` form. */
+  preparedThread: /^or2:[1-9]\d*:t:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  preparedRun: /^or2:[1-9]\d*:r:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   /** The C6 gateway's refusal of a widget the opened console does not offer. */
   otherRefusal: /^Console [0-9a-f-]+ does not offer widget \d+\.$/,
 } as const;
