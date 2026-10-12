@@ -297,3 +297,50 @@ test("dates must exist on the calendar before the lifetime is computed", () => {
   leap.target.bindings.AVATARS.resource = "inferos-disposable-smoke-20280229-kv-avatars";
   assert.equal(planOf(leap).target.expires, "2028-02-29");
 });
+
+test("refusals never repeat an input-derived key: unsafe or credential-looking path segments are redacted", () => {
+  const planted = "ghp_QA_SYNTHETIC_TOKEN_0123456789";
+  for (const mutate of [
+    (r: Record<string, any>) => { r.target.bindings[planted] = { type: "kv", resource: "synthetic" }; },
+    (r: Record<string, any>) => { r[planted] = true; },
+    (r: Record<string, any>) => { r.target[`x ${planted}`] = 1; },
+    (r: Record<string, any>) => { r.extensions[planted] = true; },
+  ]) {
+    const r = decided();
+    mutate(r);
+    const problems = problemsOf(r);
+    assert.ok(problems.length > 0);
+    assert.ok(!JSON.stringify(problems).includes("ghp_"), JSON.stringify(problems));
+    assert.ok(problems.some(p => p.field.includes("<key>")), JSON.stringify(problems));
+  }
+  // A credential-looking key in the wrapper config is redacted too, whether it is reported by this
+  // preflight's scan or inside the config parser's own message.
+  for (const mutateConfig of [
+    (c: Record<string, any>) => { c.styling[planted] = "x"; },
+    (c: Record<string, any>) => { c[planted] = true; },
+  ]) {
+    const c = config();
+    mutateConfig(c);
+    const problems = problemsOf(decided(), c);
+    assert.ok(problems.length > 0);
+    assert.ok(!JSON.stringify(problems).includes("ghp_"), JSON.stringify(problems));
+  }
+  // The CLI's text and JSON refusals carry the same redacted paths.
+  const dir = mkdtempSync(join(tmpdir(), "deploy-recipe-key-"));
+  const r = decided();
+  r.target.bindings[planted] = { type: "kv", resource: "synthetic" };
+  writeFileSync(join(dir, "bad.json"), JSON.stringify(r));
+  for (const args of [[join(dir, "bad.json"), "--config", CONFIG_PATH], [join(dir, "bad.json"), "--config", CONFIG_PATH, "--json"]]) {
+    const run = cli(args);
+    assert.equal(run.status, 1);
+    assert.ok(!`${run.stdout}${run.stderr}`.includes("ghp_"), `${run.stdout}${run.stderr}`);
+    assert.match(`${run.stdout}${run.stderr}`, /target\.bindings\.<key>/u);
+  }
+  // Ordinary paths are shown as they are.
+  const plain = decided();
+  plain.target.bindings.blueprints = { type: "kv", resource: "x" };
+  assert.ok(problemsOf(plain).some(p => p.field === "target.bindings.blueprints"));
+  const indexed = decided();
+  indexed.target.oauthOrigins = ["http://x"];
+  assert.ok(problemsOf(indexed).some(p => p.field === "target.oauthOrigins[0]"));
+});

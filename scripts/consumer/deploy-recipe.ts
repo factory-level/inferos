@@ -291,7 +291,7 @@ export function validateDeployRecipe(recipe: unknown, wrapperConfig: unknown): P
   }
 
   if (problems.length > 0 || !config || !revision || !repository || !owner || !expires || !name) {
-    return { ok: false, problems: problems.length > 0 ? problems : [{ field: "(recipe)", rule: "is incomplete" }] };
+    return { ok: false, problems: safeProblems(problems.length > 0 ? problems : [{ field: "(recipe)", rule: "is incomplete" }]) };
   }
 
   const shown = (v: unknown) => (isUnresolved(v) ? "(unresolved)" : String(v));
@@ -329,10 +329,30 @@ export function validateDeployRecipe(recipe: unknown, wrapperConfig: unknown): P
       : "No apply command exists (factory-level/inferos#11); an explicit operator decision is still required",
   };
   // Last line of defence: a plan that would print a credential-looking string is not printed.
+  // (Refusals get the same guard in safeProblems.)
   if (SECRET_VALUE.test(canonical(plan))) {
     return { ok: false, problems: [{ field: "(plan)", rule: "would contain a credential-looking value; nothing is printed" }] };
   }
   return { ok: true, plan };
+}
+
+/** A field-path segment that may be shown: a plain identifier or index that holds no credential marker. */
+const SAFE_SEGMENT = /^(?:[A-Za-z_][A-Za-z0-9_-]{0,63}|\[\d{1,4}\]|\(recipe\)|\(plan\)|\(wrapper config\)|wrapperConfig:)$/u;
+
+/**
+ * Field paths are built from the recipe's own keys, so a key can carry anything. Every segment that
+ * is not a plain identifier, or that looks like a credential, is shown as `<key>`; a rule that would
+ * still contain a credential marker is replaced. Applied to every refusal before it leaves.
+ */
+export function safeProblems(problems: readonly RecipeProblem[]): RecipeProblem[] {
+  return problems.map(({ field, rule }) => {
+    const segments = field.replace(/^wrapperConfig:\.?/u, "wrapperConfig:.").split(/\.|(?=\[)/u).filter(Boolean);
+    const safe = segments.map(segment => (SAFE_SEGMENT.test(segment) && !SECRET_VALUE.test(segment) ? segment : "<key>"));
+    return {
+      field: safe.join(".").replaceAll(".[", "[").replace("wrapperConfig:.", "wrapperConfig:"),
+      rule: SECRET_VALUE.test(rule) ? "is invalid (details withheld: they would contain a credential-looking value)" : rule,
+    };
+  });
 }
 
 /** A real calendar date, YYYY-MM-DD (2026-02-30 is not one), or null. */
