@@ -236,8 +236,20 @@ it("streams concurrent RPC state deltas and treats disconnect as loss of transpo
     let seen = decoder.decode((await reader.read()).value);
     expect(seen).toContain("RUN_STARTED");
     await a.session.dispatch({type: "setChatOpen", open: true}, 0);
-    while (!seen.includes("STATE_DELTA")) seen += decoder.decode((await reader.read()).value);
+    // Feed each received chunk one character at a time, so the barrier must survive mid-frame splits.
+    let buffered = "";
+    while (!/data: \{"type":"STATE_DELTA"[^\n]*\n\n/.test(seen)) {
+      if (!buffered) {
+        const {value, done} = await reader.read();
+        expect(done).toBe(false);
+        buffered = decoder.decode(value);
+      }
+      seen += buffered.slice(0, 1);
+      buffered = buffered.slice(1);
+    }
     expect(seen).toContain('"path":"/operate"');
+    // Keep the terminal-event check over every byte already received, including the unread suffix.
+    seen += buffered;
     expect(seen).not.toContain("RUN_FINISHED");
     await reader.cancel();
     release!(); gate = undefined;
