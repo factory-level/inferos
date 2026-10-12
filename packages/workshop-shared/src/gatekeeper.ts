@@ -1,3 +1,4 @@
+import type { ApprovalEdit, ApprovalProposal } from "./operate-approval";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
 // installation of the Gadgets Workshop may have access to different adapters, typically based on
@@ -809,6 +810,14 @@ export type ActionApplyFailure = {
  * interface is exposed to the Overseer, not directly to the Gadget.
  */
 export interface Gatekeeper<Session> extends DurableObject {
+  /** Kernel-only bounded projection of a supported explicit proposal; never exposed to sessions. */
+  getApprovalProposal?(action: number): Promise<ApprovalProposal>;
+
+  /** Validate and durably replace a proposal without applying it; identical edits recover it. */
+  editApprovalProposal?(action: number, args: ApprovalEdit): Promise<{
+    action: number; description: ActionDescription; proposal: ApprovalProposal;
+  }>;
+
   /**
    * Get more info on the specific resource without actually granting access. This information is
    * to be presented to the user in the UI, before the user actually confirms they want to grant

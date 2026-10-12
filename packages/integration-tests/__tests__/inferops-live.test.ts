@@ -52,6 +52,9 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { HttpAgent } from "@ag-ui/client";
+import type { OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, Overseer } from "@gadgets/workshop-shared/api";
 import type {
@@ -576,8 +579,20 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
         (await policySession.openIssue(issue.id)).transition(to.id, issue.revision));
       // Proposing only simulates: InferOps is not asked until approval.
       expect((await liveIssue(issue.id)).stateId).toBe(issue.stateId);
-      const message = await ws.approveAction(action.id).then(() => "", (error: unknown) =>
-        error instanceof Error ? error.message : String(error));
+      using login = connect(harness.url);
+      const token = await login.login(username,
+        new Uint8Array(createHash("sha256").update(`integration-test:${username}`).digest()));
+      const agent = new HttpAgent({url: new URL("/api/operate/agui/approval", harness.url).href,
+        headers: {Authorization: `Bearer ${token}`}, threadId: randomUUID()});
+      const forwardedProps = {approval: {workspaceId: (await ws.getMetadata()).id, actionId: action.id}};
+      await agent.runAgent({runId: randomUUID(), forwardedProps});
+      const interrupt = agent.pendingInterrupts[0]!;
+      expect(interrupt).toBeDefined();
+      await agent.runAgent({runId: randomUUID(), forwardedProps,
+        resume: [{interruptId: interrupt.id, status: "resolved", payload: {approved: true}}]});
+      const outcome = agent.state.approval as OperateApprovalSnapshot;
+      const message = outcome.failure?.message ?? "";
+      expect(outcome.status).toBe(message ? "failed" : "applied");
       lastMove = action.id;
       if (message && (await actionEntry(action.id))?.state === "pending") await ws.rejectAction(action.id);
       return message;
@@ -1006,4 +1021,51 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       `text again. Collaborator ${collaboratorName} admitted: Master text withheld ("${blocked.slice(0, 110)}"), ` +
       "readDocument still answered, a pending-edit read still composed here");
   });
+  it("m. AG-UI explicitly approves one live transition, rejects foreign callers and replays without another revision", async () => {
+    using approvalSpace = await api.newGadget();
+    using connection = await approvalSpace.newGatekeeper(accountId, boardUrl(LIVE.project));
+    if (!connection) throw new Error("No live approval binding");
+    using board = await connection.openSession() as RpcStub<InferOpsProjectSession>;
+    const before = await liveIssue(created.id);
+    const target = states.find(state => state.workflow === before.workflow && state.id !== before.stateId)!;
+    using issue = await board.openIssue(before.id);
+    await issue.transition(target.id, before.revision);
+    const action = (await approvalSpace.listActions({filter: "pending"})).entries[0]!;
+    using login = connect(harness.url);
+    const token = await login.login(username,
+      new Uint8Array(createHash("sha256").update(`integration-test:${username}`).digest()));
+    if (!token) throw new Error("Fixture Workshop login failed");
+    const threadId = randomUUID();
+    const forwardedProps = {approval: {workspaceId: (await approvalSpace.getMetadata()).id, actionId: action.id}};
+    const agent = new HttpAgent({url: new URL("/api/operate/agui/approval", harness.url).href,
+      headers: {Authorization: `Bearer ${token}`}, threadId});
+    await agent.runAgent({runId: randomUUID(), forwardedProps});
+    expect(agent.pendingInterrupts).toHaveLength(1);
+    const interrupt = agent.pendingInterrupts[0]!;
+    expect((agent.state.approval as OperateApprovalSnapshot).status).toBe("pending");
+    expect(await liveIssue(before.id)).toEqual(before);
+    const resume = [{interruptId: interrupt.id, status: "resolved" as const, payload: {approved: true}}];
+    const foreignName = nextUsernames("liveapprovalforeign")[0]!;
+    using foreignLogin = connect(harness.url);
+    using _foreign = await signUp(foreignLogin, foreignName);
+    const foreignToken = await foreignLogin.login(foreignName,
+      new Uint8Array(createHash("sha256").update(`integration-test:${foreignName}`).digest()));
+    const refused = await fetch(agent.url, {method: "POST", headers: {
+      Authorization: `Bearer ${foreignToken}`, "Content-Type": "application/json"},
+      body: JSON.stringify({threadId, runId: randomUUID(), messages: [], forwardedProps, resume})});
+    expect(refused.status).toBe(403);
+    expect(await liveIssue(before.id)).toEqual(before);
+    await agent.runAgent({runId: randomUUID(), forwardedProps, resume});
+    expect((agent.state.approval as OperateApprovalSnapshot).status).toBe("applied");
+    const after = await liveIssue(before.id);
+    expect(after.stateId).toBe(target.id);
+    expect(after.revision).not.toBe(before.revision);
+    await agent.runAgent({runId: randomUUID(), forwardedProps, resume});
+    expect((agent.state.approval as OperateApprovalSnapshot).status).toBe("applied");
+    expect(await liveIssue(before.id)).toEqual(after);
+    note(`m. AG-UI1.0.2 local HTTP: ${before.identifier}, revision ${before.revision} -> ${after.revision}; ` +
+      "pending and foreign denial left authoritative entity unchanged; explicit approval moved once; replay unchanged. " +
+      "Synthetic Workshop caller binding; local shared provider token, NOT live per-person66 proof.");
+  });
+
 });

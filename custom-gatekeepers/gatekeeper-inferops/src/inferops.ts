@@ -1,3 +1,4 @@
+import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
 // InferOps gatekeeper: scoped project-board reads and approved issue creates, updates and
 // transitions.
 //
@@ -1093,8 +1094,8 @@ class ActionBinding<P> {
    * Record a pending action, with the fingerprint of the request it will send, before it is
    * submitted, so an immediate apply can find it.
    */
-  async stage(staged: StagedAction, guard?: () => void): Promise<number> {
-    return (await this.stageOnce(staged, false, guard)).actionId;
+  async stage(staged: StagedAction, guard?: () => void, onStaged?: (id: number) => void): Promise<number> {
+    return (await this.stageOnce(staged, false, guard, onStaged)).actionId;
   }
 
   /**
@@ -1105,7 +1106,8 @@ class ActionBinding<P> {
    * step, before anything is written, so a check of other pending actions (one edit per target)
    * cannot be overtaken by a concurrent proposal; it throws to refuse.
    */
-  async stageOnce(staged: StagedAction, join = true, guard?: () => void): Promise<{ actionId: number; joined: boolean }> {
+  async stageOnce(staged: StagedAction, join = true, guard?: () => void,
+      onStaged?: (id: number) => void): Promise<{ actionId: number; joined: boolean }> {
     const fingerprint = await fingerprintOf(this.scope, staged);
     guard?.();
     if (join) {
@@ -1119,6 +1121,7 @@ class ActionBinding<P> {
     const actionId = this.kv.get<number>(NEXT_ACTION_KEY) ?? 1;
     this.kv.put(NEXT_ACTION_KEY, actionId + 1);
     this.putAction({ ...staged, actionId, status: "pending", fingerprint, attempts: {} } as ActionRecord);
+    onStaged?.(actionId);
     return { actionId, joined: false };
   }
 
@@ -1333,6 +1336,58 @@ export class InferOpsProjectGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsProjectSession> {
     return new ProjectSessionImpl(this.#binding(), approvalQueue.dup());
+  }
+
+  /** Kernel-only projection of the supported transition, from the facet's immutable action. */
+  async getApprovalProposal(action: number): Promise<ApprovalProposal> {
+    const binding = this.#binding();
+    const record = binding.action(action);
+    if (record?.kind !== "transition" || !record.fingerprint) throw new Error("Unsupported approval");
+    await assertFingerprint(binding.projectKey, record, {}, {required: true});
+    return {
+      scope: projectBoardUrl(this.ctx.props), args: {toStateId: record.toStateId},
+      expectedRevision: record.expectedRevision, fingerprint: record.fingerprint,
+      idempotencyKey: binding.idempotencyKey(action),
+      simulation: {issueId: record.issueId, fromStateId: record.fromStateId, toStateId: record.toStateId},
+    };
+  }
+
+  /** An edit stages a fresh transition; the previous proposal can never be applied afterwards. */
+  async editApprovalProposal(action: number, args: ApprovalEdit) {
+    const binding = this.#binding();
+    const old = binding.action(action);
+    if (old?.kind !== "transition") throw new Error("Unsupported approval");
+    const result = async (id: number) => {
+      const proposal = await this.getApprovalProposal(id);
+      return {action: id, proposal, description: {
+        title: sanitizeTitle(`Move ${old.identifier} to another state`),
+        ...buildDescription("Explicit edited board transition, applied only at the expected revision.")
+          .inline("Issue", old.identifier).inline("From", proposal.simulation.fromStateId)
+          .inline("To", proposal.args.toStateId).inline("Expected revision", proposal.expectedRevision).finish(),
+        implementsRevert: true,
+      }};
+    };
+    if (old.replacement !== undefined) {
+      const next = binding.action(old.replacement);
+      if (next?.kind !== "transition" || next.toStateId !== args.toStateId) throw new Error("Conflicting edit");
+      return result(next.actionId);
+    }
+    if (old.status !== "pending" || old.attempts?.dispatchedAt || old.attempts === undefined) {
+      throw new Error("Action cannot be edited after an apply attempt");
+    }
+    await assertFingerprint(binding.projectKey, old, {}, {required: true});
+    const snapshot = await binding.client.readProject(binding.projectKey);
+    const issue = snapshot.issues.find(value => value.id === old.issueId);
+    const target = snapshot.states.find(value => value.id === args.toStateId);
+    if (!issue || issue.revision !== old.expectedRevision || !target ||
+        target.workflow !== issue.workflow || issue.stateId === target.id) throw new Error("[INVALID_APPROVAL_EDIT] Invalid or stale edit");
+    const actionId = await binding.stage({kind: "transition", issueId: old.issueId,
+      identifier: old.identifier, fromStateId: issue.stateId, toStateId: target.id,
+      toStateName: target.name, expectedRevision: issue.revision}, () => {
+      const current = binding.action(action);
+      if (current?.status !== "pending" || current.replacement !== undefined) throw new Error("Conflicting edit");
+    }, id => binding.putAction({...old, status: "reverted", replacement: id}));
+    return result(actionId);
   }
 
   /**

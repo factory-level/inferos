@@ -55,6 +55,8 @@ type ActionBase = {
   fingerprint?: string;
   /** Earlier apply attempts; absent on records from before they were tracked. */
   attempts?: ApplyAttempts;
+  /** Durable replacement staged by an explicit edited proposal; never an apply receipt. */
+  replacement?: number;
 };
 
 /** A proposed move of an issue to another state. */

@@ -1,3 +1,4 @@
+import { handleOperateApproval } from "./operate-agui-approval";
 import { readRunError, READ_RUN_ERROR_STATUS } from "@gadgets/workshop-shared/operate-read-run";
 import { RpcStub as NativeRpcStub, RpcTarget } from "cloudflare:workers";
 import { EventType } from "@ag-ui/core";
@@ -45,6 +46,7 @@ export async function handleOperateAgui(request: Request,
   }
   let api: AuthenticatedApi;
   try { api = await authenticate(); } catch { return error(401, "AUTHENTICATION_REQUIRED"); }
+  if (new URL(request.url).pathname === "/api/operate/agui/approval") return handleOperateApproval(request, api);
   if (new URL(request.url).pathname === "/api/operate/agui/prepare") {
     try {
       const session = await api.getOperateSession();
