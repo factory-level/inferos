@@ -29,7 +29,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, type ConsoleSource, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, type ConsoleSource, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -7381,6 +7381,7 @@ class OverseerImpl implements AgentHooks {
     externalChatKey?: string,
     formats?: MessageFormatRef[],
     operateReadOnly = false,
+    operateConsoleRead = false,
   ): Promise<number> {
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
@@ -7412,7 +7413,7 @@ class OverseerImpl implements AgentHooks {
       }
       this.storage.chatMeta.put(meta);
       if (operateReadOnly) this.storage.chatContext.put({chatId, operateReadOnly: true,
-        bindings: {}, alwaysAvailableCapsuleIds: []});
+        ...(operateConsoleRead ? {operateConsoleRead: true as const} : {}), bindings: {}, alwaysAvailableCapsuleIds: []});
 
       let promptSequence = this.#commitPreparedChatMessage(
           chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats);
@@ -10660,12 +10661,13 @@ class OverseerImpl implements AgentHooks {
    * (`offeredWidget`, `offeredTool`) before awaiting this.
    */
   async consoleSessionCheck(user: DurableObjectStub<UserDurableObject>, consoleId: string,
-      revision: string): Promise<void> {
+      revision: string): Promise<OperateConsoleRun> {
     let open = (await user.getOperatePage()).state.console;
     if (open?.workspaceId !== this.ctx.id.toString() || open.consoleId !== consoleId ||
         open.source !== "published" || open.revision !== revision) {
       throw new ConsoleNotOpenError(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
     }
+    return open;
   }
 
   #consoleStore(): WorkspaceConsoleStore {
@@ -10733,8 +10735,9 @@ class OverseerImpl implements AgentHooks {
     if (published()?.revision !== revision) {
       return consoleToolFailure(`Console ${consoleId} is not published at revision ${revision}.`);
     }
+    let open: OperateConsoleRun;
     try {
-      await beforeDeadline(this.consoleSessionCheck(user, consoleId, revision), deadlineAt);
+      open = await beforeDeadline(this.consoleSessionCheck(user, consoleId, revision), deadlineAt);
     } catch (error) {
       if (error instanceof ConsoleNotOpenError) return consoleToolFailure(error.message);
       throw error;
@@ -10744,7 +10747,7 @@ class OverseerImpl implements AgentHooks {
     let shown = published();
     if (!current || shown?.revision !== revision) return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
     if (Date.now() >= deadlineAt) return consoleToolFailure(LISTING_TIMED_OUT);
-    let blocks = (shown.widgets ?? []).flatMap(entry => {
+    let widgets: OperateConsoleRead["widgets"] = (shown.widgets ?? []).flatMap(entry => {
       let tools = (entry.frozen?.tools ?? []).flatMap(declared => {
         try {
           return [store.offeredTool(consoleId, revision, entry.gadgetId, declared.name).tool];
@@ -10752,9 +10755,18 @@ class OverseerImpl implements AgentHooks {
           return [];
         }
       });
-      return tools.length > 0 ? [framedToolListing(entry, tools)] : [];
+      return tools.length > 0 ? [{widgetId: entry.gadgetId, gateway: "callConsoleTool" as const,
+        untrusted: framedToolListing(entry, tools), tools: tools.map(({name, input}) => ({name, input}))}] : [];
     });
-    return {status: "ok", text: blocks.length > 0 ? blocks.join("\n\n") : "This console offers no tools."};
+    let view = shown.views.find(view => view.id === open.viewId);
+    let screenId = open.screenId ?? (view?.type === "screen" ? view.screen : null);
+    let screen = screenId ? store.screen(consoleId, screenId, "published") : null;
+    let boards: OperateConsoleRead["boards"] = (screen?.sections ?? []).flatMap(section =>
+      section.widgets.flatMap((widget, index) => widget.kind === "inferops.project-board"
+        ? [{sectionId: section.id, columns: section.columns, index, widget}] : []));
+    return {status: "ok", text: widgets.length > 0 ? widgets.map(w => w.untrusted).join("\n\n")
+      : "This console offers no tools.", consoleRead: {version: 1, workspaceId: this.ctx.id.toString(),
+        consoleId, revision, viewId: open.viewId, screenId, widgets, boards}};
   }
 
   /**
@@ -10951,7 +10963,8 @@ class OverseerImpl implements AgentHooks {
       : Promise<boolean> {
     let open = (await owner.getOperatePage()).state.console;
     return open?.workspaceId === was.workspaceId && open.consoleId === was.consoleId &&
-        open.source === "published" && open.revision === was.revision;
+        open.source === "published" && open.revision === was.revision &&
+        open.viewId === was.viewId && open.screenId === was.screenId;
   }
 
   /**
@@ -13778,15 +13791,24 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }));
   }
 
-  async newOperateReadChat(message: string): Promise<number> {
+  async newOperateReadChat(message: string, consoleRead = false): Promise<number> {
     if (!this.impl.isOperateSession() || this.#clientUser.id.toString() !== this.impl.ownerId) {
       throw new Error("Read chats require the owner's Operate session.");
     }
-    if (!message.trim() || message.length > 16_384) throw new Error("Invalid read message.");
+    if (typeof consoleRead !== "boolean" || !message.trim() || message.length > 16_384) throw new Error("Invalid read message.");
     const userMeta = await this.#clientUser.getExternalMessageChatContext(null);
     if (!userMeta.aiModel) throw new Error("No model configured.");
     return this.impl.newChat(this.#clientUser, {...userMeta, quickModel: undefined}, message,
-      undefined, undefined, undefined, undefined, undefined, true);
+      undefined, undefined, undefined, undefined, undefined, true, consoleRead);
+  }
+
+  async getReadConsole(chatId: number): Promise<OperateConsoleRead | null> {
+    const context = this.impl.getChatAgentContext(chatId);
+    if (!this.impl.isOperateSession() || this.#clientUser.id.toString() !== this.impl.ownerId ||
+        !context.operateReadOnly || !context.operateConsoleRead || !consoleToolsEnabled(this.impl.env)) return null;
+    this.impl.markConsoleToolTainted(chatId);
+    const outcome = await this.impl.listSessionConsoleTools();
+    return outcome.status === "ok" ? outcome.consoleRead ?? null : null;
   }
 
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
@@ -14572,7 +14594,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       _subscriber: RpcStub<AiChatSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
     this.#deny();
   }
-  async newOperateReadChat(_message: string): Promise<number> { this.#deny(); }
+  async newOperateReadChat(_message: string, _consoleRead?: boolean): Promise<number> { this.#deny(); }
+  async getReadConsole(_chatId: number): Promise<OperateConsoleRead | null> { this.#deny(); }
   async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
                  _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> {
     this.#deny();
@@ -14707,8 +14730,11 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     return this.owner.subscribeToChat(subscriber, startAfter);
   }
-  async newOperateReadChat(message: string): Promise<number> {
-    return this.owner.newOperateReadChat(message);
+  async getReadConsole(chatId: number): Promise<OperateConsoleRead | null> {
+    return this.owner.getReadConsole(chatId);
+  }
+  async newOperateReadChat(message: string, consoleRead = false): Promise<number> {
+    return this.owner.newOperateReadChat(message, consoleRead);
   }
   async newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])

@@ -152,10 +152,12 @@ describe("offering the console tools", () => {
 });
 
 describe("calling the console tools", () => {
-  it("marks the chat before the console's workspace is reached, and frames what comes back", () =>
+  it.each([false, true])("marks before discovery/invocation and frames results (console-read policy: %s)", consoleRead =>
     withOperateChat(async h => {
+      if (consoleRead) h.impl.storage.chatContext.put({chatId: CHAT, operateReadOnly: true,
+        operateConsoleRead: true, bindings: {}, alwaysAvailableCapsuleIds: []});
       expect(isConsoleToolTainted(h.impl.storage, CHAT)).toBe(false);
-      let { contexts } = await runScriptedTurn(h.impl, [
+      let { contexts, offered } = await runScriptedTurn(h.impl, [
         step(fauxToolCall("listConsoleTools", {})),
         step(fauxToolCall("callConsoleTool", { widgetId: 7, tool: "count", input: { status: "open" } })),
         done(),
@@ -164,6 +166,7 @@ describe("calling the console tools", () => {
         { method: "list", args: [], taintedAtEntry: true },
         { method: "call", args: [7, "count", { status: "open" }], taintedAtEntry: true },
       ]);
+      if (consoleRead) for (const tools of offered) expect(tools).toEqual([...CONSOLE_TOOLS, "operatePage"]);
       expect(toolResults(contexts[2]!)).toEqual([
         { name: "listConsoleTools", text: LISTING, isError: false },
         { name: "callConsoleTool", text: RESULT, isError: false },

@@ -150,6 +150,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   },
   listSlashCommands: ws => ws.listSlashCommands(),
   newOperateReadChat: ws => ws.newOperateReadChat("Read"),
+  getReadConsole: ws => ws.getReadConsole(1),
   newChat: ws => ws.newChat("Hello", null),
   sendChatMessage: ws => ws.sendChatMessage(1, "Hello", null),
   uploadChatAttachment: ws =>

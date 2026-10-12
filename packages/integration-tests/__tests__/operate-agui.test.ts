@@ -25,6 +25,7 @@ const model = scriptedChatCompletions([
   {toolCall: {id: "late-page", name: "operatePage", arguments: {}}}, {text: "Late bound read."},
   {toolCall: {id: "late-forged-write", name: "executeCode", arguments: {code: "throw new Error('must not execute')"}}},
   {text: "Still read only."},
+  {toolCall: {id: "off-console", name: "listConsoleTools", arguments: {}}}, {text: "Console tools are disabled."},
 ]);
 const fake = new InferOpsFake();
 let gate: Promise<void> | undefined;
@@ -524,6 +525,23 @@ it("finishes a real delayed bind after retirement and retains authorized history
     expect((await workspace.listActions({filter: "all"})).entries).toEqual([]);
     expect(await session.listEvents(0, 20)).toEqual(log);
   } finally { await control("release-bind"); }
+});
+
+it("console-read endpoint advertises no authored surface when CONSOLE_TOOLS is off", async () => {
+  using a = await person();
+  const ids = await a.session.prepareReadRun();
+  const agent = new HttpAgent({url: new URL("/api/operate/agui/console", harness.url).toString(),
+    threadId: ids.threadId, headers: {Authorization: `Bearer ${a.token}`},
+    initialMessages: [{id: "off", role: "user", content: "Read console"}]});
+  await agent.runAgent({runId: ids.runId});
+  expect(agent.state.consoleRead).toMatchObject({version: 1, snapshot: null, presence: null});
+  expect(agent.state.consoleRead.capabilities.tools.items.map((item: {name: string}) => item.name)).toEqual(["operatePage"]);
+  expect(agent.messages.find(message => message.role === "activity"))
+    .toMatchObject({content: {console: null, boards: []}});
+  const request = model.requests.at(-1) as {tools: {function: {name: string}}[]};
+  expect(request.tools.map(tool => tool.function.name)).toEqual(["operatePage"]);
+  const chats = await a.workspace.listChats();
+  expect(await a.workspace.getReadConsole(chats[0].id)).toBeNull();
 });
 
 it.each(["triad-assembles-message", "tool-call-triad-assembles", "state-delta-applies",

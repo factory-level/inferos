@@ -1,9 +1,32 @@
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
-import { EventType, omitOptionalNulls, type Event, type Message } from "@ag-ui/core";
+import { EventType, omitOptionalNulls, type AgentCapabilities, type Event, type Message } from "@ag-ui/core";
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { z } from "zod";
 import type { AiChatMessage, OperateReadRun } from "@gadgets/workshop-shared/api";
 import type { OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
+import type { OperateConsoleRead } from "@gadgets/workshop-shared/operate-console";
+
+/** Bounded snapshot of the existing subject roster, without profile names or other user data. */
+export type OperateReadPresence = null | {participants: {key: string; issueId: string | null}[]; truncated: boolean};
+
+function consoleCapabilities(snapshot: OperateConsoleRead | null): AgentCapabilities {
+  const items = [{name: "operatePage", description: "Read current page references.",
+    parameters: {type: "object", properties: {}, additionalProperties: false}}];
+  const calls = snapshot?.widgets.flatMap(widget => widget.tools.map(tool => ({type: "object",
+    required: ["widgetId", "tool"], additionalProperties: false, properties: {
+      widgetId: {const: widget.widgetId}, tool: {const: tool.name}, input: tool.input,
+    }}))) ?? [];
+  return {
+    transport: {streaming: true, websocket: false, httpBinary: false, pushNotifications: false, resumable: false},
+    tools: {supported: true, clientProvided: false, items: [...items, ...(calls.length ? [
+      {name: "listConsoleTools", description: "Read the current authorized console registry.", parameters: items[0].parameters},
+      {name: "callConsoleTool", description: "Read a registered frozen widget through the console gateway.", parameters: {oneOf: calls}},
+    ] : [])]},
+    state: {snapshots: true, deltas: true, memory: false, persistentState: false},
+    multiAgent: {supported: false}, humanInTheLoop: {supported: false, approvals: false, interrupts: false},
+    custom: {activityTypes: ["inferos.console-boards.v1"], presence: "subject-roster-snapshot"},
+  };
+}
 
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/);
 const navigation = z.object({
@@ -54,18 +77,21 @@ export function projectOperatePage({seq, state}: OperateSessionSnapshot) {
 }
 
 /** Only durable caller-visible text and this seam's recorded read output become wire history. */
-export function projectReadMessage(message: AiChatMessage): Message[] {
+export function projectReadMessage(message: AiChatMessage, consoleRead = false): Message[] {
   if (message.type !== "message") return [];
   const id = `chat-${message.chatId}-${message.sequence}`;
   if (message.author.type !== "agent") return [{id, role: "user", content: message.message}];
-  const calls = (message.toolCalls ?? []).filter(call => call.toolName === "operatePage");
+  const calls = (message.toolCalls ?? []).filter(call => call.toolName === "operatePage" ||
+    call.toolName === "listConsoleTools" || call.toolName === "callConsoleTool")
+    .filter(call => consoleRead || call.toolName === "operatePage");
   const result: Message[] = [];
   if (message.reasoning) result.push({id: `${id}-reasoning`, role: "reasoning", content: message.reasoning});
   result.push({id, role: "assistant", content: message.message,
     ...(calls.length ? {toolCalls: calls.map(call => ({id: call.toolCallId, type: "function" as const,
-      function: {name: "operatePage", arguments: "{}"}}))} : {})});
+      function: {name: call.toolName, arguments: JSON.stringify(call.input)}}))} : {})});
   for (const call of calls) result.push({id: `${id}-${call.toolCallId}`, role: "tool",
-    toolCallId: call.toolCallId, content: call.error ? "Read refused." : call.output ?? ""});
+    toolCallId: call.toolCallId, content: call.error
+      ? call.toolName === "operatePage" ? "Read refused." : call.error : call.output ?? ""});
   return result;
 }
 
@@ -80,7 +106,9 @@ export class OperateReadTranslator {
   #started = false;
   #messages = new Map<string, Message>();
   #state?: string;
-  constructor(private threadId: string, private runId: string, private emit: (event: Event) => void) {}
+  #consoleState?: string;
+  constructor(private threadId: string, private runId: string, private emit: (event: Event) => void,
+      private consoleRead = false) {}
   start(): void {
     if (this.#started) throw new Error("Run already started");
     this.#started = true;
@@ -95,10 +123,25 @@ export class OperateReadTranslator {
       : {type: EventType.STATE_DELTA, delta: [{op: "replace", path: "/operate", value: operate}]});
     this.#state = encoded;
   }
+  console(snapshot: OperateConsoleRead | null, presence: OperateReadPresence = null): void {
+    if (!this.consoleRead || this.#ended) return;
+    const value = {version: 1, snapshot, presence, capabilities: consoleCapabilities(snapshot)};
+    const encoded = JSON.stringify(value);
+    if (encoded === this.#consoleState) return;
+    this.#consoleState = encoded;
+    this.#send({type: EventType.STATE_DELTA, delta: [{op: "add", path: "/consoleRead", value}]});
+    const id = `${this.runId}-boards`;
+    const content = {version: 1, console: snapshot ? {workspaceId: snapshot.workspaceId,
+      consoleId: snapshot.consoleId, revision: snapshot.revision, viewId: snapshot.viewId,
+      screenId: snapshot.screenId} : null, boards: snapshot?.boards ?? []};
+    this.#messages.set(id, {id, role: "activity", activityType: "inferos.console-boards.v1", content});
+    this.#send({type: EventType.ACTIVITY_SNAPSHOT, messageId: id,
+      activityType: "inferos.console-boards.v1", content, replace: true});
+  }
   message(record: AiChatMessage): void {
     if (this.#ended) return;
     if (record.type === "error") { this.finish(false); return; }
-    for (const message of projectReadMessage(record)) {
+    for (const message of projectReadMessage(record, this.consoleRead)) {
       if (this.#messages.has(message.id)) continue;
       this.#messages.set(message.id, message);
       if (message.role === "assistant") {

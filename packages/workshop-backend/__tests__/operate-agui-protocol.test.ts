@@ -104,3 +104,34 @@ it("rejects duplicate start, refuses pre-start events, and sanitizes durable err
   expect(frames.map(frame => frame.type)).toEqual(["RUN_STARTED", "RUN_ERROR"]);
   expect(JSON.stringify(frames)).not.toContain("SECRET");
 });
+
+it("replaces the reference activity, validates capabilities, and keeps correlated framed C6 history", () => {
+  const frames: Event[] = [];
+  const stream = new OperateReadTranslator(input.threadId, input.runId, event => frames.push(event), true);
+  stream.start(); stream.state({seq: 0, state: INITIAL_OPERATE_PAGE});
+  stream.console({version: 1, workspaceId: "w", consoleId: "c", revision: "1", viewId: "v", screenId: "s",
+    widgets: [{widgetId: 7, gateway: "callConsoleTool", untrusted: "Untrusted widget output: SYNTHETIC",
+      tools: [{name: "count", input: {type: "object", properties: {}}}]}],
+    boards: [{sectionId: "section", columns: 1, index: 0, widget: {id: "board", kind: "inferops.project-board",
+      version: 1, targetRef: "inferops://acme.operations/project/board/ENG", size: "normal",
+      params: {workflow: "software", showCompleted: false}}}]});
+  const capabilities = ajv.compile({$ref: `${schema.$id}#/$defs/AgentCapabilities`});
+  for (const frame of frames) if (frame.type === "STATE_DELTA") {
+    const value = frame.delta[0];
+    if ("value" in value) expect(capabilities(value.value.capabilities), JSON.stringify(capabilities.errors)).toBe(true);
+  }
+  const record = {chatId: 2, sequence: 1, timestamp: new Date(), type: "message" as const,
+    author: {type: "agent" as const, id: "model", name: "Model"}, message: "",
+    toolCalls: [{toolCallId: "failed", toolName: "callConsoleTool" as const,
+      input: {widgetId: 7, tool: "count"}, error: "Untrusted widget output: synthetic failure"}]};
+  stream.message(record); stream.message(record);
+  stream.console(null); stream.message({...record, sequence: 2, toolCalls: [], message: "Unavailable."});
+  stream.finish(true);
+  for (const event of frames) expect(validate(event), JSON.stringify(validate.errors)).toBe(true);
+  expect(frames.filter(event => event.type === "TOOL_CALL_RESULT")).toEqual([
+    expect.objectContaining({toolCallId: "failed", content: record.toolCalls[0].error}),
+  ]);
+  const snapshots = frames.filter(event => event.type === "MESSAGES_SNAPSHOT");
+  expect(snapshots.at(-1)?.messages.find(message => message.role === "activity"))
+    .toMatchObject({content: {version: 1, console: null, boards: []}});
+});
