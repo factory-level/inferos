@@ -821,3 +821,13 @@ on the token).
 
 Not shown: an `unknown` outcome against a real InferOps (a lost response is exercised only against
 the fake), per-person identity, and any deployment.
+
+## Explicit AG-UI approval bridge
+
+`POST /api/operate/agui/approval` adapts one existing queued InferOps board transition through the current authenticated workspace capability and action journal. The [source-adjacent wire contract](../../packages/workshop-backend/src/operate-agui-approval.md) defines the canonical1.0 request, one-answer cap, ten-minute interrupt expiry and namespaced reason. This is a deterministic approval run, not a model turn; read-only AG-UI endpoints keep their policy.
+
+The journal stores person/thread/initial-run/interrupt/proposal correlation and the explicit decision. A sparse index binds one action to each person's thread. Snapshots precede the terminal interrupt, carry bounded reference-only transition simulation, and derive state from the existing action record and last attempt. Client messages/state are ignored; tools/context cannot grant authority. Every request reopens the workspace as its authenticated caller. The existing use-only facade hides actions and refuses this method: there is currently no visible-but-non-approver capability, and this bridge creates none.
+
+Unchanged approval/rejection reuse approveAction/rejectAction and the existing action claim. The facet rechecks scope/request fingerprint and uses the original provider key/revision; InferOps rechecks current permissions/workflow policy. Identical replies reconcile the recorded outcome; conflicting replies refuse. A lost response remains unknown until an authoritative receipt, including after a later refusal. External action decisions reconcile on a fresh-client reload. Successful transport does not mean applied.
+
+Edited target arguments validate against the current issue/revision/workflow, stage a fresh transition and invalidate the old facet proposal without applying it. A durable replacement link recovers an interrupted edit; the existing journal records the replacement and emits a new interrupt with a new key/fingerprint. The prior answer never approves changed arguments. No multi-action atomicity, implicit guards, new role engine, frontend, deployment or live-identity proof is claimed.

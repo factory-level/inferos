@@ -1,6 +1,12 @@
 ---
 title: Operate mode
 covers:
+  - packages/workshop-backend/src/operate-agui-approval.ts
+  - packages/workshop-backend/src/operate-agui-approval.md
+  - packages/workshop-backend/src/operate-approval.ts
+  - packages/workshop-backend/__tests__/operate-approval.test.ts
+  - packages/workshop-shared/src/operate-approval.ts
+  - packages/integration-tests/__tests__/operate-agui-approval.test.ts
   - packages/workshop-backend/src/operate-agui.ts
   - packages/workshop-backend/src/operate-agui-protocol.ts
   - packages/workshop-backend/src/operate-agui-console.md
@@ -613,3 +619,13 @@ Against [the design](../design/operate-mode.md):
 ## Wave 5 design boundary
 
 The [publication review](../design/operate-publication.md) design was accepted by the owner on 2026-10-05. Its kernel slice is implemented as described above: a space is a workspace that build collaborators install into, upgrades need equal declared data contracts, and mock dependencies are refused outside test-only spaces. The client's review page and actions are described above. The [approval/provider policy](../design/operate-policy.md) is a proposed review artifact, not new runtime behavior. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.
+
+## Explicit AG-UI approval bridge
+
+`POST /api/operate/agui/approval` adapts one existing queued InferOps board transition through the current authenticated workspace capability and action journal. The [source-adjacent wire contract](../../packages/workshop-backend/src/operate-agui-approval.md) defines the canonical1.0 request, one-answer cap, ten-minute interrupt expiry and namespaced reason. This is a deterministic approval run, not a model turn; read-only AG-UI endpoints keep their policy.
+
+The journal stores person/thread/initial-run/interrupt/proposal correlation and the explicit decision. A sparse index binds one action to each person's thread. Snapshots precede the terminal interrupt, carry bounded reference-only transition simulation, and derive state from the existing action record and last attempt. Client messages/state are ignored; tools/context cannot grant authority. Every request reopens the workspace as its authenticated caller. The existing use-only facade hides actions and refuses this method: there is currently no visible-but-non-approver capability, and this bridge creates none.
+
+Unchanged approval/rejection reuse approveAction/rejectAction and the existing action claim. The facet rechecks scope/request fingerprint and uses the original provider key/revision; InferOps rechecks current permissions/workflow policy. Identical replies reconcile the recorded outcome; conflicting replies refuse. A lost response remains unknown until an authoritative receipt, including after a later refusal. External action decisions reconcile on a fresh-client reload. Successful transport does not mean applied.
+
+Edited target arguments validate against the current issue/revision/workflow, stage a fresh transition and invalidate the old facet proposal without applying it. A durable replacement link recovers an interrupted edit; the existing journal records the replacement and emits a new interrupt with a new key/fingerprint. The prior answer never approves changed arguments. No multi-action atomicity, implicit guards, new role engine, frontend, deployment or live-identity proof is claimed.

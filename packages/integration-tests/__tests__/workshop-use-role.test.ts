@@ -128,6 +128,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   newAgentSpawnerGatekeeper: ws =>
     ws.newAgentSpawnerGatekeeper({ displayName: "Spawner", modelId: null, env: {} }),
   approveAction: ws => ws.approveAction(0),
+  operateApproval: ws => ws.operateApproval({actionId: 0, threadId: "hidden", runId: "hidden"}),
   rejectAction: ws => ws.rejectAction(0),
   listHooks: ws => ws.listHooks(),
   enableHook: ws => ws.enableHook(0),
