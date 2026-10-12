@@ -116,7 +116,7 @@ test("malformed, unknown and out-of-bounds declarations are refused by field and
     ["built-in shadowing key", input => { input.metrics[0].key = "project.wip"; }, "metrics[0].key", /must start with custom\./u],
     ["malformed custom key", input => { input.metrics[0].key = `custom.${SENTINEL}`; }, "metrics[0].key", /custom\.<lowercase_name>/u],
     ["duplicate key", input => { input.metrics[1].key = input.metrics[0].key; }, "metrics", /duplicate/u],
-    ["unknown kind", input => { input.metrics[0].kind = SENTINEL; }, "metrics[0].kind", /counter, gauge, distribution/u],
+    ["unknown kind", input => { input.metrics[0].kind = SENTINEL; }, "metrics[0].kind", /counter, gauge, distribution, histogram/u],
     ["unknown aggregation", input => { input.metrics[0].aggregation = SENTINEL; }, "metrics[0].aggregation", /expected one of/u],
     ["unknown grain", input => { input.metrics[0].grain = "minute"; }, "metrics[0].grain", /hour, day/u],
     ["control character", input => { input.metrics[0].name = "Closed\u0007"; }, "metrics[0].name", /control characters/u],
@@ -162,6 +162,53 @@ test("code and SQL are refused wherever they appear", () => {
     assert.equal(error.field, field);
     assert.match(error.rule, /code or SQL is not accepted/u);
   }
+});
+
+test("an unknown key is never echoed in a refusal path, even when a code field sits beneath it", () => {
+  // QA260 F1: `ghp_qasyntheticsecret` matched the old identifier test and was printed as a path segment.
+  const cases: [(input: Record<string, any>) => void, string][] = [
+    [input => { input.ghp_qasyntheticsecret = { sql: "SELECT synthetic" }; }, "declarations.<key>.sql"],
+    [input => { input.metrics[0][`tok_${SENTINEL}`] = { inner: { query: "SELECT 1" } }; }, "declarations.metrics[0].<key>.<key>.query"],
+    [input => { input.metrics[2].source.customername = [{ formula: "x" }]; }, "declarations.metrics[2].source.<key>[0].formula"],
+    [input => { input.metrics[0].source.parameters.labels = [{ SECRETKEY: { Code: "x" } }]; }, "declarations.metrics[0].source.parameters.labels[0].<key>.code"],
+  ];
+  for (const [mutate, field] of cases) {
+    const error = refused(mutate);
+    assert.equal(error.field, field);
+    for (const leaked of ["ghp_qasyntheticsecret", "tok_", "customername", "SECRETKEY", "inner"]) assert.ok(!error.message.includes(leaked), `${leaked} in ${error.message}`);
+  }
+  const dir = mkdtempSync(join(tmpdir(), "metric-declarations-"));
+  try {
+    const path = join(dir, "leak.json");
+    writeFileSync(path, JSON.stringify({ ...fixture(), ghp_qasyntheticsecret: { sql: "SELECT synthetic" } }));
+    const json = cli([path, "--intake", intakePath, "--json"]);
+    const text = cli([path, "--intake", intakePath]);
+    assert.equal(json.status, 1);
+    assert.equal(text.status, 1);
+    assert.equal(JSON.parse(json.stdout).problem.field, "declarations.<key>.sql");
+    assert.match(text.stderr, /declarations\.<key>\.sql: code or SQL is not accepted/u);
+    for (const output of [json.stdout, json.stderr, text.stdout, text.stderr]) assert.ok(!output.includes("ghp_qasyntheticsecret"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("histogram and distribution are the same unresolved kind: accepted, and reported unsupported", () => {
+  // QA260 F2: the sources disagree on the name, so neither is refused and neither is preferred.
+  const recorded = fixture();
+  recorded.metrics[2].kind = "histogram";
+  const byKey = Object.fromEntries(report(recorded).metrics.map(metric => [metric.key, metric]));
+  assert.equal(byKey["custom.crew_dispatches"]!.disposition, "unsupported");
+  assert.deepEqual(byKey["custom.crew_dispatches"]!.reasons, [UNSUPPORTED.distribution]);
+  assert.match(UNSUPPORTED.distribution, /distribution or histogram/u);
+  const derived = fixture();
+  derived.metrics[4].kind = "histogram";
+  const lead = report(derived).metrics.find(metric => metric.key === "custom.work_order_lead_time")!;
+  assert.equal(lead.kind, "histogram");
+  assert.deepEqual(lead.reasons, [UNSUPPORTED.distribution, UNSUPPORTED.aggregation]);
+  const mismatch = refused(input => { input.metrics[0].kind = "histogram"; });
+  assert.equal(mismatch.field, "metrics[0].kind");
+  assert.match(mismatch.rule, /expected counter, the kind of template project\.entered_state/u);
 });
 
 test("the module itself imports no network, process or provider client", () => {

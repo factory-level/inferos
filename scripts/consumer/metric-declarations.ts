@@ -27,7 +27,13 @@ export const CUSTOM_KEY = /^custom\.[a-z][a-z0-9_]{0,62}$/u;
 export const LIMITS = { metrics: 64, dimensions: 4, values: 32, labels: 20 } as const;
 
 /** Every enumeration of the draft design. Values outside these lists are invalid. */
-export const KINDS = ["counter", "gauge", "distribution"] as const;
+export const KINDS = ["counter", "gauge", "distribution", "histogram"] as const;
+/**
+ * The sources name the duration/size kind differently -- the draft `distribution`, InferOps Metrics
+ * `histogram` -- and no decision picks one. Both are accepted as that one kind and both are reported
+ * `unsupported`; neither is preferred.
+ */
+export const DISTRIBUTION_KINDS: readonly string[] = ["distribution", "histogram"];
 export const AGGREGATIONS = ["sum", "count", "avg", "min", "max", "p50", "p90", "p95", "last", "ratio"] as const;
 export const GRAINS = ["hour", "day"] as const;
 export const STATE_GROUPS = ["backlog", "unstarted", "started", "completed", "cancelled"] as const;
@@ -49,7 +55,7 @@ export const CODE_FIELDS = ["sql", "query", "expression", "expr", "formula", "co
  * Each reason names its source, so a reviewer can see which document the subset follows.
  */
 export const UNSUPPORTED = {
-  distribution: "kind distribution: the draft names it `distribution` and InferOps Metrics names it `histogram`; the store contract reviewed so far (MVP-19 rev2) carries counter and gauge only",
+  distribution: "kind distribution or histogram: the draft names it `distribution` and InferOps Metrics names it `histogram`, with no decision between them; the store contract reviewed so far (MVP-19 rev2) carries counter and gauge only",
   aggregation: "aggregation outside sum, min, max: MVP-19 rev2 defers avg and last as not decomposable across dimensions, and no source defines count, percentiles or ratio combination yet",
   ref: "opaque-reference dimension: MVP-19 rev2 defers ref dimensions (unbounded per-series cardinality, the most identifying type)",
   live: "live source: the draft computes live values only for built-ins such as project/issue-count; no custom live path is defined",
@@ -113,6 +119,16 @@ const VALUE = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const PRODUCER = /^[a-z0-9][a-z0-9-]{0,62}$/u;
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/u;
 
+/**
+ * Every field name the format defines. A refusal path is built from these and indices only; any other
+ * key is shown as `<key>`, because a key can hold anything (a token, a customer name).
+ */
+const FORMAT_FIELDS: ReadonlySet<string> = new Set([
+  "schemaVersion", "kind", "synthetic", "metrics", "key", "name", "unit", "aggregation", "grain", "dimensions",
+  "values", "cardinalityCap", "source", "template", "parameters", "project", "stateGroup", "from", "to", "labels",
+  "producer", "attribution", "operation", "accountable",
+]);
+
 /** Refuse any code- or query-shaped field before shape checks, so the message says why. */
 function refuseCode(value: unknown, path: string): void {
   if (Array.isArray(value)) { value.forEach((entry, index) => refuseCode(entry, `${path}[${index}]`)); return; }
@@ -120,7 +136,7 @@ function refuseCode(value: unknown, path: string): void {
   for (const key of Object.keys(value)) {
     const known = CODE_FIELDS.find(field => field === key.toLowerCase());
     if (known) fail(`${path}.${known}`, "code or SQL is not accepted; name a declared template or a recorded producer");
-    refuseCode(value[key], `${path}.${NAME.test(key) || /^[A-Za-z]+$/u.test(key) ? key : "<key>"}`);
+    refuseCode(value[key], `${path}.${FORMAT_FIELDS.has(key) ? key : "<key>"}`);
   }
 }
 
@@ -209,7 +225,8 @@ export function parseMetricDeclarations(input: unknown, intake: ConsumerIntake):
       .map((dimension, at) => parseDimension(dimension, `${path}.dimensions[${at}]`));
     unique(dimensions.map(dimension => dimension.name), `${path}.dimensions`);
     const source = parseSource(metric.source, intake, `${path}.source`);
-    if (source.kind === "derived" && TEMPLATES[source.template].kind !== kind) {
+    const sameKind = (a: string, b: string) => a === b || (DISTRIBUTION_KINDS.includes(a) && DISTRIBUTION_KINDS.includes(b));
+    if (source.kind === "derived" && !sameKind(TEMPLATES[source.template].kind, kind)) {
       fail(`${path}.kind`, `expected ${TEMPLATES[source.template].kind}, the kind of template ${source.template}`);
     }
     const attribution = exact(metric.attribution, ["operation", "accountable"], `${path}.attribution`);
@@ -233,7 +250,7 @@ export function parseMetricDeclarations(input: unknown, intake: ConsumerIntake):
 /** Why a valid declaration cannot be carried through in this revision. Empty means `declared`. */
 export function unsupportedReasons(metric: MetricDeclaration): string[] {
   const reasons: string[] = [];
-  if (metric.kind === "distribution") reasons.push(UNSUPPORTED.distribution);
+  if (DISTRIBUTION_KINDS.includes(metric.kind)) reasons.push(UNSUPPORTED.distribution);
   if (!["sum", "min", "max"].includes(metric.aggregation)) reasons.push(UNSUPPORTED.aggregation);
   if (metric.dimensions.some(dimension => "cardinalityCap" in dimension)) reasons.push(UNSUPPORTED.ref);
   if (metric.source.kind === "live") reasons.push(UNSUPPORTED.live);

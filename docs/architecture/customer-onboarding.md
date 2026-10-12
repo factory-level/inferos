@@ -84,13 +84,13 @@ MVP-34 has vertical bootstraps declare their own metrics. This revision has only
 | Field | Rule |
 | --- | --- |
 | `key` | `custom.<lowercase_name>`. Any other prefix is refused, so a custom key cannot shadow a built-in. Built-ins are declared in code by their domain |
-| `kind`, `aggregation`, `grain` | Closed enumerations from the draft. `distribution`, and every aggregation except `sum`, `min` and `max`, are `unsupported` |
+| `kind`, `aggregation`, `grain` | Closed enumerations: `kind` is `counter`, `gauge`, `distribution` or `histogram`. The last two are the draft's and InferOps Metrics' names for one kind; both are accepted, both are `unsupported`, and neither is preferred. A template's kind matches either name. Every aggregation except `sum`, `min` and `max` is `unsupported` |
 | `dimensions` | At most 4. An enum dimension `{name, values}` has 1 to 32 lowercase values. An opaque reference `{name, cardinalityCap}` is `unsupported`, and so is any dimension on a derived metric |
 | `source` | `derived` names one of `project.issues_in_state`, `project.entered_state`, `project.time_between_states` or `project.age_in_state`. Its closed parameters are `project` (a key from the intake), the state groups, and optional `labels`. The template's kind must match the metric's kind. `recorded` names a producer slug. `live` is `unsupported` for custom metrics |
 | `attribution` | An operation id from the intake and a role that owns an operation there |
 | (none) | There is no `version` field. InferOps assigns versions to approved definitions |
 
-A field named `sql`, `query`, `expression`, `formula`, `code`, `script`, `deriver`, `function` (and similar), at any depth, is refused with "code or SQL is not accepted". Every other malformed or unknown field, or bound overrun, is refused by field and rule, never by value. The report is sorted and has no clock. Its `declarationsDigest` is the SHA-256 of the canonical normalized declarations.
+A field named `sql`, `query`, `expression`, `formula`, `code`, `script`, `deriver`, `function` (and similar), at any depth, is refused with "code or SQL is not accepted". Every other malformed or unknown field, or bound overrun, is refused by field and rule, never by value. A refusal path is built only from the format's own field names and indices; any other key, at any depth, appears as `<key>`. The report is sorted and has no clock. Its `declarationsDigest` is the SHA-256 of the canonical normalized declarations.
 
 **Not here, and still owed** (each needs an owner or interface decision, or the MVP-19 merge):
 - intake version 2 with an `analytics` section and a `metrics` requirement category;
@@ -116,7 +116,7 @@ The intake file is the input. Keeping it in the wrapper (for example `intake/<cu
 - Branding is not derived: `styling` stays as written.
 - Without `--inferops`, the operational inventory and pillars are recorded in the report only. The InferOS Wiki widget and gatekeeper still read documents, not the root, pillars or Masters ([#87](https://github.com/factory-level/inferos/issues/87)), and coverage is [factory-level/inferops#2325](https://github.com/factory-level/inferops/issues/2325).
 - Upgrade and deploy have no command.
-- The metrics design keeps kind naming open: the draft says `distribution` and InferOps Metrics says `histogram`. Both are reported `unsupported` here.
+- The metrics design keeps kind naming open: the draft says `distribution` and InferOps Metrics says `histogram`. Both names are accepted as one kind and reported `unsupported` here; neither is chosen.
 
 ## Open Questions
 
