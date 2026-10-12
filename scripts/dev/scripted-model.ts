@@ -1,17 +1,21 @@
 // A scripted stand-in for an AI model, for exercising the InferOps Canvas locally with no model
 // credentials. It speaks the OpenAI-compatible chat API under an Ollama-style base URL, so the
-// Workshop reaches it as an "Ollama" model (`pnpm dev:setup --mock-model` adds one).
+// Workshop reaches it as an "Ollama" model (`pnpm dev:setup --mock-model` adds one). It listens on
+// 127.0.0.1 only and makes no request of its own.
 //
-// It plays the agent's part of "add an InferOps Kanban to this canvas": list canvases, create the
-// gadget from the `inferops.kanban` blueprint, request the DEMO board connection, bind it into the
-// gadget as `board`, and place the gadget on the canvas. Each reply is chosen from what the
-// conversation already holds, so a turn that pauses for the user's connection approval resumes
-// where it left off. Everything it triggers runs through the real Workshop; only the model's
-// decisions are scripted.
+// Two scripted scenarios, chosen with `--scenario`:
+// - `kanban` (the default) plays the agent's part of "add an InferOps Kanban to this canvas": list
+//   canvases, create the gadget from the `inferops.kanban` blueprint, request the DEMO board
+//   connection, bind it into the gadget as `board`, and place the gadget on the canvas. Each reply is
+//   chosen from what the conversation already holds, so a turn that pauses for the user's connection
+//   approval resumes where it left off.
+// - `operate-read` plays an Operate chat that reads the user's page: each question gets one
+//   `operatePage` read, then a reply, labelled "[mock model]", naming the board that read returned.
+// Everything it triggers runs through the real Workshop; only the model's decisions are scripted.
 //
-// Usage: node scripts/dev/scripted-model.ts [--port 11434]
+// Usage: node scripts/dev/scripted-model.ts [--port 11434] [--scenario kanban|operate-read]
 
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -112,11 +116,73 @@ export function streamReply(reply: ScriptedReply): string {
     "data: [DONE]\n\n";
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const portFlag = process.argv.indexOf("--port");
-  const port = portFlag >= 0 ? Number(process.argv[portFlag + 1]) : 11434;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Usage: scripted-model.ts [--port PORT]");
-  createServer((request, response) => {
+/** The scenarios `--scenario` selects; the first is the default. */
+export const SCRIPTED_SCENARIOS = ["kanban", "operate-read"] as const;
+
+/** One of {@link SCRIPTED_SCENARIOS}. */
+export type ScriptedScenario = typeof SCRIPTED_SCENARIOS[number];
+
+/** Every `operate-read` text reply starts with this, so a transcript shows it came from the script. */
+export const MOCK_LABEL = "[mock model]";
+
+/**
+ * Choose the next `operate-read` reply. It reads the page once per question and answers only from
+ * the `operatePage` result that followed the latest user message, never from an earlier turn's.
+ * The answer names the board the page shows, its `board.boardRef`; a widget shown full-page is not
+ * the page's board, so it is not reported as one.
+ */
+export function nextOperateReadReply(body: { messages?: Message[]; tools?: unknown[] }): ScriptedReply {
+  const messages = body.messages ?? [];
+  if (!body.tools?.length) return { text: "Page read" };
+  const offered = (body.tools as { function?: { name?: string } }[]).map(tool => tool.function?.name);
+  if (!offered.includes("operatePage")) return { text: `${MOCK_LABEL} This scenario only reads an Operate page.` };
+  const latestUser = messages.map(message => message.role).lastIndexOf("user");
+  const reads = new Set<string>();
+  messages.forEach((message, index) => {
+    if (index < latestUser) return;
+    for (const toolCall of message.tool_calls ?? []) if (toolCall.function.name === "operatePage") reads.add(toolCall.id);
+  });
+  const result = messages.findLast((message, index) =>
+    index > latestUser && message.role === "tool" && reads.has(message.tool_call_id ?? ""));
+  if (!result) return call("operatePage", {});
+  const page = parse(text(result.content));
+  if (page === undefined) return { text: `${MOCK_LABEL} I could not read your page.` };
+  const board = page.board as { boardRef?: unknown } | null | undefined;
+  return typeof board?.boardRef === "string"
+    ? { text: `${MOCK_LABEL} Your page shows the ${board.boardRef.split("/").at(-1)} board.` }
+    : { text: `${MOCK_LABEL} Your page shows no board.` };
+}
+
+/** One server log line: the time, the scenario and the reply's kind, never its text or arguments. */
+export function logLine(scenario: ScriptedScenario, reply: ScriptedReply, at = new Date()): string {
+  return `${at.toISOString()} ${scenario} ${"text" in reply ? "text reply" : `tool call ${reply.toolCall.name}`}`;
+}
+
+/** Read `--port` and `--scenario`, refusing anything else. */
+export function parseOptions(argv: readonly string[]): { port: number; scenario: ScriptedScenario } {
+  let port = 11434;
+  let scenario: ScriptedScenario = "kanban";
+  for (let i = 0; i < argv.length; i += 2) {
+    const [name, value] = [argv[i], argv[i + 1]];
+    if (name === "--port") port = Number(value);
+    else if (name === "--scenario") {
+      if (!(SCRIPTED_SCENARIOS as readonly string[]).includes(value ?? "")) {
+        throw new Error(`Unknown scenario "${value ?? ""}"; choose one of ${SCRIPTED_SCENARIOS.join(", ")}.`);
+      }
+      scenario = value as ScriptedScenario;
+    } else throw new Error(`Usage: scripted-model.ts [--port PORT] [--scenario ${SCRIPTED_SCENARIOS.join("|")}]`);
+  }
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`Usage: scripted-model.ts [--port PORT] [--scenario ${SCRIPTED_SCENARIOS.join("|")}]`);
+  }
+  return { port, scenario };
+}
+
+/** Serve `scenario` on 127.0.0.1:`port` (0 picks a free port); resolves once it listens. */
+export function startServer(options: { port: number; scenario: ScriptedScenario; log?: (line: string) => void }): Promise<Server> {
+  const log = options.log ?? (line => console.log(line));
+  const next = options.scenario === "operate-read" ? nextOperateReadReply : nextReply;
+  const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && (url.pathname === "/api/tags" || url.pathname === "/v1/models")) {
       response.writeHead(200, { "content-type": "application/json" });
@@ -133,16 +199,32 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     request.on("data", chunk => { raw += chunk; });
     request.on("end", () => {
       try {
-        const reply = nextReply(JSON.parse(raw));
-        console.log(new Date().toISOString(), "text" in reply ? "text reply" : `tool call ${reply.toolCall.name}`);
+        const reply = next(JSON.parse(raw));
+        log(logLine(options.scenario, reply));
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(streamReply(reply));
-      } catch (error) {
-        console.error("scripted model failed to answer", error);
+      } catch {
+        // The request body is not logged: it carries the conversation.
+        log(`${new Date().toISOString()} ${options.scenario} could not answer`);
         response.writeHead(500).end();
       }
     });
-  }).listen(port, "127.0.0.1", () => {
-    console.log(`Scripted model "${SCRIPTED_MODEL_ID}" listening on http://localhost:${port}`);
   });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(options.port, "127.0.0.1", () => resolve(server));
+  });
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let options: ReturnType<typeof parseOptions>;
+  try {
+    options = parseOptions(process.argv.slice(2));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(2);
+  }
+  const server = await startServer(options);
+  const { port } = server.address() as { port: number };
+  console.log(`Scripted model "${SCRIPTED_MODEL_ID}" (${options.scenario}) listening on http://localhost:${port}`);
 }
