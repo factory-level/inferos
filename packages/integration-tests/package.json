@@ -30,6 +30,7 @@
     "capnweb-validate": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
-    "wrangler": "catalog:"
+    "wrangler": "catalog:",
+    "@ag-ui/client": "1.0.2"
   }
 }

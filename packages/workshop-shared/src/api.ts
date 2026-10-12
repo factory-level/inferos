@@ -428,6 +428,18 @@ export const createAuthError = authErrors.create;
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
 
+/** One new, non-resumable read chat, optionally preceded by sequence-checked board navigation. */
+export type OperateReadRun = {
+  /** Person-scoped one-shot thread selector. Reuse is refused after interruption too. */
+  threadId: string;
+  /** Person-scoped one-shot run selector; conveys no authority. */
+  runId: string;
+  /** New user text; the server owns history and tool policy. */
+  message: string;
+  /** Explicit navigation through this person's current board capability. */
+  navigation?: {event: {type: "openBoard"; board: OperateBoardRef}; expectedSeq: number};
+};
+
 /**
  * A person's operate session (docs/design/operate-mode.md, "Sessions"): one continuous operate
  * chat plus a page state that is the replay of an ordered event log. The person's tabs and devices
@@ -435,6 +447,11 @@ export const getAuthErrorCode = authErrors.getCode;
  * the shared `applyOperateEvent`. The session holds references only and grants no access.
  */
 export interface OperateSession extends RpcTarget {
+  /** Reserve a new run, dispatch navigation and start a durable read-only chat in getWorkspace().
+   * Repeated selectors fail without repeating work.
+   */
+  startReadRun(input: OperateReadRun): Promise<number>;
+
   /**
    * Calls `subscriber` with the current snapshot, then again after every event, with the event that
    * produced it. Dispose the returned stub to stop.
@@ -3127,6 +3144,9 @@ export interface Overseer extends RpcTarget {
    */
   listSlashCommands(): Promise<SlashCommandChoice[]>;
 
+  /** Start a durable page-read-only chat in the owner's Operate workspace, using their model. */
+  newOperateReadChat(message: string): Promise<number>;
+
   /**
    * Starts a new chat with the given initial message or slash-command request. A slash command
    * always creates a visible chat event, even when it does not produce a message for the agent.
@@ -4476,6 +4496,12 @@ export type AiToolCall = {
    * stored so that the agent's chat history can be replayed without re-issuing the fetch.
    * Formatted as a YAML-frontmatter header followed by the body (see formatWebFetchResult).
    */
+  output?: string;
+} | {
+  /** Read or navigate the Operate page. Restricted read chats accept only empty input. */
+  toolName: "operatePage";
+  input: {action?: string; workspaceId?: string; screenId?: string; step?: number; boardRef?: string};
+  /** Recorded page projection returned to the model. */
   output?: string;
 } | {
   /** This actually shouldn't ever appear in logs unless the agent misunderstands the tool. */

@@ -312,6 +312,11 @@ function makeUserStorage(storage: DurableObjectStorage) {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
       }),
+      // Permanent reservations prevent retry after an ambiguous failure from repeating work.
+      operateReadRuns: collection<{threadId: string; runId: string; chatId?: number}>()({
+        primaryKey: "threadId",
+        uniqueIndexes: {byRun: (record: {runId: string}) => record.runId},
+      }),
       // The operate session's event log (see OperateSession). Keyed by the zero-padded sequence
       // number so listing is in log order.
       operateEvents: collection<OperateEventRecord>()({
@@ -1104,6 +1109,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** The session's current page. */
   async getOperatePage(): Promise<OperateSessionSnapshot> {
     return this.#operatePage();
+  }
+
+  /** Reserve both selectors synchronously before navigation or model work. */
+  async reserveOperateReadRun(threadId: string, runId: string): Promise<void> {
+    if (this.storage.operateReadRuns.get(threadId) || this.storage.operateReadRuns.byRun.get(runId)) {
+      throw new Error("OPERATE_READ_DUPLICATE");
+    }
+    this.storage.operateReadRuns.put({threadId, runId});
+  }
+
+  /** Bind only an already reserved run to its session chat. */
+  async bindOperateReadRun(threadId: string, chatId: number): Promise<void> {
+    const record = this.storage.operateReadRuns.get(threadId);
+    if (!record || record.chatId !== undefined) throw new Error("OPERATE_READ_DUPLICATE");
+    this.storage.operateReadRuns.put({...record, chatId});
   }
 
   /**

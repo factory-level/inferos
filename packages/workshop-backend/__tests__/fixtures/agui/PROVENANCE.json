@@ -1,0 +1,32 @@
+{
+  "description": "Vendored, byte-for-byte, from the AG-UI protocol repository. Never edit these files; re-vendor at a new pinned commit and update every digest here in the same commit. `tests/conformance.test.ts` fails when any digest drifts.",
+  "repository": "https://github.com/ag-ui-protocol/ag-ui",
+  "tag": "release/2026-10-05",
+  "commit": "e776b21027bef590905fb75f004e995dbe0941f4",
+  "corePackageVersion": "1.0.2",
+  "license": "MIT (LICENSE.ag-ui)",
+  "files": {
+    "agui-1.0.schema.json": {
+      "source": "spec/1.0/schema.json",
+      "id": "https://ag-ui.com/spec/1.0/schema.json",
+      "sha256": "4b5c93226838a0e72d88e6c5df20633c686c49fcb75d9be2815c6cbf9e48e71a"
+    },
+    "conformance/streams/MANIFEST.txt": {
+      "source": "spec/1.0/conformance/streams/MANIFEST.txt",
+      "sha256": "cad0d42b7d3e1a70d32fe4bd15411147409451a235ea64b21ad990700bce26ed"
+    },
+    "conformance/streams/*.json": {
+      "source": "spec/1.0/conformance/streams/*.json",
+      "sha256OfConcatenationInManifestOrder": "baa44172058e59edcaeb02e5241697d4843482dcbf5c5f3e5fd30a19e64c564a",
+      "count": 68
+    },
+    "conformance/README.md": {
+      "source": "spec/1.0/conformance/README.md",
+      "sha256": "9a91e31a35b8570ae58d84d4c4ed84547b9458883c3cf3d35b46684d0e66149c"
+    },
+    "LICENSE.ag-ui": {
+      "source": "LICENSE",
+      "sha256": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241"
+    }
+  }
+}

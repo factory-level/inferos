@@ -1,3 +1,5 @@
+import type { OperateReadRun } from "@gadgets/workshop-shared/api";
+import { handleOperateAgui } from "./operate-agui.js";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
@@ -937,6 +939,22 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     };
   }
 
+  async startReadRun(input: OperateReadRun): Promise<number> {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.threadId) ||
+        !/^[a-zA-Z0-9_-]{1,128}$/.test(input.runId) ||
+        !input.message.trim() || input.message.length > 16_384) {
+      throw new Error("OPERATE_READ_INVALID");
+    }
+    if (input.navigation && (!Number.isSafeInteger(input.navigation.expectedSeq) ||
+        input.navigation.expectedSeq < 0)) throw new Error("OPERATE_READ_INVALID");
+    await this.user().reserveOperateReadRun(input.threadId, input.runId);
+    if (input.navigation) await this.dispatch(input.navigation.event, input.navigation.expectedSeq);
+    using workspace = await this.openWorkspace();
+    const chatId = await workspace.newOperateReadChat(input.message);
+    await this.user().bindOperateReadRun(input.threadId, chatId);
+    return chatId;
+  }
+
   async getWorkspace(): Promise<RpcStub<Overseer>> {
     // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
     //     system doesn't know this.
@@ -1228,7 +1246,7 @@ export default {
       return handleClientErrorRequest(req, env, ctx);
     }
 
-    if (url.pathname === "/api") {
+    if (url.pathname === "/api" || url.pathname === "/api/operate/agui") {
       // Fail closed on a sign-in allowlist the deployment cannot honour, with the reason.
       try {
         await (authGatekeepersChecked ??= assertAuthGatekeepersConfigured(env));
@@ -1277,6 +1295,16 @@ export default {
         }
 
         accessPayload = payload;
+      }
+
+      if (url.pathname === "/api/operate/agui") {
+        return handleOperateAgui(req, async () => {
+          const api = new PublicApiImpl(ctx, env, () => {}, accessPayload);
+          const authorization = req.headers.get("Authorization");
+          if (authorization?.startsWith("Bearer ")) return api.authenticate(authorization.slice(7));
+          if (accessPayload) return api.authenticateFromCfAccess();
+          throw new Error("Authentication required");
+        });
       }
 
       // HACK: Implement `abortSession` callback by closing the websocket.

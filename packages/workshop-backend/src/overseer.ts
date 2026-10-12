@@ -7380,6 +7380,7 @@ class OverseerImpl implements AgentHooks {
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     externalChatKey?: string,
     formats?: MessageFormatRef[],
+    operateReadOnly = false,
   ): Promise<number> {
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
@@ -7410,6 +7411,8 @@ class OverseerImpl implements AgentHooks {
         meta.activeAgent = userMeta.aiModel.profile;
       }
       this.storage.chatMeta.put(meta);
+      if (operateReadOnly) this.storage.chatContext.put({chatId, operateReadOnly: true,
+        bindings: {}, alwaysAvailableCapsuleIds: []});
 
       let promptSequence = this.#commitPreparedChatMessage(
           chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats);
@@ -7466,6 +7469,11 @@ class OverseerImpl implements AgentHooks {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
       if (decision.reuseExisting) return;
     }
+    if (this.getChatAgentContext(chatId).operateReadOnly &&
+        (typeof message !== "string" || capsules?.length || attachments?.length || formats?.length)) {
+      throw new Error("Read chats accept plain text only.");
+    }
+
     if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
@@ -8467,6 +8475,7 @@ class OverseerImpl implements AgentHooks {
   async prepareChatBindings(chatId: number, chatMessages: AiChatMessage[])
       : Promise<SeedBindingInfo[]> {
     let context = this.getChatAgentContext(chatId);
+    if (context.operateReadOnly) return [];
     let dirty = false;
 
     if (context.alwaysAvailableCapsuleIds === undefined) {
@@ -13769,6 +13778,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }));
   }
 
+  async newOperateReadChat(message: string): Promise<number> {
+    if (!this.impl.isOperateSession() || this.#clientUser.id.toString() !== this.impl.ownerId) {
+      throw new Error("Read chats require the owner's Operate session.");
+    }
+    if (!message.trim() || message.length > 16_384) throw new Error("Invalid read message.");
+    const userMeta = await this.#clientUser.getExternalMessageChatContext(null);
+    if (!userMeta.aiModel) throw new Error("No model configured.");
+    return this.impl.newChat(this.#clientUser, {...userMeta, quickModel: undefined}, message,
+      undefined, undefined, undefined, undefined, undefined, true);
+  }
+
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
                 formats?: MessageFormatRef[]): Promise<number> {
@@ -14552,6 +14572,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       _subscriber: RpcStub<AiChatSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
     this.#deny();
   }
+  async newOperateReadChat(_message: string): Promise<number> { this.#deny(); }
   async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
                  _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> {
     this.#deny();
@@ -14685,6 +14706,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
     return this.owner.subscribeToChat(subscriber, startAfter);
+  }
+  async newOperateReadChat(message: string): Promise<number> {
+    return this.owner.newOperateReadChat(message);
   }
   async newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])

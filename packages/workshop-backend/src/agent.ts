@@ -1,3 +1,4 @@
+import { projectOperatePage } from "./operate-agui-protocol.js";
 import { WorkspaceKind, AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
@@ -163,6 +164,8 @@ export interface WorktreeTurnAccess {
 
 /** Additional per-chat-thread info needed by the AI agent but not by the client. */
 export type AiChatAgentContext = {
+  /** Server-owned restriction, persisted before the first turn and retained on reopen. */
+  operateReadOnly?: true;
   /** Chat ID, corresponds to `chatMeta`. */
   chatId: number;
 
@@ -2476,6 +2479,7 @@ async function runAgentPass(
                 case "listConnectableResources":
                 case "requestConnection":
                 case "listCanvases":
+                case "operatePage":
                   toolOutput = {text: toolCall.output ?? ""};
                   break;
                 case "editCanvas":
@@ -4024,8 +4028,11 @@ async function runAgentPass(
       }),
       execute: async (toolCallId, input) => {
         try {
+          if (agentContext.operateReadOnly && Object.keys(input).length) {
+            throw new Error("This chat can only read the current page.");
+          }
           let snapshot = await hooks.operatePage(operateEventFromToolInput(input));
-          let text = JSON.stringify(snapshot.state);
+          let text = JSON.stringify(agentContext.operateReadOnly ? projectOperatePage(snapshot) : snapshot.state);
           return toolResult(text, {output: text});
         } catch (error) {
           toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
@@ -4097,6 +4104,18 @@ async function runAgentPass(
     // assertMayModifyWorkpiece).
     tools = Object.fromEntries(SPAWNED_AGENT_TOOLS.filter(name => name in tools)
         .map(name => [name, tools[name]]));
+  }
+
+  if (agentContext.operateReadOnly) {
+    // Guard execution as well as advertisement; model-supplied catalogs cannot widen this.
+    for (const tool of Object.values(tools)) {
+      const execute = tool.execute;
+      tool.execute = (...args) => {
+        if (tool.name !== "operatePage") throw new Error("This chat can only read the current page.");
+        return execute(...args);
+      };
+    }
+    tools = {operatePage: tools.operatePage};
   }
 
   // Calls that reached a tool's execute(), so tool_execution_end can tell the ones pi rejected.
