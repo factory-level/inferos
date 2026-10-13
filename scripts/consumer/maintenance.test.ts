@@ -157,11 +157,22 @@ test("a bootstrapped wrapper carries the lockfile pnpm would write, so pnpm leav
     assert.deepEqual(Object.keys(record.files[WRAPPER_LOCKFILE]).toSorted(), ["class", "sha256"]);
     assert.equal(record.files[WRAPPER_LOCKFILE].class, "customer-owned");
     // pnpm verifies (installs) the wrapper's dependencies before every script. Outside the
-    // surrounding pnpm run's environment, so it behaves as in a customer's shell.
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(npm|pnpm)_/i.test(key)));
+    // surrounding pnpm run's environment, so it behaves as in a customer's shell. The store that
+    // install opens belongs to this fixture: with PNPM_HOME filtered out, pnpm's data directory is
+    // XDG_DATA_HOME/pnpm, else ~/.local/share/pnpm, and a cached vp task drops an undeclared
+    // XDG_DATA_HOME, which can leave the store under a HOME the runner cannot write. Set after the
+    // filter, so the filter cannot remove it.
+    const dataHome = join(root, "pnpm-data");
+    const env = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(npm|pnpm)_/i.test(key))),
+      XDG_DATA_HOME: dataHome,
+    };
+    assert.equal(env.XDG_DATA_HOME, dataHome);
     const before = read(join(target, WRAPPER_LOCKFILE));
     const run = spawnSync(pnpm!, ["run", "inferos:check"], { cwd: target, encoding: "utf8", env });
-    assert.ok(existsSync(join(target, "node_modules")), run.stderr);
+    // pnpm reports store and install errors on stdout, so the message carries both streams.
+    assert.ok(existsSync(join(target, "node_modules")),
+      `pnpm run inferos:check exited ${run.status}\nstderr:\n${run.stderr}\nstdout:\n${run.stdout.slice(-4000)}`);
     assert.equal(read(join(target, WRAPPER_LOCKFILE)), before);
     assert.equal(git(target, "status", "--porcelain"), "");
   } finally { rmSync(root, { recursive: true, force: true }); }
