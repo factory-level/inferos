@@ -192,9 +192,16 @@ describe("InferOps Workflow policy client", () => {
   it("clears the policy while loading and on a refusal, and shows it again on a reload that succeeds", async () => {
     const view = await start(ok(configured()));
     expect(text()).toContain("owners-all");
+    expect(document.querySelector("header .meta")!.textContent)
+      .toBe("Revision 3 of project 10000000-0000-4000-8000-000000000001");
     reload();
+    // While the new read is pending, nothing of the previous answer remains: body or header.
     expect(text()).toContain("Loading the workflow policy");
     expect(text()).not.toContain("owners-all");
+    expect(document.querySelector("h1")!.textContent).toBe("InferOps workflow policy");
+    expect(document.querySelector("header .meta")!.textContent).toBe("");
+    expect(document.body.textContent).not.toContain("10000000-0000-4000-8000-000000000001");
+    expect(document.body.textContent).not.toContain("Revision 3");
     await view.answer({ ok: false, reason: "unavailable", message: "No such workflow policy is available to you." });
     expect(text()).not.toContain("owners-all");
     (document.querySelector("main button") as HTMLButtonElement).click();
@@ -212,6 +219,7 @@ describe("InferOps Workflow policy client", () => {
     button.disabled = false;
     reload();
     await vi.waitFor(() => expect(view.pending.length).toBe(2));
+    expect(document.querySelector("header .meta")!.textContent).toBe("");
     const [older, newer] = [view.pending[0]!, view.pending[1]!];
     newer(ok(configured("5", "NEW-LANE")));
     await new Promise(resolve => setTimeout(resolve, 0));

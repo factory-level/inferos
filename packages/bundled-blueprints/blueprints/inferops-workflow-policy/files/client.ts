@@ -224,6 +224,9 @@ function render(): void {
   main.replaceChildren();
   refreshButton.disabled = view.kind === "loading";
   if (view.kind === "loading") {
+    // Nothing of the previous answer survives a reload: not its policy, nor its project or revision.
+    titleEl.textContent = "InferOps workflow policy";
+    metaEl.textContent = "";
     statusEl.textContent = "Loading…";
     main.append(notice("Loading the workflow policy…", false));
     return;
