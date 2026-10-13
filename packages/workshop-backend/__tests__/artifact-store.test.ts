@@ -5,10 +5,13 @@ import {
 } from "@gadgets/workshop-shared/agent-artifact";
 import type { BlueprintBinding } from "@gadgets/workshop-shared/api";
 import {
-  artifactRefusalError, containsSecret, diffManifests, qualificationFindings, requirePins, revisionOf,
+  artifactRefusalError, containsSecret, requireBindingTemplates, diffManifests, qualificationFindings, requirePins, revisionOf,
   WorkspaceArtifactStore, type ArtifactRevisionRecord,
 } from "../src/artifact-store.js";
 import { makeOverseerStorage } from "../src/overseer.js";
+import {
+  ARTIFACT_ARCHIVE_VERSION, buildBlueprintArchiveStream, parseArtifactArchive, parseBlueprintArchive,
+} from "../src/blueprint-archive.js";
 import { makeMockStorage } from "./mock-storage.js";
 
 vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
@@ -192,5 +195,35 @@ describe("secret detection", () => {
   it("round-trips refusal codes through thrown errors", () => {
     expect(artifactRefusalOf(artifactRefusalError("inexact_reference", "latest"))).toBe("inexact_reference");
     expect(artifactRefusalOf(new Error("No such revision: skill/a@1"))).toBeNull();
+  });
+});
+
+describe(".gadget format version 2", () => {
+  const metadata = { title: "t", description: "", author: { type: "user", id: "a", name: "A" }, created: new Date(0),
+    version: 1, lastUpdated: new Date(0), bindings: {} } as const;
+  const archive = (version: number) => buildBlueprintArchiveStream({ ...metadata, author: { ...metadata.author } },
+      new Response(new Uint8Array([1, 2, 3])).body!, 3, version);
+
+  it("is read only by the version 2 reader, and version 1 only by the version 1 reader", async () => {
+    let read = await parseArtifactArchive(archive(ARTIFACT_ARCHIVE_VERSION));
+    expect(read).toMatchObject({ rawMetadata: { title: "t" }, contentLength: 3 });
+    expect(new Uint8Array(await new Response(read.content).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    await expect(parseBlueprintArchive(archive(ARTIFACT_ARCHIVE_VERSION))).rejects.toThrow(/version: 2/);
+    await expect(parseArtifactArchive(archive(1))).rejects.toThrow(/version: 1/);
+    expect((await parseBlueprintArchive(archive(1))).metadata.created).toEqual(new Date(0));
+  });
+
+  it("keeps only the display text, requirement and spawner env of archived binding templates", () => {
+    expect(requireBindingTemplates({
+      A: { title: "A", description: "", type: "gatekeeper", gatekeeperName: "x", typeUrlPattern: "x://*",
+        resourceUrl: "x://secret", extra: 1 },
+      S: { title: "S", description: "", type: "agentSpawner", env: { A: { type: "binding", name: "A" }, G: { type: "gadget" } },
+        suggestedModel: null, spawnerOnly: true },
+    })).toEqual({
+      A: { title: "A", description: "", type: "gatekeeper", gatekeeperName: "x", typeUrlPattern: "x://*" },
+      S: { title: "S", description: "", type: "agentSpawner", env: { A: { type: "binding", name: "A" }, G: { type: "gadget" } },
+        spawnerOnly: true },
+    });
+    expect(() => requireBindingTemplates({ A: { title: "A", type: "unknown" } })).toThrow(/Unknown binding type/);
   });
 });
