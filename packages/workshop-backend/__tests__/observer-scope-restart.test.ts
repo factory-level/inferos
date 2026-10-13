@@ -931,11 +931,13 @@ describe("revocation restart ordering", () => {
   it("removeCollaborator schedules the restart before the observer teardown", async () => {
     let restarts: string[] = [];
     let restartRecorded = Promise.withResolvers<void>();
-    let client = await openFakeOverseer({}, { impl: {
+    // The removal and its rule cleanup share one storage transaction, ahead of the restart.
+    let client = await openFakeOverseer({ transaction: (write: () => unknown) => write() }, { impl: {
       getSharingManager: async () => ({
         removeCollaborator: () =>
             [{ profile: { type: "user", id: "carol", name: "Carol" }, newRole: null }],
       }),
+      deleteRevokedAutoApprovalRules: () => {},
       // A hung gatekeeper/User-DO round trip: the cleanup never settles.
       tearDownLostObservers: () => new Promise(() => {}),
       refreshAffectedCollaboratorListings: async () => {},

@@ -52,6 +52,9 @@ covers:
   - packages/integration-tests/__tests__/operate-host-boards-off.test.ts
   - packages/workshop-backend/scripts/dev-setup.ts
   - packages/workshop-backend/src/overseer.ts
+  - packages/workshop-backend/src/auto-approval.ts
+  - packages/workshop-backend/__tests__/auto-approval.test.ts
+  - packages/integration-tests/__tests__/auto-approval-policy.test.ts
   - packages/workshop-backend/src/agent.ts
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/workshop-backend/src/blueprint-install.ts
@@ -419,6 +422,12 @@ Further details:
   - an apply interrupted by a restart that comes back with an unknown outcome;
   - a rejection refused while an apply is under way, and an approval refused while a rejection is;
   - an interrupted apply's recovered outcome reaching a subscriber that resumes from a newer watermark.
+
+**Auto-approval rules follow the enabler's access.** A rule (`setAutoApprovedActionKind`, stored per gatekeeper and action kind in `autoApproveTags`) runs under the authority of the person who enabled it, and each action it applies is attributed to them (`resolvedBy`, `autoApproved`). `autoApprovalRule` (`auto-approval.ts`), the one check that submit, the agent `awaitDecision` scan and the drain share, therefore honours a rule only while its `enabledBy` is a user whose effective role (`SharingManager.getEffectiveRole`, live) ranks at least `build`. A rule attributed to an agent or a gadget never fires, even though a gadget author's id names the owner. This narrows existing eligibility to the settled rule that anyone with access may approve, and the release check on revoked authority. It adds no eligible kind or approver.
+- The check is synchronous, against `OverseerImpl.enablerRoles()`. On a cold instance the sharing manager may first need the owner's profile over RPC, so `submitAction` (both the Overseer's and the `ApprovalQueue`'s), the AG-UI replacement submit and each drain pass resolve it first (`resolveEnablerRoles`). Until it resolves, no rule fires, so a failure leaves the actions pending.
+- `removeCollaborator`, `revokeShareLink` and the observation that sets `ownerInvitesOnly` delete the rules of every affected collaborator left below `build` (the target, anyone downgraded, and dependents cut off transitively) in the same synchronous step as the sharing change (`deleteRevokedAutoApprovalRules`). The first two do this in its transaction, ahead of the restart they schedule. Re-adding the person restores their access but not their rules; enabling a rule again is a fresh decision, attributed to whoever makes it. A rule the cleanup missed (for example, one whose enabler lost access before the cleanup existed) cannot fire while they lack Build, though it would again if they regained it.
+- `listAutoApprovedActionKinds` and `listPreApprovableActions().alreadyEnabled` show only rules the same check honours (the restricted latch aside), so a rule that cannot fire is not shown as enabled.
+- Actions that would have been auto-approved stay pending for a manual decision; nothing is replayed. `auto-approval-policy.test.ts` covers removal, a share-link downgrade to Use, a transitive loss, the `ownerInvitesOnly` observation, a queued action behind a manual gate, the listings, re-adding, re-enabling by a current Build user, and the owner's rule on a restarted instance that only a collaborator opened. `workshop-agent-actions.test.ts` covers an agent turn suspending instead of carrying on, and `auto-approval.test.ts` the predicate and the drain's role resolution.
 
 
 A stored snapshot may predate a page-state field. The user DO fills missing fields from `INITIAL_OPERATE_PAGE` whenever it reads the snapshot, so such a session reads as if it always had the field (a session stored before approvals reads `reviewing` and `lastApprovalOutcome` as null).

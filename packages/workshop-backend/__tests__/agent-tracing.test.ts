@@ -17,6 +17,7 @@ import type {
 interface OverseerInternals {
   env: Cloudflare.Env;
   ownerId: string;
+  ownerProfileId?: string;
   users: {
     idFromString(id: string): string;
     get(): {
@@ -379,6 +380,9 @@ describe("agent tracing", () => {
           resourceUrl: "https://example.com/repo", typeUrlPattern: "https://*",
         },
       });
+      // The rule runs under its enabler's authority, so the enabler must be the workspace's owner.
+      impl.ownerId = OWNER_USER_ID;
+      impl.ownerProfileId = OWNER.id;
       impl.storage.autoApproveTags.put({ gatekeeperId: 7, actionKind: poke, enabledBy: OWNER });
       impl.getGatekeeperFacet = () => ({ applyAction: async () => {} });
 
