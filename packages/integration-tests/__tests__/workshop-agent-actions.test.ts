@@ -13,7 +13,9 @@ import {
 } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  accountLabel, restartWorkspace, RpcTarget, streamGeneration, stubFor, waitFor, withOwnerWorkspace,
+  accountLabel, connect, listConnectedAccounts, MAX_OBSERVER_PROMPTS, nextUsernames,
+  ObserverConfigRecorder, restartWorkspace, RpcTarget, signUp, streamGeneration, stubFor, waitFor,
+  withOwnerWorkspace,
 } from "../src/rpc-client.js";
 
 let harness: Harness;
@@ -243,6 +245,54 @@ it.concurrent.each(["approve", "reject"] as const)(
   });
   expect(await actionState(label))
       .toEqual({ pending: [], value: 8, applyCount: decision === "approve" ? 2 : 1 });
+  expect(model.requests).toHaveLength(3);
+});
+
+it.concurrent("[3b] an always-approved write suspends the turn once its rule's enabler is removed",
+    async () => {
+  const model = models.script([
+    writeValues(6), writeValues("7, { autoApprovable: true }"), { text: "The value is applied." },
+  ]);
+  await using session = await openSession(model, "agentrevoked");
+  const label = labelOf(session);
+  const [enabler] = nextUsernames("agentenabler");
+  using enablerPublic = connect(harness.url);
+  using enablerApi = await signUp(enablerPublic, enabler!);
+  await enablerApi.provisionAmbientAccount(TEST_VENDOR_ID);
+  const enablerAccount = await waitFor("the enabler's test account", async () =>
+    (await listConnectedAccounts(enablerApi)).find(entry => entry.vendorId === TEST_VENDOR_ID) ?? null);
+
+  // A held write first, only to learn the connection's id; rejecting it leaves that turn ended.
+  await session.runTurn("Set the test value to 6.");
+  const [first] = await waitForPendingActions(session, 1);
+  const workspaceId = await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await ws.rejectAction(first.id);
+    await ws.addCollaborator(enabler!, "build");
+    return (await ws.getMetadata()).id;
+  });
+  {
+    using callback = stubFor(
+        new ObserverConfigRecorder().alwaysChoose(enablerAccount.id, MAX_OBSERVER_PROMPTS));
+    using enablerWs = await enablerApi.openGadget(workspaceId, undefined, callback);
+    await enablerWs.setAutoApprovedActionKind(first.gatekeeperId!, SET_VALUE);
+  }
+  const drops = session.connectionDrops;
+  await withOwnerWorkspace(harness.url, session.username, ws => ws.removeCollaborator(enabler!, []));
+  await waitFor("the revocation restart to drop the session", async () =>
+    session.connectionDrops > drops || null);
+
+  // The rule's enabler no longer has access, so the write needs a manual decision and the turn
+  // suspends on it rather than carrying on.
+  const turn = await session.runTurn("Set the test value to 7.");
+  expect(turn.outcome).toEqual({ status: "completed" });
+  expect(model.requests).toHaveLength(2);
+  const [held] = await waitForPendingActions(session, 1);
+  expect(await actionState(label)).toEqual({ pending: [{ id: 2, value: 7 }], applyCount: 0 });
+
+  const resumed = await session.approveActionsAndWait([held.id]);
+  expect(resumed.outcome).toEqual({ status: "completed" });
+  expect(await actionStatus(session, held.id)).toMatchObject(decidedBy(session, "approved"));
+  expect(await actionState(label)).toEqual({ pending: [], value: 7, applyCount: 1 });
   expect(model.requests).toHaveLength(3);
 });
 

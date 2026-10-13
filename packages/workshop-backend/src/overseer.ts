@@ -90,7 +90,8 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
     bumpAuthzGeneration, readAuthzGeneration, watchAuthzCollection, watchAuthzSingleton,
     watchSharingAuthzInputs } from "./sharing";
-import { AutoApprovalDrainer, autoApprovalRule } from "./auto-approval";
+import { AutoApprovalDrainer, autoApprovalRule, enablerHasBuild, NO_ROLES, type EffectiveRoleLookup }
+    from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
@@ -2260,6 +2261,8 @@ class OverseerImpl implements AgentHooks {
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
         this.storage,
+        // Warm, the lookup is in hand and the drain checks it without awaiting.
+        () => this.#sharingManager ? this.enablerRoles() : this.resolveEnablerRoles(),
         (record, resolvedBy, autoApproved) =>
             this.applyPendingAction(record, resolvedBy, autoApproved));
 
@@ -6387,6 +6390,7 @@ class OverseerImpl implements AgentHooks {
 
     if (sharing && baseline) {
       let affected = sharing.computeAffectedByOwnerInvitesOnly(baseline);
+      this.deleteRevokedAutoApprovalRules(affected);
       if (affected.length > 0) {
         // Anyone who joined through a link or through another collaborator just lost access (or
         // was downgraded), so sever live sessions as removeCollaborator does, after the writes
@@ -6627,10 +6631,12 @@ class OverseerImpl implements AgentHooks {
 
   async submitAction(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller): Promise<void> {
+    await this.resolveEnablerRoles();
     this.submitActionNow(gatekeeperId, action, description, caller);
   }
 
-  // Synchronous journal write for callers already inside a storage transaction.
+  // Synchronous journal write for callers already inside a storage transaction. A caller resolves
+  // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here.
   submitActionNow(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
       : void {
@@ -6693,7 +6699,9 @@ class OverseerImpl implements AgentHooks {
 
     // Same auto-approval gate the drainer uses, named because awaitDecision uses it too. The drain
     // is deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
-    let willAutoApprove = autoApprovalRule(this.storage, gatekeeperId, description) !== undefined;
+    let roleOf = this.enablerRoles();
+    let willAutoApprove =
+        autoApprovalRule(this.storage, roleOf, gatekeeperId, description) !== undefined;
     if (!willAutoApprove) this.traceAgentActionApproval(record, "requested");
 
     // Only agent turns suspend on awaitDecision, and only when a manual decision is pending: on this
@@ -6702,7 +6710,7 @@ class OverseerImpl implements AgentHooks {
     if (caller.from === "agent" && description.awaitDecision && (!willAutoApprove ||
         [...this.storage.actions.pendingByGatekeeper.get(gatekeeperId)].some(queued =>
             queued.type === "action" &&
-            autoApprovalRule(this.storage, gatekeeperId, queued.description) === undefined))) {
+            autoApprovalRule(this.storage, roleOf, gatekeeperId, queued.description) === undefined))) {
       this.#getOrCreateCapturedActions(caller.chatId).awaitDecision = true;
     }
 
@@ -10264,6 +10272,28 @@ class OverseerImpl implements AgentHooks {
     }));
   }
 
+  // Delete the auto-approval rules enabled by any affected collaborator who no longer has Build,
+  // in the same synchronous step as the sharing change that cost them it: the listings then stay
+  // truthful, the restart scheduled next cannot cut the deletion off, and re-adding the person
+  // later does not revive their rules (enabling one again is a fresh decision, attributed to
+  // whoever makes it). The live check in autoApprovalRule is the backstop for any rule this misses,
+  // e.g. one whose enabler lost access before this cleanup existed: it cannot fire while they lack
+  // Build, though it would again if they regained it.
+  deleteRevokedAutoApprovalRules(affected: AffectedCollaborator[]): void {
+    let revoked = new Set(affected
+        .filter(entry => entry.newRole === null || roleRank(entry.newRole) < roleRank("build"))
+        .map(entry => entry.profile.id));
+    if (revoked.size === 0) return;
+    // Collect first: deleting while the listing iterates would change what it yields.
+    let doomed: string[] = [];
+    for (let rule of this.storage.autoApproveTags.list()) {
+      if (rule.enabledBy.type === "user" && revoked.has(rule.enabledBy.id)) {
+        doomed.push(`${rule.gatekeeperId}:${rule.actionKind.tag}`);
+      }
+    }
+    for (let key of doomed) this.storage.autoApproveTags.delete(key);
+  }
+
   // Tear down observer records for collaborators who lost access as a result of a sharing change.
   // For each affected collaborator who is now fully unauthorized (newRole === null) and has an
   // observer record: best-effort removeObserver on all gatekeeper facets, then delete the record.
@@ -10651,6 +10681,34 @@ class OverseerImpl implements AgentHooks {
           this.storage, await this.getOwnerProfileId(), () => this.storage.ownerInvitesOnly.get());
     }
     return this.#sharingManager;
+  }
+
+  // The live role lookup auto-approval checks a rule's enabler against (see autoApprovalRule).
+  // Synchronous, so the submit-time check stays in the submit's one step. Until the sharing manager
+  // is resolved it knows no roles, so no rule fires: callers about to check resolve it first.
+  enablerRoles(): EffectiveRoleLookup {
+    let sharing = this.#sharingManager;
+    return sharing ? profileId => sharing.getEffectiveRole(profileId) : NO_ROLES;
+  }
+
+  #enablerRolesResolving?: Promise<EffectiveRoleLookup>;
+
+  // Resolve the sharing manager for enablerRoles(), which on a cold instance may need the owner's
+  // profile over RPC. Concurrent callers share one resolution, so submits waiting on it resume in
+  // the order they arrived. Never rejects: if it fails, the lookup fails closed (actions pend) and
+  // the next caller tries again.
+  resolveEnablerRoles(): Promise<EffectiveRoleLookup> {
+    if (this.#sharingManager) return Promise.resolve(this.enablerRoles());
+    this.#enablerRolesResolving ??= this.getSharingManager().then(
+        () => this.enablerRoles(),
+        err => {
+          this.#enablerRolesResolving = undefined;
+          this.logger.warn("could not resolve workspace roles for auto-approval", {
+            event: "auto.approval.roles.unresolved", error: err,
+          });
+          return NO_ROLES;
+        });
+    return this.#enablerRolesResolving;
   }
 
   /**
@@ -13194,6 +13252,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         }
         // The facet retains a durable replacement link. No external effect occurs in this step.
         // submitActionNow writes synchronously within the same journal transaction.
+        await this.impl.resolveEnablerRoles();
         this.impl.storage.transaction(() => {
           const nextId = this.impl.storage.nextActionId.get();
           this.impl.submitActionNow(record.gatekeeperId, replacement.action,
@@ -13498,10 +13557,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.autoApproveTags.delete(`${gatekeeperId}:${tag}`);
   }
 
-  // List the enabled auto-approval rules.
+  // List the enabled auto-approval rules: those whose enabler still has Build, the same live check
+  // autoApprovalRule applies, so a rule that can no longer fire is not shown as enabled.
   async listAutoApprovedActionKinds()
       : Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>> {
-    return [...this.impl.storage.autoApproveTags.list()].map(rule => ({
+    let roleOf = await this.impl.resolveEnablerRoles();
+    return [...this.impl.storage.autoApproveTags.list()]
+        .filter(rule => enablerHasBuild(rule, roleOf)).map(rule => ({
       gatekeeperId: rule.gatekeeperId,
       actionKind: rule.actionKind,
     }));
@@ -13527,6 +13589,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         .map(async (gk): Promise<PreApprovableAction[]> => {
       let facet = this.impl.getGatekeeperFacet(gk.id);
       let kinds = await facet.getAutoApprovableActions();
+      // Enabled means a rule autoApprovalRule would honor (latch aside): its enabler has Build.
+      // Read after the facet call, so the check sees the roles current when the listing returns.
+      let roleOf = await this.impl.resolveEnablerRoles();
+      let enabled = (tag: string) => {
+        let rule = this.impl.storage.autoApproveTags.get(`${gk.id}:${tag}`);
+        return rule !== undefined && enablerHasBuild(rule, roleOf);
+      };
       return kinds.map(actionKind => ({
         gatekeeperId: gk.id,
         // resourceTitle is a denormalized cache of the gatekeeper's describe().title, populated in a
@@ -13535,8 +13604,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         resourceTitle: gk.resourceTitle || "(title unavailable)",
         vendorId: gk.creationSpec?.type === "gatekeeper" ? gk.creationSpec.vendorId : undefined,
         actionKind,
-        alreadyEnabled:
-            this.impl.storage.autoApproveTags.get(`${gk.id}:${actionKind.tag}`) !== undefined,
+        alreadyEnabled: enabled(actionKind.tag),
       }));
     });
 
@@ -14286,8 +14354,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
+    let sharing = await this.impl.getSharingManager();
+    // Rules enabled by anyone who just lost Build go in the same transaction as the removal.
+    let affected = this.impl.storage.transaction(() => {
+      let changed = sharing.removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
+      this.impl.deleteRevokedAutoApprovalRules(changed);
+      return changed;
+    });
     // Schedule the restart in the same synchronous step as the sharing mutation: the revoked
     // collaborator's live sessions must not outlive the cleanup below, which crosses gatekeeper
     // and User-DO round trips that can stall or hang. Only restart if someone actually lost
@@ -14313,8 +14386,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
+    let sharing = await this.impl.getSharingManager();
+    // As in removeCollaborator, revoked enablers' rules go in the revocation's transaction.
+    let affected = this.impl.storage.transaction(() => {
+      let changed = sharing.revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
+      this.impl.deleteRevokedAutoApprovalRules(changed);
+      return changed;
+    });
     // Restart first, then best-effort cleanup, for the reasons given in removeCollaborator.
     if (affected.length > 0) {
       this.impl.scheduleAccessRestart(
@@ -15606,6 +15684,7 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   }
 
   async submitAction(action: number, description: ActionDescription): Promise<void> {
+    await this.impl.resolveEnablerRoles();
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
     this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
   }
