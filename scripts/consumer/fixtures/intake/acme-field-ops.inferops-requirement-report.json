@@ -1,0 +1,80 @@
+{
+  "intakeSha256": "a52d9c1bd6b00d0c81406fa124bbe712b4d227556044066279d4ca6e6f254c83",
+  "requirementReport": {
+    "intakeSha256": "a52d9c1bd6b00d0c81406fa124bbe712b4d227556044066279d4ca6e6f254c83",
+    "requirements": [
+      {
+        "id": "REQ-01",
+        "category": "kanban",
+        "text": "Dispatchers track work orders on a Kanban board with configured lanes.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      },
+      {
+        "id": "REQ-02",
+        "category": "sign-in",
+        "text": "Staff sign in with their own InferLab identity; no shared account.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      },
+      {
+        "id": "REQ-03",
+        "category": "views",
+        "text": "Supervisors keep one saved operations view showing both project boards.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      },
+      {
+        "id": "REQ-04",
+        "category": "wiki",
+        "text": "The company Wiki shows Field service, Safety and Dispatch pillars with a Master page each.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      },
+      {
+        "id": "REQ-05",
+        "category": "local-coding",
+        "text": "An engineer dispatches a local coding task against the customer fork from an ENG issue.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      },
+      {
+        "id": "REQ-06",
+        "category": "custom-component",
+        "text": "Technicians see a branded mobile checklist component for site visits.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      },
+      {
+        "id": "REQ-07",
+        "category": "integration",
+        "text": "Work orders sync from the synthetic Acme ERP connector.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      },
+      {
+        "id": "REQ-08",
+        "category": "deployment",
+        "text": "The environment is deployed to Acme's Cloudflare account.",
+        "disposition": "unresolved",
+        "needsReview": true,
+        "reason": "fulfillment-not-assessed",
+        "detail": "Applying the intake stores this requirement but does not establish that it is met; its category names an area, not a fulfillment. It needs a reviewed disposition."
+      }
+    ]
+  }
+}

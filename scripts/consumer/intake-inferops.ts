@@ -6,7 +6,8 @@
  *
  * 1. `POST /project/intake` in the operations workspace: InferOps models the projects and operations
  *    and returns its canonical `intakeSha256`. That hash is the provider's identity of the intake; it
- *    is never compared with the raw-bytes hash InferOS records.
+ *    is never compared with the raw-bytes hash InferOS records. The same response carries InferOps'
+ *    `requirementReport`, checked against the reviewed intake by {@link parseRequirementReport}.
  * 2. `POST /knowledge/wiki/pillars` in the InferMind workspace with that hash: the company root, a
  *    Master per selected pillar, and SOP pages filed under their pillars.
  * 3. `GET /knowledge/wiki/structure`: the readback. A write that succeeded is never reported as failed
@@ -93,6 +94,92 @@ export type StepStatus = "applied" | "failed" | "not-run";
 /** A Master page as read back. */
 export interface MasterReadback { key: string; title: string; documentId: string | null; members: number }
 
+/** InferOps' disposition of one requirement, as the provider reported it. */
+export interface ProviderRequirement {
+  id: string;
+  category: string;
+  /** Only `unresolved` exists in the provider today (inferops #2380). */
+  disposition: "unresolved";
+  needsReview: boolean;
+  reason: "fulfillment-not-assessed";
+  detail: string;
+}
+
+/**
+ * InferOps' own report of the intake's requirements, from step 1's response. It is the provider's
+ * disposition and stays apart from the wrapper's (`supported` here means a wrapper capability, never
+ * that InferOps found the requirement met).
+ *
+ * - `reported`: valid, bound to step 1's hash, and every reviewed requirement appears exactly once.
+ * - `unavailable`: the response has no report (a provider before #2380). Nothing is assumed.
+ * - `invalid`: present but not trustworthy; `problem` says why and `requirements` is empty.
+ * - `not-run`: step 1 did not succeed.
+ */
+export interface ProviderRequirementReport {
+  status: "reported" | "unavailable" | "invalid" | "not-run";
+  /** Why the report is `invalid`, by field and rule; never a reported value. */
+  problem: string | null;
+  intakeSha256: string | null;
+  requirements: ProviderRequirement[];
+}
+
+const PROVIDER_DISPOSITIONS: readonly string[] = ["unresolved"];
+const PROVIDER_REASONS: readonly string[] = ["fulfillment-not-assessed"];
+const REPORT_KEYS = ["intakeSha256", "requirements"];
+const ENTRY_KEYS = ["id", "category", "text", "disposition", "needsReview", "reason", "detail"];
+const HASH = /^[0-9a-f]{64}$/;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const hasExactly = (value: Record<string, unknown>, keys: string[]) =>
+  Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+
+/**
+ * Check step 1's `requirementReport` against the reviewed intake: the provider's strict schema
+ * (`IntakeRequirementReportSchema`, inferops `domains/project/shared/intake.dto.ts`), the response's
+ * own hash, and each requirement's id, category and text, in intake order, exactly once. Problems
+ * name a position and a rule, never a value the provider sent.
+ */
+export function parseRequirementReport(value: unknown, responseSha256: string, intake: ConsumerIntake): ProviderRequirementReport {
+  const invalid = (problem: string): ProviderRequirementReport => ({ status: "invalid", problem, intakeSha256: null, requirements: [] });
+  if (value === undefined) return { status: "unavailable", problem: null, intakeSha256: null, requirements: [] };
+  if (!isRecord(value) || !hasExactly(value, REPORT_KEYS)) return invalid("requirementReport: expected exactly intakeSha256, requirements");
+  if (typeof value.intakeSha256 !== "string" || !HASH.test(value.intakeSha256)) return invalid("requirementReport.intakeSha256: expected a sha-256 hex digest");
+  if (value.intakeSha256 !== responseSha256) return invalid("requirementReport.intakeSha256: does not match the apply response's intakeSha256");
+  if (!Array.isArray(value.requirements)) return invalid("requirementReport.requirements: expected an array");
+  const expected = intake.requirements;
+  const ids = value.requirements.map(entry => (isRecord(entry) ? entry.id : undefined));
+  if (new Set(ids).size !== ids.length) return invalid("requirementReport.requirements: an id appears more than once");
+  if (value.requirements.length !== expected.length) {
+    return invalid(`requirementReport.requirements: expected ${expected.length} entries, one per intake requirement, got ${value.requirements.length}`);
+  }
+  const requirements: ProviderRequirement[] = [];
+  for (const [index, entry] of value.requirements.entries()) {
+    const at = `requirementReport.requirements[${index}]`;
+    const want = expected[index]!;
+    if (!isRecord(entry) || !hasExactly(entry, ENTRY_KEYS)) return invalid(`${at}: expected exactly ${ENTRY_KEYS.join(", ")}`);
+    if (entry.id !== want.id) {
+      return invalid(expected.some(requirement => requirement.id === entry.id)
+        ? `${at}.id: out of intake order`
+        : `${at}.id: not a requirement of this intake`);
+    }
+    if (entry.category !== want.category) return invalid(`${at}.category: differs from intake requirement ${want.id}`);
+    if (entry.text !== want.text) return invalid(`${at}.text: differs from intake requirement ${want.id}`);
+    if (typeof entry.disposition !== "string" || !PROVIDER_DISPOSITIONS.includes(entry.disposition)) return invalid(`${at}.disposition: expected one of ${PROVIDER_DISPOSITIONS.join(", ")}`);
+    if (typeof entry.reason !== "string" || !PROVIDER_REASONS.includes(entry.reason)) return invalid(`${at}.reason: expected one of ${PROVIDER_REASONS.join(", ")}`);
+    if (typeof entry.needsReview !== "boolean") return invalid(`${at}.needsReview: expected boolean`);
+    // The provider's detail is one sentence; a control character or an outsized value is not shown.
+    if (typeof entry.detail !== "string" || entry.detail.length > 1000 || [...entry.detail].some(char => char < " " || char === "\u007f")) {
+      return invalid(`${at}.detail: expected a single-line string of at most 1000 characters`);
+    }
+    requirements.push({
+      id: want.id, category: want.category, disposition: "unresolved", needsReview: entry.needsReview,
+      reason: "fulfillment-not-assessed", detail: entry.detail,
+    });
+  }
+  return { status: "reported", problem: null, intakeSha256: value.intakeSha256, requirements };
+}
+
 /** What applying to InferOps did, step by step. The JSON report carries it as `inferops`. */
 export interface InferOpsApplyResult {
   /** The provider's canonical hash of the intake, once step 1 returned it. */
@@ -102,6 +189,8 @@ export interface InferOpsApplyResult {
   alreadyApplied: boolean;
   /** Step 1's changes, `kind:key=action`. */
   intakeChanges: string[];
+  /** InferOps' report of the intake's requirements, from step 1's response. */
+  requirementReport: ProviderRequirementReport;
   pillars: StepStatus;
   /** Step 2's changes, `kind:key=action`. */
   pillarChanges: string[];
@@ -195,7 +284,8 @@ export async function applyIntakeToInferOps(
 
   const { members, unlinked } = pillarMembers(intake);
   const result: InferOpsApplyResult = {
-    intakeSha256: null, intake: "not-run", alreadyApplied: false, intakeChanges: [], pillars: "not-run", pillarChanges: [],
+    intakeSha256: null, intake: "not-run", alreadyApplied: false, intakeChanges: [],
+    requirementReport: { status: "not-run", problem: null, intakeSha256: null, requirements: [] }, pillars: "not-run", pillarChanges: [],
     readback: "not-run", rootDocumentId: null, masters: [], leftoverPillars: [], sharedPages: [], unlinkedSops: unlinked, error: null,
   };
   // Scoped to tenant, workspace and operation, so one key never replays across scopes or steps.
@@ -209,6 +299,8 @@ export async function applyIntakeToInferOps(
     result.alreadyApplied = applied.alreadyApplied === true;
     result.intakeChanges = changeList(applied.changes);
     result.intake = "applied";
+    // Reporting only: an untrustworthy report never changes a step's status, the error or a retry.
+    result.requirementReport = parseRequirementReport(applied.requirementReport, applied.intakeSha256, intake);
   } catch (error) {
     result.intake = "failed";
     result.error = (error as Error).message;

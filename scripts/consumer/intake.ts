@@ -743,6 +743,7 @@ export function renderReport(report: IntakeReport): string {
       ...(report.inferops.sharedPages.length ? ["", `Pages filed under several pillars: ${report.inferops.sharedPages.map(page => `\`${page.slug}\` (${page.pillars.join(", ")})`).join("; ")}.`] : []),
       ...(report.inferops.unlinkedSops.length ? ["", `SOPs not linked to a Wiki page: ${report.inferops.unlinkedSops.map(item => `${item.operation} (${item.reason})`).join("; ")}.`] : []),
       ...(report.inferops.error ? ["", `Did not complete: ${cell(report.inferops.error)}. Rerun \`pnpm inferos intake apply <file> --inferops\`; both InferOps writes are idempotent.`] : []),
+      ...renderProviderRequirements(report.inferops.requirementReport),
     ] : []),
     "",
     "## Operational inventory",
@@ -759,6 +760,28 @@ export function renderReport(report: IntakeReport): string {
     "",
   ];
   return lines.join("\n");
+}
+
+/**
+ * InferOps' own requirement dispositions, apart from the wrapper's "Requirements" table above: a
+ * wrapper `supported` names a configured capability, while InferOps reports whether it assessed the
+ * requirement at all.
+ */
+function renderProviderRequirements(report: InferOpsApplyResult["requirementReport"]): string[] {
+  const heading = ["", "### InferOps requirement report", ""];
+  if (report.status === "not-run") return [...heading, "Not received: the intake step did not succeed."];
+  if (report.status === "unavailable") return [...heading, "Unavailable: this InferOps did not return a requirement report. No InferOps disposition is assumed."];
+  if (report.status === "invalid") return [...heading, `Not shown: the report InferOps returned is invalid (${cell(report.problem ?? "unknown")}). No InferOps disposition is assumed.`];
+  const details = [...new Set(report.requirements.map(requirement => requirement.detail))];
+  return [
+    ...heading,
+    `Reported for provider sha256 \`${report.intakeSha256}\`. These are InferOps' dispositions, not the wrapper's.`,
+    "",
+    "| ID | Category | InferOps disposition | Needs review | Reason |",
+    "| --- | --- | --- | --- | --- |",
+    ...report.requirements.map(requirement => `| ${requirement.id} | ${requirement.category} | ${requirement.disposition} | ${requirement.needsReview ? "yes" : "no"} | ${requirement.reason} |`),
+    ...(details.length ? ["", ...details.map(detail => `> ${cell(detail)}`)] : []),
+  ];
 }
 
 const USAGE = "Usage: intake.ts apply CONSUMER_ROOT INTAKE_FILE [--file-issues OWNER/REPO] [--inferops]";
@@ -780,7 +803,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     console.log(json({
       ok: complete, operation: "intake", reports: Object.values(REPORT_FILES), summary: report.summary,
       conflicts: report.configuration.conflicts, deployed: false,
-      ...(inferops ? { inferops: { intake: inferops.intake, pillars: inferops.pillars, readback: inferops.readback, error: inferops.error } } : {}),
+      ...(inferops ? { inferops: { intake: inferops.intake, pillars: inferops.pillars, readback: inferops.readback, error: inferops.error, requirementReport: inferops.requirementReport.status } } : {}),
     }));
     if (!complete) process.exitCode = 1;
   } catch (error) {
