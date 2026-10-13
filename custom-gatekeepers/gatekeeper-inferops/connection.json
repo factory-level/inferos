@@ -17,6 +17,7 @@
       "InferOpsWikiGatekeeper",
       "InferOpsTableGatekeeper",
       "InferOpsMembersGatekeeper",
+      "InferOpsWorkflowPolicyGatekeeper",
       "InferLabLogin",
       "InferOpsCredentials"
     ]
@@ -104,6 +105,19 @@
         { "method": "listMembers", "notes": "The bound workspace's grant holders in InferOps' order: principal id, kind, name, role and explicit denies there; no email." }
       ],
       "writes": []
+    },
+    {
+      "kind": "project/workflow",
+      "urlPattern": "inferops://*/project/workflow/*",
+      "gatekeeper": "InferOpsWorkflowPolicyGatekeeper",
+      "session": "InferOpsWorkflowPolicySession",
+      "scope": "The published content-workflow policy of one project, by key, in one InferOps workspace the signed-in person holds; per-person sign-in only (no stopgap connection), or the mock's demo policy. An InferOS-minted binding URL that never reaches InferOps. Every read is exactly two GETs with the person's own token in the bound workspace: InferOps' project.list (GET /project/projects) to resolve the key there, then workflow.get (GET /project/projects/:projectId/workflow?workflow=content) for that project, so InferOps' project:read, explicit denies and RLS decide. Read-only: no writes. Every rule reason, the policy's agents and the head's publishedBy are projected out; principal ids in subjects remain.",
+      "enabledBy": ["INFEROPS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED"],
+      "observers": "admission",
+      "reads": [
+        { "method": "readWorkflowPolicy", "notes": "The project's policy head as InferOps answered it, parsed strictly and fresh on every call, without rule reasons, agents or publishedBy; compiledHash is InferOps' hash of its compiled source policy, not of this projection." }
+      ],
+      "writes": []
     }
   ],
   "approval": {
@@ -146,6 +160,7 @@
     { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
     { "name": "INFEROPS_TABLES_ENABLED", "kind": "var", "purpose": "Capability switch for object/table, checked on every call.", "default": "Unset counts as off." },
     { "name": "INFEROPS_MEMBERS_ENABLED", "kind": "var", "purpose": "Capability switch for portal/members, checked on every call.", "default": "Unset counts as off." },
+    { "name": "INFEROPS_WORKFLOW_POLICY_ENABLED", "kind": "var", "purpose": "Capability switch for project/workflow, checked on every call.", "default": "Unset counts as off." },
     { "name": "INFEROPS_HOST_BOARDS", "kind": "var", "purpose": "Proposed switch for the board facet's kernel-only host-board read (project.board_snapshot), checked on every call. Adds no resource kind.", "default": "Unset counts as off." },
     { "name": "CODING_WORKBENCH_REPOS", "kind": "var", "purpose": "Comma-separated InferOps repository ids a dispatch may target.", "default": "Unset allows no repository." }
   ],

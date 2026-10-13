@@ -597,3 +597,111 @@ export interface InferOpsMembersSession {
   /** Everyone holding access to the workspace, with their role and explicit denies there. */
   listMembers(): Promise<WorkspaceMembers>;
 }
+
+/** Who a workflow rule or transition speaks about: one principal, every principal of a kind, or a role. */
+export type WorkflowPolicySubject =
+  | { principalId: string }
+  | { kind: "user" | "service_account" | "system" }
+  | { role: string };
+
+/** An action a workflow rule allows or denies on a content issue. */
+export type WorkflowPolicyAction =
+  | "read" | "create" | "edit" | "comment" | "assign" | "reprioritize" | "move-out" | "move-in"
+  | "claim" | "delegate" | "execute" | "approve" | "publish";
+
+/** One rule: an allow or deny of some actions for some subjects. Its author's free-text reason is not included. */
+export interface WorkflowPolicyRule {
+  id: string;
+  effect: "allow" | "deny";
+  subjects: WorkflowPolicySubject[];
+  actions: WorkflowPolicyAction[];
+}
+
+/** A condition every mutating action at a lane, or a move along a transition, must also satisfy. */
+export interface WorkflowPolicyGuard {
+  kind: "required-field" | "lease-holder" | "actor-kind" | "not-blocked" | "approval-ref";
+  /** `required-field` only: the issue field that must be non-empty. */
+  field?: "title" | "description" | "acceptanceCriteria" | "assigneeId" | "targetDate" | "refs";
+  /** `actor-kind` only: the principal kind the actor must be. */
+  actorKind?: "user" | "service_account" | "system";
+}
+
+/** One lane of the workflow, in board order. */
+export interface WorkflowPolicyLane {
+  id: string;
+  name: string;
+  group: "backlog" | "unstarted" | "started" | "completed" | "cancelled";
+}
+
+/** A reusable, versioned bundle of rules that lanes or other fragments pull in with `use`. */
+export interface WorkflowPolicyFragment {
+  id: string;
+  version: number;
+  use?: string[];
+  rules: WorkflowPolicyRule[];
+}
+
+/** The rules and guards bound to one lane. */
+export interface WorkflowPolicyLaneBinding {
+  laneId: string;
+  use?: string[];
+  rules?: WorkflowPolicyRule[];
+  guards?: WorkflowPolicyGuard[];
+}
+
+/**
+ * A permitted move between two lanes (`"*"` is any lane). An empty `subjects` list means anyone the
+ * lanes' rules allow; otherwise only those subjects may take it.
+ */
+export interface WorkflowPolicyTransition {
+  id: string;
+  from: string;
+  to: string;
+  subjects: WorkflowPolicySubject[];
+  guards?: WorkflowPolicyGuard[];
+  rules?: WorkflowPolicyRule[];
+}
+
+/** A version 2 workflow policy document for the content workflow, as InferOps published it. */
+export interface WorkflowPolicyV2 {
+  schemaVersion: 2;
+  workflow: "content";
+  entryLaneId: string;
+  lanes: WorkflowPolicyLane[];
+  fragments?: WorkflowPolicyFragment[];
+  laneBindings?: WorkflowPolicyLaneBinding[];
+  rules?: WorkflowPolicyRule[];
+  transitions?: WorkflowPolicyTransition[];
+}
+
+/**
+ * The published workflow policy of one project's content workflow. Rule reasons, agent notes and who
+ * published it are not included; principal ids in subjects are. `compiledHash` is InferOps' hash of
+ * its compiled source policy, not a hash of this object.
+ */
+export interface WorkflowPolicyHead {
+  projectId: string;
+  workflow: "content";
+  /** false until the first publish; then `policy` is null and `revision` is "0". */
+  configured: boolean;
+  /** The policy's revision counter, as a decimal string. */
+  revision: string;
+  policy: WorkflowPolicyV2 | null;
+  compiledHash: string | null;
+  /** true when InferOps stored a version 1 document and upgraded it on read. */
+  legacyUpgraded: boolean;
+  /** When this revision was published (ISO 8601), when configured. */
+  publishedAt?: string;
+}
+
+/**
+ * Read-only access to the published workflow policy of one InferOps project, fixed when this
+ * capability was created; it takes no account, host, workspace or project argument. Fails with
+ * NOT_FOUND when the policy is not available to you, with DISABLED while workflow policies are
+ * turned off, with UNAUTHORIZED when your InferOps sign-in has ended, and with UNAVAILABLE when
+ * InferOps could not answer or its answer could not be read (try again).
+ */
+export interface InferOpsWorkflowPolicySession {
+  /** The project's current published content-workflow policy, read fresh on every call. */
+  readWorkflowPolicy(): Promise<WorkflowPolicyHead>;
+}

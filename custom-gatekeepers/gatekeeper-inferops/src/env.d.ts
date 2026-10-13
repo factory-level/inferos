@@ -50,6 +50,11 @@ declare namespace Cloudflare {
      */
     INFEROPS_MEMBERS_ENABLED?: string;
     /**
+     * `"true"` or `"false"`: whether workflow-policy bindings are on (`INFEROPS_WORKFLOW_POLICY_ENABLED`).
+     * Unset counts as off (see workflow-policy.ts); it also needs `INFEROPS_ENABLED`.
+     */
+    INFEROPS_WORKFLOW_POLICY_ENABLED?: string;
+    /**
      * `"true"` or `"false"`: whether the kernel-only host-board read is on (`INFEROPS_HOST_BOARDS`,
      * a proposed extension of the capability vocabulary). Unset counts as off (see host-board.ts);
      * it also needs `INFEROPS_ENABLED`. Nothing sets it yet: no dev-server, wrapper or release

@@ -103,6 +103,12 @@ export function membersRequested({ config, env }: SettingsInput): boolean {
   return config.schemaVersion === 2 ? config.capabilities.INFEROPS_MEMBERS_ENABLED : env.INFEROPS_MEMBERS_ENABLED === "true";
 }
 
+/** Whether workflow policies are asked for, resolved like custom tables. */
+export function workflowPolicyRequested({ config, env }: SettingsInput): boolean {
+  return config.schemaVersion === 2
+    ? config.capabilities.INFEROPS_WORKFLOW_POLICY_ENABLED : env.INFEROPS_WORKFLOW_POLICY_ENABLED === "true";
+}
+
 /** Whether host boards are asked for, resolved like custom tables. */
 export function hostBoardsRequested({ config, env }: SettingsInput): boolean {
   return config.schemaVersion === 2 ? config.capabilities.INFEROPS_HOST_BOARDS : env.INFEROPS_HOST_BOARDS === "true";
@@ -255,6 +261,13 @@ export const SETTINGS: readonly SettingEntry[] = [
     requiredWhen: never,
     readAt: "`inferos.config.json` `capabilities.INFEROPS_MEMBERS_ENABLED` (version 2), else the shell",
     present: membersRequested,
+  },
+  {
+    name: "INFEROPS_WORKFLOW_POLICY_ENABLED", group: "Host and runtime", kind: "value", owner: "deployer", default: "off", source: "local",
+    description: "Turns read-only, private InferOps workflow-policy bindings (no rule reasons, agents or publisher) through the InferOps gatekeeper on. Needs `INFEROPS_ENABLED`; a version 2 wrapper's capability wins over the shell.",
+    requiredWhen: never,
+    readAt: "`inferos.config.json` `capabilities.INFEROPS_WORKFLOW_POLICY_ENABLED` (version 2), else the shell",
+    present: workflowPolicyRequested,
   },
   {
     name: "INFEROPS_HOST_BOARDS", group: "Host and runtime", kind: "value", owner: "deployer", default: "off", source: "local",
@@ -464,7 +477,7 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
     });
   } catch (error) { add("INFEROPS_ENABLED", "error", "contradictory", (error as Error).message); }
   if (config.schemaVersion === 2) {
-    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS"] as const) {
+    for (const name of ["INFEROPS_ENABLED", "CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS"] as const) {
       if (env[name] !== undefined && env[name] !== String(config.capabilities[name])) {
         add(name, "warning", "contradictory", `The shell's ${name} differs from the wrapper capability, which wins; unset it`);
       }
@@ -473,7 +486,7 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
       add("codingWorkbench.repos", "warning", "contradictory", "The shell's CODING_WORKBENCH_REPOS is ignored; a version 2 wrapper's codingWorkbench.repos is the allowlist");
     }
   } else {
-    for (const name of ["CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS"] as const) {
+    for (const name of ["CODING_WORKBENCH_ENABLED", "INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED", "INFEROPS_HOST_BOARDS", "INFEROPS_BOUND_VIEWS"] as const) {
       if (env[name] !== undefined && !["true", "false"].includes(env[name]!)) {
         add(name, "error", "invalid", `${name} must be "true" or "false"`);
       }
@@ -484,6 +497,9 @@ export function validateSettings(config: ConsumerConfig, env: SettingsInput["env
   }
   if (membersRequested(input) && !inferOpsOn(input)) {
     add("INFEROPS_MEMBERS_ENABLED", "error", "contradictory", "INFEROPS_MEMBERS_ENABLED is on, but the InferOps integration (INFEROPS_ENABLED) is off");
+  }
+  if (workflowPolicyRequested(input) && !inferOpsOn(input)) {
+    add("INFEROPS_WORKFLOW_POLICY_ENABLED", "error", "contradictory", "INFEROPS_WORKFLOW_POLICY_ENABLED is on, but the InferOps integration (INFEROPS_ENABLED) is off");
   }
   if (hostBoardsRequested(input) && !inferOpsOn(input)) {
     add("INFEROPS_HOST_BOARDS", "error", "contradictory", "INFEROPS_HOST_BOARDS is on, but the InferOps integration (INFEROPS_ENABLED) is off");

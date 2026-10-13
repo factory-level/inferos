@@ -1,0 +1,107 @@
+{
+  "$comment": "Synthetic demo answers of InferOps' workflow.get ({ head }), by project key; a project without one reads as unconfigured. DEMO's policy carries a distinct canary in every place the gatekeeper leaves out (each rule location's reason, agents[], publishedBy) so tests can prove none of them is passed on. The owner is named only by role, never by id.",
+  "projects": {
+    "DEMO": {
+      "head": {
+        "projectId": "10000000-0000-4000-8000-000000000001",
+        "workflow": "content",
+        "configured": true,
+        "revision": "3",
+        "policy": {
+          "schemaVersion": 2,
+          "workflow": "content",
+          "entryLaneId": "20000000-0000-4000-8000-000000000007",
+          "lanes": [
+            { "id": "20000000-0000-4000-8000-000000000007", "name": "Ideas", "group": "backlog" },
+            { "id": "20000000-0000-4000-8000-000000000008", "name": "Drafting", "group": "started" },
+            { "id": "20000000-0000-4000-8000-000000000009", "name": "Published", "group": "completed" }
+          ],
+          "fragments": [
+            {
+              "id": "reviewers",
+              "version": 1,
+              "rules": [
+                {
+                  "id": "reviewers-comment",
+                  "effect": "allow",
+                  "subjects": [{ "role": "viewer" }],
+                  "actions": ["read", "comment"],
+                  "reason": "canary-fragment-rule-reason-5d1e"
+                }
+              ]
+            }
+          ],
+          "laneBindings": [
+            {
+              "laneId": "20000000-0000-4000-8000-000000000008",
+              "use": ["reviewers"],
+              "rules": [
+                {
+                  "id": "writer-drafts",
+                  "effect": "allow",
+                  "subjects": [{ "principalId": "40000000-0000-4000-8000-000000000004" }, { "kind": "service_account" }],
+                  "actions": ["edit", "claim"],
+                  "reason": "canary-binding-rule-reason-8b2c"
+                }
+              ],
+              "guards": [
+                { "kind": "required-field", "field": "description" },
+                { "kind": "actor-kind", "actorKind": "user" },
+                { "kind": "not-blocked" }
+              ]
+            }
+          ],
+          "rules": [
+            {
+              "id": "owners-all",
+              "effect": "allow",
+              "subjects": [{ "role": "owner" }],
+              "actions": ["read", "create", "edit", "comment", "assign", "move-out", "move-in", "approve", "publish"],
+              "reason": "canary-top-rule-reason-3f9a"
+            },
+            {
+              "id": "no-agent-publish",
+              "effect": "deny",
+              "subjects": [{ "kind": "service_account" }],
+              "actions": ["publish"]
+            }
+          ],
+          "transitions": [
+            {
+              "id": "draft-to-published",
+              "from": "20000000-0000-4000-8000-000000000008",
+              "to": "20000000-0000-4000-8000-000000000009",
+              "subjects": [{ "role": "owner" }, { "principalId": "40000000-0000-4000-8000-000000000002" }],
+              "guards": [{ "kind": "approval-ref" }],
+              "rules": [
+                {
+                  "id": "publish-edge",
+                  "effect": "allow",
+                  "subjects": [{ "role": "owner" }],
+                  "actions": ["move-out", "move-in"],
+                  "reason": "canary-transition-rule-reason-6c4d"
+                }
+              ]
+            },
+            {
+              "id": "back-to-ideas",
+              "from": "*",
+              "to": "20000000-0000-4000-8000-000000000007",
+              "subjects": []
+            }
+          ],
+          "agents": [
+            {
+              "principalId": "c0a9e700-0000-4000-8000-0000000a9e71",
+              "responsibility": "canary-agent-responsibility-2e7b"
+            }
+          ]
+        },
+        "compiledHash": "0d6f2c3b9a8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e",
+        "legacyUpgraded": false,
+        "publishedBy": "c0b1b500-0000-4000-8000-0000000b1b51",
+        "publishedAt": "2026-10-01T12:00:00.000Z"
+      }
+    }
+  }
+}

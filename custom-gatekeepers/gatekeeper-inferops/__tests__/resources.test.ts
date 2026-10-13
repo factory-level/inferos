@@ -4,10 +4,11 @@ import wikiUi from "../src/configurator/wiki-ui";
 import projectUi from "../src/configurator/project-ui";
 import tableUi from "../src/configurator/table-ui";
 import membersUi from "../src/configurator/members-ui";
+import workflowUi from "../src/configurator/workflow-ui";
 import type { InferOpsProjectConfiguratorRpc } from "../src/configurator/project-configurator-types";
 import {
-  parseMembersUrl, parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl, parseWikiUrl,
-  projectBoardUrl,
+  parseMembersUrl, parseProjectBoardUrl, parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl,
+  parseWikiUrl, projectBoardUrl,
 } from "../src/resources";
 
 const URL = "inferops://acme.operations/project/board/ENG";
@@ -97,6 +98,33 @@ describe("coding-dispatch URLs", () => {
     // A board URL does not prefill the dispatch picker.
     expect(await dispatchUi.initialValuesFromResourceUrl({
       resourceUrl: URL, resourceUrlPattern: "inferops://*/project/dispatch/*", ui: uiWith(null),
+    })).toEqual({});
+  });
+});
+
+describe("workflow policy URLs", () => {
+  const WORKFLOW = "inferops://acme.operations/project/workflow/ENG";
+  const DEMO_WORKFLOW = "inferops://demo.local/project/workflow/DEMO";
+  const PATTERN = "inferops://*/project/workflow/*";
+
+  it("is a separate grammar from boards and dispatch: neither parser takes the other's URL", () => {
+    expect(() => parseProjectBoardUrl(WORKFLOW)).toThrow(EXPECTED);
+    expect(() => parseProjectWorkflowUrl(URL)).toThrow(/project\/workflow\/<KEY>/);
+    expect(() => parseProjectWorkflowUrl("inferops://acme.operations/project/dispatch/ENG")).toThrow(/project\/workflow\/<KEY>/);
+  });
+
+  // The workflow picker duplicates the grammar too; keep it in step.
+  it.each([WORKFLOW, DEMO_WORKFLOW])("round-trips %s through the workflow picker", async url => {
+    const values = await workflowUi.initialValuesFromResourceUrl({
+      resourceUrl: url, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    });
+    const { tenant, workspace, projectKey } = parseProjectWorkflowUrl(url);
+    expect(values).toEqual({ tenant, workspace, projectKey });
+    const built = await workflowUi.resourceUrl({ values: { ...workflowUi.initial, ...values }, ui: uiWith(null) });
+    expect(parseProjectWorkflowUrl(built)).toEqual(parseProjectWorkflowUrl(url));
+    // A board URL does not prefill the workflow picker.
+    expect(await workflowUi.initialValuesFromResourceUrl({
+      resourceUrl: URL, resourceUrlPattern: PATTERN, ui: uiWith(null),
     })).toEqual({});
   });
 });

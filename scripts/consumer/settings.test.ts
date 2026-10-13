@@ -101,6 +101,15 @@ test("contradictions are errors, and shell values a version 2 wrapper overrides 
     ["INFEROPS_MEMBERS_ENABLED:contradictory"]);
   assert.ok(codes(validateSettings(v1(), { INFEROPS_ENABLED: "false", INFEROPS_MEMBERS_ENABLED: "true" }))
     .includes("INFEROPS_MEMBERS_ENABLED:contradictory"));
+  assert.deepEqual(codes(validateSettings(v1(), { INFEROPS_WORKFLOW_POLICY_ENABLED: "maybe" })),
+    ["INFEROPS_WORKFLOW_POLICY_ENABLED:invalid"]);
+  assert.deepEqual(codes(validateSettings(v2(["INFEROPS_ENABLED"]), { INFEROPS_WORKFLOW_POLICY_ENABLED: "true" })),
+    ["INFEROPS_WORKFLOW_POLICY_ENABLED:contradictory"]);
+  assert.ok(codes(validateSettings(v1(), { INFEROPS_ENABLED: "false", INFEROPS_WORKFLOW_POLICY_ENABLED: "true" }))
+    .includes("INFEROPS_WORKFLOW_POLICY_ENABLED:contradictory"));
+  const workflowOn = validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED"]), {});
+  assert.equal(workflowOn.ok, true);
+  assert.equal(workflowOn.settings.find(setting => setting.name === "INFEROPS_WORKFLOW_POLICY_ENABLED")?.state, "set");
   const membersOn = validateSettings(v2(["INFEROPS_ENABLED", "INFEROPS_MEMBERS_ENABLED"]), {});
   assert.equal(membersOn.ok, true);
   assert.equal(membersOn.settings.find(setting => setting.name === "INFEROPS_MEMBERS_ENABLED")?.state, "set");

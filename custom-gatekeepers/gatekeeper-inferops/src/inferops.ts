@@ -52,6 +52,15 @@ import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/op
 //   like a table: `InferOpsMembersSession.listMembers` reads InferOps' `member.list` with the person's
 //   own sign-in in the bound workspace, so InferOps' `member:read`, explicit denies and RLS decide;
 //   the email is projected out (members.ts). InferOps workspaces only; never the stopgap connection.
+// - A workflow policy is a sixth kind, `inferops://<tenant>.<workspace>/project/workflow/<KEY>` (an
+//   InferOS-minted binding URL; it never reaches InferOps), bound into an
+//   `InferOpsWorkflowPolicyGatekeeper` facet whose props fix the account, host, project key and
+//   InferOps workspace id, and offered only while `INFEROPS_WORKFLOW_POLICY_ENABLED` is on
+//   (workflow-policy.ts). Read-only and private-only, like members: each
+//   `InferOpsWorkflowPolicySession.readWorkflowPolicy` is exactly two GETs with the person's own
+//   sign-in in the bound workspace (`project.list`, then `workflow.get` for the project the key names
+//   there), so InferOps' `project:read`, explicit denies and RLS decide. Rule reasons, agent notes
+//   and the publisher are projected out (workflow-policy.ts). Never the stopgap connection.
 // - Host boards (host-board.ts) are a kernel-only read of a board binding's fixed target:
 //   `readHostBoardSnapshot` and `connectionIdentity` on the board facet itself, never on a session
 //   or in the agent types, so only the overseer, which alone holds facet stubs, can call them. Off
@@ -129,13 +138,17 @@ import {
   assertMembersEnabled, membersEnabled, membersNotFound, projectMembers, whileMembersEnabled,
 } from "./members";
 import {
+  assertWorkflowPolicyEnabled, projectWorkflowHead, whileWorkflowPolicyEnabled, workflowPolicyEnabled,
+  workflowPolicyNotFound,
+} from "./workflow-policy";
+import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
 } from "./inferlab-login";
 import {
   DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE, PORTAL_MEMBERS_RESOURCE,
-  PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, membersUrl, parseHost, parseMembersUrl,
-  parseProjectBoardUrl, parseProjectDispatchUrl, parseTableUrl, parseWikiUrl, projectBoardUrl,
-  projectDispatchUrl, resourceKind, tableUrl, wikiUrl,
+  PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, PROJECT_WORKFLOW_RESOURCE, membersUrl, parseHost,
+  parseMembersUrl, parseProjectBoardUrl, parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl,
+  parseWikiUrl, projectBoardUrl, projectDispatchUrl, projectWorkflowUrl, resourceKind, tableUrl, wikiUrl,
 } from "./resources";
 import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
@@ -156,8 +169,9 @@ import {
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
   Board, BoardCandidate, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession,
-  InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession, Issue,
-  IssueChanges, ListRecordsOptions, NewIssue, Repo, WorkspaceMembers,
+  InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession,
+  InferOpsWorkflowPolicySession, Issue, IssueChanges, ListRecordsOptions, NewIssue, Repo,
+  WorkflowPolicyHead, WorkspaceMembers,
   Revision, Run, TableDescription, TableRecord, WikiDocument,
   WikiDocumentNode, WikiSection, WikiStructure,
 } from "./types";
@@ -168,6 +182,7 @@ import DISPATCH_CONFIGURATOR_HTML from "./generated/dispatch-ui.txt";
 import WIKI_CONFIGURATOR_HTML from "./generated/wiki-ui.txt";
 import TABLE_CONFIGURATOR_HTML from "./generated/table-ui.txt";
 import MEMBERS_CONFIGURATOR_HTML from "./generated/members-ui.txt";
+import WORKFLOW_CONFIGURATOR_HTML from "./generated/workflow-ui.txt";
 
 export { InferLabLogin, InferOpsCredentials, MockInferOps };
 
@@ -240,6 +255,12 @@ type TableGatekeeperProps = AccountRef & { host: string; tableId: string; worksp
  * a connected account, the InferOps workspace the host's slug resolved to.
  */
 type MembersGatekeeperProps = AccountRef & { host: string; workspaceId?: string };
+
+/**
+ * One workflow-policy binding, fixed when the Workshop mints it: the workspace's `host`, the project
+ * key and, for a connected account, the InferOps workspace the host's slug resolved to.
+ */
+type WorkflowPolicyGatekeeperProps = AccountRef & { host: string; projectKey: string; workspaceId?: string };
 
 type ExportsWithStores = {
   MockInferOps: DurableObjectNamespace<MockInferOps>;
@@ -433,6 +454,26 @@ function membersClientFor(
 }
 
 /**
+ * The data source for a workflow-policy binding, refused with `DISABLED` on every call while
+ * InferOps or workflow policies are off. The mock for the demo host, or a connected person's own
+ * authority in `workspaceId`; never the stopgap connection. Anything else reads as no policy.
+ */
+function workflowPolicyClientFor(
+  env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
+  workspaceId?: string,
+): InferOpsClient {
+  return whileWorkflowPolicyEnabled(env, () => {
+    if (host === DEMO_HOST) {
+      return openInferOpsClient(exports.MockInferOps, { accountId: account.accountId, host });
+    }
+    const endpoint = account.connected ? inferOpsApiEndpoint(env) : null;
+    if (!endpoint || !workspaceId) throw workflowPolicyNotFound();
+    // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
+    return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
+  });
+}
+
+/**
  * Who a host-board read may run as: only a connected person, against the configured API, in the
  * workspace the binding resolved. The demo host, the stopgap connection, an account without an
  * identity and a binding without a resolved workspace are `not-connected`; there is no fallback to
@@ -542,7 +583,13 @@ function supportedResources(env: Cloudflare.Env): SupportedResource[] {
     KNOWLEDGE_WIKI_RESOURCE,
     ...(tablesEnabled(env) ? [OBJECT_TABLE_RESOURCE] : []),
     ...(membersEnabled(env) ? [PORTAL_MEMBERS_RESOURCE] : []),
+    ...(workflowPolicyEnabled(env) ? [PROJECT_WORKFLOW_RESOURCE] : []),
   ];
+}
+
+/** The message every refused workflow-policy binding gets, whatever was missing or refused. */
+function unavailableWorkflowPolicy(host: string): string {
+  return `No InferOps workflow policy is available to you on ${host}.`;
 }
 
 /** The message every refused members binding gets, whatever was missing or refused. */
@@ -737,6 +784,8 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     if (kind === "wiki") return this.#wikiClassFor(url);
     if (kind === "table") return this.#tableClassFor(url);
     if (kind === "members") return this.#membersClassFor(url);
+    // Before the board fallthrough below, which would otherwise be the only thing refusing it.
+    if (kind === "workflow") return this.#workflowPolicyClassFor(url);
     const dispatch = kind === "dispatch";
     if (dispatch) assertCodingWorkbenchEnabled(this.env);
     const { host, projectKey } = dispatch ? parseProjectDispatchUrl(url) : parseProjectBoardUrl(url);
@@ -838,6 +887,41 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     };
   }
 
+  /**
+   * Bind one project's workflow policy: workflow policies must be on (checked first); the URL's
+   * workspace slug must be one of the person's InferOps workspaces; and one read must answer for
+   * that person there: the key in that workspace's project list, then that project's
+   * `workflow.get`, parsed strictly, under their own `project:read`. A workspace the person lacks
+   * (or an InferMind one), an account with no sign-in, the stopgap connection, and a project or
+   * policy that is missing or not readable are all refused with one message. The probe returns
+   * nothing to anyone and is not an observation.
+   */
+  async #workflowPolicyClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+    mock: boolean;
+  }> {
+    assertWorkflowPolicyEnabled(this.env);
+    const { host, projectKey } = parseProjectWorkflowUrl(url);
+    const { accountId, connected } = this.ctx.props;
+    const workspaceId = host === DEMO_HOST ? undefined : await this.#workspaceFor(host);
+    if (workspaceId === null) throw new Error(unavailableWorkflowPolicy(host));
+    try {
+      await workflowPolicyClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId)
+        .readWorkflowPolicy(projectKey);
+    } catch (error) {
+      if (inferOpsErrorCode(error) === "NOT_FOUND") {
+        throw new Error(unavailableWorkflowPolicy(host), { cause: error });
+      }
+      throw error;
+    }
+    const props: WorkflowPolicyGatekeeperProps = { accountId, connected, host, projectKey, workspaceId };
+    return {
+      class: this.ctx.exports.InferOpsWorkflowPolicyGatekeeper({ props }), resource: PROJECT_WORKFLOW_RESOURCE,
+      mock: host === DEMO_HOST,
+    };
+  }
+
   @skipRpcValidation()
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     const wiki = resourceUrlPattern === KNOWLEDGE_WIKI_RESOURCE.urlPattern;
@@ -849,7 +933,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
           ? TABLE_CONFIGURATOR_HTML
           : resourceUrlPattern === PORTAL_MEMBERS_RESOURCE.urlPattern && membersEnabled(this.env)
             ? MEMBERS_CONFIGURATOR_HTML
-            : wiki ? WIKI_CONFIGURATOR_HTML : null;
+            : resourceUrlPattern === PROJECT_WORKFLOW_RESOURCE.urlPattern && workflowPolicyEnabled(this.env)
+              ? WORKFLOW_CONFIGURATOR_HTML
+              : wiki ? WIKI_CONFIGURATOR_HTML : null;
     if (!iframeHtml) {
       throw new Error(`Unsupported InferOps resource configurator type: ${resourceUrlPattern}`);
     }
@@ -3135,6 +3221,101 @@ class MembersSessionImpl extends RpcTarget implements InferOpsMembersSession {
       // A count and the workspace, never a member's name, id or email.
       description: `Read ${result.members.length} members of the workspace ` +
         `${plainInline(result.workspace.workspaceName)} on ${host}.`,
+    });
+    return result;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow-policy gatekeeper (a facet of the Overseer, one per binding)
+
+/** Why every action call on a workflow-policy binding is refused: it never submits one. */
+const WORKFLOW_POLICY_READ_ONLY = "An InferOps workflow policy binding is read-only and has no actions.";
+
+@validateRpc()
+export class InferOpsWorkflowPolicyGatekeeper
+    extends DurableObject<Cloudflare.Env, WorkflowPolicyGatekeeperProps>
+    implements Gatekeeper<InferOpsWorkflowPolicySession> {
+  async describe(): Promise<ResourceDescription> {
+    const { host, projectKey } = this.ctx.props;
+    return {
+      url: projectWorkflowUrl({ host, projectKey }),
+      title: `InferOps workflow policy for ${projectKey} on ${host}`,
+      snippet: `The published content-workflow policy of ${projectKey} on ${host}: lanes, rules, ` +
+        "guards and transitions, without rule reasons.",
+      suggestedBindingName: "INFEROPS_WORKFLOW_POLICY",
+      tsType: "InferOpsWorkflowPolicySession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsWorkflowPolicySession> {
+    const { accountId, connected, host, projectKey, workspaceId } = this.ctx.props;
+    const client = workflowPolicyClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId);
+    return new WorkflowPolicySessionImpl({ client, host, projectKey }, approvalQueue.dup());
+  }
+
+  /**
+   * Private only, as a members binding is: no collaborator is admitted to a gadget that holds this
+   * binding, so sharing a workspace whose gadget uses it is refused.
+   */
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    throw new Error(
+      "An InferOps workflow policy binding is private to the person who connected it, so this " +
+      "gadget cannot be shared.");
+  }
+
+  /** Nothing is tracked: no observer is ever admitted. */
+  async removeObserver(_id: string): Promise<void> {}
+
+  async applyAction(_actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
+    throw new Error(WORKFLOW_POLICY_READ_ONLY);
+  }
+
+  async rejectAction(_actionId: number): Promise<void> {
+    throw new Error(WORKFLOW_POLICY_READ_ONLY);
+  }
+
+  async revertAction(_actionId: number): Promise<void> {
+    throw new Error(WORKFLOW_POLICY_READ_ONLY);
+  }
+}
+
+/** What a workflow-policy session reads with: its data source, the bound host and project key. */
+type WorkflowPolicyScope = { client: InferOpsClient; host: string; projectKey: string };
+
+@validateRpc()
+class WorkflowPolicySessionImpl extends RpcTarget implements InferOpsWorkflowPolicySession {
+  #scope: WorkflowPolicyScope;
+  #queue: RpcStub<ApprovalQueue>;
+
+  constructor(scope: WorkflowPolicyScope, queue: RpcStub<ApprovalQueue>) {
+    super();
+    this.#scope = scope;
+    this.#queue = queue;
+  }
+
+  [Symbol.dispose]() {
+    this.#queue[Symbol.dispose]();
+  }
+
+  async readWorkflowPolicy(): Promise<WorkflowPolicyHead> {
+    const { client, host, projectKey } = this.#scope;
+    // Fresh on every call: nothing is cached, so `revision` says which publication was read.
+    const result = projectWorkflowHead(await client.readWorkflowPolicy(projectKey));
+    await this.#queue.authorizeObservation({
+      title: "Read InferOps workflow policy",
+      // The project, host, revision and whether it is configured; never a subject, id, rule,
+      // reason or lane name.
+      description: `Read the ${result.configured ? "configured" : "unconfigured"} workflow policy of ` +
+        `${projectKey} on ${host} at revision ${result.revision}.`,
     });
     return result;
   }

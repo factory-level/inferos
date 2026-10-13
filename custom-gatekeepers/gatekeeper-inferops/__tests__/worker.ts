@@ -10,7 +10,8 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
-  InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, MockInferOps as BaseMockInferOps,
+  InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, InferOpsWorkflowPolicyGatekeeper,
+  MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
 import type { RejectionVerdict } from "@gadgets/gatekeeper-kit/credentials";
 import {
@@ -20,7 +21,7 @@ import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
 import type {
   InferOpsDispatchSession, InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession,
-  InferOpsWikiSession,
+  InferOpsWikiSession, InferOpsWorkflowPolicySession,
 } from "../src/types.js";
 
 export { default } from "../src/inferops.js";
@@ -30,6 +31,7 @@ export * from "../src/inferops.js";
 export {
   GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
+  InferOpsWorkflowPolicyGatekeeper,
 } from "../src/inferops.js";
 
 /** A fault the next issue write meets: refused before commit, or committed with its reply lost. */
@@ -50,6 +52,14 @@ export class MockInferOps extends BaseMockInferOps {
   /** Replaces this account's demo member list, to change it behind the gatekeeper's back. */
   async setMembers(members: WorkspaceMembersRead): Promise<void> {
     this.ctx.storage.kv.put("members:v1", members);
+  }
+
+  /**
+   * Replaces this account's demo `workflow.get` answers, by project key, to change one behind the
+   * gatekeeper's back (a key without one reads as unconfigured).
+   */
+  async setWorkflowAnswers(answers: Record<string, unknown>): Promise<void> {
+    this.ctx.storage.kv.put("workflow:v1", answers);
   }
 
   /** This account's demo tables as stored (seeded by the first table read). */
@@ -158,6 +168,11 @@ export type TableProps = {
 
 /** The props the Workshop bakes into one workspace-members binding. */
 export type MembersProps = { accountId: string; host: string; connected?: boolean; workspaceId?: string };
+
+/** The props the Workshop bakes into one workflow-policy binding. */
+export type WorkflowPolicyProps = {
+  accountId: string; host: string; projectKey: string; connected?: boolean; workspaceId?: string;
+};
 
 /** The props the Workshop bakes into one Wiki binding. */
 export type WikiProps = { accountId: string; host: string; connected?: boolean; workspaceId?: string };
@@ -291,6 +306,8 @@ type TestExports = {
   TestWikiGatekeeper(options: { props: WikiProps }): DurableObjectClass<TestWikiGatekeeper>;
   InferOpsTableGatekeeper(options: { props: TableProps }): DurableObjectClass<InferOpsTableGatekeeper>;
   InferOpsMembersGatekeeper(options: { props: MembersProps }): DurableObjectClass<InferOpsMembersGatekeeper>;
+  InferOpsWorkflowPolicyGatekeeper(options: { props: WorkflowPolicyProps }):
+    DurableObjectClass<InferOpsWorkflowPolicyGatekeeper>;
 };
 
 /** The project configurator's capability, as the picker iframe receives it. */
@@ -331,6 +348,20 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** The resource URL patterns the account offers now. */
   async supportedPatterns(props: AccountProps): Promise<string[]> {
     return (await this.#account(props).getSupportedResources()).map(r => r.urlPattern);
+  }
+
+  /** The resource kinds the account offers now, whole: pattern, title and Operate exclusion. */
+  async supportedResources(props: AccountProps) {
+    return (await this.#account(props).getSupportedResources()).map(r => ({ ...r }));
+  }
+
+  /** The resource pattern `getGatekeeperClassFor` binds `url` as, or its failure message. */
+  async boundResourcePattern(props: AccountProps, url: string): Promise<string> {
+    try {
+      return (await this.#account(props).getGatekeeperClassFor(url)).resource.urlPattern;
+    } catch (error) {
+      return `refused: ${messageOf(error)}`;
+    }
   }
 
   /** Whether the account starts a configurator for `pattern`; the failure message, or null. */
@@ -531,6 +562,77 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** The resource description of a members binding. */
   async describeMembers(props: MembersProps) {
     return this.#membersGatekeeper(props).describe();
+  }
+
+  /** A workflow-policy session over a binding `bindAccount` made under `name`. */
+  async startBoundWorkflowPolicySession(name: string): Promise<InferOpsWorkflowPolicySession> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsWorkflowPolicyGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsWorkflowPolicyGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Admission of a collaborator to a bound workflow-policy binding; the failure message, or null. */
+  async addWorkflowPolicyObserverFrom(name: string, observer: AccountProps): Promise<string | null> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsWorkflowPolicyGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    try {
+      await this.ctx.facets.get<InferOpsWorkflowPolicyGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+        .addObserver("observer-2", await this.#account(observer).getVerifier());
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  #workflowPolicyGatekeeper(props: WorkflowPolicyProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<InferOpsWorkflowPolicyGatekeeper>(
+      `${props.accountId}/workflow/${props.host}/${props.projectKey}`,
+      () => ({ class: exports.InferOpsWorkflowPolicyGatekeeper({ props }) }));
+  }
+
+  /** A workflow-policy session over a binding with these props. */
+  async startWorkflowPolicySession(props: WorkflowPolicyProps): Promise<InferOpsWorkflowPolicySession> {
+    return this.#workflowPolicyGatekeeper(props).startSession(
+      new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /** Admission of a collaborator who could read the policy; the failure message, or null. */
+  async addWorkflowPolicyObserver(props: WorkflowPolicyProps): Promise<string | null> {
+    try {
+      await this.#workflowPolicyGatekeeper(props).addObserver("observer-1",
+        new RpcStub(new TestVerifier(true)) as unknown as Fetcher<GatekeeperUserVerifier>);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Each action call on a workflow-policy binding; their failure messages, or null for one that ran. */
+  async workflowPolicyActions(props: WorkflowPolicyProps): Promise<Array<string | null>> {
+    const gatekeeper = this.#workflowPolicyGatekeeper(props);
+    const calls = [
+      () => gatekeeper.applyAction(1, new RpcStub(new TestGitCache())),
+      () => gatekeeper.rejectAction(1),
+      () => gatekeeper.revertAction(1),
+    ];
+    const results: Array<string | null> = [];
+    for (const call of calls) {
+      try {
+        await call();
+        results.push(null);
+      } catch (error) {
+        results.push(messageOf(error));
+      }
+    }
+    return results;
+  }
+
+  /** The resource description and auto-approvable actions of a workflow-policy binding. */
+  async describeWorkflowPolicy(props: WorkflowPolicyProps) {
+    const gatekeeper = this.#workflowPolicyGatekeeper(props);
+    return { ...(await gatekeeper.describe()), autoApprovable: await gatekeeper.getAutoApprovableActions() };
   }
 
   /** What `bindAccount` minted under `name`, by the resource description it gives. */
