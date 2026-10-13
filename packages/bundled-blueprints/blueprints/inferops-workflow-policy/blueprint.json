@@ -1,0 +1,31 @@
+{
+  "$comment": "The `policy` binding is an InferOpsWorkflowPolicySession from the inferops gatekeeper (custom-gatekeepers/gatekeeper-inferops). blueprintId is the install key: never rename it.",
+  "blueprintId": "inferops.workflow-policy",
+  "title": "InferOps Workflow policy",
+  "description": "Use to view one InferOps project's published content-workflow policy, read-only: its lanes, rules, fragments, lane bindings, guards and transitions with their subjects as written, without rule reasons, agent notes or the publisher. It does not work out who may do what. Needs one InferOps project workflow policy connected as the `policy` binding. The connection is private to the person who made it, so a gadget using it cannot be shared.",
+  "output": {
+    "id": "workflow-policy",
+    "noun": "Workflow policy",
+    "plural": "Workflow policies",
+    "icon": "table"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "revision": 1,
+  "created": "2026-10-13T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-10-13T00:00:00.000Z",
+  "bindings": {
+    "policy": {
+      "type": "gatekeeper",
+      "title": "InferOps workflow policy",
+      "description": "The InferOps project whose published content-workflow policy this gadget shows, e.g. inferops://demo.local/project/workflow/DEMO.",
+      "gatekeeperName": "inferops",
+      "typeUrlPattern": "inferops://*/project/workflow/*",
+      "resourceUrl": "inferops://demo.local/project/workflow/DEMO"
+    }
+  }
+}
