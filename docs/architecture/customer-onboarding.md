@@ -5,11 +5,13 @@ covers:
   - scripts/consumer/intake-inferops.ts
   - scripts/consumer/intake.schema.json
   - scripts/consumer/intake.test.ts
+  - scripts/consumer/intake-wrapper-fixture.ts
   - scripts/consumer/fixtures/intake
+  - packages/integration-tests/__tests__/intake-customer-board.test.ts
   - scripts/consumer/metric-declarations.ts
   - scripts/consumer/metric-declarations.test.ts
   - scripts/consumer/fixtures/metric-declarations
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 
 # Customer OS onboarding
@@ -27,6 +29,8 @@ Steps 6 and 7 of the [onboarding sequence](../design/customer-onboarding.md) hav
 | `scripts/consumer/intake-inferops.ts` | The InferOps side of `--inferops`: the binding from the environment (`inferOpsBindingFromEnv`), the binding proof (`proveInferOpsBinding`: a dry run in operations, a Wiki read in InferMind), the Wiki memberships an intake asks for (`pillarMembers`), the three reported steps (`applyIntakeToInferOps`) through an injectable `fetch`, and the check of InferOps' requirement report (`parseRequirementReport`) |
 | `scripts/consumer/fixtures/intake/acme-field-ops.json` | The synthetic Acme Field Operations sample: tenant `acme`, workspace `operations`, a software project `ENG` and a content project `OPS`, three pillars, four operations and eight requirements |
 | `scripts/consumer/intake.test.ts` | Parser and schema agreement, rejection without echo, the sample against a stand-in pin, rerun and conflict handling, rollback, issue drafting and filing, the wrapper commands, and `--inferops` against an in-memory InferOps: the happy path and rerun, refused bindings, a partial failure and its retry, failed and incomplete readbacks, a denied write, binding errors without echo, SOP membership, and InferOps' requirement report: reported (from a fixture of the provider's own output), unavailable, 17 invalid shapes without echo, partial and failed applies |
+| `scripts/consumer/intake-wrapper-fixture.ts` | Test fixture shared by the intake suite and the board-read integration test: a stand-in pin (`intakeSource`) and a wrapper bootstrapped by the real `bootstrapConsumer` with the sample at `intake/acme.json` (`wrapper`). Nothing runs at import |
+| `packages/integration-tests/__tests__/intake-customer-board.test.ts` | The intake-generated customer board read through the InferOps gatekeeper (MVP-03): the sample applied to a wrapper bootstrapped with the InferOps board puts `customer-operations` first with a board widget per project, leaves `inferops.targetRef` and the fixture on the demo board, and keeps a customer's screen order on rerun. The screen is saved with the canvas API; its stored ENG reference, bound by a connected member of `acme.operations` through the real gatekeeper Worker against the fake InferLab and InferOps, reads ENG as an observation; a person without the workspace is refused like a missing project with no board request; an intake that renames ENG binds only the renamed key. Synthetic provider and sign-in only |
 | `scripts/consumer/metric-declarations.ts` | The custom metric declaration contract (MVP-34, fixture proof only): `parseMetricDeclarations` against a parsed v1 intake, `buildDeclarationReport` (`NOT REGISTERED`), and the `metric-declarations.ts <declarations.json> --intake <intake.json> [--json]` entry point. It registers, proposes and writes nothing |
 | `scripts/consumer/fixtures/metric-declarations/acme-field-ops.json` | Synthetic Acme declarations: two derived metrics, one recorded metric, and two well-formed metrics outside the subset (a ratio and a distribution) |
 | `scripts/consumer/metric-declarations.test.ts` | A pinned deterministic digest, the per-metric dispositions, every unsupported construct, one refusal per invalid rule without echo, code and SQL refused at any depth, the module's imports, and the CLI exit codes under Node's permission model (read only) |
