@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -171,6 +171,140 @@ test("--file-issues files each draft once, through the injected seam only", () =
     assert.equal(calls.length, 5);
     assert.equal(again.requirements.find(requirement => requirement.id === "REQ-04")?.filed, "https://github.example/acme/wrapper/issues/1");
     assert.equal(applyIntake(target, intakePath, { upstream, exec: neverExec }).summary.filedIssues, 5);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a filing that fails part way records what was filed, and a rerun files only the rest, once", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-intake-partial-"));
+  try {
+    const { target, intakePath, upstream } = wrapper(root);
+    const recordPath = join(target, MANAGED_RECORD_FILE);
+    const requirementOf = (args: string[]) => args[args.indexOf("--title") + 1]!.match(/REQ-\d+/)![0];
+    // Calls 1-2 file; call 3 fails.
+    const first: string[] = [];
+    const failing: ExecSeam = (_command, args) => {
+      first.push(requirementOf(args));
+      if (first.length === 3) throw new Error("synthetic gh failure");
+      return `https://github.example/acme/wrapper/issues/${first.length}\n`;
+    };
+    assert.throws(() => applyIntake(target, intakePath, { upstream, fileIssues: "acme/wrapper", exec: failing }),
+      /gh issue create failed for requirement REQ-06; issues filed before it are recorded/);
+    assert.deepEqual(first, ["REQ-04", "REQ-05", "REQ-06"]);
+    assert.deepEqual(readJson(recordPath).filedIssues, {
+      "REQ-04": "https://github.example/acme/wrapper/issues/1",
+      "REQ-05": "https://github.example/acme/wrapper/issues/2",
+    });
+
+    // The rerun files exactly the three left, keeps the first two URLs, and files nothing twice.
+    const resumed: string[] = [];
+    const working: ExecSeam = (_command, args) => {
+      resumed.push(requirementOf(args));
+      return `https://github.example/acme/wrapper/issues/${10 + resumed.length}\n`;
+    };
+    const report = applyIntake(target, intakePath, { upstream, fileIssues: "acme/wrapper", exec: working });
+    assert.deepEqual(resumed, ["REQ-06", "REQ-07", "REQ-08"]);
+    assert.equal(report.summary.filedIssues, 5);
+    const filed = readJson(recordPath).filedIssues;
+    assert.deepEqual(filed, {
+      "REQ-04": "https://github.example/acme/wrapper/issues/1",
+      "REQ-05": "https://github.example/acme/wrapper/issues/2",
+      "REQ-06": "https://github.example/acme/wrapper/issues/11",
+      "REQ-07": "https://github.example/acme/wrapper/issues/12",
+      "REQ-08": "https://github.example/acme/wrapper/issues/13",
+    });
+    assert.equal(new Set([...first.slice(0, 2), ...resumed]).size, 5);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/**
+ * A synthetic `gh` for the real CLI path: it appends its argv as JSON to `calls.jsonl` beside it,
+ * accepts exactly `issue create --repo acme-synthetic/intake-fixture --title <t> --body <b>`, prints a
+ * github.example URL, and refuses anything else (exit 2). `GH_STUB_FAIL_AT=<n>` fails the n-th call.
+ */
+const GH_STUB = `#!${process.execPath}
+const { appendFileSync, readFileSync, existsSync } = require("node:fs");
+const { join } = require("node:path");
+const log = join(__dirname, "calls.jsonl");
+const args = process.argv.slice(2);
+appendFileSync(log, JSON.stringify(args) + "\\n");
+const n = readFileSync(log, "utf8").trim().split("\\n").length;
+const ok = args.length === 8 && args[0] === "issue" && args[1] === "create" && args[2] === "--repo"
+  && args[3] === "acme-synthetic/intake-fixture" && args[4] === "--title" && args[5] && args[6] === "--body" && args[7];
+if (!ok) { process.stderr.write("gh stub: refused\\n"); process.exit(2); }
+if (process.env.GH_STUB_FAIL_AT === String(n)) { process.stderr.write("gh stub: synthetic failure\\n"); process.exit(1); }
+process.stdout.write("https://github.example/acme-synthetic/intake-fixture/issues/" + n + "\\n");
+`;
+
+/** A closed environment: PATH is one owned directory holding only the stub `gh` and a link to `git`
+ * (the wrapper's checks run `git`; Node is spawned by absolute path), and HOME and the GitHub CLI's
+ * config directories are fresh temp directories. Nothing else is inherited, so no token reaches it. */
+function closedGhEnvironment(root: string, extra: Record<string, string> = {}) {
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "gh"), GH_STUB);
+  chmodSync(join(bin, "gh"), 0o755);
+  const git = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(git.startsWith("/"), "git must resolve to an absolute path to link");
+  symlinkSync(git, join(bin, "git"));
+  const home = join(root, "home");
+  for (const dir of [home, join(home, ".config"), join(home, "gh")]) mkdirSync(dir, { recursive: true });
+  const env = { PATH: bin, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), GH_CONFIG_DIR: join(home, "gh"), ...extra };
+  // Safety, before anything runs: the only `gh` this PATH resolves is the stub, and the PATH holds
+  // nothing but the stub and the git link.
+  assert.deepEqual(readdirSync(bin).toSorted(), ["gh", "git"]);
+  const resolved = spawnSync("/bin/sh", ["-c", "command -v gh"], { env, encoding: "utf8" });
+  assert.equal(resolved.status, 0);
+  assert.equal(resolved.stdout.trim(), join(bin, "gh"));
+  for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_HOST"]) assert.equal(name in env, false);
+  const calls = () => existsSync(join(bin, "calls.jsonl"))
+    ? readFileSync(join(bin, "calls.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[])
+    : [];
+  return { env, calls };
+}
+
+const runWrapperIn = (target: string, env: Record<string, string>, ...args: string[]) =>
+  spawnSync(process.execPath, [join(target, ".inferos/runtime.ts"), ...args], { cwd: target, encoding: "utf8", env });
+
+test("the wrapper CLI's intake apply --file-issues files through a closed-PATH synthetic gh, once per draft", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-intake-cli-gh-"));
+  try {
+    const { target } = wrapper(root);
+    const { env, calls } = closedGhEnvironment(root);
+    const recordPath = join(target, MANAGED_RECORD_FILE);
+    const repo = "acme-synthetic/intake-fixture";
+
+    const applied = runWrapperIn(target, env, "intake", "apply", "intake/acme.json", "--file-issues", repo);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(JSON.parse(applied.stdout).summary.filedIssues, 5);
+    assert.equal(calls().length, 5);
+    for (const call of calls()) assert.deepEqual(call.slice(0, 5), ["issue", "create", "--repo", repo, "--title"]);
+    assert.deepEqual(calls().map(call => call[5]!.match(/REQ-\d+/)![0]), ["REQ-04", "REQ-05", "REQ-06", "REQ-07", "REQ-08"]);
+    const filed = readJson(recordPath).filedIssues;
+    assert.deepEqual(Object.values(filed), [1, 2, 3, 4, 5].map(n => `https://github.example/${repo}/issues/${n}`));
+
+    // A rerun with the flag files nothing; without the flag the five are still reported.
+    const again = runWrapperIn(target, env, "intake", "apply", "intake/acme.json", "--file-issues", repo);
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(calls().length, 5);
+    const plain = runWrapperIn(target, env, "intake", "apply", "intake/acme.json");
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.equal(JSON.parse(plain.stdout).summary.filedIssues, 5);
+    assert.equal(calls().length, 5);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("through the wrapper CLI, a synthetic gh failing its second call exits non-zero with one issue recorded", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferos-intake-cli-gh-fail-"));
+  try {
+    const { target } = wrapper(root);
+    const { env, calls } = closedGhEnvironment(root, { GH_STUB_FAIL_AT: "2" });
+    const applied = runWrapperIn(target, env, "intake", "apply", "intake/acme.json", "--file-issues", "acme-synthetic/intake-fixture");
+    assert.notEqual(applied.status, 0);
+    assert.match(applied.stderr, /gh issue create failed for requirement REQ-05/);
+    assert.equal(calls().length, 2);
+    assert.deepEqual(readJson(join(target, MANAGED_RECORD_FILE)).filedIssues, {
+      "REQ-04": "https://github.example/acme-synthetic/intake-fixture/issues/1",
+    });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
