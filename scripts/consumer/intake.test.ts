@@ -1,57 +1,23 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
-import { bootstrapConsumer } from "./bootstrap.ts";
 import { CAPABILITY_NAMES } from "./config.ts";
 import { inferOpsBindingFromEnv, inferOpsComplete, pillarMembers, type FetchSeam } from "./intake-inferops.ts";
 import {
   applyIntake, applyIntakeWithInferOps, CUSTOMER_VIEW_FILE, INTAKE_MAX_BYTES, MANAGED_RECORD_FILE, parseIntake, readIntakeFile, REPORT_FILES,
   type ExecSeam,
 } from "./intake.ts";
-import { capabilitySources } from "./runtime.ts";
 import { readConsumerViews } from "./views.ts";
+import { SAMPLE_INTAKE, wrapper } from "./intake-wrapper-fixture.ts";
 
-const SAMPLE = join(import.meta.dirname, "fixtures/intake/acme-field-ops.json");
+const SAMPLE = SAMPLE_INTAKE;
 const sample = () => JSON.parse(readFileSync(SAMPLE, "utf8"));
 const schema = z.fromJSONSchema(JSON.parse(readFileSync(join(import.meta.dirname, "intake.schema.json"), "utf8")));
-const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
-
-/** A pin with what intake needs: v2 parsing, the canvas CLI, the InferOps gatekeeper, view sources and the intake script itself. */
-function intakeSource(root: string) {
-  const source = join(root, "source");
-  const repo = join(import.meta.dirname, "../..");
-  const write = (path: string, text: string | Buffer) => {
-    mkdirSync(join(source, path, ".."), { recursive: true });
-    writeFileSync(join(source, path), text);
-  };
-  execFileSync("git", ["init", "--quiet", source]);
-  write("package.json", JSON.stringify({ type: "module", packageManager: "pnpm@11.17.0" }));
-  write("packages/bundled-blueprints/blueprints/example/files/client.js", "// upstream blueprint\n");
-  for (const path of ["scripts/consumer/config.ts", "scripts/consumer/runtime.ts", "scripts/consumer/canvas.ts", "scripts/consumer/intake.ts", "scripts/consumer/intake-inferops.ts",
-    "scripts/worker-dirs.ts", "scripts/connection-status.ts", "packages/workshop-shared/src/canvas.ts"]) write(path, readFileSync(join(repo, path)));
-  write("custom-gatekeepers/gatekeeper-inferops/wrangler.jsonc", "{}\n");
-  write("packages/workshop-backend/src/canvas-store.ts", "export {};\n");
-  for (const path of [capabilitySources.INFEROPS_ENABLED!, capabilitySources.INFEROPS_AUTH!]) write(path, "export {};\n");
-  git(source, "add", ".");
-  git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture");
-  return { source, revision: git(source, "rev-parse", "HEAD") };
-}
-
-/** A fresh version 1 wrapper (bootstrapped without capabilities), as most existing customers have. */
-function wrapper(root: string, options: Parameters<typeof bootstrapConsumer>[3] = {}) {
-  const { source, revision } = intakeSource(root);
-  const target = join(root, "acme");
-  bootstrapConsumer(target, source, revision, options);
-  mkdirSync(join(target, "intake"));
-  const intakePath = join(target, "intake/acme.json");
-  writeFileSync(intakePath, readFileSync(SAMPLE));
-  return { target, intakePath, upstream: join(target, "inferos") };
-}
 
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 const runWrapper = (target: string, ...args: string[]) =>
