@@ -1,7 +1,7 @@
 ---
 title: InferOps gatekeeper
 status: draft
-updated: 2026-10-07
+updated: 2026-10-13
 ---
 
 # InferOps gatekeeper
@@ -56,9 +56,13 @@ InferOps also accepts a service-account key (`iex_…`, as the bearer or as `X-A
 
 `inferops://<tenant>.<workspace>/knowledge/wiki`
 
+`inferops://<tenant>.<workspace>/project/workflow/<KEY>`
+
 Two project-scoped kinds share the authority and key rules below. `board` grants the board session; `dispatch` grants the coding-dispatch session of the same project ([#70](https://github.com/factory-level/inferos/issues/70)). They are separate grants: neither carries the other, so an agent granted only a board cannot dispatch. `dispatch` is offered and bound only while the deployment has `CODING_WORKBENCH_ENABLED` on.
 
 The third kind, `knowledge/wiki`, grants one person's read of the workspace's InferMind Wiki and proposed section edits ([InferMind Wiki](#infermind-wiki)). It has no key: the binding is the whole Wiki of one workspace, and the authority rules below apply to it unchanged, except that `<workspace>` resolves only among the person's InferMind workspaces (an InferLab workspace belongs to one product, InferOps or InferMind, and only InferMind workspaces have a Wiki). A page of it is referenced as `inferops://<tenant>.<workspace>/knowledge/document/<slug>`. A page reference identifies a page and is never bound or granted: the page is readable only through a Wiki binding of the same workspace, with the person's own InferOps `knowledge:*` permissions. This grammar was proposed to InferOps on [factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326) (owner decision, 2026-10-02).
+
+The fourth line, `project/workflow`, is an **InferOS-minted** binding URL, as `object/table` and `portal/members` are: it grants one person's private, read-only view of one project's published content-workflow policy (MVP-18), offered only while the deployment has `INFEROPS_WORKFLOW_POLICY_ENABLED` on. InferOps defines no `project/workflow` widget (its `project/workflow-chart/<KEY>` is an issue-count chart, a different thing), and the URL never reaches InferOps: it fixes the binding's host and key, the authority and key rules below apply unchanged, and the reads are InferOps' `project.list` and `workflow.get` under the person's own `project:read`. See the [as-built record](../architecture/inferops-gatekeeper.md#workflow-policy).
 
 This is InferOps' own deep-link grammar (`_libs/widgets/shared/inferops-uri.ts` on InferOps `develop`), so a board URL from an InferOps document and one bound in InferOS are the same string. For example, against the local InferOps seeds (tenant `acme`, workspaces `operations` and `knowledge`), `inferops://acme.operations/project/board/ENG` names the ENG board of the Operations workspace ([ADR 0005](../adr/0005-inferops-uri-authority.md)).
 

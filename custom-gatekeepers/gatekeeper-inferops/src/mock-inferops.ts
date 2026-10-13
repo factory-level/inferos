@@ -36,6 +36,11 @@
 // ones included, and the rows newest first, each at the table's version. Projection is the
 // gatekeeper's job (table.ts), exactly as for the HTTP client. There are no table writes.
 //
+// Workflow policies: `src/fixtures/demo-workflow.json` holds `workflow.get` answers by project key
+// (DEMO's carries a canary in every field the gatekeeper leaves out); any other project reads as
+// unconfigured, as InferOps answers. The client parses and the gatekeeper projects them exactly as
+// InferOps' own answers (workflow-policy.ts). There are no policy writes.
+//
 // Large boards (#28, development only): `MOCK_INFEROPS_SYNTHETIC_ISSUES=<n>` (the dev server passes
 // it through from the shell or `.dev.vars`) adds a synthetic project `PERF` with n issues over six
 // states when an account's data is first seeded, for measuring the Kanban against a board of a
@@ -49,6 +54,7 @@ import SEED from "./fixtures/demo-board.json";
 import WIKI_SEED from "./fixtures/demo-wiki.json";
 import TABLE_SEED from "./fixtures/demo-table.json";
 import MEMBERS_SEED from "./fixtures/demo-members.json";
+import WORKFLOW_SEED from "./fixtures/demo-workflow.json";
 import {
   InferOpsError, atStage, inferOpsErrorCode, type DispatchRequest, type InferOpsClient,
   type IssueChanges, type NewIssueRequest,
@@ -60,6 +66,7 @@ import {
 } from "./inferops-client";
 import type { Issue, Revision, RunResult, RunStatus } from "./types";
 import { composeDocumentText, masterStructureText } from "./wiki";
+import { readWorkflowPolicyAnswer, workflowPolicyNotFound } from "./workflow-policy";
 
 /** The only InferOps host the mock serves; resource URLs naming another host are refused. */
 export const MOCK_HOST = "demo.local";
@@ -72,6 +79,7 @@ const WIKI_KEY = "wiki:v2";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
 const TABLES_KEY = "tables:v1";
 const MEMBERS_KEY = "members:v1";
+const WORKFLOW_KEY = "workflow:v1";
 const REVOKED_KEY = "revoked";
 
 /** A demo page: its listed fields, its body, version and Master role, and its last write's receipt. */
@@ -649,6 +657,29 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return members;
   }
 
+  /**
+   * The demo `workflow.get` answer (`{ head }`) for `projectKey`, as InferOps would send it, and the
+   * id of the project the key names: a key without a stored answer reads as unconfigured, as
+   * InferOps answers. `workflow:v1` (answers by project key, seeded on first use) is what tests
+   * rewrite; the client parses the answer exactly as it parses InferOps' own.
+   */
+  async readWorkflowPolicy(projectKey: string): Promise<{ projectId: string; body: unknown }> {
+    const project = this.#data().projects.find(p => p.project.identifier === projectKey)?.project;
+    if (!project) throw workflowPolicyNotFound();
+    let answers = this.ctx.storage.kv.get<Record<string, unknown>>(WORKFLOW_KEY);
+    if (!answers) {
+      answers = structuredClone(WORKFLOW_SEED.projects) as Record<string, unknown>;
+      this.ctx.storage.kv.put(WORKFLOW_KEY, answers);
+    }
+    const body = Object.hasOwn(answers, projectKey) ? answers[projectKey] : {
+      head: {
+        projectId: project.id, workflow: "content", configured: false, revision: "0", policy: null,
+        compiledHash: null, legacyUpgraded: false,
+      },
+    };
+    return { projectId: project.id, body };
+  }
+
   /** Deletes the account's data and refuses every later call (see the header). */
   async forget(): Promise<void> {
     await this.ctx.storage.deleteAll();
@@ -711,6 +742,10 @@ export function openInferOpsClient(
     readTableRow: (host, recordId) => host === account.host
       ? stub.readTableRow(recordId) : Promise.reject(tableNotFound()),
     listWorkspaceMembers: () => stub.listWorkspaceMembers(),
+    readWorkflowPolicy: async projectKey => {
+      const { projectId, body } = await stub.readWorkflowPolicy(projectKey);
+      return readWorkflowPolicyAnswer(body, projectId);
+    },
     forget: () => stub.forget(),
   };
 }

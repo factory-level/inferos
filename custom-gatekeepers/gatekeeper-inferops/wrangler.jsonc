@@ -66,6 +66,12 @@
       "new_sqlite_classes": [
         "InferOpsMembersGatekeeper"
       ]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": [
+        "InferOpsWorkflowPolicyGatekeeper"
+      ]
     }
   ]
 }

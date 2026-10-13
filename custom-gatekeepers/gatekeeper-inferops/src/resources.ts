@@ -6,7 +6,11 @@
 // InferMind Wiki and proposed section edits; `…/knowledge/document/<slug>` names one page of it and
 // is a reference only, never bound. `inferops://<tenant>.<workspace>/portal/members` grants one
 // person's private read of the workspace's member list (never shared with observers, never offered
-// to Operate chat). A URL names a target; it never grants
+// to Operate chat). `inferops://<tenant>.<workspace>/project/workflow/<KEY>` grants one person's
+// private read of one project's published content-workflow policy, on the same terms. It is an
+// InferOS-minted binding URL, as `object/table` and `portal/members` are: InferOps defines no
+// `project/workflow` widget (its `project/workflow-chart` is an issue-count chart, another thing),
+// and the URL never reaches InferOps. A URL names a target; it never grants
 // anything by itself, and it never names a deployment: the API base URL and the credentials come
 // from the account and the deployment's configuration. The gatekeeper resolves the workspace slug
 // against the person's own workspaces, binds the result into its props when the Workshop mints the
@@ -76,8 +80,22 @@ export const PORTAL_MEMBERS_RESOURCE: SupportedResource = {
   excludeFromOperateChat: true,
 };
 
+/**
+ * One project's published content-workflow policy, read-only: its lanes, rules, guards and
+ * transitions, without rule reasons, agent notes or its publisher. Offered only while the deployment
+ * has `INFEROPS_WORKFLOW_POLICY_ENABLED` on. Never shared: a gadget that read it admits no collaborator.
+ */
+export const PROJECT_WORKFLOW_RESOURCE: SupportedResource = {
+  urlPattern: "inferops://*/project/workflow/*",
+  title: "InferOps workflow policy",
+  description:
+    "Read one InferOps project's published content-workflow policy: its lanes, rules, guards and " +
+    "transitions, without rule reasons.",
+  excludeFromOperateChat: true,
+};
+
 /** The project-scoped resource kinds, by the path segment that names them. */
-export type ProjectResourceKind = "board" | "dispatch";
+export type ProjectResourceKind = "board" | "dispatch" | "workflow";
 
 /**
  * A parsed project-board resource URL. `host` is `<tenant>.<workspace>`, the URL's authority, kept
@@ -107,6 +125,7 @@ export function parseHost(host: string): { tenant: string; workspace: string } |
 const KIND_NOUN: Record<ProjectResourceKind, string> = {
   board: "project board",
   dispatch: "coding dispatch",
+  workflow: "workflow policy",
 };
 
 /**
@@ -139,10 +158,15 @@ export function parseProjectDispatchUrl(url: string): ProjectBoardRef {
   return parseProjectUrl(url, "dispatch");
 }
 
-/** The kind a project resource URL names, or null when it names neither (the parsers explain why). */
+/** Parse a workflow-policy URL, or throw a message naming the expected form. */
+export function parseProjectWorkflowUrl(url: string): ProjectBoardRef {
+  return parseProjectUrl(url, "workflow");
+}
+
+/** The kind a project resource URL names, or null when it names none (the parsers explain why). */
 export function projectResourceKind(url: string): ProjectResourceKind | null {
   const kind = /^inferops:\/\/[^/?#]+\/project\/([a-z]+)\//.exec(url.trim())?.[1];
-  return kind === "board" || kind === "dispatch" ? kind : null;
+  return kind === "board" || kind === "dispatch" || kind === "workflow" ? kind : null;
 }
 
 /** Every resource kind, by what its URL's path names. */
@@ -280,4 +304,9 @@ export function projectBoardUrl({ host, projectKey }: Pick<ProjectBoardRef, "hos
 /** The canonical URL of a project's coding dispatch. Inverse of `parseProjectDispatchUrl`. */
 export function projectDispatchUrl({ host, projectKey }: Pick<ProjectBoardRef, "host" | "projectKey">): string {
   return `inferops://${host}/project/dispatch/${projectKey}`;
+}
+
+/** The canonical URL of a project's workflow policy. Inverse of `parseProjectWorkflowUrl`. */
+export function projectWorkflowUrl({ host, projectKey }: Pick<ProjectBoardRef, "host" | "projectKey">): string {
+  return `inferops://${host}/project/workflow/${projectKey}`;
 }

@@ -57,6 +57,7 @@ import {
   type WikiSectionRecord, type WikiStructureRecord,
 } from "./inferops-client";
 import { membersNotFound } from "./members";
+import { readWorkflowPolicyAnswer, workflowPolicyNotFound, type WorkflowHeadRecord } from "./workflow-policy";
 import { isSlug } from "./resources";
 import type {
   Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
@@ -704,6 +705,12 @@ function parseWorkspaceMembers(value: unknown): WorkspaceMembersRead {
     },
     members: list(body.members, "members").map(parseWorkspaceMember),
   };
+}
+
+/** A refusal of either workflow-policy read (403, 404) as the one NOT_FOUND; anything else as it is. */
+function workflowPolicyRefusal(error: unknown): unknown {
+  const code = inferOpsCode(error);
+  return code === "NOT_FOUND" || code === "FORBIDDEN" ? workflowPolicyNotFound() : error;
 }
 
 /** One workspace of the caller's tenant, as `GET /workspaces` lists it: its id and its slug. */
@@ -1498,6 +1505,35 @@ export function openHttpInferOpsClient(
           throw new Malformed("not the workspace asked for");
         }
         return read;
+      });
+    },
+
+    async readWorkflowPolicy(projectKey: string): Promise<WorkflowHeadRecord> {
+      // Exactly two GETs: the key is resolved in the bound workspace's own project list first,
+      // because `workflow.get` answers a project id of another workspace as unconfigured rather
+      // than refusing it. A refusal of either read (403, 404) and a key not in the list are one
+      // NOT_FOUND, so the binding cannot be used to tell them apart; a 401 is the account's to
+      // adjudicate (UNAUTHORIZED). The answer is parsed strictly against that project; a malformed,
+      // ambiguous or foreign one is UNAVAILABLE, and only the operation is logged, never a value.
+      let found: Project | undefined;
+      try {
+        found = (await projects()).find(p => p.identifier === projectKey);
+      } catch (error) {
+        throw workflowPolicyRefusal(error);
+      }
+      if (!found) throw workflowPolicyNotFound();
+      let body: unknown;
+      try {
+        body = await request("workflow.get", {
+          method: "GET", path: `/project/projects/${found.id}/workflow?workflow=content`,
+        });
+      } catch (error) {
+        throw workflowPolicyRefusal(error);
+      }
+      return readWorkflowPolicyAnswer(body, found.id, () => {
+        logger.error("InferOps response did not match the contract", {
+          event: "http.response.malformed", operation: "workflow.get",
+        });
       });
     },
 

@@ -514,6 +514,12 @@
             "InferOpsMembersGatekeeper"
           ],
           "tag": "v5"
+        },
+        {
+          "new_sqlite_classes": [
+            "InferOpsWorkflowPolicyGatekeeper"
+          ],
+          "tag": "v6"
         }
       ],
       "modules": [

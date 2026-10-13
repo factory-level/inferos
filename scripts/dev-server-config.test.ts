@@ -15,6 +15,7 @@ import {
   resolveCodingWorkbenchEnabled,
   resolveInferOpsEnabled,
   resolveInferOpsMembersEnabled,
+  resolveInferOpsWorkflowPolicyEnabled,
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
   resolveInferOpsBoundViews,
@@ -208,6 +209,18 @@ describe("resolveInferOpsTablesEnabled", () => {
       /INFEROPS_MEMBERS_ENABLED must be "true" or "false"/);
     assert.throws(() => resolveInferOpsMembersEnabled({ capability: true, inferOpsEnabled: "false", shell: undefined }),
       /INFEROPS_MEMBERS_ENABLED is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
+  });
+
+  it("resolves the workflow-policy switch like custom tables: off by default, never without InferOps", () => {
+    assert.equal(resolveInferOpsWorkflowPolicyEnabled({ capability: null, inferOpsEnabled: "true", shell: undefined }), "false");
+    assert.equal(resolveInferOpsWorkflowPolicyEnabled({ capability: null, inferOpsEnabled: "true", shell: "false" }), "false");
+    assert.equal(resolveInferOpsWorkflowPolicyEnabled({ capability: null, inferOpsEnabled: "true", shell: "true" }), "true");
+    assert.equal(resolveInferOpsWorkflowPolicyEnabled({ capability: true, inferOpsEnabled: "true", shell: "false" }), "true");
+    assert.equal(resolveInferOpsWorkflowPolicyEnabled({ capability: false, inferOpsEnabled: "true", shell: "true" }), "false");
+    assert.throws(() => resolveInferOpsWorkflowPolicyEnabled({ capability: null, inferOpsEnabled: "true", shell: "yes" }),
+      /INFEROPS_WORKFLOW_POLICY_ENABLED must be "true" or "false"/);
+    assert.throws(() => resolveInferOpsWorkflowPolicyEnabled({ capability: true, inferOpsEnabled: "false", shell: undefined }),
+      /INFEROPS_WORKFLOW_POLICY_ENABLED is on, but the InferOps integration \(INFEROPS_ENABLED\) is off/);
   });
 });
 

@@ -12,6 +12,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleInferLabLogin } from "../src/inferlab-login.js";
+import DEMO_WORKFLOW from "../src/fixtures/demo-workflow.json";
 import type { HostBoardFence, HostBoardRead } from "@gadgets/gatekeeper-kit/host-board";
 import {
   REPORT_SENTINEL, expired, reconnects, signIns, type AccountProps, type InferLabLogin, type SignInExports,
@@ -70,14 +71,16 @@ function jwt(expiresAt: number): string {
 }
 
 /** The routes whose answers a test can hold in flight. */
-type HeldRoute = "embed" | "snapshot" | "members";
+type HeldRoute = "embed" | "snapshot" | "members" | "workflow";
 
 /**
  * One InferOps request. `issuer` is the test whose fake minted the request's access token (null for
  * none or one no fake minted), so a request a previous test left in flight is told apart from one
  * this test's own read sent.
  */
-type ApiCall = { path: string; token: string | null; workspaceId: string | null; issuer: string | null };
+type ApiCall = {
+  path: string; token: string | null; workspaceId: string | null; issuer: string | null; method?: string;
+};
 
 /** Every fake's token tag, by the test that made it. */
 const issuers = new Map<string, string>();
@@ -112,6 +115,12 @@ class FakeInferLab {
   knowledgeDenied = false;
   /** Whether the person lacks `member:read` (or holds an explicit deny on it). */
   memberReadDenied = false;
+  /** Whether `workflow.get` refuses the person (no `project:read`, or an explicit deny on it). */
+  workflowReadDenied = false;
+  /** Whether the person's workspace lists no projects at all. */
+  noProjects = false;
+  /** DEMO's `workflow.get` answer: the gatekeeper's canary fixture, which is about this project id. */
+  workflowAnswer: unknown = structuredClone(DEMO_WORKFLOW.projects.DEMO);
   /** The handbook page's body and version, and the page body writes InferOps took. */
   page = { body: "The handbook.", version: 3 };
   pageWrites: Array<{ body: string; idempotencyKey: string | null }> = [];
@@ -137,7 +146,7 @@ class FakeInferLab {
   /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
   snapshotAnswer: (() => Response) | null = null;
   /** Requests that have reached a gate, by route. */
-  held: Record<HeldRoute, number> = { embed: 0, snapshot: 0, members: 0 };
+  held: Record<HeldRoute, number> = { embed: 0, snapshot: 0, members: 0, workflow: 0 };
   /** The open gate per route: a request reaching it waits there, after reading its answer. */
   #gates: Partial<Record<HeldRoute, { arrive: (path: string) => void; released: Promise<void> }>> = {};
   /** Releases every gate this fake has opened, whether or not anything reached it. */
@@ -274,7 +283,9 @@ class FakeInferLab {
         id, tenant_id: "t1", product: "inferops", name: slug, slug,
       })));
     }
-    this.apiCalls.push({ path: url.pathname + url.search, token, workspaceId, issuer: issuerOf(token) });
+    this.apiCalls.push({
+      path: url.pathname + url.search, token, workspaceId, issuer: issuerOf(token), method: init.method ?? "GET",
+    });
     if (!token || !this.access.has(token)) {
       return Response.json({ error: { code: "UNAUTHORIZED", message: "bad token" } }, { status: 401 });
     }
@@ -354,7 +365,16 @@ class FakeInferLab {
       return answer;
     }
     if (url.pathname === "/object/types") return Response.json({ types: [TABLE_TYPE] });
-    if (url.pathname === "/project/projects") return Response.json({ projects: [DEMO] });
+    if (url.pathname === `/project/projects/${DEMO.id}/workflow`) {
+      // InferOps' workflow.get: the X-Workspace-Id workspace's project, under project:read.
+      if (this.workflowReadDenied) {
+        return Response.json({ error: { code: "FORBIDDEN", message: "Missing permission: project:read" } }, { status: 403 });
+      }
+      const answer = Response.json(this.workflowAnswer);
+      await this.#pass("workflow", url.pathname + url.search);
+      return answer;
+    }
+    if (url.pathname === "/project/projects") return Response.json({ projects: this.noProjects ? [] : [DEMO] });
     if (url.pathname === "/project/board") {
       return Response.json({
         projectId: DEMO.id, projects: [DEMO],
@@ -1179,6 +1199,177 @@ describe("workspace members as the person", () => {
     expect(await hooks().bindAccount("m-shared", owner, MEMBERS_URL)).toBeNull();
     const member = await connect("members-member");
     expect(await hooks().addMembersObserverFrom("m-shared", member)).toContain("cannot be shared");
+  });
+});
+
+describe("workflow policies as the person", () => {
+  const vars = env as unknown as { INFEROPS_WORKFLOW_POLICY_ENABLED?: string };
+  beforeEach(() => { vars.INFEROPS_WORKFLOW_POLICY_ENABLED = "true"; });
+  afterEach(() => { delete vars.INFEROPS_WORKFLOW_POLICY_ENABLED; });
+  const WORKFLOW_URL = "inferops://acme.operations/project/workflow/DEMO";
+  const unavailable = (host: string) => `No InferOps workflow policy is available to you on ${host}.`;
+  const workflowCalls = () => inferlab.apiCalls.filter(c => c.path.startsWith("/project/projects"));
+  const CANARIES = ["canary", "c0a9e700-0000-4000-8000-0000000a9e71", "c0b1b500-0000-4000-8000-0000000b1b51"];
+
+  it("reads with the person's own token in the bound workspace: two GETs per read, no reasons, agents or publisher", async () => {
+    const account = await connect("workflow");
+    expect(await hooks().bindAccount("workflow", account, WORKFLOW_URL)).toBeNull();
+    const result = await hooks().startBoundWorkflowPolicySession("workflow").readWorkflowPolicy();
+    expect(result).toMatchObject({ projectId: DEMO.id, workflow: "content", configured: true, revision: "3" });
+    expect(result.policy!.rules!.map(rule => rule.id)).toEqual(["owners-all", "no-agent-publish"]);
+    for (const canary of CANARIES) expect(JSON.stringify(result)).not.toContain(canary);
+    // The probe's two GETs and the read's two: nothing else, and nothing outside the workspace.
+    expect(workflowCalls().map(c => c.path)).toEqual([
+      "/project/projects", `/project/projects/${DEMO.id}/workflow?workflow=content`,
+      "/project/projects", `/project/projects/${DEMO.id}/workflow?workflow=content`,
+    ]);
+    for (const call of workflowCalls()) {
+      expect(call.workspaceId).toBe(OPS);
+      expect(call.token).toBe(inferlab.accessOf("refresh-1"));
+    }
+    const text = (await hooks().log()).observationTexts.at(-1)!;
+    expect(text).toBe("Read the configured workflow policy of DEMO on acme.operations at revision 3.");
+  });
+
+  it("refuses every unavailable policy with one message per host, whatever the cause", async () => {
+    // An explicit project:read deny (or no grant): InferOps' 403 on workflow.get.
+    const denied = await connect("workflow-denied");
+    inferlab.workflowReadDenied = true;
+    const noPermission = await hooks().bindAccount("w-denied", denied, WORKFLOW_URL);
+    inferlab.workflowReadDenied = false;
+    // Membership lost in InferOps since the sign-in: InferOps' 403 for the workspace.
+    const gone = await connect("workflow-gone");
+    inferlab.memberships.delete(OPS);
+    const notMember = await hooks().bindAccount("w-gone", gone, WORKFLOW_URL);
+    inferlab.memberships.add(OPS);
+    // A key that is not in the bound workspace's list (it exists only in another workspace).
+    const elsewhere = await connect("workflow-elsewhere");
+    const otherKey = await hooks().bindAccount("w-elsewhere", elsewhere, "inferops://acme.operations/project/workflow/SALES");
+    // A workspace with no projects at all.
+    const empty = await connect("workflow-empty");
+    inferlab.noProjects = true;
+    const noProjects = await hooks().bindAccount("w-empty", empty, WORKFLOW_URL);
+    inferlab.noProjects = false;
+    for (const outcome of [noPermission, notMember, otherKey, noProjects]) {
+      expect(outcome).toBe(unavailable("acme.operations"));
+    }
+
+    // A workspace the person does not hold, and an InferMind one: refused before any request.
+    const outside = await connect("workflow-outside");
+    const before = workflowCalls().length;
+    expect(await hooks().bindAccount("w-outside", outside, "inferops://acme.sales/project/workflow/DEMO"))
+      .toBe(unavailable("acme.sales"));
+    inferlab.workspaces.push({ workspaceId: MIND, workspaceName: "Mind", product: "infermind" });
+    inferlab.memberships.add(MIND);
+    const mind = await connect("workflow-mind");
+    expect(await hooks().bindAccount("w-mind", mind, "inferops://acme.mind/project/workflow/DEMO"))
+      .toBe(unavailable("acme.mind"));
+    expect(workflowCalls().length).toBe(before);
+  });
+
+  it("turns a deny that arrives after the bind into the one NOT_FOUND on the next read", async () => {
+    const account = await connect("workflow-later");
+    expect(await hooks().bindAccount("w-later", account, WORKFLOW_URL)).toBeNull();
+    inferlab.workflowReadDenied = true;
+    expect(await failure(hooks().startBoundWorkflowPolicySession("w-later").readWorkflowPolicy()))
+      .toBe("InferOpsError: NOT_FOUND: No such workflow policy is available to you.");
+  });
+
+  it("treats the tenant label as inert: a second tenant's label only ever reads the person's own workspace", async () => {
+    const account = await connect("workflow-label");
+    expect(await hooks().bindAccount("w-label", account, "inferops://globex.operations/project/workflow/DEMO")).toBeNull();
+    await hooks().startBoundWorkflowPolicySession("w-label").readWorkflowPolicy();
+    expect(workflowCalls().every(c => c.workspaceId === OPS)).toBe(true);
+  });
+
+  it("fails a malformed answer closed with no data and no value", async () => {
+    const account = await connect("workflow-malformed");
+    expect(await hooks().bindAccount("w-malformed", account, WORKFLOW_URL)).toBeNull();
+    const broken = structuredClone(DEMO_WORKFLOW.projects.DEMO) as { head: Record<string, any> };
+    broken.head.policy.lanes[0].color = "canary-new-provider-field";
+    inferlab.workflowAnswer = broken;
+    const outcome = await failure(hooks().startBoundWorkflowPolicySession("w-malformed").readWorkflowPolicy());
+    expect(outcome).toMatch(/^InferOpsError: UNAVAILABLE: /);
+    expect(outcome).not.toContain("canary");
+  });
+
+  it("refuses reads once the session has ended (401, adjudicated by the account), and once the account is revoked", async () => {
+    const ended = await connect("workflow-ended");
+    expect(await hooks().bindAccount("w-ended", ended, WORKFLOW_URL)).toBeNull();
+    inferlab.endSession("refresh-1");
+    expect(await failure(hooks().startBoundWorkflowPolicySession("w-ended").readWorkflowPolicy())).toContain("UNAUTHORIZED");
+
+    const revoked = await connect("workflow-revoked");
+    expect(await hooks().bindAccount("w-revoked", revoked, WORKFLOW_URL)).toBeNull();
+    const session = hooks().startBoundWorkflowPolicySession("w-revoked");
+    await session.readWorkflowPolicy();
+    await hooks().revokeAccount(revoked);
+    expect(await failure(session.readWorkflowPolicy())).toContain("not connected");
+  });
+
+  it("refuses the next read once the switch is turned off mid-session, and resumes when it is back on", async () => {
+    const account = await connect("workflow-switch");
+    expect(await hooks().bindAccount("w-switch", account, WORKFLOW_URL)).toBeNull();
+    const session = hooks().startBoundWorkflowPolicySession("w-switch");
+    await session.readWorkflowPolicy();
+    const before = workflowCalls().length;
+    delete vars.INFEROPS_WORKFLOW_POLICY_ENABLED;
+    expect(await failure(session.readWorkflowPolicy())).toContain("DISABLED");
+    expect(workflowCalls().length).toBe(before);
+    vars.INFEROPS_WORKFLOW_POLICY_ENABLED = "true";
+    expect((await session.readWorkflowPolicy()).revision).toBe("3");
+  });
+
+  /** Starts a workflow read whose InferOps answer is held until `settle()`, which gives its failure. */
+  const heldWorkflowRead = (name: string) =>
+    heldRead("workflow", () => failure(hooks().startBoundWorkflowPolicySession(name).readWorkflowPolicy()));
+
+  const workflowObservations = async () =>
+    (await hooks().log()).observations.filter(title => title === "Read InferOps workflow policy").length;
+
+  it("discards an answer that arrives after a reconnect committed while it was in flight", async () => {
+    const account = await connect("workflow-fence-reconnect");
+    expect(await hooks().bindAccount("w-fence-reconnect", account, WORKFLOW_URL)).toBeNull();
+    const observed = await workflowObservations();
+    const read = await heldWorkflowRead("w-fence-reconnect");
+
+    expect((await finish(await hooks().reconnectAccount(account))).status).toBe(200);
+    const stageId = reconnects.find(r => r.label === "workflow-fence-reconnect")!.stageId;
+    expect(await hooks().commitReconnect(account, stageId)).toBeNull();
+
+    expect(await read.settle()).toBe("InferOpsError: UNAVAILABLE: This InferOps connection changed. Try again.");
+    expect(await workflowObservations()).toBe(observed);
+    expect((await hooks().startBoundWorkflowPolicySession("w-fence-reconnect").readWorkflowPolicy()).revision).toBe("3");
+    expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-2"));
+  });
+
+  it("discards an answer that arrives after the account was revoked while it was in flight", async () => {
+    const account = await connect("workflow-fence-revoke");
+    expect(await hooks().bindAccount("w-fence-revoke", account, WORKFLOW_URL)).toBeNull();
+    const observed = await workflowObservations();
+    const read = await heldWorkflowRead("w-fence-revoke");
+
+    await hooks().revokeAccount(account);
+
+    const outcome = await read.settle();
+    expect(outcome).toMatch(/^InferOpsError: (UNAVAILABLE|UNAUTHORIZED): /);
+    expect(outcome).not.toContain("owners-all");
+    expect(await workflowObservations()).toBe(observed);
+  });
+
+  it("never admits a collaborator, even one who holds the workspace", async () => {
+    const owner = await connect("workflow-owner");
+    expect(await hooks().bindAccount("w-shared", owner, WORKFLOW_URL)).toBeNull();
+    const member = await connect("workflow-member");
+    expect(await hooks().addWorkflowPolicyObserverFrom("w-shared", member)).toContain("cannot be shared");
+  });
+
+  it("sends nothing but GETs, ever", async () => {
+    const account = await connect("workflow-gets");
+    expect(await hooks().bindAccount("w-gets", account, WORKFLOW_URL)).toBeNull();
+    await hooks().startBoundWorkflowPolicySession("w-gets").readWorkflowPolicy();
+    expect(workflowCalls()).toHaveLength(4);
+    expect(workflowCalls().every(call => call.method === "GET")).toBe(true);
   });
 });
 

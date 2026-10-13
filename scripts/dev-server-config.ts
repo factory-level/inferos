@@ -295,6 +295,15 @@ export function resolveInferOpsMembersEnabled(options: InferOpsSwitchOptions): "
 }
 
 /**
+ * The `INFEROPS_WORKFLOW_POLICY_ENABLED` var the InferOps gatekeeper gets, which it checks on every
+ * workflow-policy binding and call (`workflow-policy.ts`). Resolved exactly as `INFEROPS_TABLES_ENABLED`:
+ * off by default, never on while the InferOps integration is off.
+ */
+export function resolveInferOpsWorkflowPolicyEnabled(options: InferOpsSwitchOptions): "true" | "false" {
+  return resolveInferOpsSwitch("INFEROPS_WORKFLOW_POLICY_ENABLED", options);
+}
+
+/**
  * The `INFEROPS_TABLES_ENABLED` var the InferOps gatekeeper gets, which it checks on every
  * custom-table binding and call (`table.ts`). Resolved exactly as `CODING_WORKBENCH_ENABLED`: the
  * version 2 capability wins, otherwise the shell's `INFEROPS_TABLES_ENABLED=true`; off by default,
@@ -335,7 +344,8 @@ export type InferOpsSwitchOptions = {
 };
 
 function resolveInferOpsSwitch(
-  name: "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED" | "INFEROPS_MEMBERS_ENABLED" | "INFEROPS_HOST_BOARDS",
+  name: "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED" | "INFEROPS_MEMBERS_ENABLED" |
+    "INFEROPS_WORKFLOW_POLICY_ENABLED" | "INFEROPS_HOST_BOARDS",
   options: InferOpsSwitchOptions,
 ): "true" | "false" {
   return resolveSwitch(name, options, options.inferOpsEnabled, "the InferOps integration (INFEROPS_ENABLED) is");

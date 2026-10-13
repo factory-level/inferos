@@ -7,6 +7,7 @@ import type {
   Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
   WikiDocumentNode, WikiStructure,
 } from "./types";
+import type { WorkflowHeadRecord } from "./workflow-policy";
 
 /** Error codes a data source reports. Callers branch on these, never on message text. */
 export type InferOpsErrorCode =
@@ -385,6 +386,15 @@ export interface InferOpsClient {
    * (no grant, no `member:read`, an explicit deny), without saying which.
    */
   listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead>;
+
+  /**
+   * The published content-workflow policy head of the project with key `projectKey`, as InferOps'
+   * `workflow.get` answers it under the account's `project:read`: the key is resolved through the
+   * project list of the client's own workspace first, then that one project's head is read and
+   * parsed strictly (workflow-policy.ts). NOT_FOUND when the project or its policy is missing or not
+   * readable, without saying which; UNAVAILABLE when the answer is malformed or not about that project.
+   */
+  readWorkflowPolicy(projectKey: string): Promise<WorkflowHeadRecord>;
 
   /** Whether the account can open the project; used to admit observers of a shared gadget. */
   hasProject(projectKey: string): Promise<boolean>;
