@@ -1181,6 +1181,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async dispatchOperateEvent(event: OperateEvent, expectedSeq: number | null,
                              actor: OperateEventActor): Promise<OperateSessionSnapshot> {
+    // An agent has no authority to start a flow. Every path an event takes, the person's checked
+    // one (OperateSessionImpl.dispatch) and the operate agent's (Overseer.operatePage), arrives
+    // here, so none can record an agent's start. Granting agents one would replace this refusal
+    // with the person path's check of the flow against an authoritative definition.
+    if (actor === "agent" && event.type === "startFlow") {
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    }
     let current = this.#operatePage();
     if (expectedSeq !== null && expectedSeq !== current.seq) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);

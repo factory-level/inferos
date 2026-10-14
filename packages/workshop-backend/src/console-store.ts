@@ -2,12 +2,13 @@ import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, Wo
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
 import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
-type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens" | "gadgets">;
+type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens" | "gadgets" | "flows">;
 
 /**
  * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called
@@ -332,16 +333,18 @@ function frozenSurfaces(commit: SourceCommit): Pick<ConsoleWidgetFreeze, "ui" | 
  * of the console's previous publication are removed. Each widget's current commit must be one of
  * `commits`, whose surfaces its entry freezes (`ConsoleWidgetFreeze.ui` and `.tools`), and a widget
  * with no UI must not be placed on a screen. Each bound view must pass `boundViewRefusal` against
- * `commits`, and gets its source commit's spec in `frozen`; no install is made for it.
+ * `commits`, and gets its source commit's spec in `frozen`; no install is made for it. Each listed
+ * flow is copied into the publication as it is now (see `publishedFlows`).
  * Everything is checked before anything is created, except the stored record's size, which is
  * checked last. Call inside a storage transaction, which undoes the installs if that refuses.
  * Shared by publishing and the storage migration that publishes consoles saved before publication
- * existed, which have no widgets or bound views.
+ * existed, which have no widgets, bound views or flows.
  */
 export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateConsole, publishedAt: string,
     frozen?: FrozenInstalls, commits?: SourceCommits): OperateConsole {
   let { id, revision, published: _, ...content } = stored;
   checkConsoleWidgets(storage, content, commits);
+  let flows = publishedFlows(storage, content);
   let entries = content.widgets ?? [];
   if (entries.length > 0 && (!frozen || !commits)) throw new Error("This console's widgets cannot be published here.");
   let boundViews = (content.boundViews ?? []).map((entry): BoundViewEntry => {
@@ -371,13 +374,28 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   }
   let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
     ...(content.boundViews === undefined ? {} : { boundViews }) };
-  let result: OperateConsole = { ...stored, published: { revision, publishedAt, content: publishedContent } };
+  let result: OperateConsole = { ...stored,
+    published: { revision, publishedAt, content: publishedContent, ...(flows.length === 0 ? {} : { flows }) } };
   if (jsonBytes(result) > CONSOLE_SIZE_LIMITS.console) {
     throw new Error(`This console would be over ${CONSOLE_SIZE_LIMITS.console} bytes published.`);
   }
   storage.consoles.put(result);
   if (frozen) dropFrozenInstalls(storage, frozen, id, new Set(frozenIds.values()));
   return result;
+}
+
+// The flows `content` lists, each copied as it is now, for its publication. Each must still exist,
+// and every step must be a screen the console shows, so whoever can open the published console can
+// render every step of a flow it offers; otherwise nothing is published.
+function publishedFlows(storage: Pick<OverseerStorage, "flows">, content: OperateConsoleContent): OperateFlow[] {
+  let screens = new Set(consoleScreens(content));
+  return (content.flows ?? []).map(id => {
+    let flow = storage.flows.get(id);
+    if (!flow) throw new Error(`Console flow ${id} is not a flow in this workspace`);
+    let outside = flow.steps.find(step => !screens.has(step));
+    if (outside) throw new Error(`Console flow "${flow.title}" has step ${outside}, which the console does not show`);
+    return { id: flow.id, revision: flow.revision, title: flow.title, steps: [...flow.steps] };
+  });
 }
 
 /**
@@ -460,23 +478,27 @@ export class WorkspaceConsoleStore {
     }
   }
 
-  // Omitted means keep: editors that predate host boards or bound views send no `hostBoards` or
-  // `boundViews`, and replacing through them must not delete saved entries. An explicit list (`[]`
-  // included) replaces them. The saved entries are merged in before parsing, so the combined
-  // registry limit and the requirement names apply.
+  // Omitted means keep: editors that predate host boards, bound views or flows send no
+  // `hostBoards`, `boundViews` or `flows`, and replacing through them must not delete saved
+  // entries. An explicit list (`[]` included) replaces them. The saved entries are merged in before
+  // parsing, so the combined registry limit and the requirement names apply.
   #inherit(content: OperateConsoleContent, current?: OperateConsole): OperateConsoleContent {
     return { ...content,
       ...(content.hostBoards === undefined && current?.hostBoards !== undefined ? { hostBoards: current.hostBoards } : {}),
-      ...(content.boundViews === undefined && current?.boundViews !== undefined ? { boundViews: current.boundViews } : {}) };
+      ...(content.boundViews === undefined && current?.boundViews !== undefined ? { boundViews: current.boundViews } : {}),
+      ...(content.flows === undefined && current?.flows !== undefined ? { flows: current.flows } : {}) };
   }
 
-  // A console may only be saved over screens that exist; one deleted later shows as unavailable.
-  // Its widgets and bound views are checked now, against `commits`, and again at publication,
-  // since screens and gadgets change.
+  // A console may only be saved over screens and flows that exist; one deleted later shows as
+  // unavailable, and a flow is checked again at publication (see `publishedFlows`). Its widgets and
+  // bound views are checked now, against `commits`, and again at publication, since screens and
+  // gadgets change.
   #parse(content: OperateConsoleContent, commits: SourceCommits | undefined, current?: OperateConsole): OperateConsoleContent {
     let parsed = parseOperateConsoleContent(this.#inherit(content, current));
     let missing = consoleScreens(parsed).find(screen => !this.storage.canvases.get(screen));
     if (missing) throw new Error(`Console screen ${missing} is not a screen in this workspace`);
+    let missingFlow = parsed.flows?.find(flow => !this.storage.flows.get(flow));
+    if (missingFlow) throw new Error(`Console flow ${missingFlow} is not a flow in this workspace`);
     checkConsoleWidgets(this.storage, parsed, commits);
     let hostBoards = parsed.hostBoards === undefined ? undefined : this.#hostBoards(parsed.hostBoards, current);
     let boundViews = parsed.boundViews === undefined ? undefined : this.#boundViews(parsed.boundViews, commits, current);

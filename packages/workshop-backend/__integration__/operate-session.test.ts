@@ -103,31 +103,17 @@ describe("operate session", () => {
     expect((await authenticated.listGadgets()).map(gadget => gadget.id)).not.toContain(id);
   });
 
-  it("carries a running flow's step to every connection", async () => {
-    using first = await connect();
-    const token = await createAccount(first);
-    using second = await connect();
-    using tabA = await first.authenticate(token);
-    using tabB = await second.authenticate(token);
-    using sessionA = await tabA.getOperateSession();
-    using sessionB = await tabB.getOperateSession();
+  // A running flow reaching every connection, from a real stored flow, is in integration-tests
+  // (operate-console-flows.test.ts): durable views are off here, so no flow can exist.
+  it("refuses a flow start naming no flow the caller can read, changing nothing", async () => {
+    using publicApi = await connect();
+    using authenticated = await publicApi.authenticate(await createAccount(publicApi));
+    using session = await authenticated.getOperateSession();
 
-    let sawStep = () => {};
-    const stepped = new Promise<void>(resolve => { sawStep = resolve; });
-    let latest: OperateSessionUpdate | undefined;
-    using _subscription = await sessionB.subscribe((update: OperateSessionUpdate) => {
-      latest = update;
-      if (update.seq === 2) sawStep();
-    });
-
-    await sessionA.dispatch(
-        { type: "startFlow", workspaceId: "ws1", flowId: "intake", title: "Intake", steps: ["a", "b"] }, 0);
-    await sessionA.dispatch({ type: "goToStep", index: 1 }, 1);
-    await stepped;
-    expect(latest?.state.flow).toMatchObject({ flowId: "intake", index: 1, steps: ["a", "b"] });
-
-    expect(await rejectionCode(sessionA.dispatch({ type: "goToStep", index: 2 }, 2)))
-        .toBe(OPERATE_SESSION_ERROR_CODES.invalidEvent);
-    expect((await sessionA.dispatch({ type: "exitFlow" }, 2)).state.flow).toBeNull();
+    expect(await rejectionCode(session.dispatch(
+        { type: "startFlow", workspaceId: "ws1", flowId: "intake", title: "Intake", steps: ["a", "b"] }, 0)))
+        .toBe(OPERATE_SESSION_ERROR_CODES.flowUnavailable);
+    expect(await session.listEvents(0, 50)).toEqual([]);
+    expect((await session.dispatch({ type: "setChatOpen", open: false }, 0)).seq).toBe(1);
   });
 });

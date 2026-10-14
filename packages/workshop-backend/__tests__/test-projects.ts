@@ -90,6 +90,7 @@ export const WORKERD_LIGHT: readonly string[] = [
  */
 export const BACKEND: readonly string[] = [
   "operate-agui.test.ts",
+  "operate-flow-start.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
   "authorize-observation-flags.test.ts",

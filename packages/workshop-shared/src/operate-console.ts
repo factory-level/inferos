@@ -1,4 +1,5 @@
 import type { WorkpieceId } from "./api.js";
+import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
 import type { WidgetToolDeclaration } from "./widget-tools.js";
 import type { CanvasProjectBoardWidget } from "./canvas.js";
@@ -267,6 +268,13 @@ export type OperateConsoleContent = {
    * requirements of this content's `hostBoards`.
    */
   boundViews?: BoundViewEntry[];
+  /**
+   * The flows this console offers, as ids of this workspace's flows: unique, at most
+   * `MAX_WORKSPACE_FLOWS`, in the order operators see them. Absent and `[]` both mean none. Each
+   * must exist when the draft is saved; publishing freezes a copy of each (see
+   * `ConsolePublication.flows`), whose steps must all be screens the console shows.
+   */
+  flows?: string[];
 };
 
 /**
@@ -286,6 +294,11 @@ export type ConsolePublication = {
   publishedAt: string;
   /** The console's content as published. */
   content: OperateConsoleContent;
+  /**
+   * The flows `content.flows` lists, each as it was when published, in that order; absent if it
+   * lists none. Operators run only these: a later edit to a flow reaches them through a republish.
+   */
+  flows?: OperateFlow[];
 };
 
 /**
@@ -383,11 +396,26 @@ export function parseOperateConsoleContent(content: OperateConsoleContent): Oper
     }
     customization = { screens: flags.screens, widgets: flags.widgets, tools: flags.tools, skills: flags.skills };
   }
+  let flows = content.flows === undefined ? undefined : parseFlowIds(content.flows);
   return { title: title(content.title, "console"), views: parsed, fullChat: content.fullChat,
     ...(customization === undefined ? {} : { customization }),
     ...(widgets === undefined ? {} : { widgets }),
     ...(hostBoards === undefined ? {} : { hostBoards }),
-    ...(boundViews === undefined ? {} : { boundViews }) };
+    ...(boundViews === undefined ? {} : { boundViews }),
+    ...(flows === undefined ? {} : { flows }) };
+}
+
+function parseFlowIds(ids: string[]): string[] {
+  if (!Array.isArray(ids) || ids.length > MAX_WORKSPACE_FLOWS) {
+    throw new TypeError(`A console offers at most ${MAX_WORKSPACE_FLOWS} flows.`);
+  }
+  let seen = new Set<string>();
+  for (let id of ids) {
+    if (typeof id !== "string" || !ID.test(id)) throw new TypeError("A console flow must be a flow id.");
+    if (seen.has(id)) throw new TypeError(`Flow ${id} is listed twice.`);
+    seen.add(id);
+  }
+  return [...ids];
 }
 
 function parseWidgets(entries: ConsoleWidgetEntry[]): ConsoleWidgetEntry[] {

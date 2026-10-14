@@ -8,6 +8,7 @@ import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, Ai
 import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type OperateConsole, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
 import { boundViewsEnabled, describeBoundView } from "./console-store.js";
 import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
+import type { OperateFlowContent } from '@gadgets/workshop-shared/operate-flow';
 import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -663,6 +664,39 @@ type HostBoardDeps = {
   desk: (initialize: boolean) => Promise<DurableObjectStub<OverseerDurableObject>>;
 };
 
+/**
+ * Where a `startFlow`'s flow may be defined, each read through the caller's own access and
+ * undefined where it has no such flow (or can't be read).
+ */
+type FlowStartSources = {
+  /** The flow as the published console open on the caller's page offers it (`ConsolePublication.flows`). */
+  published: () => Promise<OperateFlowContent | undefined>;
+  /** The flow as the caller's own flows hold it, in the event's workspace. */
+  stored: () => Promise<OperateFlowContent | undefined>;
+};
+
+/**
+ * Checks a `startFlow` against its flow's authoritative definitions, the published one first:
+ * refused with `flowUnavailable` if no source defines the flow, and with `invalidEvent` unless its
+ * `title` and `steps` (order included) equal one of the definitions found. The event is never
+ * rewritten, so the logged event is what the client sent and replays as it ran.
+ */
+async function checkFlowStart(event: Extract<OperateEvent, { type: "startFlow" }>,
+    sources: FlowStartSources): Promise<void> {
+  let found = false;
+  for (let read of [sources.published, sources.stored]) {
+    let flow = await read();
+    if (!flow) continue;
+    found = true;
+    if (flow.title === event.title && flow.steps.length === event.steps.length &&
+        flow.steps.every((step, index) => step === event.steps[index])) {
+      return;
+    }
+  }
+  throw createOperateSessionError(found
+      ? OPERATE_SESSION_ERROR_CODES.invalidEvent : OPERATE_SESSION_ERROR_CODES.flowUnavailable);
+}
+
 // The caller's console context, re-read through their own access: their session must show the
 // console from that source at that revision, and that must still be the console's revision. A
 // host board's context also needs that revision to offer the entry.
@@ -848,6 +882,40 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     }
   }
 
+  // A startFlow copies a title and steps into the session, and the reducer can't know whether they
+  // are a flow's at all, so they must equal an authoritative definition read through the caller's
+  // own access (see checkFlowStart): the copy the published console open on the page offers, at the
+  // revision it opened, or the caller's own flows, which only owner and build access can list. The
+  // page checked is the one at `expectedSeq`, which the user DO's append also requires, so it can't
+  // change in between.
+  async #checkFlowStart(event: OperateEvent, expectedSeq: number): Promise<void> {
+    if (event.type !== "startFlow") return;
+    let page = await this.user().getOperatePage();
+    if (page.seq !== expectedSeq) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);
+    let run = page.state.console;
+    await checkFlowStart(event, {
+      published: async () => {
+        if (run?.source !== "published" || run.workspaceId !== event.workspaceId) return undefined;
+        try {
+          using workspace = await this.openConsoleWorkspace(run.workspaceId);
+          let saved = await workspace.getConsole(run.consoleId, "published");
+          if (!saved || saved.revision !== run.revision) return undefined;
+          return saved.published?.flows?.find(flow => flow.id === event.flowId);
+        } catch {
+          return undefined;
+        }
+      },
+      stored: async () => {
+        try {
+          using workspace = await this.openConsoleWorkspace(event.workspaceId);
+          return (await workspace.listFlows()).find(flow => flow.id === event.flowId);
+        } catch {
+          return undefined;  // Unreachable, or no role there that lists flows (a use-role one).
+        }
+      },
+    });
+  }
+
   async subscribe(subscriber: RpcStub<(update: OperateSessionUpdate) => void>)
       : Promise<RpcStub<{}>> {
     return this.user().subscribeOperateSession(subscriber);
@@ -878,6 +946,7 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
     }
     await this.#checkConsoleEvent(event);
+    await this.#checkFlowStart(event, expectedSeq);
     if (event.type === "openBoard") (await this.#reachBoard(event.board))[Symbol.dispose]();
     return this.user().dispatchOperateEvent(event, expectedSeq, "person");
   }

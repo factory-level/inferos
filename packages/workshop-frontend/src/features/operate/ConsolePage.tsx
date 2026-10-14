@@ -10,6 +10,7 @@ import { useWorkspaceOpen } from '../../useWorkspaceOpen'
 import { canonicalBoardRef } from '../canvas/boardData'
 import { CanvasView, type CanvasResourceScope } from '../canvas/CanvasView'
 import { BoardConnectPrompt } from './BoardConnectPrompt'
+import { ConsoleFlows } from './ConsoleFlows'
 import { ConsoleRollup } from './ConsoleRollup'
 import { openConsoleEvent, type ConsoleEntry } from './consoles'
 import { SessionBoard } from './SessionBoard'
@@ -24,6 +25,8 @@ const ignore = () => {}
  * their own InferOps account (`BoardConnectPrompt`); the console owner's connection is never used
  * for them. A board card's full view is the session's shown board (`openBoard`), so it survives
  * reload and reconnect and Back is a session event.
+ *
+ * The published revision the session opened offers the flows frozen into it (`ConsoleFlows`).
  *
  * A draft opened as a preview says so, and offers publishing it. When the revision the session
  * opened is no longer the latest (a newer one was published, or the previewed draft was saved
@@ -119,6 +122,9 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   }
 
   const outdated = !!entry && entry.console.revision !== run.revision
+  // Only the published revision the session opened: its frozen flows are the ones the kernel
+  // accepts a start of while it is open, and a newer one's are offered after reopening it.
+  const flows = run.source === 'published' && !outdated && !board ? entry?.console.published?.flows ?? [] : []
   const reopen = () => {
     if (!entry) return
     const event = openConsoleEvent(entry, run.source)
@@ -154,7 +160,10 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
           action={<Button size="sm" onClick={reopen}>Reopen</Button>} />}
       </div>}
       <main ref={main} tabIndex={-1} aria-label={crumbs.at(-1)} className="min-h-0 min-w-0 flex-1 overflow-auto focus:outline-none">
-        <div className="mx-auto w-full max-w-6xl p-5">{body}</div>
+        <div className="mx-auto w-full max-w-6xl space-y-4 p-5">
+          <ConsoleFlows workspaceId={run.workspaceId} flows={flows} />
+          {body}
+        </div>
       </main>
     </div>
   )
