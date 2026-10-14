@@ -1,6 +1,7 @@
 import type { GadgetMetadataWithTimestamps, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleSource, type ConsoleView, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from '@gadgets/workshop-shared/operate-console'
+import type { OperateFlow } from '@gadgets/workshop-shared/operate-flow'
 import type { OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
 import type { WorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { gadgetIdOf } from '../canvas/canvasLayout'
@@ -89,21 +90,44 @@ export const screenInventory = (screen: CanvasDefinition,
 
 /**
  * Checks console content for saving, with its host boards as `edited`, or (undefined) as `saved`
- * when the editor did not change them, and its bound views likewise as `views.edited` or
- * `views.saved`. Every check runs over the entries the console will hold, so the combined widget,
- * host-board and bound-view limit counts saved entries too, and a bound view's requirements are
- * checked against the boards kept; unedited lists are then left out, since the kernel keeps saved
- * entries when a list is omitted, and an editor that never touched them cannot drop or alter
- * them. An edited list, empty included, replaces them.
+ * when the editor did not change them, and its bound views and flows likewise as `views.edited` or
+ * `views.saved` and `flows.edited` or `flows.saved`. Every check runs over the entries the console
+ * will hold, so the combined widget, host-board and bound-view limit counts saved entries too, and
+ * a bound view's requirements are checked against the boards kept; unedited lists are then left
+ * out, since the kernel keeps saved entries when a list is omitted, and an editor that never
+ * touched them cannot drop or alter them. An edited list, empty included, replaces them.
  */
-export const consoleContentForSave = (content: Omit<OperateConsoleContent, 'hostBoards' | 'boundViews'>,
+export const consoleContentForSave = (content: Omit<OperateConsoleContent, 'hostBoards' | 'boundViews' | 'flows'>,
   saved: HostBoardEntry[] | undefined, edited: HostBoardEntry[] | undefined,
-  views: { saved: BoundViewEntry[] | undefined; edited: BoundViewEntry[] | undefined } = { saved: undefined, edited: undefined }): OperateConsoleContent => {
+  views: { saved: BoundViewEntry[] | undefined; edited: BoundViewEntry[] | undefined } = { saved: undefined, edited: undefined },
+  flowLists: { saved: string[] | undefined; edited: string[] | undefined } = { saved: undefined, edited: undefined }): OperateConsoleContent => {
   const boards = edited ?? saved
   const boundViews = views.edited ?? views.saved
+  const listed = flowLists.edited ?? flowLists.saved
   const parsed = parseOperateConsoleContent({ ...content, ...(boards === undefined ? {} : { hostBoards: boards }),
-    ...(boundViews === undefined ? {} : { boundViews }) })
-  const { hostBoards, boundViews: parsedViews, ...rest } = parsed
+    ...(boundViews === undefined ? {} : { boundViews }), ...(listed === undefined ? {} : { flows: listed }) })
+  const { hostBoards, boundViews: parsedViews, flows, ...rest } = parsed
   return { ...rest, ...(edited !== undefined && hostBoards !== undefined ? { hostBoards } : {}),
-    ...(views.edited !== undefined && parsedViews !== undefined ? { boundViews: parsedViews } : {}) }
+    ...(views.edited !== undefined && parsedViews !== undefined ? { boundViews: parsedViews } : {}),
+    ...(flowLists.edited !== undefined && flows !== undefined ? { flows } : {}) }
+}
+
+/** The ids of `selected` in the workspace's flow order, then any it no longer has, in their order. */
+export const orderConsoleFlows = (selected: readonly string[], flows: readonly OperateFlow[]): string[] => [
+  ...flows.filter(flow => selected.includes(flow.id)).map(flow => flow.id),
+  ...selected.filter(id => !flows.some(flow => flow.id === id)),
+]
+
+/** The steps of `flow` that are not among `shown` (the screens a console's views show). */
+export const unshownSteps = (flow: OperateFlow, shown: readonly string[]): string[] =>
+  flow.steps.filter(step => !shown.includes(step))
+
+/**
+ * The text to show for a console save or publish refused by the kernel: its own message when it is
+ * about one of the console's flows (it names only the builder's own workspace data), otherwise
+ * `fallback`.
+ */
+export const consoleRefusalMessage = (caught: unknown, fallback: string): string => {
+  const message = caught instanceof Error ? caught.message : ''
+  return message.startsWith('Console flow ') ? message : fallback
 }
