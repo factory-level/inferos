@@ -5,6 +5,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  applyOperateEvent,
   INITIAL_OPERATE_PAGE,
   type OperateEvent,
   type OperateEventRecord,
@@ -44,7 +45,13 @@ vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({
     ] },
   ] }),
 }))
-vi.mock('../../pages/inferops-canvas/InferOpsCanvasHome', () => ({ InferOpsCanvasHome: () => <div data-testid="home" /> }))
+// The home lists the workspace's flows through the real WorkspaceFlows, so Start is the real button.
+vi.mock('../../pages/inferops-canvas/InferOpsCanvasHome', async () => {
+  const { WorkspaceFlows } = await vi.importActual<typeof import('./WorkspaceFlows')>('./WorkspaceFlows')
+  const screens = [{ id: 'intake', title: 'Intake' }, { id: 'triage', title: 'Triage' }] as never[]
+  const flows = [{ id: 'f1', revision: '0', title: 'Admission', steps: ['intake', 'triage'] }] as never[]
+  return { InferOpsCanvasHome: () => <div data-testid="home"><WorkspaceFlows workspaceId="ws1" screens={screens} flows={flows} /></div> }
+})
 vi.mock('./ConsoleMosaic', () => ({ ConsoleMosaic: () => <div data-testid="mosaic" /> }))
 vi.mock('./ConsolePage', () => ({
   ConsolePage: ({ entry, presentation }: { entry?: { console: { title: string } }; presentation: string }) =>
@@ -87,6 +94,7 @@ beforeEach(() => {
   testState.dispatch = dispatch
   testState.recentEvents = []
   testState.search = {}
+  testState.navigate = vi.fn<(options: unknown) => void>()
   testState.hostBoards = false
 })
 
@@ -155,6 +163,41 @@ describe('OperateSessionPage', () => {
     act(() => finish.click())
     expect(dispatch).toHaveBeenCalledWith({ type: 'exitFlow' })
   })
+})
+
+it('shows a flow started from Screens and flows at its first step, without ending it', async () => {
+  // The session follows the real reducer, and the address bar follows navigation, as in the app.
+  let state: OperatePageState = { ...INITIAL_OPERATE_PAGE }
+  testState.dispatch = vi.fn<(event: OperateEvent) => Promise<void>>(async event => { state = applyOperateEvent(state, event) })
+  testState.navigate.mockImplementation(options => {
+    const next = (options as { search?: unknown }).search
+    if (next && typeof next === 'object') testState.search = next as typeof testState.search
+  })
+  testState.search = { tools: true }
+  render(state)
+
+  const start = container.querySelector<HTMLButtonElement>('button[aria-label="Start Admission"]')!
+  await act(async () => start.click())
+  render(state)
+
+  expect(testState.dispatch).toHaveBeenCalledWith({ type: 'startFlow', workspaceId: 'ws1', flowId: 'f1', title: 'Admission', steps: ['intake', 'triage'] })
+  expect(testState.dispatch).not.toHaveBeenCalledWith({ type: 'showHome' })
+  expect(state.flow?.index).toBe(0)
+  expect(container.textContent).toContain('Step 1 of 2')
+  expect(container.querySelector('[data-testid="step"]')?.textContent).toBe('intake')
+})
+
+it('stays on Screens and flows, and says so, when a flow cannot be started', async () => {
+  testState.dispatch = vi.fn<(event: OperateEvent) => Promise<void>>(async () => { throw new Error('refused') })
+  const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+  testState.search = { tools: true }
+  render({ ...INITIAL_OPERATE_PAGE })
+
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Start Admission"]')!.click())
+
+  expect(testState.navigate).not.toHaveBeenCalled()
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe('Could not start the flow.')
+  quiet.mockRestore()
 })
 
 it('keeps one conversation mounted as home changes to a console, a screen, and setup', () => {

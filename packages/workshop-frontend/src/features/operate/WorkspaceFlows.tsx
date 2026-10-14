@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { PlayIcon } from '@phosphor-icons/react'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateFlow, OperateFlowContent } from '@gadgets/workshop-shared/operate-flow'
@@ -21,6 +22,7 @@ export const WorkspaceFlows = ({ workspaceId, screens, flows }: {
 }) => {
   const { authenticatedApi } = useAuthenticatedApi()
   const operate = useOperateSession()
+  const navigate = useNavigate()
   // 'new', a flow id being edited, or null.
   const [editing, setEditing] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -43,7 +45,9 @@ export const WorkspaceFlows = ({ workspaceId, screens, flows }: {
   }
   const start = (flow: OperateFlow) => {
     operate?.dispatch({ type: 'startFlow', workspaceId, flowId: flow.id, title: flow.title, steps: flow.steps })
-      .catch(caught => { console.error('Failed to start the flow:', caught); setError('Could not start the flow.') })
+      // The Operate page shows these tools instead of the running flow while its address asks for them.
+      .then(() => void navigate({ to: '/inferops-canvas', search: {} }),
+        caught => { console.error('Failed to start the flow:', caught); setError('Could not start the flow.') })
   }
   const cancel = () => { setEditing(null); setError(null) }
 
