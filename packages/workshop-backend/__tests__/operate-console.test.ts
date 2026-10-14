@@ -14,6 +14,7 @@ import {
   type OperateConsole,
   type OperateConsoleContent,
 } from "@gadgets/workshop-shared/operate-console";
+import { MAX_WORKSPACE_FLOWS } from "@gadgets/workshop-shared/operate-flow";
 import type { OperateConsoleRun } from "@gadgets/workshop-shared/operate-session";
 import { consoleWidgetRefusal } from "../src/console-store";
 import type { GadgetRecord } from "../src/overseer";
@@ -61,6 +62,25 @@ it('retains independent customization flags, with old consoles remaining opt-out
       customization: { ...customization, [key]: "true" },
     }))).toThrow(/booleans/);
   }
+});
+
+describe("console flows", () => {
+  it("keeps up to MAX_WORKSPACE_FLOWS unique flow ids in order, absent and [] both meaning none", () => {
+    expect(parseOperateConsoleContent(content([board])).flows).toBeUndefined();
+    expect(parseOperateConsoleContent(content([board], { flows: [] })).flows).toEqual([]);
+    expect(parseOperateConsoleContent(content([board], { flows: ["b", "a"] })).flows).toEqual(["b", "a"]);
+    let most = Array.from({ length: MAX_WORKSPACE_FLOWS }, (_, i) => `f${i}`);
+    expect(parseOperateConsoleContent(content([board], { flows: most })).flows).toEqual(most);
+  });
+
+  it("rejects more than MAX_WORKSPACE_FLOWS, a repeated id, and a malformed one", () => {
+    let many = Array.from({ length: MAX_WORKSPACE_FLOWS + 1 }, (_, i) => `f${i}`);
+    expect(() => parseOperateConsoleContent(content([board], { flows: many }))).toThrow(/at most 32 flows/);
+    expect(() => parseOperateConsoleContent(content([board], { flows: ["a", "a"] }))).toThrow(/twice/);
+    for (let bad of ["", "../x", "a".repeat(65), 7 as unknown as string]) {
+      expect(() => parseOperateConsoleContent(content([board], { flows: [bad] }))).toThrow(/flow id/);
+    }
+  });
 });
 
 describe("published consoles", () => {

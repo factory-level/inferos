@@ -3,7 +3,7 @@
 
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import type { OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
@@ -40,6 +40,13 @@ vi.mock('./ConsoleRollup', () => ({ ConsoleRollup: () => <div data-testid="rollu
 vi.mock('./OperateChatPanel', () => ({
   OperateChatPanel: ({ layout = 'side' }: { layout?: string }) => <div data-testid="chat">{layout}</div>,
 }))
+type Dispatch = (event: OperateEvent) => Promise<unknown>
+const operate = vi.hoisted(() => ({
+  navigate: null as unknown as Mock<(options: unknown) => void>,
+  dispatch: null as unknown as Mock<Dispatch>,
+}))
+vi.mock('@tanstack/react-router', () => ({ useNavigate: () => operate.navigate }))
+vi.mock('./OperateSessionContext', () => ({ useOperateSession: () => ({ dispatch: operate.dispatch }) }))
 
 import { ConsolePage } from './ConsolePage'
 import type { ConsoleEntry } from './consoles'
@@ -67,6 +74,8 @@ beforeEach(() => {
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
   onEvent.mockClear(); onPublish.mockClear()
   consoleOpen.overseer = { stub: CONSOLE_STUB }
+  operate.navigate = vi.fn<(options: unknown) => void>()
+  operate.dispatch = vi.fn<Dispatch>(async () => ({ seq: 1, state: {} }))
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
@@ -95,6 +104,40 @@ it('offers to reopen on a newer published revision, at the same view while it st
   expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'openConsole', source: 'published', revision: '2', viewId: 'overview' }))
   render({ entry: { ...entry, console: published }, run: run({ revision: '2' }) })
   expect(buttonNamed('Reopen')).toBeUndefined()
+})
+
+// A published console's frozen flows, with an untrimmed-looking title the page must send as is.
+const FROZEN = [{ id: 'intake', revision: '3', title: 'Intake  desk', steps: ['s1', 's2'] }]
+const withFlows = (revision = '0') => ({ ...entry, workspace: { id: 'w1', role: 'use' } as never, console: {
+  ...SAVED, revision, published: { revision, publishedAt: '2026-10-14T00:00:00.000Z', content: { ...SAVED, flows: ['intake'] }, flows: FROZEN },
+} })
+const startButton = () => [...container.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === 'Start Intake  desk')
+
+it('starts a flow the open published console offers with its frozen title and steps, then shows it', async () => {
+  render({ entry: withFlows() })
+  expect(container.querySelector('section[aria-label="Flows"]')?.textContent).toContain('Intake  desk')
+  await act(async () => startButton()!.click())
+  expect(operate.dispatch).toHaveBeenCalledWith({ type: 'startFlow', workspaceId: 'w1', flowId: 'intake', title: 'Intake  desk', steps: ['s1', 's2'] })
+  expect(operate.navigate).toHaveBeenCalledWith({ to: '/inferops-canvas', search: {} })
+})
+
+it('stays on the console and says so when a start is refused', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  operate.dispatch.mockRejectedValueOnce(new Error('OPERATE_SESSION_FLOW_UNAVAILABLE'))
+  render({ entry: withFlows() })
+  await act(async () => startButton()!.click())
+  expect(operate.navigate).not.toHaveBeenCalled()
+  expect(container.querySelector('section[aria-label="Flows"] [role="alert"]')?.textContent).toBe('Could not start Intake  desk.')
+})
+
+it('offers no flows for a revision other than the one opened, a draft preview, or over a board', () => {
+  render({ entry: withFlows('2') })
+  expect(startButton()).toBeUndefined()
+  render({ entry: withFlows(), run: run({ source: 'draft' }) })
+  expect(startButton()).toBeUndefined()
+  render({ entry: { ...withFlows(), screens: [boardScreen] }, run: run({ viewId: 'board' }),
+    board: { workspaceId: 'session-ws', boardRef: DEMO, issueId: null } })
+  expect(startButton()).toBeUndefined()
 })
 
 it('shows a rollup view with no Back at the view itself', () => {

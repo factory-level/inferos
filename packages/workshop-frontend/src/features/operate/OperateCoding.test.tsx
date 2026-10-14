@@ -67,7 +67,8 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 
 it.each([
   ['a session screen', () => <SessionScreen workspaceId="w" screenId="ops" onShowScreen={() => {}} onClose={() => {}} />],
-  ['a flow step', () => <FlowScreen workspaceId="w" screenId="ops" onTitle={() => {}} />],
+  ['a flow step', () => <FlowScreen run={{ workspaceId: 'w', flowId: 'f', title: 'F', steps: ['ops'], index: 0 }}
+    console={{ open: null, entry: undefined, loading: false, sessionWorkspace: null }} onTitle={() => {}} />],
 ])('shows the board on %s with no coding control, without looking up the coding-dispatch connection', async (_name, element) => {
   await render(element())
   expect(container.querySelector('[data-issue-id="1"]')).not.toBeNull()

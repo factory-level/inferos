@@ -143,6 +143,139 @@ it('registers an installed widget before the console is first saved', async () =
   ] }))
 })
 
+// Flows (F2 C6): the builder chooses which of the workspace's flows a console offers employees.
+const INTAKE = { id: 'f1', revision: '2', title: 'Intake', steps: ['s1', 's2'] }
+const NOTES_FLOW = { id: 'f2', revision: '0', title: 'Notes flow', steps: ['s1', 's3'] }
+const NOTES = { schemaVersion: 1 as const, id: 's3', title: 'Notes', revision: '0', sections: [] }
+const withFlows = (flows = [INTAKE, NOTES_FLOW]): WorkspaceScreens[] =>
+  [{ ...workspaces[0], flows, screens: [...workspaces[0].screens!, NOTES] }]
+const twoViews = [{ id: 'board', title: 'Board', type: 'screen' as const, screen: 's1' }, { id: 'activity', title: 'Activity', type: 'screen' as const, screen: 's2' }]
+const listing = (extra: Partial<ConsoleEntry['console']> = {}): ConsoleEntry =>
+  ({ ...initial, screens: withFlows()[0].screens!, console: { ...initial.console, views: twoViews, flows: ['f1'], ...extra } })
+const renderWith = (spaces: WorkspaceScreens[], editing?: ConsoleEntry) =>
+  act(() => root.render(<ConsoleBuilder workspaces={spaces} initial={editing} onSaved={onSaved} onCancel={onCancel} />))
+const flowBox = (text: string) => {
+  const box = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Console flows"] [role="checkbox"]')]
+    .find(candidate => candidate.closest('li')?.textContent?.includes(text))
+  if (!box) throw new Error(`No flow checkbox: ${text}`)
+  return box
+}
+const flowsSection = () => container.querySelector('[aria-labelledby="console-flows-heading"]')
+const alertText = () => container.querySelector('footer')?.previousElementSibling?.getAttribute('role') === 'alert'
+  ? container.querySelector('footer')?.previousElementSibling?.textContent : [...container.querySelectorAll('[role="alert"]')].at(-1)?.textContent
+
+it('B-1: lists the workspace flows with step counts, and a checked one is saved and reviewed', async () => {
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  renderWith(withFlows())
+  fill('Console name', 'Intake console')
+  await click('Continue')
+  fill('Add an existing screen', 's1')
+  fill('Add an existing screen', 's2')
+  expect(flowsSection()?.textContent).toContain('Intake · 2 steps')
+  expect(flowsSection()?.textContent).toContain('Notes flow · 2 steps')
+  await act(async () => flowBox('Intake').click())
+  await click('Continue'); await click('Continue')
+  const preview = container.querySelector('[aria-label="Console preview"]')?.textContent
+  expect(preview).toContain('Intake')
+  expect(preview).toContain('· 1 flow')
+  await click('Create draft')
+  expect(testState.createConsole).toHaveBeenCalledWith(expect.objectContaining({ flows: ['f1'] }))
+})
+
+it('B-2: an edit that leaves Flows alone sends no flows; unchecking all sends []', async () => {
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  renderWith(withFlows(), listing())
+  await click('Continue'); await click('Continue'); await click('Continue'); await click('Save draft')
+  expect(testState.replaceConsole.mock.calls[0]![2]).not.toHaveProperty('flows')
+  act(() => root.unmount()); root = createRoot(container)
+  renderWith(withFlows(), listing())
+  await click('Continue')
+  await act(async () => flowBox('Intake').click())
+  await click('Continue'); await click('Continue'); await click('Save draft')
+  expect(testState.replaceConsole.mock.calls[1]![2]).toMatchObject({ flows: [] })
+})
+
+it('B-3: a flow over a screen the console does not show says so, and Continue is blocked with nothing saved', async () => {
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  renderWith(withFlows())
+  fill('Console name', 'Intake console')
+  await click('Continue')
+  fill('Add an existing screen', 's1')
+  fill('Add an existing screen', 's2')
+  await act(async () => flowBox('Notes flow').click())
+  expect(flowBox('Notes flow').closest('li')?.textContent)
+    .toContain("Uses Notes, which this console doesn't show. Add it to a view, or leave this flow out.")
+  await click('Continue')
+  expect(alertText()).toBe('Flow "Notes flow" uses screens this console doesn\'t show. Add them to a view, or leave the flow out.')
+  expect(container.querySelector('[aria-current="step"]')?.textContent).toBe('2. Screens and views')
+  expect(testState.createConsole).not.toHaveBeenCalled()
+})
+
+it('B-4: a listed flow since deleted blocks saving until it is removed, and the save then drops it', async () => {
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  renderWith(withFlows(), listing({ flows: ['gone'] }))
+  await click('Continue')
+  expect(flowsSection()?.textContent).toContain('A flow this console listed was deleted')
+  await click('Continue')
+  expect(alertText()).toBe('A flow this console listed was deleted. Remove it to continue.')
+  await click('Remove deleted flow gone')
+  expect(flowsSection()?.textContent).not.toContain('was deleted')
+  await click('Continue'); await click('Continue'); await click('Save draft')
+  expect(testState.replaceConsole).toHaveBeenCalledWith('c1', '7', expect.objectContaining({ flows: [] }))
+})
+
+it('B-5: says the workspace has no flows yet, with nothing to check', async () => {
+  renderWith(withFlows([]))
+  fill('Console name', 'Intake console')
+  await click('Continue')
+  expect(flowsSection()?.textContent).toContain('This workspace has no flows yet. Create one in Screens and flows, then come back to add it.')
+  expect(flowsSection()?.querySelector('[role="checkbox"]')).toBeNull()
+})
+
+it('B-6: marks a chosen flow edited since the console was published, or not published at all', async () => {
+  const published = { revision: '7', publishedAt: '2026-10-14T00:00:00.000Z', content: { title: 'Operations lead', fullChat: 'available' as const, views: twoViews },
+    flows: [{ ...INTAKE, revision: '1' }] }
+  renderWith(withFlows(), listing({ flows: ['f1', 'f2'], published }))
+  await click('Continue')
+  expect(flowBox('Intake').closest('li')?.textContent).toContain('Edited since published. Publish again to give employees this version.')
+  expect(flowBox('Notes flow').closest('li')?.textContent).toContain('Not published yet. Publish again to give employees this flow.')
+})
+
+it('B-7: once build access is gone the flows cannot be changed', async () => {
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  renderWith(withFlows(), listing())
+  await click('Continue')
+  testState.denied = true
+  renderWith(withFlows(), listing())
+  const boxes = [...container.querySelectorAll('[aria-label="Console flows"] [role="checkbox"]')]
+  expect(boxes).toHaveLength(2)
+  for (const box of boxes) {
+    expect(box.hasAttribute('disabled') || box.getAttribute('aria-disabled') === 'true' || box.hasAttribute('data-disabled')).toBe(true)
+  }
+  await act(async () => flowBox('Intake').click())
+  expect(button('Continue').disabled).toBe(true)
+  expect(testState.replaceConsole).not.toHaveBeenCalled()
+})
+
+it('B-8: an Assistant-only console says its flows are unavailable to employees', async () => {
+  renderWith(withFlows(), listing({ fullChat: 'only' }))
+  await click('Continue'); await click('Continue')
+  expect([...container.querySelectorAll('[role="status"]')].map(node => node.textContent))
+    .toContain('Its flows are unavailable to employees while it shows only Assistant.')
+})
+
+it("B-9: shows the kernel's own refusal about a console flow on save, and the generic message otherwise", async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  testState.replaceConsole.mockRejectedValueOnce(new Error('Console flow f1 is not a flow in this workspace'))
+  renderWith(withFlows(), listing())
+  await click('Continue'); await click('Continue'); await click('Continue'); await click('Save draft')
+  expect(alertText()).toBe('Console flow f1 is not a flow in this workspace')
+  testState.replaceConsole.mockRejectedValueOnce(new Error('Internal detail 1234'))
+  await click('Save draft')
+  expect(alertText()).toContain('Could not save this console.')
+  expect(container.textContent).not.toContain('Internal detail 1234')
+})
+
 it('forgets widgets registered in one workspace when the console moves to another', async () => {
   vi.stubGlobal('PointerEvent', MouseEvent)
   const other: WorkspaceScreens = { ...workspaces[0], workspace: { ...workspace, id: 'w2', title: 'Support' } }

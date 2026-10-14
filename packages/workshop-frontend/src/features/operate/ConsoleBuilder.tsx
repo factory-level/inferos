@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button, Input, Select } from '@cloudflare/kumo'
-import { ChatsCircleIcon, LayoutIcon } from '@phosphor-icons/react'
+import { ChatsCircleIcon, LayoutIcon, ListNumbersIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { DEFAULT_CONSOLE_CUSTOMIZATION, MAX_CONSOLE_VIEWS, MAX_WORKSPACE_CONSOLES, type BoundViewEntry, type ConsoleFullChat, type ConsoleView, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
@@ -12,10 +12,11 @@ import { invalidateWorkspaceScreens, type WorkspaceScreens } from '../../pages/i
 import { ConsoleScreenEditor } from './ConsoleScreenEditor'
 import { ConsoleViewEditor } from './ConsoleViewEditor'
 import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
+import { ConsoleFlowRegistry } from './ConsoleFlowRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 import { consoleScreens } from '@gadgets/workshop-shared/operate-console'
-import { consoleContentForSave, type ConsoleEntry } from './consoles'
+import { consoleContentForSave, consoleRefusalMessage, unshownSteps, viewScreens, type ConsoleEntry } from './consoles'
 
 const ignore = () => {}
 const START_LABELS: Record<ConsoleFullChat, string> = { default: 'Assistant first', available: 'A view first, with Assistant', off: 'A view first, with side chat only', only: 'Assistant only' }
@@ -44,6 +45,9 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   // Likewise for bound views; saved ones count toward the shared limit even while bound views are off.
   const [boundViews, setBoundViews] = useState<BoundViewEntry[] | undefined>(undefined)
   const shownBoundViews = boundViews ?? initial?.console.boundViews ?? []
+  // Likewise for flows: untouched, the saved list is kept as it is.
+  const [flows, setFlows] = useState<string[] | undefined>(undefined)
+  const shownFlows = flows ?? initial?.console.flows ?? []
   const [step, setStep] = useState(0)
   const [creatingScreen, setCreatingScreen] = useState(false)
   const [addedScreens, setAddedScreens] = useState<CanvasDefinition[]>([])
@@ -61,11 +65,19 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const screens = [...new Map([...(entry?.screens ?? []), ...addedScreens].map(screen => [screen.id, screen])).values()]
   const available = !!overseer && ready && metadata?.id === workspaceId && metadata.role !== 'use' && !openError && !observerConfig
   const limitReached = !initial && (entry?.consoles.length ?? 0) >= MAX_WORKSPACE_CONSOLES
+  const workspaceFlows = entry?.flows ?? []
+  const chosenFlows = workspaceFlows.filter(flow => shownFlows.includes(flow.id))
   const validate = () => {
     const content = consoleContentForSave({ title, views, fullChat, customization: initial?.console.customization ?? { ...DEFAULT_CONSOLE_CUSTOMIZATION },
       ...(widgets.length > 0 || initial?.console.widgets ? { widgets } : {}) }, initial?.console.hostBoards, hostBoards,
-      { saved: initial?.console.boundViews, edited: boundViews })
+      { saved: initial?.console.boundViews, edited: boundViews }, { saved: initial?.console.flows, edited: flows })
     if (consoleScreens(content).some(id => !screens.some(screen => screen.id === id))) throw new Error('Choose an available screen for every view.')
+    // The kernel refuses both at save and publish; checked here first so the builder can fix them.
+    if (shownFlows.some(id => !workspaceFlows.some(flow => flow.id === id))) {
+      throw new Error('A flow this console listed was deleted. Remove it to continue.')
+    }
+    const outside = chosenFlows.find(flow => unshownSteps(flow, consoleScreens(content)).length > 0)
+    if (outside) throw new Error(`Flow "${outside.title}" uses screens this console doesn't show. Add them to a view, or leave the flow out.`)
     return content
   }
   const next = () => {
@@ -86,7 +98,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
       onSaved({ workspace: entry!.workspace, console: saved, screens, publishedScreens: initial?.publishedScreens ?? [] })
     } catch (caught) {
       console.error('Console save failed:', caught)
-      setError('Could not save this console. Check your access and fields. If it changed elsewhere, reopen it to review the latest version. Your draft is still here.')
+      setError(consoleRefusalMessage(caught, 'Could not save this console. Check your access and fields. If it changed elsewhere, reopen it to review the latest version. Your draft is still here.'))
     } finally { setSaving(false) }
   }
   return <div className="mx-auto w-full max-w-4xl space-y-6 px-5 py-6 sm:px-8">
@@ -107,7 +119,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
       <Input label="Console name" placeholder="e.g. Operations" value={title} required maxLength={120} onChange={event => setTitle(event.target.value)} />
       <Select label="Workspace" value={workspaceId} disabled={!!initial} placeholder="Choose a workspace"
         renderValue={value => workspaces.find(item => item.workspace.id === value)?.workspace.title ?? 'Choose a workspace'}
-        onValueChange={value => { setWorkspaceId(String(value)); setViews([]); setAddedScreens([]); setWidgets([]); setError(null) }}>
+        onValueChange={value => { setWorkspaceId(String(value)); setViews([]); setAddedScreens([]); setWidgets([]); setFlows(undefined); setError(null) }}>
         {workspaces.map(item => <Select.Option key={item.workspace.id} value={item.workspace.id}>{item.workspace.title || 'Untitled workspace'}</Select.Option>)}
       </Select>
       <p className="text-sm text-kumo-subtle">Choose where this console’s screens and widgets live.</p>
@@ -134,6 +146,10 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
             {boundViewsOn && <ConsoleBoundViewRegistry boundViews={shownBoundViews} published={initial?.console.published?.content.boundViews}
               candidates={widgetInstalls} hostBoards={shownHostBoards} otherCount={widgets.length + shownHostBoards.length}
               assistantOnly={fullChat === 'only'} disabled={!available} onChange={setBoundViews} />}
+            <ConsoleFlowRegistry flows={workspaceFlows} selected={shownFlows}
+              published={initial?.console.published ? initial.console.published.flows ?? [] : undefined}
+              shownScreens={[...new Set(views.flatMap(viewScreens))]} screens={screens}
+              disabled={!available} onChange={setFlows} />
           </>}
     </div>}
     {step === 2 && <div className="space-y-5">
@@ -152,6 +168,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
       {fullChat === 'only' && <p className="text-sm text-kumo-subtle">This console keeps its saved views, but only shows Assistant.</p>}
       {fullChat === 'only' && hostBoardsOn && shownHostBoards.length > 0 && <p role="status" className="text-sm text-kumo-subtle">Its boards are unavailable to operators while it shows only Assistant.</p>}
       {fullChat === 'only' && boundViewsOn && shownBoundViews.length > 0 && <p role="status" className="text-sm text-kumo-subtle">Its views are unavailable to operators while it shows only Assistant.</p>}
+      {fullChat === 'only' && shownFlows.length > 0 && <p role="status" className="text-sm text-kumo-subtle">Its flows are unavailable to employees while it shows only Assistant.</p>}
     </div>}
     {step === 3 && <section aria-label="Console preview" className="overflow-hidden rounded-xl border border-kumo-line">
       <div className="border-b border-kumo-line px-5 py-3 font-medium text-kumo-default">{title}</div>
@@ -159,11 +176,12 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
         <div className="w-40 shrink-0 space-y-2 bg-kumo-elevated p-4 text-sm text-kumo-subtle">
           {fullChat !== 'off' && <p className="flex items-center gap-2"><ChatsCircleIcon aria-hidden />Assistant</p>}
           {fullChat !== 'only' && views.map(view => <p className="flex items-center gap-2" key={view.id}><LayoutIcon className="shrink-0" aria-hidden /><span className="truncate">{view.title}</span></p>)}
+          {fullChat !== 'only' && chosenFlows.map(flow => <p className="flex items-center gap-2" key={flow.id}><ListNumbersIcon className="shrink-0" aria-hidden /><span className="truncate">{flow.title}</span></p>)}
         </div>
         <div className="flex min-w-0 flex-1 flex-col items-center justify-center gap-3 p-5 text-center">
           <p className="font-medium text-kumo-default">{fullChat === 'default' || fullChat === 'only' ? 'How can I help?' : views[0]?.title}</p>
           <p className="text-sm text-kumo-subtle">{fullChat === 'default' || fullChat === 'only' ? 'Starts with your shared assistant conversation' : 'Starts with this view and side chat'}</p>
-          <p className="text-xs text-kumo-subtle">{views.length} views · {new Set(views.flatMap(view => view.type === 'screen' ? [view.screen] : view.screens)).size} screens</p>
+          <p className="text-xs text-kumo-subtle">{views.length} views · {new Set(views.flatMap(view => view.type === 'screen' ? [view.screen] : view.screens)).size} screens{chosenFlows.length > 0 ? ` · ${chosenFlows.length} ${chosenFlows.length === 1 ? 'flow' : 'flows'}` : ''}</p>
         </div>
       </div>
     </section>}

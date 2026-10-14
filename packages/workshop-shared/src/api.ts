@@ -472,7 +472,11 @@ export interface OperateSession extends RpcTarget {
    * `consoleChanged` when a console event (`openConsole`, `openView`, `showScreen`) names a view or
    * screen outside the console's current definition, read through the caller's own access to the
    * console's workspace, and with `boardUnavailable` when an `openBoard` names a board the named
-   * workspace, opened with the caller's own access, holds no connection to. The kernel-only
+   * workspace, opened with the caller's own access, holds no connection to. A `startFlow` must
+   * name a flow of the published console the page has open (its frozen copy, see
+   * `ConsolePublication.flows`) or one of the caller's own flows, read through their own access
+   * to its workspace, or it is refused with `flowUnavailable`; its `title` and `steps` must then
+   * equal one of those definitions exactly, or it is refused with `invalidEvent`. The kernel-only
    * `handoverReceived` and `handoverSent` are refused with `invalidEvent`. Either way nothing
    * changes.
    */
@@ -670,6 +674,8 @@ export const OPERATE_SESSION_ERROR_CODES = {
   boardUnavailable: "OPERATE_SESSION_BOARD_UNAVAILABLE",
   /** A handover names no other user of this deployment. */
   recipientUnavailable: "OPERATE_SESSION_RECIPIENT_UNAVAILABLE",
+  /** The flow named is in neither the open published console nor the caller's own flows. */
+  flowUnavailable: "OPERATE_SESSION_FLOW_UNAVAILABLE",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -689,6 +695,8 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
       "choose another board.",
   [OPERATE_SESSION_ERROR_CODES.recipientUnavailable]:
       "There is no other person with that id here to hand this over to.",
+  [OPERATE_SESSION_ERROR_CODES.flowUnavailable]:
+      "That flow is not offered by the console you have open, and is not one of your own flows.",
 });
 
 /** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */
