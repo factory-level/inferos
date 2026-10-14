@@ -2,15 +2,17 @@ import { useRef, useState } from 'react'
 import { ArrowLeftIcon, ArrowRightIcon, ChatCircleIcon, CheckIcon, XIcon } from '@phosphor-icons/react'
 import type { OperateEvent, OperateFlowRun } from '@gadgets/workshop-shared/operate-session'
 import { WorkshopButton } from '../../components/WorkshopControls'
-import { FlowScreen } from './FlowScreen'
+import { FlowScreen, type FlowConsole } from './FlowScreen'
 
 /**
  * The full-canvas state: a running flow's current step fills the page, in place of the session's
  * tabs and the app's navigation. Back and Next move the step through the session, so every tab
  * and device of the person's shows the same step.
  */
-export const FlowPage = ({ flow, chatOpen, onEvent }: {
+export const FlowPage = ({ flow, console: shown, chatOpen, onEvent }: {
   flow: OperateFlowRun
+  /** The console open on the page, through which a use-role viewer sees the steps. */
+  console: FlowConsole
   chatOpen: boolean
   onEvent: (event: OperateEvent) => void
 }) => {
@@ -55,8 +57,8 @@ export const FlowPage = ({ flow, chatOpen, onEvent }: {
       </header>
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <main ref={scrollRoot} className="min-h-0 min-w-0 flex-1 overflow-auto bg-kumo-tint">
-          <FlowScreen scrollRoot={scrollRoot} key={`${flow.index}/${flow.steps[flow.index]}`} workspaceId={flow.workspaceId}
-            screenId={flow.steps[flow.index]!} onTitle={setStepTitle} />
+          <FlowScreen scrollRoot={scrollRoot} key={`${flow.index}/${flow.steps[flow.index]}`} run={flow}
+            console={shown} onTitle={setStepTitle} />
         </main>
       </div>
     </div>

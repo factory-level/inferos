@@ -8,7 +8,7 @@ import type { OperateEvent, OperateFlowRun } from '@gadgets/workshop-shared/oper
 
 vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: () => <div data-testid="chat" /> }))
 vi.mock('./FlowScreen', () => ({
-  FlowScreen: ({ screenId }: { screenId: string }) => <div data-testid="step">{screenId}</div>,
+  FlowScreen: ({ run }: { run: OperateFlowRun }) => <div data-testid="step">{run.steps[run.index]}</div>,
 }))
 
 import { FlowPage } from './FlowPage'
@@ -35,7 +35,8 @@ afterEach(() => {
 })
 
 const render = (index: number, chatOpen = false) => act(() => root.render(
-  <FlowPage flow={{ ...FLOW, index }} chatOpen={chatOpen} onEvent={onEvent} />,
+  <FlowPage flow={{ ...FLOW, index }} console={{ open: null, entry: undefined, loading: false, sessionWorkspace: null }}
+    chatOpen={chatOpen} onEvent={onEvent} />,
 ))
 const button = (name: string) => {
   const found = [...container.querySelectorAll('button')]

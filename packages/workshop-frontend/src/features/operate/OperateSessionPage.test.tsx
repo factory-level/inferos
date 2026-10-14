@@ -70,7 +70,9 @@ vi.mock('./SessionApprovals', () => ({
 }))
 vi.mock('./useSessionWorkspace', () => ({ useSessionWorkspace: () => null }))
 vi.mock('./SessionScreen', () => ({ SessionScreen: ({ screenId }: { screenId: string }) => <div data-testid="screen">{screenId}</div> }))
-vi.mock('./FlowScreen', () => ({ FlowScreen: ({ screenId }: { screenId: string }) => <div data-testid="step">{screenId}</div> }))
+vi.mock('./FlowScreen', () => ({
+  FlowScreen: ({ run }: { run: { steps: string[]; index: number } }) => <div data-testid="step">{run.steps[run.index]}</div>,
+}))
 vi.mock('./OperateSessionContext', () => ({
   useOperateSession: () => ({ snapshot: { seq: 3, state: testState.state }, recentEvents: testState.recentEvents,
     error: null, dispatch: testState.dispatch, session: { stub: {} } }),

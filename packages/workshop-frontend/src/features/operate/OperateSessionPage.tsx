@@ -198,7 +198,8 @@ export const OperateSessionPage = () => {
               : <ConsoleBuilder key={`${search.workspace ?? ''}/${setup}`} workspaces={workspaces.filter(canBuild)} initial={editing}
                   onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
           : tools ? <InferOpsCanvasHome />
-          : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send} />
+          : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={send}
+              console={{ open: run, entry, loading: screens.status === 'loading', sessionWorkspace }} />
           : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
           : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} board={state.board}
               sessionWorkspace={sessionWorkspace} onEvent={send} onPublish={setPublishing} />
