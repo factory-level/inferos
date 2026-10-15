@@ -21,6 +21,21 @@
 // The publish-job count (exactly one, for P1 only) is read by the seed's `verify` step after this
 // file runs, since the job table is in InferOps' database.
 //
+// Step B (MVP-40 worker proof), opt-in again with `INFEROPS_WIKI_LIVE_PUBLISH`, one phase per run
+// of this file. The approval phase above runs with it unset, before any job consumer exists (L3
+// asserts nothing was published yet). Then the runner starts inferops' test-only
+// `wiki-publish-consumer.ts` (the real `knowledge.wiki.publish` job only, from the real queued
+// envelope) and runs this file again:
+// - `published`: L-B1, the owner reads P1 published into its target at expectedVersion + 1 (a
+//   bounded wait while the consumer runs the queued job); L-B2, the page keeps its id, slug,
+//   parent and pillar membership, has P1's title and content, and no Master role; L-B4, P2 and the
+//   member's refused approval published nothing;
+// - then the runner tells the consumer to redeliver P1's completed job envelope once, and waits for
+//   it to settle; `redelivered`: L-B3, P1 is still published at the same version and the page did
+//   not change, and a direct same-hash approval by the owner replays without queueing a job.
+// The job counts and states, sibling order and provenance are read by the seed's `verify` after
+// each phase. Only the describe of the selected phase runs.
+//
 // What it does NOT prove: InferLab sign-in (the InferLab legs are a fixture, as in
 // `inferops-members-live.test.ts`; the tokens are InferOps' real stub-login tokens), publication
 // (no worker runs; the proof stops at approved and queued), a deployed InferOps, the shared-gadget
@@ -31,6 +46,7 @@
 //   INFEROPS_WIKI_LIVE_BASE_URL  the local InferOps API origin, e.g. http://127.0.0.1:8380
 //   INFEROPS_WIKI_LIVE_ORIGIN    an origin the API's CORS allows (default http://localhost:3000)
 //   INFEROPS_WIKI_LIVE_SEED      the JSON the seed printed (path to a file)
+//   INFEROPS_WIKI_LIVE_PUBLISH   unset (approval), `published` or `redelivered` (Step B phases)
 //
 // Run, after `pnpm --filter @gadgets/integration-tests run test:prebuild`:
 //   INFEROPS_WIKI_LIVE_BASE_URL=... INFEROPS_WIKI_LIVE_SEED=... \
@@ -51,7 +67,11 @@ const LIVE = {
   baseUrl: process.env.INFEROPS_WIKI_LIVE_BASE_URL?.replace(/\/+$/, "") ?? "",
   origin: process.env.INFEROPS_WIKI_LIVE_ORIGIN ?? "http://localhost:3000",
   seed: process.env.INFEROPS_WIKI_LIVE_SEED ?? "",
+  publish: process.env.INFEROPS_WIKI_LIVE_PUBLISH ?? "",
 };
+if (!["", "published", "redelivered"].includes(LIVE.publish)) {
+  throw new Error("INFEROPS_WIKI_LIVE_PUBLISH must be unset, published or redelivered.");
+}
 
 const INFEROPS_GATEKEEPER_DIR = resolve(import.meta.dirname, "../../../custom-gatekeepers/gatekeeper-inferops");
 const GATEKEEPER_WORKER = "gatekeeper-inferops";
@@ -61,7 +81,10 @@ const FIXTURE_INFERLAB = "https://inferlab.fixture.test";
 const WIKI_URL = "inferops://acme.knowledge/knowledge/wiki";
 
 type SeededProposal = { id: string; proposalHash: string; requestedBy: string; sources: { sectionId: string; version: number }[] };
-type Seed = { tag: string; p1: SeededProposal; p2: SeededProposal };
+type Seed = {
+  tag: string; lane: string; p1: SeededProposal & { targetDocumentId: string; expectedVersion: number };
+  p2: SeededProposal; p1Parent: { id: string; siblingOrder: number };
+};
 
 const randomHex = () => Array.from(randomBytes(8), byte => byte.toString(16).padStart(2, "0")).join("");
 
@@ -191,50 +214,53 @@ const entryOf = async (ws: Gadget, id: number) => (await ws.listActions({ filter
 const failure = (call: Promise<unknown>) =>
   call.then(() => "", (error: unknown) => error instanceof Error ? error.message : String(error));
 
-describe.skipIf(!LIVE.baseUrl)("Wiki proposal approval against a local InferOps", () => {
-  beforeAll(async () => {
-    if (!LIVE.seed) throw new Error("INFEROPS_WIKI_LIVE_SEED must name the seed's JSON.");
-    seed = JSON.parse(readFileSync(LIVE.seed, "utf8")) as Seed;
-    if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(LIVE.baseUrl)) {
-      throw new Error("INFEROPS_WIKI_LIVE_BASE_URL must be a local InferOps.");
-    }
-    const [owner, member] = await Promise.all([signIn("owner"), signIn("member")]);
+async function setUp(): Promise<void> {
+  if (!LIVE.seed) throw new Error("INFEROPS_WIKI_LIVE_SEED must name the seed's JSON.");
+  seed = JSON.parse(readFileSync(LIVE.seed, "utf8")) as Seed;
+  if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(LIVE.baseUrl)) {
+    throw new Error("INFEROPS_WIKI_LIVE_BASE_URL must be a local InferOps.");
+  }
+  const [owner, member] = await Promise.all([signIn("owner"), signIn("member")]);
 
-    network.install();
-    harness = await startHarness({
-      gatekeepers: [{
-        binding: "INFEROPS",
-        dir: INFEROPS_GATEKEEPER_DIR,
-        patch: config => {
-          if (process.env.WORKSHOP_INTEGRATION_PREBUILT === "1") delete config.build;
-          config.vars = {
-            ...config.vars,
-            INFERLAB_AUTH_ORIGIN: FIXTURE_INFERLAB,
-            INFEROPS_BASE_URL: LIVE.baseUrl,
-            BASE_URL: "http://workshop.test/gatekeeper/inferops",
-          };
-          // Never the stopgap: no shared InferOps token reaches this gatekeeper.
-          delete (config.vars as Record<string, unknown>).INFEROPS_API_TOKEN;
-        },
-      }],
-    });
-    people.owner = await connectPerson("owner", owner!);
-    people.member = await connectPerson("member", member!);
-    expect(knowledgeOf(owner!)).toBe(knowledgeOf(member!));
-  }, 120_000);
-
-  afterAll(async () => {
-    try {
-      await harness?.server.close();
-    } finally {
-      const escaped = network.getUnmockedCalls();
-      network.uninstall();
-      evidence.push(`unmocked non-loopback calls from InferOS: ${escaped.length}`);
-      console.log(`\nLocal Wiki proposal evidence:\n${evidence.map(line => `  ${line}`).join("\n")}\n`);
-      // Nothing left the machine: every InferOS request was loopback or the InferLab fixture.
-      expect(escaped).toEqual([]);
-    }
+  network.install();
+  harness = await startHarness({
+    gatekeepers: [{
+      binding: "INFEROPS",
+      dir: INFEROPS_GATEKEEPER_DIR,
+      patch: config => {
+        if (process.env.WORKSHOP_INTEGRATION_PREBUILT === "1") delete config.build;
+        config.vars = {
+          ...config.vars,
+          INFERLAB_AUTH_ORIGIN: FIXTURE_INFERLAB,
+          INFEROPS_BASE_URL: LIVE.baseUrl,
+          BASE_URL: "http://workshop.test/gatekeeper/inferops",
+        };
+        // Never the stopgap: no shared InferOps token reaches this gatekeeper.
+        delete (config.vars as Record<string, unknown>).INFEROPS_API_TOKEN;
+      },
+    }],
   });
+  people.owner = await connectPerson("owner", owner!);
+  people.member = await connectPerson("member", member!);
+  expect(knowledgeOf(owner!)).toBe(knowledgeOf(member!));
+}
+
+async function tearDown(): Promise<void> {
+  try {
+    await harness?.server.close();
+  } finally {
+    const escaped = network.getUnmockedCalls();
+    network.uninstall();
+    evidence.push(`unmocked non-loopback calls from InferOS: ${escaped.length}`);
+    console.log(`\nLocal Wiki proposal evidence:\n${evidence.map(line => `  ${line}`).join("\n")}\n`);
+    // Nothing left the machine: every InferOS request was loopback or the InferLab fixture.
+    expect(escaped).toEqual([]);
+  }
+}
+
+describe.skipIf(!LIVE.baseUrl || LIVE.publish !== "")("Wiki proposal approval against a local InferOps", () => {
+  beforeAll(setUp, 120_000);
+  afterAll(tearDown);
 
   it("L1: the owner's per-person reads equal InferOps' own answer, as observations", async () => {
     const { ws, session } = await wikiOf("owner");
@@ -322,5 +348,72 @@ describe.skipIf(!LIVE.baseUrl)("Wiki proposal approval against a local InferOps"
       state: "in_review", approvedHash: null, decidedBy: null,
     });
     evidence.push(`L6 owner self-approval of P2 refused CONFLICT (failed, not retryable); P2 still in_review, undecided`);
+  });
+});
+
+describe.skipIf(!LIVE.baseUrl || LIVE.publish !== "published")("Step B: the queued publish job, read back through InferOS", () => {
+  beforeAll(setUp, 120_000);
+  afterAll(tearDown);
+
+  it("L-B1: the owner reads P1 published into its target at expectedVersion + 1, once the real job ran", async () => {
+    // Bounded wait on InferOps' own answer (each InferOS read is an observation), then one InferOS read.
+    await waitFor("P1 settled by the queued job", async () => {
+      const state = (await proposalDirect(people.owner.person, seed.p1.id)).body.proposal?.state;
+      return state === "approved" || state === "publishing" ? null : state;
+    }, 60_000);
+    const { session } = await wikiOf("owner");
+    const published = (await session.readProposal(seed.p1.id)).proposal;
+    expect(published).toMatchObject({
+      state: "published", publishedDocumentId: seed.p1.targetDocumentId,
+      publishedVersion: seed.p1.expectedVersion + 1, blockedReason: null, lastError: null,
+    });
+    const direct = (await proposalDirect(people.owner.person, seed.p1.id)).body.proposal;
+    expect(direct).toMatchObject({
+      state: "published", publishedDocumentId: seed.p1.targetDocumentId, publishedVersion: seed.p1.expectedVersion + 1,
+      decidedBy: { id: people.owner.person.user.id, type: "user" },
+    });
+    evidence.push(`L-B1 P1 ${seed.p1.id} published into ${seed.p1.targetDocumentId} at version ${seed.p1.expectedVersion + 1}`);
+  }, 90_000);
+
+  it("L-B2: the page keeps its identity, parent and pillar, with P1's title and content", async () => {
+    const { session } = await wikiOf("owner");
+    const { proposal } = await session.readProposal(seed.p1.id);
+    const page = await session.readDocument(seed.p1.targetDocumentId);
+    expect(page).toMatchObject({
+      id: seed.p1.targetDocumentId, title: proposal.title, body: proposal.content,
+      version: seed.p1.expectedVersion + 1, masterRole: null,
+    });
+    expect(page.slug).toBe(proposal.targetSlug);
+    const structure = await session.readStructure();
+    const pillar = structure.pillars.find(p => p.key === seed.lane);
+    expect(pillar?.members.find(m => m.id === seed.p1.targetDocumentId))
+      .toMatchObject({ slug: proposal.targetSlug, parentId: seed.p1Parent.id });
+    evidence.push(`L-B2 page ${page.id} (${page.slug}) at v${page.version}: parent ${seed.p1Parent.id}, still in pillar ${seed.lane}, body and title = P1's`);
+  });
+
+  it("L-B4: P2 and the member's refused approval published nothing", async () => {
+    const { session } = await wikiOf("owner");
+    const { proposal } = await session.readProposal(seed.p2.id);
+    expect(proposal).toMatchObject({ state: "in_review", publishedDocumentId: null, approvedHash: null });
+    evidence.push(`L-B4 P2 ${seed.p2.id} still in_review, unpublished`);
+  });
+});
+
+describe.skipIf(!LIVE.baseUrl || LIVE.publish !== "redelivered")("Step B: a redelivered publish job publishes nothing more", () => {
+  beforeAll(setUp, 120_000);
+  afterAll(tearDown);
+
+  it("L-B3: after one redelivery of the exact envelope, P1 and its page are unchanged; a same-hash approval replays", async () => {
+    const { session } = await wikiOf("owner");
+    const { proposal } = await session.readProposal(seed.p1.id);
+    expect(proposal).toMatchObject({
+      state: "published", publishedDocumentId: seed.p1.targetDocumentId, publishedVersion: seed.p1.expectedVersion + 1,
+    });
+    const page = await session.readDocument(seed.p1.targetDocumentId);
+    expect(page).toMatchObject({ version: seed.p1.expectedVersion + 1, body: proposal.content, title: proposal.title });
+    const replay = await approveDirect(people.owner.person, seed.p1.id, seed.p1.proposalHash, seed.p1.sources);
+    expect(replay.status).toBe(200);
+    expect(replay.body.proposal).toMatchObject({ id: seed.p1.id, state: "published", publishedVersion: seed.p1.expectedVersion + 1 });
+    evidence.push(`L-B3 after redelivery: P1 still published at v${page.version}, page unchanged; same-hash approve replayed (200, published)`);
   });
 });
