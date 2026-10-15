@@ -732,10 +732,13 @@ describe("Wiki proposal approval", () => {
     expect(action!.fields).toEqual({
       Page: "Release process", Revision: "1", "Proposal hash": hash,
       Summary: "Writes the release steps out as the page's own body.", Sources: "2 cited sections",
+      Contradictions: "none",
       Content: "# Release process\n\n1. Cut the release branch.\n2. Run the checks on it.\n3. Tag the build and announce it.",
     });
     // The identifying fields come before the content.
-    expect(Object.keys(action!.fields)).toEqual(["Page", "Revision", "Proposal hash", "Summary", "Sources", "Content"]);
+    expect(Object.keys(action!.fields)).toEqual(["Page", "Revision", "Proposal hash", "Summary", "Sources", "Contradictions", "Content"]);
+    // An edit keeps its pillars, so none is shown.
+    expect(action!.fields.Pillar).toBeUndefined();
     expect(await mock.approveRequests()).toEqual([]);
     expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("in_review");
 
@@ -939,6 +942,29 @@ describe("Wiki proposal approval", () => {
     });
   });
 
+  it("A9: a new page's card shows its destination, pillar and recorded contradictions before anything is sent", async () => {
+    const { hooks, mock, session } = setup();
+    const { proposal } = await mock.readProposal(P_NEW);
+    expect(proposal).toMatchObject({ parentId: OPERATIONS, pathwayType: "operations" });
+    await session.approveProposal(P_NEW, proposal.proposalHash);
+    const [action] = (await hooks.log()).actions;
+    expect(action!.fields).toMatchObject({
+      Page: 'New page "Postmortems" (postmortems) under "Operations"', Pillar: "operations",
+      "Proposal hash": proposal.proposalHash,
+    });
+    expect(action!.lists.Contradictions).toEqual(proposal.contradictions);
+    expect(proposal.contradictions).toEqual([
+      "The current-work section says postmortems are optional; the draft makes them required.",
+    ]);
+    // Destination, pillar and contradictions come before the content, and nothing is cut.
+    expect(action!.labels).toEqual([
+      "Page", "Pillar", "Revision", "Proposal hash", "Summary", "Sources", "Contradictions", "Content",
+    ]);
+    expect(action).toMatchObject({ complete: true, truncated: [] });
+    // Shown at staging: nothing has reached InferOps yet.
+    expect(await mock.approveRequests()).toEqual([]);
+  });
+
   it("A10: reads the later outcome from InferOps: stale when the target moved, superseded when revised", async () => {
     const { props, hooks, mock, session, id } = await staged();
     expect(await hooks.applyWiki(props, id)).toBeNull();
@@ -1107,7 +1133,7 @@ describe("Wiki proposal approval", () => {
     const fits = await mock.seedProposal({ title: "Fits", content: `# Fits\n\n${"word ".repeat(15_000)}` });
     await session.approveProposal(fits.id, fits.proposalHash);
     expect((await hooks.log()).actions[0]).toMatchObject({ complete: true, truncated: [] });
-    expect(Object.keys((await hooks.log()).actions[0]!.fields)).toEqual(["Page", "Revision", "Proposal hash", "Summary", "Sources", "Content"]);
+    expect(Object.keys((await hooks.log()).actions[0]!.fields)).toEqual(["Page", "Revision", "Proposal hash", "Summary", "Sources", "Contradictions", "Content"]);
   });
 });
 

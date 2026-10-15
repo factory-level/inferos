@@ -460,8 +460,9 @@ transaction, run as the approver.
   (`STALE_REVISION`), and a new page without a parent (`INVALID_REQUEST`). The card (`buildDescription`)
   says approving queues publication and publishes nothing, and that InferOps publishes only if the
   approver's access, the cited sections, grounding and the target still allow it, then shows the
-  page (or "New page … under …"), revision, hash, summary and source count before the content
-  verbatim. A card that would drop anything (`descriptionIsComplete` unset, the 96 KiB budget) is
+  page (or "New page … under …" and, for a new page, its pillar or "none"), revision, hash,
+  summary, source count and the contradictions the draft recorded (or "none") before the content
+  verbatim: each is InferOps' record of what the hash binds, shown as data. A card that would drop anything (`descriptionIsComplete` unset, the 96 KiB budget) is
   refused at staging (`INVALID_REQUEST`), so nothing is approved unseen. The stage guard joins the
   same pending approval and refuses another for the same proposal (`CONFLICT`). Action kind
   `inferops.wiki-proposal-approve`, `implementsRevert: false`, never auto-approvable, and the Wiki

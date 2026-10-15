@@ -211,6 +211,10 @@ export type QueueLog = {
     id: number; title: string; description: string; implementsRevert: boolean;
     /** Each field's label and shown value. */
     fields: Record<string, string>;
+    /** Each list field's label and shown items. */
+    lists: Record<string, string[]>;
+    /** Every field's label, in the order shown. */
+    labels: string[];
     /** The action kind's tag, when the action declares one. */
     kind?: string;
     /** Whether the description says nothing was dropped (`descriptionIsComplete`). */
@@ -233,12 +237,15 @@ class TestApprovalQueue extends RpcTarget {
 
   async submitAction(id: number, description: ActionDescription): Promise<void> {
     const fields: Record<string, string> = {};
+    const lists: Record<string, string[]> = {};
     for (const field of description.fields ?? []) {
       if ("value" in field && typeof field.value === "string") fields[field.label] = field.value;
+      if (field.kind === "list") lists[field.label] = [...field.items];
     }
     this.log.actions.push({
       id, title: description.title, description: description.description,
-      implementsRevert: description.implementsRevert ?? false, fields,
+      implementsRevert: description.implementsRevert ?? false, fields, lists,
+      labels: (description.fields ?? []).map(field => field.label),
       ...(description.actionKind ? { kind: description.actionKind.tag } : {}),
       complete: description.descriptionIsComplete === true,
       truncated: (description.fields ?? []).filter(field => "truncated" in field && field.truncated !== undefined)

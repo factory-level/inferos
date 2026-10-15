@@ -207,7 +207,9 @@
       "expectedVersion": null,
       "parentId": "60000000-0000-4000-8000-000000000007",
       "pathwayType": "operations",
-      "contradictions": [],
+      "contradictions": [
+        "The current-work section says postmortems are optional; the draft makes them required."
+      ],
       "sectionRefs": [],
       "requestedBy": "00000000-0000-4000-8000-0000000000d2",
       "revisedBy": null,

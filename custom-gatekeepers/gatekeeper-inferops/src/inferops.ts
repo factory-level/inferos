@@ -3253,7 +3253,9 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
 
   /**
    * The approval card: what approving does and does not do, then the fields that identify the
-   * proposal (page, revision, hash, summary, sources), then its content verbatim.
+   * proposal (page, for a new page its pillar, revision, hash, summary, sources, the contradictions
+   * the draft recorded), then its content verbatim. Every field is InferOps' own record of what the
+   * hash binds, shown as data; none of it changes what is approved.
    */
   async #approvalCard(proposal: WikiProposalRecord, isNewPage: boolean) {
     const binding = this.#binding;
@@ -3272,14 +3274,17 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       `if you still hold knowledge:publish, can see every cited section, every heading is grounded in ` +
       `them, and neither the page nor its sources changed; otherwise the proposal ends stale or ` +
       `blocked, and reading it shows which. An approval cannot be undone here.`)
-      .inline("Page", page)
+      .inline("Page", page);
+    // A new page is filed in its pillar on publication; an edit keeps its pillars, so none is shown.
+    if (isNewPage) builder.inline("Pillar", proposal.pathwayType ?? "none");
+    builder
       .inline("Revision", String(proposal.revision))
       .inline("Proposal hash", proposal.proposalHash);
     if (proposal.summary) builder.verbatim("Summary", proposal.summary);
-    return builder
-      .inline("Sources", `${proposal.sources.length} cited section${proposal.sources.length === 1 ? "" : "s"}`)
-      .verbatim("Content", proposal.content)
-      .finish();
+    builder.inline("Sources", `${proposal.sources.length} cited section${proposal.sources.length === 1 ? "" : "s"}`);
+    if (proposal.contradictions.length > 0) builder.list("Contradictions", proposal.contradictions);
+    else builder.inline("Contradictions", "none");
+    return builder.verbatim("Content", proposal.content).finish();
   }
 }
 
