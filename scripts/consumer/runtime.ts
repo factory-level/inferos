@@ -383,7 +383,7 @@ async function main() {
     const script = join(upstream, "scripts/consumer/intake.ts");
     if (!existsSync(script)) throw new Error("Pinned revision does not support customer intake; select a reviewed newer pin");
     const [action, file, ...rest] = process.argv.slice(3);
-    if (action !== "apply" || !file) throw new Error("Usage: pnpm inferos intake apply <file> [--file-issues OWNER/REPO] [--inferops]");
+    if (action !== "apply" || !file) throw new Error("Usage: pnpm inferos intake apply <file> [--file-issues OWNER/REPO] [--inferops [--rebase-onto SHA256]]");
     // The pinned script prints its own result or error; relay only its exit status.
     const result = spawnSync(process.execPath, [script, "apply", root, resolve(file), ...rest], { cwd: upstream, stdio: "inherit" });
     process.exitCode = result.status ?? 1;

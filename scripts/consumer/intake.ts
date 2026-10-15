@@ -7,7 +7,10 @@ import { parseArgs } from "node:util";
 import { parseCanvasDefinition, type CanvasSection } from "../../packages/workshop-shared/src/canvas.ts";
 import { canvasInventory, CANVAS_CONFIG_FILE, DEFAULT_CANVAS_CONFIG, resolveCanvasConfig, type CanvasConfig } from "./canvas.ts";
 import { CAPABILITY_REQUIREMENTS, migrateConsumerConfig, parseConsumerConfig, type CapabilityName } from "./config.ts";
-import { applyIntakeToInferOps, inferOpsBindingFromEnv, inferOpsComplete, proveInferOpsBinding, type FetchSeam, type InferOpsApplyResult, type InferOpsBinding } from "./intake-inferops.ts";
+import {
+  applyIntakeToInferOps, currentInferOpsIntake, inferOpsBindingFromEnv, inferOpsComplete, IntakeConflictError, proveInferOpsBinding,
+  type FetchSeam, type InferOpsApplyResult, type InferOpsBinding,
+} from "./intake-inferops.ts";
 import { capabilitySources, featureSources, inferOpsGatekeeperSelected, unsupportedCapabilities } from "./runtime.ts";
 
 /** The only intake format version this revision reads. */
@@ -308,7 +311,11 @@ export interface FieldChange {
 
 /** What the last `--inferops` run left in InferOps: references only, never a copy of InferOps data. */
 interface InferOpsRecord {
-  /** The provider's canonical hash; distinct from the raw-bytes `intakeSha256` and never compared with it. */
+  /**
+   * The provider's canonical hash of the last intake InferOps applied; distinct from the raw-bytes
+   * `intakeSha256` and never compared with it. It is the next run's base (inferops#2324), so a failed or
+   * refused run keeps it rather than clearing it: a cleared base would make every change a conflict.
+   */
   intakeSha256: string | null;
   intake: InferOpsApplyResult["intake"];
   pillars: InferOpsApplyResult["pillars"];
@@ -539,6 +546,11 @@ export interface ApplyIntakeWithInferOpsOptions extends ApplyIntakeOptions {
   binding?: InferOpsBinding;
   /** Replaces `fetch`; tests inject it. */
   fetch?: FetchSeam;
+  /**
+   * `--rebase-onto`: the reviewed resolution of an intake conflict. Sent as the base for this run only,
+   * in place of the recorded one, and only when it is InferOps' current intake (`inventory.list`).
+   */
+  rebaseOnto?: string;
 }
 
 /**
@@ -548,16 +560,34 @@ export interface ApplyIntakeWithInferOpsOptions extends ApplyIntakeOptions {
  * InferOps is contacted only after `inferos:check` passes, so a wrapper rollback never sits behind a
  * remote write. A later InferOps failure leaves the wrapper as derived and is reported step by step;
  * rerunning is safe because both InferOps writes are idempotent.
+ *
+ * Conflicting intake revisions (inferops#2324): every call names the base, the provider hash this
+ * wrapper last applied (or `rebaseOnto`). A conflict in the binding dry run stops the run with an
+ * {@link IntakeConflictError} before the wrapper is derived; one InferOps finds only at the apply (a
+ * race lost after the dry run) is reported with the same recovery data. The recorded base changes only
+ * when InferOps applied the intake.
  */
 export async function applyIntakeWithInferOps(root: string, intakePath: string, options: ApplyIntakeWithInferOpsOptions = {}) {
   const binding = options.binding ?? inferOpsBindingFromEnv();
   const { intake } = readIntakeFile(intakePath);
   if (intake.review.status !== "reviewed") throw new Error("Intake is a draft; apply only a reviewed intake (review.status \"reviewed\")");
-  await proveInferOpsBinding(intake, binding, options.fetch);
+  if (options.rebaseOnto !== undefined && !/^[0-9a-f]{64}$/.test(options.rebaseOnto)) {
+    throw new Error("--rebase-onto takes the current InferOps intake's sha-256 (64 lowercase hex)");
+  }
+  const base = options.rebaseOnto ?? readManagedRecord(root).inferops?.intakeSha256 ?? null;
+  const plan = await proveInferOpsBinding(intake, binding, options.fetch, { base });
+  if (options.rebaseOnto !== undefined) {
+    // A rebase names the state the reviewer looked at; it must still be InferOps' current one.
+    const current = await currentInferOpsIntake(binding, options.fetch);
+    if (current !== options.rebaseOnto) {
+      throw new Error(`--rebase-onto ${options.rebaseOnto} is not InferOps' current intake (${current ?? "none"}); review the current state, then rebase onto it. The wrapper is unchanged.`);
+    }
+  }
+  if (plan.conflicts.length) throw new IntakeConflictError(plan.conflicts, plan.currentIntakeSha256);
   const derived = applyIntake(root, intakePath, options);
   const before = readManagedRecord(root).inferops;
   const liveBefore = before?.livePillars ?? Object.keys(before?.masters ?? {});
-  const result = await applyIntakeToInferOps(intake, binding, options.fetch, { pillarsAppliedBefore: liveBefore.length > 0 });
+  const result = await applyIntakeToInferOps(intake, binding, options.fetch, { pillarsAppliedBefore: liveBefore.length > 0, base });
   const read = result.readback === "complete" || result.readback === "incomplete";
   const livePillars = read
     ? [...result.masters.filter(master => master.documentId).map(master => master.key), ...result.leftoverPillars]
@@ -566,7 +596,8 @@ export async function applyIntakeWithInferOps(root: string, intakePath: string, 
   const recordPath = join(root, MANAGED_RECORD_FILE);
   const record = readManagedRecord(root);
   record.inferops = {
-    intakeSha256: result.intakeSha256, intake: result.intake, pillars: result.pillars, readback: result.readback,
+    // Only an applied intake moves the base; a failed or refused one keeps the prior base (inferops#2324).
+    intakeSha256: result.intake === "applied" ? result.intakeSha256 : before?.intakeSha256 ?? null, intake: result.intake, pillars: result.pillars, readback: result.readback,
     rootDocumentId: result.rootDocumentId, masters: Object.fromEntries(result.masters.map(master => [master.key, master.documentId])),
     livePillars: livePillars.toSorted(),
   };
@@ -742,7 +773,12 @@ export function renderReport(report: IntakeReport): string {
       ...(report.inferops.leftoverPillars.length ? ["", `Pillars no longer selected but still live: ${report.inferops.leftoverPillars.map(key => `\`${key}\``).join(", ")}.`] : []),
       ...(report.inferops.sharedPages.length ? ["", `Pages filed under several pillars: ${report.inferops.sharedPages.map(page => `\`${page.slug}\` (${page.pillars.join(", ")})`).join("; ")}.`] : []),
       ...(report.inferops.unlinkedSops.length ? ["", `SOPs not linked to a Wiki page: ${report.inferops.unlinkedSops.map(item => `${item.operation} (${item.reason})`).join("; ")}.`] : []),
-      ...(report.inferops.error ? ["", `Did not complete: ${cell(report.inferops.error)}. Rerun \`pnpm inferos intake apply <file> --inferops\`; both InferOps writes are idempotent.`] : []),
+      ...(report.inferops.conflicts.length ? [
+        "",
+        `Conflicting intake revisions: InferOps refused the intake because another apply landed after this run's check. Its operations, intake record and current intake are unchanged, but a project InferOps created for this intake just before the refusal may remain (it is kept as created, and a rerun never duplicates it). These operations changed since the intake this wrapper last applied: ${report.inferops.conflicts.map(conflict => `\`${conflict.key}\` (${conflict.action})`).join(", ")}. The current InferOps intake is \`${report.inferops.currentIntakeSha256 ?? "unknown"}\`.`,
+        "",
+        `Resolve each by hand, then rerun \`pnpm inferos intake apply <file> --inferops --rebase-onto ${report.inferops.currentIntakeSha256 ?? "<current intake sha256>"}\`.`,
+      ] : report.inferops.error ? ["", `Did not complete: ${cell(report.inferops.error)}. Rerun \`pnpm inferos intake apply <file> --inferops\`; both InferOps writes are idempotent.`] : []),
       ...renderProviderRequirements(report.inferops.requirementReport),
     ] : []),
     "",
@@ -784,26 +820,30 @@ function renderProviderRequirements(report: InferOpsApplyResult["requirementRepo
   ];
 }
 
-const USAGE = "Usage: intake.ts apply CONSUMER_ROOT INTAKE_FILE [--file-issues OWNER/REPO] [--inferops]";
+const USAGE = "Usage: intake.ts apply CONSUMER_ROOT INTAKE_FILE [--file-issues OWNER/REPO] [--inferops [--rebase-onto SHA256]]";
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     let parsed;
     try {
-      parsed = parseArgs({ allowPositionals: true, options: { "file-issues": { type: "string" }, inferops: { type: "boolean" } } });
+      parsed = parseArgs({ allowPositionals: true, options: { "file-issues": { type: "string" }, inferops: { type: "boolean" }, "rebase-onto": { type: "string" } } });
     } catch { throw new Error(USAGE); }
     const [command, root, file, extra] = parsed.positionals;
     if (command !== "apply" || !root || !file || extra) throw new Error(USAGE);
+    if (parsed.values["rebase-onto"] !== undefined && !parsed.values.inferops) throw new Error("--rebase-onto applies only with --inferops");
     const options = { fileIssues: parsed.values["file-issues"] };
     const report = parsed.values.inferops
-      ? await applyIntakeWithInferOps(resolve(root), resolve(file), options)
+      ? await applyIntakeWithInferOps(resolve(root), resolve(file), { ...options, rebaseOnto: parsed.values["rebase-onto"] })
       : applyIntake(resolve(root), resolve(file), options);
     const inferops = report.inferops;
     const complete = inferops === null || inferOpsComplete(inferops);
     console.log(json({
       ok: complete, operation: "intake", reports: Object.values(REPORT_FILES), summary: report.summary,
       conflicts: report.configuration.conflicts, deployed: false,
-      ...(inferops ? { inferops: { intake: inferops.intake, pillars: inferops.pillars, readback: inferops.readback, error: inferops.error, requirementReport: inferops.requirementReport.status } } : {}),
+      ...(inferops ? { inferops: {
+        intake: inferops.intake, pillars: inferops.pillars, readback: inferops.readback, error: inferops.error, requirementReport: inferops.requirementReport.status,
+        ...(inferops.conflicts.length ? { conflicts: inferops.conflicts, currentIntakeSha256: inferops.currentIntakeSha256 } : {}),
+      } } : {}),
     }));
     if (!complete) process.exitCode = 1;
   } catch (error) {

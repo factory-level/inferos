@@ -17,6 +17,14 @@
  * intake apply in the operations workspace and a Wiki read in the InferMind one. Both writes are idempotent on InferOps, so a rerun after a
  * partial failure completes without duplicating anything or losing human edits. The token is sent
  * only in the `authorization` header and never appears in a result, an error or the report.
+ *
+ * Conflicting intake revisions require review (inferops#2324). Every intake call names its base: the
+ * provider hash of the intake this wrapper last applied. InferOps reports an operation that both this
+ * intake and, since that base, another apply changed as a `conflict` and refuses the whole intake
+ * (409 `STALE_REVISION`): its operations, intake record and current intake are unchanged. A conflict
+ * the dry run finds creates nothing; one found only at the apply (a race lost after the dry run) may
+ * leave a project InferOps created just before its locked check. The dry run surfaces it before the wrapper is derived
+ * ({@link IntakeConflictError}); the human's resolution is an explicit rebase onto the current intake.
  */
 import type { ConsumerIntake } from "./intake.ts";
 
@@ -64,6 +72,39 @@ export function inferOpsBindingFromEnv(env: NodeJS.ProcessEnv = process.env): In
     knowledgeWorkspaceId: read(INFEROPS_BINDING_VARS.knowledgeWorkspaceId),
   };
 }
+
+const HASH_PATTERN = /^[0-9a-f]{64}$/;
+
+/** One operation InferOps reported as conflicting, and the step this intake wanted for it. */
+export interface IntakeConflict { key: string; action: string }
+
+/**
+ * InferOps refused the intake because some operation changed since this wrapper's base intake. Raised
+ * by the binding dry run, before the wrapper is derived, so nothing changed anywhere.
+ */
+export class IntakeConflictError extends Error {
+  readonly conflicts: IntakeConflict[];
+  readonly currentIntakeSha256: string | null;
+  constructor(conflicts: IntakeConflict[], currentIntakeSha256: string | null) {
+    super([
+      `InferOps refused the intake before any write: ${conflicts.length} operation(s) changed since the intake this wrapper last applied:`,
+      conflicts.map(conflict => `${conflict.key} (${conflict.action})`).join(", ") + ".",
+      `The current InferOps intake is ${currentIntakeSha256 ?? "unknown"}.`,
+      "The wrapper is unchanged. Resolve each by hand (inventory.list shows the current operations), then rerun with",
+      `--rebase-onto ${currentIntakeSha256 ?? "<current intake sha256>"}.`,
+    ].join(" "));
+    this.conflicts = conflicts;
+    this.currentIntakeSha256 = currentIntakeSha256;
+  }
+}
+
+/** The conflicting operations of a provider change list (dry run), with the step each would have been. */
+const conflictsIn = (changes: unknown): IntakeConflict[] => Array.isArray(changes)
+  ? changes.filter(change => change?.kind === "operation" && change?.action === "conflict").map(change => ({
+    key: String(change.key),
+    action: /^this intake would (create|update|retire) it/.exec(typeof change.detail === "string" ? change.detail : "")?.[1] ?? "change",
+  }))
+  : [];
 
 /** `fetch`, injected in tests so nothing reaches a network. */
 export type FetchSeam = (url: string, init: RequestInit) => Promise<Response>;
@@ -206,11 +247,25 @@ export interface InferOpsApplyResult {
   /** Pages filed under two or more of the selected pillars: one page, several pillars. */
   sharedPages: { documentId: string; slug: string; pillars: string[] }[];
   unlinkedSops: { operation: string; reason: string }[];
+  /** The base this run sent: the provider hash of the intake applied before (or `--rebase-onto`). */
+  baseIntakeSha256: string | null;
+  /** Operations InferOps refused as conflicting (409 `STALE_REVISION` on step 1); empty otherwise. */
+  conflicts: IntakeConflict[];
+  /** The current InferOps intake when step 1 was refused as conflicting: the rebase target. */
+  currentIntakeSha256: string | null;
   /** The first failure, as `step: status code message`; null when every step succeeded. */
   error: string | null;
 }
 
-class StepError extends Error {}
+class StepError extends Error {
+  readonly code: string;
+  readonly details: Record<string, unknown> | null;
+  constructor(message: string, code = "", details: Record<string, unknown> | null = null) {
+    super(message);
+    this.code = code;
+    this.details = details;
+  }
+}
 
 /** A provider change list as `kind:key=action` lines. */
 const changeList = (value: unknown) => Array.isArray(value)
@@ -218,17 +273,33 @@ const changeList = (value: unknown) => Array.isArray(value)
 
 type Call = (step: string, workspace: string, method: "GET" | "POST", path: string, body?: unknown, idempotencyKey?: string) => Promise<Record<string, unknown>>;
 
-/** A provider error as `HTTP status CODE: message`, from either error envelope, without echoing the request. */
-async function describe(response: Response): Promise<string> {
+/**
+ * A provider error as `HTTP status CODE: message`, from either error envelope, without echoing the
+ * request; plus its code and `details` (recovery data, e.g. a conflict's current intake).
+ */
+async function describe(response: Response): Promise<{ text: string; code: string; details: Record<string, unknown> | null }> {
   let code = "";
   let message = "";
+  let details: Record<string, unknown> | null = null;
   try {
-    const body = await response.json() as { code?: unknown; message?: unknown; error?: { code?: unknown; message?: unknown } | string };
+    const body = await response.json() as { code?: unknown; message?: unknown; details?: unknown; error?: { code?: unknown; message?: unknown; details?: unknown } | string };
     const error = typeof body.error === "object" && body.error ? body.error : body;
     code = typeof error.code === "string" ? error.code : "";
     message = typeof error.message === "string" ? error.message.slice(0, 300) : "";
+    details = isRecord(error.details) ? error.details : null;
   } catch { /* a non-JSON error body says nothing more than its status */ }
-  return `HTTP ${response.status}${code ? ` ${code}` : ""}${message ? `: ${message}` : ""}`;
+  return { text: `HTTP ${response.status}${code ? ` ${code}` : ""}${message ? `: ${message}` : ""}`, code, details };
+}
+
+/** A 409 `STALE_REVISION` conflict's recovery data, read strictly; null for any other failure. */
+function conflictOf(error: unknown): { conflicts: IntakeConflict[]; currentIntakeSha256: string | null } | null {
+  if (!(error instanceof StepError) || error.code !== "STALE_REVISION" || !error.details) return null;
+  const { conflicts, currentIntakeSha256 } = error.details;
+  if (!Array.isArray(conflicts)) return null;
+  return {
+    conflicts: conflicts.filter(isRecord).map(conflict => ({ key: String(conflict.key), action: String(conflict.action) })),
+    currentIntakeSha256: typeof currentIntakeSha256 === "string" && HASH_PATTERN.test(currentIntakeSha256) ? currentIntakeSha256 : null,
+  };
 }
 
 function caller(binding: InferOpsBinding, fetchSeam: FetchSeam): Call {
@@ -251,7 +322,10 @@ function caller(binding: InferOpsBinding, fetchSeam: FetchSeam): Call {
     } catch (error) {
       throw new StepError(`${step}: InferOps unreachable (${(error as Error).name})`);
     }
-    if (!response.ok) throw new StepError(`${step}: ${await describe(response)}`);
+    if (!response.ok) {
+      const failure = await describe(response);
+      throw new StepError(`${step}: ${failure.text}`, failure.code, failure.details);
+    }
     try { return await response.json() as Record<string, unknown>; } catch { throw new StepError(`${step}: response is not JSON`); }
   };
 }
@@ -263,14 +337,35 @@ function caller(binding: InferOpsBinding, fetchSeam: FetchSeam): Call {
  * structure read, which the provider answers only in an InferMind workspace the token may read. A
  * wrong, swapped or unauthorized workspace is refused here, before the wrapper or InferOps changes.
  */
-export async function proveInferOpsBinding(intake: ConsumerIntake, binding: InferOpsBinding, fetchSeam: FetchSeam = fetch): Promise<void> {
+export async function proveInferOpsBinding(
+  intake: ConsumerIntake, binding: InferOpsBinding, fetchSeam: FetchSeam = fetch, options: { base?: string | null } = {},
+): Promise<{ conflicts: IntakeConflict[]; currentIntakeSha256: string | null }> {
   const call = caller(binding, fetchSeam);
+  let plan: Record<string, unknown>;
   try {
-    await call("operations binding", binding.operationsWorkspaceId, "POST", "/project/intake", { ...intake, dryRun: true });
+    plan = await call("operations binding", binding.operationsWorkspaceId, "POST", "/project/intake", { ...intake, ...withBase(options.base), dryRun: true });
     await call("knowledge binding", binding.knowledgeWorkspaceId, "GET", "/knowledge/wiki/structure");
   } catch (error) {
     throw new Error(`InferOps binding refused before any write. ${(error as Error).message}`, { cause: error });
   }
+  // The same dry run is the conflict review's first look: what InferOps would refuse, and its current intake.
+  const current = typeof plan.currentIntakeSha256 === "string" && HASH_PATTERN.test(plan.currentIntakeSha256) ? plan.currentIntakeSha256 : null;
+  return { conflicts: conflictsIn(plan.changes), currentIntakeSha256: current };
+}
+
+/** The request field naming the base intake; omitted when there is none (InferOps then fails closed). */
+const withBase = (base: string | null | undefined) => (base ? { baseIntakeSha256: base } : {});
+
+/**
+ * The operations workspace's current intake hash, from `inventory.list` (null before any intake). It is
+ * what `--rebase-onto` must name: a dry run whose base is already current reports no current hash.
+ */
+export async function currentInferOpsIntake(binding: InferOpsBinding, fetchSeam: FetchSeam = fetch): Promise<string | null> {
+  const inventory = await caller(binding, fetchSeam)("inventory.list", binding.operationsWorkspaceId, "GET", "/project/inventory") as { intake?: { sha256?: unknown } | null };
+  const sha = inventory.intake?.sha256;
+  if (inventory.intake === null || inventory.intake === undefined) return null;
+  if (typeof sha !== "string" || !HASH_PATTERN.test(sha)) throw new Error("inventory.list: the current intake has no sha-256");
+  return sha;
 }
 
 /**
@@ -278,7 +373,8 @@ export async function proveInferOpsBinding(intake: ConsumerIntake, binding: Infe
  * failure is returned as a step status, never thrown, so a partial result is reported truthfully.
  */
 export async function applyIntakeToInferOps(
-  intake: ConsumerIntake, binding: InferOpsBinding, fetchSeam: FetchSeam = fetch, options: { pillarsAppliedBefore?: boolean } = {},
+  intake: ConsumerIntake, binding: InferOpsBinding, fetchSeam: FetchSeam = fetch,
+  options: { pillarsAppliedBefore?: boolean; base?: string | null } = {},
 ): Promise<InferOpsApplyResult> {
   const call = caller(binding, fetchSeam);
 
@@ -286,14 +382,15 @@ export async function applyIntakeToInferOps(
   const result: InferOpsApplyResult = {
     intakeSha256: null, intake: "not-run", alreadyApplied: false, intakeChanges: [],
     requirementReport: { status: "not-run", problem: null, intakeSha256: null, requirements: [] }, pillars: "not-run", pillarChanges: [],
-    readback: "not-run", rootDocumentId: null, masters: [], leftoverPillars: [], sharedPages: [], unlinkedSops: unlinked, error: null,
+    readback: "not-run", rootDocumentId: null, masters: [], leftoverPillars: [], sharedPages: [], unlinkedSops: unlinked,
+    baseIntakeSha256: options.base ?? null, conflicts: [], currentIntakeSha256: null, error: null,
   };
   // Scoped to tenant, workspace and operation, so one key never replays across scopes or steps.
   const idempotencyKey = (operation: string, workspace: string, hash: string) =>
     `inferos-intake:${intake.inferops.tenant}:${workspace}:${operation}:${hash}`;
 
   try {
-    const applied = await call("intake.apply", binding.operationsWorkspaceId, "POST", "/project/intake", intake);
+    const applied = await call("intake.apply", binding.operationsWorkspaceId, "POST", "/project/intake", { ...intake, ...withBase(options.base) });
     if (typeof applied.intakeSha256 !== "string") throw new StepError("intake.apply: response has no intakeSha256");
     result.intakeSha256 = applied.intakeSha256;
     result.alreadyApplied = applied.alreadyApplied === true;
@@ -304,6 +401,9 @@ export async function applyIntakeToInferOps(
   } catch (error) {
     result.intake = "failed";
     result.error = (error as Error).message;
+    // A race lost after the dry run: another apply landed in between. Same recovery as the dry-run stop.
+    const conflict = conflictOf(error);
+    if (conflict) Object.assign(result, conflict);
     return result;
   }
 
