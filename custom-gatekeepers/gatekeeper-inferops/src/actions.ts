@@ -1,6 +1,6 @@
 // The actions a binding records between proposal and decision: on a board binding a transition, an
 // issue create or an issue update; on a coding-dispatch binding a dispatch or a run cancel; on a
-// Wiki binding a section update or a page body update. Each is
+// Wiki binding a section update, a page body update or a proposal approval. Each is
 // stored in the facet's KV under `action:<n>` (inferops.ts)
 // and carries the exact request it will send when applied, plus a fingerprint of that request.
 //
@@ -16,7 +16,7 @@
 //   have none, so their history is unknown.
 
 import type { NewIssueRequest, IssueChanges } from "./inferops-client";
-import type { Revision } from "./types";
+import type { Revision, WikiProposalSource } from "./types";
 
 /**
  * Where a recorded action stands. `failed` is an apply known not to have taken effect and refused
@@ -152,10 +152,33 @@ export type DocumentUpdateAction = ActionBase & {
   appliedVersion?: number;
 };
 
+/**
+ * A proposed approval of one Wiki proposal for publication, at the hash and cited sources read when
+ * it was proposed. InferOps queues the publication itself; nothing here publishes.
+ */
+export type ProposalApproveAction = ActionBase & {
+  kind: "proposal-approve";
+  proposalId: string;
+  /** The proposal hash read at staging; InferOps refuses any other. */
+  proposalHash: string;
+  /** The proposal's cited sources at staging, sorted by section id. */
+  sources: WikiProposalSource[];
+  /** For messages and the approval card only; not sent. */
+  targetTitle: string;
+  targetSlug: string;
+  isNewPage: boolean;
+  revision: number;
+  /**
+   * InferOps' state of the proposal in its answer to the applied approval (normally "approved"; a
+   * replay answers the state it has reached). A snapshot: never read as "published" by itself.
+   */
+  approvedState?: string;
+};
+
 /** Any recorded action. */
 export type ActionRecord =
   | TransitionAction | CreateAction | UpdateAction | DispatchAction | CancelRunAction
-  | SectionUpdateAction | DocumentUpdateAction;
+  | SectionUpdateAction | DocumentUpdateAction | ProposalApproveAction;
 
 /** An action a board binding records. */
 export type BoardAction = TransitionAction | CreateAction | UpdateAction;
@@ -163,8 +186,11 @@ export type BoardAction = TransitionAction | CreateAction | UpdateAction;
 /** An action a coding-dispatch binding records. */
 export type CodingAction = DispatchAction | CancelRunAction;
 
+/** A Wiki edit: what the page reads overlay. */
+export type WikiEditAction = SectionUpdateAction | DocumentUpdateAction;
+
 /** An action a Wiki binding records. */
-export type WikiAction = SectionUpdateAction | DocumentUpdateAction;
+export type WikiAction = WikiEditAction | ProposalApproveAction;
 
 /** A pending change to an existing issue: what simulation overlays and what blocks another. */
 export type PendingIssueChange = TransitionAction | UpdateAction;
@@ -177,7 +203,8 @@ export type StagedAction =
   | Omit<DispatchAction, "actionId" | "status">
   | Omit<CancelRunAction, "actionId" | "status">
   | Omit<SectionUpdateAction, "actionId" | "status">
-  | Omit<DocumentUpdateAction, "actionId" | "status">;
+  | Omit<DocumentUpdateAction, "actionId" | "status">
+  | Omit<ProposalApproveAction, "actionId" | "status">;
 
 /** A stored record, with legacy records (no `kind`) read as the transitions they are. */
 export function readAction(raw: unknown): ActionRecord | undefined {
@@ -213,6 +240,9 @@ export function requestOf(record: StagedAction | ActionRecord): unknown {
     case "document-update":
       return { kind: record.kind, documentId: record.documentId, body: record.body,
                expectedVersion: record.expectedVersion };
+    case "proposal-approve":
+      return { kind: record.kind, proposalId: record.proposalId, proposalHash: record.proposalHash,
+               sources: sortedSources(record.sources) };
   }
 }
 
@@ -223,7 +253,18 @@ export function isCodingAction(record: ActionRecord): record is CodingAction {
 
 /** Whether an action belongs to a Wiki binding. */
 export function isWikiAction(record: ActionRecord): record is WikiAction {
+  return isWikiEdit(record) || record.kind === "proposal-approve";
+}
+
+/** Whether an action is a Wiki section or page body edit. */
+export function isWikiEdit(record: ActionRecord): record is WikiEditAction {
   return record.kind === "section-update" || record.kind === "document-update";
+}
+
+/** Cited sources in one order (by section id), as an approval stages and sends them. */
+export function sortedSources(sources: readonly WikiProposalSource[]): WikiProposalSource[] {
+  return sources.map(({ sectionId, version }) => ({ sectionId, version }))
+    .toSorted((a, b) => (a.sectionId < b.sectionId ? -1 : a.sectionId > b.sectionId ? 1 : a.version - b.version));
 }
 
 /** JSON with object keys sorted and undefined members dropped, so equal requests hash equally. */

@@ -5,7 +5,8 @@
 
 import type {
   Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
-  WikiDocumentNode, WikiStructure,
+  WikiDocumentNode, WikiProposal, WikiProposalFreshness, WikiProposalSource, WikiProposalState,
+  WikiStructure,
 } from "./types";
 import type { WorkflowHeadRecord } from "./workflow-policy";
 
@@ -167,6 +168,37 @@ export type WikiSectionRecord = {
   /** InferOps' row version, bumped by every write. */
   version: number;
 };
+
+/** A Wiki proposal as InferOps returns it, field by field (no principals). */
+export type WikiProposalRecord = Omit<WikiProposal, "pending">;
+
+/** One proposal and its freshness for this account (`proposal.get`). */
+export type WikiProposalRead = { proposal: WikiProposalRecord; freshness: WikiProposalFreshness };
+
+/** What an approval sends: the hash reviewed and the cited sources at the versions reviewed. */
+export type WikiProposalApproval = { proposalHash: string; sources: WikiProposalSource[] };
+
+export type { WikiProposalState };
+
+/**
+ * What a refused approval says, by cause. InferOps' `proposal.approve` refusals map onto these in
+ * the HTTP client, and the mock refuses with the same, so both read alike.
+ */
+export const PROPOSAL_APPROVE_REFUSED = {
+  /** 409 `STALE_PROPOSAL` (another hash, other sources, or a superseded revision): STALE_REVISION. */
+  stale: "The proposal changed since it was approved here; read it again.",
+  /** Any other 409: CONFLICT. */
+  conflict: "InferMind refused this approval in the proposal's current state (already decided, " +
+    "decided by someone else, rejected, or failing its integrity check).",
+  /** 403 `SELF_APPROVAL_DENIED`: CONFLICT, since no grant fixes it. */
+  self: "You requested this draft or wrote this revision; another person must approve it.",
+  /** Any other 403: FORBIDDEN, which a grant can fix. */
+  forbidden: "Approving for publication needs knowledge:publish (Owner or Admin).",
+  /** 422 `NEEDS_PLACEMENT`: INVALID_REQUEST. */
+  placement: "A new page needs a parent; set one in InferMind.",
+  /** 404, including the proposal routes absent while Wiki publishing is off: NOT_FOUND. */
+  notFound: "No such proposal in this Wiki, or Wiki publishing is off in InferOps.",
+} as const;
 
 /**
  * One column of a custom table as InferOps defines it, personal ones included: the gatekeeper
@@ -361,6 +393,29 @@ export interface InferOpsClient {
    * section first and decides. The key is sent anyway, for when InferOps honors it.
    */
   updateSection(sectionId: string, body: string, idempotencyKey: string): Promise<WikiSectionRecord>;
+
+  /**
+   * The workspace's Wiki proposals, newest first (InferOps returns at most 200), optionally only
+   * one state's (`proposal.list`, `knowledge:read`). NOT_FOUND while Wiki publishing is off in
+   * InferOps (its routes are not mounted).
+   */
+  listProposals(state?: WikiProposalState): Promise<WikiProposalRecord[]>;
+
+  /**
+   * One proposal by UUID with its freshness, read under the account's lens (`proposal.get`).
+   * NOT_FOUND for one this workspace does not have (or not a UUID), or while publishing is off.
+   */
+  readProposal(proposalId: string): Promise<WikiProposalRead>;
+
+  /**
+   * Approve one in_review proposal at `approval` (`proposal.approve`, `knowledge:publish`), which
+   * also queues its publication. InferOps replays a resend by the same principal with the same
+   * hash on a decided proposal, answering the proposal as it now is; the key is sent by convention
+   * only. Refusals read as `PROPOSAL_APPROVE_REFUSED`. The answer must be this proposal, approved
+   * at this hash, or it is UNAVAILABLE.
+   */
+  approveProposal(proposalId: string, approval: WikiProposalApproval, idempotencyKey: string):
+    Promise<WikiProposalRecord>;
 
   /** The workspace's custom tables the account can open, for the resource picker. */
   listTables(): Promise<TableSummary[]>;

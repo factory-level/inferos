@@ -36,7 +36,10 @@ import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/op
 //   are approved actions. A section edit is checked at apply against the section's current version,
 //   since InferOps' section PATCH has no expected version; a body edit is InferOps' own strict
 //   compare-and-swap on the page version (see `InferOpsWikiGatekeeper.applyAction`). InferOps'
-//   product gate and `knowledge:*` permissions apply to the person's token.
+//   product gate and `knowledge:*` permissions apply to the person's token. Drafted page proposals
+//   are read, and one is approved for publication as an approved action that only the binding's own
+//   account holder can decide: refused while the gadget is shared or on the stopgap connection
+//   (`approveProposal`). Approving queues InferOps' publication; nothing here publishes.
 // - A custom table is a fourth kind, `inferops://<tenant>.<workspace>/object/table/<tableId>`, bound
 //   into an `InferOpsTableGatekeeper` facet whose props fix the account, host, table id and
 //   workspace id, and offered only while `INFEROPS_TABLES_ENABLED` is on (table.ts). It is read-only
@@ -109,10 +112,11 @@ import {
 } from "@gadgets/gatekeeper-kit/credentials";
 import {
   InferOpsError, atStage, inferOpsErrorCode, isPolicyRefusal, writeStage, type InferOpsClient,
-  type ProjectSummary, type RunRecord, type TableRead, type WikiDocumentHead, type WikiStructureRecord, type WriteStage,
+  type ProjectSummary, type RunRecord, type TableRead, type WikiDocumentHead, type WikiProposalRead,
+  type WikiProposalRecord, type WikiStructureRecord, type WriteStage,
 } from "./inferops-client";
 import {
-  BOARD_WRITES, CheckRefused, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
+  BOARD_WRITES, CheckRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
 } from "./apply-attempts";
 import {
   WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, openHttpInferOpsClient, tableNotFound,
@@ -154,10 +158,10 @@ import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
 } from "./simulation";
 import {
-  fingerprintOf, isCodingAction, isIssueChange, isWikiAction, matchesFingerprint, readAction,
-  type ActionRecord, type CancelRunAction, type CreateAction, type DispatchAction,
-  type DocumentUpdateAction, type SectionUpdateAction, type StagedAction, type StoredFailure,
-  type UpdateAction, type WikiAction,
+  fingerprintOf, isCodingAction, isIssueChange, isWikiAction, isWikiEdit, matchesFingerprint, readAction,
+  sortedSources, type ActionRecord, type CancelRunAction, type CreateAction, type DispatchAction,
+  type DocumentUpdateAction, type ProposalApproveAction, type SectionUpdateAction, type StagedAction,
+  type StoredFailure, type UpdateAction, type WikiEditAction,
 } from "./actions";
 import {
   authoredContent, composeDocumentText, embeddedReferences, masterStructureText, wikilinksOf,
@@ -173,7 +177,7 @@ import type {
   InferOpsWorkflowPolicySession, Issue, IssueChanges, ListRecordsOptions, NewIssue, Repo,
   WorkflowPolicyHead, WorkspaceMembers,
   Revision, Run, TableDescription, TableRecord, WikiDocument,
-  WikiDocumentNode, WikiSection, WikiStructure,
+  WikiDocumentNode, WikiProposal, WikiProposalDetail, WikiProposalState, WikiSection, WikiStructure,
 } from "./types";
 import type { NewIssueRequest, WikiSectionRecord } from "./inferops-client";
 import TYPES_CODE from "./types.txt";
@@ -1278,7 +1282,7 @@ class ActionBinding<P> {
     const { outcome, retryable } = classifyAttempt(
       { code, stage, policy: isPolicyRefusal(error) }, earlierUncertain, options.policy);
     const message = outcome === "notApplied"
-      ? error instanceof CheckRefused ? error.reason : applyFailureMessage(record, code)
+      ? error instanceof CheckRefused ? error.reason : applyFailureMessage(record, code, detailOf(error))
       : uncertainMessage(record, code, stage, earlierUncertain, retryable && options.policy.replayable);
     const failure: StoredFailure = { outcome, message, ...(code !== null ? { code } : {}) };
     if (outcome === "notApplied") {
@@ -1667,7 +1671,14 @@ function actionLabel(record: ActionRecord): string {
       return `The edit of section ${plainInline(record.tag, 60)} of "${plainInline(record.documentTitle, 60)}"`;
     case "document-update":
       return `The edit of page "${plainInline(record.documentTitle, 60)}"`;
+    case "proposal-approve":
+      return `The approval of Wiki proposal "${plainInline(record.targetTitle, 60)}" (revision ${record.revision})`;
   }
+}
+
+/** A data-source failure's own detail, past its code; undefined for any other error. */
+function detailOf(error: unknown): string | undefined {
+  return error instanceof InferOpsError ? error.detail : undefined;
 }
 
 /**
@@ -1724,13 +1735,14 @@ function isBoardAction(record: ActionRecord): boolean {
   return !isCodingAction(record) && !isWikiAction(record);
 }
 
-function applyFailureMessage(record: ActionRecord, code: string | null): string {
+function applyFailureMessage(record: ActionRecord, code: string | null, detail?: string): string {
   const what = actionLabel(record);
   if (isCodingAction(record)) {
     const coding = codingFailureMessage(record, what, code);
     if (coding) return coding;
   }
-  if (isWikiAction(record)) return wikiFailureMessage(record, what, code);
+  if (record.kind === "proposal-approve") return proposalFailureMessage(what, code, detail);
+  if (isWikiEdit(record)) return wikiFailureMessage(record, what, code);
   const noun = {
     transition: "move", create: "issue", update: "update", dispatch: "dispatch", cancel: "cancel",
   }[record.kind];
@@ -1766,8 +1778,40 @@ function applyFailureMessage(record: ActionRecord, code: string | null): string 
   }
 }
 
+/**
+ * Why an approval of a Wiki proposal was not applied: InferOps' refusal as the data source states
+ * it (`PROPOSAL_APPROVE_REFUSED`), which tells a self-approval from a decided proposal although both
+ * are CONFLICT, else the shared Wiki messages.
+ */
+function proposalFailureMessage(what: string, code: string | null, detail: string | undefined): string {
+  switch (code) {
+    case "STALE_REVISION":
+    case "CONFLICT":
+    case "FORBIDDEN":
+    case "INVALID_REQUEST":
+    case "NOT_FOUND":
+      if (detail) return `${what} was not applied: ${detail}`;
+      break;
+    case "IDEMPOTENCY_CONFLICT":
+      return `${what} was not applied: the stored request no longer matches the one proposed. ` +
+        `Discard it and propose it again.`;
+  }
+  switch (code) {
+    case "UNAUTHORIZED":
+      return `${what} was not applied: InferOps rejected this connection's credential. Reconnect InferOps.`;
+    case "DISABLED":
+      return `${what} was not applied: InferOps is turned off for this deployment. It can be ` +
+        `applied once InferOps is turned back on.`;
+    case null:
+    case "UNAVAILABLE":
+      return `${what} could not be applied. Try again later.`;
+    default:
+      return `${what} was not applied: InferOps refused it (${code}).`;
+  }
+}
+
 /** Why a Wiki section or page body edit was not applied. */
-function wikiFailureMessage(record: WikiAction, what: string, code: string | null): string {
+function wikiFailureMessage(record: WikiEditAction, what: string, code: string | null): string {
   const target = record.kind === "section-update" ? "section" : "page";
   switch (code) {
     case "STALE_REVISION":
@@ -2506,13 +2550,41 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
   }
 
   /** Pending section and page body edits, oldest first. */
-  pendingEdits(): WikiAction[] {
-    const edits: WikiAction[] = [];
+  pendingEdits(): WikiEditAction[] {
+    const edits: WikiEditAction[] = [];
     for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
       const record = readAction(raw);
-      if (record?.status === "pending" && isWikiAction(record)) edits.push(record);
+      if (record?.status === "pending" && isWikiEdit(record)) edits.push(record);
     }
     return edits.toSorted((a, b) => a.actionId - b.actionId);
+  }
+
+  /** Pending proposal approvals, oldest first. */
+  pendingApprovals(): ProposalApproveAction[] {
+    const approvals: ProposalApproveAction[] = [];
+    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
+      const record = readAction(raw);
+      if (record?.status === "pending" && record.kind === "proposal-approve") approvals.push(record);
+    }
+    return approvals.toSorted((a, b) => a.actionId - b.actionId);
+  }
+
+  /** The collaborators admitted to this binding (strategy B), by id. */
+  observers(): string[] {
+    return Array.from(this.kv.list({ prefix: OBSERVER_PREFIX }), ([key]) => key.slice(OBSERVER_PREFIX.length));
+  }
+
+  /**
+   * Why only this binding's own account holder may not decide an approval of a proposal now, or
+   * null when they alone can: an admitted collaborator could decide it while the apply sends the
+   * owner's sign-in, and the stopgap connection is a shared credential with no person behind it.
+   * InferOps records the sender as the approver and refuses self-approval against them, so the
+   * person approving here must be that sender.
+   */
+  approvalRefusal(): string | null {
+    if (!this.ctx.props.connected && this.host !== DEMO_HOST) return APPROVE_NEEDS_OWN_SIGN_IN;
+    if (this.observers().length > 0) return APPROVE_NOT_SHARED;
+    return null;
   }
 
   /**
@@ -2547,6 +2619,35 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
 /** Thrown from a staging guard when the same edit is already pending: the proposal is a no-op. */
 class AlreadyProposed extends Error {}
 
+/** Why a shared Wiki gadget cannot approve a proposal (see `WikiBinding.approvalRefusal`). */
+const APPROVE_NOT_SHARED =
+  "A shared gadget cannot approve Wiki proposals: the approval would be sent with the gadget " +
+  "owner's InferOps sign-in. Approve from an unshared gadget.";
+
+/** Why the stopgap connection cannot approve a proposal (see `WikiBinding.approvalRefusal`). */
+const APPROVE_NEEDS_OWN_SIGN_IN =
+  "Approving a Wiki proposal needs your own InferLab sign-in: this connection is shared and " +
+  "approves as no one.";
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+const PROPOSAL_STATES: readonly WikiProposalState[] =
+  ["in_review", "approved", "publishing", "published", "rejected", "superseded", "stale", "blocked"];
+
+const failApprovalConflict = (title: string): never =>
+  fail("CONFLICT",
+    `Wiki proposal "${plainInline(title, 60)}" already has another approval waiting for a decision. ` +
+    `Wait for it, then read the proposal again.`);
+
+/** One message for a proposal that is unknown, not an id, or behind publishing turned off. */
+const PROPOSAL_NOT_FOUND = "No such proposal in this Wiki, or Wiki publishing is off in InferOps.";
+
+/** Rethrow a data-source "not found" for a proposal with the one proposal message. */
+function hideProposalExistence(error: unknown): never {
+  if (inferOpsErrorCode(error) === "NOT_FOUND") fail("NOT_FOUND", PROPOSAL_NOT_FOUND);
+  throw error;
+}
+
 const failBodyConflict = (slug: string): never =>
   fail("CONFLICT",
     `Page ${slug} already has a body edit that has not taken effect yet. Wait for it, then read the ` +
@@ -2578,7 +2679,8 @@ export class InferOpsWikiGatekeeper
     return {
       url: wikiUrl({ host }),
       title: `InferMind Wiki ${host}`,
-      snippet: `The InferMind Wiki of ${host}: read its pages and propose edits to their sections.`,
+      snippet: `The InferMind Wiki of ${host}: read its pages and propose edits to their sections, ` +
+        `and read drafted page proposals and ask to approve one for publication.`,
       suggestedBindingName: "INFEROPS_WIKI",
       tsType: "InferOpsWikiSession",
     };
@@ -2588,7 +2690,11 @@ export class InferOpsWikiGatekeeper
     return TYPES_CODE;
   }
 
-  /** Every section edit waits for review; none is auto-approvable. */
+  /**
+   * Every section edit, page body edit and proposal approval waits for review; none is
+   * auto-approvable. An approval of a proposal is of the exact bytes staged: this facet offers no
+   * edit-before-approve path for it.
+   */
   async getAutoApprovableActions(): Promise<ActionKind[]> {
     return [];
   }
@@ -2622,7 +2728,8 @@ export class InferOpsWikiGatekeeper
    * fingerprint is required: every Wiki record has one. Both are reconcile-only
    * (apply-attempts.ts): a failure before sending is known not applied, any other failure leaves
    * the outcome unknown, and once an attempt may have reached InferOps no later apply sends it
-   * again, even when the page now shows the edit.
+   * again, even when the page now shows the edit. A proposal approval is replayable instead; see
+   * `#applyApproval`.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
       Promise<void | { failed: ActionApplyFailure }> {
@@ -2633,12 +2740,45 @@ export class InferOpsWikiGatekeeper
     if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
     if (!isWikiAction(record)) throw new Error(`InferOps action ${actionId} is not a Wiki action.`);
     const fields = { host: binding.host, action: actionId };
+    if (record.kind === "proposal-approve") return this.#applyApproval(binding, record, fields);
     return binding.applyOnce(record, {
       policy: RECONCILE_ONLY, fields,
       check: () => assertFingerprint(WIKI_SCOPE, record, fields, { required: true }),
       send: marked => record.kind === "document-update"
         ? this.#sendBodyEdit(binding, marked as DocumentUpdateAction)
         : this.#sendSectionEdit(binding, marked as SectionUpdateAction),
+    });
+  }
+
+  /**
+   * Apply an approval of a proposal: replayable (`PROPOSAL_APPROVE`), since InferOps' refusals roll
+   * back and a same-principal, same-hash resend answers the decided proposal. Checked first, inside
+   * `applyOnce` so nothing is marked dispatched before it passes: that only the binding's own
+   * account holder could have decided it (a collaborator may have been admitted since it was
+   * staged), refused unsent and left pending as a FORBIDDEN a later apply can pass; then the
+   * fingerprint. Sent under `<instance>:<action>`. Applied means approved and queued, with the
+   * state InferOps answered; publication is InferOps' later job, read through `readProposal`.
+   */
+  async #applyApproval(binding: WikiBinding, record: ProposalApproveAction, fields: Partial<LogFields>):
+      Promise<void | { failed: ActionApplyFailure }> {
+    return binding.applyOnce(record, {
+      policy: PROPOSAL_APPROVE, fields,
+      check: async () => {
+        const refusal = binding.approvalRefusal();
+        if (refusal !== null) {
+          logger.warn("proposal approval refused before sending", {
+            event: "proposal-approve.apply.not_owner_only", ...fields, code: "FORBIDDEN",
+          });
+          throw new CheckRefused("FORBIDDEN", refusal);
+        }
+        await assertFingerprint(WIKI_SCOPE, record, fields, { required: true });
+      },
+      send: async marked => {
+        const approved = await binding.client.approveProposal(
+          record.proposalId, { proposalHash: record.proposalHash, sources: record.sources },
+          binding.idempotencyKey(record.actionId));
+        return { ...(marked as ProposalApproveAction), status: "applied", approvedState: approved.state };
+      },
     });
   }
 
@@ -2709,10 +2849,13 @@ export class InferOpsWikiGatekeeper
       Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
     const binding = this.#binding();
     const record = binding.action(actionId);
+    if (record?.kind === "proposal-approve") {
+      return { message: "An approval cannot be undone here. If the page was published, edit it in InferMind." };
+    }
     if (!record || record.status !== "applied") {
       return { message: "This change was never applied, so there is nothing to revert." };
     }
-    if (!isWikiAction(record)) return { message: "This is not a Wiki action." };
+    if (!isWikiEdit(record)) return { message: "This is not a Wiki action." };
     if (record.kind === "document-update") return this.#revertBodyEdit(binding, record);
     let current: WikiSectionRecord;
     try {
@@ -3006,6 +3149,142 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       implementsRevert: true,
       actionKind: { tag: "inferops.wiki-section-update", label: "Edit a Wiki section" },
     });
+  }
+
+  /** A proposal as the caller sees it: InferOps' record, marked while an approval of it waits here. */
+  #shownProposal(record: WikiProposalRecord, approvals: readonly ProposalApproveAction[]): WikiProposal {
+    return approvals.some(a => a.proposalId === record.id) ? { ...record, pending: "approve" } : { ...record };
+  }
+
+  async listProposals(state?: WikiProposalState): Promise<WikiProposal[]> {
+    if (state !== undefined && !PROPOSAL_STATES.includes(state)) {
+      fail("INVALID_REQUEST", `state must be one of ${PROPOSAL_STATES.join(", ")}.`);
+    }
+    const binding = this.#binding;
+    const records = await binding.client.listProposals(state).catch(hideProposalExistence);
+    const approvals = binding.pendingApprovals();
+    await this.#queue.authorizeObservation({
+      title: "List InferMind Wiki proposals",
+      description: `Listed the ${records.length} ${state === undefined ? "" : `${state} `}page proposals ` +
+        `of the InferMind Wiki of ${binding.host}, with their content.`,
+    });
+    return records.map(record => this.#shownProposal(record, approvals));
+  }
+
+  async readProposal(proposalId: string): Promise<WikiProposalDetail> {
+    if (!UUID.test(proposalId)) fail("NOT_FOUND", PROPOSAL_NOT_FOUND);
+    const binding = this.#binding;
+    const { proposal, freshness } = await this.#readProposal(proposalId);
+    await this.#queue.authorizeObservation({
+      title: `Read Wiki proposal ${plainInline(proposal.targetSlug, 80)}`,
+      description: `Read proposal "${plainInline(proposal.title, 120)}" (revision ${proposal.revision}) of the ` +
+        `InferMind Wiki of ${binding.host}: ${proposal.state}, ` +
+        `${freshness.stale ? "its target or a cited section has changed" : "its target and cited sections unchanged"}, ` +
+        `${proposal.sources.length} cited sections, with its content.`,
+    });
+    return { proposal: this.#shownProposal(proposal, binding.pendingApprovals()), freshness };
+  }
+
+  #readProposal(proposalId: string): Promise<WikiProposalRead> {
+    return this.#binding.client.readProposal(proposalId.toLowerCase()).catch(hideProposalExistence);
+  }
+
+  /**
+   * Checked before anything is staged: that only this binding's account holder can decide it (not
+   * shared, not the stopgap connection), then against the proposal as InferOps has it now: in
+   * review (a superseded one is STALE_REVISION), at this hash, not stale for this reader, and a new
+   * page with a parent. The approval card must show the whole proposal, or nothing is staged. Not
+   * an observation: the approval shows what was read. Self-approval is InferOps' to refuse, at
+   * apply, against the account holder who sends it.
+   */
+  async approveProposal(proposalId: string, proposalHash: string): Promise<void> {
+    if (!UUID.test(proposalId)) fail("NOT_FOUND", PROPOSAL_NOT_FOUND);
+    if (!SHA256_HEX.test(proposalHash)) {
+      fail("INVALID_REQUEST", "proposalHash must be the proposalHash readProposal() returned.");
+    }
+    const binding = this.#binding;
+    const refusal = binding.approvalRefusal();
+    if (refusal !== null) throw new InferOpsError("FORBIDDEN", refusal);
+    const { proposal, freshness } = await this.#readProposal(proposalId);
+    const name = `Wiki proposal "${plainInline(proposal.title, 60)}"`;
+    if (proposal.state === "superseded") {
+      fail("STALE_REVISION", `${name} has a newer revision. Read the proposals again.`);
+    }
+    if (proposal.state !== "in_review") fail("CONFLICT", `${name} is ${proposal.state}, not in review.`);
+    if (proposal.proposalHash !== proposalHash) {
+      fail("STALE_REVISION", `${name} changed since it was read (its hash differs). Read it again.`);
+    }
+    if (freshness.stale) {
+      fail("STALE_REVISION",
+        `${name} is stale: its target page or a cited section changed (or is not visible to you). Draft it again.`);
+    }
+    const isNewPage = proposal.targetDocumentId === null;
+    if (isNewPage && proposal.parentId === null) {
+      fail("INVALID_REQUEST", `${name} is a new page that needs a parent; set it in InferMind.`);
+    }
+    const description = await this.#approvalCard(proposal, isNewPage);
+    if (!description.descriptionIsComplete) {
+      fail("INVALID_REQUEST",
+        "This proposal is too long to show in full on an approval card; approve it in InferOps directly " +
+        "(proposal.approve).");
+    }
+    const actionId = await binding.stage({
+      kind: "proposal-approve", proposalId: proposal.id, proposalHash, sources: sortedSources(proposal.sources),
+      targetTitle: proposal.title, targetSlug: proposal.targetSlug, isNewPage, revision: proposal.revision,
+    }, () => {
+      // Re-checked with the write, after the reads above: sharing or a concurrent proposal may have changed since.
+      const now = binding.approvalRefusal();
+      if (now !== null) throw new InferOpsError("FORBIDDEN", now);
+      const waiting = binding.pendingApprovals().filter(a => a.proposalId === proposal.id);
+      if (waiting.some(a => a.proposalHash === proposalHash)) throw new AlreadyProposed();
+      if (waiting.length > 0) failApprovalConflict(proposal.title);
+    }).catch(error => {
+      if (error instanceof AlreadyProposed) return null;
+      throw error;
+    });
+    if (actionId === null) return;
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Approve Wiki proposal: ${proposal.title}`),
+      ...description,
+      implementsRevert: false,
+      actionKind: { tag: "inferops.wiki-proposal-approve", label: "Approve a Wiki proposal for publication" },
+    });
+  }
+
+  /**
+   * The approval card: what approving does and does not do, then the fields that identify the
+   * proposal (page, for a new page its pillar, revision, hash, summary, sources, the contradictions
+   * the draft recorded), then its content verbatim. Every field is InferOps' own record of what the
+   * hash binds, shown as data; none of it changes what is approved.
+   */
+  async #approvalCard(proposal: WikiProposalRecord, isNewPage: boolean) {
+    const binding = this.#binding;
+    let page = proposal.title;
+    if (isNewPage) {
+      const parent = await binding.client.readDocument(proposal.parentId!).catch(error => {
+        if (inferOpsErrorCode(error) === "NOT_FOUND") return null;
+        throw error;
+      });
+      page = `New page "${proposal.title}" (${proposal.targetSlug}) under ` +
+        `${parent ? `"${parent.title}"` : `page ${proposal.parentId}`}`;
+    }
+    const builder = buildDescription(
+      `Approve one drafted page of the InferMind Wiki of ${binding.host} for publication. Approving ` +
+      `queues its publication and publishes nothing itself. InferOps publishes it later, as you, only ` +
+      `if you still hold knowledge:publish, can see every cited section, every heading is grounded in ` +
+      `them, and neither the page nor its sources changed; otherwise the proposal ends stale or ` +
+      `blocked, and reading it shows which. An approval cannot be undone here.`)
+      .inline("Page", page);
+    // A new page is filed in its pillar on publication; an edit keeps its pillars, so none is shown.
+    if (isNewPage) builder.inline("Pillar", proposal.pathwayType ?? "none");
+    builder
+      .inline("Revision", String(proposal.revision))
+      .inline("Proposal hash", proposal.proposalHash);
+    if (proposal.summary) builder.verbatim("Summary", proposal.summary);
+    builder.inline("Sources", `${proposal.sources.length} cited section${proposal.sources.length === 1 ? "" : "s"}`);
+    if (proposal.contradictions.length > 0) builder.list("Contradictions", proposal.contradictions);
+    else builder.inline("Contradictions", "none");
+    return builder.verbatim("Content", proposal.content).finish();
   }
 }
 

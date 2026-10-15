@@ -31,6 +31,18 @@
 // turns the demo workspace into one without InferMind, so every Wiki call fails FORBIDDEN as
 // InferOps' product gate does.
 //
+// Wiki proposals (MVP-40): the fixture's drafted proposals, hashed here as InferOps hashes them
+// (one canonical document of everything an approval binds), with InferOps' `approveProposal` rules
+// exactly: the account's role (`setProposalRole`; Viewer and Member lack `knowledge:publish`),
+// a replay for the same principal and hash on a decided proposal, CONFLICT for any other decided
+// state or a failed integrity re-hash, STALE for a superseded revision, another hash or other
+// sources, the self-decision refusal for the requester or reviser, and a new page's parent. The
+// demo account is one principal (`MOCK_PRINCIPAL`). An approval queues one publish job; nothing
+// runs it but the test-only `runPublishJobs`, which claims each approved proposal once and
+// publishes it as InferOps' job does (an edit keeps the page's id, parent, order, Master role and
+// pillars; a new page goes under its parent, filed in its pillar), or ends it stale when the target
+// or a cited section moved. `reviseProposal` stands in for a reviewer's revision.
+//
 // Custom tables: one synthetic table (`src/fixtures/demo-table.json`) with a personal column and a
 // relation, read as InferOps' `object.embed` answers: the definition with every column, personal
 // ones included, and the rows newest first, each at the table's version. Projection is the
@@ -61,10 +73,11 @@ import {
   type ProjectSnapshot, type ProjectSummary, type RepoRecord, type RunRecord, type TableRead,
   type TableReadOptions, type TableRecordSchema, type TableRowRecord, type TableSummary,
   type WikiDocumentHead,
-  type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiSectionRecord,
-  type WikiStructureRecord, type WorkspaceMembersRead,
+  type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiProposalApproval,
+  type WikiProposalRead, type WikiProposalRecord, type WikiProposalState, type WikiSectionRecord,
+  type WikiStructureRecord, type WorkspaceMembersRead, PROPOSAL_APPROVE_REFUSED,
 } from "./inferops-client";
-import type { Issue, Revision, RunResult, RunStatus } from "./types";
+import type { Issue, Revision, RunResult, RunStatus, WikiProposalSource } from "./types";
 import { composeDocumentText, masterStructureText } from "./wiki";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound } from "./workflow-policy";
 
@@ -77,6 +90,8 @@ const IDEMPOTENCY_PREFIX = "idem:";
 // v2 added page bodies, versions, Master roles and pillars; a v1 copy is left unread.
 const WIKI_KEY = "wiki:v2";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
+const PROPOSALS_KEY = "wiki:proposals:v1";
+const PROPOSAL_ROLE_KEY = "wiki:proposal-role";
 const TABLES_KEY = "tables:v1";
 const MEMBERS_KEY = "members:v1";
 const WORKFLOW_KEY = "workflow:v1";
@@ -95,6 +110,74 @@ type MockPillar = {
 
 /** The demo Wiki: its pages, their sections and its pillars. */
 type MockWiki = { documents: MockDocument[]; sections: WikiSectionRecord[]; pillars: MockPillar[] };
+
+/** The demo account's own InferOps principal (Dana Demo, the owner in demo-members.json). */
+export const MOCK_PRINCIPAL = "00000000-0000-4000-8000-0000000000d1";
+
+/** Another person of the demo workspace (Vic Viewer), for revisions made by someone else. */
+const MOCK_OTHER_PRINCIPAL = "00000000-0000-4000-8000-0000000000d2";
+
+/** A role of the demo account in its workspace, for InferOps' `knowledge:publish` check. */
+export type MockProposalRole = "owner" | "admin" | "member" | "viewer";
+
+/** A demo proposal: InferOps' record plus the principals and grounding it keeps to itself. */
+type MockProposal = WikiProposalRecord & {
+  requestedBy: string; revisedBy: string | null; decidedBy: string | null;
+  sectionRefs: { heading: string; sectionIds: string[] }[];
+};
+
+/** The demo proposals, the publish jobs queued (proposal ids, never removed) and what each saw. */
+type MockProposals = {
+  proposals: MockProposal[]; jobs: string[];
+  approvals: Record<string, number>; enqueues: Record<string, number>; publications: Record<string, number>;
+};
+
+/** How often one proposal was approved, had its publication queued, and was published. */
+export type MockProposalCounts = { approvals: number; enqueues: number; publications: number };
+
+/** InferOps' decided states: an approval of one replays for its approver, else conflicts. */
+const DECIDED: readonly WikiProposalState[] = ["approved", "publishing", "published", "stale", "blocked"];
+
+/** JSON with object keys sorted, as InferOps' `stableStringify` orders a canonical document. */
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, member]) => member !== undefined)
+      .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, member]) => `${JSON.stringify(key)}:${stable(member)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** The hash of everything an approval binds (InferOps' `canonicalWikiProposal`, schema 1). */
+async function proposalHashOf(p: MockProposal): Promise<string> {
+  const canonical = stable({
+    schemaVersion: 1, targetDocumentId: p.targetDocumentId, expectedVersion: p.expectedVersion,
+    targetSlug: p.targetSlug, parentId: p.parentId, pathwayType: p.pathwayType, title: p.title,
+    content: p.content, sources: p.sources.map(s => ({ sectionId: s.sectionId, version: s.version })),
+    sectionRefs: p.sectionRefs.map(r => ({ heading: r.heading, sectionIds: r.sectionIds })),
+    contradictions: p.contradictions, summary: p.summary,
+  });
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** A source list as one order-free key. */
+function sourcesKey(list: readonly WikiProposalSource[]): string {
+  return list.map(s => `${s.sectionId}@${s.version}`).toSorted().join(",");
+}
+
+/** Whether two source lists cite the same sections at the same versions, in any order. */
+function sameSources(a: readonly WikiProposalSource[], b: readonly WikiProposalSource[]): boolean {
+  return a.length === b.length && sourcesKey(a) === sourcesKey(b);
+}
+
+/** A proposal as InferOps returns it: its record, without the principals or grounding. */
+function proposalView(p: MockProposal): WikiProposalRecord {
+  const { requestedBy: _r, revisedBy: _v, decidedBy: _d, sectionRefs: _s, ...record } = p;
+  return structuredClone(record);
+}
 
 /** The demo tables: definitions with every column, and rows stored without their version. */
 export type MockTables = { tables: TableRecordSchema[]; rows: Omit<TableRowRecord, "typeVersion">[] };
@@ -577,6 +660,211 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return section;
   }
 
+  /** The demo proposals, seeded and hashed on first use, behind the same gates as the Wiki. */
+  async #proposals(): Promise<MockProposals> {
+    this.#wiki();
+    let store = this.ctx.storage.kv.get<MockProposals>(PROPOSALS_KEY);
+    if (!store) {
+      const seeded = structuredClone((WIKI_SEED as unknown as { proposals: MockProposal[] }).proposals);
+      const proposals: MockProposal[] = [];
+      for (const raw of seeded) {
+        const p: MockProposal = {
+          ...raw, proposalHash: "", approvedHash: null, decidedAt: null, decidedBy: null,
+          blockedReason: null, lastError: null, publishedDocumentId: null, publishedVersion: null,
+          publishedAt: null,
+        };
+        proposals.push({ ...p, proposalHash: await proposalHashOf(p) });
+      }
+      store = { proposals, jobs: [], approvals: {}, enqueues: {}, publications: {} };
+      this.ctx.storage.kv.put(PROPOSALS_KEY, store);
+    }
+    return store;
+  }
+
+  async listProposals(state?: WikiProposalState): Promise<WikiProposalRecord[]> {
+    return (await this.#proposals()).proposals
+      .filter(p => state === undefined || p.state === state)
+      .toSorted((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : b.revision - a.revision))
+      .slice(0, 200)
+      .map(proposalView);
+  }
+
+  /** One proposal with its freshness now, as InferOps' `getProposalDetail` computes it. */
+  async readProposal(proposalId: string): Promise<WikiProposalRead> {
+    const found = (await this.#proposals()).proposals.find(p => p.id === proposalId);
+    if (!found) throw new InferOpsError("NOT_FOUND", PROPOSAL_APPROVE_REFUSED.notFound);
+    const wiki = this.#wiki();
+    const sources = found.sources.map(s => ({
+      sectionId: s.sectionId, proposedVersion: s.version,
+      currentVersion: wiki.sections.find(section => section.id === s.sectionId)?.version ?? null,
+    }));
+    const targetVersion = found.targetDocumentId === null ? null
+      : wiki.documents.find(d => d.id === found.targetDocumentId)?.version ?? null;
+    const stale = sources.some(s => s.currentVersion !== s.proposedVersion) ||
+      (found.targetDocumentId !== null && targetVersion !== found.expectedVersion);
+    return { proposal: proposalView(found), freshness: { targetVersion, sources, stale } };
+  }
+
+  /** InferOps' `approveProposal` for the demo account's principal; see the header. */
+  async approveProposal(proposalId: string, approval: WikiProposalApproval, idempotencyKey: string):
+      Promise<WikiProposalRecord> {
+    if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+    const store = await this.#proposals();
+    const row = store.proposals.find(p => p.id === proposalId);
+    if (!row) throw new InferOpsError("NOT_FOUND", PROPOSAL_APPROVE_REFUSED.notFound);
+    const role = this.ctx.storage.kv.get<MockProposalRole>(PROPOSAL_ROLE_KEY) ?? "owner";
+    // The capability's own permission check runs before the handler, as `knowledge:publish` does.
+    if (role !== "owner" && role !== "admin") {
+      throw new InferOpsError("FORBIDDEN", PROPOSAL_APPROVE_REFUSED.forbidden);
+    }
+    if (DECIDED.includes(row.state)) {
+      if (row.decidedBy === MOCK_PRINCIPAL && row.approvedHash === approval.proposalHash) {
+        logger.info("approval replayed", { event: "mock.write.replayed", replayed: true });
+        return proposalView(row);
+      }
+      throw new InferOpsError("CONFLICT", PROPOSAL_APPROVE_REFUSED.conflict);
+    }
+    if (row.state === "superseded") throw new InferOpsError("STALE_REVISION", PROPOSAL_APPROVE_REFUSED.stale);
+    if (row.state !== "in_review") throw new InferOpsError("CONFLICT", PROPOSAL_APPROVE_REFUSED.conflict);
+    if (row.requestedBy === MOCK_PRINCIPAL || row.revisedBy === MOCK_PRINCIPAL) {
+      throw new InferOpsError("CONFLICT", PROPOSAL_APPROVE_REFUSED.self);
+    }
+    if (await proposalHashOf(row) !== row.proposalHash) {
+      throw new InferOpsError("CONFLICT", PROPOSAL_APPROVE_REFUSED.conflict);
+    }
+    if (row.proposalHash !== approval.proposalHash || !sameSources(row.sources, approval.sources)) {
+      throw new InferOpsError("STALE_REVISION", PROPOSAL_APPROVE_REFUSED.stale);
+    }
+    if (row.targetDocumentId === null && row.parentId === null) {
+      throw new InferOpsError("INVALID_REQUEST", PROPOSAL_APPROVE_REFUSED.placement);
+    }
+    // Approve and queue the publication in one step, as InferOps does in one transaction.
+    const now = new Date().toISOString();
+    Object.assign(row, {
+      state: "approved", decidedBy: MOCK_PRINCIPAL, decidedAt: now, approvedHash: row.proposalHash, updatedAt: now,
+    });
+    store.jobs.push(row.id);
+    store.approvals[row.id] = (store.approvals[row.id] ?? 0) + 1;
+    store.enqueues[row.id] = (store.enqueues[row.id] ?? 0) + 1;
+    this.ctx.storage.kv.put(PROPOSALS_KEY, store);
+    return proposalView(row);
+  }
+
+  /** Test only: the demo account's role for `knowledge:publish` (owner, the default, and admin hold it). */
+  async setProposalRole(role: MockProposalRole): Promise<void> {
+    this.ctx.storage.kv.put(PROPOSAL_ROLE_KEY, role);
+  }
+
+  /**
+   * Test only: a reviewer's revision, as InferOps' `reviseProposal` makes it (of an in_review or
+   * approved proposal): the proposal is superseded, and a new revision with new content and a new
+   * hash is in review, written by another person or, with `self`, by the demo account.
+   */
+  async reviseProposal(proposalId: string, by: "other" | "self" = "other"): Promise<WikiProposalRecord> {
+    const store = await this.#proposals();
+    const row = store.proposals.find(p => p.id === proposalId);
+    if (!row) throw new InferOpsError("NOT_FOUND", PROPOSAL_APPROVE_REFUSED.notFound);
+    if (row.state !== "in_review" && row.state !== "approved") {
+      throw new InferOpsError("CONFLICT", `A ${row.state} proposal cannot be revised.`);
+    }
+    const now = new Date().toISOString();
+    row.state = "superseded";
+    row.updatedAt = now;
+    const next: MockProposal = {
+      ...structuredClone(row), id: crypto.randomUUID(), revision: row.revision + 1, state: "in_review",
+      content: `${row.content}\n\n(Revised.)`, revisedBy: by === "self" ? MOCK_PRINCIPAL : MOCK_OTHER_PRINCIPAL,
+      decidedBy: null, decidedAt: null, approvedHash: null, createdAt: now, updatedAt: now,
+    };
+    next.proposalHash = await proposalHashOf(next);
+    store.proposals.push(next);
+    this.ctx.storage.kv.put(PROPOSALS_KEY, store);
+    return proposalView(next);
+  }
+
+  /**
+   * Test only: run every queued publish job, as InferOps' `knowledge.wiki.publish` job runs (and
+   * as a queue that delivers a job at least once may run it again). Each job first claims its
+   * proposal, which only an approved proposal passes, so a job runs once. Returns how many it
+   * published.
+   */
+  async runPublishJobs(): Promise<number> {
+    const store = await this.#proposals();
+    const wiki = this.#wiki();
+    let published = 0;
+    for (const proposalId of store.jobs) {
+      const row = store.proposals.find(p => p.id === proposalId);
+      if (!row) continue;
+      // The claim: approved -> publishing, once.
+      if (row.state !== "approved") continue;
+      row.state = "publishing";
+      const now = new Date().toISOString();
+      const moved = row.sources.some(s => wiki.sections.find(section => section.id === s.sectionId)?.version !== s.version);
+      const target = row.targetDocumentId === null ? undefined : wiki.documents.find(d => d.id === row.targetDocumentId);
+      if (moved || (row.targetDocumentId !== null && target?.version !== row.expectedVersion)) {
+        Object.assign(row, {
+          state: "stale", updatedAt: now,
+          lastError: moved ? "A cited section changed since the proposal was drafted."
+            : "The page changed since the proposal was drafted.",
+        });
+        continue;
+      }
+      let document: MockDocument;
+      if (target) {
+        // The page edit: its id, parent, order, Master role and pillar membership stay.
+        target.body = row.content;
+        target.version += 1;
+        target.lastWriteReceipt = undefined;
+        document = target;
+      } else {
+        document = {
+          id: crypto.randomUUID(), slug: row.targetSlug, title: row.title, parentId: row.parentId,
+          siblingOrder: wiki.documents.filter(d => d.parentId === row.parentId).length,
+          body: row.content, version: 1, masterRole: null,
+        };
+        wiki.documents.push(document);
+        const pillar = row.pathwayType === null ? undefined : wiki.pillars.find(p => p.key === row.pathwayType);
+        pillar?.members.push({ documentId: document.id, source: "human" });
+      }
+      Object.assign(row, {
+        state: "published", publishedDocumentId: document.id, publishedVersion: document.version,
+        publishedAt: now, updatedAt: now,
+      });
+      store.publications[row.id] = (store.publications[row.id] ?? 0) + 1;
+      published += 1;
+    }
+    this.ctx.storage.kv.put(WIKI_KEY, wiki);
+    this.ctx.storage.kv.put(PROPOSALS_KEY, store);
+    return published;
+  }
+
+  /**
+   * Test only: another in-review proposal shaped like the first fixture proposal (an edit of
+   * release-process requested by another person), with `overrides`, hashed as any other.
+   */
+  async seedProposal(overrides: { title?: string; content?: string; summary?: string }): Promise<WikiProposalRecord> {
+    const store = await this.#proposals();
+    const now = new Date().toISOString();
+    const p: MockProposal = {
+      ...structuredClone(store.proposals[0]!), ...overrides, id: crypto.randomUUID(), runId: crypto.randomUUID(),
+      revision: 1, state: "in_review", decidedBy: null, decidedAt: null, approvedHash: null, revisedBy: null,
+      lastError: null, publishedDocumentId: null, publishedVersion: null, publishedAt: null,
+      createdAt: now, updatedAt: now,
+    };
+    p.proposalHash = await proposalHashOf(p);
+    store.proposals.push(p);
+    this.ctx.storage.kv.put(PROPOSALS_KEY, store);
+    return proposalView(p);
+  }
+
+  /** Test only: how often one proposal was approved, queued and published. */
+  async proposalCounts(proposalId: string): Promise<MockProposalCounts> {
+    const store = await this.#proposals();
+    return {
+      approvals: store.approvals[proposalId] ?? 0, enqueues: store.enqueues[proposalId] ?? 0,
+      publications: store.publications[proposalId] ?? 0,
+    };
+  }
+
   /** Make the demo workspace one with InferMind (the default) or without it. */
   async setInferMindEnabled(enabled: boolean): Promise<void> {
     if (enabled) this.ctx.storage.kv.delete(NO_INFERMIND_KEY);
@@ -736,6 +1024,10 @@ export function openInferOpsClient(
     readSection: sectionId => stub.readSection(sectionId),
     updateSection: (sectionId, body, idempotencyKey) =>
       refused(stub.updateSection(sectionId, body, idempotencyKey)),
+    listProposals: state => stub.listProposals(state),
+    readProposal: proposalId => stub.readProposal(proposalId),
+    approveProposal: (proposalId, approval, idempotencyKey) =>
+      refused(stub.approveProposal(proposalId, approval, idempotencyKey)),
     listTables: () => stub.listTables(),
     readTable: (host, tableId, options) => host === account.host
       ? stub.readTable(tableId, options) : Promise.reject(tableNotFound()),

@@ -9,10 +9,14 @@
 // - `unknown`: anything else, including any failure of a record staged before attempts were kept.
 //
 // Board writes (transition, create, update) are replayable: InferOps answers a repeated key with
-// its first result, so an unknown attempt may be sent again under the same key. Coding dispatches
-// and cancels and Wiki edits are not yet: no same-key replay contract has been verified for them,
-// so once an attempt may have reached InferOps they are reconcile-only, and every later apply
-// returns the stored unknown without sending anything.
+// its first result, so an unknown attempt may be sent again under the same key. Wiki proposal
+// approvals are too, by InferOps' own contract rather than the key (`proposal.approve`,
+// inferops#2368): a refusal rolls the whole transaction back, so it proves nothing took effect, and
+// a resend by the same principal with the same hash on a decided proposal answers that proposal
+// without approving or queueing it again. Coding dispatches and cancels and Wiki edits are not
+// yet: no same-key replay contract has been verified for them, so once an attempt may have reached
+// InferOps they are reconcile-only, and every later apply returns the stored unknown without
+// sending anything.
 
 import type { ActionApplyFailure } from "@gadgets/workshop-shared/gatekeeper";
 import { InferOpsError, type InferOpsErrorCode, type WriteStage } from "./inferops-client";
@@ -30,6 +34,9 @@ export type ApplyPolicy = {
 
 /** Board transitions, creates and updates. */
 export const BOARD_WRITES: ApplyPolicy = { refusalsProven: true, replayable: true };
+
+/** Wiki proposal approvals: InferOps' refusals roll back, and its principal+hash rule replays. */
+export const PROPOSAL_APPROVE: ApplyPolicy = { refusalsProven: true, replayable: true };
 
 /** Coding dispatches and cancels, and Wiki section and page edits. */
 export const RECONCILE_ONLY: ApplyPolicy = { refusalsProven: false, replayable: false };

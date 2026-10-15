@@ -4,7 +4,7 @@
   "id": "inferops",
   "package": "@inferos/gatekeeper-inferops",
   "status": "reference",
-  "summary": "InferOps project boards, coding dispatch, the InferMind Wiki (its structure, page bodies and sections) and read-only custom tables, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
+  "summary": "InferOps project boards, coding dispatch, the InferMind Wiki (its structure, page bodies and sections, and approval of drafted page proposals for publication) and read-only custom tables, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
   "entrypoints": {
     "main": "src/inferops.ts",
     "vendor": "GatekeeperVendor",
@@ -71,11 +71,14 @@
         { "method": "listDocuments" },
         { "method": "readStructure", "notes": "The company root, the pillars with their Masters and filed pages, and the unfiled pages; only pages listDocuments shows." },
         { "method": "readDocument", "notes": "The page's body (document-level), its lens-gated sections and its references, with pending edits overlaid." },
-        { "method": "readDocumentText", "notes": "InferOps' page-text contract: the body, else the visible sections, then a Master's generated structure block. A page with a body never merges its sections." }
+        { "method": "readDocumentText", "notes": "InferOps' page-text contract: the body, else the visible sections, then a Master's generated structure block. A page with a body never merges its sections." },
+        { "method": "listProposals", "notes": "InferOps' drafted page proposals (proposal.list), newest first, at most 200, without principals; one waiting for an approval here is marked pending approve. NOT_FOUND while knowledge.wikiPublish.enabled is off in InferOps." },
+        { "method": "readProposal", "notes": "One proposal with its freshness for this reader (proposal.get): the target's and each cited section's current version, null where not visible." }
       ],
       "writes": [
         { "method": "updateDocumentBody", "concurrency": "expected-version", "idempotency": "provider-key", "revert": "conditional", "notes": "InferOps' page PATCH is a strict compare-and-swap on the page version: apply sends the proposed version and is refused STALE_REVISION by any change since, even one that left the same body; InferOps replays only a retry of the same write under the same key. Reverted by a fresh write expecting the version the edit produced, under its own key." },
-        { "method": "updateSection", "concurrency": "expected-version", "idempotency": "read-before-write", "revert": "conditional", "notes": "InferOps' section PATCH takes no expected version and does not replay a key, so apply re-reads the section: at the proposed version it writes; already showing this body it counts as applied; otherwise it refuses as STALE_REVISION. Reverted while the section still shows the applied body at the applied version." }
+        { "method": "updateSection", "concurrency": "expected-version", "idempotency": "read-before-write", "revert": "conditional", "notes": "InferOps' section PATCH takes no expected version and does not replay a key, so apply re-reads the section: at the proposed version it writes; already showing this body it counts as applied; otherwise it refuses as STALE_REVISION. Reverted while the section still shows the applied body at the applied version." },
+        { "method": "approveProposal", "concurrency": "expected-version", "idempotency": "provider-key", "revert": "never", "notes": "Approves one in_review proposal for publication (proposal.approve, knowledge:publish: Owner or Admin), which queues InferOps' publish job; nothing here publishes, and the applied action says approved, never published. The expected version is the proposal hash and cited sources read at staging (STALE_REVISION for any other). The replay is InferOps' own, by the same principal and hash on a decided proposal, not by the key, which is sent by convention only. Owner-only: refused while the gadget is shared (any admitted collaborator) and on the stopgap connection, at staging and again at apply before anything is sent, since InferOps records the sender as the approver. Self-approval is InferOps' to refuse, at apply, for good (CONFLICT). A proposal that cannot be shown in full on the approval card is refused at staging. Retry, for this operation (unlike the shared FORBIDDEN entry below): a FORBIDDEN proven not to have taken effect, whether refused before sending (a shared gadget, the stopgap) or refused by InferOps with its envelope (no knowledge:publish), leaves the action pending and retryable, and a later apply sends it once unshared or granted. A first attempt refused as stale, self-approval, already decided or needing a parent ends it failed, not retryable. Once an attempt may have reached InferOps (no answer, or a lost response), the outcome is unknown: it is resent under the same key while InferOps' answer could still help (InferOps replays the same principal and hash), even when a later check refuses it before sending, and a refusal that will stand ends it unknown and not retryable, never not-applied." }
       ]
     },
     {
@@ -133,15 +136,15 @@
     { "code": "INVALID_STATE", "meaning": "The target state is not part of the bound project.", "retryable": false },
     { "code": "IDEMPOTENCY_CONFLICT", "meaning": "A key was reused for a different change, or the stored request no longer matches its fingerprint.", "retryable": false },
     { "code": "INVALID_REQUEST", "meaning": "The request itself was malformed (for instance a non-decimal revision or an empty title).", "retryable": false },
-    { "code": "CONFLICT", "meaning": "Refused in the target's current condition, such as a second pending change of one issue.", "retryable": false },
+    { "code": "CONFLICT", "meaning": "Refused in the target's current condition, such as a second pending change of one issue, a Wiki proposal already decided, or an approval by the proposal's own requester or reviser.", "retryable": false },
     { "code": "RUN_ACTIVE", "meaning": "The issue already has a queued or running coding run, or a dispatch waiting for approval.", "retryable": false },
     { "code": "UNAUTHORIZED", "meaning": "The person's session ended, was revoked, or the account was disconnected.", "retryable": false },
-    { "code": "FORBIDDEN", "meaning": "The person lacks the InferOps permission, or the workspace lacks the product.", "retryable": false },
+    { "code": "FORBIDDEN", "meaning": "The person lacks the InferOps permission, or the workspace lacks the product; or a Wiki proposal approval from a shared gadget or the stopgap connection, which stays pending until it is unshared.", "retryable": false },
     { "code": "UNAVAILABLE", "meaning": "InferOps could not be reached, answered unusably, or the connection changed mid-request. The action stays pending, and a retry sends the same idempotency key.", "retryable": true },
     { "code": "DISABLED", "meaning": "The deployment has the integration (or coding dispatch) turned off; the action stays pending until it is turned back on.", "retryable": true }
   ],
   "simulation": {
-    "summary": "Pending actions are stored beside the binding and overlaid on every read until applied or rejected: a move shows the issue in its target state, an update its new title and priority, a create a provisional card, a dispatch a pending run, a cancel a run marked pending, a section edit its new body, a page body edit its new body (marked pendingBody).",
+    "summary": "Pending actions are stored beside the binding and overlaid on every read until applied or rejected: a move shows the issue in its target state, an update its new title and priority, a create a provisional card, a dispatch a pending run, a cancel a run marked pending, a section edit its new body, a page body edit its new body (marked pendingBody), a proposal approval its proposal (marked pending approve, in InferOps' own state).",
     "limits": [
       "A pending change keeps the revision InferOps reported: InferOps revisions are positions in a shared ledger, so the revision a change will produce cannot be computed. An issue therefore carries at most one live pending change, and a second is refused with CONFLICT.",
       "A pending create is a provisional card (id pending-<action id>, identifier <KEY>-new, revision \"0\") that openIssue does not accept.",
@@ -170,7 +173,7 @@
       "repository": "https://github.com/factory-level/inferops",
       "revision": "29b01a024c377b9c37b8754e7001b290e15d1509",
       "apiVersion": null,
-      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin."
+      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin. Wiki proposal reads and approval need InferOps at or after 5483e7cd (factory-level/inferops#2368) with knowledge.wikiPublish.enabled on; otherwise those calls are NOT_FOUND."
     },
     "inferos": { "gatekeeperApi": [1] },
     "contracts": [
@@ -202,7 +205,7 @@
       {
         "kind": "knowledge/wiki",
         "cases": ["resource-scope", "observation", "sharing", "approval", "apply-once", "stale-revision", "lost-response-retry"],
-        "reason": "No shared-suite adapter yet. Its section write is guarded by a read before the write, so a retry after a lost response is answered by that re-read; its page body write by InferOps' compare-and-swap and same-key replay. Its own suite covers these cases.",
+        "reason": "No shared-suite adapter yet. Its section write is guarded by a read before the write, so a retry after a lost response is answered by that re-read; its page body write by InferOps' compare-and-swap and same-key replay; its proposal approval by InferOps' principal-and-hash replay. Its own suite covers these cases.",
         "coveredBy": ["__tests__/wiki.test.ts"]
       },
       {

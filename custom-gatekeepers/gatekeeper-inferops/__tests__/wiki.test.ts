@@ -5,7 +5,8 @@
 // InferOps' page-text contract, with Masters listing the structure. Over the mock's demo Wiki.
 
 import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { fingerprintOf } from "../src/actions";
 import {
   parseWikiDocumentUrl, parseWikiUrl, resourceKind, wikiDocumentUrl, wikiUrl,
 } from "../src/resources";
@@ -633,6 +634,506 @@ describe("the integration switch and observers", () => {
     // Another page, with nothing of its own waiting, still reads InferOps' text.
     await session.readDocumentText("handbook");
     expect((await hooks.log()).excluded.at(-1)).toEqual(["observer-1"]);
+  });
+});
+
+// MVP-40: drafted page proposals, read as observations and approved for publication as an approved
+// action, over the mock's InferOps rules (mock-inferops.ts). Approving queues InferOps' publication;
+// the mock's `runPublishJobs` stands in for that job.
+describe("Wiki proposal approval", () => {
+  const P_EDIT = "62000000-0000-4000-8000-000000000001";
+  const P_NEW = "62000000-0000-4000-8000-000000000002";
+  const P_NOPARENT = "62000000-0000-4000-8000-000000000003";
+  const P_SELF = "62000000-0000-4000-8000-000000000004";
+  const P_STALE = "62000000-0000-4000-8000-000000000005";
+  const P_UNKNOWN = "62000000-0000-4000-8000-0000000000ff";
+  const FIRST_WEEK = "61000000-0000-4000-8000-000000000004";
+  const NO_PROPOSAL = "NOT_FOUND: No such proposal in this Wiki, or Wiki publishing is off in InferOps.";
+  const SHARED = "A shared gadget cannot approve Wiki proposals: the approval would be sent with the " +
+    "gadget owner's InferOps sign-in. Approve from an unshared gadget.";
+  /** P-edit's sources as staged and sent: sorted by section id. */
+  const EDIT_SOURCES = [{ sectionId: PURPOSE, version: 1 }, { sectionId: STEPS, version: 2 }];
+
+  type Mock = ReturnType<typeof setup>["mock"];
+  const hashOf = async (mock: Mock, id: string) => (await mock.readProposal(id)).proposal.proposalHash;
+  const instanceKey = async (hooks: ReturnType<typeof setup>["hooks"], props: WikiProps, id: number) =>
+    `${await hooks.getWikiRaw(props, "instanceId") as string}:${id}`;
+
+  /** A fresh binding with P-edit's approval staged; returns its action id and hash. */
+  async function staged(proposalId = P_EDIT) {
+    const context = setup();
+    const hash = await hashOf(context.mock, proposalId);
+    await context.session.approveProposal(proposalId, hash);
+    const action = (await context.hooks.log()).actions.at(-1)!;
+    return { ...context, hash, id: action.id, action };
+  }
+
+  it("A1: lists and reads proposals as observations, with state, hash, target, sources and freshness", async () => {
+    const { hooks, session } = setup();
+    const all = await session.listProposals();
+    expect(all.map(p => p.id)).toEqual([P_STALE, P_SELF, P_NOPARENT, P_NEW, P_EDIT]);
+    expect(await session.listProposals("in_review")).toHaveLength(5);
+    expect(await session.listProposals("published")).toEqual([]);
+    // Refused at the RPC boundary, before anything reaches InferOps.
+    expect(await failure(session.listProposals("nope" as never))).toContain("listProposals[0]: expected union");
+    const { proposal, freshness } = await session.readProposal(P_EDIT);
+    expect(proposal).toMatchObject({
+      id: P_EDIT, revision: 1, state: "in_review", targetDocumentId: RELEASE, expectedVersion: 2,
+      targetSlug: "release-process", parentId: null, title: "Release process", approvedHash: null,
+      publishedDocumentId: null, sources: [{ sectionId: STEPS, version: 2 }, { sectionId: PURPOSE, version: 1 }],
+    });
+    expect(proposal.proposalHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(proposal.pending).toBeUndefined();
+    // No principal of InferOps' reaches the caller.
+    expect(Object.keys(proposal)).not.toContain("requestedBy");
+    expect(freshness).toEqual({
+      targetVersion: 2, stale: false, sources: [
+        { sectionId: STEPS, proposedVersion: 2, currentVersion: 2 }, { sectionId: PURPOSE, proposedVersion: 1, currentVersion: 1 },
+      ],
+    });
+    expect((await session.readProposal(P_STALE)).freshness).toMatchObject({
+      stale: true, sources: [{ sectionId: FIRST_WEEK, proposedVersion: 0, currentVersion: 1 }],
+    });
+    expect(await failure(session.readProposal(P_UNKNOWN))).toContain(NO_PROPOSAL);
+    expect(await failure(session.readProposal("../x"))).toContain(NO_PROPOSAL);
+    const log = await hooks.log();
+    expect(log.observations).toEqual([
+      "List InferMind Wiki proposals", "List InferMind Wiki proposals", "List InferMind Wiki proposals",
+      "Read Wiki proposal release-process", "Read Wiki proposal onboarding",
+    ]);
+    expect(log.observationTexts[0]).toBe("Listed the 5 page proposals of the InferMind Wiki of demo.local, with their content.");
+    expect(log.observationTexts[3]).toContain("in_review, its target and cited sections unchanged, 2 cited sections");
+    expect(log.observationTexts[4]).toContain("its target or a cited section has changed");
+  });
+
+  it("A1: shows a proposal with an approval waiting here as pending approve", async () => {
+    const { session } = await staged();
+    expect((await session.readProposal(P_EDIT)).proposal).toMatchObject({ state: "in_review", pending: "approve" });
+    const listed = await session.listProposals();
+    expect(listed.find(p => p.id === P_EDIT)!.pending).toBe("approve");
+    expect(listed.find(p => p.id === P_NEW)!.pending).toBeUndefined();
+  });
+
+  it("A2: stages one approval with the exact card, sends nothing until approved, then reads approved and later published", async () => {
+    const { props, hooks, mock, session } = setup();
+    const page = (await mock.listDocuments()).find(d => d.id === RELEASE);
+    const head = await mock.readDocument(RELEASE);
+    const structure = await mock.readStructure();
+    const hash = await hashOf(mock, P_EDIT);
+    await session.approveProposal(P_EDIT, hash);
+
+    const [action] = (await hooks.log()).actions;
+    expect(action).toMatchObject({
+      title: "Approve Wiki proposal: Release process", kind: "inferops.wiki-proposal-approve",
+      implementsRevert: false, complete: true, truncated: [],
+    });
+    expect(action!.description).toContain("Approving queues its publication and publishes nothing itself.");
+    expect(action!.description).toContain("otherwise the proposal ends stale or blocked");
+    expect(action!.fields).toEqual({
+      Page: "Release process", Revision: "1", "Proposal hash": hash,
+      Summary: "Writes the release steps out as the page's own body.", Sources: "2 cited sections",
+      Contradictions: "none",
+      Content: "# Release process\n\n1. Cut the release branch.\n2. Run the checks on it.\n3. Tag the build and announce it.",
+    });
+    // The identifying fields come before the content.
+    expect(Object.keys(action!.fields)).toEqual(["Page", "Revision", "Proposal hash", "Summary", "Sources", "Contradictions", "Content"]);
+    // An edit keeps its pillars, so none is shown.
+    expect(action!.fields.Pillar).toBeUndefined();
+    expect(await mock.approveRequests()).toEqual([]);
+    expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("in_review");
+
+    expect(await hooks.applyWiki(props, action!.id)).toBeNull();
+    expect(await mock.approveRequests()).toEqual([
+      { proposalId: P_EDIT, approval: { proposalHash: hash, sources: EDIT_SOURCES }, key: await instanceKey(hooks, props, action!.id) },
+    ]);
+    expect(await hooks.getWikiRaw(props, `action:${action!.id}`))
+      .toMatchObject({ status: "applied", approvedState: "approved", proposalId: P_EDIT, proposalHash: hash });
+    const approved = (await session.readProposal(P_EDIT)).proposal;
+    expect(approved).toMatchObject({ state: "approved", approvedHash: hash, publishedDocumentId: null, publishedVersion: null });
+    expect(approved.pending).toBeUndefined();
+
+    expect(await mock.runPublishJobs()).toBe(1);
+    expect((await session.readProposal(P_EDIT)).proposal).toMatchObject({
+      state: "published", publishedDocumentId: RELEASE, publishedVersion: head.version + 1,
+    });
+    expect(await mock.readDocument(RELEASE)).toEqual({
+      ...head, version: head.version + 1, body: action!.fields.Content,
+    });
+    // Its id, parent, sibling order, Master role and pillar membership are unchanged.
+    expect((await mock.listDocuments()).find(d => d.id === RELEASE)).toEqual(page);
+    expect(await mock.readStructure()).toEqual(structure);
+    expect(await mock.proposalCounts(P_EDIT)).toEqual({ approvals: 1, enqueues: 1, publications: 1 });
+  });
+
+  it("A3: a Viewer or Member is refused FORBIDDEN with the publish message, stays pending, and passes once granted", async () => {
+    const { props, hooks, mock, id } = await staged();
+    for (const role of ["viewer", "member"] as const) {
+      await mock.setProposalRole(role);
+      expect(await hooks.applyOutcome(props, id, "wiki")).toEqual({
+        outcome: "notApplied", retryable: true, code: "FORBIDDEN",
+        message: 'The approval of Wiki proposal "Release process" (revision 1) was not applied: ' +
+          "Approving for publication needs knowledge:publish (Owner or Admin).",
+      });
+      expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "pending", attempts: {} });
+    }
+    expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("in_review");
+    expect(await mock.proposalCounts(P_EDIT)).toMatchObject({ approvals: 0 });
+    await mock.setProposalRole("admin");
+    expect(await hooks.applyWiki(props, id)).toBeNull();
+    expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("approved");
+  });
+
+  it("A4: the requester's own approval is refused for good by InferOps, and nothing is approved", async () => {
+    const { props, hooks, mock, id } = await staged(P_SELF);
+    const refused = {
+      outcome: "notApplied", retryable: false, code: "CONFLICT",
+      message: 'The approval of Wiki proposal "Incident response" (revision 1) was not applied: ' +
+        "You requested this draft or wrote this revision; another person must approve it.",
+    };
+    expect(await hooks.applyOutcome(props, id, "wiki")).toEqual(refused);
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "failed" });
+    // A later apply replays the refusal without sending.
+    expect(await hooks.applyOutcome(props, id, "wiki")).toEqual(refused);
+    expect(await mock.approveRequests()).toHaveLength(1);
+    expect((await mock.readProposal(P_SELF)).proposal.state).toBe("in_review");
+    expect(await mock.proposalCounts(P_SELF)).toEqual({ approvals: 0, enqueues: 0, publications: 0 });
+    // A revision the demo account wrote is its own too.
+    const revised = await mock.reviseProposal(P_EDIT, "self");
+    const second = setup(props.accountId);
+    await second.session.approveProposal(revised.id, revised.proposalHash);
+    const last = (await hooks.log()).actions.at(-1)!;
+    expect(await hooks.applyOutcome(props, last.id, "wiki")).toMatchObject({ outcome: "notApplied", code: "CONFLICT" });
+  });
+
+  it("A5: refuses a stale proposal before anything is staged", async () => {
+    const { hooks, mock, session } = setup();
+    const hash = await hashOf(mock, P_EDIT);
+    expect(await failure(session.approveProposal(P_EDIT, "0".repeat(64))))
+      .toContain('STALE_REVISION: Wiki proposal "Release process" changed since it was read (its hash differs).');
+    expect(await failure(session.approveProposal(P_STALE, await hashOf(mock, P_STALE))))
+      .toContain("is stale: its target page or a cited section changed (or is not visible to you). Draft it again.");
+    await mock.reviseProposal(P_EDIT);
+    expect(await failure(session.approveProposal(P_EDIT, hash)))
+      .toContain('STALE_REVISION: Wiki proposal "Release process" has a newer revision.');
+    // A target moved since the draft is stale too.
+    await mock.updateDocument(INCIDENT, { body: "Moved on." }, 4, "elsewhere");
+    expect(await failure(session.approveProposal(P_SELF, await hashOf(mock, P_SELF)))).toContain("is stale");
+    // Not in review, a malformed hash and an unknown or malformed id.
+    await mock.approveProposal(P_NEW, { proposalHash: await hashOf(mock, P_NEW), sources: [{ sectionId: CURRENT_WORK, version: 3 }] }, "elsewhere");
+    expect(await failure(session.approveProposal(P_NEW, await hashOf(mock, P_NEW))))
+      .toContain('CONFLICT: Wiki proposal "Postmortems" is approved, not in review.');
+    expect(await failure(session.approveProposal(P_NEW, "ABC"))).toContain("INVALID_REQUEST");
+    expect(await failure(session.approveProposal(P_UNKNOWN, hash))).toContain(NO_PROPOSAL);
+    expect(await failure(session.approveProposal("not-an-id", hash))).toContain(NO_PROPOSAL);
+    expect((await hooks.log()).actions).toEqual([]);
+  });
+
+  it("A6: a proposal revised after staging is refused at apply as stale, for good", async () => {
+    const { props, hooks, mock, id } = await staged();
+    await mock.reviseProposal(P_EDIT);
+    expect(await hooks.applyOutcome(props, id, "wiki")).toEqual({
+      outcome: "notApplied", retryable: false, code: "STALE_REVISION",
+      message: 'The approval of Wiki proposal "Release process" (revision 1) was not applied: ' +
+        "The proposal changed since it was approved here; read it again.",
+    });
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "failed" });
+    expect(await mock.proposalCounts(P_EDIT)).toEqual({ approvals: 0, enqueues: 0, publications: 0 });
+  });
+
+  it("A7a/b: a lost response is unknown and resent under the same key, which InferOps replays once", async () => {
+    const { props, hooks, mock, hash, id } = await staged();
+    await mock.failNextWrite("lost");
+    expect(await hooks.applyOutcome(props, id, "wiki")).toMatchObject({ outcome: "unknown", retryable: true });
+    expect(await hooks.getWikiRaw(props, `action:${id}`))
+      .toMatchObject({ status: "pending", attempts: { dispatchedAt: expect.any(String) } });
+    expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("approved");
+
+    expect(await hooks.applyWiki(props, id)).toBeNull();
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "applied", approvedState: "approved" });
+    const key = await instanceKey(hooks, props, id);
+    const sent = { proposalId: P_EDIT, approval: { proposalHash: hash, sources: EDIT_SOURCES }, key };
+    expect(await mock.approveRequests()).toEqual([sent, sent]);
+    // (b) Applying an applied action sends nothing.
+    expect(await hooks.applyWiki(props, id)).toBeNull();
+    expect(await mock.approveRequests()).toHaveLength(2);
+    // A job delivered twice publishes once, and the second delivery leaves the outcome as it was.
+    expect(await mock.runPublishJobs()).toBe(1);
+    expect(await mock.runPublishJobs()).toBe(0);
+    expect(await mock.proposalCounts(P_EDIT)).toEqual({ approvals: 1, enqueues: 1, publications: 1 });
+    expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("published");
+  });
+
+  it("A7c: concurrent proposals of one approval stage it once; another approval waiting is CONFLICT", async () => {
+    const { props, hooks, mock, session } = setup();
+    const hash = await hashOf(mock, P_EDIT);
+    const raced = await Promise.allSettled([session.approveProposal(P_EDIT, hash), session.approveProposal(P_EDIT, hash)]);
+    expect(raced.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    const actions = (await hooks.log()).actions;
+    expect(actions).toHaveLength(1);
+    // Another approval of the same proposal waiting here (another hash) blocks this one.
+    const stored = await hooks.getWikiRaw(props, `action:${actions[0]!.id}`) as Record<string, unknown>;
+    await hooks.putWikiRaw(props, `action:${actions[0]!.id}`, { ...stored, proposalHash: "f".repeat(64) });
+    expect(await failure(session.approveProposal(P_EDIT, hash)))
+      .toContain('CONFLICT: Wiki proposal "Release process" already has another approval waiting for a decision.');
+    expect((await hooks.log()).actions).toHaveLength(1);
+  });
+
+  it("A7d: a lost response, then a revision, then a retry ends unknown and not retryable, publishing nothing", async () => {
+    const { props, hooks, mock, id } = await staged();
+    await mock.failNextWrite("lost");
+    expect(await hooks.applyOutcome(props, id, "wiki")).toMatchObject({ outcome: "unknown", retryable: true });
+    await mock.reviseProposal(P_EDIT);
+    const outcome = await hooks.applyOutcome(props, id, "wiki") as { outcome: string; retryable: boolean; code: string; message: string };
+    expect(outcome).toMatchObject({ outcome: "unknown", retryable: false, code: "STALE_REVISION" });
+    expect(outcome.message).toContain("may already have been applied by an earlier attempt");
+    expect(outcome.message).not.toMatch(/publish/i);
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "pending" });
+    expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("superseded");
+    expect(await mock.runPublishJobs()).toBe(0);
+    expect(await mock.proposalCounts(P_EDIT)).toMatchObject({ publications: 0 });
+  });
+
+  it("A8: a stored record changed after staging is refused before sending", async () => {
+    const { props, hooks, mock, id } = await staged();
+    const stored = await hooks.getWikiRaw(props, `action:${id}`) as Record<string, unknown>;
+    await hooks.putWikiRaw(props, `action:${id}`, { ...stored, proposalHash: "e".repeat(64) });
+    expect(await hooks.applyOutcome(props, id, "wiki")).toMatchObject({ outcome: "notApplied", code: "IDEMPOTENCY_CONFLICT" });
+    await hooks.putWikiRaw(props, `action:${id}`, { ...stored, sources: [{ sectionId: PURPOSE, version: 1 }] });
+    expect(await hooks.applyWiki(props, id)).toContain("the stored request no longer matches");
+    const { fingerprint: _, ...unsigned } = stored;
+    await hooks.putWikiRaw(props, `action:${id}`, unsigned);
+    expect(await hooks.applyWiki(props, id)).toContain("the stored request no longer matches");
+    expect(await mock.approveRequests()).toEqual([]);
+  });
+
+  it("A9: a new page needs a parent; with one it publishes under it, filed in its pillar", async () => {
+    const { props, hooks, mock, session } = setup();
+    expect(await failure(session.approveProposal(P_NOPARENT, await hashOf(mock, P_NOPARENT))))
+      .toContain('INVALID_REQUEST: Wiki proposal "Glossary" is a new page that needs a parent; set it in InferMind.');
+    expect((await hooks.log()).actions).toEqual([]);
+
+    await session.approveProposal(P_NEW, await hashOf(mock, P_NEW));
+    const [action] = (await hooks.log()).actions;
+    expect(action!.fields.Page).toBe('New page "Postmortems" (postmortems) under "Operations"');
+    expect(await hooks.applyWiki(props, action!.id)).toBeNull();
+    // Delivered twice, a new page (which no page version guards) is still published once.
+    expect(await mock.runPublishJobs()).toBe(1);
+    expect(await mock.runPublishJobs()).toBe(0);
+    expect(await mock.proposalCounts(P_NEW)).toEqual({ approvals: 1, enqueues: 1, publications: 1 });
+    expect((await mock.listDocuments()).filter(d => d.slug === "postmortems")).toHaveLength(1);
+    const published = (await session.readProposal(P_NEW)).proposal;
+    expect(published).toMatchObject({ state: "published", publishedVersion: 1 });
+    expect((await mock.listDocuments()).find(d => d.slug === "postmortems"))
+      .toMatchObject({ id: published.publishedDocumentId, parentId: OPERATIONS, title: "Postmortems" });
+    const operations = (await mock.readStructure()).pillars.find(p => p.key === "operations")!;
+    expect(operations.members.map(m => m.slug)).toContain("postmortems");
+
+    // InferOps' 422 at apply (a parentless proposal reaching it) is final INVALID_REQUEST.
+    const stored = await hooks.getWikiRaw(props, `action:${action!.id}`) as Record<string, unknown>;
+    const parentless = {
+      ...stored, actionId: 99, status: "pending", attempts: {}, approvedState: undefined,
+      proposalId: P_NOPARENT, proposalHash: await hashOf(mock, P_NOPARENT), sources: [{ sectionId: PURPOSE, version: 1 }],
+    };
+    await hooks.putWikiRaw(props, "action:99", { ...parentless, fingerprint: await fingerprintOf("knowledge/wiki", parentless as never) });
+    expect(await hooks.applyOutcome(props, 99, "wiki")).toEqual({
+      outcome: "notApplied", retryable: false, code: "INVALID_REQUEST",
+      message: 'The approval of Wiki proposal "Postmortems" (revision 1) was not applied: ' +
+        "A new page needs a parent; set one in InferMind.",
+    });
+  });
+
+  it("A9: a new page's card shows its destination, pillar and recorded contradictions before anything is sent", async () => {
+    const { hooks, mock, session } = setup();
+    const { proposal } = await mock.readProposal(P_NEW);
+    expect(proposal).toMatchObject({ parentId: OPERATIONS, pathwayType: "operations" });
+    await session.approveProposal(P_NEW, proposal.proposalHash);
+    const [action] = (await hooks.log()).actions;
+    expect(action!.fields).toMatchObject({
+      Page: 'New page "Postmortems" (postmortems) under "Operations"', Pillar: "operations",
+      "Proposal hash": proposal.proposalHash,
+    });
+    expect(action!.lists.Contradictions).toEqual(proposal.contradictions);
+    expect(proposal.contradictions).toEqual([
+      "The current-work section says postmortems are optional; the draft makes them required.",
+    ]);
+    // Destination, pillar and contradictions come before the content, and nothing is cut.
+    expect(action!.labels).toEqual([
+      "Page", "Pillar", "Revision", "Proposal hash", "Summary", "Sources", "Contradictions", "Content",
+    ]);
+    expect(action).toMatchObject({ complete: true, truncated: [] });
+    // Shown at staging: nothing has reached InferOps yet.
+    expect(await mock.approveRequests()).toEqual([]);
+  });
+
+  it("A10: reads the later outcome from InferOps: stale when the target moved, superseded when revised", async () => {
+    const { props, hooks, mock, session, id } = await staged();
+    expect(await hooks.applyWiki(props, id)).toBeNull();
+    await mock.updateDocument(RELEASE, { body: "Edited in InferMind meanwhile." }, 2, "elsewhere");
+    expect(await mock.runPublishJobs()).toBe(0);
+    expect((await session.readProposal(P_EDIT)).proposal).toMatchObject({
+      state: "stale", lastError: "The page changed since the proposal was drafted.", publishedDocumentId: null,
+    });
+    // The action stays what it was: approved, never published.
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "applied", approvedState: "approved" });
+    expect((await mock.readDocument(RELEASE)).body).toBe("Edited in InferMind meanwhile.");
+
+    const second = await staged();
+    expect(await second.hooks.applyWiki(second.props, second.id)).toBeNull();
+    await second.mock.reviseProposal(P_EDIT);
+    expect((await second.session.readProposal(P_EDIT)).proposal).toMatchObject({ state: "superseded", publishedDocumentId: null });
+    expect(await second.mock.runPublishJobs()).toBe(0);
+    expect((await second.mock.readDocument(RELEASE)).version).toBe(2);
+  });
+
+  it("A11: the stopgap connection is refused an approval at staging and at apply, sending nothing; its reads go to InferOps", async () => {
+    const stopgap = env as unknown as Record<string, string | undefined>;
+    const names = ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG"];
+    const saved = names.map(name => stopgap[name]);
+    const workspaceId = "90000000-0000-4000-8000-000000000001";
+    Object.assign(stopgap, {
+      INFEROPS_BASE_URL: "http://stopgap.test", INFEROPS_API_TOKEN: "iex_stopgap-for-proposals",
+      INFEROPS_WORKSPACE_ID: workspaceId, INFEROPS_WORKSPACE_SLUG: "knowledge",
+    });
+    // The demo binding's proposal, as InferOps answers it.
+    const demo = setup();
+    const wire = { ...(await demo.mock.readProposal(P_EDIT)), };
+    const record = {
+      ...wire.proposal, requestedBy: { id: "00000000-0000-4000-8000-0000000000d2", type: "user" }, draftedBy: null,
+      revisedBy: null, decidedBy: null, decisionNote: null, approvedSources: null, sectionRefs: [],
+    };
+    const calls: Array<{ method: string; path: string; token: string | null }> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({ method: init?.method ?? "GET", path: url.pathname + url.search,
+                   token: new Headers(init?.headers).get("authorization") });
+      if (url.pathname === "/knowledge/wiki/proposals") return Response.json({ proposals: [record] });
+      if (url.pathname === `/knowledge/wiki/proposals/${P_EDIT}`) return Response.json({ proposal: record, freshness: wire.freshness });
+      return Response.json({ success: false, error: { code: "NOT_FOUND", message: "no route" } }, { status: 404 });
+    });
+    try {
+      const { props, hooks, session } = setup();
+      const stopgapProps = { accountId: props.accountId, host: "acme.knowledge" };
+      const stopgapSession = hooks.startWikiSession(stopgapProps);
+      expect((await stopgapSession.listProposals()).map(p => p.id)).toEqual([P_EDIT]);
+      expect((await stopgapSession.readProposal(P_EDIT)).proposal.proposalHash).toBe(record.proposalHash);
+      expect(calls.map(c => [c.method, c.path, c.token])).toEqual([
+        ["GET", "/knowledge/wiki/proposals", "Bearer iex_stopgap-for-proposals"],
+        ["GET", `/knowledge/wiki/proposals/${P_EDIT}`, "Bearer iex_stopgap-for-proposals"],
+      ]);
+      expect(await failure(stopgapSession.approveProposal(P_EDIT, record.proposalHash))).toContain(
+        "FORBIDDEN: Approving a Wiki proposal needs your own InferLab sign-in: this connection is shared and approves as no one.");
+      expect(calls).toHaveLength(2);
+      expect((await hooks.log()).actions).toEqual([]);
+
+      // At apply: an approval in a stopgap binding is refused unsent and stays pending.
+      await session.approveProposal(P_EDIT, record.proposalHash);
+      const [action] = (await hooks.log()).actions;
+      await hooks.putWikiRaw(stopgapProps, `action:${action!.id}`, await hooks.getWikiRaw(props, `action:${action!.id}`));
+      expect(await hooks.applyOutcome(stopgapProps, action!.id, "wiki")).toMatchObject({
+        outcome: "notApplied", retryable: true, code: "FORBIDDEN",
+        message: "Approving a Wiki proposal needs your own InferLab sign-in: this connection is shared and approves as no one.",
+      });
+      expect(await hooks.getWikiRaw(stopgapProps, `action:${action!.id}`)).toMatchObject({ status: "pending", attempts: {} });
+      expect(calls.filter(c => c.method !== "GET")).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+      names.forEach((name, index) => {
+        if (saved[index] === undefined) delete stopgap[name];
+        else stopgap[name] = saved[index];
+      });
+    }
+  });
+
+  it("A12: an approval cannot be reverted here, and a rejected one is forgotten without a call", async () => {
+    const { props, hooks, mock, session, id } = await staged();
+    await hooks.rejectWiki(props, id);
+    expect((await session.readProposal(P_EDIT)).proposal.pending).toBeUndefined();
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toBeUndefined();
+    expect(await mock.approveRequests()).toEqual([]);
+
+    await session.approveProposal(P_EDIT, await hashOf(mock, P_EDIT));
+    const again = (await hooks.log()).actions.at(-1)!;
+    expect(await hooks.applyWiki(props, again.id)).toBeNull();
+    expect(await hooks.revertWiki(props, again.id))
+      .toBe("An approval cannot be undone here. If the page was published, edit it in InferMind.");
+    expect(await mock.approveRequests()).toHaveLength(1);
+    expect(await hooks.getWikiRaw(props, `action:${again.id}`)).toMatchObject({ status: "applied" });
+  });
+
+  it("A13: with InferOps off, reads and apply are DISABLED and the approval stays pending", async () => {
+    const { props, hooks, mock, session, id } = await staged();
+    vars.INFEROPS_ENABLED = "false";
+    expect(await failure(session.listProposals())).toContain("DISABLED");
+    expect(await failure(session.readProposal(P_EDIT))).toContain("DISABLED");
+    expect(await hooks.applyOutcome(props, id, "wiki")).toMatchObject({ outcome: "notApplied", retryable: true, code: "DISABLED" });
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "pending", attempts: {} });
+    delete vars.INFEROPS_ENABLED;
+    expect(await hooks.applyWiki(props, id)).toBeNull();
+    expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("approved");
+  });
+
+  it("A14: a shared gadget is refused an approval at staging; its reads and edits still work", async () => {
+    const { props, hooks, mock, session } = setup();
+    expect(await hooks.addWikiObserver(props, true)).toBeNull();
+    expect(await failure(session.approveProposal(P_EDIT, await hashOf(mock, P_EDIT)))).toBe(`InferOpsError: FORBIDDEN: ${SHARED}`);
+    expect((await hooks.log()).actions).toEqual([]);
+    expect(await hooks.getWikiRaw(props, "action:1")).toBeUndefined();
+    expect((await session.readProposal(P_EDIT)).proposal.state).toBe("in_review");
+    expect(await session.listProposals()).toHaveLength(5);
+    await session.updateDocumentBody("incident-response", "Edited while shared.", 4);
+    expect((await hooks.log()).actions.map(a => a.kind)).toEqual(["inferops.wiki-page-update"]);
+  });
+
+  it("A15: a collaborator admitted after staging stops the apply before it is sent, until removed", async () => {
+    const { props, hooks, mock, id } = await staged();
+    expect(await hooks.addWikiObserver(props, true)).toBeNull();
+    expect(await hooks.applyOutcome(props, id, "wiki")).toEqual({
+      outcome: "notApplied", retryable: true, code: "FORBIDDEN", message: SHARED,
+    });
+    const stored = await hooks.getWikiRaw(props, `action:${id}`) as { status: string; attempts: Record<string, unknown> };
+    expect(stored).toMatchObject({ status: "pending", attempts: {} });
+    expect(stored.attempts.dispatchedAt).toBeUndefined();
+    expect(await mock.approveRequests()).toEqual([]);
+    expect(await mock.proposalCounts(P_EDIT)).toEqual({ approvals: 0, enqueues: 0, publications: 0 });
+
+    await hooks.removeWikiObserver(props);
+    expect(await hooks.applyWiki(props, id)).toBeNull();
+    expect(await mock.approveRequests()).toHaveLength(1);
+    expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "applied", approvedState: "approved" });
+  });
+
+  it("A15: after an attempt that may have been sent, the collaborator refusal is unknown and retryable, sending nothing", async () => {
+    const { props, hooks, mock, id } = await staged();
+    await mock.failNextWrite("lost");
+    expect(await hooks.applyOutcome(props, id, "wiki")).toMatchObject({ outcome: "unknown", retryable: true });
+    expect(await hooks.addWikiObserver(props, true)).toBeNull();
+    expect(await hooks.applyOutcome(props, id, "wiki")).toMatchObject({ outcome: "unknown", retryable: true, code: "FORBIDDEN" });
+    expect(await mock.approveRequests()).toHaveLength(1);
+    expect(await hooks.getWikiRaw(props, `action:${id}`))
+      .toMatchObject({ status: "pending", attempts: { dispatchedAt: expect.any(String) } });
+    await hooks.removeWikiObserver(props);
+    expect(await hooks.applyWiki(props, id)).toBeNull();
+    expect(await mock.approveRequests()).toHaveLength(2);
+  });
+
+  it("A16: an approval is never auto-approvable, and the Wiki facet has no edit-before-approve path", async () => {
+    const { props, hooks } = setup();
+    expect(await hooks.wikiApprovalSurfaces(props)).toEqual({
+      autoApprovable: [], getApprovalProposal: false, editApprovalProposal: false, boardEditPath: true,
+    });
+  });
+
+  it("A17: a proposal too long to show in full is refused at staging; one that fits shows every field whole", async () => {
+    const { hooks, mock, session } = setup();
+    const long = await mock.seedProposal({ title: "Long page", content: `# Long page\n\n${"word ".repeat(30_000)}` });
+    expect(await failure(session.approveProposal(long.id, long.proposalHash)))
+      .toContain("INVALID_REQUEST: This proposal is too long to show in full on an approval card; approve it in " +
+        "InferOps directly (proposal.approve).");
+    expect((await hooks.log()).actions).toEqual([]);
+    const fits = await mock.seedProposal({ title: "Fits", content: `# Fits\n\n${"word ".repeat(15_000)}` });
+    await session.approveProposal(fits.id, fits.proposalHash);
+    expect((await hooks.log()).actions[0]).toMatchObject({ complete: true, truncated: [] });
+    expect(Object.keys((await hooks.log()).actions[0]!.fields)).toEqual(["Page", "Revision", "Proposal hash", "Summary", "Sources", "Contradictions", "Content"]);
   });
 });
 

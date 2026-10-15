@@ -1,5 +1,5 @@
 {
-  "$comment": "Seed Wiki for the mock InferOps data source (mock-inferops.ts): InferMind documents (detail shape: body, version, masterRole), sections (WikiSectionSchema) and pillars (a pathway_type pillar with its Master and wiki_pillar_member rows) as InferOps' knowledge routes return them. UUIDs are synthetic. Drafts has nothing to read; Onboarding has a body and a section; Incident response is a body-only SOP; Demo Company is the root (no body); Engineering is a section-less, body-less Master; Release process and the slash-slugged Dispatch a crew SOP (whose body opens with a heading other than its title) are filed in both pillars.",
+  "$comment": "Seed Wiki for the mock InferOps data source (mock-inferops.ts): InferMind documents (detail shape: body, version, masterRole), sections (WikiSectionSchema) and pillars (a pathway_type pillar with its Master and wiki_pillar_member rows) as InferOps' knowledge routes return them. UUIDs are synthetic. Drafts has nothing to read; Onboarding has a body and a section; Incident response is a body-only SOP; Demo Company is the root (no body); Engineering is a section-less, body-less Master; Release process and the slash-slugged Dispatch a crew SOP (whose body opens with a heading other than its title) are filed in both pillars. Proposals are InferOps' wiki proposal records (wiki-proposal.dto.ts) without their hash, which the mock computes, plus requestedBy/revisedBy principal ids: P-edit (release-process), P-new (postmortems, under Operations), P-noparent (glossary), P-self (requested by the demo account, 0000000000d1) and P-stale (a source read at version 0).",
   "documents": [
     {
       "id": "60000000-0000-4000-8000-000000000001",
@@ -156,6 +156,151 @@
         {
           "documentId": "60000000-0000-4000-8000-000000000009",
           "source": "intake"
+        }
+      ]
+    }
+  ],
+  "proposals": [
+    {
+      "id": "62000000-0000-4000-8000-000000000001",
+      "runId": "63000000-0000-4000-8000-000000000001",
+      "revision": 1,
+      "state": "in_review",
+      "targetDocumentId": "60000000-0000-4000-8000-000000000002",
+      "expectedVersion": 2,
+      "parentId": null,
+      "pathwayType": null,
+      "contradictions": [],
+      "sectionRefs": [
+        {
+          "heading": "Release process",
+          "sectionIds": [
+            "61000000-0000-4000-8000-000000000003"
+          ]
+        }
+      ],
+      "requestedBy": "00000000-0000-4000-8000-0000000000d2",
+      "revisedBy": null,
+      "createdAt": "2026-10-01T09:00:00.000Z",
+      "updatedAt": "2026-10-01T09:00:00.000Z",
+      "targetSlug": "release-process",
+      "title": "Release process",
+      "content": "# Release process\n\n1. Cut the release branch.\n2. Run the checks on it.\n3. Tag the build and announce it.",
+      "summary": "Writes the release steps out as the page's own body.",
+      "sources": [
+        {
+          "sectionId": "61000000-0000-4000-8000-000000000003",
+          "version": 2
+        },
+        {
+          "sectionId": "61000000-0000-4000-8000-000000000001",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "id": "62000000-0000-4000-8000-000000000002",
+      "runId": "63000000-0000-4000-8000-000000000002",
+      "revision": 1,
+      "state": "in_review",
+      "targetDocumentId": null,
+      "expectedVersion": null,
+      "parentId": "60000000-0000-4000-8000-000000000007",
+      "pathwayType": "operations",
+      "contradictions": [
+        "The current-work section says postmortems are optional; the draft makes them required."
+      ],
+      "sectionRefs": [],
+      "requestedBy": "00000000-0000-4000-8000-0000000000d2",
+      "revisedBy": null,
+      "createdAt": "2026-10-02T09:00:00.000Z",
+      "updatedAt": "2026-10-02T09:00:00.000Z",
+      "targetSlug": "postmortems",
+      "title": "Postmortems",
+      "content": "# Postmortems\n\nWrite one within a week of every incident.",
+      "summary": "A new Operations page on postmortems.",
+      "sources": [
+        {
+          "sectionId": "61000000-0000-4000-8000-000000000002",
+          "version": 3
+        }
+      ]
+    },
+    {
+      "id": "62000000-0000-4000-8000-000000000003",
+      "runId": "63000000-0000-4000-8000-000000000003",
+      "revision": 1,
+      "state": "in_review",
+      "targetDocumentId": null,
+      "expectedVersion": null,
+      "parentId": null,
+      "pathwayType": null,
+      "contradictions": [],
+      "sectionRefs": [],
+      "requestedBy": "00000000-0000-4000-8000-0000000000d2",
+      "revisedBy": null,
+      "createdAt": "2026-10-03T09:00:00.000Z",
+      "updatedAt": "2026-10-03T09:00:00.000Z",
+      "targetSlug": "glossary",
+      "title": "Glossary",
+      "content": "# Glossary\n\nTerms the team uses.",
+      "summary": "A new page with no place in the tree yet.",
+      "sources": [
+        {
+          "sectionId": "61000000-0000-4000-8000-000000000001",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "id": "62000000-0000-4000-8000-000000000004",
+      "runId": "63000000-0000-4000-8000-000000000004",
+      "revision": 1,
+      "state": "in_review",
+      "targetDocumentId": "60000000-0000-4000-8000-000000000008",
+      "expectedVersion": 4,
+      "parentId": null,
+      "pathwayType": null,
+      "contradictions": [],
+      "sectionRefs": [],
+      "requestedBy": "00000000-0000-4000-8000-0000000000d1",
+      "revisedBy": null,
+      "createdAt": "2026-10-04T09:00:00.000Z",
+      "updatedAt": "2026-10-04T09:00:00.000Z",
+      "targetSlug": "incident-response",
+      "title": "Incident response",
+      "content": "# Incident response\n\nPage the on-call engineer first.",
+      "summary": "Drafted at the demo account's own request.",
+      "sources": [
+        {
+          "sectionId": "61000000-0000-4000-8000-000000000001",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "id": "62000000-0000-4000-8000-000000000005",
+      "runId": "63000000-0000-4000-8000-000000000005",
+      "revision": 1,
+      "state": "in_review",
+      "targetDocumentId": "60000000-0000-4000-8000-000000000003",
+      "expectedVersion": 3,
+      "parentId": null,
+      "pathwayType": null,
+      "contradictions": [],
+      "sectionRefs": [],
+      "requestedBy": "00000000-0000-4000-8000-0000000000d2",
+      "revisedBy": null,
+      "createdAt": "2026-10-05T09:00:00.000Z",
+      "updatedAt": "2026-10-05T09:00:00.000Z",
+      "targetSlug": "onboarding",
+      "title": "Onboarding",
+      "content": "# Onboarding\n\nRead the handbook on day one.",
+      "summary": "Cites a section that has moved on since it was read.",
+      "sources": [
+        {
+          "sectionId": "61000000-0000-4000-8000-000000000004",
+          "version": 0
         }
       ]
     }
