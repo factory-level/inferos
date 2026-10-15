@@ -231,6 +231,8 @@ describe.skipIf(!LIVE.baseUrl)("Wiki proposal approval against a local InferOps"
       network.uninstall();
       evidence.push(`unmocked non-loopback calls from InferOS: ${escaped.length}`);
       console.log(`\nLocal Wiki proposal evidence:\n${evidence.map(line => `  ${line}`).join("\n")}\n`);
+      // Nothing left the machine: every InferOS request was loopback or the InferLab fixture.
+      expect(escaped).toEqual([]);
     }
   });
 
@@ -270,7 +272,9 @@ describe.skipIf(!LIVE.baseUrl)("Wiki proposal approval against a local InferOps"
     // L3: approved by the owner, at the hash; not published.
     await ws.approveAction(action.id);
     const entry = await entryOf(ws, action.id);
-    expect(entry?.state).toBe("applied");
+    // `ActionState` has no "applied": an approved action is one the gatekeeper applied.
+    expect(entry?.state).toBe("approved");
+    expect(entry).not.toHaveProperty("lastAttempt");
     const after = (await proposalDirect(people.owner.person, seed.p1.id)).body.proposal;
     expect(after).toMatchObject({
       state: "approved", approvedHash: seed.p1.proposalHash, decidedBy: { id: people.owner.person.user.id, type: "user" },
@@ -279,7 +283,8 @@ describe.skipIf(!LIVE.baseUrl)("Wiki proposal approval against a local InferOps"
     const shown = (await session.readProposal(seed.p1.id)).proposal;
     expect(shown).toMatchObject({ state: "approved", publishedDocumentId: null });
     expect(shown.pending).toBeUndefined();
-    expect(JSON.stringify(await ws.listActions({ filter: "all" }))).not.toMatch(/published/i);
+    // Nothing about the approved action claims a publication.
+    expect(JSON.stringify(entry)).not.toMatch(/\bpublished\b/i);
     evidence.push(`L3 applied: InferOps approved, decidedBy owner ${people.owner.person.user.id}, approvedHash = seed hash, not published`);
 
     // L4: approving the applied action again sends nothing; a direct resend replays the decision.
