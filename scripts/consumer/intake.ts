@@ -775,7 +775,7 @@ export function renderReport(report: IntakeReport): string {
       ...(report.inferops.unlinkedSops.length ? ["", `SOPs not linked to a Wiki page: ${report.inferops.unlinkedSops.map(item => `${item.operation} (${item.reason})`).join("; ")}.`] : []),
       ...(report.inferops.conflicts.length ? [
         "",
-        `Conflicting intake revisions: InferOps refused the intake, so nothing was written there. These operations changed since the intake this wrapper last applied: ${report.inferops.conflicts.map(conflict => `\`${conflict.key}\` (${conflict.action})`).join(", ")}. The current InferOps intake is \`${report.inferops.currentIntakeSha256 ?? "unknown"}\`.`,
+        `Conflicting intake revisions: InferOps refused the intake because another apply landed after this run's check. Its operations, intake record and current intake are unchanged, but a project InferOps created for this intake just before the refusal may remain (it is kept as created, and a rerun never duplicates it). These operations changed since the intake this wrapper last applied: ${report.inferops.conflicts.map(conflict => `\`${conflict.key}\` (${conflict.action})`).join(", ")}. The current InferOps intake is \`${report.inferops.currentIntakeSha256 ?? "unknown"}\`.`,
         "",
         `Resolve each by hand, then rerun \`pnpm inferos intake apply <file> --inferops --rebase-onto ${report.inferops.currentIntakeSha256 ?? "<current intake sha256>"}\`.`,
       ] : report.inferops.error ? ["", `Did not complete: ${cell(report.inferops.error)}. Rerun \`pnpm inferos intake apply <file> --inferops\`; both InferOps writes are idempotent.`] : []),

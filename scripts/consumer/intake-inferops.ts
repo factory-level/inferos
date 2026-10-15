@@ -21,7 +21,9 @@
  * Conflicting intake revisions require review (inferops#2324). Every intake call names its base: the
  * provider hash of the intake this wrapper last applied. InferOps reports an operation that both this
  * intake and, since that base, another apply changed as a `conflict` and refuses the whole intake
- * (409 `STALE_REVISION`, nothing written). The dry run surfaces it before the wrapper is derived
+ * (409 `STALE_REVISION`): its operations, intake record and current intake are unchanged. A conflict
+ * the dry run finds creates nothing; one found only at the apply (a race lost after the dry run) may
+ * leave a project InferOps created just before its locked check. The dry run surfaces it before the wrapper is derived
  * ({@link IntakeConflictError}); the human's resolution is an explicit rebase onto the current intake.
  */
 import type { ConsumerIntake } from "./intake.ts";

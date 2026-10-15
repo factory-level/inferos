@@ -891,6 +891,10 @@ test("a conflict in the dry run stops before the wrapper is derived, naming the 
     assert.match(error.message, /dispatch-crew \(update\)/);
     assert.match(error.message, new RegExp(`--rebase-onto ${OTHER}`));
     assert.match(error.message, /Resolve each by hand/);
+    // A preflight (dry-run) conflict: nothing anywhere changed, so the message may say so, exactly.
+    assert.equal(error.message, "InferOps refused the intake before any write: 1 operation(s) changed since the intake this wrapper last applied: "
+      + `dispatch-crew (update). The current InferOps intake is ${OTHER}. The wrapper is unchanged. Resolve each by hand `
+      + `(inventory.list shows the current operations), then rerun with --rebase-onto ${OTHER}.`);
     assert.ok(!error.message.includes(TOKEN));
     return true;
   });
@@ -930,7 +934,14 @@ test("a race lost after the wrapper is derived reports the conflicts and the reb
   assert.deepEqual(report.inferops?.conflicts, [{ key: "dispatch-crew", action: "update" }]);
   assert.equal(report.inferops?.currentIntakeSha256, OTHER);
   const markdown = readFileSync(join(target, REPORT_FILES.markdown), "utf8");
-  assert.match(markdown, /Conflicting intake revisions: InferOps refused the intake/);
+  // The exact claim: InferOps' records are unchanged, but a lost race may leave a created project.
+  assert.ok(markdown.includes(
+    "Conflicting intake revisions: InferOps refused the intake because another apply landed after this run's check. "
+    + "Its operations, intake record and current intake are unchanged, but a project InferOps created for this intake just before the refusal may remain "
+    + "(it is kept as created, and a rerun never duplicates it). "
+    + `These operations changed since the intake this wrapper last applied: \`dispatch-crew\` (update). The current InferOps intake is \`${OTHER}\`.`,
+  ), "the 409 report states exactly what InferOps kept and what may remain");
+  assert.doesNotMatch(markdown, /nothing was written/, "a lost race is never reported as writing nothing");
   assert.match(markdown, new RegExp(`--rebase-onto ${OTHER}`));
   assert.doesNotMatch(markdown, /both InferOps writes are idempotent/, "a conflict is not a plain rerun");
   assert.equal(readJson(join(target, MANAGED_RECORD_FILE)).inferops.intakeSha256, APPLIED, "the prior base is kept");
