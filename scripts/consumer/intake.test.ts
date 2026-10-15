@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
 import { CAPABILITY_NAMES } from "./config.ts";
-import { inferOpsBindingFromEnv, inferOpsComplete, pillarMembers, type FetchSeam } from "./intake-inferops.ts";
+import { inferOpsBindingFromEnv, inferOpsComplete, IntakeConflictError, pillarMembers, type FetchSeam } from "./intake-inferops.ts";
 import {
   applyIntake, applyIntakeWithInferOps, CUSTOMER_VIEW_FILE, INTAKE_MAX_BYTES, MANAGED_RECORD_FILE, parseIntake, readIntakeFile, REPORT_FILES,
   type ExecSeam,
@@ -798,4 +798,163 @@ test("the requirement report survives a partial apply and is not-run when the in
   assert.match(readFileSync(join(target, REPORT_FILES.markdown), "utf8"), /Not received: the intake step did not succeed/);
   // Without --inferops nothing about InferOps is reported at all.
   assert.equal(applyIntake(target, intakePath, { upstream, exec: neverExec }).inferops, null);
+});
+
+// ── Conflicting intake revisions (inferops#2324) ────────────────────────────────────────────────
+
+const APPLIED = "a".repeat(64);
+const OTHER = "b".repeat(64);
+const NEXT = "d".repeat(64);
+
+/**
+ * The fake InferOps of {@link fakeInferOps}, with the provider's base rule on `POST /project/intake`:
+ * InferOps holds a current intake; a call whose `baseIntakeSha256` is not that intake (an absent base
+ * while one exists included) sees `dispatch-crew` as a conflict. A dry run reports it; an apply is a
+ * 409 `STALE_REVISION` with the recovery data. `raceAfterDryRun` lets the dry run pass and refuses the
+ * apply, as when another apply lands in between. A successful apply makes `applies` the current intake.
+ */
+function conflictingInferOps(state: { current: string | null; applies?: string; raceAfterDryRun?: boolean; intakeStatus?: number }) {
+  const inner = fakeInferOps();
+  const bodies: { dryRun: boolean; base: string | undefined }[] = [];
+  const fetch: FetchSeam = async (url, init) => {
+    const { pathname } = new URL(url);
+    if (pathname === "/project/inventory") {
+      return reply(200, { asOf: "e".repeat(64), intake: state.current ? { sha256: state.current, appliedAt: "2026-10-15T00:00:00.000Z", synthetic: true } : null, pillars: [], items: [] });
+    }
+    if (pathname !== "/project/intake") return inner.fetch(url, init);
+    const body = JSON.parse(String(init.body));
+    const dryRun = body.dryRun === true;
+    bodies.push({ dryRun, base: body.baseIntakeSha256 });
+    const conflicting = (body.baseIntakeSha256 ?? null) !== state.current && !(dryRun && state.raceAfterDryRun);
+    const raced = !dryRun && state.raceAfterDryRun;
+    if (conflicting || raced) {
+      const current = raced ? OTHER : state.current;
+      if (dryRun) {
+        return reply(200, {
+          intakeSha256: NEXT, dryRun: true, alreadyApplied: false, pillars: [], currentIntakeSha256: current,
+          changes: [{ kind: "operation", key: "dispatch-crew", action: "conflict", detail: `this intake would update it, but it was changed since your base intake; the current intake is ${current}` }],
+        });
+      }
+      return reply(409, {
+        success: false,
+        error: { code: "STALE_REVISION", message: "1 operation(s) changed since your base intake: dispatch-crew.", details: { currentIntakeSha256: current, conflicts: [{ key: "dispatch-crew", action: "update" }] } },
+      });
+    }
+    if (!dryRun && state.intakeStatus) return providerError(state.intakeStatus, "FAKE_FAILURE");
+    if (dryRun) return reply(200, { intakeSha256: NEXT, dryRun: true, alreadyApplied: false, changes: [], pillars: [] });
+    state.current = state.applies ?? NEXT;
+    return reply(200, { intakeSha256: state.current, dryRun: false, alreadyApplied: false, changes: [{ kind: "operation", key: "dispatch-crew", action: "update" }], pillars: [] });
+  };
+  return { fetch, calls: inner.calls, bodies };
+}
+
+/** Every wrapper file the command may write, by path, for a byte-for-byte "untouched" check. */
+const wrapperBytes = (target: string) => Object.fromEntries(
+  ["inferos.config.json", "inferos.canvas.json", MANAGED_RECORD_FILE, REPORT_FILES.json, REPORT_FILES.markdown, CUSTOMER_VIEW_FILE]
+    .map(file => [file, existsSync(join(target, file)) ? readFileSync(join(target, file), "utf8") : null]),
+);
+
+/** A wrapper whose last --inferops run applied the intake InferOps knows as {@link APPLIED}. */
+async function appliedWrapper(dir: string) {
+  const { target, intakePath, upstream } = wrapper(dir);
+  const fake = conflictingInferOps({ current: null, applies: APPLIED });
+  await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.equal(readJson(join(target, MANAGED_RECORD_FILE)).inferops.intakeSha256, APPLIED);
+  return { target, intakePath, upstream, first: fake };
+}
+
+test("--inferops sends the recorded base on the dry run and the apply; a first run sends none", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-conflict-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream, first } = await appliedWrapper(dir);
+  assert.deepEqual(first.bodies, [{ dryRun: true, base: undefined }, { dryRun: false, base: undefined }]);
+
+  const fake = conflictingInferOps({ current: APPLIED, applies: NEXT });
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.deepEqual(fake.bodies, [{ dryRun: true, base: APPLIED }, { dryRun: false, base: APPLIED }]);
+  assert.equal(report.inferops?.baseIntakeSha256, APPLIED);
+  assert.deepEqual(report.inferops?.conflicts, []);
+  assert.equal(readJson(join(target, MANAGED_RECORD_FILE)).inferops.intakeSha256, NEXT, "an applied intake becomes the next base");
+});
+
+test("a conflict in the dry run stops before the wrapper is derived, naming the keys, the current intake and the rebase", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-conflict-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = await appliedWrapper(dir);
+  // Another caller applied OTHER since this wrapper's base, APPLIED.
+  const before = wrapperBytes(target);
+  const fake = conflictingInferOps({ current: OTHER });
+  await assert.rejects(applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch }), (error: Error) => {
+    assert.ok(error instanceof IntakeConflictError);
+    assert.deepEqual(error.conflicts, [{ key: "dispatch-crew", action: "update" }]);
+    assert.equal(error.currentIntakeSha256, OTHER);
+    assert.match(error.message, /dispatch-crew \(update\)/);
+    assert.match(error.message, new RegExp(`--rebase-onto ${OTHER}`));
+    assert.match(error.message, /Resolve each by hand/);
+    assert.ok(!error.message.includes(TOKEN));
+    return true;
+  });
+  assert.deepEqual(fake.bodies, [{ dryRun: true, base: APPLIED }], "only the dry run reached InferOps");
+  assert.deepEqual(writes(fake.calls), [], "no InferOps write");
+  assert.deepEqual(wrapperBytes(target), before, "every wrapper file is byte-identical");
+});
+
+test("--rebase-onto is checked against inventory.list before the wrapper is derived, then sent as this run's base", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-conflict-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = await appliedWrapper(dir);
+  const before = wrapperBytes(target);
+  for (const [rebaseOnto, pattern] of [["c".repeat(64), /is not InferOps' current intake \(b{64}\)/], ["B".repeat(64), /64 lowercase hex/]] as const) {
+    const fake = conflictingInferOps({ current: OTHER });
+    await assert.rejects(applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch, rebaseOnto }), pattern);
+    assert.deepEqual(writes(fake.calls), [], "no InferOps write");
+    assert.deepEqual(wrapperBytes(target), before, "wrapper unchanged");
+  }
+
+  const fake = conflictingInferOps({ current: OTHER, applies: NEXT });
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch, rebaseOnto: OTHER });
+  assert.deepEqual(fake.bodies, [{ dryRun: true, base: OTHER }, { dryRun: false, base: OTHER }]);
+  assert.equal(report.inferops?.intake, "applied");
+  assert.equal(readJson(join(target, MANAGED_RECORD_FILE)).inferops.intakeSha256, NEXT);
+});
+
+test("a race lost after the wrapper is derived reports the conflicts and the rebase step, and keeps the recorded base", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-conflict-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = await appliedWrapper(dir);
+  const fake = conflictingInferOps({ current: APPLIED, raceAfterDryRun: true });
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.equal(report.inferops?.intake, "failed");
+  assert.equal(report.inferops?.pillars, "not-run");
+  assert.match(report.inferops?.error ?? "", /^intake\.apply: HTTP 409 STALE_REVISION/);
+  assert.deepEqual(report.inferops?.conflicts, [{ key: "dispatch-crew", action: "update" }]);
+  assert.equal(report.inferops?.currentIntakeSha256, OTHER);
+  const markdown = readFileSync(join(target, REPORT_FILES.markdown), "utf8");
+  assert.match(markdown, /Conflicting intake revisions: InferOps refused the intake/);
+  assert.match(markdown, new RegExp(`--rebase-onto ${OTHER}`));
+  assert.doesNotMatch(markdown, /both InferOps writes are idempotent/, "a conflict is not a plain rerun");
+  assert.equal(readJson(join(target, MANAGED_RECORD_FILE)).inferops.intakeSha256, APPLIED, "the prior base is kept");
+});
+
+test("a failed apply keeps the recorded base instead of clearing it", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "intake-conflict-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { target, intakePath, upstream } = await appliedWrapper(dir);
+  const report = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: conflictingInferOps({ current: APPLIED, intakeStatus: 503 }).fetch });
+  assert.equal(report.inferops?.intake, "failed");
+  assert.equal(report.inferops?.intakeSha256, null);
+  const record = readJson(join(target, MANAGED_RECORD_FILE));
+  assert.equal(record.inferops.intake, "failed");
+  assert.equal(record.inferops.intakeSha256, APPLIED, "the next run's base survives the failure");
+  // So the next run, InferOps unchanged, sends that base and applies cleanly.
+  const fake = conflictingInferOps({ current: APPLIED, applies: NEXT });
+  const retried = await applyIntakeWithInferOps(target, intakePath, { upstream, exec: neverExec, binding, fetch: fake.fetch });
+  assert.equal(retried.inferops?.intake, "applied");
+  assert.deepEqual(fake.bodies.map(body => body.base), [APPLIED, APPLIED]);
+});
+
+test("the intake CLI takes --rebase-onto only with --inferops", () => {
+  const result = spawnSync(process.execPath, [join(import.meta.dirname, "intake.ts"), "apply", tmpdir(), SAMPLE, "--rebase-onto", OTHER], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--rebase-onto applies only with --inferops/);
 });
