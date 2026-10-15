@@ -15,7 +15,8 @@ import {
 } from "../src/inferops.js";
 import type { RejectionVerdict } from "@gadgets/gatekeeper-kit/credentials";
 import {
-  InferOpsError, type IssueChanges, type NewIssueRequest, type WorkspaceMembersRead,
+  InferOpsError, type IssueChanges, type NewIssueRequest, type WikiProposalApproval, type WikiProposalRecord,
+  type WorkspaceMembersRead,
 } from "../src/inferops-client.js";
 import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
@@ -34,7 +35,10 @@ export {
   InferOpsWorkflowPolicyGatekeeper,
 } from "../src/inferops.js";
 
-/** A fault the next issue write meets: refused before commit, or committed with its reply lost. */
+/**
+ * A fault the next issue write or proposal approval meets: refused before commit, or committed with
+ * its reply lost.
+ */
 export type WriteFault = "unavailable" | "lost";
 
 const FAULT_KEY = "test:fault";
@@ -97,7 +101,21 @@ export class MockInferOps extends BaseMockInferOps {
     return this.#faulted(() =>
       super.updateIssue(projectKey, issueId, changes, expectedRevision, idempotencyKey));
   }
+
+  /** Every approval request that reached the mock, faulted or not, in order. */
+  async approveRequests(): Promise<Array<{ proposalId: string; approval: WikiProposalApproval; key: string }>> {
+    return this.ctx.storage.kv.get(APPROVE_LOG_KEY) ?? [];
+  }
+
+  override approveProposal(proposalId: string, approval: WikiProposalApproval, idempotencyKey: string):
+      Promise<WikiProposalRecord> {
+    const log = this.ctx.storage.kv.get<unknown[]>(APPROVE_LOG_KEY) ?? [];
+    this.ctx.storage.kv.put(APPROVE_LOG_KEY, [...log, { proposalId, approval, key: idempotencyKey }]);
+    return this.#faulted(() => super.approveProposal(proposalId, approval, idempotencyKey));
+  }
 }
+
+const APPROVE_LOG_KEY = "test:approveRequests";
 
 const REPORT_FAULT_KEY = "test:failNextReport";
 /** What the failed adjudication RPC's error carries, in its message and its stack. */
@@ -195,6 +213,10 @@ export type QueueLog = {
     fields: Record<string, string>;
     /** The action kind's tag, when the action declares one. */
     kind?: string;
+    /** Whether the description says nothing was dropped (`descriptionIsComplete`). */
+    complete: boolean;
+    /** The labels of fields shown truncated or omitted. */
+    truncated: string[];
   }>;
 };
 
@@ -218,6 +240,9 @@ class TestApprovalQueue extends RpcTarget {
       id, title: description.title, description: description.description,
       implementsRevert: description.implementsRevert ?? false, fields,
       ...(description.actionKind ? { kind: description.actionKind.tag } : {}),
+      complete: description.descriptionIsComplete === true,
+      truncated: (description.fields ?? []).filter(field => "truncated" in field && field.truncated !== undefined)
+        .map(field => field.label),
     });
   }
 
@@ -796,6 +821,29 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return messageOf(error);
     }
+  }
+
+  /** Forget the collaborator `addWikiObserver` admitted to a Wiki binding. */
+  async removeWikiObserver(props: WikiProps): Promise<void> {
+    await this.#wikiGatekeeper(props).removeObserver("observer-1");
+  }
+
+  /**
+   * What the Wiki facet offers an approval surface: its auto-approvable kinds, and whether it has
+   * the edit-before-approve methods a board facet has.
+   */
+  async wikiApprovalSurfaces(props: WikiProps):
+      Promise<{ autoApprovable: unknown[]; getApprovalProposal: boolean; editApprovalProposal: boolean;
+                boardEditPath: boolean }> {
+    const prototype = InferOpsWikiGatekeeper.prototype as unknown as Record<string, unknown>;
+    const board = InferOpsProjectGatekeeper.prototype as unknown as Record<string, unknown>;
+    return {
+      autoApprovable: await this.#wikiGatekeeper(props).getAutoApprovableActions(),
+      getApprovalProposal: typeof prototype.getApprovalProposal === "function",
+      editApprovalProposal: typeof prototype.editApprovalProposal === "function",
+      // The control: a board facet does offer the edit-before-approve path.
+      boardEditPath: typeof board.getApprovalProposal === "function" && typeof board.editApprovalProposal === "function",
+    };
   }
 
   /** Admission of a collaborator by their own account's verifier, over a bound Wiki binding. */

@@ -453,6 +453,86 @@ export interface WikiDocument {
 }
 
 /**
+ * Where an InferMind Wiki proposal stands. "in_review" waits for a decision; "approved" and
+ * "publishing" are queued for publication; "published" is on the page; "stale" means the target or a
+ * cited section changed before it could publish; "blocked" means a publish-time check refused it
+ * (blockedReason names it); "superseded" means a newer revision replaced it; "rejected" is closed.
+ */
+export type WikiProposalState =
+  | "in_review" | "approved" | "publishing" | "published" | "rejected" | "superseded" | "stale" | "blocked";
+
+/** One cited section, at the version the draft read. */
+export interface WikiProposalSource {
+  sectionId: string;
+  version: number;
+}
+
+/**
+ * One revision of a drafted Wiki page waiting for review, or decided. Approving it binds exactly
+ * this revision (its proposalHash) and its cited sources.
+ */
+export interface WikiProposal {
+  /** Stable proposal UUID; a revision has its own. */
+  id: string;
+  /** The draft run it came from; all its revisions share it. */
+  runId: string;
+  revision: number;
+  state: WikiProposalState;
+  /** InferOps' hash of everything an approval binds; supply it to approveProposal(). */
+  proposalHash: string;
+  /** The page it replaces, or null for a new page. */
+  targetDocumentId: string | null;
+  /** The page version it replaces, or null for a new page. */
+  expectedVersion: number | null;
+  targetSlug: string;
+  /** A new page's parent; a new page cannot be approved without one. Null for an edit. */
+  parentId: string | null;
+  /** A new page's pillar, if any. */
+  pathwayType: string | null;
+  title: string;
+  /** The proposed page markdown. */
+  content: string;
+  summary: string;
+  sources: WikiProposalSource[];
+  /** Contradictions the draft noted between its sources. */
+  contradictions: string[];
+  /** The hash an approval bound (approved and later), else null. */
+  approvedHash: string | null;
+  decidedAt: string | null;
+  /** Which publish-time check refused it, when blocked. */
+  blockedReason: "integrity" | "access" | "grounding" | "feedback" | null;
+  /** Why it ended stale or blocked, when it did. */
+  lastError: string | null;
+  /** The page it was published to, its version and when, once published. */
+  publishedDocumentId: string | null;
+  publishedVersion: number | null;
+  publishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /**
+   * Set while an approval of this proposal requested through this connection waits for a decision
+   * here; absent otherwise. The state shown is still InferOps' own.
+   */
+  pending?: "approve";
+}
+
+/** Whether a proposal's target and cited sections still match it, as you can see them now. */
+export interface WikiProposalFreshness {
+  /** The target page's current version (null for a new page, or a page you cannot open). */
+  targetVersion: number | null;
+  /** Each cited section with its current version, null when you cannot see it (or it is gone). */
+  sources: { sectionId: string; proposedVersion: number; currentVersion: number | null }[];
+  /** True when the target or any cited section no longer matches the proposal. */
+  stale: boolean;
+}
+
+/** One proposal and its freshness for you. */
+export interface WikiProposalDetail {
+  proposal: WikiProposal;
+  freshness: WikiProposalFreshness;
+}
+
+/**
  * The InferMind Wiki of one workspace, fixed when this capability is created. Fails with
  * FORBIDDEN when the workspace is not an InferMind workspace or your InferOps access lacks
  * knowledge permission, and with NOT_FOUND for a page or section this Wiki does not have.
@@ -492,6 +572,29 @@ export interface InferOpsWikiSession {
    * another fails with CONFLICT. A body over 100000 characters fails with INVALID_REQUEST.
    */
   updateSection(sectionId: string, body: string, expectedVersion: number): Promise<void>;
+  /**
+   * Drafted page proposals, newest first (at most 200), optionally only those in one state. Fails
+   * with NOT_FOUND when Wiki publishing is off in InferOps.
+   */
+  listProposals(state?: WikiProposalState): Promise<WikiProposal[]>;
+  /**
+   * One proposal by UUID, with whether its target and cited sections still match it. Fails with
+   * NOT_FOUND for a proposal this Wiki does not have, or when Wiki publishing is off in InferOps.
+   */
+  readProposal(proposalId: string): Promise<WikiProposalDetail>;
+  /**
+   * Ask a person to approve one in_review proposal for publication, exactly at the proposalHash
+   * readProposal() returned. Approving queues publication and publishes nothing itself: InferOps
+   * publishes later, as the approver, only if their access, every cited section and the target
+   * still allow it, and the proposal otherwise ends stale or blocked; readProposal() shows which.
+   * Reads show the proposal marked pending "approve" until it is decided. Fails with
+   * STALE_REVISION for another hash, a superseded revision or a stale proposal, CONFLICT for a
+   * proposal no longer in review or one with another approval waiting, INVALID_REQUEST for a new
+   * page without a parent or a proposal too long to show in full for approval, and FORBIDDEN when
+   * this capability is shared with collaborators or uses a connection that is not your own sign-in.
+   * InferOps refuses an approval by the person who requested the draft or wrote its revision.
+   */
+  approveProposal(proposalId: string, proposalHash: string): Promise<void>;
 }
 
 /** What a relation of a custom table links to: an issue, a project, or a row of a custom table. */

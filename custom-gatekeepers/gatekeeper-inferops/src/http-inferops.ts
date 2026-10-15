@@ -54,14 +54,16 @@ import {
   type TableColumnRecord, type TableRead, type TableReadOptions, type TableRecordSchema,
   type TableRowRecord, type TableSummary, type WikiPageChanges, type WikiPageWrite,
   type WorkspaceMemberRecord, type WorkspaceMembersRead,
-  type WikiSectionRecord, type WikiStructureRecord,
+  type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
+  type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
 } from "./inferops-client";
 import { membersNotFound } from "./members";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound, type WorkflowHeadRecord } from "./workflow-policy";
 import { isSlug } from "./resources";
 import type {
   Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
-  State, StateGroup, TableTargetKind, WikiPillar, WikiPillarMember, WikiStructurePage, Workflow,
+  State, StateGroup, TableTargetKind, WikiPillar, WikiPillarMember, WikiProposalFreshness,
+  WikiProposalSource, WikiStructurePage, Workflow,
 } from "./types";
 
 type LogFields = { vendorId: string; operation: string; status: number; code: string };
@@ -490,6 +492,99 @@ const INFEROPS_REF = /^inferops:\/\/[^\s]{1,1990}$/;
 function bool(value: unknown, what: string): boolean {
   if (typeof value !== "boolean") throw new Malformed(`${what} is not valid`);
   return value;
+}
+
+const PROPOSAL_STATES: readonly WikiProposalState[] =
+  ["in_review", "approved", "publishing", "published", "rejected", "superseded", "stale", "blocked"];
+const BLOCKED_REASONS = ["integrity", "access", "grounding", "feedback"] as const;
+const SHA256 = /^[0-9a-f]{64}$/;
+
+function nullableInt(value: unknown, what: string): number | null {
+  return value === null ? null : int(value, what);
+}
+
+function proposalSource(value: unknown, what: string): WikiProposalSource {
+  const source = record(value, what);
+  return {
+    sectionId: text(source.sectionId, `${what}.sectionId`, UUID).toLowerCase(),
+    version: int(source.version, `${what}.version`),
+  };
+}
+
+/**
+ * A Wiki proposal (`WikiProposalRecordSchema`), field by field: the principals (`requestedBy`,
+ * `draftedBy`, `revisedBy`, `decidedBy`), the decision note, the grounding and the approved
+ * source copy are dropped.
+ */
+function parseProposal(value: unknown): WikiProposalRecord {
+  const p = record(value, "proposal");
+  return {
+    id: text(p.id, "proposal.id", UUID).toLowerCase(),
+    runId: text(p.runId, "proposal.runId", UUID).toLowerCase(),
+    revision: int(p.revision, "proposal.revision"),
+    state: oneOf(p.state, PROPOSAL_STATES, "proposal.state"),
+    proposalHash: text(p.proposalHash, "proposal.proposalHash", SHA256),
+    targetDocumentId: nullable(p.targetDocumentId, "proposal.targetDocumentId", UUID)?.toLowerCase() ?? null,
+    expectedVersion: nullableInt(p.expectedVersion, "proposal.expectedVersion"),
+    targetSlug: text(p.targetSlug, "proposal.targetSlug"),
+    parentId: nullable(p.parentId, "proposal.parentId", UUID)?.toLowerCase() ?? null,
+    pathwayType: nullable(p.pathwayType, "proposal.pathwayType"),
+    title: text(p.title, "proposal.title"),
+    content: text(p.content, "proposal.content"),
+    summary: text(p.summary, "proposal.summary"),
+    sources: list(p.sources, "proposal.sources").map(source => proposalSource(source, "proposal.source")),
+    contradictions: list(p.contradictions, "proposal.contradictions")
+      .map(item => text(item, "proposal.contradiction")),
+    approvedHash: nullable(p.approvedHash, "proposal.approvedHash", SHA256),
+    decidedAt: nullable(p.decidedAt, "proposal.decidedAt"),
+    blockedReason: p.blockedReason === null ? null : oneOf(p.blockedReason, BLOCKED_REASONS, "proposal.blockedReason"),
+    lastError: nullable(p.lastError, "proposal.lastError"),
+    publishedDocumentId: nullable(p.publishedDocumentId, "proposal.publishedDocumentId", UUID)?.toLowerCase() ?? null,
+    publishedVersion: nullableInt(p.publishedVersion, "proposal.publishedVersion"),
+    publishedAt: nullable(p.publishedAt, "proposal.publishedAt"),
+    createdAt: text(p.createdAt, "proposal.createdAt"),
+    updatedAt: text(p.updatedAt, "proposal.updatedAt"),
+  };
+}
+
+/** A proposal's freshness for this reader (`WikiProposalFreshnessSchema`). */
+function parseFreshness(value: unknown): WikiProposalFreshness {
+  const f = record(value, "freshness");
+  return {
+    targetVersion: nullableInt(f.targetVersion, "freshness.targetVersion"),
+    sources: list(f.sources, "freshness.sources").map(raw => {
+      const source = record(raw, "freshness.source");
+      return {
+        sectionId: text(source.sectionId, "freshness.source.sectionId", UUID).toLowerCase(),
+        proposedVersion: int(source.proposedVersion, "freshness.source.proposedVersion"),
+        currentVersion: nullableInt(source.currentVersion, "freshness.source.currentVersion"),
+      };
+    }),
+    stale: bool(f.stale, "freshness.stale"),
+  };
+}
+
+function proposalNotFound(): InferOpsError {
+  return new InferOpsError("NOT_FOUND", PROPOSAL_APPROVE_REFUSED.notFound);
+}
+
+/**
+ * What a refused `proposal.approve` means, from its status and InferOps' code; undefined leaves
+ * the shared mapping. Only this request reads these codes: the 403 split (a self-approval no grant
+ * fixes, apart from a missing permission) and a 422 `NEEDS_PLACEMENT`, which InferOps raises
+ * before anything is written, counted as a refusal here alone.
+ */
+function approveFailure(status: number, wire: string | null): SendFailure | undefined {
+  const R = PROPOSAL_APPROVE_REFUSED;
+  if (status === 409) {
+    return wire === "STALE_PROPOSAL" ? { code: "STALE_REVISION", detail: R.stale } : { code: "CONFLICT", detail: R.conflict };
+  }
+  if (status === 403) {
+    return wire === "SELF_APPROVAL_DENIED" ? { code: "CONFLICT", detail: R.self } : { code: "FORBIDDEN", detail: R.forbidden };
+  }
+  if (status === 422 && wire === "NEEDS_PLACEMENT") return { code: "INVALID_REQUEST", detail: R.placement, refusal: true };
+  if (status === 404) return { code: "NOT_FOUND", detail: R.notFound };
+  return undefined;
 }
 
 /**
@@ -935,10 +1030,18 @@ export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: st
 // ---------------------------------------------------------------------------
 // Client
 
+/**
+ * A request's own reading of a failed response: the code and detail, and whether this status counts
+ * as InferOps refusing the write (when it carries the envelope) beyond `REFUSAL_STATUSES`.
+ */
+type SendFailure = { code: InferOpsErrorCode; detail: string; refusal?: true };
+
 type Send = {
   method: "GET" | "POST" | "PATCH"; path: string; body?: unknown; idempotencyKey?: string;
   /** A successful response may have no body (InferOps' answer for a missing Wiki item). */
   maybeEmpty?: boolean;
+  /** Read a failed response before the shared mapping; undefined falls back to it. */
+  failure?: (status: number, wire: string | null) => SendFailure | undefined;
 };
 
 /**
@@ -997,17 +1100,21 @@ export function openHttpInferOpsClient(
     }
     if (!response.ok) {
       const wire = wireCode(body);
-      const code = failureCode(response.status, wire);
+      const own = response.status === 401 ? undefined : send.failure?.(response.status, wire);
+      const code = own?.code ?? failureCode(response.status, wire);
       logger.warn("InferOps request failed", {
         event: "http.request.failed", operation, status: response.status, code: wire ?? code,
       });
-      const policy = code === "FORBIDDEN" && isPolicyRefusalBody(body);
+      const policy = own === undefined && code === "FORBIDDEN" && isPolicyRefusalBody(body);
       // A write InferOps refused before it took effect: any 401 (the auth layer turns the request
-      // away), or one of the other refusal statuses carrying InferOps' own error envelope. Anything
-      // else (5xx, another status, a malformed or foreign body, a redirect) proves nothing.
-      const refused = response.status === 401 || (REFUSAL_STATUSES.has(response.status) && wire !== null);
+      // away), or one of the other refusal statuses (or one this request names) carrying InferOps'
+      // own error envelope. Anything else (5xx, another status, a malformed or foreign body, a
+      // redirect) proves nothing.
+      const refused = response.status === 401 ||
+        ((REFUSAL_STATUSES.has(response.status) || own?.refusal === true) && wire !== null);
       const stage = send.method !== "GET" && refused ? "refused" : undefined;
-      throw new InferOpsError(code, policy ? POLICY_REFUSED : FAILURE_DETAIL[code], { stage, policy });
+      throw new InferOpsError(code, own?.detail ?? (policy ? POLICY_REFUSED : FAILURE_DETAIL[code]),
+                              { stage, policy });
     }
     if (body === undefined) {
       if (send.maybeEmpty) return null;
@@ -1464,6 +1571,71 @@ export function openHttpInferOpsClient(
         const updated = parseSection(raw);
         if (updated.id !== sectionId.toLowerCase()) throw new Malformed("another section was returned");
         return updated;
+      });
+    },
+
+    async listProposals(state?: WikiProposalState): Promise<WikiProposalRecord[]> {
+      if (state !== undefined && !PROPOSAL_STATES.includes(state)) {
+        throw new InferOpsError("INVALID_REQUEST", "Not a Wiki proposal state.");
+      }
+      const query = state === undefined ? "" : `?${new URLSearchParams({ state })}`;
+      let body: unknown;
+      try {
+        body = await knowledge("wiki.proposal.list", { method: "GET", path: `/knowledge/wiki/proposals${query}` });
+      } catch (error) {
+        if (inferOpsCode(error) === "NOT_FOUND") throw proposalNotFound();
+        throw error;
+      }
+      return parsed("wiki.proposal.list", body, raw =>
+        list(record(raw, "response").proposals, "proposals").map(parseProposal));
+    },
+
+    async readProposal(proposalId: string): Promise<WikiProposalRead> {
+      // Also keeps anything that is not an id out of the request path.
+      if (!UUID.test(proposalId)) throw proposalNotFound();
+      let body: unknown;
+      try {
+        body = await knowledge("wiki.proposal.get", { method: "GET", path: `/knowledge/wiki/proposals/${proposalId}` });
+      } catch (error) {
+        if (inferOpsCode(error) === "NOT_FOUND") throw proposalNotFound();
+        throw error;
+      }
+      return parsed("wiki.proposal.get", body, raw => {
+        const answer = record(raw, "response");
+        const proposal = parseProposal(answer.proposal);
+        if (proposal.id !== proposalId.toLowerCase()) throw new Malformed("another proposal was returned");
+        return { proposal, freshness: parseFreshness(answer.freshness) };
+      });
+    },
+
+    async approveProposal(proposalId: string, approval: WikiProposalApproval, idempotencyKey: string):
+        Promise<WikiProposalRecord> {
+      await beforeSending(async () => {
+        if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
+        if (!SHA256.test(approval.proposalHash) || approval.sources.length === 0) {
+          throw new InferOpsError("INVALID_REQUEST", "An approval names the proposal hash and its sources.");
+        }
+        if (!UUID.test(proposalId)) throw proposalNotFound();
+      });
+      // Not through `knowledge()`: its one 403 message would erase the difference between a
+      // self-approval and a missing permission, which `approveFailure` keeps.
+      const body = await request("wiki.proposal.approve", {
+        method: "POST", path: `/knowledge/wiki/proposals/${proposalId}/approve`,
+        body: {
+          proposalHash: approval.proposalHash,
+          sources: approval.sources.map(({ sectionId, version }) => ({ sectionId, version })),
+        },
+        // InferOps replays by principal and hash, not by this key; it is sent by convention only.
+        idempotencyKey,
+        failure: approveFailure,
+      });
+      return parsed("wiki.proposal.approve", body, raw => {
+        const proposal = parseProposal(record(raw, "response").proposal);
+        if (proposal.id !== proposalId.toLowerCase()) throw new Malformed("another proposal was returned");
+        if (proposal.approvedHash !== approval.proposalHash) {
+          throw new Malformed("the proposal was not approved at the hash sent");
+        }
+        return proposal;
       });
     },
 

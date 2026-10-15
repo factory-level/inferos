@@ -7,7 +7,7 @@ import {
   WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
-import { inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
+import { PROPOSAL_APPROVE_REFUSED, inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
 
 const TOKEN = "iex_test-secret-token";
 const CONNECTION: InferOpsConnection = {
@@ -1062,5 +1062,185 @@ describe("the InferMind Wiki over HTTP", () => {
       : undefined);
     const error = await refused.readDocumentText(DOC).catch(e => e) as Error;
     expect(error.message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
+  });
+});
+
+// MVP-40: InferOps' Wiki proposal routes (inferops#2368). Reads go through the Wiki's one 403
+// message; the approval reads InferOps' refusal codes itself, before that collapse (H1).
+describe("Wiki proposals over HTTP", () => {
+  const PROPOSAL = "62000000-0000-4000-8000-000000000001";
+  const OTHER = "62000000-0000-4000-8000-000000000002";
+  const SECTION_A = "61000000-0000-4000-8000-000000000001";
+  const SECTION_B = "61000000-0000-4000-8000-000000000003";
+  const HASH = "a".repeat(64);
+  const PRINCIPAL = { id: "00000000-0000-4000-8000-0000000000d2", type: "user" };
+  const R = PROPOSAL_APPROVE_REFUSED;
+
+  /** A proposal exactly as InferOps' `WikiProposalRecordSchema` answers it, principals included. */
+  const wireProposal = (overrides: Record<string, unknown> = {}) => ({
+    id: PROPOSAL.toUpperCase(), runId: "63000000-0000-4000-8000-000000000001", revision: 2, state: "in_review",
+    proposalHash: HASH, targetDocumentId: "60000000-0000-4000-8000-000000000002", expectedVersion: 2,
+    targetSlug: "release-process", parentId: null, pathwayType: null, title: "Release process",
+    content: "# Release process", summary: "Steps.", contradictions: ["One source says weekly."],
+    sources: [{ sectionId: SECTION_B, version: 2 }, { sectionId: SECTION_A, version: 1 }],
+    sectionRefs: [{ heading: "Release process", sectionIds: [SECTION_B] }],
+    requestedBy: PRINCIPAL, draftedBy: null, revisedBy: PRINCIPAL, decidedBy: null, decidedAt: null,
+    decisionNote: "private note", approvedHash: null, approvedSources: null, blockedReason: null, lastError: null,
+    publishedDocumentId: null, publishedVersion: null, publishedAt: null,
+    createdAt: "2026-10-01T09:00:00.000Z", updatedAt: "2026-10-01T09:00:00.000Z", ...overrides,
+  });
+  const freshness = {
+    targetVersion: 2, stale: false,
+    sources: [{ sectionId: SECTION_B, proposedVersion: 2, currentVersion: 2 }, { sectionId: SECTION_A, proposedVersion: 1, currentVersion: null }],
+  };
+  const envelope = (status: number, code: string, message = `server detail for ${code}`) =>
+    Response.json({ success: false, error: { code, message } }, { status });
+  const approval = { proposalHash: HASH, sources: [{ sectionId: SECTION_A, version: 1 }, { sectionId: SECTION_B, version: 2 }] };
+
+  type ProposalCall = { method: string; path: string; headers: Headers; body: unknown };
+
+  function fakeProposals(answer: (call: ProposalCall) => Response | undefined) {
+    const calls: ProposalCall[] = [];
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const call: ProposalCall = {
+        method: init?.method ?? "GET", path: url.pathname.replace(/^\/api/, "") + url.search,
+        headers: new Headers(init?.headers), body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      };
+      calls.push(call);
+      return answer(call) ?? envelope(404, "NOT_FOUND", "Route not found");
+    }) as typeof fetch;
+    return { calls, client: openHttpInferOpsClient(CONNECTION, fetcher) };
+  }
+
+  /** The approve route answering `response`, and the error the client raises for it. */
+  async function approveRefusal(response: () => Response) {
+    const { client, calls } = fakeProposals(call => call.method === "POST" ? response() : undefined);
+    const error = await client.approveProposal(PROPOSAL, approval, "instance:7").catch(e => e) as Error;
+    return { error, calls };
+  }
+
+  it("A1: lists and reads proposals field by field, without InferOps' principals, notes or grounding", async () => {
+    const { client, calls } = fakeProposals(call =>
+      call.path === "/knowledge/wiki/proposals" || call.path === "/knowledge/wiki/proposals?state=in_review"
+        ? Response.json({ proposals: [wireProposal()] })
+        : call.path === `/knowledge/wiki/proposals/${PROPOSAL}`
+          ? Response.json({ proposal: wireProposal(), freshness }) : undefined);
+    const [listed] = await client.listProposals();
+    expect(listed).toEqual({
+      id: PROPOSAL, runId: "63000000-0000-4000-8000-000000000001", revision: 2, state: "in_review",
+      proposalHash: HASH, targetDocumentId: "60000000-0000-4000-8000-000000000002", expectedVersion: 2,
+      targetSlug: "release-process", parentId: null, pathwayType: null, title: "Release process",
+      content: "# Release process", summary: "Steps.", contradictions: ["One source says weekly."],
+      sources: [{ sectionId: SECTION_B, version: 2 }, { sectionId: SECTION_A, version: 1 }],
+      approvedHash: null, decidedAt: null, blockedReason: null, lastError: null,
+      publishedDocumentId: null, publishedVersion: null, publishedAt: null,
+      createdAt: "2026-10-01T09:00:00.000Z", updatedAt: "2026-10-01T09:00:00.000Z",
+    });
+    expect(await client.listProposals("in_review")).toHaveLength(1);
+    expect(await client.readProposal(PROPOSAL)).toEqual({ proposal: listed, freshness });
+    expect(calls.map(c => [c.method, c.path])).toEqual([
+      ["GET", "/knowledge/wiki/proposals"], ["GET", "/knowledge/wiki/proposals?state=in_review"],
+      ["GET", `/knowledge/wiki/proposals/${PROPOSAL}`],
+    ]);
+    expect(calls[0]!.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(calls[0]!.headers.get("x-workspace-id")).toBe(CONNECTION.workspaceId);
+    const before = calls.length;
+    expect(inferOpsErrorCode(await client.readProposal("../x").catch(e => e))).toBe("NOT_FOUND");
+    expect(calls).toHaveLength(before);
+  });
+
+  it("A1: a 404 (an unknown proposal, or the routes unmounted while publishing is off) is NOT_FOUND", async () => {
+    const { client } = fakeProposals(() => undefined);
+    for (const read of [client.listProposals(), client.readProposal(PROPOSAL)]) {
+      const error = await read.catch(e => e) as Error;
+      expect(error.message).toBe(`NOT_FOUND: ${R.notFound}`);
+    }
+    // Reads keep the Wiki's one 403 message.
+    const { client: refused } = fakeProposals(() => envelope(403, "FORBIDDEN", "Missing permission: knowledge:read"));
+    expect((await refused.readProposal(PROPOSAL).catch(e => e) as Error).message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
+  });
+
+  it("H1: refuses a malformed or foreign answer as UNAVAILABLE", async () => {
+    const answers = [
+      Response.json({ proposal: wireProposal({ id: OTHER }), freshness }),
+      Response.json({ proposal: wireProposal({ state: "draft" }), freshness }),
+      Response.json({ proposal: wireProposal({ proposalHash: "nothex" }), freshness }),
+      Response.json({ proposal: wireProposal(), freshness: { ...freshness, stale: "no" } }),
+      Response.json({ proposal: wireProposal({ sources: [{ sectionId: "x", version: 1 }] }), freshness }),
+    ];
+    for (const answer of answers) {
+      const { client } = fakeProposals(() => answer);
+      expect(inferOpsErrorCode(await client.readProposal(PROPOSAL).catch(e => e))).toBe("UNAVAILABLE");
+    }
+  });
+
+  it("H1: sends the approval as InferOps takes it, and requires its answer to be this proposal approved at this hash", async () => {
+    const approved = wireProposal({ state: "approved", approvedHash: HASH, decidedBy: PRINCIPAL, decidedAt: "2026-10-15T10:00:00.000Z" });
+    const { client, calls } = fakeProposals(call => call.method === "POST" ? Response.json({ proposal: approved }) : undefined);
+    expect(await client.approveProposal(PROPOSAL, approval, "instance:7"))
+      .toMatchObject({ id: PROPOSAL, state: "approved", approvedHash: HASH });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      method: "POST", path: `/knowledge/wiki/proposals/${PROPOSAL}/approve`, body: approval,
+    });
+    expect(calls[0]!.headers.get("x-idempotency-key")).toBe("instance:7");
+    expect(calls[0]!.headers.get("content-type")).toBe("application/json");
+
+    for (const answer of [{ proposal: { ...approved, id: OTHER } }, { proposal: { ...approved, approvedHash: "b".repeat(64) } },
+                          { proposal: { ...approved, approvedHash: null } }, { ok: true }]) {
+      const { client: odd } = fakeProposals(call => call.method === "POST" ? Response.json(answer) : undefined);
+      const error = await odd.approveProposal(PROPOSAL, approval, "instance:7").catch(e => e);
+      expect(inferOpsErrorCode(error)).toBe("UNAVAILABLE");
+      // A write that was sent and answered unusably proves nothing.
+      expect(writeStage(error)).toBeUndefined();
+    }
+    // Nothing that cannot be sent is: no key, a malformed hash, no sources, a non-UUID id.
+    const { client: unsent, calls: none } = fakeProposals(() => undefined);
+    for (const call of [
+      unsent.approveProposal(PROPOSAL, approval, ""), unsent.approveProposal(PROPOSAL, { ...approval, proposalHash: "x" }, "k"),
+      unsent.approveProposal(PROPOSAL, { ...approval, sources: [] }, "k"), unsent.approveProposal("../x", approval, "k"),
+    ]) {
+      expect(writeStage(await call.catch(e => e))).toBe("unsent");
+    }
+    expect(none).toEqual([]);
+  });
+
+  it("H1: maps each refusal of the approval from InferOps' exact envelope, before the Wiki's 403 collapse", async () => {
+    const rows: Array<[Response, string, string, "refused" | undefined]> = [
+      [envelope(409, "STALE_PROPOSAL", "This proposal is stale: its hash differs"), "STALE_REVISION", R.stale, "refused"],
+      [envelope(409, "CONFLICT", "This proposal is already approved by someone else"), "CONFLICT", R.conflict, "refused"],
+      [envelope(403, "SELF_APPROVAL_DENIED", "You requested this draft; another person must approve it"), "CONFLICT", R.self, "refused"],
+      [envelope(403, "FORBIDDEN", "Missing permission: knowledge:publish"), "FORBIDDEN", R.forbidden, "refused"],
+      [envelope(403, "PRODUCT_FORBIDDEN", "Wrong product for this route"), "FORBIDDEN", R.forbidden, "refused"],
+      [envelope(422, "NEEDS_PLACEMENT", "A new page needs a parent"), "INVALID_REQUEST", R.placement, "refused"],
+      [envelope(404, "NOT_FOUND", "Proposal not found"), "NOT_FOUND", R.notFound, "refused"],
+      // Without InferOps' envelope, nothing is proven.
+      [new Response("<html>bad gateway</html>", { status: 409 }), "CONFLICT", R.conflict, undefined],
+      // Another 422 is not a refusal this request knows.
+      [envelope(422, "INVALID_PROPOSAL", "something else"), "UNAVAILABLE", "InferOps could not be reached or returned an unusable response.", undefined],
+      [envelope(500, "INTERNAL", "boom"), "UNAVAILABLE", "InferOps could not be reached or returned an unusable response.", undefined],
+    ];
+    for (const [response, code, detail, stage] of rows) {
+      const { error } = await approveRefusal(() => response.clone());
+      expect(error.message, `${response.status} ${code}`).toBe(`${code}: ${detail}`);
+      expect(writeStage(error), `${response.status} ${code}`).toBe(stage);
+      expect(isPolicyRefusal(error)).toBe(false);
+    }
+    // A 401 is still the credential's.
+    const { error } = await approveRefusal(() => envelope(401, "UNAUTHORIZED"));
+    expect(inferOpsErrorCode(error)).toBe("UNAUTHORIZED");
+    expect(writeStage(error)).toBe("refused");
+  });
+
+  it("H1: leaves the shared mapping of every other write unchanged", async () => {
+    // A page body write's 403 is still the Wiki's one message, and a 422 there proves nothing.
+    const { client } = fakeProposals(call => call.method === "PATCH" ? envelope(403, "SELF_APPROVAL_DENIED") : undefined);
+    const forbidden = await client.updateDocument("60000000-0000-4000-8000-000000000002", { body: "x" }, 2, "k").catch(e => e) as Error;
+    expect(forbidden.message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
+    const { client: placement } = fakeProposals(call => call.method === "PATCH" ? envelope(422, "NEEDS_PLACEMENT") : undefined);
+    const unproven = await placement.updateDocument("60000000-0000-4000-8000-000000000002", { body: "x" }, 2, "k").catch(e => e);
+    expect(inferOpsErrorCode(unproven)).toBe("UNAVAILABLE");
+    expect(writeStage(unproven)).toBeUndefined();
   });
 });
