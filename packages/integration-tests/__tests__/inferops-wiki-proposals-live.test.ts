@@ -37,8 +37,9 @@
 // each phase. Only the describe of the selected phase runs.
 //
 // What it does NOT prove: InferLab sign-in (the InferLab legs are a fixture, as in
-// `inferops-members-live.test.ts`; the tokens are InferOps' real stub-login tokens), publication
-// (no worker runs; the proof stops at approved and queued), a deployed InferOps, the shared-gadget
+// `inferops-members-live.test.ts`; the tokens are InferOps' real stub-login tokens), the full
+// worker (Step B runs only the test-only consumer of the one publish job; the approval phase alone
+// stops at approved and queued), a deployed InferOps, the shared-gadget
 // and stopgap refusals, the uncertain prior dispatch and the no-replay cases (all covered against
 // the mock in the gatekeeper's own suite, `wiki.test.ts`, and not repeated here).
 //
