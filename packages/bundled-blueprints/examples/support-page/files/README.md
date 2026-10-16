@@ -41,9 +41,10 @@ The real denial controls here are:
   - The board is stale when last updated more than 15 minutes before the page was read.
 - **Support runbook.** One Wiki page drawn as text: headings, paragraphs and numbered steps, with no
   links or embeds, and its version and edit time.
-- **Region states.** Each region is ready, stale, empty, refused (`denied`), or could-not-load. The
-  runbook can also be missing. A missing figure reads **Unknown**, never 0. No tile, column or issue
-  is marked healthy, degraded, or with a severity colour.
+- **Region states.** Each region is ready, stale, refused (`denied`), or could-not-load. The board and
+  the runbook can also be empty, and the runbook can be missing. A tile has no empty state: `0 people`
+  is a measurement. A missing figure reads **Unknown**, never 0. No tile, column or issue is marked
+  healthy, degraded, or with a severity colour.
 
 ## How it works
 
