@@ -20,3 +20,4 @@ archive is built with the same reader, codec and checks, so an example could lat
 | --- | --- |
 | [`model-usage/`](model-usage/files/README.md) | A read-only model-usage view on synthetic demo figures (MVP-28 presentation only). |
 | [`system-metrics/`](system-metrics/files/README.md) | A read-only System Metrics view (activity, agent-run status, runtime health) on synthetic demo figures (MVP-28 presentation only). |
+| [`support-page/`](support-page/files/README.md) | A read-only tech-support page (metric tiles, a support board and a runbook) on synthetic demo data (MVP-28 presentation only). |

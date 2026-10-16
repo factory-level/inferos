@@ -29,6 +29,7 @@ describe("example blueprints", () => {
     const names = await examples();
     expect(names).toContain("model-usage");
     expect(names).toContain("system-metrics");
+    expect(names).toContain("support-page");
     for (const name of names) {
       const { manifest, bytes } = await buildExampleArchive(join(EXAMPLES_DIR, name));
       const archive = parseArchive(bytes, name);
@@ -49,6 +50,12 @@ describe("example blueprints", () => {
   it("the system-metrics example has no bindings: it reaches no gatekeeper, metrics source or account", async () => {
     const { manifest } = await buildExampleArchive(join(EXAMPLES_DIR, "system-metrics"));
     expect(manifest.blueprintId).toBe("example.system-metrics");
+    expect(manifest.bindings).toEqual({});
+  });
+
+  it("the support-page example has no bindings: it reaches no gatekeeper, board, wiki or account", async () => {
+    const { manifest } = await buildExampleArchive(join(EXAMPLES_DIR, "support-page"));
+    expect(manifest.blueprintId).toBe("example.support-page");
     expect(manifest.bindings).toEqual({});
   });
 });
