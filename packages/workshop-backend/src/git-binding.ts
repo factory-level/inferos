@@ -117,15 +117,19 @@ export class GitImpl extends RpcTarget implements Git {
   /**
    * `author` resolves the identity commits are attributed to, matching how the caller's commits
    * through the agent's own worktree bindings would be. Called only when a worktree commits.
+   * `readOnly` (an operate workspace's binding) makes every worktree it creates refuse edits and
+   * commits; reads, newWorktree and readCommit are unaffected.
    */
-  constructor(private host: GitBindingHost, private author: () => Promise<AiChatAuthorInfo>) {
+  constructor(private host: GitBindingHost, private author: () => Promise<AiChatAuthorInfo>,
+              private readOnly = false) {
     super();
   }
 
   async newWorktree(commitId: string): Promise<Worktree> {
     let base = await this.host.gitCache.fetchCommit(commitId);
     let worktree = new InMemoryWorktree(this.host.gitCache, this.host.gitStore, base);
-    return new WorktreeSessionImpl(worktree, IN_MEMORY_WORKTREE_ID, worktree, this.author);
+    return new WorktreeSessionImpl(worktree, IN_MEMORY_WORKTREE_ID, worktree, this.author,
+                                   this.readOnly);
   }
 
   async readCommit(commitId: string): Promise<CommitMetadata> {

@@ -21,7 +21,8 @@
 
 /**
  * The `env.GIT` binding, available in every gadget's `env` and in the agent's `executeCode` env.
- * Provides programmatic access to the workspace's git objects.
+ * Provides programmatic access to the workspace's git objects. In an Operate chat its worktrees
+ * are read-only: `writeFile()`, `deleteFile()` and `commit()` throw, and source is edited in Build.
  */
 export interface Git {
   /**

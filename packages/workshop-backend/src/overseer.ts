@@ -6223,11 +6223,15 @@ class OverseerImpl implements AgentHooks {
             new WorktreeSessionImpl(this, target.id, turn.access, async () => initiator));
       }
 
-      case "git":
-        if (caller.from === "agent" && this.storage.operateSession.get()) {
+      case "git": {
+        let operate = this.storage.operateSession.get();
+        if (caller.from === "agent" && operate) {
           this.#assertExecutionLive(target, caller);
         }
-        return Promise.resolve(new GitImpl(this, () => this.#gitAuthorFor(caller)));
+        // Repository source edits and commits stay in Build: in an operate workspace, every
+        // caller's env.GIT reads but its worktrees refuse writeFile, deleteFile and commit.
+        return Promise.resolve(new GitImpl(this, () => this.#gitAuthorFor(caller), operate));
+      }
 
       default:
         target satisfies never;

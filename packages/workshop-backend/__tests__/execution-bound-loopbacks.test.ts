@@ -159,3 +159,115 @@ describe("other workspaces", () => {
     expect(await open(impl, env.GIT)).toBeDefined();
   }));
 });
+
+// Repository source edits and commits stay in Build (MVP-09): in an operate workspace, the
+// worktrees `env.GIT` creates read as everywhere else but refuse writeFile, deleteFile and
+// commit before changing anything, whoever the caller. Other workspaces are unchanged.
+
+async function commitFiles(impl: any, files: Record<string, string>): Promise<string> {
+  return await impl.gitStore.writeFilesAsCommit(new Map(Object.entries(files)), {
+    parents: [],
+    author: { name: "Alice", email: "alice@example.com" },
+    message: "test commit",
+    timestamp: new Date(1700000000_000),
+  });
+}
+
+// Every stored object's oid, to observe that nothing is written.
+function storedOids(impl: any): string[] {
+  return [...impl.storage.gitObjects.list()].map((record: { oid: string }) => record.oid);
+}
+
+// The agent's own env.GIT, opened inside a live executeCode run, and a worktree on a seeded c1.
+async function withAgentWorktree(
+    impl: any, fn: (worktree: any, git: any, c1: string) => Promise<void>): Promise<void> {
+  let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+  let run = startExecution(impl, 1, 2000);
+  let git: any = await open(impl, (await run.env).GIT);
+  await fn(await git.newWorktree(c1), git, c1);
+  await run.done;
+}
+
+async function expectBuildOnly(promise: Promise<unknown>): Promise<void> {
+  let error = await promise.then(() => undefined, (err: unknown) => err);
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toMatch(/Operate/);
+  expect((error as Error).message).toMatch(/Build/);
+}
+
+describe("operate workspace: env.GIT reads repository source but cannot edit or commit it", () => {
+  it("R1: reads, newWorktree and readCommit behave as today", () => withImpl(true, async impl => {
+    await withAgentWorktree(impl, async (worktree, git, c1) => {
+      let before = storedOids(impl);
+      expect(await worktree.listFiles()).toEqual([{ path: "a.txt", kind: "file" }]);
+      expect(await worktree.readFile("a.txt")).toBe("one\n");
+      expect(await worktree.grep(/one/)).toContain("one");
+      expect(await worktree.structuredGrep(/one/)).toEqual(
+          { matches: [{ file: "a.txt", line: 1, text: "one" }], errors: [] });
+      expect(await worktree.diff()).toBe("");
+      expect(await worktree.structuredDiff()).toEqual({ files: [], errors: [] });
+      expect(await git.readCommit(c1)).toMatchObject({ parents: [], message: "test commit\n" });
+      expect(storedOids(impl)).toEqual(before);
+    });
+  }));
+
+  it("W1: refuses editing a file, leaving it, the diff and the store unchanged",
+      () => withImpl(true, async impl => {
+    await withAgentWorktree(impl, async worktree => {
+      let before = storedOids(impl);
+      await expectBuildOnly(worktree.writeFile("a.txt", "two\n"));
+      expect(await worktree.readFile("a.txt")).toBe("one\n");
+      expect(await worktree.diff()).toBe("");
+      expect(storedOids(impl)).toEqual(before);
+    });
+  }));
+
+  it("W2: refuses creating a file", () => withImpl(true, async impl => {
+    await withAgentWorktree(impl, async worktree => {
+      await expectBuildOnly(worktree.writeFile("new.txt", "x"));
+      expect(await worktree.listFiles()).toEqual([{ path: "a.txt", kind: "file" }]);
+    });
+  }));
+
+  it("W3: refuses deleting a file", () => withImpl(true, async impl => {
+    await withAgentWorktree(impl, async worktree => {
+      await expectBuildOnly(worktree.deleteFile("a.txt"));
+      expect(await worktree.readFile("a.txt")).toBe("one\n");
+      expect(await worktree.diff()).toBe("");
+    });
+  }));
+
+  it("W4: refuses a commit, writing no object", () => withImpl(true, async impl => {
+    await withAgentWorktree(impl, async worktree => {
+      let before = storedOids(impl);
+      await expectBuildOnly(worktree.commit("m"));
+      expect(storedOids(impl)).toEqual(before);
+      expect(await worktree.diff()).toBe("");
+    });
+  }));
+
+  it("G2: a gadget caller's env.GIT reads but cannot edit or commit either",
+      () => withImpl(true, async impl => {
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let git: any = await open(impl, { target: { type: "git" }, caller: { from: "gadget", gadgetId: 100 } });
+    let worktree = await git.newWorktree(c1);
+    let before = storedOids(impl);
+    expect(await worktree.readFile("a.txt")).toBe("one\n");
+    await expectBuildOnly(worktree.writeFile("a.txt", "two\n"));
+    await expectBuildOnly(worktree.commit("m"));
+    expect(await worktree.readFile("a.txt")).toBe("one\n");
+    expect(storedOids(impl)).toEqual(before);
+  }));
+});
+
+describe("other workspaces: env.GIT edits and commits as before", () => {
+  it("B1: the agent's env.GIT edits and commits in a live run", () => withImpl(false, async impl => {
+    await withAgentWorktree(impl, async worktree => {
+      await worktree.writeFile("a.txt", "two\n");
+      await worktree.writeFile("new.txt", "x");
+      await worktree.deleteFile("new.txt");
+      let commit = await worktree.commit("agent commit");
+      expect(await impl.readFileAtCommit(commit, "a.txt")).toBe("two\n");
+    });
+  }));
+});
