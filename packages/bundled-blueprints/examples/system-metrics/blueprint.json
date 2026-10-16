@@ -1,0 +1,22 @@
+{
+  "$comment": "An EXAMPLE, not a bundled blueprint: it lives outside blueprints/, so no deployment installs or promotes it. Build its archive with `pnpm --filter @gadgets/bundled-blueprints build:example` and import it by hand. Its data is a synthetic fixture in its own files.",
+  "blueprintId": "example.system-metrics",
+  "title": "System metrics (demo data)",
+  "description": "Use to preview a read-only System Metrics view on SYNTHETIC demo data: activity, agent-run status counts and per-Worker runtime health for one demo installation, each panel with its own source, window and freshness. It reads no Analytics Engine dataset, InferOps run or Cloudflare account, has no bindings, and sets no threshold, alert or health verdict.",
+  "output": {
+    "id": "system-metrics",
+    "noun": "System metrics view",
+    "plural": "System metrics views",
+    "icon": "chartBar"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "revision": 1,
+  "created": "2026-10-16T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-10-16T00:00:00.000Z",
+  "bindings": {}
+}
