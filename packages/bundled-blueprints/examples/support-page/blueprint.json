@@ -1,0 +1,22 @@
+{
+  "$comment": "An EXAMPLE, not a bundled blueprint: it lives outside blueprints/, so no deployment installs or promotes it. Build its archive with `pnpm --filter @gadgets/bundled-blueprints build:example` and import it by hand. Its data is a synthetic fixture in its own files.",
+  "blueprintId": "example.support-page",
+  "title": "Tech support page (demo data)",
+  "description": "Use to preview a read-only tech-support page on SYNTHETIC demo data: four support metric tiles (two with figures, two with no data source yet), a read-only support board and a runbook page for one demo installation, each region with its own source and freshness. It reads no InferOps board, InferMind Wiki, Analytics Engine dataset or account, has no bindings, and cannot change an issue or the runbook.",
+  "output": {
+    "id": "support-page",
+    "noun": "Tech support page",
+    "plural": "Tech support pages",
+    "icon": "chartBar"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "revision": 1,
+  "created": "2026-10-16T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-10-16T00:00:00.000Z",
+  "bindings": {}
+}

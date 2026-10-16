@@ -26,6 +26,10 @@ The second is `system-metrics` (`example.system-metrics`), the presentation half
 Metrics view: Activity, Agent runs and Runtime health for one demo installation, on synthetic
 figures, with no bindings.
 
+The third is `support-page` (`example.support-page`), the presentation half of MVP-28's tech-support
+page: four metric tiles, a read-only support board and a runbook page for one demo installation, on
+synthetic data, with no bindings.
+
 ## Components
 
 | Path | Responsibility |
@@ -33,9 +37,10 @@ figures, with no bindings.
 | `packages/bundled-blueprints/examples/README.md` | What an example is and how to install one by hand. |
 | `packages/bundled-blueprints/examples/model-usage/` | The model-usage demo view: `blueprint.json`, `files/` (client, server, `lib/`) and `__tests__/`. |
 | `packages/bundled-blueprints/examples/system-metrics/` | The System Metrics demo view, in the same layout. |
+| `packages/bundled-blueprints/examples/support-page/` | The tech-support page demo, in the same layout. |
 | `packages/bundled-blueprints/src/example-archive.ts` | `buildExampleArchive(dir)`: the bundled build's manifest parser, source reader (TypeScript bundling and import checks) and archive codec, for one example. `EXAMPLES_DIR`. |
 | `packages/bundled-blueprints/src/cli/build-example.ts` | `pnpm --filter @gadgets/bundled-blueprints build:example <dir> <out.gadget>`: writes the archive; installs nothing. |
-| `packages/bundled-blueprints/__tests__/examples.test.ts` | Examples stay outside `blueprints/` and out of the generated bundled module; each builds a valid archive; `model-usage` and `system-metrics` have no bindings. |
+| `packages/bundled-blueprints/__tests__/examples.test.ts` | Examples stay outside `blueprints/` and out of the generated bundled module; each builds a valid archive; `model-usage`, `system-metrics` and `support-page` have no bindings. |
 
 The package's tsconfig programs and vitest `gadgets` project include `examples/*`, so an example is
 type-checked and tested like a bundled blueprint.
@@ -68,6 +73,27 @@ A missing figure is "Unknown", a reported zero is drawn as zero, and a panel is 
 when every figure is a reported zero. The view draws no threshold, alert or health verdict, and offers
 no export or storage.
 
+`support-page` has the same frame and one load per installation. `lib/source.ts` returns only the
+requested demo installation's page. Its regions are each `reported`, `denied` or `unavailable` on
+their own, and the runbook may also be `missing`:
+
+- **Support metrics.**
+  - **People active today:** shaped like `activity/v1` actors.
+  - **Coding runs failed, last 24 hours:** shaped like InferOps run statuses. `unknown` runs are not
+    counted.
+  - **Actions rejected** and **Median time to decision:** no data source exists (`approvals/v1` is not
+    built). The protocol has no field for them, so no number can be drawn.
+- **Support board:** the support project's columns and issues, drawn as text. It is read-only, with no
+  move or open control.
+- **Support runbook:** one Wiki-shaped page drawn as text, with no links or embeds.
+
+Staleness is measured against the page's read time (`lib/page.ts` `STALE_AFTER_MS`: tiles 1 h, board
+15 min). The `denied` state is a fixture state: it shows how a refusal is presented and proves no
+authorization. The real controls are `bindings: {}`, installation selection at the source, and a
+Durable Object with only its two read methods. A screen template cannot hold a gadget today
+(`canvas.ts`), so this example draws its own board and runbook rather than the real
+`inferops.project-board` and `inferops.wiki` widgets.
+
 ## Configuration
 
 None. No flag, binding, admin setting or format curation is involved. Installing the example is a
@@ -83,6 +109,8 @@ These examples cover presentation only:
 - no gatekeeper resource (the InferOps metrics resources depend on MVP-19);
 - for System Metrics: window totals rather than per day, no run duration, coding runs only, no
   governed actions, and no health verdict (that needs an owner SLO);
+- for the tech-support page: not the real screen template or widgets, no support connection, and no
+  approval tiles' source;
 - no live check;
 - no per-person or session figures;
 - no budget limit;
@@ -90,4 +118,4 @@ These examples cover presentation only:
 
 ## Open Questions
 
-- Whether either view moves into `blueprints/` (shipping it to every deployment) once a real source exists, and where it is placed among the consoles.
+- Whether any of these views moves into `blueprints/` (shipping it to every deployment) once a real source exists, and where it is placed among the consoles.
