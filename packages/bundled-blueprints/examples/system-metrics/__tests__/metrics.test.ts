@@ -5,11 +5,14 @@ import { describe, expect, it } from "vitest";
 // Test-only, by relative path: the gadget keeps its own literal union, and this catches drift.
 import { ACTIVITY_EVENT_TYPES } from "../../../../observability/src/metrics-schema.ts";
 import { DEMO_INSTALLATIONS } from "../files/lib/fixture.ts";
-import type { ActivityData, HealthData, RunsData } from "../files/lib/protocol.ts";
+import type { ActivityData, ActivityEventType, HealthData, RunsData } from "../files/lib/protocol.ts";
 import {
   ACTIVITY_EVENTS, errorRate, finishLoad, formatCount, formatMs, freshness, initialState, isEmpty,
   RUN_STATUSES, runTotal, STALE_AFTER_MS, startLoad,
 } from "../files/lib/metrics.ts";
+
+// M5 at compile time (R1 L1): every member of the protocol's union is an activity/v1 event type.
+const _protocolUnionIsActivityV1: (typeof ACTIVITY_EVENT_TYPES)[number] = null as unknown as ActivityEventType;
 
 const WINDOW_TO = "2026-10-12T00:00:00.000Z";
 const before = (ms: number) => new Date(Date.parse(WINDOW_TO) - ms).toISOString();
