@@ -254,6 +254,12 @@ it("two people stage the same revision: one approval commits once, the stale one
   await expect(alice.session.listSubjectAudit({ workspaceId: bob.workspaceId, boardRef: ENG_BOARD }))
     .rejects.toSatisfy(refusedWith(OPERATE_SESSION_ERROR_CODES.boardUnavailable));
 
+  // No one can open another person's session workspace directly (R1 L1; the same refusal as
+  // operate-chat.test.ts "never anyone else's").
+  for (const [who, owner] of [[carol, alice], [carol, bob], [bob, alice], [alice, bob]] as const) {
+    await expect(who.api.openGadget(owner.workspaceId)).rejects.toThrow();
+  }
+
   // Carol, with no ENG access, reads neither person's session, audit or actions.
   for (const who of [alice, bob]) {
     await expect(carol.session.listSubjectAudit({ workspaceId: who.workspaceId, boardRef: ENG_BOARD }))
