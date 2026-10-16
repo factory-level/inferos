@@ -390,6 +390,7 @@ describe("env.GIT presence", () => {
     expect(description).toContain("readCommit(commitId: string): Promise<CommitMetadata>");
     expect(description).toContain("export type CommitMetadata");
     expect(description).toContain("export interface Worktree");
+    expect(description).toMatch(/In an Operate chat its worktrees\s+\* are read-only/);
     expect(description).not.toContain("BEGIN AGENT API");
   }));
 });

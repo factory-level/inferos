@@ -51,6 +51,13 @@ export interface WorktreeRecordView {
 }
 
 /**
+ * The refusal of a read-only worktree's edits and commits: the ones `env.GIT` creates in an operate
+ * workspace, where repository source edits and commits stay in Build.
+ */
+export const OPERATE_READ_ONLY_MESSAGE =
+    "An Operate chat can read repository source but not edit or commit it. Edit in Build.";
+
+/**
  * The Worktree binding served to executeCode. One instance per (execution, worktree); see the
  * module doc for how state splits between the turn (`turn`) and the workspace (`host`).
  */
@@ -59,10 +66,17 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
   /**
    * `author` resolves who commits are attributed to. It is called only by commit(), so a session
    * that never commits never pays for resolving it (env.GIT's may need an RPC to the owner's DO).
+   * A `readOnly` session serves every read but refuses writeFile, deleteFile and commit before
+   * changing anything.
    */
   constructor(private host: WorktreeSessionHost, private worktreeId: WorkpieceId,
-              private turn: WorktreeTurnAccess, private author: () => Promise<AiChatAuthorInfo>) {
+              private turn: WorktreeTurnAccess, private author: () => Promise<AiChatAuthorInfo>,
+              private readOnly = false) {
     super();
+  }
+
+  #assertWritable(): void {
+    if (this.readOnly) throw new Error(OPERATE_READ_ONLY_MESSAGE);
   }
 
   // The base commit the overlay is expressed against: the chat pin's base while the worktree is
@@ -162,6 +176,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
   }
 
   async writeFile(path: string, text: string): Promise<void> {
+    this.#assertWritable();
     let base = this.#pinBase();
     let overlay = this.turn.getOverlayFiles(this.worktreeId);
     let before: string | undefined;
@@ -193,6 +208,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
   }
 
   async deleteFile(path: string): Promise<void> {
+    this.#assertWritable();
     let base = this.#pinBase();
     if (!this.turn.getOverlayFiles(this.worktreeId).has(path)) {
       if (this.turn.getRemovedPaths(this.worktreeId).has(path)) {
@@ -228,6 +244,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
 
 
   async commit(message: string): Promise<string> {
+    this.#assertWritable();
     // Resolved first: it may be an RPC, and the worktree state read below shouldn't go stale
     // across it.
     let author = commitIdentityForAuthor(await this.author());
