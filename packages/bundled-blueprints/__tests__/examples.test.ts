@@ -28,6 +28,7 @@ describe("example blueprints", () => {
   it("each build to an archive whose metadata and files match their source", async () => {
     const names = await examples();
     expect(names).toContain("model-usage");
+    expect(names).toContain("system-metrics");
     for (const name of names) {
       const { manifest, bytes } = await buildExampleArchive(join(EXAMPLES_DIR, name));
       const archive = parseArchive(bytes, name);
@@ -42,6 +43,12 @@ describe("example blueprints", () => {
   it("the model-usage example has no bindings: it reaches no gatekeeper, provider or account", async () => {
     const { manifest } = await buildExampleArchive(join(EXAMPLES_DIR, "model-usage"));
     expect(manifest.blueprintId).toBe("example.model-usage");
+    expect(manifest.bindings).toEqual({});
+  });
+
+  it("the system-metrics example has no bindings: it reaches no gatekeeper, metrics source or account", async () => {
+    const { manifest } = await buildExampleArchive(join(EXAMPLES_DIR, "system-metrics"));
+    expect(manifest.blueprintId).toBe("example.system-metrics");
     expect(manifest.bindings).toEqual({});
   });
 });
