@@ -13,7 +13,7 @@ import { connect, logIn, nextUsernames, signUp } from "../src/rpc-client.js";
 // and its chats' agents get no authoring tools but can change the session's page as themselves.
 
 const AUTHORING_TOOLS = [
-  "writeFile", "editFile", "createGadget", "createWorktree", "setGadgetBinding", "editCanvas",
+  "readFile", "writeFile", "editFile", "createGadget", "createWorktree", "setGadgetBinding", "editCanvas",
 ];
 const BOARD: OperateRef = { type: "workspace", workspaceId: "board-workspace" };
 
@@ -132,7 +132,7 @@ it("offers an operate chat no authoring tools, and refuses one it asks for", asy
 
   const offered = offeredTools(first);
   for (const name of AUTHORING_TOOLS) expect(offered).not.toContain(name);
-  expect(offered).toEqual(expect.arrayContaining(["executeCode", "readFile", "operatePage"]));
+  expect(offered).toEqual(expect.arrayContaining(["executeCode", "grep", "operatePage"]));
   expect(toolResult("operate-write")).toMatch(/writeFile/);
   expect(result.workpieces.filter(workpiece => workpiece.type === "gadget")).toEqual([]);
 });

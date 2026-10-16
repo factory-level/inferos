@@ -1093,7 +1093,6 @@ let SPAWNED_AGENT_TOOLS = [
 // creates or edits a gadget, worktree, binding, or canvas. An allowlist, so a new tool stays out of
 // operate until it is added here.
 let OPERATE_AGENT_TOOLS = [
-  "readFile",
   "grep",
   "webFetch",
   "observeUserChanges",

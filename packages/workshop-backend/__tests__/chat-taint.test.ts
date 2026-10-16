@@ -677,11 +677,11 @@ describe("webFetch", () => {
 
 describe("file tools", () => {
   // The git cache's fault pull (#pullGitObjects) reaches a connection's gitPull, which the gates do
-  // not see. In an operate workspace the agent's only file tools are readFile and grep, it can
-  // create no worktree, and a gadget there (a blueprint install) has only local content, so they
-  // read without pulling. (In Build, the file tools and createWorktree can pull; Build chats are
-  // never marked.)
-  it("readFile and grep in a tainted operate chat reach no gitPull", () => withImpl(true, async impl => {
+  // not see. In an operate workspace the agent's only file tool is grep (readFile is an authoring
+  // tool it is not offered), it can create no worktree, and a gadget there (a blueprint install)
+  // has only local content, so grep reads without pulling. (In Build, the file tools and
+  // createWorktree can pull; Build chats are never marked.)
+  it("an operate chat is refused readFile, and its grep reaches no gitPull", () => withImpl(true, async impl => {
     let sent = intercept(impl);
     let c1 = await commitFiles(impl, { "a.txt": "one\n" });
     impl.storage.gadgets.put({ type: "gadget", id: 100, title: "App", created: new Date(0),
@@ -700,7 +700,9 @@ describe("file tools", () => {
       fauxAssistantMessage(fauxText("Done.")),
     ]);
     let results = toolResultTexts(contexts[1]);
-    expect(results).toEqual(["one\n", "a.txt:1:one"]);
+    // readFile is not offered, so the call is refused as an unknown tool and returns no content.
+    expect(results).toEqual(["Tool readFile not found", "a.txt:1:one"]);
+    expect(results[0]).not.toContain("one");
     expect(sent.filter(entry => entry === "gitPull" || entry.startsWith("facet:"))).toEqual([]);
 
     // The interceptor does see a fault pull when one happens.
