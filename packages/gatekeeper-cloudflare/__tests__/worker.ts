@@ -6,12 +6,19 @@
 // instantiates a gatekeeper in production.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import type { GatekeeperUserVerifier, GitCache, GitObjectType, GitOid }
+import type { ApprovalQueue, GatekeeperUserVerifier, GitCache, GitObjectType, GitOid }
   from "@gadgets/workshop-shared/gatekeeper";
-import type { CloudflareObservabilityGatekeeper } from "../src/cloudflare.js";
+import type {
+  CloudflareObservabilityGatekeeper,
+  CloudflareVerifier,
+} from "../src/cloudflare.js";
+import type { CloudflareObservabilitySession } from "../src/types.js";
 
 export { default } from "../src/cloudflare.js";
 export * from "../src/cloudflare.js";
+// Named as well, because `ctx.exports` lists only the entrypoints this module names itself (the
+// Durable Objects are listed through their bindings); a star re-export alone leaves it out.
+export { CloudflareVerifier } from "../src/cloudflare.js";
 
 type GatekeeperProps = {
   userObjectId: string;
@@ -23,6 +30,7 @@ export type TestExports = {
   CloudflareObservabilityGatekeeper(options: { props: GatekeeperProps }):
     DurableObjectClass<CloudflareObservabilityGatekeeper>;
   TestConnectCallback(options: { props: { label: string } }): Fetcher<TestConnectCallback>;
+  CloudflareVerifier(options: { props: { userObjectId: string } }): Fetcher<CloudflareVerifier>;
 };
 
 /**
@@ -106,6 +114,35 @@ export class TestHooks extends DurableObject<Env> {
     const { url, title, suggestedBindingName } =
       await this.#gatekeeper(facetName, props).describe();
     return { url, title, suggestedBindingName };
+  }
+
+  /**
+   * Open the agent's read session on a binding, as the overseer does: the production gatekeeper
+   * builds the API client from its props and the bound user's stored credentials.
+   */
+  async startSession(facetName: string, props: GatekeeperProps, queue: ApprovalQueue): Promise<unknown> {
+    // Typed loosely on purpose: the facet stub's mapped RPC types for a session are too deep for
+    // tsc to instantiate, and the test casts the returned stub back to the session interface.
+    const gatekeeper = this.#gatekeeper(facetName, props) as unknown as {
+      startSession(queue: ApprovalQueue): Promise<CloudflareObservabilitySession>;
+    };
+    return gatekeeper.startSession(queue);
+  }
+
+  /**
+   * Run the production verifier for a collaborator's own account. Returns its answer, or the thrown
+   * message, so a refusal and a failure stay distinguishable.
+   */
+  async verifyObserver(
+    userObjectId: string, accountId: string, workerName?: string,
+  ): Promise<boolean | string> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    try {
+      return await exports.CloudflareVerifier({ props: { userObjectId } })
+        .hasObservabilityAccess(accountId, workerName);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   /** Confirms the read-only resource refuses every mutating gatekeeper operation. */

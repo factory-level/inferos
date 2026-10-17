@@ -47,6 +47,12 @@ describe("Cloudflare observability resources", () => {
     )).toThrow("Unsupported Cloudflare observability URL");
   });
 
+  it("binds a Worker only in its production environment", () => {
+    expect(() => parseObservabilityResourceUrl(
+      `https://dash.cloudflare.com/${ACCOUNT_ID}/workers/services/view/api-worker/staging/observability`,
+    )).toThrow("Unsupported Cloudflare observability URL");
+  });
+
   it("rejects malformed account IDs and URL encoding", () => {
     expect(() => accountObservabilityUrl("account-id")).toThrow("account ID");
     expect(() => parseObservabilityResourceUrl(
