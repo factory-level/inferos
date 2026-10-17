@@ -311,6 +311,11 @@ async function failure(call: PromiseLike<unknown>): Promise<string> {
   }
 }
 const commitsBy = (user: User) => fake.commits.filter(c => c.person === user.username);
+/** The stored log entry of one action, whatever its state. */
+const entryOf = async (ws: RpcStub<Overseer>, id: number) =>
+  (await ws.listActions({ filter: "all" })).entries.find(a => a.id === id);
+/** How the gatekeeper words an apply InferOps refused for access (FORBIDDEN and UNAUTHORIZED alike). */
+const NOT_PERMITTED = "was not applied: InferOps does not permit it for this connection";
 
 describe("IL-03-03 leg G: per-person authority on the intake's board-eng reference", () => {
   let target: string;
@@ -391,7 +396,8 @@ describe("IL-03-03 leg G: per-person authority on the intake's board-eng referen
     fake.setWorkspaces(alice.person, []);
     const commits = fake.commits.length;
     expect(await failure(aliceSession.readBoard())).toContain("FORBIDDEN");
-    expect(await failure(aliceWs.approveAction(action.id))).not.toBe("");
+    expect(await failure(aliceWs.approveAction(action.id))).toContain(NOT_PERMITTED);
+    expect(await entryOf(aliceWs, action.id)).toMatchObject({ lastAttempt: { outcome: "notApplied", code: "FORBIDDEN" } });
     expect(fake.commits.length).toBe(commits);
     expect(fake.issue("ENG-2").title).not.toBe("Never while revoked");
     fake.setWorkspaces(alice.person, ["operations"]);
@@ -405,7 +411,8 @@ describe("IL-03-03 leg G: per-person authority on the intake's board-eng referen
     const commits = fake.commits.length;
     fake.revokeSessions(alice.person);
     expect(await failure(aliceSession.readBoard())).toContain("UNAUTHORIZED");
-    expect(await failure(aliceWs.approveAction(action.id))).not.toBe("");
+    expect(await failure(aliceWs.approveAction(action.id))).toContain(NOT_PERMITTED);
+    expect(await entryOf(aliceWs, action.id)).toMatchObject({ lastAttempt: { outcome: "notApplied", code: "UNAUTHORIZED" } });
     expect(fake.commits.length).toBe(commits);
     expect(commitsBy(alice)).toHaveLength(1);
     expect(fake.issuesOf("ENG")).toHaveLength(issues);
