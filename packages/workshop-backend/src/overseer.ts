@@ -272,6 +272,18 @@ type PendingAgentCallRecord = {
   initiatorModelId: string | null;  // null when the spawner has no model (see spawnAgent)
 };
 
+// A resume an approval could not start because the chat's turn was still running (IL-29-04 L2):
+// the turn's end delivers it, after re-checking the decision. See the `pendingResumes` collection.
+type PendingResumeRecord = {
+  chatId: number;
+  approvedId: number;         // the approved action whose decision completed the turn's awaited set
+  // The approval note's sequence. The note is user-authored, which a turn-scoped scan reads as the
+  // start of a new turn, so the deferred re-check scans the messages before it, and any turn
+  // boundary after it means the chat has moved on.
+  noteSequence: number;
+  initiatorUserId: string;    // hex durable object ID of the approving client's user DO
+};
+
 type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 
 // getAgentCatalog is optional on Gatekeeper; ambient capsules always implement it. After confirming
@@ -1618,6 +1630,14 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      // Resumes an approval recorded instead of starting, because the chat's turn was still
+      // running (its teardown had not cleared activeAgent yet). One per chat: a later record
+      // overwrites. Consumed, after re-checking the decision, by #finishAgentTurn. Backend only;
+      // never sent to clients.
+      pendingResumes: collection<PendingResumeRecord>()({
+        primaryKey: "chatId",
+      }),
+
       // Model-facing snapshots of agent steps, replayed verbatim on later turns so reasoning
       // (including provider-opaque signatures) and true model provenance survive turn boundaries
       // and restarts. Stored separately from the chat messages so these payloads -- opaque and
@@ -2223,7 +2243,12 @@ class OverseerImpl implements AgentHooks {
     this.#liveChats.delete(chatId);
 
     if (this.hasPendingAgentCalls(chatId)) {
+      // The drained turn replays the history, approval note included: it is the continuation, so a
+      // resume deferred during this turn must not start a second one.
+      this.storage.pendingResumes.delete(chatId);
       this.drainPendingAgentCalls(chatId);
+    } else if (this.storage.pendingResumes.get(chatId)) {
+      void this.#drainDeferredResume(chatId);
     } else {
       this.#deliverWaitingExternalMessageResponse(chatId);
     }
@@ -8097,6 +8122,110 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // The current turn's awaited actions, oldest first: the agent-requested actions with
+  // awaitDecision recorded since whatever started the turn (a user/gadget message or a gadget
+  // callback; agentNudge is mid-turn, so it isn't a boundary). Shared by the approval resume and
+  // the deferred resume, so both scope a decision to the same turn.
+  // `beforeSequence` limits the scan to earlier messages (the deferred resume skips its own note).
+  turnAwaitedActions(chatId: number, beforeSequence?: number): (ActionRecord & {type: "action"})[] {
+    let awaited: (ActionRecord & {type: "action"})[] = [];
+    for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
+      if (beforeSequence !== undefined && msg.sequence >= beforeSequence) continue;
+      if (msg.type === "agentCallback") break;
+      if (msg.type === "message" &&
+          (msg.author.type === "user" || msg.author.type === "gadget")) {
+        break;
+      }
+      if (msg.type === "action") {
+        let record = this.storage.actions.get(msg.actionId);
+        if (record && record.type === "action" &&
+            record.caller.from === "agent" && record.description.awaitDecision) {
+          awaited.push(record);
+        }
+      }
+    }
+    return awaited.toReversed();
+  }
+
+  // Start the turn an approval deferred because the chat's previous turn was still tearing down
+  // (see `pendingResumes`). Called by #finishAgentTurn once that turn is over. The note was posted
+  // when the approval landed, so none is posted here. Re-checks everything the approval checked,
+  // because the chat may have moved on: the record is dropped unless `approvedId` is still in the
+  // current turn's awaited set, every one decided and none rejected.
+  async #drainDeferredResume(chatId: number): Promise<void> {
+    let record = this.storage.pendingResumes.get(chatId);
+    if (!record) return;
+    // A turn boundary after the note (a user or gadget message, a gadget callback) is a newer turn.
+    let newerTurn = false;
+    for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
+      if (msg.sequence <= record.noteSequence) break;
+      if (msg.type === "agentCallback" ||
+          (msg.type === "message" && (msg.author.type === "user" || msg.author.type === "gadget"))) {
+        newerTurn = true;
+        break;
+      }
+    }
+    let awaited = this.turnAwaitedActions(chatId, record.noteSequence);
+    if (newerTurn || !awaited.some(r => r.id === record.approvedId) ||
+        awaited.some(r => r.state === "pending" || r.state === "rejected")) {
+      this.storage.pendingResumes.delete(chatId);
+      return;
+    }
+
+    // The model as #resumeSuspendedAgent recovers it: from the most recent agent-authored message.
+    let modelId: string | null = null;
+    for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
+      if (msg.author.type === "agent") {
+        modelId = msg.author.fallbackForModelId ?? msg.author.id;
+        break;
+      }
+    }
+    let author: AiChatAuthorInfo | undefined;
+    try {
+      let user = this.users.get(this.users.idFromString(record.initiatorUserId));
+      let userMeta = await retryOnDoReset(() => user.getChatContext(modelId), this.logger);
+      author = userMeta.profile;
+
+      // getChatContext() waits on the user's Durable Object, and another path may start the agent
+      // meanwhile: wait for message preparation, then re-read. A running turn reads the note itself.
+      let preparation = this.waitForChatMessagePreparation(chatId);
+      while (preparation) {
+        await preparation;
+        preparation = this.waitForChatMessagePreparation(chatId);
+      }
+      let meta = this.storage.chatMeta.get(chatId);
+      if (!meta || meta.activeAgent) {
+        this.storage.pendingResumes.delete(chatId);
+        return;
+      }
+      if (!userMeta.aiModel) {
+        this.storage.pendingResumes.delete(chatId);
+        this.postAgentErrorMessage(chatId, author,
+            "Could not resume the agent after the approval: no model could be resolved.");
+        this.#deliverWaitingExternalMessageResponse(chatId);
+        return;
+      }
+
+      // No awaits from here to the start: the record is consumed in the same step that marks the
+      // chat running, so at most one start passes the activeAgent guard.
+      this.storage.pendingResumes.delete(chatId);
+      meta.activeAgent = userMeta.aiModel.profile;
+      meta.lastActive = this.getChatTimestamp();
+      this.storage.chatMeta.put(meta);
+      this.startAgent(chatId, userMeta.aiModel, userMeta.profile, record.initiatorUserId);
+    } catch (err) {
+      this.storage.pendingResumes.delete(chatId);
+      this.logger.error("failed to resume the agent after a deferred approval", {
+        event: "agent.resume.deferred.failed", error: err, chatId,
+      });
+      if (author) {
+        this.postAgentErrorMessage(chatId, author,
+            `Could not resume the agent after the approval: ${stringifyError(err)}`);
+      }
+      this.#deliverWaitingExternalMessageResponse(chatId);
+    }
+  }
+
   // Whether any calls to the chat's agent are recorded but not yet appended to its chat log.
   hasPendingAgentCalls(chatId: number): boolean {
     return Array.from(this.storage.pendingAgentCalls.list(
@@ -13445,25 +13574,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // awaited actions approved. Scoping to the current turn keeps older actions out of it: a rejected
   // one can't block future resumes, and approving one can't restart a newer turn.
   async #maybeResumeAfterActionDecision(chatId: number, approvedId: number): Promise<void> {
-    let awaited: (ActionRecord & {type: "action"})[] = [];
-    for (let msg of this.impl.storage.chats.list(
-        {prefix: `${keyString(chatId)}.`, reverse: true})) {
-      // Stop at whatever started the current turn: a user/gadget message or a gadget callback.
-      // (agentNudge is mid-turn, so it isn't a boundary.)
-      if (msg.type === "agentCallback") break;
-      if (msg.type === "message" &&
-          (msg.author.type === "user" || msg.author.type === "gadget")) {
-        break;
-      }
-      if (msg.type === "action") {
-        let record = this.impl.storage.actions.get(msg.actionId);
-        if (record && record.type === "action" &&
-            record.caller.from === "agent" && record.description.awaitDecision) {
-          awaited.push(record);
-        }
-      }
-    }
-    awaited.reverse();  // Present titles chronologically.
+    let awaited = this.impl.turnAwaitedActions(chatId);  // chronological, for the titles
 
     // Only resume when every awaited action in the turn has been decided, none rejected. One the
     // provider refused (failed) is decided: the turn moves on, told what did not apply and why.
@@ -13486,8 +13597,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     ].filter(part => part !== "").join(" ");
     let author = await this.#getClientProfile();
     this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}]);
+    // The note just appended, read before any await, so nothing can follow it yet.
+    let [note] = Array.from(this.impl.storage.chats.list(
+        {prefix: `${keyString(chatId)}.`, reverse: true, limit: 1}));
 
-    await this.#resumeSuspendedAgent(chatId);
+    await this.#resumeSuspendedAgent(chatId, note && {approvedId, noteSequence: note.sequence});
   }
 
   async rejectAction(id: number): Promise<void> {
@@ -13633,11 +13747,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   // Restart a suspended agent turn after its outcome is recorded in chat history (accepted
   // connection, or all awaited actions approved). Denials intentionally don't call this.
-  async #resumeSuspendedAgent(chatId: number): Promise<void> {
+  //
+  // `deferral`, when an action approval asks: if the chat's turn is still running (its teardown
+  // has not cleared activeAgent yet), the resume is recorded for that turn's end instead of
+  // dropped (IL-29-04 L2). The turn may be past its last model read, so it would never see the note.
+  async #resumeSuspendedAgent(
+      chatId: number, deferral?: {approvedId: number; noteSequence: number}): Promise<void> {
     await this.impl.waitForChatMessagePreparation(chatId);
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) return;  // Chat deleted.
-    if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
+    if (meta.activeAgent) return this.#deferResume(chatId, deferral);  // Already running.
 
     // Recover the model this thread was using. getChatContext(null) does NOT resolve a model, so we
     // find the original model choice from the most recent agent-authored message.
@@ -13656,13 +13775,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let preparation = this.impl.waitForChatMessagePreparation(chatId);
     if (preparation) {
       await preparation;
-      return this.#resumeSuspendedAgent(chatId);
+      return this.#resumeSuspendedAgent(chatId, deferral);
     }
 
     // Re-read after the await: another concurrent accept may have started the agent in the
     // meantime. Avoid starting a second agent loop for the same chat.
     let fresh = this.impl.storage.chatMeta.get(chatId);
-    if (!fresh || fresh.activeAgent) return;
+    if (!fresh) return;
+    if (fresh.activeAgent) return this.#deferResume(chatId, deferral);
 
     fresh.activeAgent = userMeta.aiModel.profile;
     fresh.lastActive = this.impl.getChatTimestamp();
@@ -13670,6 +13790,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
                          this.#clientUser.id.toString());
+  }
+
+  // Leave an approval's resume for the running turn's end (#finishAgentTurn re-checks it then).
+  // Connection-request accepts pass no deferral and keep today's behaviour.
+  #deferResume(chatId: number, deferral: {approvedId: number; noteSequence: number} | undefined): void {
+    if (!deferral) return;
+    this.impl.storage.pendingResumes.put(
+        {chatId, ...deferral, initiatorUserId: this.#clientUser.id.toString()});
   }
 
   async acceptConnectionRequest(
@@ -14126,6 +14254,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.storage.pendingAgentCalls.delete(
           `${keyString(entry.chatId)}.${keyString(entry.callId)}`);
     }
+    this.impl.storage.pendingResumes.delete(chatId);
 
     // Clean up the chat's model-facing snapshots.
     for (let entry of this.impl.storage.chatModelData.list(

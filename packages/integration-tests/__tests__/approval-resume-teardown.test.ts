@@ -4,8 +4,10 @@
 // action persists its card, then its teardown reaps pending gadgets before clearing `activeAgent`.
 // That reap awaits external I/O only for a pending gadget left reverted by an earlier reap that
 // failed, with an enabled hook: `deleteHook` awaits the hook controller's `disable()`. An approval
-// arriving during that await finds the card and posts its note, but returns because `activeAgent`
-// is still set, and the teardown never re-checks.
+// arriving during that await finds the card and posts its note, but its resume is refused because
+// `activeAgent` is still set. Before the fix the teardown never re-asked, so the turn was lost
+// (reproduced at 6254ab84). The fix records the refused resume and #finishAgentTurn starts it once,
+// after re-checking the decision; these cases assert that, and the refusals around it.
 //
 // The seed is reached through product paths only (Step 0-prime, R1 PASS): a Build chat creates a
 // gadget it never merges (provisional), binds and enables a hook on it, then reverts the creating
@@ -71,11 +73,13 @@ const watch = (key: string): ChatCompletionStep[] => [
   { toolCall: { id: "watch", name: "executeCode", arguments: { code: watchCode(key) } } },
   { text: "Watching." },
 ];
-const WRITE: ChatCompletionStep = {
+const writes = (...values: number[]): ChatCompletionStep => ({
   toolCall: { id: "write", name: "executeCode", arguments: {
-    code: "export default async function(self, env) { await env.TEST_AMBIENT.writeValue(7); }",
+    code: `export default async function(self, env) { ${
+      values.map(value => `await env.TEST_AMBIENT.writeValue(${value});`).join(" ")} }`,
   } },
-};
+});
+const WRITE = writes(7);
 const STEP_2 = "Step 2: the value is applied.";
 
 const APPROVAL_RESUME_NOTE = "The changes you submitted have been approved and applied";
@@ -105,10 +109,11 @@ async function signedIn(prefix: string, model: RoutedScriptedModel) {
  * The seed, then T3 up to the held teardown: returns once call 3 is held, with every A1
  * precondition asserted (a failed precondition fails the case; nothing is skipped).
  */
-async function seedAndHoldTeardown(prefix: string) {
+async function seedAndHoldTeardown(
+    prefix: string, values: number[] = [7], after: ChatCompletionStep[] = [{ text: STEP_2 }]) {
   const [user] = nextUsernames(`${prefix}k`);
   const key = `${user}:lingering`;
-  const model = models.script([...BUILD, ...watch(key), WRITE, { text: STEP_2 }]);
+  const model = models.script([...BUILD, ...watch(key), writes(...values), ...after]);
   const session = await signedIn(prefix, model);
   const { ws } = session;
 
@@ -139,21 +144,22 @@ async function seedAndHoldTeardown(prefix: string) {
   // T3: its start reap is call 2 (refused); step 1's awaited write persists the card; the turn's
   // teardown reap is call 3, held.
   await control("hold-next-disable", { key });
-  await ws.sendChatMessage(chat, "Set the test value to 7.", SCRIPTED_MODEL_ID);
-  const [action] = await waitFor("the awaited write's card", async () => {
+  await ws.sendChatMessage(chat, "Set the test values.", SCRIPTED_MODEL_ID);
+  const actions = await waitFor("the awaited writes' cards", async () => {
     const entries = await pending(ws);
-    return entries.length === 1 ? entries : null;
+    return entries.length === values.length ? entries.toSorted((a, b) => a.id - b.id) : null;
   });
   await waitFor("the teardown's held disable", async () => (await disableCalls(key)).calls === 3 || null);
 
   // A1: every precondition of the L2 interval, at the moment of approval.
-  expect(action, "A1: the card").toMatchObject({ requestedBy: "agent", description: { title: "Set the test value to 7" } });
+  expect(actions, "A1: the cards").toMatchObject(values.map(value =>
+    ({ requestedBy: "agent", description: { title: `Set the test value to ${value}` } })));
   expect(await activeAgentOf(ws, chat), "A1: the turn is still active").toBeDefined();
   expect(await disableCalls(key), "A1: calls 1 and 2 refused, call 3 pending")
       .toEqual({ calls: 3, rejected: 2, completed: 0 });
   expect((await ws.listHooks()).map(h => h.id), "A1: the gadget's hook is still present").toContain(hook!.id);
   expect(model.requests).toHaveLength(5);
-  return { ...session, model, chat, key, action: action! };
+  return { ...session, model, chat, key, action: actions[0]!, actions };
 }
 
 const close = (session: { ws: RpcStub<Overseer>; api: { [Symbol.dispose](): void }; publicApi: { [Symbol.dispose](): void } }) => {
@@ -165,27 +171,116 @@ const close = (session: { ws: RpcStub<Overseer>; api: { [Symbol.dispose](): void
 describe("IL-29-04 L2: approval during a held teardown hook disable", () => {
   // The determinism loop: the same interleaving, three fresh users, the same outcome each time.
   for (const round of [1, 2, 3]) {
-    it(`L2 (round ${round}): the approval posts its note once, and the turn is never resumed`, async () => {
+    it(`L2 (round ${round}): the approval posts its note once, and the turn resumes once after the teardown`, async () => {
       const s = await seedAndHoldTeardown(`l2r${round}`);
       try {
         await s.ws.approveAction(s.action.id);
         await control("release-disable", { key: s.key });
+        // T1 (2), T2 (2) and T3's step 1 are 5; the deferred resume requests step 2 as the 6th.
+        await waitFor("the deferred resume", async () => s.model.requests.length === 6 || null);
         await waitForIdleChat(s.ws, s.chat);
 
         const history = await historyOf(s.ws, s.chat);
         expect(approvalResumeNotes(history)).toBe(1);
-        // T1 (2), T2 (2) and T3's step 1: a resume would request step 2 as the 6th.
-        expect(s.model.requests, "step 2 was never requested").toHaveLength(5);
-        expect(agentSaid(history, STEP_2)).toBe(0);
-        expect(s.model.remainingSteps()).toBe(1);
+        expect(agentSaid(history, STEP_2)).toBe(1);
+        expect(s.model.remainingSteps()).toBe(0);
         expect(await pending(s.ws)).toEqual([]);
         expect(await activeAgentOf(s.ws, s.chat)).toBeUndefined();
         expect(await disableCalls(s.key)).toEqual({ calls: 3, rejected: 2, completed: 1 });
+        // No 7th request: the chat is idle again and asks nothing more.
+        await waitForIdleChat(s.ws, s.chat);
+        expect(s.model.requests).toHaveLength(6);
       } finally {
         close(s);
       }
     });
   }
+
+  it("R1: approving one awaited write and rejecting the other during the hold resumes nothing", async () => {
+    const s = await seedAndHoldTeardown("l2rej", [7, 8]);
+    try {
+      const [a, b] = s.actions;
+      await s.ws.approveAction(a!.id);
+      await s.ws.rejectAction(b!.id);
+      await control("release-disable", { key: s.key });
+      await waitForIdleChat(s.ws, s.chat);
+
+      const history = await historyOf(s.ws, s.chat);
+      expect(approvalResumeNotes(history)).toBe(0);
+      expect(s.model.requests).toHaveLength(5);
+      expect(agentSaid(history, STEP_2)).toBe(0);
+      expect(s.model.remainingSteps()).toBe(1);
+      expect(await pending(s.ws)).toEqual([]);
+    } finally {
+      close(s);
+    }
+  });
+
+  it("R2a: both awaited writes approved during the hold give one note and one resume", async () => {
+    const s = await seedAndHoldTeardown("l2both", [7, 8]);
+    try {
+      const [a, b] = s.actions;
+      await s.ws.approveAction(a!.id);
+      await s.ws.approveAction(b!.id);
+      await control("release-disable", { key: s.key });
+      await waitFor("the deferred resume", async () => s.model.requests.length === 6 || null);
+      await waitForIdleChat(s.ws, s.chat);
+
+      const history = await historyOf(s.ws, s.chat);
+      expect(approvalResumeNotes(history)).toBe(1);
+      expect(agentSaid(history, STEP_2)).toBe(1);
+      expect(s.model.requests).toHaveLength(6);
+      expect(s.model.remainingSteps()).toBe(0);
+    } finally {
+      close(s);
+    }
+  });
+
+  it("R2b: one write approved during the hold and the other after the teardown resumes once", async () => {
+    const s = await seedAndHoldTeardown("l2split", [7, 8]);
+    try {
+      const [a, b] = s.actions;
+      await s.ws.approveAction(a!.id);
+      await control("release-disable", { key: s.key });
+      await waitForIdleChat(s.ws, s.chat);
+      expect(s.model.requests, "nothing resumes while one write is still pending").toHaveLength(5);
+      await s.ws.approveAction(b!.id);
+      await waitFor("the resumed turn", async () => s.model.requests.length === 6 || null);
+      await waitForIdleChat(s.ws, s.chat);
+
+      const history = await historyOf(s.ws, s.chat);
+      expect(approvalResumeNotes(history)).toBe(1);
+      expect(agentSaid(history, STEP_2)).toBe(1);
+      expect(s.model.requests).toHaveLength(6);
+      expect(s.model.remainingSteps()).toBe(0);
+    } finally {
+      close(s);
+    }
+  });
+
+  // R3 (R1's "newer turn"): a user message cannot start a newer turn before the teardown ends --
+  // the product refuses it while activeAgent is set -- so that branch of the deferred re-check is
+  // not reachable here. What is asserted: the refusal, and that the deferred resume still runs once.
+  it("R3: a newer user message during the hold is refused, and the deferred resume runs once", async () => {
+    const s = await seedAndHoldTeardown("l2newer");
+    try {
+      await s.ws.approveAction(s.action.id);
+      await expect(s.ws.sendChatMessage(s.chat, "A newer request.", SCRIPTED_MODEL_ID))
+          .rejects.toThrow("Agent is running, wait for it to finish.");
+      await control("release-disable", { key: s.key });
+      await waitFor("the deferred resume", async () => s.model.requests.length === 6 || null);
+      await waitForIdleChat(s.ws, s.chat);
+
+      const history = await historyOf(s.ws, s.chat);
+      expect(approvalResumeNotes(history)).toBe(1);
+      expect(agentSaid(history, STEP_2)).toBe(1);
+      expect(history.some(m => m.type === "message" && m.message === "A newer request.")).toBe(false);
+      expect(s.model.requests).toHaveLength(6);
+      expect(s.model.remainingSteps()).toBe(0);
+    } finally {
+      close(s);
+    }
+  });
 
   it("A2(a): approving after the teardown finished, with the gadget lingering, resumes once", async () => {
     const s = await seedAndHoldTeardown("l2late");
