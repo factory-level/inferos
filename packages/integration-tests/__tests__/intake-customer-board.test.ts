@@ -31,11 +31,12 @@ import type { InferOpsProjectSession } from "../../../custom-gatekeepers/gatekee
 import { wrapper } from "../../../scripts/consumer/intake-wrapper-fixture.ts";
 import { startHarness, type Harness } from "../src/harness.js";
 import {
-  INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, WORKSPACES, boardUrl, type FakePerson, type WorkspaceSlug,
+  INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, PROJECTS, WORKSPACES, boardUrl, type FakePerson, type WorkspaceSlug,
 } from "../src/inferops-fake.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  connect, listConnectedAccounts, nextUsernames, signUp, waitFor, type ConnectedAccount,
+  connect, listConnectedAccounts, MAX_OBSERVER_PROMPTS, nextUsernames, ObserverConfigRecorder, signUp, stubFor, waitFor,
+  type ConnectedAccount,
 } from "../src/rpc-client.js";
 
 const INFEROPS_GATEKEEPER_DIR =
@@ -280,5 +281,141 @@ describe("reading the customer's board from the generated screen", () => {
 
   it("writes nothing to InferOps and files nothing", () => {
     expect(fake.commits).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IL-03-03 leg G: per-person authority on the intake-generated board reference, through the real
+// gatekeeper Worker and each person's own InferLab connection, against the synthetic provider.
+// It uses the intake's `board-eng` reference: the fake places OPS in `knowledge`, so the intake's
+// `acme.operations/OPS` reference is refused for everyone and is not a per-person distinction
+// (OPS per-person authority is leg P, in InferOps). Not joined with a real InferOps (IL-13-R1);
+// no real OAuth; no UI capture. Runs after "writes nothing", which it would otherwise break.
+
+const ENG = PROJECTS.ENG;
+const pending = async (ws: RpcStub<Overseer>) => (await ws.listActions({ filter: "pending" })).entries;
+/** The one action the next proposal queues. */
+async function proposed(ws: RpcStub<Overseer>, propose: () => Promise<unknown>) {
+  const before = new Set((await pending(ws)).map(a => a.id));
+  await propose();
+  const added = (await pending(ws)).filter(a => !before.has(a.id));
+  expect(added).toHaveLength(1);
+  return added[0]!;
+}
+async function failure(call: PromiseLike<unknown>): Promise<string> {
+  try {
+    await call;
+    return "";
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+const commitsBy = (user: User) => fake.commits.filter(c => c.person === user.username);
+
+describe("IL-03-03 leg G: per-person authority on the intake's board-eng reference", () => {
+  let target: string;
+  let intakePath: string;
+  let screenBefore: unknown;
+  let alice: User;
+  let aliceWs: RpcStub<Overseer>;
+  let aliceSession: RpcStub<InferOpsProjectSession>;
+  let connectionId: number;
+  let moved: { stateId: string; revision: string };
+
+  it("G1: the owner (acme.operations) reads and makes one approved write, attributed to her", async () => {
+    ({ target, intakePath } = derivedWrapper());
+    screenBefore = customerScreen(target);
+    alice = await newUser("permga", ["operations"]);
+    const { ws, stored } = await saveScreen(alice, customerScreen(target));
+    aliceWs = ws;
+    const connection = await ws.newGatekeeper(alice.account.id, storedBoard(stored, "board-eng").targetRef);
+    if (!connection) throw new Error("No connection for the generated ENG reference");
+    connectionId = await connection.getId();
+    aliceSession = await connection.openSession() as RpcStub<InferOpsProjectSession>;
+    expect((await aliceSession.readBoard()).project.identifier).toBe("ENG");
+
+    const issue = await (await aliceSession.openIssue(fake.issue("ENG-2").id)).read();
+    const commits = fake.commits.length;
+    const action = await proposed(ws, async () =>
+      (await aliceSession.openIssue(issue.id)).transition(ENG.states[1]!.id, issue.revision));
+    expect(fake.commits.length).toBe(commits);
+    await ws.approveAction(action.id);
+    expect(fake.commits.slice(commits)).toEqual([expect.objectContaining({ person: alice.username, issueId: issue.id })]);
+    moved = { stateId: ENG.states[1]!.id, revision: String(Number(issue.revision) + 1) };
+    expect(fake.issue("ENG-2")).toMatchObject(moved);
+    const mine = requestsBy(alice.person);
+    expect(mine.every(r => r.workspaceId === OPERATIONS && r.person === alice.username)).toBe(true);
+  });
+
+  it("G2: a person without acme.operations is refused the binding, with no board request and no write", async () => {
+    const bob = await newUser("permgb", ["knowledge"]);
+    const { ws, stored } = await saveScreen(bob, customerScreen(target));
+    const commits = fake.commits.length;
+    expect(await bindRefusal(ws, bob, storedBoard(stored, "board-eng").targetRef)).toContain(unavailable("ENG", "acme.operations"));
+    expect(boardRequestsBy(bob.person)).toEqual([]);
+    expect(requestsBy(bob.person).filter(r => r.workspaceId === OPERATIONS)).toEqual([]);
+    expect(fake.commits.length).toBe(commits);
+  });
+
+  // G3 is limited to admission and visibility. A collaborator's APPROVED WRITE through the shared
+  // binding commits under the binding owner's InferOps identity (the fake records Alice, not
+  // Carol): the gatekeeper documents that "the apply sends the owner's sign-in" and refuses it only
+  // for approval-type proposals (gatekeeper-inferops/src/inferops.ts approvalRefusal). Whether that
+  // meets "never borrow another person's connection" is a product decision returned to R1 and the
+  // lead (slices/57 FINDING-G3.md); this test asserts neither answer.
+  it("G3: a collaborator without the project is refused at open; one with it is verified with their own account and sees no token", async () => {
+    const { id: gadgetId } = await aliceWs.getMetadata();
+    const bob = await newUser("permgc", ["knowledge"]);
+    expect(await aliceWs.addCollaborator(bob.username, "build")).toBeTruthy();
+    const bobAsked = new ObserverConfigRecorder().alwaysChoose(bob.account.id, MAX_OBSERVER_PROMPTS);
+    using bobCallback = stubFor(bobAsked);
+    expect(await failure(bob.api.openGadget(gadgetId, undefined, bobCallback))).toMatch(/could not confirm/i);
+    expect(requestsBy(bob.person).filter(r => r.workspaceId === OPERATIONS)).toEqual([]);
+
+    const carol = await newUser("permgd", ["operations"]);
+    expect(await aliceWs.addCollaborator(carol.username, "build")).toBeTruthy();
+    const carolAsked = new ObserverConfigRecorder().alwaysChoose(carol.account.id, MAX_OBSERVER_PROMPTS);
+    using carolCallback = stubFor(carolAsked);
+    using carolWs = await carol.api.openGadget(gadgetId, undefined, carolCallback);
+    using shared = await carolWs.getGatekeeperById(connectionId);
+    expect(requestsBy(carol.person).some(r => r.workspaceId === OPERATIONS && r.path === "/project/projects")).toBe(true);
+    using carolSession = await shared.openSession() as RpcStub<InferOpsProjectSession>;
+    const seen = JSON.stringify([await carolSession.readBoard(), await carolWs.listActions()]);
+    for (const token of fake.issuedTokens()) expect(seen).not.toContain(token);
+  });
+
+  it("G4: a membership revoked at InferOps refuses her read and her write's apply; restoring it restores the read", async () => {
+    const issue = await (await aliceSession.openIssue(fake.issue("ENG-2").id)).read();
+    const action = await proposed(aliceWs, async () =>
+      (await aliceSession.openIssue(issue.id)).update({ title: "Never while revoked" }, issue.revision));
+    fake.setWorkspaces(alice.person, []);
+    const commits = fake.commits.length;
+    expect(await failure(aliceSession.readBoard())).toContain("FORBIDDEN");
+    expect(await failure(aliceWs.approveAction(action.id))).not.toBe("");
+    expect(fake.commits.length).toBe(commits);
+    expect(fake.issue("ENG-2").title).not.toBe("Never while revoked");
+    fake.setWorkspaces(alice.person, ["operations"]);
+    expect((await aliceSession.readBoard()).project.identifier).toBe("ENG");
+  });
+
+  it("G5: a session revoked at InferLab fails her read and apply as UNAUTHORIZED and writes nothing", async () => {
+    // A create, since G4's refused update still holds ENG-2's pending change.
+    const issues = fake.issuesOf("ENG").length;
+    const action = await proposed(aliceWs, () => aliceSession.createIssue({ title: "Never after sign-out" }));
+    const commits = fake.commits.length;
+    fake.revokeSessions(alice.person);
+    expect(await failure(aliceSession.readBoard())).toContain("UNAUTHORIZED");
+    expect(await failure(aliceWs.approveAction(action.id))).not.toBe("");
+    expect(fake.commits.length).toBe(commits);
+    expect(commitsBy(alice)).toHaveLength(1);
+    expect(fake.issuesOf("ENG")).toHaveLength(issues);
+  });
+
+  it("G6: the owner's change reads back after the refusals, and an intake rerun keeps the customer screen", () => {
+    expect(fake.issue("ENG-2")).toMatchObject(moved);
+    const { report } = applyIntake(target, intakePath);
+    expect(customerScreen(target)).toEqual(screenBefore);
+    expect(readJson(join(target, "inferos.canvas.json")).screens.map((screen: { id: string }) => screen.id)).toEqual([CUSTOMER_SCREEN, "operations"]);
+    expect(report.configuration.changes.find((change: { field: string }) => change.field === `inferos.canvas.json:/screens[id=${CUSTOMER_SCREEN}]`)?.action).toBe("unchanged");
   });
 });
