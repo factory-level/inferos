@@ -295,6 +295,46 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.kv.put(`hook:${key}`, { ...hook, disableCount: hook.disableCount + 1 });
   }
 
+  /** The next `count` TestHookController.disable() calls for `key` throw (IL-29-04 L2). */
+  failNextDisables(key: string, count: number): void {
+    this.ctx.storage.kv.put(`fail-disables:${key}`, count);
+  }
+
+  /** One-shot: the next disable() for `key` that is not failed waits for releaseDisable(). */
+  holdNextDisable(key: string): void {
+    this.ctx.storage.kv.put(`hold-next-disable:${key}`, true);
+    this.ctx.storage.kv.delete(`release-disable:${key}`);
+  }
+
+  releaseDisable(key: string): void {
+    this.ctx.storage.kv.put(`release-disable:${key}`, true);
+  }
+
+  isDisableReleased(key: string): boolean {
+    return this.ctx.storage.kv.get<boolean>(`release-disable:${key}`) ?? false;
+  }
+
+  /** Counts one disable() call and says what it does: fail (spending the budget), hold, or proceed. */
+  beginDisable(key: string): "fail" | "hold" | "proceed" {
+    this.ctx.storage.kv.put(`disable-calls:${key}`, this.getDisableCalls(key).calls + 1);
+    const failsLeft = this.ctx.storage.kv.get<number>(`fail-disables:${key}`) ?? 0;
+    if (failsLeft > 0) {
+      this.ctx.storage.kv.put(`fail-disables:${key}`, failsLeft - 1);
+      this.ctx.storage.kv.put(`disable-rejected:${key}`, this.getDisableCalls(key).rejected + 1);
+      return "fail";
+    }
+    return this.ctx.storage.kv.delete(`hold-next-disable:${key}`) ? "hold" : "proceed";
+  }
+
+  /** Every disable() call for `key`: how many were made, refused, and completed (recordHookDisable). */
+  getDisableCalls(key: string): { calls: number; rejected: number; completed: number } {
+    return {
+      calls: this.ctx.storage.kv.get<number>(`disable-calls:${key}`) ?? 0,
+      rejected: this.ctx.storage.kv.get<number>(`disable-rejected:${key}`) ?? 0,
+      completed: this.#hook(key).disableCount,
+    };
+  }
+
   getHookState(key: string) {
     const { initiator, target, disableCount } = this.#hook(key);
     return { enabled: initiator !== undefined, target, disableCount };
@@ -712,6 +752,13 @@ async function waitForRejectRelease(state: DurableObjectStub<TestControl>, label
   }
 }
 
+async function waitForDisableRelease(state: DurableObjectStub<TestControl>, key: string) {
+  for (const deadline = Date.now() + 30_000; !await state.isDisableReleased(key);) {
+    if (Date.now() > deadline) throw new Error("The held test hook disable was never released.");
+    await scheduler.wait(25);
+  }
+}
+
 async function waitForApplyRelease(state: DurableObjectStub<TestControl>, label: string) {
   for (const deadline = Date.now() + 30_000; !await state.isApplyReleased(label);) {
     if (Date.now() > deadline) throw new Error("The held test apply was never released.");
@@ -835,7 +882,11 @@ export class TestHookController
   }
 
   async disable(): Promise<void> {
-    await control(this.ctx.exports).recordHookDisable(this.ctx.props.key);
+    const state = control(this.ctx.exports);
+    const step = await state.beginDisable(this.ctx.props.key);
+    if (step === "fail") throw new Error("test: disable refused");
+    if (step === "hold") await waitForDisableRelease(state, this.ctx.props.key);
+    await state.recordHookDisable(this.ctx.props.key);
   }
 }
 
@@ -1073,6 +1124,39 @@ export default {
     }
 
     // Body: {"key": "..."} -> {"enabled": boolean, "target"?: HookTargetMetadata, "disableCount"}
+    // IL-29-04 L2: the next `count` hook disables for `key` throw. Body: {"key": "...", "count": n}
+    if (url.pathname === "/control/fail-next-disable" && req.method === "POST") {
+      const { key, count } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
+      if (!Number.isInteger(count) || (count as number) < 0) return badRequest("`count` must be a non-negative integer");
+      await control(ctx.exports).failNextDisables(key, count as number);
+      return new Response(null, { status: 204 });
+    }
+
+    // One-shot: the next hook disable for `key` that is not failed waits for /control/release-disable.
+    // Body: {"key": "..."}
+    if (url.pathname === "/control/hold-next-disable" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
+      await control(ctx.exports).holdNextDisable(key);
+      return new Response(null, { status: 204 });
+    }
+
+    // Body: {"key": "..."}
+    if (url.pathname === "/control/release-disable" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
+      await control(ctx.exports).releaseDisable(key);
+      return new Response(null, { status: 204 });
+    }
+
+    // Body: {"key": "..."} -> {"calls": n, "rejected": n, "completed": n}
+    if (url.pathname === "/control/disable-calls" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
+      return Response.json(await control(ctx.exports).getDisableCalls(key));
+    }
+
     if (url.pathname === "/control/hook-state" && req.method === "POST") {
       const { key } = body as Record<string, unknown>;
       if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
