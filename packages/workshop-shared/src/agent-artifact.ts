@@ -244,6 +244,27 @@ export interface ArtifactRevision {
   publishedAt: Date;
 }
 
+/**
+ * The revision block a `.gadget` format version 2 archive carries in its metadata JSON, beside the
+ * ordinary BlueprintMetadata fields (`bindings` there holds the binding display text and spawner
+ * env). Everything in it is a claim: the receiver decodes the archive's files, rebuilds the
+ * manifest and recomputes the digest, refusing `digest_mismatch`, and checks the qualification and
+ * pins as publishing would. The source publisher is not carried over, since it cannot be verified.
+ * JSON carries `qualification.completedAt` as an ISO string.
+ */
+export interface ArtifactArchiveRevision {
+  /** Artifact name. The kind is `manifest.kind`. */
+  name: string;
+  /** Revision number. */
+  number: number;
+  /** The digest the archive claims for `manifest`. */
+  digest: ArtifactDigest;
+  /** The manifest the digest covers. */
+  manifest: ArtifactManifest;
+  /** Evidence that qualified `digest`. */
+  qualification: ArtifactQualification;
+}
+
 /** Outcome of a publish: the revision (new or an identical existing one), or why it was refused. */
 export type ArtifactPublishResult =
   | { ok: true; created: boolean; revision: ArtifactRevision }

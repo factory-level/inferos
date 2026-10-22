@@ -230,3 +230,109 @@ it("queues a publish request for a person's approval and records the approver as
   await expect(binding.requestPublish({ ...request, name: "Bad Name", qualification: qualified(digest) }))
       .rejects.toThrow(/Invalid artifact name/);
 });
+
+/** A `.gadget` archive split into its prefix fields, metadata JSON and content bytes. */
+async function readArchive(stream: ReadableStream<Uint8Array>) {
+  const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const metadataLength = view.getUint32(12);
+  return {
+    version: view.getUint32(8),
+    metadata: JSON.parse(new TextDecoder().decode(bytes.subarray(24, 24 + metadataLength))),
+    content: bytes.subarray(24 + metadataLength),
+    bytes,
+  };
+}
+
+function writeArchive(version: number, metadata: object, content: Uint8Array): ReadableStream<Uint8Array> {
+  const metadataBytes = new TextEncoder().encode(JSON.stringify(metadata));
+  const bytes = new Uint8Array(24 + metadataBytes.byteLength + content.byteLength);
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(0, 0xec2e2d3a2300e317n);
+  view.setUint32(8, version);
+  view.setUint32(12, metadataBytes.byteLength);
+  view.setBigUint64(16, BigInt(content.byteLength));
+  bytes.set(metadataBytes, 24);
+  bytes.set(content, 24 + metadataBytes.byteLength);
+  return new Response(bytes).body!;
+}
+
+it("exports revisions as .gadget v2, verifies them on import into a clean workspace, and rebinds explicitly", async () => {
+  using source = await authoringWorkspace("artifactexporter");
+  const ws: RpcStub<Overseer> = source.workspace;
+  await source.owner.addModel(SCRIPTED_MODEL_PROFILE, SCRIPTED_MODEL_CONFIG);
+  const skill = await source.gadget("Triage skill", "TRIAGE");
+  await source.commit(skill, "SKILL.md", undefined, "Route bugs.\n");
+  {
+    using model = await ws.newAiModelGatekeeper(SCRIPTED_MODEL_ID);
+    using gadget = await ws.getGadget(skill);
+    await gadget.bind("MODEL", await model.getId());
+  }
+  const v1 = await ws.validateArtifact(skill, "skill", [], { type: "any" });
+  await ws.publishArtifactRevision(skill, "skill", "triage", 1, [], { type: "any" }, qualified(v1.digest));
+  await source.commit(skill, "SKILL.md", "Route bugs.\n", "Route bugs first.\n");
+  const v2 = await ws.validateArtifact(skill, "skill", [], { type: "any" });
+  await ws.publishArtifactRevision(skill, "skill", "triage", 2, [], { type: "any" }, qualified(v2.digest));
+  const agent = await source.gadget("Agent", "AGENT");
+  await source.commit(agent, "persona.md", undefined, "Be brief.\n");
+  const pin = { kind: "skill" as const, name: "triage", number: 1, digest: v1.digest };
+  const a1 = await ws.validateArtifact(agent, "agent", [pin], null);
+  await ws.publishArtifactRevision(agent, "agent", "brief", 1, [pin], null, qualified(a1.digest));
+
+  const archive1 = await readArchive(await ws.exportArtifactRevision("skill/triage@1"));
+  const archive2 = await readArchive(await ws.exportArtifactRevision("skill/triage@2"));
+  const agentArchive = await readArchive(await ws.exportArtifactRevision("agent/brief@1"));
+  expect(archive1.version).toBe(2);
+  expect(archive1.metadata.revision).toMatchObject({ name: "triage", number: 1, digest: v1.digest });
+  expect(archive1.metadata.bindings).toEqual({ MODEL: { title: expect.any(String), description: "", type: "aiModel" } });
+  // No credentials, connections, grants, history or execution state travel.
+  const text = new TextDecoder().decode(archive1.bytes);
+  for (const secret of [SCRIPTED_MODEL_CONFIG.apiToken, SCRIPTED_MODEL_CONFIG.accountId, "Route bugs first"]) {
+    expect(text).not.toContain(secret);
+  }
+
+  using destination = await authoringWorkspace("artifactimporter");
+  const dest: RpcStub<Overseer> = destination.workspace;
+  await destination.owner.addModel(SCRIPTED_MODEL_PROFILE, SCRIPTED_MODEL_CONFIG);
+  const reimport = (archive: Awaited<ReturnType<typeof readArchive>>, metadata = archive.metadata,
+      content = archive.content, version = 2) => dest.importArtifactRevision(writeArchive(version, metadata, content));
+
+  // Tampered and incompatible archives are refused before anything is stored.
+  const tamperedFiles = { ...archive1.metadata, revision: { ...archive1.metadata.revision,
+    manifest: { ...archive1.metadata.revision.manifest, files: { "SKILL.md": v2.manifest.files["SKILL.md"] } } } };
+  expect(await reimport(archive1, tamperedFiles)).toMatchObject({ ok: false, refusal: "digest_mismatch" });
+  expect(await reimport(archive1, archive2.metadata)).toMatchObject({ ok: false, refusal: "digest_mismatch" });
+  const tamperedBindings = { ...archive1.metadata, bindings: {} };
+  expect(await reimport(archive1, tamperedBindings)).toMatchObject({ ok: false, refusal: "digest_mismatch" });
+  const corrupt = archive1.content.slice(); corrupt[corrupt.length - 5]! ^= 0xff;
+  expect(await reimport(archive1, archive1.metadata, corrupt)).toMatchObject({ ok: false, refusal: "digest_mismatch" });
+  const futureFormat = { ...archive1.metadata, revision: { ...archive1.metadata.revision,
+    manifest: { ...archive1.metadata.revision.manifest, format: "inferos-artifact/9" } } };
+  expect(await reimport(archive1, futureFormat)).toMatchObject({ ok: false, refusal: "unsupported_format" });
+  const staleProof = { ...archive1.metadata, revision: { ...archive1.metadata.revision,
+    qualification: { ...archive1.metadata.revision.qualification, digest: v2.digest } } };
+  expect(await reimport(archive1, staleProof)).toMatchObject({ ok: false, refusal: "qualification_stale" });
+  expect(await reimport(agentArchive)).toMatchObject({ ok: false, refusal: "pin_unresolved" });
+  await expect(reimport(archive1, archive1.metadata, archive1.content, 1)).rejects.toThrow(/Unsupported gadget archive version: 1/);
+  await expect(destination.owner.importBlueprint(writeArchive(2, archive1.metadata, archive1.content)))
+      .rejects.toThrow(/Unsupported gadget archive version: 2/);
+  expect(await dest.listArtifactRevisions("skill", "triage")).toEqual([]);
+
+  // Verified archives import, publishedBy the importer; a dependent then resolves its pin here.
+  const imported = await reimport(archive1);
+  expect(imported).toMatchObject({ ok: true, created: true,
+    revision: { ref: "skill/triage@1", digest: v1.digest, publishedBy: { id: (await destination.owner.whoami()).id } } });
+  expect(await reimport(archive1)).toMatchObject({ ok: true, created: false });
+  expect(await reimport(archive2)).toMatchObject({ ok: true, created: true });
+  expect(await reimport(agentArchive)).toMatchObject({ ok: true, created: true });
+
+  // Revision selection and rollback: bind the earlier exact revision with the destination's own model.
+  const rolledBack = await dest.bindArtifactRevision("skill/triage@1", { MODEL: { type: "aiModel", modelId: SCRIPTED_MODEL_ID } });
+  const head = await destination.headOf(rolledBack);
+  expect(await dest.readFilesAtCommit(head, ["SKILL.md"])).toEqual([["SKILL.md", { kind: "text", text: "Route bugs.\n" }]]);
+  using gadget = await dest.getGadget(rolledBack);
+  expect((await gadget.listBindings()).map(binding => binding.name)).toEqual(["MODEL"]);
+  // A round trip reproduces the archive's revision exactly.
+  expect((await readArchive(await dest.exportArtifactRevision("skill/triage@1"))).metadata.revision)
+      .toEqual(archive1.metadata.revision);
+});
