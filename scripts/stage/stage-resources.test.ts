@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deployTargetProblem, parseDeployTargets, parseKvNamespaceList } from "./stage-resources.ts";
+import {
+  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending,
+} from "./stage-resources.ts";
 
 test("parseKvNamespaceList finds the array after Wrangler's banner and refuses duplicate titles", () => {
   const stdout = " ⛅️ wrangler 4.138.0\n───\n" + JSON.stringify([
@@ -36,4 +38,27 @@ test("deployTargetProblem allows the custom domain on the router and nothing any
   assert.equal(deployTargetProblem("inferos-dev-workshop-backend", [], null), null);
   assert.match(String(deployTargetProblem("inferos-dev-workshop-backend",
       ["https://inferos-dev-workshop-backend.example.workers.dev"], null)), /only the router/);
+});
+
+test("retryWhileDnsPending waits out ENOTFOUND, then returns the probe's answer", async () => {
+  const notYet = Object.assign(new Error("fetch failed"), {
+    cause: Object.assign(new Error("getaddrinfo ENOTFOUND dev-os.example.dev"), { code: "ENOTFOUND" }),
+  });
+  let calls = 0;
+  const slept: number[] = [];
+  const answer = await retryWhileDnsPending(async () => {
+    calls++;
+    if (calls < 3) throw notYet;
+    return "access-redirect";
+  }, 60_000, async (ms) => { slept.push(ms); });
+  assert.equal(answer, "access-redirect");
+  assert.deepEqual(slept, [2_000, 4_000]);
+});
+
+test("retryWhileDnsPending rethrows other errors at once, and DNS failures past the deadline", async () => {
+  await assert.rejects(retryWhileDnsPending(async () => { throw new Error("ECONNRESET"); }, 60_000,
+      async () => { assert.fail("must not wait on a non-DNS error"); }), /ECONNRESET/);
+  await assert.rejects(retryWhileDnsPending(async () => {
+    throw Object.assign(new Error("getaddrinfo EAI_AGAIN x"), { code: "EAI_AGAIN" });
+  }, 0, async () => {}), /EAI_AGAIN/);
 });
