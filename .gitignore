@@ -35,6 +35,9 @@ packages/workshop-backend/src/generated/browser-export-page.js
 # Site-specific deployment configs.
 wrangler.prod.jsonc
 wrangler.staging.jsonc
+# Persistent stage configs and their inputs (scripts/stage); the vars file holds secrets.
+wrangler.stage-*.jsonc
+.stage-*.vars
 
 # Site-specific dev server configs.
 wrangler.dev.jsonc

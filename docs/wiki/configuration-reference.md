@@ -107,6 +107,9 @@ as its `settings` check. Doctor reports a secret by presence only and never prin
 | CF_AI_GATEWAY family | Deployer; env.d.ts and selected mode | Cloudflare AI Gateway billing/provider configuration | Account ID/provider list nonsecret; API_TOKEN secret; USE_BINDING changes path |
 | Gatekeeper CLIENT_ID / CLIENT_SECRET | Deployer/provider app; deploy-inputs metadata | Default OAuth install inputs unless overridden | Client secret secret; no-OAuth connectors must opt out of misleading required inputs |
 | BLUEPRINTS / BLUEPRINT_CONTENT / AVATARS | Deployer; KV/R2 bindings | Core artifact/avatar storage | Resource identifiers nonsecret; stored data access is still scoped |
+| STAGE_ADMINS | Deployer; shell or gitignored `.stage-<stage>.vars` (scripts/stage) | Every `pnpm stage:deploy`; required | Comma-separated admin emails, uploaded as the stage backend's `ADMINS` secret; never written to a config or the plan |
+| CLOUDFLARE_ACCOUNT_ID (stages) | Deployer; shell or `.stage-<stage>.vars` | Every `pnpm stage:*` | Nonsecret account id; authentication is the Wrangler login (OAuth) or `CLOUDFLARE_API_TOKEN` |
+| CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET (stages) | Deployer; shell or `.stage-<stage>.vars` | Optional; enables the post-deploy smoke through Access | Access service token; secret is secret |
 | BUNDLED_BLUEPRINTS_DIR | Builder; environment | Optional alternate bundle directory | Nonsecret filesystem path; backend build is uncached because file contents matter |
 | Context sharingDomain | Deployer; gatekeeper binding props | Context Library | Isolation namespace; dev default is dev, choose production domain deliberately |
 | METRICS / ERROR_REPORTER | Deployer; optional bindings | Observability enabled | Routing/configuration separate from payload; logs must exclude prompts/tokens/data |

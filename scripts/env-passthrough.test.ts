@@ -129,6 +129,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "GITHUB_REPOSITORY", "GITHUB_TOKEN", "PREVIEW_ADMINS", "PREVIEW_GITHUB_CLIENT_ID",
       "PREVIEW_GITHUB_CLIENT_SECRET", "PREVIEW_NAME", "PREVIEW_PR_NUMBER",
       "PREVIEW_WORKERS_DEV_HOST", "PREVIEW_WRANGLER", "VITE_BACKEND_HOST",
+      // scripts/stage reads its admins and the optional Access service token for the post-deploy smoke.
+      "STAGE_ADMINS", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET",
       // Read by `vp/concurrency.ts` in the wrapper before `vp` starts, never inside a task.
       "VP_RUN_CONCURRENCY_LIMIT",
       // The MOCK `inferops` and `codex` binaries in local/testdata, started as processes by the runner
