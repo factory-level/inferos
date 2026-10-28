@@ -32,14 +32,14 @@ covers:
   - scripts/check-fast.ts
   - scripts/check-fast.test.ts
   - scripts/check-full.ts
-updated: 2026-10-12
+updated: 2026-10-27
 ---
 
 # Cloudflare-like local development
 
 ## Overview
 
-The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)). For local-to-cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)), the production router's request path is exercised in workerd and an opt-in smoke recipe checks a deployed instance (see [router-path parity](#router-path-parity)); wrapper-aware cloud packaging is not implemented. Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
+The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)). For local-to-cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)), the production router's request path is exercised in workerd and an opt-in smoke recipe checks a deployed instance (see [router-path parity](#router-path-parity)); wrapper-aware cloud packaging is not implemented. Two persistent cloud stages (`pnpm stage:deploy dev|prod`) deploy this checkout to custom domains behind Cloudflare Access (see [stage deploy](stage-deploy.md)). Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
 
 ## Components
 
@@ -229,6 +229,10 @@ When the CI Test step fails, the job's last step, `node scripts/vp/last-run-repo
 - **Integration phases.** The tail of `packages/integration-tests/node_modules/.vite/integration-phases.jsonl`, with the phases still open when it stopped, the longest gaps between events, and the gap from the last event to the end of the run. `src/phase-log.ts`, a setup file, appends the suite-start, test-start, test-end and suite-end timestamps per worker pid. It writes them to that file only: the idle watchdog resets on any output, so printing them would change which silences it catches. `__tests__/phase-log.test.ts` guards that.
 - **Same run only.** A summary or phase log older than the marker came from an earlier invocation, such as Build, and is withheld.
 - **No change to the job's result.** The report always exits 0, so the job keeps the Test step's status and gains no second failure. It changes no command, timeout, concurrency, permission or trigger.
+
+## Persistent stages
+
+Two long-lived cloud instances, deployed with `pnpm stage:deploy dev|prod`, are described in [stage deploy](stage-deploy.md).
 
 ## Configuration
 

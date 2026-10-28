@@ -24,6 +24,7 @@ Create documents from [`_template.md`](_template.md).
 | [Local coding workflows and agent dispatch](local-coding-workflows.md) | `custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts`, `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx`, `scripts/consumer/config.ts`, `scripts/dev-server-config.ts` | Governed coding dispatch through the InferOps gatekeeper behind `CODING_WORKBENCH_ENABLED`; the runner itself is InferOps' |
 | [Example blueprints](example-blueprints.md) | `packages/bundled-blueprints/examples`, `packages/bundled-blueprints/src/example-archive.ts`, `packages/bundled-blueprints/src/cli` | Unbundled example blueprints installed only by hand: the synthetic model-usage, System Metrics and tech-support page demo views (MVP-28 presentation only) |
 | [Native agent deployments](agent-deployments.md) | `packages/workshop-shared/src/agent-deployment.ts` | Accepted contract only (types, lifecycle table, grant carry-forward); `AGENT_DEPLOYMENTS` still reported unsupported |
+| [Persistent stage deploys](stage-deploy.md) | `scripts/stage`, `scripts/preview/staging-config.ts` | `pnpm stage:deploy dev\|prod`: real prefixed Workers on custom domains behind Access, signed in with InferLab; no CI job yet |
 
 ## Designs with no implementation yet
 

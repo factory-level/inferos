@@ -1,6 +1,6 @@
 ---
 title: Local development and Cloudflare parity
-updated: 2026-10-03
+updated: 2026-10-27
 ---
 
 # Local development and Cloudflare parity
@@ -105,7 +105,7 @@ Cloudflare’s [development binding table](https://developers.cloudflare.com/wor
 
 `scripts/preview/smoke.ts` checks an already deployed instance from outside. It is a recipe, not part of CI, and it has **not been run against Cloudflare**; nothing in this repository runs it. It never deploys, creates, changes or deletes anything: every request is a GET or a WebSocket handshake closed at once, and it calls neither the Cloudflare API nor Wrangler.
 
-1. Deploy a disposable instance, for example a preview with `node scripts/preview/preview.ts deploy` (see that script's header for the required account and Access settings), and note its router URL.
+1. Deploy a disposable instance, for example a preview with `node scripts/preview/preview.ts deploy` (see that script's header for the required account and Access settings), and note its router URL. A persistent stage (`pnpm stage:deploy dev`, see [stage deploy](stage-deploy.md)) runs this smoke itself after deploying when an Access service token is set.
 2. If the instance sits behind Cloudflare Access, create an Access service token allowed by its policy and export `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
 3. Optionally, start a connect flow in the Workshop for each OAuth gatekeeper to check, and copy the popup's URL before signing in.
 4. Run:

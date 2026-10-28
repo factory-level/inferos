@@ -284,11 +284,19 @@ function previewObservability(config: StagingConfig): ObservabilityConfig {
   };
 }
 
-// How the backend calls gatekeepers: the GatekeeperVendor RPC entrypoint.
-function backendGatekeeperServices(gatekeepers: string[], baseUrl: string): PreviewService[] {
+/**
+ * How the backend calls gatekeepers: the GatekeeperVendor RPC entrypoint. `serviceName` maps a
+ * package to the worker it is deployed as; a preview deploys each under its package name, a stage
+ * (scripts/stage) under a prefixed one.
+ */
+export function backendGatekeeperServices(
+  gatekeepers: readonly string[],
+  baseUrl: string,
+  serviceName: (pkgName: string) => string = (pkgName) => pkgName,
+): PreviewService[] {
   return gatekeepers.map((pkgName) => ({
     binding: gatekeeperBindingName(pkgName),
-    service: pkgName,
+    service: serviceName(pkgName),
     entrypoint: "GatekeeperVendor",
     // The Context gatekeeper namespaces each workshop's shared data by a "sharingDomain" carried
     // in its binding props (packages/gatekeeper-context/src/domain.ts). Using the preview's own
@@ -298,12 +306,17 @@ function backendGatekeeperServices(gatekeepers: string[], baseUrl: string): Prev
   }));
 }
 
-// How the router calls gatekeepers: the default entrypoint, since it forwards whole HTTP
-// requests rather than making vendor RPC calls.
-function routerGatekeeperServices(gatekeepers: string[]): PreviewService[] {
+/**
+ * How the router calls gatekeepers: the default entrypoint, since it forwards whole HTTP requests
+ * rather than making vendor RPC calls. `serviceName` as for {@link backendGatekeeperServices}.
+ */
+export function routerGatekeeperServices(
+  gatekeepers: readonly string[],
+  serviceName: (pkgName: string) => string = (pkgName) => pkgName,
+): PreviewService[] {
   return gatekeepers.map((pkgName) => ({
     binding: gatekeeperBindingName(pkgName),
-    service: pkgName,
+    service: serviceName(pkgName),
   }));
 }
 
