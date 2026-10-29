@@ -35,7 +35,9 @@ import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageConfigDigest,
   stageConfigFileName, stageKvNamespaces, stagePackages, stageTiers, stageWorkerName,
 } from "./stage-config.ts";
-import { deployTargetProblem, parseDeployTargets, parseKvNamespaceList } from "./stage-resources.ts";
+import {
+  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending,
+} from "./stage-resources.ts";
 import { resolveStage, type StageDefinition, type StageName } from "./stages.ts";
 
 /** The subcommands this script accepts. */
@@ -230,7 +232,8 @@ async function deployWorker(
 
 /** Without credentials the hostname must answer with an Access login, never the app. */
 async function assertBehindAccess(stage: StageDefinition): Promise<void> {
-  const response = await smokeRequest(new URL(`https://${stage.hostname}/`), { headers: {}, timeoutMs: 15_000 });
+  const response = await retryWhileDnsPending(() =>
+    smokeRequest(new URL(`https://${stage.hostname}/`), { headers: {}, timeoutMs: 15_000 }));
   if (!isAccessRedirect(response)) {
     throw new Error(`https://${stage.hostname}/ answered ${response.status} without credentials: the ` +
         "stage is deployed but NOT behind Cloudflare Access. Create the Access application now " +

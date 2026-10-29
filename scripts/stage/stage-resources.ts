@@ -60,3 +60,34 @@ export function deployTargetProblem(workerName: string, targets: readonly string
   return stray.length === 0 ? null :
     `${workerName} is reachable at ${stray.join(", ")} besides ${expectedHost}; only the custom domain is allowed`;
 }
+
+/** How long a first deploy waits for its new custom domain to resolve before probing it. */
+const DNS_WAIT_MS = 5 * 60_000;
+
+/** True when `err` is a name-resolution failure (the custom domain's record is not visible yet). */
+export function isDnsNotReady(err: unknown): boolean {
+  for (let e: unknown = err; e instanceof Error; e = (e as Error & { cause?: unknown }).cause) {
+    const code = (e as Error & { code?: string }).code;
+    if (code === "ENOTFOUND" || code === "EAI_AGAIN" || /getaddrinfo (ENOTFOUND|EAI_AGAIN)/.test(e.message)) return true;
+  }
+  return false;
+}
+
+/**
+ * Runs `request`, retrying while the hostname does not resolve yet: a first deploy creates the
+ * router's custom-domain record moments before the probe, so `ENOTFOUND` there means "not yet",
+ * not "broken". Any other error, or still no record after {@link DNS_WAIT_MS}, is thrown.
+ */
+export async function retryWhileDnsPending<T>(request: () => Promise<T>, waitMs = DNS_WAIT_MS,
+    sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))): Promise<T> {
+  const deadline = Date.now() + waitMs;
+  for (let delay = 2_000; ; delay = Math.min(delay * 2, 30_000)) {
+    try {
+      return await request();
+    } catch (err) {
+      if (!isDnsNotReady(err) || Date.now() + delay > deadline) throw err;
+      console.log(`waiting for DNS (${(err as Error).message}); retrying in ${delay / 1000}s`);
+      await sleep(delay);
+    }
+  }
+}
