@@ -122,6 +122,7 @@ import {
   WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, openHttpInferOpsClient, tableNotFound,
   type BoardSnapshotAnswer, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
+import { inferLabFetch } from "./edge-header";
 import type {
   HostBoardConnectionFence, HostBoardFence, HostBoardRead, HostBoardReader,
 } from "@gadgets/gatekeeper-kit/host-board";
@@ -282,8 +283,8 @@ function credentialsOf(exports: ExportsWithStores, accountId: string) {
  * a session replaced mid-request as `UNAVAILABLE`, which a retry resolves.
  */
 function accountClient(
-  exports: ExportsWithStores, endpoint: InferOpsEndpoint, accountId: string, workspaceId: string,
-  options: { fenceSuccess?: boolean } = {},
+  env: Cloudflare.Env, exports: ExportsWithStores, endpoint: InferOpsEndpoint, accountId: string,
+  workspaceId: string, options: { fenceSuccess?: boolean } = {},
 ): InferOpsClient {
   const source = accountSource(exports, accountId, workspaceId);
   return openHttpInferOpsClient({
@@ -313,7 +314,7 @@ function accountClient(
         throw error;
       }
     },
-  });
+  }, inferLabFetch(env));
 }
 
 /**
@@ -395,11 +396,11 @@ function openClientFor(
   if (host === DEMO_HOST) return mock();
   if (account.connected) {
     const endpoint = inferOpsApiEndpoint(env);
-    if (endpoint && workspaceId) return accountClient(exports, endpoint, account.accountId, workspaceId);
+    if (endpoint && workspaceId) return accountClient(env, exports, endpoint, account.accountId, workspaceId);
   } else {
     const stopgap = connectionFromEnv(env);
     if (stopgap && parseHost(host)?.workspace === stopgap.workspaceSlug) {
-      return openHttpInferOpsClient(stopgap);
+      return openHttpInferOpsClient(stopgap, inferLabFetch(env));
     }
   }
   // The mock refuses every host but its own, with the same NOT_FOUND an unknown project gets.
@@ -433,7 +434,7 @@ function tableClientFor(
     const endpoint = account.connected ? inferOpsApiEndpoint(env) : null;
     if (!endpoint || !workspaceId) throw tableNotFound();
     // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
-    return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
+    return accountClient(env, exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
   });
 }
 
@@ -453,7 +454,7 @@ function membersClientFor(
     const endpoint = account.connected ? inferOpsApiEndpoint(env) : null;
     if (!endpoint || !workspaceId) throw membersNotFound();
     // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
-    return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
+    return accountClient(env, exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
   });
 }
 
@@ -473,7 +474,7 @@ function workflowPolicyClientFor(
     const endpoint = account.connected ? inferOpsApiEndpoint(env) : null;
     if (!endpoint || !workspaceId) throw workflowPolicyNotFound();
     // Reads only, so every successful answer is fenced against a reconnect or revoke in flight.
-    return accountClient(exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
+    return accountClient(env, exports, endpoint, account.accountId, workspaceId, { fenceSuccess: true });
   });
 }
 
@@ -536,7 +537,7 @@ async function readHostBoardOnce(env: Cloudflare.Env, exports: ExportsWithStores
   try {
     answer = await source.run(async ({ token }, read) => {
       sent = read;
-      return fetchBoardSnapshot(endpoint.baseUrl, token, ref);
+      return fetchBoardSnapshot(endpoint.baseUrl, token, ref, inferLabFetch(env));
     }, { replayable: true });
   } catch (error) {
     if (isCredentialsExpired(error)) return HOST_BOARD_NOT_CONNECTED;

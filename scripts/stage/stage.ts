@@ -18,6 +18,7 @@
 //   CLOUDFLARE_ACCOUNT_ID                 required
 //   CF_AI_GATEWAY*                        optional, see resolveAiGateway
 //   CF_ACCESS_CLIENT_ID/_SECRET           optional Access service token for the post-deploy smoke
+//   INFEROPS_EDGE_SECRET                  optional, the InferOps gatekeeper's InferLab edge header
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -33,8 +34,10 @@ import { ROOT, type StagingConfig } from "../preview/staging-config.ts";
 import { isAccessRedirect, runSmoke, smokeRequest } from "../preview/smoke.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageConfigDigest,
-  stageConfigFileName, stageKvNamespaces, stagePackages, stageTiers, stageWorkerName,
+  stageConfigFileName, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers,
+  stageWorkerName,
 } from "./stage-config.ts";
+import { INFEROPS_GATEKEEPER } from "../dev-server-config.ts";
 import {
   deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending,
 } from "./stage-resources.ts";
@@ -175,6 +178,8 @@ interface Prepared {
   accountId: string;
   packages: DeployablePackage[];
   secrets: Record<string, string>;
+  /** Secrets per gatekeeper package; a package with none (or an empty record) uploads none. */
+  gatekeeperSecrets: Record<string, Record<string, string>>;
   canvasCatalog: string | undefined;
 }
 
@@ -192,11 +197,17 @@ function prepare(args: StageArgs): Prepared {
   // Only the deploy uploads secrets; the other commands still resolve them, so a missing admin
   // list is reported by the dry run rather than by the deploy it was meant to rehearse.
   const secrets = stageBackendSecrets();
+  const gatekeeperSecrets = { [INFEROPS_GATEKEEPER]: stageInferOpsGatekeeperSecrets() };
   const catalog = readCanvasConfig(ROOT)?.catalog;
   return {
-    stageName, stage, accountId, packages, secrets,
+    stageName, stage, accountId, packages, secrets, gatekeeperSecrets,
     canvasCatalog: catalog === undefined ? undefined : JSON.stringify(catalog),
   };
+}
+
+/** The names (never values) of each gatekeeper's secrets, for the plan. */
+function secretNamesOf(prepared: Prepared): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(prepared.gatekeeperSecrets).map(([pkg, secrets]) => [pkg, Object.keys(secrets)]));
 }
 
 function writeConfigs(prepared: Prepared, configs: ReadonlyMap<string, StagingConfig>): void {
@@ -213,9 +224,10 @@ async function deployWorker(
 ): Promise<void> {
   const outputFile = join(secretsDir, `${pkg.name}.output.ndjson`);
   const args = ["deploy", "-c", stageConfigFileName(prepared.stageName), "--message", message];
-  if (pkg.name === "workshop-backend") {
-    const secretsFile = join(secretsDir, "backend.secrets.json");
-    writeFileSync(secretsFile, JSON.stringify(prepared.secrets), { mode: 0o600 });
+  const secrets = pkg.name === "workshop-backend" ? prepared.secrets : prepared.gatekeeperSecrets[pkg.name];
+  if (secrets && Object.keys(secrets).length > 0) {
+    const secretsFile = join(secretsDir, `${pkg.name}.secrets.json`);
+    writeFileSync(secretsFile, JSON.stringify(secrets), { mode: 0o600 });
     args.push("--secrets-file", secretsFile);
   }
   console.log(`deploying ${config.name}`);
@@ -271,7 +283,7 @@ async function deploy(args: StageArgs): Promise<void> {
     const configs = buildStageConfigs({ stageName, stage, packages, accountId, kvIds: placeholderIds,
       canvasCatalog: prepared.canvasCatalog });
     console.log(`dry-run plan (no network):\n${formatStagePlan({ stageName, stage, configs,
-      secretNames: Object.keys(secrets), kv })}`);
+      secretNames: Object.keys(secrets), gatekeeperSecretNames: secretNamesOf(prepared), kv })}`);
     return;
   }
 
@@ -321,7 +333,8 @@ async function configure(args: StageArgs): Promise<void> {
     const placeholderIds = new Map(kv.map((ns) => [ns.title, "<resolved at deploy>"]));
     const configs = buildStageConfigs({ stageName, stage, packages, accountId, kvIds: placeholderIds,
       canvasCatalog: prepared.canvasCatalog });
-    console.log(formatStagePlan({ stageName, stage, configs, secretNames: Object.keys(prepared.secrets), kv }));
+    console.log(formatStagePlan({ stageName, stage, configs, secretNames: Object.keys(prepared.secrets),
+      gatekeeperSecretNames: secretNamesOf(prepared), kv }));
     return;
   }
   const whoami = await runWrangler(ROOT, ["whoami"]);

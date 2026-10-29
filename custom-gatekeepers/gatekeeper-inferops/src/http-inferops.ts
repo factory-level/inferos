@@ -818,7 +818,7 @@ export type WorkspaceSlug = { workspaceId: string; slug: string };
  * request, `UNAVAILABLE` for a response that does not match.
  */
 export async function listWorkspaceSlugs(baseUrl: string, token: string,
-                                         fetcher: typeof fetch = fetch): Promise<WorkspaceSlug[]> {
+                                         fetcher: typeof fetch): Promise<WorkspaceSlug[]> {
   const operation = "workspace.list";
   let response: Response;
   try {
@@ -972,7 +972,7 @@ function snapshotRefusal(status: number, wire: string | null): BoardSnapshotAnsw
  * never the reference, the token, a body, a provider-chosen code or an error object.
  */
 export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: string,
-                                         fetcher: typeof fetch = fetch): Promise<BoardSnapshotAnswer> {
+                                         fetcher: typeof fetch): Promise<BoardSnapshotAnswer> {
   const fail = (status: number, code: string, answer: BoardSnapshotAnswer): BoardSnapshotAnswer => {
     logger.warn("InferOps request failed", {
       event: "http.request.failed", operation: SNAPSHOT_OPERATION, status, code,
@@ -1046,12 +1046,12 @@ type Send = {
 
 /**
  * The InferOps HTTP data source for one connection: a fixed credential, or an endpoint whose
- * authority is fetched per request. `fetcher` is injectable for tests. Project keys are resolved to
- * ids through the project list on every use, so scope always follows what the connection can see
- * now.
+ * authority is fetched per request. `fetcher` is `inferLabFetch(env)` (edge-header.ts) in the
+ * worker and a fake in tests. Project keys are resolved to ids through the project list on every
+ * use, so scope always follows what the connection can see now.
  */
 export function openHttpInferOpsClient(
-  connection: InferOpsConnection | InferOpsAuthorizedEndpoint, fetcher: typeof fetch = fetch,
+  connection: InferOpsConnection | InferOpsAuthorizedEndpoint, fetcher: typeof fetch,
 ): InferOpsClient {
   const authorize: Authorize = "authorize" in connection
     ? connection.authorize

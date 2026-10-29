@@ -31,6 +31,7 @@ import { readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import { createLogger } from "@gadgets/observability/logger";
 import type { GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
 import type { InferOpsAuthority } from "./http-inferops";
+import { inferLabFetch } from "./edge-header";
 
 const VENDOR_ID = "inferops";
 type LogFields = { vendorId: string; status: number };
@@ -120,8 +121,9 @@ export function grantFromRefreshResponse(body: string): InferOpsGrant {
   };
 }
 
-async function postSession(origin: string, path: string, refreshToken: string): Promise<Response> {
-  return fetch(`${origin}${path}`, {
+async function postSession(origin: string, path: string, refreshToken: string,
+                           fetcher: typeof fetch): Promise<Response> {
+  return fetcher(`${origin}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ refreshToken }),
@@ -134,11 +136,11 @@ async function postSession(origin: string, path: string, refreshToken: string): 
  * Rotates the session at InferLab. A 401 proves the session dead (signed out, expired, or already
  * rotated elsewhere); any other failure leaves the stored grant as it is.
  */
-export async function refreshInferLabSession(origin: string, current: InferOpsGrant):
-    Promise<InferOpsGrant> {
+export async function refreshInferLabSession(origin: string, current: InferOpsGrant,
+                                             fetcher: typeof fetch): Promise<InferOpsGrant> {
   let response: Response;
   try {
-    response = await postSession(origin, "/auth/refresh", current.refreshToken);
+    response = await postSession(origin, "/auth/refresh", current.refreshToken, fetcher);
   } catch (error) {
     throw new RefreshFailed("InferLab could not be reached to refresh the session.", { cause: error });
   }
@@ -154,9 +156,10 @@ export async function refreshInferLabSession(origin: string, current: InferOpsGr
 }
 
 /** Signs the session out at InferLab. Best effort: a failure is logged and the local copy goes anyway. */
-export async function logoutInferLabSession(origin: string, refreshToken: string): Promise<void> {
+export async function logoutInferLabSession(origin: string, refreshToken: string,
+                                            fetcher: typeof fetch): Promise<void> {
   try {
-    const response = await postSession(origin, "/auth/logout", refreshToken);
+    const response = await postSession(origin, "/auth/logout", refreshToken, fetcher);
     if (!response.ok && response.status !== 401) {
       logger.warn("InferLab logout failed", { event: "session.logout.failed", status: response.status });
     }
@@ -187,7 +190,7 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
   #refresh = (current: InferOpsGrant): Promise<InferOpsGrant> => {
     const origin = sessionOrigin(this.env);
     if (!origin) throw new RefreshFailed("InferLab sign-in is not configured on this deployment.");
-    return refreshInferLabSession(origin, current);
+    return refreshInferLabSession(origin, current, inferLabFetch(this.env));
   };
 
   #notify = (): Promise<void> => notifyCredentialsExpiredOnce(
@@ -218,7 +221,9 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       const dropped = discardStagedCredentials<InferOpsConnection>(this.ctx.storage.kv, stageId);
       const origin = sessionOrigin(this.env);
-      if (dropped && origin) await logoutInferLabSession(origin, dropped.grant.refreshToken);
+      if (dropped && origin) {
+        await logoutInferLabSession(origin, dropped.grant.refreshToken, inferLabFetch(this.env));
+      }
       throw error;
     }
   }
@@ -232,7 +237,9 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
     this.#coordinator.connect(staged.grant);
     // The old session is a separate InferLab session; ending it cannot touch the new one.
     const origin = sessionOrigin(this.env);
-    if (previous && origin) await logoutInferLabSession(origin, previous.refreshToken);
+    if (previous && origin) {
+      await logoutInferLabSession(origin, previous.refreshToken, inferLabFetch(this.env));
+    }
   }
 
   /** Who connected, or null before a connect. */
@@ -281,8 +288,9 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
     await this.ctx.storage.deleteAll();
     const origin = sessionOrigin(this.env);
     if (!origin) return;
-    if (current) await logoutInferLabSession(origin, current.refreshToken);
-    if (staged) await logoutInferLabSession(origin, staged.grant.refreshToken);
+    const fetcher = inferLabFetch(this.env);
+    if (current) await logoutInferLabSession(origin, current.refreshToken, fetcher);
+    if (staged) await logoutInferLabSession(origin, staged.grant.refreshToken, fetcher);
   }
 
   #membership(workspaceId: string): InferOpsWorkspace {
