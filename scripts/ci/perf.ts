@@ -15,7 +15,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveLocalStack } from "../local/stack.ts";
-import { dockerRun, exec, finish, nodeContext, runAsMain, type CommandRecord } from "./lib.ts";
+import { dockerRun, exec, finish, nodeContext, runAsMain, userEntryMount, type CommandRecord } from "./lib.ts";
 
 export const PERF_SCENARIOS: Record<string, string> = { http: "inferos-http.yml", browser: "inferos-browser.yml" };
 
@@ -44,11 +44,13 @@ export async function main(argv: string[]): Promise<number> {
   const summaries: Record<string, unknown> = {};
   // Artillery prints "Checks:" only when it evaluated `ensure`; a run without it gated nothing.
   const unchecked: string[] = [];
+  const artillery = "artilleryio/artillery:latest";
+  const userEntry = userEntryMount(ctx, artillery);
   for (const name of names) {
     const record = await exec(ctx, dockerRun(ctx, [
       "--network", "host", "-e", `FACTORY_TARGET=${target}`,
-      "-v", `${join(ctx.root, "load")}:/load:ro`, "-v", `${ctx.dir}:/out`,
-      "artilleryio/artillery:latest", "run", "--output", `/out/${name}.json`, `/load/${PERF_SCENARIOS[name]}`,
+      "-v", `${join(ctx.root, "load")}:/load:ro`, "-v", `${ctx.dir}:/out`, ...userEntry,
+      artillery, "run", "--output", `/out/${name}.json`, `/load/${PERF_SCENARIOS[name]}`,
     ]), { log: `${name}.log` });
     records.push(record);
     if (!/^Checks:/m.test(readFileSync(record.log, "utf8"))) unchecked.push(name);

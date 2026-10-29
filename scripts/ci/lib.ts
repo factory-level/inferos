@@ -153,6 +153,33 @@ export function dockerRun(ctx: NodeContext, extra: string[]): string[] {
   return ["docker", "run", "--rm", "-u", uid, "-e", "HOME=/tmp", ...extra];
 }
 
+/**
+ * The image's `/etc/passwd` with a `factory` entry for `uid:gid` appended, or null when the image
+ * already names that uid. Node's `os.userInfo()` (Artillery) and ZAP's start script fail for a uid
+ * the image does not know: on a laptop the user is usually uid 1000, which the images name (`node`,
+ * `zap`), but a GitHub-hosted runner is uid 1001.
+ */
+export function passwdWithUser(passwd: string, uid: number, gid: number): string | null {
+  const known = passwd.split("\n").some(line => line.split(":")[2] === String(uid));
+  return known ? null : `${passwd.replace(/\n?$/, "\n")}factory:x:${uid}:${gid}:factory:/tmp:/bin/sh\n`;
+}
+
+/**
+ * Docker arguments that give `image` a passwd entry for this user (read-only bind of
+ * {@link passwdWithUser}'s file into the node's evidence dir), or none when it already has one.
+ * The container still runs as this uid, so what it writes stays ours.
+ */
+export function userEntryMount(ctx: NodeContext, image: string): string[] {
+  if (typeof process.getuid !== "function") return [];
+  const read = spawnSync("docker", ["run", "--rm", "--network", "none", "--entrypoint", "cat", image, "/etc/passwd"], { encoding: "utf8" });
+  if (read.status !== 0) return [];
+  const passwd = passwdWithUser(read.stdout, process.getuid(), process.getgid?.() ?? process.getuid());
+  if (passwd === null) return [];
+  const file = join(ctx.dir, `.passwd-${image.replace(/[^\w.-]/g, "_")}`);
+  writeFileSync(file, passwd);
+  return ["-v", `${file}:/etc/passwd:ro`];
+}
+
 /** Run a node's `main` when its file is the entry point. */
 export async function runAsMain(metaUrl: string, main: (argv: string[]) => Promise<number>): Promise<void> {
   if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(metaUrl)) {

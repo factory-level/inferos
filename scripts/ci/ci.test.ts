@@ -7,7 +7,7 @@ import { parse } from "yaml";
 import { declaredBindings, judgeWorker } from "./bindings.ts";
 import { accountFreeEnv } from "./build.ts";
 import { newHighAlerts, parseZap } from "./dast.ts";
-import { dockerRun, nodeContext } from "./lib.ts";
+import { dockerRun, nodeContext, passwdWithUser } from "./lib.ts";
 import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
 import { smokeContainer, smokePreconditions, stageInferlab } from "./stage-smoke.ts";
@@ -255,4 +255,11 @@ test("stage-smoke wiki: the gatekeeper's page must be InferOps' page, field by f
   assert.equal(wikiDisagreement(page, { ...page, body: "c" }), "the body differs");
   assert.equal(wikiDisagreement(page, { ...page, sections: ["s1"] }), "2 sections vs 1");
   assert.equal(wikiDisagreement(page, { ...page, sections: ["s1", "x"] }), "section 2 differs");
+});
+
+test("a tool image gets a passwd entry only for a uid it does not already name", () => {
+  const passwd = "root:x:0:0:root:/root:/bin/bash\nnode:x:1000:1000::/home/node:/bin/bash\n";
+  assert.equal(passwdWithUser(passwd, 1000, 1000), null);
+  assert.equal(passwdWithUser(passwd, 1001, 118), `${passwd}factory:x:1001:118:factory:/tmp:/bin/sh\n`);
+  assert.match(passwdWithUser("root:x:0:0::/root:/bin/sh", 1001, 1001)!, /\/bin\/sh\nfactory:x:1001:1001:/);
 });

@@ -13,7 +13,7 @@
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveLocalStack } from "../local/stack.ts";
-import { dockerRun, exec, finish, nodeContext, runAsMain } from "./lib.ts";
+import { dockerRun, exec, finish, nodeContext, runAsMain, userEntryMount } from "./lib.ts";
 
 /** One ZAP alert, reduced to what the gate and the evidence need. */
 export interface ZapAlert {
@@ -41,9 +41,10 @@ export async function main(argv: string[]): Promise<number> {
   const target = resolveLocalStack(ctx.root, [], ctx.env).url;
   // ZAP runs as this uid but writes its session scratch beside the reports.
   chmodSync(ctx.dir, 0o777);
+  const zap = "ghcr.io/zaproxy/zaproxy:stable";
   const record = await exec(ctx, dockerRun(ctx, [
-    "--network", "host", "-v", `${ctx.dir}:/zap/wrk:rw`,
-    "ghcr.io/zaproxy/zaproxy:stable", "zap-baseline.py", "-t", target, "-J", "zap.json", "-r", "zap.html", "-I",
+    "--network", "host", "-v", `${ctx.dir}:/zap/wrk:rw`, ...userEntryMount(ctx, zap),
+    zap, "zap-baseline.py", "-t", target, "-J", "zap.json", "-r", "zap.html", "-I",
   ]), { log: "zap.log" });
   const reportPath = join(ctx.dir, "zap.json");
   const alerts = existsSync(reportPath) ? parseZap(JSON.parse(readFileSync(reportPath, "utf8"))) : null;
