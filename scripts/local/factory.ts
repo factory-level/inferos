@@ -31,6 +31,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { isAccessRedirect } from "../preview/smoke.ts";
+import { STAGES } from "../stage/stages.ts";
 import type { CodingDeps, ProcessResult } from "./coding.ts";
 import { providerVariables } from "./runner.ts";
 import {
@@ -108,14 +109,38 @@ export function stageTarget(url: string, access?: string | null): StageTarget {
 
 /**
  * The smoke credentials a stage needs, by name. A remote stage: the Access service token and the
- * operator persona's sign-in, plus the viewer persona. A loopback stage has no Access in front and
- * its InferOps signs people in as stub personas, so only the persona names (operator and viewer).
- * An emulated stage is a loopback stage behind the Access emulator: its service token plus the
- * persona names (still no password: the InferOps behind it is the stub-auth sandbox one).
+ * operator and viewer personas, plus the operator's password unless the stage's InferLab signs
+ * people in as stub personas (`authMode` `stub`, as `dev`'s does; any other or unknown mode, such as
+ * `prod`'s oauth, keeps it required). A loopback stage has no Access in front and its InferOps signs
+ * people in as stub personas, so only the persona names. An emulated stage is a loopback stage
+ * behind the Access emulator: its service token plus the persona names.
  */
-export function requiredSmokeCredentials(kind: StageKind): string[] {
-  if (kind === "remote") return ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"];
-  return [...(kind === "emulated" ? ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"] : []), "GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"];
+export function requiredSmokeCredentials(kind: StageKind, authMode?: string | null): string[] {
+  const personas = ["GROKBOT_PERSONA_USER", ...(kind === "remote" && authMode !== "stub" ? ["GROKBOT_PERSONA_PASSWORD"] : []), "GROKBOT_VIEWER_USER"];
+  return [...(kind === "loopback" ? [] : ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"]), ...personas];
+}
+
+/**
+ * The InferOps API a remote stage connects people to: `FACTORY_INFEROPS_URL` when set, else the
+ * `inferops.baseUrl` of the persistent stage (scripts/stage/stages.ts) whose hostname is the
+ * stage's; null for a host no stage names.
+ */
+export function remoteStageInferopsUrl(stage: StageTarget, env: NodeJS.ProcessEnv): string | null {
+  if (env.FACTORY_INFEROPS_URL) return new URL(env.FACTORY_INFEROPS_URL).origin;
+  const host = new URL(stage.origin).hostname;
+  return Object.values(STAGES).find(definition => definition.hostname === host)?.inferops.baseUrl ?? null;
+}
+
+/** InferLab's sign-in mode at `inferops` (`/auth/public-config` `mode`: `stub` or `oauth`), or null when it does not say. */
+export async function inferlabAuthMode(inferops: string, fetchImpl: typeof fetch): Promise<string | null> {
+  try {
+    const response = await fetchImpl(`${inferops}/auth/public-config`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) return null;
+    const mode = (await response.json() as { mode?: unknown }).mode;
+    return typeof mode === "string" ? mode : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The image whose bundled Playwright and Chromium the stage smoke runs on (also node 8's). */
@@ -387,13 +412,15 @@ function credentialCheck(sandbox: Sandbox, deps: FactoryDeps): Check {
   };
 }
 
-function smokeCheck(target: StageTarget | null, deps: FactoryDeps): Check {
+function smokeCheck(target: StageTarget | null, authMode: string | null, deps: FactoryDeps): Check {
   if (!target) return { name: "smoke-credentials", status: "FAIL", detail: "no stage, so no credential set applies (set FACTORY_STAGE_URL or --stage-url)" };
-  const required = requiredSmokeCredentials(target.kind);
+  const required = requiredSmokeCredentials(target.kind, authMode);
   const missing = required.filter(name => !deps.env[name]);
+  // Only a remote stage's set depends on the mode; say which mode decided it.
+  const kind = target.kind === "remote" ? `remote stage (InferLab auth ${authMode ?? "unknown"}${authMode === "stub" ? ": persona ids, no password" : ""})` : `${target.kind} stage`;
   return {
     name: "smoke-credentials", status: missing.length ? "FAIL" : "READY",
-    detail: missing.length ? `${target.kind} stage, missing (names only): ${missing.join(", ")}` : `${target.kind} stage, present (names only): ${required.join(", ")}`,
+    detail: missing.length ? `${kind}, missing (names only): ${missing.join(", ")}` : `${kind}, present (names only): ${required.join(", ")}`,
   };
 }
 
@@ -426,15 +453,15 @@ export function stageInferopsUrl(stage: StageTarget, root: string, env: NodeJS.P
  * (every Worker and the shell) and the InferOps it is connected to are healthy, and that InferOps
  * signs people in as stub personas (the reason the persona passwords are not needed).
  */
-async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ target: StageTarget | null; checks: Check[] }> {
+async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ target: StageTarget | null; authMode: string | null; checks: Check[] }> {
   if (!config.stageUrl) {
-    return { target: null, checks: [{ name: "stage", status: "FAIL", detail: "no stage named: set FACTORY_STAGE_URL or pass --stage-url (https://<stage> behind Access, or the loopback dev sandbox)" }] };
+    return { target: null, authMode: null, checks: [{ name: "stage", status: "FAIL", detail: "no stage named: set FACTORY_STAGE_URL or pass --stage-url (https://<stage> behind Access, or the loopback dev sandbox)" }] };
   }
   let target: StageTarget;
   try {
     target = stageTarget(config.stageUrl, config.stageAccess);
   } catch (error) {
-    return { target: null, checks: [{ name: "stage", status: "FAIL", detail: (error as Error).message }] };
+    return { target: null, authMode: null, checks: [{ name: "stage", status: "FAIL", detail: (error as Error).message }] };
   }
   const checks: Check[] = [{ name: "stage", status: "READY", detail: `${target.kind} stage ${target.origin}` }];
   const root = await getJson(`${target.origin}/`, deps);
@@ -442,15 +469,19 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
     name: "stage:reachable", status: root.status === null ? "FAIL" : "READY",
     detail: root.status === null ? `${target.origin}/ did not answer: ${String(root.body)}` : `${target.origin}/ answered ${root.status}`,
   });
-  if (root.status === null) return { target, checks };
+  if (root.status === null) return { target, authMode: null, checks };
   if (target.kind !== "loopback") checks.push(await accessCheck(target, root.status, deps));
-  if (target.kind === "remote") return { target, checks };
-  // An emulated stage is reached the way the smoke reaches it: with the service token.
+  // A stage behind Access (remote or emulated) is reached the way the smoke reaches it: with the service token.
   const token = { "CF-Access-Client-Id": deps.env.CF_ACCESS_CLIENT_ID ?? "", "CF-Access-Client-Secret": deps.env.CF_ACCESS_CLIENT_SECRET ?? "" };
-  const fetchStage: typeof fetch = target.kind === "emulated"
+  const fetchStage: typeof fetch = target.kind !== "loopback"
     ? (input, init) => deps.fetchImpl(input, { ...init, headers: { ...init?.headers as Record<string, string>, ...token } })
     : deps.fetchImpl;
-  if (target.kind === "emulated") checks.push(...await emulatedAccessChecks(target, fetchStage, deps));
+  if (target.kind !== "loopback") checks.push(...await accessTokenChecks(target, fetchStage, deps));
+  if (target.kind === "remote") {
+    const check = await remoteInferlabCheck(target, deps);
+    checks.push(check.check);
+    return { target, authMode: check.authMode, checks };
+  }
   const shell = target.kind === "emulated" ? (await getJson(`${target.origin}/`, { ...deps, fetchImpl: fetchStage })).status : root.status;
   const stack: LocalStack = { ...config.inferos, url: target.origin, port: Number(new URL(target.origin).port || 80) };
   const workers = await probeWorkers(stack.url, configuredWorkers(deps.root), fetchStage);
@@ -465,7 +496,7 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
   const inferops = stageInferopsUrl(target, deps.root, deps.env);
   if (!inferops) {
     checks.push({ name: "stage:inferops", status: "FAIL", detail: `no InferOps is recorded as connected to ${target.origin}: start it with pnpm local factory up dev --inferops-connect, or set FACTORY_INFEROPS_URL` });
-    return { target, checks };
+    return { target, authMode: null, checks };
   }
   const ready = await getJson(`${inferops}/health/ready`, deps);
   const auth = await getJson(`${inferops}/auth/public-config`, deps);
@@ -478,7 +509,33 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
         : `${inferops} is healthy but its auth mode is ${String(mode)}; a loopback stage's personas sign in only in stub mode`,
     health: { url: `${inferops}/health/ready`, status: ready.status, body: ready.body, authMode: mode ?? null },
   });
-  return { target, checks };
+  return { target, authMode: typeof mode === "string" ? mode : null, checks };
+}
+
+/**
+ * A remote stage's `stage:inferops`: the InferLab it connects people to (`remoteStageInferopsUrl`)
+ * answers `/health/ready` and says its sign-in mode, which decides whether the smoke needs a
+ * persona password (`requiredSmokeCredentials`). Read without credentials: InferLab is not behind
+ * the stage's Access.
+ */
+async function remoteInferlabCheck(target: StageTarget, deps: FactoryDeps): Promise<{ authMode: string | null; check: Check }> {
+  const inferops = remoteStageInferopsUrl(target, deps.env);
+  if (!inferops) {
+    return { authMode: null, check: { name: "stage:inferops", status: "FAIL", detail: `no persistent stage in scripts/stage/stages.ts has the hostname ${new URL(target.origin).hostname}; set FACTORY_INFEROPS_URL to its InferLab API` } };
+  }
+  const ready = await getJson(`${inferops}/health/ready`, deps);
+  const mode = await inferlabAuthMode(inferops, deps.fetchImpl);
+  const healthy = ready.status === 200 && readyBodyOk(ready.body);
+  return {
+    authMode: mode,
+    check: {
+      name: "stage:inferops", status: healthy && mode !== null ? "READY" : "FAIL",
+      detail: !healthy ? `${inferops}/health/ready ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
+        : mode === null ? `${inferops}/auth/public-config names no auth mode, so the smoke's credential set is unknown`
+          : `${inferops}/health/ready answered 200; auth mode ${mode} (${mode === "stub" ? "persona sign-in, no password" : "persona password required"})`,
+      health: { url: `${inferops}/health/ready`, status: ready.status, body: ready.body, authMode: mode },
+    },
+  };
 }
 
 /** One GET of `url` without following redirects: the status and `Location`, or null status when nothing answered. */
@@ -505,26 +562,42 @@ async function accessCheck(target: StageTarget, rootStatus: number, deps: Factor
   };
 }
 
+/** A redirect target's host (a login URL's query names the application, so only the host is reported). */
+function hostOf(location: string): string {
+  try {
+    return new URL(location).hostname || location.split("?")[0]!;
+  } catch {
+    return location.split("?")[0]!;
+  }
+}
+
 /**
- * An emulated stage's Service Auth policy: the service token reaches InferOS (`stage:access-token`,
- * a 200 that is not a redirect), and a wrong secret beside the right client id is refused with 403
- * (`stage:access-refused`). Neither line carries a token value.
+ * A stage's Service Auth policy: the service token reaches InferOS (`stage:access-token`, a 200
+ * that is not a redirect), and a wrong secret beside the right client id is refused
+ * (`stage:access-refused`). The emulator refuses with 403; real Cloudflare Access sends a request
+ * whose token matches no Service Auth policy to its login page, so for a remote stage a 302 to
+ * `*.cloudflareaccess.com` (`isAccessRedirect`) is a refusal too. Neither line carries a token value.
  */
-async function emulatedAccessChecks(target: StageTarget, fetchStage: typeof fetch, deps: FactoryDeps): Promise<Check[]> {
+async function accessTokenChecks(target: StageTarget, fetchStage: typeof fetch, deps: FactoryDeps): Promise<Check[]> {
   const granted = await fetchHead(`${target.origin}/`, fetchStage);
   const wrong = await fetchHead(`${target.origin}/`, (input, init) => deps.fetchImpl(input, {
     ...init, headers: { "CF-Access-Client-Id": deps.env.CF_ACCESS_CLIENT_ID ?? "", "CF-Access-Client-Secret": `wrong-${randomBytes(8).toString("hex")}` },
   }));
+  const remote = target.kind === "remote";
+  const redirected = wrong.status !== null && isAccessRedirect({ status: wrong.status, headers: { location: wrong.location }, body: "" });
+  const refused = wrong.status === 403 || (remote && redirected);
+  const tokenSource = remote ? "the stage's Access service token (a Service Auth policy on its Access application)" : "the emulator's token (source .factory/access-emulator.env)";
   return [
     {
       name: "stage:access-token", status: granted.status === 200 ? "READY" : "FAIL",
       detail: granted.status === 200 ? "GET / with the service token (CF-Access-Client-Id/Secret) reaches InferOS (200)"
-        : `GET / with the service token answered ${granted.status ?? "nothing"}${granted.location ? ` -> ${granted.location}` : ""}; CF_ACCESS_CLIENT_ID/SECRET are not the emulator's token (source .factory/access-emulator.env)`,
+        : `GET / with the service token answered ${granted.status ?? "nothing"}${granted.location ? ` -> ${hostOf(granted.location)}` : ""}; CF_ACCESS_CLIENT_ID/SECRET are not ${tokenSource}`,
     },
     {
-      name: "stage:access-refused", status: wrong.status === 403 ? "READY" : "FAIL",
+      name: "stage:access-refused", status: refused ? "READY" : "FAIL",
       detail: wrong.status === 403 ? "GET / with a wrong service-token secret is refused (403)"
-        : `GET / with a wrong service-token secret answered ${wrong.status ?? "nothing"}, not 403; the emulator does not enforce its Service Auth policy`,
+        : refused ? `GET / with a wrong service-token secret is refused (302 to Cloudflare Access, ${hostOf(wrong.location!)})`
+          : `GET / with a wrong service-token secret answered ${wrong.status ?? "nothing"}, not ${remote ? "403 or an Access login redirect" : "403"}; ${remote ? "the stage's Access does not enforce its Service Auth policy" : "the emulator does not enforce its Service Auth policy"}`,
     },
   ];
 }
@@ -583,7 +656,7 @@ async function allChecks(sandbox: Sandbox, config: FactoryConfig, deps: FactoryD
   const stage = sandbox === "stage-probe" ? await stageChecks(config, deps) : null;
   return [
     credentialCheck(sandbox, deps),
-    ...(stage ? [smokeCheck(stage.target, deps), ...stage.checks] : []),
+    ...(stage ? [smokeCheck(stage.target, stage.authMode, deps), ...stage.checks] : []),
     ...services,
     ...toolChecks(sandbox, deps),
   ];

@@ -4,7 +4,8 @@
 //
 //   node scripts/ci/stage-smoke-flow.ts <evidence dir>
 //
-// Environment: FACTORY_STAGE_URL, GROKBOT_PERSONA_USER (operator persona), GROKBOT_VIEWER_USER
+// Environment: FACTORY_STAGE_URL, FACTORY_INFEROPS_URL (the InferOps API the oracles read; else the
+// sign-in popup's origin), GROKBOT_PERSONA_USER (operator persona), GROKBOT_VIEWER_USER
 // (viewer persona), FACTORY_STAGE_BOARD (default the grokbot GROK board), FACTORY_STAGE_WIKI
 // (default the grokbot tenant's InferMind Wiki, `grokbot.knowledge`), and for a stage behind Access
 // (remote, or emulated locally) CF_ACCESS_CLIENT_ID/SECRET, sent as Access service-token headers on
@@ -173,10 +174,16 @@ async function connectInferOps(context: Any, page: Any, user: Any, role: string,
   return until(() => inferopsAccount(user), account => account !== null, 30_000);
 }
 
-/** InferOps' own API as a persona (stub-mode persona login, bearer transport). */
-async function inferopsApi(origin: string, persona: string): Promise<{ issue(id: string): Promise<IssueState>; wikiPage(slug: string): Promise<WikiPageText | null> } | string> {
+/**
+ * InferOps' own API as a persona (stub-mode persona login, bearer transport), at
+ * `FACTORY_INFEROPS_URL` (the stage's InferOps API, resolved by stage-smoke.ts) or else `popupOrigin`,
+ * the InferLab the sign-in popup opened. Against a non-stub InferLab there is no persona token, so
+ * the oracle using it FAILs with that reason, never passes.
+ */
+async function inferopsApi(popupOrigin: string, persona: string): Promise<{ issue(id: string): Promise<IssueState>; wikiPage(slug: string): Promise<WikiPageText | null> } | string> {
+  const origin = env.FACTORY_INFEROPS_URL ? new URL(env.FACTORY_INFEROPS_URL).origin : popupOrigin;
   const config = await (await fetch(`${origin}/auth/public-config`)).json() as { mode?: string };
-  if (config.mode !== "stub") return `InferOps auth mode is ${config.mode}; its API is read here only through stub persona login`;
+  if (config.mode !== "stub") return `InferOps (${origin}) auth mode is ${config.mode}; its API is read here only through stub persona login, so this oracle is unproven`;
   const login = await fetch(`${origin}/auth/inferlab-login`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ personaId: persona, product: "inferops", transport: "bearer" }),
@@ -355,6 +362,7 @@ async function operatorFlow(browser: Any): Promise<void> {
   const persona = env.GROKBOT_PERSONA_USER!;
   const { context, page, token, inferops } = await signIn(browser, "operator", persona);
   notes.inferopsOrigin = inferops;
+  notes.inferopsApi = env.FACTORY_INFEROPS_URL ? new URL(env.FACTORY_INFEROPS_URL).origin : inferops;
   const { api, close } = connectWorkshop();
   try {
     const config = await api.getServerConfig() as { canvasFeatures?: { composableViews?: boolean; durableViews?: boolean } };

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ProcessResult } from "./coding.ts";
-import { accessTokenFile, forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
+import { accessTokenFile, forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, remoteStageInferopsUrl, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
 import { runLifecycle, defaultDeps } from "./lifecycle.ts";
 import type { DevServerRecord } from "./stack.ts";
 
@@ -322,6 +322,9 @@ test("a stage URL is loopback (http(s) on this machine) or remote (https only)",
 
 test("a remote stage needs the Access token and persona sign-in; a loopback stage only the persona names", () => {
   assert.deepEqual(requiredSmokeCredentials("remote"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("remote", "oauth"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("remote", "stub"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("loopback", "oauth"), ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
   assert.deepEqual(requiredSmokeCredentials("loopback"), ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
 });
 
@@ -387,23 +390,87 @@ test("a loopback stage's InferOps comes from the recorded --inferops-connect san
   }
 });
 
-test("a remote stage: the Access token and persona by name, and unauthenticated GET / redirected to Access", async () => {
+/**
+ * A fake remote stage behind real Cloudflare Access at dev-os.example.test (a matching token is
+ * 200; no token, or a token matching no Service Auth policy, is the Access login redirect, or 403
+ * with `wrong` "403"), and its InferLab at inferlab.example.test answering `mode`.
+ */
+const REMOTE_LOGIN = "https://team.cloudflareaccess.com/cdn-cgi/access/login/dev-os.example.test?kid=k&redirect_url=%2F";
+function remoteStage(mode: string | null, wrong: "302" | "403" | "200" = "302") {
+  return (url: URL, headers: Record<string, string>): Response | undefined => {
+    if (url.hostname === "inferlab.example.test") {
+      if (url.pathname === "/health/ready") return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (url.pathname === "/auth/public-config") return new Response(JSON.stringify(mode ? { mode } : {}), { status: 200 });
+      return undefined;
+    }
+    if (url.hostname !== "dev-os.example.test") return undefined;
+    const id = headers["CF-Access-Client-Id"];
+    const secret = headers["CF-Access-Client-Secret"];
+    if (id === "id-value-123" && secret === "secret-value-456") return new Response("<html>", { status: 200 });
+    if (id && wrong === "403") return new Response("Forbidden", { status: 403 });
+    if (id && wrong === "200") return new Response("<html>", { status: 200 });
+    return new Response(null, { status: 302, headers: { location: REMOTE_LOGIN } });
+  };
+}
+const REMOTE_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "https://dev-os.example.test", FACTORY_INFEROPS_URL: "https://inferlab.example.test", CF_ACCESS_CLIENT_ID: "id-value-123", CF_ACCESS_CLIENT_SECRET: "secret-value-456", GROKBOT_PERSONA_USER: "u", GROKBOT_VIEWER_USER: "v" };
+
+test("a remote stage's InferLab is its stages.ts entry's, or FACTORY_INFEROPS_URL", () => {
+  const devos = stageTarget("https://dev-os.factorylevel.dev");
+  assert.equal(remoteStageInferopsUrl(devos, {}), "https://api.dev.inferlab.io");
+  assert.equal(remoteStageInferopsUrl(stageTarget("https://os.factorylevel.dev"), {}), "https://api.inferlab.io");
+  assert.equal(remoteStageInferopsUrl(stageTarget("https://other.example.test"), {}), null);
+  assert.equal(remoteStageInferopsUrl(devos, { FACTORY_INFEROPS_URL: "https://inferlab.example.test/x" }), "https://inferlab.example.test");
+});
+
+test("a remote stage in stub auth: Access redirect, token 200, wrong token redirected (refused); persona ids, no password", async () => {
   const root = tempRoot();
   try {
-    const env = { PATH: "/bin", FACTORY_STAGE_URL: "https://dev-os.example.test", CF_ACCESS_CLIENT_ID: "id-value-123", CF_ACCESS_CLIENT_SECRET: "secret-value-456", GROKBOT_PERSONA_USER: "u", GROKBOT_PERSONA_PASSWORD: "pw-value-789", GROKBOT_VIEWER_USER: "v" };
-    const access = { "/": "https://team.cloudflareaccess.com/cdn-cgi/access/login/dev-os.example.test" };
-    const fake = fakeDeps(root, { env, answers: { "/": 302 }, redirects: access });
+    const fake = fakeDeps(root, { env: REMOTE_ENV, respond: remoteStage("stub") });
     const ready = await runFactory(["up", "stage-probe", "--json"], fake.deps);
     assert.equal(ready.exitCode, 0, ready.headline);
+    const checks = ready.report.checks as { name: string; status: string; detail: string }[];
+    assert.deepEqual(checks.map(c => `${c.status} ${c.name}`), [
+      "READY credentials", "READY smoke-credentials", "READY stage", "READY stage:reachable", "READY stage:access", "READY stage:access-token", "READY stage:access-refused", "READY stage:inferops", "READY tool:docker", "READY tool:artilleryio/artillery:latest",
+    ]);
     assert.match(ready.headline, /READY stage:access: unauthenticated GET \/ is redirected to Cloudflare Access \(team.cloudflareaccess.com\)/);
+    assert.match(ready.headline, /READY stage:access-refused: GET \/ with a wrong service-token secret is refused \(302 to Cloudflare Access, team.cloudflareaccess.com\)/);
+    assert.match(ready.headline, /READY smoke-credentials: remote stage \(InferLab auth stub: persona ids, no password\), present \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_USER, GROKBOT_VIEWER_USER$/m);
+    assert.match(ready.headline, /READY stage:inferops: https:\/\/inferlab.example.test\/health\/ready answered 200; auth mode stub/);
     assert.equal(fake.launches.length, 0);
     const text = JSON.stringify(ready.report) + ready.headline;
-    for (const value of Object.values(env).filter(v => v.includes("value"))) assert.ok(!text.includes(value));
+    for (const value of ["id-value-123", "secret-value-456"]) assert.ok(!text.includes(value), value);
 
-    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: { PATH: "/bin", FACTORY_STAGE_URL: "https://dev-os.example.test", GROKBOT_PERSONA_USER: "u", GROKBOT_VIEWER_USER: "v" }, answers: { "/": 302 }, redirects: access }).deps);
-    assert.match(missing.headline, /FAIL\s+smoke-credentials: remote stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_PASSWORD/);
-    const open = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env, answers: { "/": 200 } }).deps);
+    const { CF_ACCESS_CLIENT_SECRET: _secret, ...noSecret } = REMOTE_ENV;
+    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: noSecret, respond: remoteStage("stub") }).deps);
+    assert.equal(missing.exitCode, 1);
+    assert.match(missing.headline, /FAIL\s+smoke-credentials: remote stage \(InferLab auth stub: persona ids, no password\), missing \(names only\): CF_ACCESS_CLIENT_SECRET$/m);
+    assert.match(missing.headline, /FAIL\s+stage:access-token: GET \/ with the service token answered 302 -> team.cloudflareaccess.com/);
+    const forbidden = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: REMOTE_ENV, respond: remoteStage("stub", "403") }).deps);
+    assert.match(forbidden.headline, /READY stage:access-refused: GET \/ with a wrong service-token secret is refused \(403\)/);
+    const lax = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: REMOTE_ENV, respond: remoteStage("stub", "200") }).deps);
+    assert.match(lax.headline, /FAIL\s+stage:access-refused: .*answered 200, not 403 or an Access login redirect/);
+    const open = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: REMOTE_ENV, answers: { "/": 200 } }).deps);
     assert.match(open.headline, /FAIL\s+stage:access: unauthenticated GET \/ answered 200, not an Access redirect/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a remote stage in oauth (or unknown) auth still needs the persona password", async () => {
+  const root = tempRoot();
+  try {
+    const oauth = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: REMOTE_ENV, respond: remoteStage("oauth") }).deps);
+    assert.match(oauth.headline, /FAIL\s+smoke-credentials: remote stage \(InferLab auth oauth\), missing \(names only\): GROKBOT_PERSONA_PASSWORD$/m);
+    assert.match(oauth.headline, /READY stage:inferops: .*auth mode oauth \(persona password required\)/);
+    const withPassword = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: { ...REMOTE_ENV, GROKBOT_PERSONA_PASSWORD: "pw-value-789" }, respond: remoteStage("oauth") }).deps);
+    assert.equal(withPassword.exitCode, 0, withPassword.headline);
+    assert.ok(!withPassword.headline.includes("pw-value-789"));
+    const unknown = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: REMOTE_ENV, respond: remoteStage(null) }).deps);
+    assert.match(unknown.headline, /FAIL\s+smoke-credentials: remote stage \(InferLab auth unknown\), missing \(names only\): GROKBOT_PERSONA_PASSWORD$/m);
+    assert.match(unknown.headline, /FAIL\s+stage:inferops: .*names no auth mode/);
+    const { FACTORY_INFEROPS_URL: _url, ...unnamed } = REMOTE_ENV;
+    const nowhere = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: unnamed, respond: remoteStage("stub") }).deps);
+    assert.match(nowhere.headline, /FAIL\s+stage:inferops: no persistent stage in scripts\/stage\/stages.ts has the hostname dev-os.example.test/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

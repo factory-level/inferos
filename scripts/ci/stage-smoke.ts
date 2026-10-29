@@ -19,22 +19,28 @@
 // Credentials reach the container by name (`docker run -e NAME`), never on a command line or in a
 // log, and the evidence names personas by role. An emulated stage (FACTORY_STAGE_ACCESS=emulated: the
 // loopback `dev` sandbox behind scripts/local/access-emulator.ts) sends the Access service token like
-// a remote one, with the loopback stage's stub personas. Required names follow the stage's kind
-// (`requiredSmokeCredentials` in scripts/local/factory.ts). Gate: every flow oracle passes and the
+// a remote one, with the loopback stage's stub personas. Required names follow the stage's kind and
+// its InferLab's sign-in mode (`requiredSmokeCredentials` in scripts/local/factory.ts: a remote stage
+// in stub mode, like dev-os, needs no persona password); the InferOps API the oracles read is passed
+// to the flow as FACTORY_INFEROPS_URL (`stageInferlab`). Gate: every flow oracle passes and the
 // probe's `ensure` conditions hold. Evidence: `<run>/stage-smoke/` (smoke.json, screenshots, the
 // probe report, result.json).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { forbiddenCredentials, requiredSmokeCredentials, STAGE_SMOKE_IMAGE, stageTarget, type StageTarget } from "../local/factory.ts";
+import { forbiddenCredentials, inferlabAuthMode, remoteStageInferopsUrl, requiredSmokeCredentials, STAGE_SMOKE_IMAGE, stageInferopsUrl, stageTarget, type StageTarget } from "../local/factory.ts";
 import { summarizeArtillery } from "./perf.ts";
 import { dockerRun, exec, finish, nodeContext, runAsMain, type CommandRecord, type NodeContext } from "./lib.ts";
 
 /** The variables passed into the smoke's container, by name only: whichever of these are set. */
-const PASSED_VARS = ["FACTORY_STAGE_URL", "FACTORY_STAGE_BOARD", "FACTORY_STAGE_WIKI", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"];
+const PASSED_VARS = ["FACTORY_STAGE_URL", "FACTORY_INFEROPS_URL", "FACTORY_STAGE_BOARD", "FACTORY_STAGE_WIKI", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"];
 
-/** Why the smoke cannot start against `env`, or null: an unusable stage, forbidden or missing credentials. */
-export function smokePreconditions(env: NodeJS.ProcessEnv): { target: StageTarget | null; problem: string | null } {
+/**
+ * Why the smoke cannot start against `env`, or null: an unusable stage, forbidden or missing
+ * credentials. `authMode` is the stage's InferLab sign-in mode (`stageInferlab`); a remote stage
+ * whose mode is not `stub` needs the persona password too.
+ */
+export function smokePreconditions(env: NodeJS.ProcessEnv, authMode: string | null = null): { target: StageTarget | null; problem: string | null } {
   if (!env.FACTORY_STAGE_URL) return { target: null, problem: "FACTORY_STAGE_URL names no stage" };
   let target: StageTarget;
   try {
@@ -44,9 +50,25 @@ export function smokePreconditions(env: NodeJS.ProcessEnv): { target: StageTarge
   }
   const forbidden = forbiddenCredentials(env, "stage-probe");
   if (forbidden.length) return { target, problem: `cloud/provider/prod credentials present (names only): ${forbidden.join(", ")}` };
-  const missing = requiredSmokeCredentials(target.kind).filter(name => !env[name]);
-  if (missing.length) return { target, problem: `${target.kind} stage, missing (names only): ${missing.join(", ")}` };
+  const missing = requiredSmokeCredentials(target.kind, authMode).filter(name => !env[name]);
+  if (missing.length) return { target, problem: `${target.kind} stage${target.kind === "remote" ? ` (InferLab auth ${authMode ?? "unknown"})` : ""}, missing (names only): ${missing.join(", ")}` };
   return { target, problem: null };
+}
+
+/**
+ * The InferOps API the stage connects people to and its sign-in mode, as doctor finds them: a
+ * remote stage's from scripts/stage/stages.ts (or `FACTORY_INFEROPS_URL`), a loopback or emulated
+ * one's from the recorded sandbox. Null when the stage is unusable or names no InferOps.
+ */
+export async function stageInferlab(env: NodeJS.ProcessEnv, root: string, fetchImpl: typeof fetch = fetch): Promise<{ url: string; authMode: string | null } | null> {
+  let target: StageTarget;
+  try {
+    target = stageTarget(env.FACTORY_STAGE_URL ?? "", env.FACTORY_STAGE_ACCESS);
+  } catch {
+    return null;
+  }
+  const url = target.kind === "remote" ? remoteStageInferopsUrl(target, env) : stageInferopsUrl(target, root, env);
+  return url ? { url, authMode: await inferlabAuthMode(url, fetchImpl) } : null;
 }
 
 /** The docker arguments for one smoke container: named variables only, loopback and emulated stages on the host network. */
@@ -64,11 +86,14 @@ export async function main(argv: string[]): Promise<number> {
   const ctx = nodeContext("stage-smoke", argv);
   const part = ctx.part ?? "all";
   if (!["all", "flow", "probe"].includes(part)) throw new Error("--part must be all, flow or probe");
-  const { target, problem } = smokePreconditions(ctx.env);
+  const inferlab = await stageInferlab(ctx.env, ctx.root);
+  // The flow's InferOps API oracles read this origin (by name into the container), not the sign-in popup's.
+  if (inferlab) ctx.env.FACTORY_INFEROPS_URL = inferlab.url;
+  const { target, problem } = smokePreconditions(ctx.env, inferlab?.authMode ?? null);
   const gate = "node 10: as each persona the grokbot.knowledge Wiki page InferOps' knowledge API answers renders in the canvas Wiki widget; as the operator persona the board renders and a simulate -> approve transition is visible in InferOps' API (then reverted); the viewer persona is refused with InferOps unchanged; the light Artillery Playwright probe's ensure holds";
   if (problem || !target) return finish(ctx, { node: "stage-smoke", ok: false, gate, commands: [], details: { refused: problem } });
   const records: CommandRecord[] = [];
-  const details: Record<string, unknown> = { stage: target.origin, kind: target.kind };
+  const details: Record<string, unknown> = { stage: target.origin, kind: target.kind, inferops: inferlab?.url ?? null, inferlabAuth: inferlab?.authMode ?? null };
   if (part === "all" || part === "flow") {
     const record = await exec(ctx, smokeContainer(ctx, target, [
       "--entrypoint", "node", STAGE_SMOKE_IMAGE, join(ctx.root, "scripts", "ci", "stage-smoke-flow.ts"), ctx.dir,

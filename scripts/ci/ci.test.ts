@@ -10,7 +10,7 @@ import { newHighAlerts, parseZap } from "./dast.ts";
 import { dockerRun, nodeContext } from "./lib.ts";
 import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
-import { smokeContainer, smokePreconditions } from "./stage-smoke.ts";
+import { smokeContainer, smokePreconditions, stageInferlab } from "./stage-smoke.ts";
 import { DEFAULT_WIKI, missingWikiText, wikiDisagreement, wikiExpectedText } from "./stage-smoke-wiki.ts";
 import { cvssSeverity, dedupe, newFindings, parseGitleaks, parseOsv, parseSemgrep, parseTrivy, type Baseline } from "./security.ts";
 import { VERIFY_PARTS } from "./verify.ts";
@@ -201,11 +201,28 @@ test("stage-smoke: a loopback stage needs the persona names, a remote one the Ac
   assert.deepEqual(smokePreconditions(loopback), { target: { origin: "http://localhost:8797", kind: "loopback" }, problem: null });
   assert.match(String(smokePreconditions({ ...loopback, OPENAI_API_KEY: "sk-secret" }).problem), /present \(names only\): OPENAI_API_KEY$/);
   assert.match(String(smokePreconditions({ ...loopback, FACTORY_STAGE_URL: "https://dev-os.example.test" }).problem),
-    /remote stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_PASSWORD$/);
+    /remote stage \(InferLab auth unknown\), missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_PASSWORD$/);
+  const remote = { ...loopback, FACTORY_STAGE_URL: "https://dev-os.example.test", CF_ACCESS_CLIENT_ID: "i", CF_ACCESS_CLIENT_SECRET: "s" };
+  assert.deepEqual(smokePreconditions(remote, "stub"), { target: { origin: "https://dev-os.example.test", kind: "remote" }, problem: null });
+  assert.match(String(smokePreconditions(remote, "oauth").problem), /remote stage \(InferLab auth oauth\), missing \(names only\): GROKBOT_PERSONA_PASSWORD$/);
   const emulated = { ...loopback, FACTORY_STAGE_URL: "http://127.0.0.1:8789", FACTORY_STAGE_ACCESS: "emulated" };
   assert.match(String(smokePreconditions(emulated).problem), /emulated stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET$/);
   assert.deepEqual(smokePreconditions({ ...emulated, CF_ACCESS_CLIENT_ID: "i", CF_ACCESS_CLIENT_SECRET: "s" }), { target: { origin: "http://127.0.0.1:8789", kind: "emulated" }, problem: null });
   assert.match(String(smokePreconditions({ ...emulated, FACTORY_STAGE_URL: "https://dev-os.example.test" }).problem), /loopback stage only/);
+});
+
+test("stage-smoke resolves a remote stage's InferOps API from stages.ts and reads its auth mode", async () => {
+  const seen: string[] = [];
+  const fake = (async (input: string | URL) => {
+    seen.push(String(input));
+    return new Response(JSON.stringify({ mode: "stub" }), { status: 200 });
+  }) as typeof fetch;
+  assert.deepEqual(await stageInferlab({ FACTORY_STAGE_URL: "https://dev-os.factorylevel.dev" }, "/nonexistent", fake), { url: "https://api.dev.inferlab.io", authMode: "stub" });
+  assert.deepEqual(seen, ["https://api.dev.inferlab.io/auth/public-config"]);
+  assert.equal(await stageInferlab({ FACTORY_STAGE_URL: "https://other.example.test" }, "/nonexistent", fake), null);
+  assert.equal(await stageInferlab({ FACTORY_STAGE_URL: "http://dev-os.example.test" }, "/nonexistent", fake), null);
+  const down = (async () => { throw new Error("refused"); }) as typeof fetch;
+  assert.deepEqual(await stageInferlab({ FACTORY_STAGE_URL: "https://dev-os.factorylevel.dev" }, "/nonexistent", down), { url: "https://api.dev.inferlab.io", authMode: null });
 });
 
 test("stage-smoke containers get credentials by name only, the checkout read-only, host network for loopback and emulated stages only", () => {
