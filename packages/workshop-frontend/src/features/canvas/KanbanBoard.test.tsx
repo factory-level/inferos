@@ -83,6 +83,13 @@ it('renders the given columns with their cards: identifier, title, priority, ass
   expect(menuItems('1')).toEqual(['Move to Doing', 'Move to Done'])
 })
 
+it('shows an issue\'s estimate in story points, and nothing for an unsized issue', async () => {
+  await render(board([TODO, [issue('1', 'todo', { estimate: 5 }), issue('2', 'todo', { estimate: 0 }), issue('3', 'todo')]]))
+  expect(card('1').textContent).toContain('5 pts')
+  expect(card('2').textContent).toContain('0 pts')
+  expect(card('3').textContent).not.toContain('pts')
+})
+
 it('marks an open card overdue only once its target day has passed in UTC', async () => {
   // The fixture's card 1 targets 2026-10-09 and sits in Todo, an open state.
   const dueSpan = () => [...card('1').querySelectorAll('span')].find(span => /^(Due|Overdue) /.test(span.textContent ?? ''))!

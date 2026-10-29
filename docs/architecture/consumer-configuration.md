@@ -22,7 +22,7 @@ covers:
   - .agents/skills/verify-inferos
   - .agents/skills/upgrade-inferos
   - .agents/skills/recover-inferos
-updated: 2026-10-13
+updated: 2026-10-28
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -323,4 +323,4 @@ Switching on an unsupported capability fails instead of doing nothing. `inferos:
 
 `generate-board-schema.ts` exports the canonical InferOps board DTO through Zod JSON Schema from a clean reviewed checkout. `project-board.schema.json` records repository/revision/path/export provenance. `fixtures.ts` loads that generated contract through Zod and applies local sample bounds and relationship checks. The small relationship projection selects only keys needed for referential checks after canonical validation; it is not another complete board DTO. No gatekeeper protocol or data authorization is implemented by this module.
 
-Generated wrappers expose fixtures:check; doctor and dev invoke the pinned validator. Missing support or dependencies fails explicitly. Fixture mode checks a regular bounded JSON file and rejects symlinked fixture directory/files, duplicate IDs, project-reference mismatch and inconsistent column membership/workflow. It reports only counts and schema revision. Remote mode avoids the fixture entirely and remains startup-blocked. The schema is generated from InferOps 29b01a024c377b9c37b8754e7001b290e15d1509; drift checks against a different revision require explicit regeneration and review.
+Generated wrappers expose fixtures:check; doctor and dev invoke the pinned validator. Missing support or dependencies fails explicitly. Fixture mode checks a regular bounded JSON file and rejects symlinked fixture directory/files, duplicate IDs, project-reference mismatch and inconsistent column membership/workflow. It reports only counts and schema revision. Remote mode avoids the fixture entirely and remains startup-blocked. The schema is generated from InferOps 239de4858285e37ceea9c7305dc021ac7d2e8308 (the `feat/factory-feature-demo` branch, which adds the optional issue `estimate`; unmerged, so the pin must move to its merged `develop` commit before this lands); drift checks against a different revision require explicit regeneration and review.
