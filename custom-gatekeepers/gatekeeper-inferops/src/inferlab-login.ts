@@ -38,6 +38,7 @@ import {
   type InferOpsWorkspace,
 } from "./inferops-credentials";
 import { endpointFromEnv, listWorkspaceSlugs, type InferOpsEndpoint } from "./http-inferops";
+import { inferLabFetch } from "./edge-header";
 
 const logger = createLogger<{ vendorId: string }>({
   component: "gatekeeper.inferops.login", vendorId: "inferops",
@@ -63,6 +64,7 @@ const CALLBACK_KEY = "callback";
 /** The deployment settings this flow reads. */
 export type InferLabLoginEnv = {
   INFERLAB_AUTH_ORIGIN?: string; BASE_URL?: string; INFEROPS_BASE_URL?: string;
+  INFEROPS_EDGE_SECRET?: string;
 };
 
 /**
@@ -119,7 +121,8 @@ async function withWorkspaceSlugs(env: InferLabLoginEnv, exchange: InferLabExcha
   if (!endpoint) throw new SignInFailure(NOT_CONFIGURED);
   let slugs: Map<string, string>;
   try {
-    const listed = await listWorkspaceSlugs(endpoint.baseUrl, exchange.grant.accessToken);
+    const listed = await listWorkspaceSlugs(endpoint.baseUrl, exchange.grant.accessToken,
+                                            inferLabFetch(env));
     slugs = new Map(listed.map(w => [w.workspaceId, w.slug]));
   } catch (error) {
     logger.warn("InferOps workspace list failed", { event: "inferlab.workspaces.failed", error });
@@ -276,7 +279,8 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
       if (!purpose) return null;
       const origin = inferLabAuthOrigin(this.env);
       if (!origin) return { error: NOT_CONFIGURED };
-      const exchange = await exchangeCode(origin, code, flow.codeVerifier, flow.redirectUri);
+      const exchange = await exchangeCode(origin, code, flow.codeVerifier, flow.redirectUri,
+                                          inferLabFetch(this.env));
       return { handoff: await this.#finish(origin, purpose, exchange, callback) };
     } catch (error) {
       if (error instanceof SignInFailure) return { error: error.message };
@@ -295,7 +299,7 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
         if (!callback) throw new Error("This sign-in attempt has no callback.");
         // Only the email is kept: the session itself is ended, since signing in grants nothing.
         const email = verifiedEmail(exchange);
-        await logoutInferLabSession(origin, exchange.grant.refreshToken);
+        await logoutInferLabSession(origin, exchange.grant.refreshToken, inferLabFetch(this.env));
         return callback.complete(this.#account({ accountId: crypto.randomUUID(), email }));
       }
       case "connect": {
@@ -328,7 +332,7 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
     try {
       return await withWorkspaceSlugs(this.env, exchange);
     } catch (error) {
-      await logoutInferLabSession(origin, exchange.grant.refreshToken);
+      await logoutInferLabSession(origin, exchange.grant.refreshToken, inferLabFetch(this.env));
       throw error;
     }
   }
@@ -362,11 +366,13 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
 class SignInFailure extends Error {}
 
 async function exchangeCode(origin: string, code: string, codeVerifier: string,
-                            redirectUri: string): Promise<InferLabExchange> {
-  const response = await fetch(`${origin}/auth/token`, {
+                            redirectUri: string, fetcher: typeof fetch): Promise<InferLabExchange> {
+  const response = await fetcher(`${origin}/auth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ clientId: INFERLAB_CLIENT_ID, code, codeVerifier, redirectUri }),
+    // A redirect is never followed: it would carry the code (and the edge header) elsewhere.
+    redirect: "manual",
     signal: AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS),
   });
   const body = await readTextCapped(response, MAX_TOKEN_RESPONSE_BYTES);

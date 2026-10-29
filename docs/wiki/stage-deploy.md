@@ -1,6 +1,6 @@
 ---
 title: Deploy a persistent stage
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 
 # Deploy a persistent stage
@@ -30,6 +30,7 @@ How to deploy, update, roll back and delete the two persistent InferOS instances
    | `STAGE_ADMINS` | yes | Comma-separated emails of the stage's admins (`/admin`). Uploaded as the backend's `ADMINS` secret. |
    | `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` | no | The Access service token; when set, the deploy runs the smoke through Access. |
    | `CF_AI_GATEWAY`, `CF_AI_GATEWAY_ACCOUNT_ID`, … | no | Server-managed models through AI Gateway (see `resolveAiGateway`). Unset, each user brings their own model keys. |
+   | `INFEROPS_EDGE_SECRET` | no (yes for `dev` today) | The shared secret InferLab's edge lets through. Dev InferLab's Cloud Armor allows only allowlisted IPs, so without it the stage's sign-in (`POST /auth/token`) and every InferOps call get a 403. Set it to the same value as InferOps' `waf:inferosEdgeSecret` (at least 32 characters of `A-Za-z0-9_-`). It is uploaded as a `gatekeeper-inferops` secret, and the gatekeeper sends it as `x-inferos-edge` to the InferLab origins only. |
 
 ## Steps
 
@@ -37,6 +38,16 @@ How to deploy, update, roll back and delete the two persistent InferOS instances
 2. Deploy: `pnpm stage:deploy dev`. It builds the workspace (frontend in non-Access mode), creates any missing KV namespace, writes `wrangler.stage-dev.jsonc` beside each package, deploys gatekeepers, then the backend, then the router, checks that only the router has a URL, checks the Access redirect, and runs the smoke when a service token is set. `dev` refuses a dirty tree unless `--allow-dirty`; `prod` always refuses one.
 3. Accept it by hand: sign in through Access, choose "Sign in with InferLab", and open a board you hold (`inferops://<tenant>.<workspace>/project/board/<KEY>`). A config that validates is not acceptance.
 4. Re-deploying is the same command; KV namespaces, the bucket and every Durable Object are kept.
+
+## InferLab edge secret
+
+Dev InferLab's WAF lets the stage through only when the InferOps side and this side hold the same value: the WAF's `waf:inferosEdgeSecret` (the InferOps runbook "Allow the hosted InferOS edge"), and this stage's `INFEROPS_EDGE_SECRET`.
+
+1. Add `INFEROPS_EDGE_SECRET=<value>` to `.stage-dev.vars`.
+2. Rehearse with `pnpm stage:deploy dev --dry-run`. The `inferos-dev-gatekeeper-inferops` line should read `secrets: INFEROPS_EDGE_SECRET`, with no value anywhere.
+3. Deploy with `pnpm stage:deploy dev`, then sign in with InferLab.
+4. **Rotate.** Change both values and redeploy both sides. Requests are refused between the two deploys.
+5. **Remove.** Leaving the variable out does not delete the value, because a deploy without it keeps the previous version's secret. Delete it with `pnpm exec wrangler secret delete INFEROPS_EDGE_SECRET --name inferos-dev-gatekeeper-inferops`.
 
 ## Rollback and deletion
 

@@ -8,7 +8,8 @@ import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
-  stageKvNamespaces, stagePackages, stageTiers, stageWorkerName, resolveStageAdmins,
+  stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers, stageWorkerName,
+  resolveStageAdmins,
 } from "./stage-config.ts";
 import { STAGES, resolveStage, stageDefinitionProblems, type StageDefinition } from "./stages.ts";
 import { parseStageArgs } from "./stage.ts";
@@ -170,6 +171,32 @@ test("secrets: admins are required, and the plan names secrets without their val
   assert.ok(!plan.includes("admin@example.com"), "an admin email reached the plan");
   assert.match(plan, /secrets: ADMINS, CF_AI_GATEWAY_API_TOKEN/);
   assert.match(plan, /inferos-dev-router at dev-os\.factorylevel\.dev \(custom domain\)/);
+});
+
+test("the InferLab edge secret is optional, validated, and named in the plan without its value", () => {
+  assert.deepEqual(stageInferOpsGatekeeperSecrets({ edgeSecret: undefined }), {});
+  assert.deepEqual(stageInferOpsGatekeeperSecrets({ edgeSecret: "  " }), {});
+  const value = "edge_secret-0123456789abcdefABCDEF0123";
+  assert.deepEqual(stageInferOpsGatekeeperSecrets({ edgeSecret: ` ${value}\n` }), { INFEROPS_EDGE_SECRET: value });
+  for (const bad of ["short_secret", `${"a".repeat(32)}' || true || '`, `${"a".repeat(32)} b`]) {
+    assert.throws(() => stageInferOpsGatekeeperSecrets({ edgeSecret: bad }), (error: Error) =>
+      /INFEROPS_EDGE_SECRET must be/.test(error.message) && !error.message.includes(bad));
+  }
+
+  // Never a var: vars are printed by Wrangler and the plan.
+  const configs = build("dev");
+  assert.equal(configs.get("gatekeeper-inferops")?.vars?.INFEROPS_EDGE_SECRET, undefined);
+
+  const kv = stageKvNamespaces(STAGES.dev, ALL_PACKAGES);
+  const gatekeeperSecretNames = { "gatekeeper-inferops": Object.keys(stageInferOpsGatekeeperSecrets({ edgeSecret: value })) };
+  const plan = formatStagePlan({ stageName: "dev", stage: STAGES.dev, configs, secretNames: ["ADMINS"],
+    gatekeeperSecretNames, kv });
+  assert.ok(!plan.includes(value), "the edge secret reached the plan");
+  assert.match(plan, /inferos-dev-gatekeeper-inferops, secrets: INFEROPS_EDGE_SECRET \[vars:/);
+  assert.match(plan, /inferos-dev-gatekeeper-context \[vars:/);
+  const unset = formatStagePlan({ stageName: "dev", stage: STAGES.dev, configs, secretNames: ["ADMINS"],
+    gatekeeperSecretNames: { "gatekeeper-inferops": [] }, kv });
+  assert.doesNotMatch(unset, /INFEROPS_EDGE_SECRET/);
 });
 
 test("tiers deploy gatekeepers, then the backend, then the router", () => {
