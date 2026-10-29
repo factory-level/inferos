@@ -183,3 +183,11 @@ test("Artillery reports summarize p95s, codes and browser vitals", () => {
   assert.equal((summary.vitals as Record<string, { p75: number }>)["browser.page.LCP.http://localhost:8787/"]!.p75, 300);
   assert.ok((summary.steps as Record<string, unknown>)["browser.step.sign_in"]);
 });
+
+test("every load scenario enables the ensure plugin, without which Artillery ignores its gates", () => {
+  for (const file of ["inferos-http.yml", "inferos-browser.yml"]) {
+    const config = parse(readFileSync(join(REPO, "load", file), "utf8")).config;
+    assert.ok(config.plugins && "ensure" in config.plugins, file);
+    assert.ok(config.ensure.thresholds.length > 0 && config.ensure.conditions.length > 0, file);
+  }
+});

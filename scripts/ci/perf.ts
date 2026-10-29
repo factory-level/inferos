@@ -42,6 +42,8 @@ export async function main(argv: string[]): Promise<number> {
   const target = resolveLocalStack(ctx.root, [], ctx.env).url;
   const records: CommandRecord[] = [];
   const summaries: Record<string, unknown> = {};
+  // Artillery prints "Checks:" only when it evaluated `ensure`; a run without it gated nothing.
+  const unchecked: string[] = [];
   for (const name of names) {
     const record = await exec(ctx, dockerRun(ctx, [
       "--network", "host", "-e", `FACTORY_TARGET=${target}`,
@@ -49,6 +51,7 @@ export async function main(argv: string[]): Promise<number> {
       "artilleryio/artillery:latest", "run", "--output", `/out/${name}.json`, `/load/${PERF_SCENARIOS[name]}`,
     ]), { log: `${name}.log` });
     records.push(record);
+    if (!/^Checks:/m.test(readFileSync(record.log, "utf8"))) unchecked.push(name);
     try {
       summaries[name] = summarizeArtillery(JSON.parse(readFileSync(join(ctx.dir, `${name}.json`), "utf8")));
     } catch {
@@ -56,9 +59,9 @@ export async function main(argv: string[]): Promise<number> {
     }
   }
   return finish(ctx, {
-    node: "perf", ok: records.every(record => record.exitCode === 0),
+    node: "perf", ok: records.every(record => record.exitCode === 0) && unchecked.length === 0,
     gate: "Artillery ensure thresholds pass for the HTTP load and the Playwright-engine browser profile (proposed ceilings, #158)",
-    commands: records, details: { target, summaries },
+    commands: records, details: { target, ensureEvaluated: unchecked.length === 0, unchecked, summaries },
   });
 }
 

@@ -21,6 +21,9 @@ config:
       duration: 20
       arrivalRate: 1
       maxVusers: 2
+  # Artillery 2 evaluates `ensure` only with the plugin enabled; without it the run exits 0.
+  plugins:
+    ensure: {}
   ensure:
     thresholds:
       - browser.step.shell_boot.p95: 5000

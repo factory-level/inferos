@@ -261,6 +261,21 @@ test("down signals the process group the factory launched and waits for it", asy
   }
 });
 
+test("down never signals a recorded process that already exited", async () => {
+  const root = tempRoot();
+  try {
+    mkdirSync(join(root, ".factory"));
+    writeFileSync(stateFile(root), JSON.stringify({ sandbox: "dev", startedAt: "x", services: { inferops: { pid: 901, startedByFactory: true } } }));
+    const fake = fakeDeps(root, { alive: () => false });
+    const result = await runFactory(["down"], fake.deps);
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(fake.signals, []);
+    assert.deepEqual(result.report.alreadyExited, ["inferops"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("verify checks every tool image; a missing one is FAIL with the pull command", async () => {
   const root = tempRoot();
   try {

@@ -413,12 +413,16 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
   const stopped: string[] = [];
   const left: string[] = [];
   const failed: string[] = [];
+  const exited: string[] = [];
   for (const [name, service] of Object.entries(state.services)) {
     if (!service.startedByFactory) {
       left.push(name);
     } else if (service.container) {
       const removed = deps.runCli(["docker", "rm", "-f", service.container], dockerEnv(deps));
       (removed.exitCode === 0 ? stopped : failed).push(name);
+    } else if (service.pid !== undefined && !deps.processAlive(service.pid)) {
+      // Already gone: never signal a group id the kernel may have handed to someone else.
+      exited.push(name);
     } else if (service.pid !== undefined) {
       ((await stopGroup(service.pid, deps)) ? stopped : failed).push(name);
     }
@@ -427,8 +431,9 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
   const ok = failed.length === 0;
   return {
     exitCode: ok ? 0 : 1,
-    report: { ok, command: "factory down", sandbox: state.sandbox, stopped, leftRunning: left, failed },
+    report: { ok, command: "factory down", sandbox: state.sandbox, stopped, alreadyExited: exited, leftRunning: left, failed },
     headline: `factory down ${state.sandbox}: stopped ${stopped.join(", ") || "nothing"}` +
+      (exited.length ? `; already exited: ${exited.join(", ")}` : "") +
       (left.length ? `; left running (not started by the factory): ${left.join(", ")}` : "") +
       (failed.length ? `; FAILED to stop ${failed.join(", ")}` : ""),
   };

@@ -14,6 +14,10 @@ config:
     - name: sustain
       duration: 30
       arrivalRate: 10
+  # Artillery 2 evaluates `ensure` only with the plugin enabled; without it the run exits 0.
+  plugins:
+    ensure: {}
+    expect: {}
   ensure:
     thresholds:
       - http.response_time.p95: 500
