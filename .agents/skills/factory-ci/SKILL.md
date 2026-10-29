@@ -31,6 +31,10 @@ pnpm local factory down
 
 `--keep-going` runs every node even after a red gate; `--base REF` sets the gitleaks commit range (default `origin/main`). Exit 0 is green; 1 means a gate failed or the run was refused.
 
+## In GitHub Actions
+
+`.github/workflows/factory.yml` runs `pnpm factory:ci --run-id gha-<run>-<attempt> --keep-going` on GitHub-hosted `ubuntu-latest`, for PRs to `main` and `workflow_dispatch`. This repo is a public fork, so never use self-hosted runners for it. The workflow has `contents: read`, no secrets and `persist-credentials: false`. Read a run with `gh run view <id> --log-failed`. The evidence is the `factory-run-<run-id>` artifact (`gh run download <id>`), and the node table is in the job summary.
+
 ## Evidence
 
 `.factory/runs/<run-id>/state.json` lists each node's exit code and duration and the `passes`. Each node writes `.factory/runs/<run-id>/<node>/result.json` (gate, commands, exit codes, details) plus one log per command and its reports: `security/{semgrep,gitleaks-*,osv,trivy,findings,new-findings}.json`, `build/release/manifest.json`, `local-deploy/health.json`, `bindings/result.json`, `dast/zap.{json,html}`, `perf/{http,browser}.json`. Quote these files, not your expectation of them. `.factory/` is gitignored; attach the run id when reporting.

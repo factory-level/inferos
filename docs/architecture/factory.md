@@ -10,6 +10,7 @@ covers:
   - load
   - .github/workflows/ci.yml
   - .github/workflows/_verify.yml
+  - .github/workflows/factory.yml
   - .github/actions
   - .agents/skills/factory-sandboxes
   - .agents/skills/factory-ci
@@ -39,6 +40,7 @@ The factory is the skills agents consume plus the sandbox environments they run 
 | `scripts/ci/stage-smoke.ts`, `stage-smoke-flow.ts`, `stage-smoke-wiki.ts`, `load/stage-probe.{yml,mjs}` | Node 10, the scripted stage smoke: the grokbot operator and viewer personas against the stage `FACTORY_STAGE_URL` names (`stage-smoke-wiki.ts` holds the Wiki oracle's pure comparisons), in the `artilleryio/artillery` container's Playwright, plus a 2-VU Artillery Playwright probe of the sign-in. Not part of `pipeline.ts`; run from `stage-probe` (`pnpm local factory stage-smoke`). |
 | `scripts/ci/pipeline.ts` | The orchestrator: credential refusal, node selection (`--only/--skip`), one child per node, fail-fast (`--keep-going`), `state.json`. `pnpm factory:ci` is `--target=local`. |
 | `scripts/ci/security-baseline.json`, `dast-baseline.json` | Reviewed accepted findings by fingerprint / ZAP plugin id. |
+| `.github/workflows/factory.yml` | The whole local graph (`pnpm factory:ci --keep-going`) as one job on GitHub-hosted `ubuntu-latest`, for PRs to `main` and `workflow_dispatch`. This repo is a public fork, so self-hosted runners are not allowed. It has `contents: read`, no secrets and `persist-credentials: false`, and uploads `.factory/runs/<id>/` as the `factory-run-<id>` artifact. |
 | `.github/workflows/_verify.yml`, `.github/actions/{setup,verify}` | Node 1 as a `workflow_call` workflow (jobs Lint and Build and test, unchanged commands) built from a toolchain setup action and an action that runs `scripts/ci/verify.ts --part <p>`. `ci.yml` keeps its triggers and concurrency and calls it. |
 | `.agents/skills/factory-sandboxes`, `factory-ci` | Agent SOPs with `evals/evals.json`. |
 
@@ -64,7 +66,7 @@ The factory is the skills agents consume plus the sandbox environments they run 
 
 **Security gate.** Fingerprints ignore line numbers: `semgrep:<rule>:<file>`, `gitleaks:<rule>:<file>`, `osv:<advisory>:<package>`, `trivy:<id>:<package or file>`. Severities: Semgrep `ERROR` high; gitleaks always critical; OSV `max_severity` CVSS (≥9 critical, ≥7 high, empty unknown); Trivy's own. Only high/critical findings absent from the baseline fail. `--update-baseline` rewrites the accepted set; the committed file is reviewed in its diff.
 
-**GitHub Actions.** `ci.yml` → `_verify.yml` jobs `lint` (setup without cache → `verify --part lint`) and `test` (setup with cache and Bun → `--part build` → `--part test`), 25-minute cap as before. Called jobs surface as `verify / Lint` and `verify / Build and test`.
+**GitHub Actions.** `ci.yml` → `_verify.yml` jobs `lint` (setup without cache → `verify --part lint`) and `test` (setup with cache and Bun → `--part build` → `--part test`), 25-minute cap as before. Called jobs surface as `verify / Lint` and `verify / Build and test`. `factory.yml` runs the full graph on a fresh hosted VM: a full-history checkout (gitleaks' `origin/main..HEAD` range), the setup action with cache and Bun, then `pnpm factory:ci --run-id gha-<run>-<attempt> --keep-going`. A node table goes to the job summary, the evidence is uploaded, and `pnpm local factory down` runs in an `always()` step. Docker is preinstalled on the hosted image, and the nodes pull their tool images, including Artillery's, which carries Chromium for the Playwright engine.
 
 ## Configuration
 

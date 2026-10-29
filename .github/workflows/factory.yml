@@ -1,0 +1,79 @@
+name: Factory CI
+
+# The InferOS side of the software factory's release graph (scripts/ci/pipeline.ts: verify,
+# security, build, local-deploy, bindings, dast, perf) as one job on a GitHub-hosted runner.
+# This repository is a public fork, so it never uses the owner's self-hosted runners (their
+# runner group blocks public repositories). The job runs exactly `pnpm factory:ci`, the
+# sandboxed local graph, on a fresh ubuntu-latest VM: Docker is preinstalled there, the tool
+# containers (Semgrep, gitleaks, OSV-Scanner, Trivy, ZAP, Artillery with its Chromium) are
+# pulled by the nodes, and `pnpm run-local` serves the stack on 127.0.0.1:8787.
+#
+# No secrets, `contents: read`, `persist-credentials: false`; nothing is deployed (`build` is a
+# wrangler dry run with Cloudflare variables stripped). Evidence uploads as an artifact.
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: factory-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  factory:
+    name: Factory graph (hosted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      # Full history: security's gitleaks range is origin/main..HEAD.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up the toolchain
+        uses: ./.github/actions/setup
+        with:
+          node-version: "24.19.0"
+          cache: "true"
+          bun: "true"
+
+      # --keep-going: every node runs and reports even after a red gate; the exit code still
+      # fails the job when any gate failed.
+      - name: Factory graph
+        run: pnpm factory:ci --run-id "${RUN_ID}" --keep-going
+
+      - name: Node table
+        if: ${{ always() }}
+        run: |
+          # shellcheck disable=SC2016 # the single-quoted program is JavaScript, not shell
+          f=".factory/runs/${RUN_ID}/state.json"
+          [ -f "$f" ] || { echo "no state.json"; exit 0; }
+          node -e '
+            const s = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            const rows = s.nodes.map(n => `| ${n.node} | ${n.ok ? "pass" : "fail"} (exit ${n.exitCode}) | ${(n.durationMs / 1000).toFixed(1)}s |`);
+            console.log([`### Factory run ${s.runId}: ${s.ok ? "GREEN" : "RED"}`, "", "| node | result | time |", "|---|---|---|", ...rows].join("\n"));
+          ' "$f" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: factory-run-${{ env.RUN_ID }}
+          path: .factory/runs/${{ env.RUN_ID }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop the local stack
+        if: ${{ always() }}
+        run: |
+          pnpm local factory down || true
+          docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
