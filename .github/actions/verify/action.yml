@@ -1,0 +1,18 @@
+name: Factory verify node
+description: >-
+  Runs one part of factory node 1 (`scripts/ci/verify.ts`): lint, build, test, docs or all. The
+  script is the step; this action only names it, so `node scripts/ci/pipeline.ts --target=local`
+  runs the same commands outside GitHub Actions. Evidence lands in .factory/runs/<run-id>/verify/.
+inputs:
+  part:
+    description: lint | build | test | docs | all
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Run scripts/ci/verify.ts
+      shell: bash
+      env:
+        PART: ${{ inputs.part }}
+        FACTORY_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      run: node scripts/ci/verify.ts --target=gha --part "$PART"

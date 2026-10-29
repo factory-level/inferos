@@ -24,6 +24,7 @@ Create documents from [`_template.md`](_template.md).
 | [Connection packages and reviewed fork updates](connection-extensions.md) | draft | Repeatable Gatekeeper connection packages and reviewed upgrades of customized customer repositories |
 | [External-agent platform integrations](agent-platform-integrations.md) | draft | Governed capability bridge for Harness HG and other external agent platforms |
 | [Native agent deployments](agent-deployments.md) | draft | Persistent native persona/skill agent deployments with scoped identity and lifecycle controls |
+| [Software factory sandboxes and local CI](factory.md) | draft | Credential-free sandboxes agents run in and one release graph run identically locally and in CI (#285) |
 
 ## Wave 5 review artifacts
 

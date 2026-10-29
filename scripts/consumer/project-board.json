@@ -7,7 +7,7 @@
       "issues": [{
         "id": "30000000-0000-4000-8000-000000000001", "identifier": "DEMO-1", "title": "Verify the local environment",
         "priority": "medium", "stateId": "20000000-0000-4000-8000-000000000001", "targetDate": null,
-        "workflow": "software", "revision": "1", "assigneeId": null, "blockedReason": null, "lease": null, "run": null
+        "workflow": "software", "revision": "1", "assigneeId": null, "blockedReason": null, "estimate": 3, "lease": null, "run": null
       }]
     },
     { "state": { "id": "20000000-0000-4000-8000-000000000002", "name": "Working", "group": "started", "position": 0, "workflow": "software" }, "issues": [] },

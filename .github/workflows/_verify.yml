@@ -1,0 +1,81 @@
+name: Verify (reusable)
+
+# Factory release-graph node 1 as a reusable workflow: the two jobs CI has always run, now each a
+# setup action plus one `scripts/ci/verify.ts` part (see .github/actions/*). `ci.yml` calls it;
+# `node scripts/ci/pipeline.ts --target=local` runs the same script outside GitHub Actions.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version for Vite+.
+        type: string
+        required: false
+        default: "24.19.0"
+
+permissions:
+  contents: read
+
+jobs:
+  # Parallel to `test` so lint and test failures surface on the same run. Package type checking
+  # lives in Build; `scripts/` is checked here instead, because it is deliberately kept off
+  # `pnpm build`'s hot path (see AGENTS.md) and this is the cheap job.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No dependency cache here, unlike `test`: this job is fast anyway, and both caching means
+      # they race to reserve the same lockfile-keyed entry.
+      - name: Set up the toolchain
+        uses: ./.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "false"
+
+      # pnpm lint:check, pnpm types:scripts, pnpm configs:check
+      - name: Lint, type-check scripts/, check generated worker configs
+        uses: ./.github/actions/verify
+        with:
+          part: lint
+
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    # Without an explicit cap a wedged test process (a spawned child that outlives its reap keeps
+    # `node --test` alive forever) burns the 6-hour default instead of failing, on every run of the
+    # branch. 25 minutes leaves room for the 900 s per-command backstop
+    # (`TOTAL_TIMEOUT_SECONDS`, scripts/vitest-task-vite-config.ts) to fire first: about 1.5 minutes of
+    # checkout, install and build, the backend run starting about 1.3 minutes into the Test step, then
+    # up to 15 minutes before the backstop -- about 18 minutes in all. The backstop then reports which
+    # command hung, instead of GitHub cancelling the job.
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the toolchain
+        uses: ./.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "true"
+          bun: "true"
+
+      # Codegen, the frontend/SPA bundles, and the repo's single type check (`types:check` aliases this).
+      - name: Build
+        uses: ./.github/actions/verify
+        with:
+          part: build
+
+      # `pnpm test`; on failure the script also prints that run's per-task outcomes and the
+      # integration suite's phase timings (scripts/vp/last-run-report.ts), keeping the failure.
+      - name: Test
+        uses: ./.github/actions/verify
+        with:
+          part: test

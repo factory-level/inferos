@@ -25,6 +25,7 @@ Create documents from [`_template.md`](_template.md).
 | [Example blueprints](example-blueprints.md) | `packages/bundled-blueprints/examples`, `packages/bundled-blueprints/src/example-archive.ts`, `packages/bundled-blueprints/src/cli` | Unbundled example blueprints installed only by hand: the synthetic model-usage, System Metrics and tech-support page demo views (MVP-28 presentation only) |
 | [Native agent deployments](agent-deployments.md) | `packages/workshop-shared/src/agent-deployment.ts` | Accepted contract only (types, lifecycle table, grant carry-forward); `AGENT_DEPLOYMENTS` still reported unsupported |
 | [Persistent stage deploys](stage-deploy.md) | `scripts/stage`, `scripts/preview/staging-config.ts` | `pnpm stage:deploy dev\|prod`: real prefixed Workers on custom domains behind Access, signed in with InferLab; no CI job yet |
+| [Software factory sandboxes and local CI](factory.md) | `scripts/local/factory.ts`, `scripts/ci`, `load`, `.github/workflows/_verify.yml`, `.github/actions` | `pnpm local factory up dev\|infra\|verify\|stage-probe` and `scripts/ci/pipeline.ts --target=local` (verify, security, build, local deploy, bindings, DAST, perf) with evidence under `.factory/runs/` |
 
 ## Designs with no implementation yet
 

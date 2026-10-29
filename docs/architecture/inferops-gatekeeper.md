@@ -181,7 +181,10 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   write, `X-Idempotency-Key`, with a 15 s timeout and redirects not followed. A project key is
   resolved to its UUID through `GET /project/projects` on every use. `readProject` requests
   `GET /project/board?projectId=<uuid>`, requires the response's `projectId` to match, and keeps
-  only states and the `Issue` fields, dropping the workspace `projects[]`, leases and runs.
+  only states and the `Issue` fields, dropping the workspace `projects[]`, leases and runs. An
+  issue's `estimate` (story points, an integer 0 to 100) is kept when InferOps sends a number and
+  left out when it sends `null` or nothing (older InferOps); any other value fails the read as
+  malformed.
   `readIssue` requests `GET /project/issues/<id>` and answers
   `NOT_FOUND: No such issue in this project.` for a 404, for an issue whose `projectId` is another
   project's, and for an id that is not a UUID. `transition` makes that same scope check first, then

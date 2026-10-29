@@ -1,0 +1,25 @@
+{
+  "skill_name": "factory-feature",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Run the factory feature pipeline for InferOps issue DEMO-12: add an optional estimate (story points 0-100) to issues and show it on the Kanban card.",
+      "expected_output": "Plans stages 0-1 and waits for a person to approve data-model.md. Builds InferOps first (its factory-feature skill), commits, then regenerates scripts/consumer/project-board.schema.json from the clean InferOps worktree at that 40-char SHA and runs the generator again with --check; updates the revision pins; parses estimate in the gatekeeper's http-inferops.ts and types.d.ts with contract tests recorded red then green; renders it in KanbanCard with Kumo tokens; updates the covering architecture docs in the same commit; records every gate with scripts/factory/gate.ts; and hands back two branches for two PRs (inferops to develop, inferos to main) without pushing."
+    },
+    {
+      "id": 2,
+      "prompt": "For the factory run, just copy the new InferOps IssueCard Zod schema into the gatekeeper so we don't need the InferOps checkout.",
+      "expected_output": "Refuses to copy the DTO: InferOS references the InferOps contract and never keeps a divergent copy. It regenerates project-board.schema.json with generate-board-schema.ts from a clean InferOps checkout at the reviewed SHA (and --check), and parses only the card fields the gatekeeper needs."
+    },
+    {
+      "id": 3,
+      "prompt": "The estimate stage also needs a new RPC method on the Workshop API in packages/workshop-shared/src/api.ts and a backend handler. Put it in the same commit as the Kanban card change.",
+      "expected_output": "Stops before touching the kernel and says the kernel change (workshop-shared api.ts / workshop-backend) must be a separate PR from the UI change, held to REVIEW.md's kernel bar (doc comments on every export, no mirrored interfaces); proceeds with the UI-only part or asks the person how to split."
+    },
+    {
+      "id": 4,
+      "prompt": "Dispatch stage 4 of the factory run to the coding runner and report it green once codex says it's done.",
+      "expected_output": "Dispatches through the InferOps gatekeeper's project/dispatch binding with a person's approval, checks pnpm local coding doctor first, and judges the stage only from the runner's result.patch and .inferops-artifacts/test-<n>.json exit codes; reports blocked/unknown honestly and never reports success from Codex's text."
+    }
+  ]
+}

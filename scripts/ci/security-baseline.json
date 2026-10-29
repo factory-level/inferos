@@ -1,0 +1,178 @@
+{
+  "note": "Accepted high/critical findings by fingerprint. Regenerated with `node scripts/ci/security.ts --update-baseline`; every change to this file is reviewed in its diff.",
+  "accepted": [
+    {
+      "fingerprint": "osv:GHSA-2m5v-pch6-74hx:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-2v37-7h3g-55p8:nanoid",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-4w7w-5xrc-9h26:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-587h-7wmj-h5pm:vite",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-587h-7wmj-h5pm:vite-plus",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-68fv-2mgg-jv7q:source-map-js",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-6qxp-vccf-f47h:@modelcontextprotocol/client",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-7pqw-9j4j-h8q3:extract-zip",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-7rv5-mrxv-xcr9:seroval",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-97r2-qh9m-474h:seroval",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-c475-qrg2-pj4r:basic-ftp",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-cg2g-xh64-v4q7:dompurify",
+      "severity": "critical"
+    },
+    {
+      "fingerprint": "osv:GHSA-jmr9-qjv8-65gv:extract-zip",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-mrhx-c7xc-m3w5:zod",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-mrv2-3pqr-j5jr:dompurify",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-qrxm-fqhp-jwvm:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-rfgv-xxqx-mfg5:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-w293-vg96-wgc3:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-wp97-x4hv-qvhp:seroval",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-wq5f-xc86-pv6w:sharp",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "osv:GHSA-xjj6-f33q-929c:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "semgrep:generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value:packages/workshop-backend/__tests__/artifact-store.test.ts",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "semgrep:generic.secrets.security.detected-jwt-token.detected-jwt-token:packages/workshop-backend/__tests__/artifact-store.test.ts",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "semgrep:generic.secrets.security.detected-jwt-token.detected-jwt-token:scripts/consumer/deploy-recipe.test.ts",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "semgrep:javascript.lang.security.audit.spawn-shell-true.spawn-shell-true:scripts/check-fast.ts",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "semgrep:typescript.react.security.react-insecure-request.react-insecure-request:packages/integration-tests/__tests__/network-interceptor.test.ts",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-102990:basic-ftp",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-104850:@modelcontextprotocol/client",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-109383:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-109829:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-109869:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-112942:vite",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-116580:seroval",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-116581:seroval",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-116584:seroval",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-19534:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-19693:extract-zip",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-56876:extract-zip",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-67213:nanoid",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-84961:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-87018:undici",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:CVE-2026-93749:source-map-js",
+      "severity": "high"
+    },
+    {
+      "fingerprint": "trivy:gcp-service-account:custom-gatekeepers/gatekeeper-inferops/src/fixtures/demo-members.json",
+      "severity": "critical",
+      "note": "False positive: a demo principal whose type is \"service_account\" (no key material)."
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+# Factory node 8, HTTP load on the InferOS public router (scripts/ci/perf.ts runs it in the
+# artilleryio/artillery container on the host network, against the local stack only).
+#
+# The `ensure` ceilings are PROPOSED, not agreed: numeric budgets are owner-deferred to
+# factory-level/inferos#158, and the only agreed Kanban budgets (#28/#158) cover the local mock
+# browser measurement, not this route mix. They are set loose enough to catch a gross regression
+# (an order of magnitude) on a laptop; tighten them against the last green run's report.
+config:
+  target: "{{ $env.FACTORY_TARGET }}"
+  phases:
+    - name: warm
+      duration: 10
+      arrivalRate: 2
+    - name: sustain
+      duration: 30
+      arrivalRate: 10
+  # Artillery 2 evaluates `ensure` only with the plugin enabled; without it the run exits 0.
+  plugins:
+    ensure: {}
+    expect: {}
+  ensure:
+    thresholds:
+      - http.response_time.p95: 500
+      - http.response_time.p99: 1500
+    conditions:
+      - expression: "vusers.failed == 0"
+        strict: true
+      - expression: "http.codes.200 > 0"
+        strict: true
+scenarios:
+  - name: shell and API edge
+    flow:
+      # Shell boot: the SPA document and its asset path, served by the router's ASSETS binding.
+      - get:
+          url: "/"
+          expect:
+            - statusCode: 200
+      - get:
+          url: "/login"
+          expect:
+            - statusCode: 200
+      # The Workshop backend through the router: an unauthenticated /api answers 400 by design.
+      - get:
+          url: "/api"
+          expect:
+            - statusCode: 400

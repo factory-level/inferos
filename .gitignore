@@ -53,3 +53,6 @@ wrangler.dev.jsonc
 .dev.vars.*
 **/.dev.vars
 **/.dev.vars.*
+
+# Software factory evidence, sandbox state and tool caches (scripts/local/factory.ts, scripts/ci/).
+/.factory/
