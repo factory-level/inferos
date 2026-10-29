@@ -17,7 +17,7 @@ The factory is the skills agents consume plus the sandboxes they run in; InferOS
 ## Commands
 
 ```bash
-pnpm local factory up <sandbox> [--inferops-dir DIR] [--inferops-image REF] [--timeout SECONDS]   # start, then wait for health
+pnpm local factory up <sandbox> [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--timeout SECONDS]   # start, then wait for health
 pnpm local factory doctor [sandbox]     # one READY/FAIL line per check + health JSON per service
 pnpm local factory status               # the recorded sandbox's services only
 pnpm local factory down                 # stop exactly what `up` started
@@ -41,5 +41,5 @@ Configuration (environment): `FACTORY_INFEROPS_DIR` (the InferOps checkout; or `
 - A port held by a process this checkout did not start is reported, never probed as the stack and never signalled.
 - `stage-probe` is the only sandbox that may hold the smoke credentials (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, `GROKBOT_PERSONA_USER`, `GROKBOT_PERSONA_PASSWORD`); in any other sandbox they are a credentials FAIL. Never echo, log or paste their values.
 - Docker: ports on 127.0.0.1 only, never mount `/var/run/docker.sock`. Image mode mounts nothing and passes no credential; never add a secret layer or `GOOGLE_APPLICATION_CREDENTIALS` to make an image boot.
-- InferOS in `dev` reads boards from the InferOps gatekeeper's mock unless `INFEROPS_BASE_URL` (and a sign-in) is set in the shell that starts it; `pnpm local status` says `mock` or `live`. Do not report the mock as InferOps.
+- InferOS in `dev` reads boards from the InferOps gatekeeper's mock unless `up` is given `--inferops-connect` (or `INFEROPS_BASE_URL` and a sign-in are set in the shell that starts it); `factory status --json` records `inferos.inferops` as `mock` or `connected`. With `--inferops-connect` people sign in through the sandbox's InferOps ("Continue with InferOps"; in image mode a stub persona such as `grokbot-operator`), each with their own session. Do not report the mock as InferOps.
 - State lives in `.factory/sandbox.json` and logs in `.factory/logs/` (gitignored). Do not edit the state file by hand; `down` reads it.

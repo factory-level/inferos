@@ -111,6 +111,12 @@ export interface FactoryConfig {
   /** Image mode: an admin connection to the local Postgres (the InferOps compose one by default). */
   pgAdminUrl: string;
   inferopsUrl: string;
+  /**
+   * `--inferops-connect`: start InferOS's `run-local` talking to this sandbox's InferOps instead of the
+   * gatekeeper's mock, with people signing in through it ("Sign in with InferLab"; in image mode its
+   * stub-mode persona page). Loopback only.
+   */
+  inferopsConnect: boolean;
   flociPort: number;
   flociImage: string;
 }
@@ -121,7 +127,7 @@ export interface FactoryConfig {
  * ponytail: the offset is not read from the InferOps checkout's `config/local.json`, which also holds
  * that checkout's secrets; upgrade path is an InferOps CLI command that prints only its ports.
  */
-export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string, inferopsImage?: string): FactoryConfig {
+export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string, inferopsImage?: string, inferopsConnect = false): FactoryConfig {
   const dir = inferopsDir ?? env.FACTORY_INFEROPS_DIR;
   const image = inferopsImage ?? env.FACTORY_INFEROPS_IMAGE ?? null;
   if (image !== null && !/^\w[\w.-]*(?::\d+)?(?:\/\w[\w.-]*)*(?::\w[\w.-]*)?(?:@sha256:[0-9a-f]{64})?$/.test(image)) {
@@ -133,23 +139,55 @@ export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?
   if (!Number.isInteger(offset) || offset < 0 || offset > 500) throw new Error("FACTORY_INFEROPS_OFFSET must be a whole number from 0 to 500");
   const flociPort = Number(env.FACTORY_FLOCI_PORT ?? 4588);
   if (!Number.isInteger(flociPort) || flociPort < 1 || flociPort > 65535) throw new Error("FACTORY_FLOCI_PORT must be a TCP port");
+  const inferopsUrl = env.FACTORY_INFEROPS_URL ?? `http://127.0.0.1:${8080 + offset * 100}`;
+  if (inferopsConnect && !isLoopbackHttp(inferopsUrl)) {
+    throw new Error(`--inferops-connect connects only to an InferOps on loopback over http; ${inferopsUrl} is not one`);
+  }
   return {
     inferos: resolveLocalStack(root, [], env),
     inferopsDir: dir ? resolve(dir) : null,
     inferopsImage: image,
     inferopsDb,
     pgAdminUrl: env.FACTORY_PG_ADMIN_URL ?? "postgres://postgres:postgres@localhost:5432/postgres",
-    inferopsUrl: env.FACTORY_INFEROPS_URL ?? `http://127.0.0.1:${8080 + offset * 100}`,
+    inferopsUrl,
+    inferopsConnect,
     flociPort,
     flociImage: env.FACTORY_FLOCI_IMAGE ?? "floci/floci-gcp:latest",
   };
+}
+
+function isLoopbackHttp(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The variables `--inferops-connect` adds to InferOS's environment: the gatekeeper's InferLab origin
+ * and API base URL both point at the sandbox's InferOps (locally one server serves both), and
+ * `inferops` joins `AUTH_GATEKEEPERS` so the login page offers "Sign in with InferLab" beside the
+ * password form. No token: every person brings their own session, and the stopgap stays unset.
+ */
+export function inferopsConnectEnv(inferopsUrl: string, env: NodeJS.ProcessEnv): Record<string, string> {
+  const origin = new URL(inferopsUrl).origin;
+  const vendors = (env.AUTH_GATEKEEPERS ?? "").split(",").map(vendor => vendor.trim()).filter(Boolean);
+  if (!vendors.includes("inferops")) vendors.push("inferops");
+  return { INFERLAB_AUTH_ORIGIN: origin, INFEROPS_BASE_URL: origin, AUTH_GATEKEEPERS: vendors.join(",") };
+}
+
+/** The `NODE_CONFIG` layer that lets InferOps' central auth redirect back to the InferOS at `inferosUrl`. */
+export function inferopsSsoLayer(inferosUrl: string): string {
+  return JSON.stringify({ auth: { sso: { inferosOrigins: [new URL(inferosUrl).origin] } } });
 }
 
 /** What `up` started (or reused), so `down` stops exactly that. */
 export interface SandboxState {
   sandbox: Sandbox;
   startedAt: string;
-  services: Partial<Record<ServiceName, { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean }>>;
+  services: Partial<Record<ServiceName, { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean; inferops?: "mock" | "connected"; inferopsUrl?: string }>>;
 }
 
 export const stateFile = (root: string) => join(root, ".factory", "sandbox.json");
@@ -327,12 +365,13 @@ const asStringEnv = (env: NodeJS.ProcessEnv) =>
   Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined));
 
 /** Start this checkout's `run-local` detached, in its own process group, logging under `.factory/logs`. */
-export function launchInferos(stack: LocalStack, deps: Pick<FactoryDeps, "root" | "env" | "launch">): { pid: number; log: string; startedByFactory: true } {
+export function launchInferos(stack: LocalStack, deps: Pick<FactoryDeps, "root" | "env" | "launch">, connectTo?: string): NonNullable<SandboxState["services"]["inferos"]> {
   const logDir = join(deps.root, ".factory", "logs");
   mkdirSync(logDir, { recursive: true });
   const log = join(logDir, "inferos.log");
-  const pid = deps.launch([process.execPath, join(deps.root, "scripts", "run-local.ts"), "--port", String(stack.port)], asStringEnv(deps.env), log, deps.root);
-  return { pid, log, startedByFactory: true };
+  const env = { ...asStringEnv(deps.env), ...(connectTo ? inferopsConnectEnv(connectTo, deps.env) : {}) };
+  const pid = deps.launch([process.execPath, join(deps.root, "scripts", "run-local.ts"), "--port", String(stack.port)], env, log, deps.root);
+  return { pid, log, startedByFactory: true, ...(connectTo ? { inferops: "connected" as const, inferopsUrl: new URL(connectTo).origin } : { inferops: "mock" as const }) };
 }
 
 /** `postgres://user:pass@host:port/db?x` with the host and database swapped; the credentials stay as given. */
@@ -385,6 +424,10 @@ export function startInferopsImage(config: FactoryConfig, deps: FactoryDeps, log
     "-e", "NODE_ENV=production", "-e", "NODE_CONFIG_ENV=factory", "-e", "SUPPRESS_NO_CONFIG_WARNING=1",
     "-e", "API_PORT=8080", "-e", `DATABASE_URL=${databaseUrl(config.pgAdminUrl, db, "host.docker.internal")}`,
     "-e", "VERSION=factory-image",
+    // --inferops-connect: register this InferOS's origin as InferOps' `inferos` SSO client redirect
+    // (its default allows only http://localhost:8787). node-config's NODE_CONFIG layer; the image has
+    // no secret layer to compete with it in `factory`.
+    ...(config.inferopsConnect ? ["-e", `NODE_CONFIG=${inferopsSsoLayer(config.inferos.url)}`] : []),
     image,
   ], dockerEnv(deps));
   if (run.exitCode !== 0) return { problems: [`inferops: docker run ${image} failed: ${run.stderr.trim()}`] };
@@ -405,14 +448,17 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
       const ownership = stackOwnership(await deps.isPortListening(stack.port), deps.devServerRecord(stack.recordPath), stack.port);
       if (ownership === "running") {
         state.services.inferos = { pid: deps.devServerRecord(stack.recordPath)?.pid, startedByFactory: false };
+        // An adopted server keeps the environment it was started with; connecting it means a restart.
+        if (config.inferopsConnect) problems.push(`inferos: --inferops-connect cannot rewire the InferOS already running on port ${stack.port}; stop it (pnpm local stop) and run up again`);
       } else if (ownership === "port-in-use-by-other") {
         problems.push(`inferos: port ${stack.port} is in use by a process this checkout did not start`);
       } else {
-        state.services.inferos = launchInferos(stack, deps);
+        state.services.inferos = launchInferos(stack, deps, config.inferopsConnect ? config.inferopsUrl : undefined);
       }
     } else if (service === "inferops") {
       if ((await inferopsHealth(config, deps)).status === "READY") {
-        state.services.inferops = { startedByFactory: false };
+        // A second `up` (say, to restart InferOS with new settings) keeps what an earlier one started.
+        state.services.inferops = state.services.inferops?.startedByFactory ? state.services.inferops : { startedByFactory: false };
       } else if (config.inferopsImage) {
         const log = join(logDir, "inferops.log");
         writeFileSync(log, "");
@@ -545,7 +591,7 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
   };
 }
 
-export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down> [--json] [--inferops-dir DIR] [--inferops-image REF] [--timeout SECONDS]
+export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--timeout SECONDS]
   sandboxes: ${SANDBOXES.join(", ")}`;
 
 /** Run one factory command (argv after `factory`). Usage errors exit 2. */
@@ -555,7 +601,7 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   try {
     ({ values, positionals } = parseArgs({
       args: [...argv], allowPositionals: true,
-      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, "inferops-image": { type: "string" }, timeout: { type: "string", default: "600" } },
+      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, "inferops-image": { type: "string" }, "inferops-connect": { type: "boolean", default: false }, timeout: { type: "string", default: "600" } },
     }));
   } catch (error) {
     return usage((error as Error).message);
@@ -565,9 +611,10 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   if (extra.length) return usage(`Unexpected argument "${extra[0]}"`);
   if (named !== undefined && !(SANDBOXES as readonly string[]).includes(named)) return usage(`Unknown sandbox "${named}"`);
   if (!/^\d+$/.test(values.timeout)) return usage("--timeout must be a whole number of seconds");
+  if (values["inferops-connect"] && command !== "up") return usage("--inferops-connect applies to up only");
   let config: FactoryConfig;
   try {
-    config = factoryConfig(deps.root, deps.env, values["inferops-dir"], values["inferops-image"]);
+    config = factoryConfig(deps.root, deps.env, values["inferops-dir"], values["inferops-image"], values["inferops-connect"]);
   } catch (error) {
     return usage((error as Error).message);
   }

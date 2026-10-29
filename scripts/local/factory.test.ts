@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ProcessResult } from "./coding.ts";
-import { forbiddenCredentials, inferopsChildEnv, runFactory, stateFile, VERIFY_IMAGES, type FactoryDeps } from "./factory.ts";
+import { forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, runFactory, stateFile, VERIFY_IMAGES, type FactoryDeps } from "./factory.ts";
 import { runLifecycle, defaultDeps } from "./lifecycle.ts";
 import type { DevServerRecord } from "./stack.ts";
 
@@ -432,5 +432,118 @@ test("/health/ready answering 200 with a non-ready body is a FAIL", async () => 
     assert.match(result.headline, /FAIL\s+service:inferops: .*answered 200 but not ready/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--inferops-connect starts run-local against the sandbox's InferOps with InferLab sign-in and no token", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    const fake = fakeDeps(root, {
+      env: { PATH: "/bin", FACTORY_INFEROPS_OFFSET: "9", AUTH_GATEKEEPERS: "cloudflare" },
+      alive: () => true,
+    });
+    const launched = () => fake.launches.length > 0;
+    fake.deps.isPortListening = async () => launched();
+    fake.deps.devServerRecord = () => launched() ? ours : null;
+    fake.deps.fetchImpl = (async (input: string | URL) => {
+      const port = new URL(String(input)).port;
+      if (port === "8787" && launched() || port === "8980") return new Response("{}", { status: 200 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+    const result = await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-connect", "--json"], fake.deps);
+    assert.equal(result.exitCode, 0, result.headline);
+    const [inferos] = fake.launches;
+    assert.equal(inferos!.env.INFERLAB_AUTH_ORIGIN, "http://127.0.0.1:8980");
+    assert.equal(inferos!.env.INFEROPS_BASE_URL, "http://127.0.0.1:8980");
+    assert.equal(inferos!.env.AUTH_GATEKEEPERS, "cloudflare,inferops");
+    assert.equal(inferos!.env.INFEROPS_API_TOKEN, undefined);
+    const services = result.report.services as Record<string, { inferops?: string; inferopsUrl?: string }>;
+    assert.equal(services.inferos?.inferops, "connected");
+    assert.equal(services.inferos?.inferopsUrl, "http://127.0.0.1:8980");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+test("without --inferops-connect run-local keeps the mock and gets no InferLab origin", async () => {
+  const root = tempRoot();
+  try {
+    const fake = fakeDeps(root, { env: { PATH: "/bin" }, alive: () => false });
+    await runFactory(["up", "dev"], fake.deps);
+    const [inferos] = fake.launches;
+    assert.equal(inferos!.env.INFERLAB_AUTH_ORIGIN, undefined);
+    assert.equal(inferos!.env.INFEROPS_BASE_URL, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--inferops-connect refuses a non-loopback InferOps, other commands, and cannot rewire an adopted InferOS", async () => {
+  const root = tempRoot();
+  try {
+    const remote = await runFactory(["up", "dev", "--inferops-connect"], fakeDeps(root, { env: { PATH: "/bin", FACTORY_INFEROPS_URL: "https://api.dev.inferlab.io" } }).deps);
+    assert.equal(remote.exitCode, 2);
+    assert.match(String(remote.report.error), /loopback/);
+    const doctor = await runFactory(["doctor", "dev", "--inferops-connect"], fakeDeps(root).deps);
+    assert.equal(doctor.exitCode, 2);
+    const fake = fakeDeps(root, { env: { PATH: "/bin" }, listening: [8787], record: ours, answers: { 8787: 200, 8080: 200 } });
+    const adopted = await runFactory(["up", "dev", "--inferops-connect", "--json"], fake.deps);
+    assert.equal(fake.launches.length, 0);
+    assert.match(JSON.stringify(adopted.report.problems), /cannot rewire/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("inferopsConnectEnv keeps an existing inferops vendor once", () => {
+  assert.deepEqual(inferopsConnectEnv("http://localhost:8080/", { AUTH_GATEKEEPERS: "inferops" }),
+    { INFERLAB_AUTH_ORIGIN: "http://localhost:8080", INFEROPS_BASE_URL: "http://localhost:8080", AUTH_GATEKEEPERS: "inferops" });
+});
+
+test("image mode with --inferops-connect registers this InferOS's origin with InferOps' central auth", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    const fake = fakeDeps(root, { env: { PATH: "/bin", VITE_BACKEND_HOST: "localhost:8797" }, alive: () => false });
+    await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-image", IMAGE, "--inferops-connect", "--timeout", "0"], fake.deps);
+    const run = fake.dockerCalls.find(argv => argv[0] === "docker" && argv[1] === "run")!;
+    assert.ok(run.includes(`NODE_CONFIG=${inferopsSsoLayer("http://localhost:8797")}`), run.join(" "));
+    assert.deepEqual(JSON.parse(inferopsSsoLayer("http://localhost:8797/x")), { auth: { sso: { inferosOrigins: ["http://localhost:8797"] } } });
+    assert.ok(!run.some(arg => /docker\.sock/.test(arg)));
+    const plain = fakeDeps(root, { env: { PATH: "/bin" }, alive: () => false });
+    rmSync(stateFile(root), { force: true });
+    await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-image", IMAGE, "--timeout", "0"], plain.deps);
+    assert.ok(!plain.dockerCalls.find(argv => argv[1] === "run")!.some(arg => arg.startsWith("NODE_CONFIG=")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+test("a second up keeps the InferOps container an earlier up started, so down still removes it", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    let started = false;
+    const fake = fakeDeps(root, {
+      env: { PATH: "/bin" }, alive: () => true, listening: [8787], record: ours,
+      docker: argv => { if (argv[1] === "run") started = true; return { exitCode: 0, stdout: "true\n", stderr: "" }; },
+    });
+    fake.deps.fetchImpl = (async (input: string | URL) => {
+      const port = new URL(String(input)).port;
+      if (port === "8787" || port === "8080" && started) return new Response("{}", { status: 200 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+    await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-image", IMAGE], fake.deps);
+    const again = await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-image", IMAGE, "--json"], fake.deps);
+    assert.equal(fake.dockerCalls.filter(argv => argv[1] === "run").length, 1);
+    const services = again.report.services as Record<string, { container?: string; startedByFactory: boolean }>;
+    assert.equal(services.inferops?.container, "inferos-factory-inferops");
+    assert.equal(services.inferops?.startedByFactory, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
   }
 });
