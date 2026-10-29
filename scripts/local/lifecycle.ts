@@ -14,7 +14,7 @@
 //                                                The InferOps coding runner for a wrapper (scripts/local/coding.ts)
 //   pnpm local coding doctor [--json] [--consumer-root DIR]
 //                                                Whether that runner may start: flag, allowlist, CLI, sign-in, environment
-//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down [--json] [--inferops-dir DIR]
+//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down [--json] [--inferops-dir DIR] [--inferops-image REF]
 //                                                The software factory's sandboxes (scripts/local/factory.ts)
 //
 // Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and
@@ -70,7 +70,7 @@ export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
                           Run the InferOps coding runner (patch mode) for a wrapper's codingWorkbench.repos
   coding doctor [--consumer-root DIR]
                           Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env
-  factory up <dev|infra|verify|stage-probe>|status|doctor [sandbox]|down [--inferops-dir DIR] [--timeout S]
+  factory up <dev|infra|verify|stage-probe>|status|doctor [sandbox]|down [--inferops-dir DIR] [--inferops-image REF] [--timeout S]
                           The factory sandboxes: start, report READY/FAIL per check, stop what was started`;
 
 /** The subcommands of the two-word commands. */
@@ -94,6 +94,8 @@ export interface LifecycleDeps extends CodingDeps {
   /** This checkout's live dev-server record (see `readDevServerRecord`), or null. */
   devServerRecord: (recordPath: string) => DevServerRecord | null;
   fetchImpl: typeof fetch;
+  /** Run argv to completion in `cwd` with `env` (the factory's InferOps migrate and seed). */
+  runIn: (argv: string[], env: Record<string, string>, cwd: string, timeoutMs: number) => ProcessResult;
   /** Run an operator script from packages/workshop-backend/scripts and parse its JSON. */
   runOperator: (script: string, args: string[], env: NodeJS.ProcessEnv) => OperatorResult;
   /** Start the stack in the foreground; resolves only in tests, which stub it. */
@@ -138,6 +140,11 @@ function runProcess(argv: string[], env: Record<string, string> | NodeJS.Process
   return { exitCode: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? (result.error ? String(result.error.message) : "") };
 }
 
+function runProcessIn(argv: string[], env: Record<string, string>, cwd: string, timeoutMs: number): ProcessResult {
+  const result = spawnSync(argv[0]!, argv.slice(1), { cwd, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 });
+  return { exitCode: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? (result.error ? String(result.error.message) : "") };
+}
+
 /** Start the runner in its own process group, detached, appending its output to `logPath`. */
 function launchDetached(argv: string[], env: Record<string, string>, logPath: string, cwd: string): number {
   mkdirSync(cwd, { recursive: true });
@@ -167,6 +174,7 @@ export const defaultDeps: LifecycleDeps = {
   wranglerLogDir: () => wranglerLogDir(),
   now: Date.now,
   runCli: runProcess,
+  runIn: runProcessIn,
   launch: launchDetached,
   git: args => runProcess(["git", ...args], process.env),
 };

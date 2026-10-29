@@ -16,10 +16,12 @@ function fakeDeps(root: string, opts: {
   record?: DevServerRecord | null;
   docker?: (argv: string[]) => ProcessResult;
   alive?: (pid: number) => boolean;
+  runIn?: (argv: string[]) => ProcessResult;
 } = {}) {
   const launches: { argv: string[]; env: Record<string, string>; cwd: string }[] = [];
   const signals: [number, NodeJS.Signals][] = [];
   const dockerCalls: string[][] = [];
+  const runInCalls: { argv: string[]; env: Record<string, string>; cwd: string }[] = [];
   let clock = 0;
   const deps: FactoryDeps = {
     root,
@@ -37,6 +39,10 @@ function fakeDeps(root: string, opts: {
       dockerCalls.push(argv);
       return opts.docker?.(argv) ?? { exitCode: 0, stdout: "27.0.0\n", stderr: "" };
     },
+    runIn: (argv, env, cwd) => {
+      runInCalls.push({ argv, env, cwd });
+      return opts.runIn?.(argv) ?? { exitCode: 0, stdout: "", stderr: "" };
+    },
     launch: (argv, env, _log, cwd) => {
       launches.push({ argv, env, cwd });
       return 4242 + launches.length;
@@ -46,7 +52,7 @@ function fakeDeps(root: string, opts: {
     sleep: async ms => { clock += ms; },
     now: () => clock,
   };
-  return { deps, launches, signals, dockerCalls };
+  return { deps, launches, signals, dockerCalls, runInCalls };
 }
 
 /** A checkout with a (fake) installed wrangler, which `infra` and `verify` check for. */
@@ -61,8 +67,12 @@ function inferopsCheckout(): string {
   const dir = mkdtempSync(join(tmpdir(), "inferops-"));
   mkdirSync(join(dir, "scripts"));
   writeFileSync(join(dir, "scripts", "dev.mjs"), "");
+  mkdirSync(join(dir, "db"));
+  writeFileSync(join(dir, "db", "init-db.sql"), "");
   return dir;
 }
+
+const IMAGE = `127.0.0.1:5600/services/inferlab@sha256:${"a".repeat(64)}`;
 
 const ours: DevServerRecord = { pid: 777, port: 8787, mode: "run-local", startedAt: "2026-10-28T00:00:00.000Z" };
 
@@ -326,4 +336,101 @@ test("pnpm local routes factory through lifecycle.ts with --json", async () => {
 
 test("the InferOps child loses pnpm's script environment", () => {
   assert.deepEqual(inferopsChildEnv({ PATH: "/b", npm_lifecycle_event: "local", INIT_CWD: "/x", NODE_OPTIONS: "--x", HOME: "/h" }), { PATH: "/b", HOME: "/h" });
+});
+
+test("image mode: migrate + seed in the InferOps checkout on its own database, then the image on loopback without KMS", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    let apiUp = false;
+    const fake = fakeDeps(root, {
+      env: { PATH: "/bin", HOME: "/h", FACTORY_INFEROPS_OFFSET: "7", npm_config_user_agent: "pnpm/11" }, listening: [8787], record: ours, answers: { 8787: 200 },
+      docker: argv => {
+        if (argv[1] === "run") apiUp = true;
+        return { exitCode: 0, stdout: argv[1] === "inspect" ? "true\n" : "", stderr: "" };
+      },
+    });
+    const fetchImpl = fake.deps.fetchImpl;
+    fake.deps.fetchImpl = (async (input: string | URL, init?: RequestInit) =>
+      apiUp && String(input).includes(":8780/health/ready") ? new Response(JSON.stringify({ status: "ok", checks: [{ name: "postgres", status: "ok" }] }), { status: 200 }) : fetchImpl(input, init)) as typeof fetch;
+    const result = await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-image", IMAGE], fake.deps);
+    assert.equal(result.exitCode, 0, result.headline);
+    assert.equal(fake.launches.length, 0, "no bun run dev up and no run-local (adopted)");
+    assert.deepEqual(fake.runInCalls.map(c => c.argv.slice(0, 4).join(" ")), [
+      "psql postgres://postgres:postgres@localhost:5432/postgres -v ON_ERROR_STOP=1",
+      "psql postgres://postgres:postgres@localhost:5432/postgres -v ON_ERROR_STOP=1",
+      "psql postgres://postgres:postgres@localhost:5432/inferos_factory?sslmode=disable -v ON_ERROR_STOP=1",
+      "bunx turbo run migrate", "bunx turbo run seed", "bunx turbo run seed:reserved",
+    ]);
+    assert.match(fake.runInCalls[0]!.argv.at(-1)!, /^DROP DATABASE IF EXISTS inferos_factory WITH \(FORCE\)$/);
+    for (const call of fake.runInCalls) {
+      assert.equal(call.cwd, inferops);
+      assert.equal(call.env.DATABASE_URL, "postgres://postgres:postgres@localhost:5432/inferos_factory?sslmode=disable");
+      assert.equal(call.env.npm_config_user_agent, undefined);
+    }
+    const run = fake.dockerCalls.find(argv => argv[1] === "run")!;
+    assert.equal(run.at(-1), IMAGE);
+    assert.ok(run.includes("127.0.0.1:8780:8080"));
+    assert.ok(run.includes("NODE_CONFIG_ENV=factory"));
+    assert.ok(run.includes("DATABASE_URL=postgres://postgres:postgres@host.docker.internal:5432/inferos_factory?sslmode=disable"));
+    assert.ok(!run.includes("-v") && !run.join(" ").includes("docker.sock") && !run.join(" ").includes("GOOGLE_APPLICATION_CREDENTIALS"));
+    const stopped = await runFactory(["down", "--json"], fake.deps);
+    assert.deepEqual(stopped.report.stopped, ["inferops"]);
+    assert.deepEqual(stopped.report.leftRunning, ["inferos"]);
+    assert.ok(fake.dockerCalls.some(argv => argv.join(" ") === "docker rm -f inferos-factory-inferops"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+test("image mode needs the InferOps checkout for migrations, and a failed migrate never runs the image", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    const bare = fakeDeps(root, { env: { PATH: "/bin", FACTORY_INFEROPS_IMAGE: IMAGE }, listening: [8787], record: ours, answers: { 8787: 200 } });
+    const noDir = await runFactory(["up", "dev", "--timeout", "0"], bare.deps);
+    assert.equal(noDir.exitCode, 1);
+    assert.match(noDir.headline, /image mode needs --inferops-dir/);
+    assert.equal(bare.runInCalls.length, 0);
+    rmSync(stateFile(root), { force: true });
+    const failing = fakeDeps(root, {
+      env: { PATH: "/bin" }, listening: [8787], record: ours, answers: { 8787: 200 },
+      runIn: argv => ({ exitCode: argv.includes("migrate") ? 3 : 0, stdout: "", stderr: "boom" }),
+    });
+    const result = await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-image", IMAGE, "--timeout", "0"], failing.deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.headline, /inferops: migrate exited 3/);
+    assert.ok(!failing.dockerCalls.some(argv => argv[1] === "run"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+test("an image reference that is not one is a usage error", async () => {
+  const root = tempRoot();
+  try {
+    for (const bad of ["--privileged", "img; rm -rf /", "a b"]) {
+      const result = await runFactory(["doctor", "dev", `--inferops-image=${bad}`], fakeDeps(root).deps);
+      assert.equal(result.exitCode, 2, bad);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/health/ready answering 200 with a non-ready body is a FAIL", async () => {
+  const root = tempRoot();
+  try {
+    const fake = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200 } });
+    const fetchImpl = fake.deps.fetchImpl;
+    fake.deps.fetchImpl = (async (input: string | URL, init?: RequestInit) =>
+      String(input).includes(":8080/health/ready") ? new Response(JSON.stringify({ status: "degraded" }), { status: 200 }) : fetchImpl(input, init)) as typeof fetch;
+    const result = await runFactory(["doctor", "dev"], fake.deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.headline, /FAIL\s+service:inferops: .*answered 200 but not ready/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

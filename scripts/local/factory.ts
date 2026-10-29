@@ -3,7 +3,10 @@
 // credential-free set of local services an agent builds, runs, attacks and loads:
 //
 //   dev          InferOS `pnpm run-local` (this checkout) + the InferOps stack, started in ITS OWN
-//                checkout with ITS OWN toolchain (`bun run dev up --docker --seed`)
+//                checkout with ITS OWN toolchain (`bun run dev up --docker --seed`), or, in image
+//                mode (`--inferops-image`), the built InferOps API image run the way the InferOps
+//                CI's local-deploy node runs it: no secret layer (so no KMS), its own database,
+//                migrated and seeded from that checkout, published on 127.0.0.1 only
 //   infra        dev + floci-gcp (an existing listener on the port is reused, else a container
 //                is started, published on 127.0.0.1 only) + Wrangler for the bindings proof
 //   verify       dev + the security/perf tool images (Semgrep, gitleaks, OSV-Scanner, Trivy, ZAP,
@@ -16,10 +19,10 @@
 // report. What the factory started is recorded in `.factory/sandbox.json`; `down` stops exactly
 // that and leaves anything it merely reused running.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import type { CodingDeps } from "./coding.ts";
+import type { CodingDeps, ProcessResult } from "./coding.ts";
 import { providerVariables } from "./runner.ts";
 import {
   configuredWorkers, probeWorkers, resolveLocalStack, stackOwnership,
@@ -82,6 +85,8 @@ export function forbiddenCredentials(env: NodeJS.ProcessEnv, sandbox: Sandbox): 
 
 /** What the factory touches outside its own logic; `pnpm local`'s deps satisfy it as they are. */
 export type FactoryDeps = Pick<CodingDeps, "root" | "env" | "runCli" | "launch" | "signal" | "processAlive" | "sleep" | "now"> & {
+  /** Run argv to completion in `cwd` (the InferOps checkout's migrate and seed), bounded by `timeoutMs`. */
+  runIn: (argv: string[], env: Record<string, string>, cwd: string, timeoutMs: number) => ProcessResult;
   isPortListening: (port: number) => Promise<boolean>;
   devServerRecord: (recordPath: string) => DevServerRecord | null;
   fetchImpl: typeof fetch;
@@ -97,8 +102,14 @@ export interface FactoryResult {
 /** Where the services of a sandbox are, from flags and the environment. */
 export interface FactoryConfig {
   inferos: LocalStack;
-  /** The InferOps checkout `bun run dev up` runs in; unset means the inferops service FAILs. */
+  /** The InferOps checkout `bun run dev up` runs in (image mode: migrate + seed run there); unset means the inferops service FAILs. */
   inferopsDir: string | null;
+  /** Image mode: the InferOps API image to run (best by digest); null runs `bun run dev up`. */
+  inferopsImage: string | null;
+  /** Image mode: the database the container uses, recreated by `up` in the Postgres at `pgAdminUrl`. */
+  inferopsDb: string;
+  /** Image mode: an admin connection to the local Postgres (the InferOps compose one by default). */
+  pgAdminUrl: string;
   inferopsUrl: string;
   flociPort: number;
   flociImage: string;
@@ -110,8 +121,14 @@ export interface FactoryConfig {
  * ponytail: the offset is not read from the InferOps checkout's `config/local.json`, which also holds
  * that checkout's secrets; upgrade path is an InferOps CLI command that prints only its ports.
  */
-export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string): FactoryConfig {
+export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string, inferopsImage?: string): FactoryConfig {
   const dir = inferopsDir ?? env.FACTORY_INFEROPS_DIR;
+  const image = inferopsImage ?? env.FACTORY_INFEROPS_IMAGE ?? null;
+  if (image !== null && !/^\w[\w.-]*(?::\d+)?(?:\/\w[\w.-]*)*(?::\w[\w.-]*)?(?:@sha256:[0-9a-f]{64})?$/.test(image)) {
+    throw new Error("--inferops-image / FACTORY_INFEROPS_IMAGE must be an image reference (registry/name[:tag][@sha256:digest])");
+  }
+  const inferopsDb = env.FACTORY_INFEROPS_DB ?? "inferos_factory";
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(inferopsDb)) throw new Error("FACTORY_INFEROPS_DB must be a lower-case Postgres identifier");
   const offset = Number(env.FACTORY_INFEROPS_OFFSET ?? 0);
   if (!Number.isInteger(offset) || offset < 0 || offset > 500) throw new Error("FACTORY_INFEROPS_OFFSET must be a whole number from 0 to 500");
   const flociPort = Number(env.FACTORY_FLOCI_PORT ?? 4588);
@@ -119,6 +136,9 @@ export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?
   return {
     inferos: resolveLocalStack(root, [], env),
     inferopsDir: dir ? resolve(dir) : null,
+    inferopsImage: image,
+    inferopsDb,
+    pgAdminUrl: env.FACTORY_PG_ADMIN_URL ?? "postgres://postgres:postgres@localhost:5432/postgres",
     inferopsUrl: env.FACTORY_INFEROPS_URL ?? `http://127.0.0.1:${8080 + offset * 100}`,
     flociPort,
     flociImage: env.FACTORY_FLOCI_IMAGE ?? "floci/floci-gcp:latest",
@@ -129,7 +149,7 @@ export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?
 export interface SandboxState {
   sandbox: Sandbox;
   startedAt: string;
-  services: Partial<Record<ServiceName, { pid?: number; container?: string; log?: string; startedByFactory: boolean }>>;
+  services: Partial<Record<ServiceName, { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean }>>;
 }
 
 export const stateFile = (root: string) => join(root, ".factory", "sandbox.json");
@@ -156,6 +176,7 @@ export interface Check {
 }
 
 const FLOCI_CONTAINER = "inferos-factory-floci";
+const INFEROPS_CONTAINER = "inferos-factory-inferops";
 
 /** Docker needs only these; nothing else of this environment reaches it. */
 const dockerEnv = (deps: FactoryDeps): Record<string, string> => ({ PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" });
@@ -195,13 +216,25 @@ async function inferosHealth(config: FactoryConfig, deps: FactoryDeps): Promise<
   };
 }
 
+/**
+ * `/health/ready` answers 200 even while Postgres is down; the body's `status` is the verdict. A body
+ * without one (an older API) is judged by the HTTP status alone.
+ */
+function readyBodyOk(body: unknown): boolean {
+  const status = body && typeof body === "object" ? (body as { status?: unknown }).status : undefined;
+  return status === undefined || (typeof status === "string" && /^(?:ok|up|ready)$/.test(status));
+}
+
 async function inferopsHealth(config: FactoryConfig, deps: FactoryDeps): Promise<Check> {
   const url = `${config.inferopsUrl}/health/ready`;
   const { status, body } = await getJson(url, deps);
-  const configured = config.inferopsDir ? `checkout ${config.inferopsDir}` : "no InferOps checkout configured (--inferops-dir or FACTORY_INFEROPS_DIR)";
+  const ready = status === 200 && readyBodyOk(body);
+  const configured = config.inferopsImage ? `image ${config.inferopsImage} on database ${config.inferopsDb}`
+    : config.inferopsDir ? `checkout ${config.inferopsDir}` : "no InferOps checkout configured (--inferops-dir or FACTORY_INFEROPS_DIR)";
   return {
-    name: "service:inferops", status: status === 200 ? "READY" : "FAIL",
-    detail: status === 200 ? `${url} answered 200` : `${url} ${status === null ? "did not answer" : `answered ${status}`}; ${configured}`,
+    name: "service:inferops", status: ready ? "READY" : "FAIL",
+    detail: ready ? `${url} answered 200 (${configured})`
+      : `${url} ${status === null ? "did not answer" : status === 200 ? "answered 200 but not ready" : `answered ${status}`}; ${configured}`,
     health: { url, status, body },
   };
 }
@@ -302,6 +335,66 @@ export function launchInferos(stack: LocalStack, deps: Pick<FactoryDeps, "root" 
   return { pid, log, startedByFactory: true };
 }
 
+/** `postgres://user:pass@host:port/db?x` with the host and database swapped; the credentials stay as given. */
+export function databaseUrl(adminUrl: string, database: string, host?: string): string {
+  const url = new URL(adminUrl);
+  if (host) url.hostname = host;
+  url.pathname = `/${database}`;
+  url.search = "sslmode=disable";
+  return url.toString();
+}
+
+/**
+ * Image mode: recreate the factory's own database, prepare it from the InferOps checkout the way
+ * InferOps CI's `db-ephemeral-setup` does (init-db.sql, migrate, seed, the reserved seed with
+ * throwaway keys), then run the image the way its `local-deploy` node does: `NODE_CONFIG_ENV=factory`
+ * (no secret layer, so nothing is KMS-decrypted and no credential is mounted), published on
+ * 127.0.0.1 only, the Docker socket never mounted. Returns the problems, empty on success.
+ */
+export function startInferopsImage(config: FactoryConfig, deps: FactoryDeps, log: string): { problems: string[]; service?: SandboxState["services"]["inferops"] } {
+  const image = config.inferopsImage!;
+  const dir = config.inferopsDir;
+  if (!dir) return { problems: ["inferops: image mode needs --inferops-dir (the checkout at the image's commit): the image carries no migrations, so migrate + seed run there"] };
+  if (!existsSync(join(dir, "db", "init-db.sql"))) return { problems: [`inferops: ${dir} is not an InferOps checkout (no db/init-db.sql)`] };
+  const port = Number(new URL(config.inferopsUrl).port || 80);
+  const host = new URL(config.inferopsUrl).hostname;
+  if (host !== "127.0.0.1" && host !== "localhost") return { problems: [`inferops: image mode publishes on 127.0.0.1 only; ${config.inferopsUrl} is not local`] };
+  const db = config.inferopsDb;
+  const url = databaseUrl(config.pgAdminUrl, db);
+  const env = { ...inferopsChildEnv(deps.env), DATABASE_URL: url };
+  // Throwaway values: this database is the factory's own, recreated on every `up`, valid nowhere else.
+  const reserved = { ...env, SYNTHETICS_PROBE_KEY: "iex_synthetic_factory_local_0000", SMOKE_MCP_KEY: "iex_smoke_mcp_factory_local_0000" };
+  const steps: [string, string[], Record<string, string>][] = [
+    ["drop database", ["psql", config.pgAdminUrl, "-v", "ON_ERROR_STOP=1", "-q", "-c", `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`], env],
+    ["create database", ["psql", config.pgAdminUrl, "-v", "ON_ERROR_STOP=1", "-q", "-c", `CREATE DATABASE ${db}`], env],
+    ["init-db.sql", ["psql", url, "-v", "ON_ERROR_STOP=1", "-q", "-f", "db/init-db.sql"], env],
+    ["migrate", ["bunx", "turbo", "run", "migrate"], env],
+    ["seed", ["bunx", "turbo", "run", "seed"], env],
+    ["seed:reserved", ["bunx", "turbo", "run", "seed:reserved"], reserved],
+  ];
+  for (const [name, argv, stepEnv] of steps) {
+    const result = deps.runIn(argv, stepEnv, dir, 900_000);
+    appendFileSync(log, `$ ${name}: ${argv.slice(0, 3).join(" ")} ... (exit ${result.exitCode})\n${result.stdout}${result.stderr}\n`);
+    if (result.exitCode !== 0) return { problems: [`inferops: ${name} exited ${result.exitCode} in ${dir}; see ${log}`] };
+  }
+  deps.runCli(["docker", "rm", "-f", INFEROPS_CONTAINER], dockerEnv(deps));
+  const run = deps.runCli([
+    "docker", "run", "-d", "--name", INFEROPS_CONTAINER,
+    "--add-host", "host.docker.internal:host-gateway",
+    "-p", `127.0.0.1:${port}:8080`,
+    "-e", "NODE_ENV=production", "-e", "NODE_CONFIG_ENV=factory", "-e", "SUPPRESS_NO_CONFIG_WARNING=1",
+    "-e", "API_PORT=8080", "-e", `DATABASE_URL=${databaseUrl(config.pgAdminUrl, db, "host.docker.internal")}`,
+    "-e", "VERSION=factory-image",
+    image,
+  ], dockerEnv(deps));
+  if (run.exitCode !== 0) return { problems: [`inferops: docker run ${image} failed: ${run.stderr.trim()}`] };
+  return { problems: [], service: { container: INFEROPS_CONTAINER, image, database: db, log, startedByFactory: true } };
+}
+
+/** Whether a container the factory started is still running. */
+const containerRunning = (name: string, deps: FactoryDeps) =>
+  deps.runCli(["docker", "inspect", "-f", "{{.State.Running}}", name], dockerEnv(deps)).stdout.trim() === "true";
+
 async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: FactoryDeps, state: SandboxState): Promise<string[]> {
   const problems: string[] = [];
   const logDir = join(deps.root, ".factory", "logs");
@@ -320,6 +413,12 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
     } else if (service === "inferops") {
       if ((await inferopsHealth(config, deps)).status === "READY") {
         state.services.inferops = { startedByFactory: false };
+      } else if (config.inferopsImage) {
+        const log = join(logDir, "inferops.log");
+        writeFileSync(log, "");
+        const started = startInferopsImage(config, deps, log);
+        problems.push(...started.problems);
+        if (started.service) state.services.inferops = started.service;
       } else if (!config.inferopsDir) {
         problems.push("inferops: no InferOps checkout configured (--inferops-dir or FACTORY_INFEROPS_DIR); not started");
       } else if (!existsSync(join(config.inferopsDir, "scripts", "dev.mjs"))) {
@@ -363,7 +462,8 @@ async function up(sandbox: Sandbox, config: FactoryConfig, deps: FactoryDeps, ti
   const deadline = deps.now() + timeoutMs;
   let checks = await allChecks(sandbox, config, deps);
   while (checks.some(check => check.status === "FAIL" && check.name.startsWith("service:")) && deps.now() < deadline) {
-    const dead = Object.entries(state.services).filter(([, s]) => s.pid !== undefined && s.startedByFactory && !deps.processAlive(s.pid));
+    const dead = Object.entries(state.services).filter(([name, s]) => s.startedByFactory &&
+      (s.pid !== undefined ? !deps.processAlive(s.pid) : name === "inferops" && s.container !== undefined && !containerRunning(s.container, deps)));
     const pending = checks.filter(check => check.status === "FAIL" && check.name.startsWith("service:"))
       .filter(check => !dead.some(([name]) => check.name === `service:${name}`))
       .filter(check => !(check.name === "service:inferops" && !state.services.inferops));
@@ -375,6 +475,12 @@ async function up(sandbox: Sandbox, config: FactoryConfig, deps: FactoryDeps, ti
     if (service.pid !== undefined && service.startedByFactory && !deps.processAlive(service.pid)) {
       problems.push(`${name}: pid ${service.pid} exited; see ${service.log}`);
     }
+  }
+  const inferops = state.services.inferops;
+  if (inferops?.container === INFEROPS_CONTAINER && inferops.startedByFactory && checks.some(check => check.name === "service:inferops" && check.status === "FAIL")) {
+    const logs = deps.runCli(["docker", "logs", "--tail", "40", INFEROPS_CONTAINER], dockerEnv(deps));
+    if (inferops.log) appendFileSync(inferops.log, `$ docker logs --tail 40 ${INFEROPS_CONTAINER}\n${logs.stdout}${logs.stderr}\n`);
+    problems.push(`inferops: container ${INFEROPS_CONTAINER} ${containerRunning(INFEROPS_CONTAINER, deps) ? "is running but not ready" : "exited"}; see ${inferops.log}`);
   }
   const result = summarize("up", sandbox, checks, { state: stateFile(deps.root), services: state.services, problems });
   if (problems.length) {
@@ -439,7 +545,7 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
   };
 }
 
-export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down> [--json] [--inferops-dir DIR] [--timeout SECONDS]
+export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down> [--json] [--inferops-dir DIR] [--inferops-image REF] [--timeout SECONDS]
   sandboxes: ${SANDBOXES.join(", ")}`;
 
 /** Run one factory command (argv after `factory`). Usage errors exit 2. */
@@ -449,7 +555,7 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   try {
     ({ values, positionals } = parseArgs({
       args: [...argv], allowPositionals: true,
-      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, timeout: { type: "string", default: "600" } },
+      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, "inferops-image": { type: "string" }, timeout: { type: "string", default: "600" } },
     }));
   } catch (error) {
     return usage((error as Error).message);
@@ -461,7 +567,7 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   if (!/^\d+$/.test(values.timeout)) return usage("--timeout must be a whole number of seconds");
   let config: FactoryConfig;
   try {
-    config = factoryConfig(deps.root, deps.env, values["inferops-dir"]);
+    config = factoryConfig(deps.root, deps.env, values["inferops-dir"], values["inferops-image"]);
   } catch (error) {
     return usage((error as Error).message);
   }
