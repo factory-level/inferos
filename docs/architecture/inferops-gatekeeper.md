@@ -21,7 +21,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 
 # InferOps gatekeeper
@@ -391,7 +391,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 
 `cloudflare.config.ts` uses the shared gatekeeper factory (`allow_irrevocable_stub_storage`,
 migrations `v0`: `MockInferOps`, `InferOpsProjectGatekeeper`, `v1`: `InferLabLogin`,
-`InferOpsCredentials`, `v2`: `InferOpsDispatchGatekeeper`, `v3`: `InferOpsWikiGatekeeper`, `v4`: `InferOpsTableGatekeeper`, `v5`: `InferOpsMembersGatekeeper`, and `v6`: `InferOpsWorkflowPolicyGatekeeper`); `wrangler.jsonc` is generated. The worker needs no secrets. `BASE_URL` is
+`InferOpsCredentials`, `v2`: `InferOpsDispatchGatekeeper`, `v3`: `InferOpsWikiGatekeeper`, `v4`: `InferOpsTableGatekeeper`, `v5`: `InferOpsMembersGatekeeper`, and `v6`: `InferOpsWorkflowPolicyGatekeeper`); `wrangler.jsonc` is generated. The worker needs no secrets, except the optional edge secret below. `BASE_URL` is
 set per deployment like every gatekeeper's. Discovery under `custom-gatekeepers/` binds it as
 `GATEKEEPER_INFEROPS`. The release manifest gives it no deploy inputs and marks it install-once.
 
@@ -414,6 +414,7 @@ sign-in flag (default `http://localhost:8080`, the local InferLab stack).
 | `INFEROPS_API_TOKEN` | Stopgap bearer token (a user access token or an `iex_` service-account key) for accounts with no identity. Requires the base URL, the workspace id and the workspace slug, else an error names the missing variable. |
 | `INFEROPS_WORKSPACE_ID` | The workspace UUID the stopgap sends as `X-Workspace-Id`. |
 | `INFEROPS_WORKSPACE_SLUG` | The stopgap workspace's slug: a resource URL whose `<workspace>` is this slug (for example `inferops://acme.operations/project/board/ENG` with `operations`) uses the stopgap connection. |
+| `INFEROPS_EDGE_SECRET` | A **secret**, not a var. Optional. It is the shared value that InferLab's IP-allowlisting edge lets through (dev InferLab's Cloud Armor rule, InferOps `waf:inferosEdgeSecret`); see [edge header](#edge-header). Unset, no header is sent. |
 
 `demo.local` bindings keep working beside a configured API.
 
@@ -421,6 +422,26 @@ sign-in flag (default `http://localhost:8080`, the local InferLab stack).
 so every account that has no identity acts with it and observer verification cannot tell those
 people apart. It never backs a connected person, and the release manifest offers no input for any
 of these vars, so a deployed instance cannot be given them through the deploy wizard.
+
+### Edge header
+
+A hosted Worker reaches InferLab from Cloudflare's shared egress IPs, so an IP-allowlisting edge refuses it. `src/edge-header.ts` builds the one `fetch` that every outgoing request uses: `inferLabFetch(env)`.
+
+- When `INFEROPS_EDGE_SECRET` is set, a request whose exact origin is `INFERLAB_AUTH_ORIGIN` or `INFEROPS_BASE_URL` carries `x-inferos-edge: <secret>`. The secret is trimmed first, and its redirect is forced to `manual`. Any other URL is fetched untouched. When the secret is unset, the function is plain `fetch`.
+- It is threaded through every caller as a required `fetcher`. The callers are:
+  - the token exchange (`exchangeCode`, which now also refuses redirects);
+  - session refresh and logout (`refreshInferLabSession` and `logoutInferLabSession`, from `InferLabLogin` and `InferOpsCredentials`);
+  - the sign-in workspace list (`listWorkspaceSlugs`);
+  - the host-board snapshot (`fetchBoardSnapshot`);
+  - the HTTP client (`openHttpInferOpsClient`) behind every board, issue, Wiki, table, members, workflow-policy and dispatch call, for connected accounts and the stopgap alike.
+- The value is never logged, and nothing in the helper logs. It is an edge credential, not an identity: InferOps authentication, permissions and RLS apply behind it unchanged.
+- `__tests__/edge-header.test.ts` covers the following:
+  - the header is present for both origins when the secret is set;
+  - it is absent when the secret is unset or blank;
+  - it is never sent to a foreign or look-alike origin;
+  - each request path above carries it;
+  - a source guard fails if any `src/` file other than `edge-header.ts` calls the global `fetch`.
+- Stages upload the secret with the gatekeeper's version ([stage deploys](stage-deploy.md)). The release manifest offers no input for it.
 
 ### Integration switch
 

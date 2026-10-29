@@ -3,7 +3,7 @@ title: Persistent stage deploys
 covers:
   - scripts/stage
   - scripts/preview/staging-config.ts
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 
 # Persistent stage deploys
@@ -23,16 +23,16 @@ updated: 2026-10-27
 - **Sign-in.** Cloudflare Access protects the hostname at the edge only. The backend gets no `CF_ACCESS_*`, because with `CF_ACCESS_AUD` set it takes the Access identity and refuses every other login; instead it gets `AUTH_GATEKEEPERS=inferops` and `DISABLE_PASSWORD_AUTH=true`, checked with `inferLabLoginStartupError` before deploying, and the frontend is built with `VITE_CF_ACCESS_MODE=false`. The InferOps gatekeeper gets `INFEROPS_BASE_URL`, `INFERLAB_AUTH_ORIGIN`, `INFEROPS_ENABLED=true`, and every optional switch stated `false` (coding dispatch included). The local-development stopgap (`INFEROPS_API_TOKEN`, workspace id/slug, mock seed) is refused.
 - **Backend.** `PUBLIC_BASE_URL` is the stage origin, `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` are on, `CANVAS_CATALOG` comes from `inferos.canvas.json` when the checkout has one, and the `WORKERS_AI` binding is injected as in the manifest and previews.
 - **Resources.** KV namespaces are titled `<resourcePrefix><package>-<binding>`, found by title with `wrangler kv namespace list`, created when missing and bound by id; the R2 bucket is `<resourcePrefix>blueprint-content`, which Wrangler creates on first deploy. Committed Durable Object migrations pass through unchanged; a step that deletes, renames or transfers a class is refused unless `--allow-destructive-migrations` is passed.
-- **Secrets.** `ADMINS` (from `STAGE_ADMINS`, required) and the optional AI Gateway settings (`resolveAiGateway`) are uploaded with the backend's version through a temporary `--secrets-file`; no value is written to a config, argv or the plan. Inputs come from the shell, then a gitignored `.stage-<stage>.vars`.
-- **Checks.** `--dry-run` prints the plan with no network. `prod` deploys only from a clean tree; `dev` needs `--allow-dirty` for one. After the router deploys, an unauthenticated request to the hostname must be an Access login redirect, or the run fails saying the stage is exposed; with `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` set it then runs `runSmoke` against the stage's gatekeepers. `pnpm stage:delete <stage> --confirm <hostname>` deletes the workers, router first, and keeps the KV namespaces and bucket.
-- `scripts/stage/stage-config.test.ts` and `stage-resources.test.ts` cover the configs built from the real packages, the stage definitions, secret redaction in the plan and the Wrangler output parsers. The runbook is [deploy a persistent stage](../wiki/stage-deploy.md); the decision is [ADR 0009](../adr/0009-persistent-stage-deploys.md) (proposed).
+- **Secrets.** `ADMINS` (from `STAGE_ADMINS`, required) and the optional AI Gateway settings (`resolveAiGateway`) are uploaded with the backend's version through a temporary `--secrets-file`; no value is written to a config, argv or the plan. The InferOps gatekeeper's optional `INFEROPS_EDGE_SECRET` (`stageInferOpsGatekeeperSecrets`, validated as `[A-Za-z0-9_-]{32,}` without printing it) is uploaded the same way with that gatekeeper's version, and the plan names it on that worker's line. Unset, no secrets file is passed to the gatekeeper, so the deploy keeps any value an earlier version held. Inputs come from the shell, then a gitignored `.stage-<stage>.vars`.
+- **Checks.** `--dry-run` prints the plan with no network. `prod` deploys only from a clean tree; `dev` needs `--allow-dirty` for one. After the router deploys, an unauthenticated request to the hostname must be an Access login redirect, or the run fails saying the stage is exposed; on a first deploy the probe retries name-resolution failures (`ENOTFOUND`/`EAI_AGAIN`) for up to five minutes while the new custom-domain record appears (`retryWhileDnsPending`, `scripts/stage/stage-resources.ts`); with `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` set it then runs `runSmoke` against the stage's gatekeepers. `pnpm stage:delete <stage> --confirm <hostname>` deletes the workers, router first, and keeps the KV namespaces and bucket.
+- `scripts/stage/stage-config.test.ts` and `stage-resources.test.ts` cover the configs built from the real packages, the stage definitions, secret redaction in the plan (the backend's and the edge secret), edge-secret validation and the Wrangler output parsers. The runbook is [deploy a persistent stage](../wiki/stage-deploy.md); the decision is [ADR 0009](../adr/0009-persistent-stage-deploys.md) (proposed).
 
 ## Divergences from Design
 
 - There is no design document for stages; the owner's stated intent (two Zero-Trust instances wired to InferLab dev and prod, deployed from a workstation) is recorded in [ADR 0009](../adr/0009-persistent-stage-deploys.md), which is proposed. The cloud-parity requirements in [local development](../design/local-development.md) remain the nearest design.
 - No CI job deploys a stage. Access applications are created by hand in Zero Trust; a deploy can only probe that one is in front of the hostname.
 - Stages deploy this checkout's packages only, not wrapper gatekeepers.
-- No stage deploy has been recorded yet, so Access, InferLab sign-in and deployed bindings remain unproven in the cloud.
+- Both stages were first deployed on 2026-10-28 (`inferos-dev-*` at dev-os.factorylevel.dev, `inferos-prod-*` at os.factorylevel.dev); each answered an unauthenticated `/`, `/api/` and `/gatekeeper/inferops/oauth` with an Access login redirect. InferLab sign-in and the deployed InferOps bindings remain unproven in the cloud.
 
 ## Open Questions
 

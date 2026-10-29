@@ -270,6 +270,31 @@ export function stageBackendSecrets({
   return { ADMINS: JSON.stringify(admins), ...aiGateway };
 }
 
+/**
+ * The shape InferLab's edge allow rule accepts for the shared secret (inferops `infra/waf`,
+ * `waf:inferosEdgeSecret`): long, and free of anything that could leave its CEL string literal.
+ */
+const INFEROPS_EDGE_SECRET_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
+
+/**
+ * The InferOps gatekeeper's secrets: optionally `INFEROPS_EDGE_SECRET`, the value the gatekeeper
+ * sends to InferLab in the `x-inferos-edge` header so InferLab's IP-allowlisting edge lets the
+ * stage through. Uploaded with the gatekeeper's version via `--secrets-file`, like the backend's.
+ * Unset, nothing is uploaded and the deploy keeps whatever the previous version held. A malformed
+ * value is refused before anything deploys, without being printed.
+ */
+export function stageInferOpsGatekeeperSecrets({
+  edgeSecret = process.env.INFEROPS_EDGE_SECRET,
+}: { edgeSecret?: string } = {}): Record<string, string> {
+  const value = edgeSecret?.trim();
+  if (!value) return {};
+  if (!INFEROPS_EDGE_SECRET_PATTERN.test(value)) {
+    throw new Error("INFEROPS_EDGE_SECRET must be at least 32 characters of [A-Za-z0-9_-], the " +
+        "same value as InferLab's waf:inferosEdgeSecret (its value is not shown)");
+  }
+  return { INFEROPS_EDGE_SECRET: value };
+}
+
 /** A tier of the deploy: workers that can go out together because nothing in it binds to another. */
 export interface StageTier {
   /** What the tier is, for the plan. */
@@ -293,13 +318,15 @@ export function stageTiers(configs: ReadonlyMap<string, StagingConfig>): StageTi
 
 /**
  * The human-readable plan `--dry-run` prints. It names every secret but never shows a value: the
- * plan is meant to be pasted into a PR or a log.
+ * plan is meant to be pasted into a PR or a log. `secretNames` are the backend's;
+ * `gatekeeperSecretNames` the secrets a gatekeeper package is uploaded with, by package name.
  */
-export function formatStagePlan({ stageName, stage, configs, secretNames, kv }: {
+export function formatStagePlan({ stageName, stage, configs, secretNames, gatekeeperSecretNames = {}, kv }: {
   stageName: StageName;
   stage: StageDefinition;
   configs: ReadonlyMap<string, StagingConfig>;
   secretNames: string[];
+  gatekeeperSecretNames?: Readonly<Record<string, readonly string[]>>;
   kv: readonly StageKvNamespace[];
 }): string {
   const lines = [`stage "${stageName}" -> https://${stage.hostname} (InferLab ${stage.inferops.baseUrl})`];
@@ -308,8 +335,10 @@ export function formatStagePlan({ stageName, stage, configs, secretNames, kv }: 
     for (const pkgName of tier.packages) {
       const config = configs.get(pkgName) as StagingConfig;
       const vars = Object.keys(config.vars ?? {}).toSorted().join(", ");
+      const gatekeeperSecrets = gatekeeperSecretNames[pkgName] ?? [];
       const extra = pkgName === "router" ? ` at ${stage.hostname} (custom domain)` :
-        pkgName === "workshop-backend" ? `, secrets: ${secretNames.join(", ")}` : "";
+        pkgName === "workshop-backend" ? `, secrets: ${secretNames.join(", ")}` :
+        gatekeeperSecrets.length > 0 ? `, secrets: ${gatekeeperSecrets.join(", ")}` : "";
       lines.push(`    ${config.name}${extra}${vars ? ` [vars: ${vars}]` : ""}`);
     }
   }

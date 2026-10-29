@@ -30,6 +30,13 @@ declare namespace Cloudflare {
      */
     INFERLAB_AUTH_ORIGIN?: string;
     /**
+     * A secret, not a var: the shared value InferLab's edge (an IP-allowlisting WAF) lets through
+     * in the `x-inferos-edge` header. Set, every request to `INFERLAB_AUTH_ORIGIN` and
+     * `INFEROPS_BASE_URL` carries it, and no other request does (see edge-header.ts). Unset, no
+     * header is sent.
+     */
+    INFEROPS_EDGE_SECRET?: string;
+    /**
      * `"true"` or `"false"`: whether the InferOps integration is on (capability `INFEROPS_ENABLED`).
      * The dev server always sets it; unset counts as on (see enablement.ts).
      */
