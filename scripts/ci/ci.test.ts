@@ -10,6 +10,7 @@ import { newHighAlerts, parseZap } from "./dast.ts";
 import { dockerRun, nodeContext } from "./lib.ts";
 import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
+import { smokeContainer, smokePreconditions } from "./stage-smoke.ts";
 import { cvssSeverity, dedupe, newFindings, parseGitleaks, parseOsv, parseSemgrep, parseTrivy, type Baseline } from "./security.ts";
 import { VERIFY_PARTS } from "./verify.ts";
 
@@ -190,4 +191,24 @@ test("every load scenario enables the ensure plugin, without which Artillery ign
     assert.ok(config.plugins && "ensure" in config.plugins, file);
     assert.ok(config.ensure.thresholds.length > 0 && config.ensure.conditions.length > 0, file);
   }
+});
+
+test("stage-smoke: a loopback stage needs the persona names, a remote one the Access token too; forbidden keys refuse", () => {
+  assert.match(String(smokePreconditions({}).problem), /names no stage/);
+  assert.match(String(smokePreconditions({ FACTORY_STAGE_URL: "http://dev-os.example.test" }).problem), /must be https/);
+  const loopback = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "op", GROKBOT_VIEWER_USER: "vw" };
+  assert.deepEqual(smokePreconditions(loopback), { target: { origin: "http://localhost:8797", kind: "loopback" }, problem: null });
+  assert.match(String(smokePreconditions({ ...loopback, OPENAI_API_KEY: "sk-secret" }).problem), /present \(names only\): OPENAI_API_KEY$/);
+  assert.match(String(smokePreconditions({ ...loopback, FACTORY_STAGE_URL: "https://dev-os.example.test" }).problem),
+    /remote stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_PASSWORD$/);
+});
+
+test("stage-smoke containers get credentials by name only, the checkout read-only, host network for loopback only", () => {
+  const env = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "operator-secret", GROKBOT_VIEWER_USER: "viewer-secret", PATH: "/bin" };
+  const ctx = { root: "/repo", dir: "/repo/.factory/runs/r/stage-smoke", env };
+  const loopback = smokeContainer(ctx, { origin: "http://localhost:8797", kind: "loopback" }, ["image", "cmd"]);
+  assert.ok(!loopback.join(" ").includes("secret"));
+  assert.deepEqual(loopback.slice(-14, -2), ["--network", "host", "-e", "FACTORY_STAGE_URL", "-e", "GROKBOT_PERSONA_USER", "-e", "GROKBOT_VIEWER_USER", "-v", "/repo:/repo:ro", "-v", "/repo/.factory/runs/r/stage-smoke:/repo/.factory/runs/r/stage-smoke"]);
+  assert.ok(!loopback.includes("/var/run/docker.sock") && !loopback.some(arg => arg.startsWith("-p")));
+  assert.ok(!smokeContainer(ctx, { origin: "https://dev-os.example.test", kind: "remote" }, ["image"]).includes("--network"));
 });

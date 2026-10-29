@@ -14,7 +14,7 @@
 //                                                The InferOps coding runner for a wrapper (scripts/local/coding.ts)
 //   pnpm local coding doctor [--json] [--consumer-root DIR]
 //                                                Whether that runner may start: flag, allowlist, CLI, sign-in, environment
-//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down [--json] [--inferops-dir DIR] [--inferops-image REF]
+//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down|stage-smoke [--json] [--inferops-dir DIR] [--inferops-image REF] [--stage-url URL]
 //                                                The software factory's sandboxes (scripts/local/factory.ts)
 //
 // Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and
@@ -70,8 +70,8 @@ export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
                           Run the InferOps coding runner (patch mode) for a wrapper's codingWorkbench.repos
   coding doctor [--consumer-root DIR]
                           Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env
-  factory up <dev|infra|verify|stage-probe>|status|doctor [sandbox]|down [--inferops-dir DIR] [--inferops-image REF] [--timeout S]
-                          The factory sandboxes: start, report READY/FAIL per check, stop what was started`;
+  factory up <dev|infra|verify|stage-probe>|status|doctor [sandbox]|down|stage-smoke [--inferops-dir DIR] [--inferops-image REF] [--stage-url URL] [--timeout S]
+                          The factory sandboxes: start, report READY/FAIL per check, stop what was started; the stage smoke`;
 
 /** The subcommands of the two-word commands. */
 const SUBCOMMANDS: Partial<Record<Command, readonly string[]>> = {

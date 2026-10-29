@@ -12,8 +12,9 @@
 //
 // Before anything runs, the environment is checked for cloud, model-provider and prod credentials
 // (the factory sandboxes' rule, scripts/local/factory.ts): the pipeline refuses to run with one.
-// Nodes 0 (intake), 6 (e2e) and 9-12 (release, stage smoke, rollback) are not part of this local
-// InferOS graph yet; see docs/architecture/factory.md.
+// Nodes 0 (intake), 6 (e2e), 9 and 11-12 (release, rollback) are not part of this local InferOS
+// graph yet; node 10 (stage smoke, scripts/ci/stage-smoke.ts) runs from the stage-probe sandbox
+// (`pnpm local factory stage-smoke`), not here. See docs/architecture/factory.md.
 
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";

@@ -11,7 +11,12 @@
 //                is started, published on 127.0.0.1 only) + Wrangler for the bindings proof
 //   verify       dev + the security/perf tool images (Semgrep, gitleaks, OSV-Scanner, Trivy, ZAP,
 //                Artillery with its Playwright engine)
-//   stage-probe  no services: only checks the smoke credentials are present, by name
+//   stage-probe  no services: probes the stage named by FACTORY_STAGE_URL (or --stage-url) and
+//                checks the smoke credentials it needs are present, by name. A remote https stage
+//                sits behind Cloudflare Access (service token + persona); a loopback stage is the
+//                local `dev` sandbox started with --inferops-connect, whose InferOps runs stub
+//                persona login (persona names only). `stage-smoke` runs the scripted smoke
+//                (scripts/ci/stage-smoke.ts) once doctor is READY.
 //
 // `doctor` reports one READY/FAIL line per check, each service's health JSON, and FAILS while a
 // cloud, model-provider or prod credential is in the environment (smoke credentials are allowed
@@ -31,7 +36,7 @@ import {
 
 export const SANDBOXES = ["dev", "infra", "verify", "stage-probe"] as const;
 export type Sandbox = (typeof SANDBOXES)[number];
-export const FACTORY_COMMANDS = ["up", "status", "doctor", "down"] as const;
+export const FACTORY_COMMANDS = ["up", "status", "doctor", "down", "stage-smoke"] as const;
 type FactoryCommand = (typeof FACTORY_COMMANDS)[number];
 
 type ServiceName = "inferos" | "inferops" | "floci";
@@ -55,14 +60,55 @@ export const VERIFY_IMAGES = [
 ] as const;
 
 /**
- * The stage smoke credentials, by name. Only `stage-probe` may hold them (and must); in every other
- * sandbox their presence is a failed credential check. `GROKBOT_PERSONA_*` are proposed names.
- * ponytail: the names are fixed here; upgrade path is reading them from the stage config once the
- * grokbot persona smoke (release graph node 10) lands.
+ * The stage smoke credentials, by name. Only `stage-probe` may hold them; in every other sandbox
+ * their presence is a failed credential check. Which of them a stage needs is
+ * {@link requiredSmokeCredentials}. `GROKBOT_PERSONA_*` and `GROKBOT_VIEWER_USER` are proposed names.
+ * ponytail: the names are fixed here; upgrade path is reading them from the stage config.
  */
 export const SMOKE_CREDENTIAL_VARS = [
-  "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD",
+  "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER",
 ] as const;
+
+/** Where a stage is: behind Cloudflare Access on the internet, or this machine's `dev` sandbox. */
+export type StageKind = "remote" | "loopback";
+
+/** A stage origin and its kind. */
+export interface StageTarget { origin: string; kind: StageKind }
+
+const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
+
+/**
+ * Classify a stage URL: http(s) on a loopback host is `loopback`; any other host must be https and
+ * is `remote`. Throws on anything else (plain http to a remote host would send the Access token in
+ * the clear).
+ */
+export function stageTarget(url: string): StageTarget {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`FACTORY_STAGE_URL / --stage-url is not a URL: ${url}`);
+  }
+  if (LOOPBACK_HOSTS.includes(parsed.hostname) && (parsed.protocol === "http:" || parsed.protocol === "https:")) {
+    return { origin: parsed.origin, kind: "loopback" };
+  }
+  if (parsed.protocol !== "https:") throw new Error(`a remote stage must be https: ${parsed.origin}`);
+  return { origin: parsed.origin, kind: "remote" };
+}
+
+/**
+ * The smoke credentials a stage needs, by name. A remote stage: the Access service token and the
+ * operator persona's sign-in, plus the viewer persona. A loopback stage has no Access in front and
+ * its InferOps signs people in as stub personas, so only the persona names (operator and viewer).
+ */
+export function requiredSmokeCredentials(kind: StageKind): string[] {
+  return kind === "remote"
+    ? ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"]
+    : ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"];
+}
+
+/** The image whose bundled Playwright and Chromium the stage smoke runs on (also node 8's). */
+export const STAGE_SMOKE_IMAGE = "artilleryio/artillery:latest";
 
 /**
  * Cloud and deploy credentials no sandbox may hold. Model-provider keys come from runner.ts's
@@ -119,6 +165,8 @@ export interface FactoryConfig {
   inferopsConnect: boolean;
   flociPort: number;
   flociImage: string;
+  /** `stage-probe`: the stage to probe (`--stage-url` or `FACTORY_STAGE_URL`), unparsed; null when unset. */
+  stageUrl: string | null;
 }
 
 /**
@@ -127,7 +175,7 @@ export interface FactoryConfig {
  * ponytail: the offset is not read from the InferOps checkout's `config/local.json`, which also holds
  * that checkout's secrets; upgrade path is an InferOps CLI command that prints only its ports.
  */
-export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string, inferopsImage?: string, inferopsConnect = false): FactoryConfig {
+export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string, inferopsImage?: string, inferopsConnect = false, stageUrl?: string): FactoryConfig {
   const dir = inferopsDir ?? env.FACTORY_INFEROPS_DIR;
   const image = inferopsImage ?? env.FACTORY_INFEROPS_IMAGE ?? null;
   if (image !== null && !/^\w[\w.-]*(?::\d+)?(?:\/\w[\w.-]*)*(?::\w[\w.-]*)?(?:@sha256:[0-9a-f]{64})?$/.test(image)) {
@@ -153,13 +201,14 @@ export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?
     inferopsConnect,
     flociPort,
     flociImage: env.FACTORY_FLOCI_IMAGE ?? "floci/floci-gcp:latest",
+    stageUrl: stageUrl ?? env.FACTORY_STAGE_URL ?? null,
   };
 }
 
 function isLoopbackHttp(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+    return parsed.protocol === "http:" && LOOPBACK_HOSTS.includes(parsed.hostname);
   } catch {
     return false;
   }
@@ -187,7 +236,7 @@ export function inferopsSsoLayer(inferosUrl: string): string {
 export interface SandboxState {
   sandbox: Sandbox;
   startedAt: string;
-  services: Partial<Record<ServiceName, { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean; inferops?: "mock" | "connected"; inferopsUrl?: string }>>;
+  services: Partial<Record<ServiceName, { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean; url?: string; inferops?: "mock" | "connected"; inferopsUrl?: string }>>;
 }
 
 export const stateFile = (root: string) => join(root, ".factory", "sandbox.json");
@@ -300,12 +349,106 @@ function credentialCheck(sandbox: Sandbox, deps: FactoryDeps): Check {
   };
 }
 
-function smokeCheck(deps: FactoryDeps): Check {
-  const missing = SMOKE_CREDENTIAL_VARS.filter(name => !deps.env[name]);
+function smokeCheck(target: StageTarget | null, deps: FactoryDeps): Check {
+  if (!target) return { name: "smoke-credentials", status: "FAIL", detail: "no stage, so no credential set applies (set FACTORY_STAGE_URL or --stage-url)" };
+  const required = requiredSmokeCredentials(target.kind);
+  const missing = required.filter(name => !deps.env[name]);
   return {
     name: "smoke-credentials", status: missing.length ? "FAIL" : "READY",
-    detail: missing.length ? `missing (names only): ${missing.join(", ")}` : `present (names only): ${SMOKE_CREDENTIAL_VARS.join(", ")}`,
+    detail: missing.length ? `${target.kind} stage, missing (names only): ${missing.join(", ")}` : `${target.kind} stage, present (names only): ${required.join(", ")}`,
   };
+}
+
+/** The ports of two loopback origins match (`localhost` and `127.0.0.1` are the same machine). */
+function sameLoopback(a: string, b: string): boolean {
+  const left = new URL(a);
+  const right = new URL(b);
+  return LOOPBACK_HOSTS.includes(left.hostname) && LOOPBACK_HOSTS.includes(right.hostname) &&
+    left.protocol === right.protocol && (left.port || "80") === (right.port || "80");
+}
+
+/**
+ * The InferOps a loopback stage is connected to: `FACTORY_INFEROPS_URL` when set, else the origin
+ * the recorded sandbox's InferOS was started against with `--inferops-connect`, if that InferOS is
+ * the stage.
+ */
+export function stageInferopsUrl(stage: StageTarget, root: string, env: NodeJS.ProcessEnv): string | null {
+  if (env.FACTORY_INFEROPS_URL) return new URL(env.FACTORY_INFEROPS_URL).origin;
+  const inferos = readState(root)?.services.inferos;
+  if (!inferos?.url || inferos.inferops !== "connected" || !inferos.inferopsUrl) return null;
+  return sameLoopback(inferos.url, stage.origin) ? inferos.inferopsUrl : null;
+}
+
+/**
+ * What doctor knows about a stage without signing in: that it answers; for a remote stage, that an
+ * unauthenticated request is redirected to Cloudflare Access; for a loopback stage, that InferOS
+ * (every Worker and the shell) and the InferOps it is connected to are healthy, and that InferOps
+ * signs people in as stub personas (the reason the persona passwords are not needed).
+ */
+async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ target: StageTarget | null; checks: Check[] }> {
+  if (!config.stageUrl) {
+    return { target: null, checks: [{ name: "stage", status: "FAIL", detail: "no stage named: set FACTORY_STAGE_URL or pass --stage-url (https://<stage> behind Access, or the loopback dev sandbox)" }] };
+  }
+  let target: StageTarget;
+  try {
+    target = stageTarget(config.stageUrl);
+  } catch (error) {
+    return { target: null, checks: [{ name: "stage", status: "FAIL", detail: (error as Error).message }] };
+  }
+  const checks: Check[] = [{ name: "stage", status: "READY", detail: `${target.kind} stage ${target.origin}` }];
+  const root = await getJson(`${target.origin}/`, deps);
+  checks.push({
+    name: "stage:reachable", status: root.status === null ? "FAIL" : "READY",
+    detail: root.status === null ? `${target.origin}/ did not answer: ${String(root.body)}` : `${target.origin}/ answered ${root.status}`,
+  });
+  if (root.status === null) return { target, checks };
+  if (target.kind === "remote") {
+    const location = await redirectLocation(`${target.origin}/`, deps);
+    const access = location !== null && /(?:^|\.)cloudflareaccess\.com$/.test(location.hostname);
+    checks.push({
+      name: "stage:access", status: access ? "READY" : "FAIL",
+      detail: access ? `unauthenticated GET / is redirected to Cloudflare Access (${location!.hostname})`
+        : `unauthenticated GET / answered ${root.status}${location ? ` -> ${location.origin}` : ""}, not an Access redirect; the stage is not behind Access`,
+    });
+    return { target, checks };
+  }
+  const stack: LocalStack = { ...config.inferos, url: target.origin, port: Number(new URL(target.origin).port || 80) };
+  const workers = await probeWorkers(stack.url, configuredWorkers(deps.root), deps.fetchImpl);
+  const failing = workers.filter(worker => worker.state !== "up").map(worker => worker.name);
+  if (root.status !== 200) failing.push(`shell (/ answered ${root.status})`);
+  checks.push({
+    name: "stage:inferos", status: failing.length ? "FAIL" : "READY",
+    detail: failing.length ? `${failing.join(", ")} not answering on ${target.origin}` : `${workers.length} Workers and the shell answering on ${target.origin}`,
+    health: { url: target.origin, shell: root.status, workers: workers.map(({ name, state, status }) => ({ name, state, status })) },
+  });
+  const inferops = stageInferopsUrl(target, deps.root, deps.env);
+  if (!inferops) {
+    checks.push({ name: "stage:inferops", status: "FAIL", detail: `no InferOps is recorded as connected to ${target.origin}: start it with pnpm local factory up dev --inferops-connect, or set FACTORY_INFEROPS_URL` });
+    return { target, checks };
+  }
+  const ready = await getJson(`${inferops}/health/ready`, deps);
+  const auth = await getJson(`${inferops}/auth/public-config`, deps);
+  const mode = auth.body && typeof auth.body === "object" ? (auth.body as { mode?: unknown }).mode : undefined;
+  const healthy = ready.status === 200 && readyBodyOk(ready.body);
+  checks.push({
+    name: "stage:inferops", status: healthy && mode === "stub" ? "READY" : "FAIL",
+    detail: !healthy ? `${inferops}/health/ready ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
+      : mode === "stub" ? `${inferops}/health/ready answered 200; auth mode stub (persona sign-in, no password)`
+        : `${inferops} is healthy but its auth mode is ${String(mode)}; a loopback stage's personas sign in only in stub mode`,
+    health: { url: `${inferops}/health/ready`, status: ready.status, body: ready.body, authMode: mode ?? null },
+  });
+  return { target, checks };
+}
+
+/** Where `url` redirects to when fetched without following redirects, or null. */
+async function redirectLocation(url: string, deps: FactoryDeps): Promise<URL | null> {
+  try {
+    const response = await deps.fetchImpl(url, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
+    const location = response.headers.get("location");
+    return response.status >= 300 && response.status < 400 && location ? new URL(location, url) : null;
+  } catch {
+    return null;
+  }
 }
 
 function toolChecks(sandbox: Sandbox, deps: FactoryDeps): Check[] {
@@ -314,9 +457,14 @@ function toolChecks(sandbox: Sandbox, deps: FactoryDeps): Check[] {
     const wrangler = join(deps.root, "node_modules", ".bin", "wrangler");
     checks.push({ name: "tool:wrangler", status: existsSync(wrangler) ? "READY" : "FAIL", detail: existsSync(wrangler) ? wrangler : "run pnpm install" });
   }
-  if (sandbox === "infra" || sandbox === "verify") {
+  if (sandbox === "infra" || sandbox === "verify" || sandbox === "stage-probe") {
     const docker = deps.runCli(["docker", "version", "--format", "{{.Server.Version}}"], dockerEnv(deps));
     checks.push({ name: "tool:docker", status: docker.exitCode === 0 ? "READY" : "FAIL", detail: docker.exitCode === 0 ? `server ${docker.stdout.trim()}` : docker.stderr.trim() || "docker is not reachable" });
+  }
+  if (sandbox === "stage-probe") {
+    // The smoke's browser: the Artillery image's bundled Playwright and Chromium.
+    const present = deps.runCli(["docker", "image", "inspect", "--format", "{{.Id}}", STAGE_SMOKE_IMAGE], dockerEnv(deps)).exitCode === 0;
+    checks.push({ name: `tool:${STAGE_SMOKE_IMAGE}`, status: present ? "READY" : "FAIL", detail: present ? "image present" : `docker pull ${STAGE_SMOKE_IMAGE}` });
   }
   if (sandbox === "verify") {
     for (const image of VERIFY_IMAGES) {
@@ -329,9 +477,10 @@ function toolChecks(sandbox: Sandbox, deps: FactoryDeps): Check[] {
 
 async function allChecks(sandbox: Sandbox, config: FactoryConfig, deps: FactoryDeps): Promise<Check[]> {
   const services = await Promise.all(SANDBOX_SERVICES[sandbox].map(name => HEALTH[name](config, deps)));
+  const stage = sandbox === "stage-probe" ? await stageChecks(config, deps) : null;
   return [
     credentialCheck(sandbox, deps),
-    ...(sandbox === "stage-probe" ? [smokeCheck(deps)] : []),
+    ...(stage ? [smokeCheck(stage.target, deps), ...stage.checks] : []),
     ...services,
     ...toolChecks(sandbox, deps),
   ];
@@ -371,7 +520,7 @@ export function launchInferos(stack: LocalStack, deps: Pick<FactoryDeps, "root" 
   const log = join(logDir, "inferos.log");
   const env = { ...asStringEnv(deps.env), ...(connectTo ? inferopsConnectEnv(connectTo, deps.env) : {}) };
   const pid = deps.launch([process.execPath, join(deps.root, "scripts", "run-local.ts"), "--port", String(stack.port)], env, log, deps.root);
-  return { pid, log, startedByFactory: true, ...(connectTo ? { inferops: "connected" as const, inferopsUrl: new URL(connectTo).origin } : { inferops: "mock" as const }) };
+  return { pid, log, startedByFactory: true, url: stack.url, ...(connectTo ? { inferops: "connected" as const, inferopsUrl: new URL(connectTo).origin } : { inferops: "mock" as const }) };
 }
 
 /** `postgres://user:pass@host:port/db?x` with the host and database swapped; the credentials stay as given. */
@@ -591,8 +740,9 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
   };
 }
 
-export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--timeout SECONDS]
-  sandboxes: ${SANDBOXES.join(", ")}`;
+export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down|stage-smoke> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--stage-url URL] [--timeout SECONDS]
+  sandboxes: ${SANDBOXES.join(", ")}
+  stage-smoke: doctor stage-probe, then (when READY) the scripted smoke scripts/ci/stage-smoke.ts`;
 
 /** Run one factory command (argv after `factory`). Usage errors exit 2. */
 export async function runFactory(argv: readonly string[], deps: FactoryDeps): Promise<FactoryResult> {
@@ -601,7 +751,7 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   try {
     ({ values, positionals } = parseArgs({
       args: [...argv], allowPositionals: true,
-      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, "inferops-image": { type: "string" }, "inferops-connect": { type: "boolean", default: false }, timeout: { type: "string", default: "600" } },
+      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, "inferops-image": { type: "string" }, "inferops-connect": { type: "boolean", default: false }, "stage-url": { type: "string" }, timeout: { type: "string", default: "600" } },
     }));
   } catch (error) {
     return usage((error as Error).message);
@@ -612,9 +762,10 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   if (named !== undefined && !(SANDBOXES as readonly string[]).includes(named)) return usage(`Unknown sandbox "${named}"`);
   if (!/^\d+$/.test(values.timeout)) return usage("--timeout must be a whole number of seconds");
   if (values["inferops-connect"] && command !== "up") return usage("--inferops-connect applies to up only");
+  if (command === "stage-smoke" && named !== undefined) return usage("stage-smoke takes no sandbox (it is stage-probe's smoke)");
   let config: FactoryConfig;
   try {
-    config = factoryConfig(deps.root, deps.env, values["inferops-dir"], values["inferops-image"], values["inferops-connect"]);
+    config = factoryConfig(deps.root, deps.env, values["inferops-dir"], values["inferops-image"], values["inferops-connect"], values["stage-url"]);
   } catch (error) {
     return usage((error as Error).message);
   }
@@ -626,6 +777,8 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
       return up(named as Sandbox, config, deps, Number(values.timeout) * 1_000);
     case "down":
       return down(deps);
+    case "stage-smoke":
+      return stageSmoke(config, deps, Number(values.timeout) * 1_000);
     case "status":
     case "doctor": {
       if (!sandbox) {
@@ -637,6 +790,29 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
       return summarize(command, sandbox, shown, { recorded: recorded ?? null });
     }
   }
+}
+
+/**
+ * `stage-smoke`: the stage-probe doctor first, and only when every check is READY the scripted smoke
+ * (`scripts/ci/stage-smoke.ts`, which writes `.factory/runs/<id>/stage-smoke/`), with the stage URL
+ * passed on in the environment. The smoke's exit code is the gate.
+ */
+async function stageSmoke(config: FactoryConfig, deps: FactoryDeps, timeoutMs: number): Promise<FactoryResult> {
+  const doctor = summarize("stage-smoke", "stage-probe", await allChecks("stage-probe", config, deps));
+  if (doctor.exitCode !== 0) {
+    doctor.headline += "\n  note  the smoke did not run: doctor stage-probe is not READY";
+    return doctor;
+  }
+  const env = { ...asStringEnv(deps.env), FACTORY_STAGE_URL: config.stageUrl! };
+  const smoke = deps.runIn([process.execPath, join(deps.root, "scripts", "ci", "stage-smoke.ts")], env, deps.root, timeoutMs);
+  // Only the smoke's own report lines: oracle verdicts and the evidence path, never the environment.
+  const lines = `${smoke.stdout}${smoke.stderr}`.split("\n").filter(line => /^\[(?:stage-smoke|factory)\]/.test(line));
+  const ok = smoke.exitCode === 0;
+  return {
+    exitCode: ok ? 0 : 1,
+    report: { ...doctor.report, ok, command: "factory stage-smoke", smoke: { exitCode: smoke.exitCode, lines } },
+    headline: `${doctor.headline}\nstage smoke: ${ok ? "PASS" : `FAIL (exit ${smoke.exitCode})`}\n${lines.map(line => `  ${line}`).join("\n")}`,
+  };
 }
 
 function usage(message: string): FactoryResult {

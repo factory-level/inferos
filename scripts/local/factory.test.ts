@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ProcessResult } from "./coding.ts";
-import { forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, runFactory, stateFile, VERIFY_IMAGES, type FactoryDeps } from "./factory.ts";
+import { forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
 import { runLifecycle, defaultDeps } from "./lifecycle.ts";
 import type { DevServerRecord } from "./stack.ts";
 
@@ -17,6 +17,10 @@ function fakeDeps(root: string, opts: {
   docker?: (argv: string[]) => ProcessResult;
   alive?: (pid: number) => boolean;
   runIn?: (argv: string[]) => ProcessResult;
+  /** Response bodies by `<port><path>` (default `{ path }`). */
+  bodies?: Record<string, unknown>;
+  /** `Location` headers by `<port><path>`, for redirect answers. */
+  redirects?: Record<string, string>;
 } = {}) {
   const launches: { argv: string[]; env: Record<string, string>; cwd: string }[] = [];
   const signals: [number, NodeJS.Signals][] = [];
@@ -33,7 +37,8 @@ function fakeDeps(root: string, opts: {
       const key = `${url.port}${url.pathname}`;
       const status = opts.answers?.[key] ?? opts.answers?.[url.port];
       if (status === undefined) throw new Error("connection refused");
-      return new Response(JSON.stringify({ path: url.pathname }), { status });
+      const location = opts.redirects?.[key];
+      return new Response(JSON.stringify(opts.bodies?.[key] ?? { path: url.pathname }), { status, headers: location ? { location } : {} });
     }) as typeof fetch,
     runCli: argv => {
       dockerCalls.push(argv);
@@ -303,20 +308,139 @@ test("verify checks every tool image; a missing one is FAIL with the pull comman
   }
 });
 
-test("stage-probe runs nothing and checks the smoke credentials by name only", async () => {
+test("a stage URL is loopback (http(s) on this machine) or remote (https only)", () => {
+  assert.deepEqual(stageTarget("http://127.0.0.1:8797/x"), { origin: "http://127.0.0.1:8797", kind: "loopback" });
+  assert.deepEqual(stageTarget("http://localhost:8787"), { origin: "http://localhost:8787", kind: "loopback" });
+  assert.deepEqual(stageTarget("https://dev-os.factorylevel.dev"), { origin: "https://dev-os.factorylevel.dev", kind: "remote" });
+  assert.throws(() => stageTarget("http://dev-os.factorylevel.dev"), /remote stage must be https/);
+  assert.throws(() => stageTarget("not a url"), /not a URL/);
+});
+
+test("a remote stage needs the Access token and persona sign-in; a loopback stage only the persona names", () => {
+  assert.deepEqual(requiredSmokeCredentials("remote"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("loopback"), ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
+});
+
+test("stage-probe without a stage FAILs and names the variable", async () => {
   const root = tempRoot();
   try {
-    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: { PATH: "/bin", CF_ACCESS_CLIENT_ID: "id-value-123" } }).deps);
+    const result = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: { PATH: "/bin", GROKBOT_PERSONA_USER: "op" } }).deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.headline, /FAIL\s+stage: no stage named: set FACTORY_STAGE_URL or pass --stage-url/);
+    assert.match(result.headline, /FAIL\s+smoke-credentials: no stage/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const LOOPBACK_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "http://127.0.0.1:8797", GROKBOT_PERSONA_USER: "operator-value-1", GROKBOT_VIEWER_USER: "viewer-value-2", FACTORY_INFEROPS_URL: "http://127.0.0.1:8980" };
+const LOOPBACK_ANSWERS = { 8797: 200, "8980/health/ready": 200, "8980/auth/public-config": 200 };
+const STUB = { "8980/health/ready": { status: "ok" }, "8980/auth/public-config": { mode: "stub" } };
+
+test("a loopback stage: persona names only, InferOS and its connected InferOps healthy, InferOps in stub auth", async () => {
+  const root = tempRoot();
+  try {
+    const fake = fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: STUB });
+    const ready = await runFactory(["doctor", "stage-probe", "--json"], fake.deps);
+    assert.equal(ready.exitCode, 0, ready.headline);
+    const checks = ready.report.checks as { name: string; status: string; detail: string }[];
+    assert.deepEqual(checks.map(c => `${c.status} ${c.name}`), [
+      "READY credentials", "READY smoke-credentials", "READY stage", "READY stage:reachable", "READY stage:inferos", "READY stage:inferops", "READY tool:docker", "READY tool:artilleryio/artillery:latest",
+    ]);
+    assert.match(checks[1]!.detail, /loopback stage, present \(names only\): GROKBOT_PERSONA_USER, GROKBOT_VIEWER_USER/);
+    assert.equal(fake.launches.length, 0);
+    const text = JSON.stringify(ready.report) + ready.headline;
+    for (const value of ["operator-value-1", "viewer-value-2"]) assert.ok(!text.includes(value));
+
+    const { GROKBOT_VIEWER_USER: _viewer, ...noViewer } = LOOPBACK_ENV;
+    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: noViewer, answers: LOOPBACK_ANSWERS, bodies: STUB }).deps);
     assert.equal(missing.exitCode, 1);
-    assert.match(missing.headline, /FAIL\s+smoke-credentials: missing \(names only\): CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_USER, GROKBOT_PERSONA_PASSWORD/);
-    const env = { PATH: "/bin", CF_ACCESS_CLIENT_ID: "id-value-123", CF_ACCESS_CLIENT_SECRET: "secret-value-456", GROKBOT_PERSONA_USER: "u", GROKBOT_PERSONA_PASSWORD: "pw-value-789" };
-    const fake = fakeDeps(root, { env });
+    assert.match(missing.headline, /FAIL\s+smoke-credentials: loopback stage, missing \(names only\): GROKBOT_VIEWER_USER/);
+
+    const oauth = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: { ...STUB, "8980/auth/public-config": { mode: "oauth" } } }).deps);
+    assert.match(oauth.headline, /FAIL\s+stage:inferops: .*auth mode is oauth/);
+    const down = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: LOOPBACK_ENV, answers: { "8980/health/ready": 200 }, bodies: STUB }).deps);
+    assert.match(down.headline, /FAIL\s+stage:reachable: http:\/\/127.0.0.1:8797\/ did not answer/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a loopback stage's InferOps comes from the recorded --inferops-connect sandbox when the stage is its InferOS", () => {
+  const root = tempRoot();
+  try {
+    const stage = stageTarget("http://127.0.0.1:8797");
+    assert.equal(stageInferopsUrl(stage, root, {}), null);
+    const state = (inferops: "mock" | "connected", url: string) => writeState(root, { sandbox: "dev", startedAt: "t", services: { inferos: { pid: 1, startedByFactory: true, url, inferops, inferopsUrl: inferops === "connected" ? "http://127.0.0.1:8980" : undefined } } });
+    state("connected", "http://localhost:8797");
+    assert.equal(stageInferopsUrl(stage, root, {}), "http://127.0.0.1:8980");
+    assert.equal(stageInferopsUrl(stageTarget("http://localhost:8787"), root, {}), null, "another port is another stage");
+    assert.equal(stageInferopsUrl(stage, root, { FACTORY_INFEROPS_URL: "http://127.0.0.1:9000/x" }), "http://127.0.0.1:9000");
+    state("mock", "http://localhost:8797");
+    assert.equal(stageInferopsUrl(stage, root, {}), null, "a mock InferOS is connected to nothing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a remote stage: the Access token and persona by name, and unauthenticated GET / redirected to Access", async () => {
+  const root = tempRoot();
+  try {
+    const env = { PATH: "/bin", FACTORY_STAGE_URL: "https://dev-os.example.test", CF_ACCESS_CLIENT_ID: "id-value-123", CF_ACCESS_CLIENT_SECRET: "secret-value-456", GROKBOT_PERSONA_USER: "u", GROKBOT_PERSONA_PASSWORD: "pw-value-789", GROKBOT_VIEWER_USER: "v" };
+    const access = { "/": "https://team.cloudflareaccess.com/cdn-cgi/access/login/dev-os.example.test" };
+    const fake = fakeDeps(root, { env, answers: { "/": 302 }, redirects: access });
     const ready = await runFactory(["up", "stage-probe", "--json"], fake.deps);
     assert.equal(ready.exitCode, 0, ready.headline);
+    assert.match(ready.headline, /READY stage:access: unauthenticated GET \/ is redirected to Cloudflare Access \(team.cloudflareaccess.com\)/);
     assert.equal(fake.launches.length, 0);
-    assert.equal(fake.dockerCalls.length, 0);
     const text = JSON.stringify(ready.report) + ready.headline;
     for (const value of Object.values(env).filter(v => v.includes("value"))) assert.ok(!text.includes(value));
+
+    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: { PATH: "/bin", FACTORY_STAGE_URL: "https://dev-os.example.test", GROKBOT_PERSONA_USER: "u", GROKBOT_VIEWER_USER: "v" }, answers: { "/": 302 }, redirects: access }).deps);
+    assert.match(missing.headline, /FAIL\s+smoke-credentials: remote stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_PASSWORD/);
+    const open = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env, answers: { "/": 200 } }).deps);
+    assert.match(open.headline, /FAIL\s+stage:access: unauthenticated GET \/ answered 200, not an Access redirect/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persona variables are a credentials FAIL in every sandbox but stage-probe", async () => {
+  const root = tempRoot();
+  try {
+    const env = { PATH: "/bin", GROKBOT_PERSONA_USER: "operator-value-1", GROKBOT_VIEWER_USER: "viewer-value-2" };
+    assert.deepEqual(forbiddenCredentials(env, "stage-probe"), []);
+    for (const sandbox of ["dev", "infra", "verify"] as const) assert.deepEqual(forbiddenCredentials(env, sandbox), ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
+    const result = await runFactory(["doctor", "dev"], fakeDeps(root, { env }).deps);
+    assert.match(result.headline, /FAIL\s+credentials: cloud\/provider\/prod credentials present \(names only\): GROKBOT_PERSONA_USER, GROKBOT_VIEWER_USER/);
+    assert.ok(!result.headline.includes("value"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stage-smoke runs the smoke only when doctor stage-probe is READY, and reports only its verdict lines", async () => {
+  const root = tempRoot();
+  try {
+    const { GROKBOT_VIEWER_USER: _viewer, ...noViewer } = LOOPBACK_ENV;
+    const blocked = fakeDeps(root, { env: noViewer, answers: LOOPBACK_ANSWERS, bodies: STUB });
+    const refused = await runFactory(["stage-smoke"], blocked.deps);
+    assert.equal(refused.exitCode, 1);
+    assert.equal(blocked.runInCalls.length, 0);
+    assert.match(refused.headline, /the smoke did not run/);
+
+    const output = "noise with operator-value-1\n[stage-smoke] PASS operator.applied: moved\n[factory] stage-smoke: PASS (evidence /e)\n";
+    for (const exitCode of [0, 1]) {
+      const fake = fakeDeps(root, { env: { ...LOOPBACK_ENV, FACTORY_STAGE_URL: "http://127.0.0.1:1" }, answers: { ...LOOPBACK_ANSWERS, 1: 200 }, bodies: STUB, runIn: () => ({ exitCode, stdout: output, stderr: "" }) });
+      const result = await runFactory(["stage-smoke", "--stage-url", "http://127.0.0.1:8797", "--json"], fake.deps);
+      assert.equal(result.exitCode, exitCode, result.headline);
+      assert.equal(fake.runInCalls.length, 1);
+      assert.match(fake.runInCalls[0]!.argv.at(-1)!, /scripts\/ci\/stage-smoke\.ts$/);
+      assert.equal(fake.runInCalls[0]!.env.FACTORY_STAGE_URL, "http://127.0.0.1:8797", "--stage-url wins over the environment");
+      assert.deepEqual((result.report.smoke as { lines: string[] }).lines, ["[stage-smoke] PASS operator.applied: moved", "[factory] stage-smoke: PASS (evidence /e)"]);
+      assert.ok(!result.headline.includes("operator-value-1"));
+    }
+    assert.equal((await runFactory(["stage-smoke", "dev"], blocked.deps)).exitCode, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
