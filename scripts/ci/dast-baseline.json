@@ -1,0 +1,4 @@
+{
+  "note": "ZAP plugin ids of accepted high-risk alerts (riskcode 3). Each entry is a reviewed decision; add one only with its reason in the commit.",
+  "acceptedHighPluginIds": []
+}

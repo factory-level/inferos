@@ -30,6 +30,7 @@
     "docs:check": "scripts/check-docs.sh",
     "check:fast": "node scripts/check-fast.ts",
     "check:full": "node scripts/check-full.ts",
+    "factory:ci": "node scripts/ci/pipeline.ts --target=local",
     "check:dev-secrets": "node scripts/check-gatekeeper-dev-secrets.ts",
     "lint:check": "vp lint",
     "lint:fix": "vp lint --fix",

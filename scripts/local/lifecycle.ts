@@ -14,6 +14,8 @@
 //                                                The InferOps coding runner for a wrapper (scripts/local/coding.ts)
 //   pnpm local coding doctor [--json] [--consumer-root DIR]
 //                                                Whether that runner may start: flag, allowlist, CLI, sign-in, environment
+//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down [--json] [--inferops-dir DIR]
+//                                                The software factory's sandboxes (scripts/local/factory.ts)
 //
 // Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and
 // exits 0 when its check passed, 1 when it failed, 2 on a usage error. With `--json` the only
@@ -36,6 +38,7 @@ import { assertLocalPortAvailable } from "../consumer/runtime.ts";
 import { relayTermination } from "../relay-termination.ts";
 import { withWorktreeEnv } from "../worktree-env.ts";
 import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
+import { runFactory } from "./factory.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
   probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack, stackOwnership,
@@ -45,7 +48,7 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OPERATORS = join(ROOT, "packages", "workshop-backend", "scripts");
 
-export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs", "runner", "coding"] as const;
+export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs", "runner", "coding", "factory"] as const;
 export type Command = (typeof COMMANDS)[number];
 
 /** Exit codes every command shares. */
@@ -66,7 +69,9 @@ export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
   runner start|status|stop [--consumer-root DIR] [--once]
                           Run the InferOps coding runner (patch mode) for a wrapper's codingWorkbench.repos
   coding doctor [--consumer-root DIR]
-                          Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env`;
+                          Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env
+  factory up <dev|infra|verify|stage-probe>|status|doctor [sandbox]|down [--inferops-dir DIR] [--timeout S]
+                          The factory sandboxes: start, report READY/FAIL per check, stop what was started`;
 
 /** The subcommands of the two-word commands. */
 const SUBCOMMANDS: Partial<Record<Command, readonly string[]>> = {
@@ -449,6 +454,8 @@ function logs(parsed: Parsed, deps: LifecycleDeps): LifecycleResult {
 
 /** Run one command. Usage errors surface as exit 2 with the usage text in `report.error`. */
 export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps = defaultDeps): Promise<LifecycleResult & { json: boolean }> {
+  // The factory has its own argument shape (a sandbox positional), so it parses for itself.
+  if (argv[0] === "factory") return { ...await runFactory(argv.slice(1), deps), json: argv.includes("--json") };
   let parsed: Parsed;
   let stack: LocalStack;
   try {
@@ -471,6 +478,8 @@ export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps 
       case "runner":
       case "coding":
         return runCoding(parsed.command, parsed.sub!, { consumerRoot: parsed.consumerRoot, once: parsed.once }, deps);
+      case "factory":
+        throw new Error("factory is dispatched before parsing");
     }
   })();
   return { ...result, json: parsed.json };

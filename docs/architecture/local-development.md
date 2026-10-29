@@ -32,7 +32,7 @@ covers:
   - scripts/check-fast.ts
   - scripts/check-fast.test.ts
   - scripts/check-full.ts
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 
 # Cloudflare-like local development
@@ -122,6 +122,7 @@ This is the Workshop's Cap'n Web Operate chat, not an AG-UI client. The model an
 | `reset --yes` | Deletes `.wrangler/state` (Wrangler's Durable Object, KV, R2 and cache state; the dev server starts Wrangler from the repo root, so every Worker's state lives there) and the dev-server record, nothing else. | `--yes` is missing, or the recorded dev server is still running. |
 | `runner start\|status\|stop [--consumer-root DIR] [--once]` | The local InferOps coding runner of a wrapper, detached and recorded in `.inferos/state/runner/` ([local coding workflows](local-coding-workflows.md#runner-lifecycle)). | Start: refused (flag off, settings missing, not ready). Status: not running, not ready or paused. Stop: it survives 30 s. |
 | `coding doctor [--consumer-root DIR]` | Whether that runner may start: flag, allowlist, settings, child environment, CLI version, Codex sign-in, pause file. | Any check fails. |
+| `factory up <sandbox>\|status\|doctor [sandbox]\|down` | The software factory's sandboxes (`scripts/local/factory.ts`, parsed by itself before the rest of `lifecycle.ts`): this stack plus the InferOps stack in its own checkout, floci-gcp, tool images or smoke credentials by name ([software factory](factory.md)). | `up`: a credential is present, a port is foreign, or a service is not healthy before `--timeout`. `doctor`/`status`: any check FAILs. `down`: a started process survives. |
 | `logs [--lines N]` | Reports Wrangler's log directory (`WRANGLER_LOG_PATH`, else `logs/` under its global config directory, which is per user, not per checkout) and the newest file's tail. The terminal running `start` holds the request log. | Never. |
 
 A generated wrapper's `pnpm local` runs this operator from its pinned submodule, with the wrapper's `local.port`; `start` adds `--consumer-root <wrapper>` after the wrapper's own startup refusals, and `seed` defaults `--screen` to the wrapper's first screen template, and `runner`/`coding` get `--consumer-root <wrapper>` ([consumer configuration](consumer-configuration.md#data-and-control-flow), [walkthrough](../wiki/consumer-bootstrap.md#wrapper-pnpm-local)).

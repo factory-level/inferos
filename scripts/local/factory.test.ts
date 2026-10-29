@@ -1,0 +1,314 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import type { ProcessResult } from "./coding.ts";
+import { forbiddenCredentials, inferopsChildEnv, runFactory, stateFile, VERIFY_IMAGES, type FactoryDeps } from "./factory.ts";
+import { runLifecycle, defaultDeps } from "./lifecycle.ts";
+import type { DevServerRecord } from "./stack.ts";
+
+/** A fake machine: which ports answer, which URLs return what, which processes live. */
+function fakeDeps(root: string, opts: {
+  env?: NodeJS.ProcessEnv;
+  answers?: Record<string, number>;
+  listening?: number[];
+  record?: DevServerRecord | null;
+  docker?: (argv: string[]) => ProcessResult;
+  alive?: (pid: number) => boolean;
+} = {}) {
+  const launches: { argv: string[]; env: Record<string, string>; cwd: string }[] = [];
+  const signals: [number, NodeJS.Signals][] = [];
+  const dockerCalls: string[][] = [];
+  let clock = 0;
+  const deps: FactoryDeps = {
+    root,
+    env: opts.env ?? { PATH: "/usr/bin" },
+    isPortListening: async port => (opts.listening ?? []).includes(port),
+    devServerRecord: () => opts.record ?? null,
+    fetchImpl: (async (input: string | URL) => {
+      const url = new URL(String(input));
+      const key = `${url.port}${url.pathname}`;
+      const status = opts.answers?.[key] ?? opts.answers?.[url.port];
+      if (status === undefined) throw new Error("connection refused");
+      return new Response(JSON.stringify({ path: url.pathname }), { status });
+    }) as typeof fetch,
+    runCli: argv => {
+      dockerCalls.push(argv);
+      return opts.docker?.(argv) ?? { exitCode: 0, stdout: "27.0.0\n", stderr: "" };
+    },
+    launch: (argv, env, _log, cwd) => {
+      launches.push({ argv, env, cwd });
+      return 4242 + launches.length;
+    },
+    signal: (pid, signal) => { signals.push([pid, signal]); },
+    processAlive: pid => opts.alive?.(pid) ?? false,
+    sleep: async ms => { clock += ms; },
+    now: () => clock,
+  };
+  return { deps, launches, signals, dockerCalls };
+}
+
+/** A checkout with a (fake) installed wrangler, which `infra` and `verify` check for. */
+function tempRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), "inferos-factory-"));
+  mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(root, "node_modules", ".bin", "wrangler"), "");
+  return root;
+}
+
+function inferopsCheckout(): string {
+  const dir = mkdtempSync(join(tmpdir(), "inferops-"));
+  mkdirSync(join(dir, "scripts"));
+  writeFileSync(join(dir, "scripts", "dev.mjs"), "");
+  return dir;
+}
+
+const ours: DevServerRecord = { pid: 777, port: 8787, mode: "run-local", startedAt: "2026-10-28T00:00:00.000Z" };
+
+test("usage errors exit 2", async () => {
+  const root = tempRoot();
+  try {
+    for (const argv of [[], ["bogus"], ["up"], ["up", "prod"], ["doctor", "dev", "extra"], ["up", "dev", "--timeout", "soon"]]) {
+      const result = await runFactory(argv, fakeDeps(root).deps);
+      assert.equal(result.exitCode, 2, argv.join(" "));
+      assert.match(String(result.report.error), /dev, infra, verify, stage-probe/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("credentials are detected by name: provider keys via runner.ts, cloud keys, smoke keys outside stage-probe", () => {
+  const env = { OPENAI_API_KEY: "sk-x", AWS_SECRET_ACCESS_KEY: "y", CLOUDFLARE_API_TOKEN: "z", CF_ACCESS_CLIENT_SECRET: "s", PATH: "/bin", INFEROPS_API_KEY: "ok", EMPTY_API_KEY: "" };
+  assert.deepEqual(forbiddenCredentials(env, "dev"), ["AWS_SECRET_ACCESS_KEY", "CF_ACCESS_CLIENT_SECRET", "CLOUDFLARE_API_TOKEN", "OPENAI_API_KEY"]);
+  assert.deepEqual(forbiddenCredentials(env, "stage-probe"), ["AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN", "OPENAI_API_KEY"]);
+});
+
+test("doctor FAILS on a credential and never prints its value", async () => {
+  const root = tempRoot();
+  try {
+    const { deps } = fakeDeps(root, { env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk-ant-secret-value" }, listening: [8787], record: ours, answers: { 8787: 200, 8080: 200 } });
+    const result = await runFactory(["doctor", "dev", "--json"], deps);
+    assert.equal(result.exitCode, 1);
+    const text = JSON.stringify(result.report) + result.headline;
+    assert.ok(!text.includes("sk-ant-secret-value"));
+    const checks = result.report.checks as { name: string; status: string; detail: string }[];
+    assert.equal(checks.find(c => c.name === "credentials")?.status, "FAIL");
+    assert.match(checks.find(c => c.name === "credentials")!.detail, /ANTHROPIC_API_KEY/);
+    assert.match(result.headline, /FAIL\s+credentials/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("up refuses with a credential present, before launching anything", async () => {
+  const root = tempRoot();
+  try {
+    const fake = fakeDeps(root, { env: { PATH: "/bin", GOOGLE_APPLICATION_CREDENTIALS: "/k.json" } });
+    const result = await runFactory(["up", "dev"], fake.deps);
+    assert.equal(result.exitCode, 1);
+    assert.equal(fake.launches.length, 0);
+    assert.equal(existsSync(stateFile(root)), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor dev is READY when both services answer, with health JSON per service", async () => {
+  const root = tempRoot();
+  try {
+    const { deps } = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200 } });
+    const result = await runFactory(["doctor", "dev", "--json"], deps);
+    assert.equal(result.exitCode, 0, result.headline);
+    const checks = result.report.checks as { name: string; status: string; health?: { status?: number; workers?: unknown[] } }[];
+    assert.deepEqual(checks.map(c => [c.name, c.status]), [["credentials", "READY"], ["service:inferos", "READY"], ["service:inferops", "READY"]]);
+    assert.ok(Array.isArray(checks[1]!.health?.workers));
+    assert.equal(checks[2]!.health?.status, 200);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an InferOps that does not answer is an honest FAIL naming the missing checkout", async () => {
+  const root = tempRoot();
+  try {
+    const { deps } = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200 } });
+    const result = await runFactory(["doctor", "dev"], deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.headline, /FAIL\s+service:inferops: http:\/\/127\.0\.0\.1:8080\/health\/ready did not answer; no InferOps checkout configured/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a foreign listener on the InferOS port is never adopted or probed as the stack", async () => {
+  const root = tempRoot();
+  try {
+    const fake = fakeDeps(root, { listening: [8787], record: null, answers: { 8787: 200, "8080/health/ready": 200 } });
+    const result = await runFactory(["up", "dev", "--timeout", "0"], fake.deps);
+    assert.equal(result.exitCode, 1);
+    assert.equal(fake.launches.length, 0);
+    assert.match(result.headline, /port 8787 is in use by a process this checkout did not start/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("up dev launches run-local here and bun in the InferOps checkout, each with its own toolchain", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    const fake = fakeDeps(root, {
+      env: { PATH: "/bin", npm_config_user_agent: "pnpm/11", PNPM_HOME: "/p", HOME: "/h" },
+      answers: {}, alive: () => true,
+    });
+    // Each service answers once the factory launched it.
+    const launchedBy = (tool: string) => fake.launches.some(l => l.argv[0] === tool || l.argv[0] === process.execPath && tool === "node");
+    fake.deps.isPortListening = async () => launchedBy("node");
+    fake.deps.devServerRecord = () => launchedBy("node") ? ours : null;
+    fake.deps.fetchImpl = (async (input: string | URL) => {
+      const port = new URL(String(input)).port;
+      if (port === "8787" && launchedBy("node") || port === "8080" && launchedBy("bun")) return new Response("{}", { status: 200 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+    const result = await runFactory(["up", "dev", "--inferops-dir", inferops], fake.deps);
+    assert.equal(result.exitCode, 0, result.headline);
+    assert.equal(fake.launches.length, 2);
+    const [inferos, ops] = fake.launches;
+    assert.match(inferos!.argv.join(" "), /scripts\/run-local\.ts --port 8787$/);
+    assert.equal(inferos!.cwd, root);
+    assert.deepEqual(ops!.argv, ["bun", "run", "dev", "up", "--docker", "--seed"]);
+    assert.equal(ops!.cwd, inferops);
+    assert.equal(ops!.env.npm_config_user_agent, undefined);
+    assert.equal(ops!.env.PNPM_HOME, undefined);
+    assert.equal(ops!.env.HOME, "/h");
+    assert.ok(existsSync(stateFile(root)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+test("up stops waiting when a launched service dies, and reports its log", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    const fake = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200 }, alive: () => false });
+    const result = await runFactory(["up", "dev", "--inferops-dir", inferops], fake.deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.headline, /inferops: pid \d+ exited; see .*inferops\.log/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+test("infra reuses a floci already answering, and down leaves it running", async () => {
+  const root = tempRoot();
+  try {
+    const fake = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200, "4588/health": 200 } });
+    const result = await runFactory(["up", "infra"], fake.deps);
+    assert.equal(result.exitCode, 0, result.headline);
+    assert.ok(!fake.dockerCalls.some(argv => argv[1] === "run"));
+    const stopped = await runFactory(["down"], fake.deps);
+    assert.deepEqual(stopped.report.stopped, []);
+    assert.deepEqual((stopped.report.leftRunning as string[]).toSorted(), ["floci", "inferops", "inferos"]);
+    assert.equal(fake.signals.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("infra starts floci on loopback when none answers, and down removes only that container", async () => {
+  const root = tempRoot();
+  try {
+    let flociUp = false;
+    const fake = fakeDeps(root, {
+      env: { PATH: "/bin", FACTORY_FLOCI_PORT: "14588" }, listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200 },
+      docker: argv => { if (argv[1] === "run") flociUp = true; return { exitCode: 0, stdout: "", stderr: "" }; },
+    });
+    const fetchImpl = fake.deps.fetchImpl;
+    fake.deps.fetchImpl = (async (input: string | URL, init?: RequestInit) =>
+      flociUp && String(input).includes(":14588/") ? new Response("{}", { status: 200 }) : fetchImpl(input, init)) as typeof fetch;
+    const result = await runFactory(["up", "infra"], fake.deps);
+    assert.equal(result.exitCode, 0, result.headline);
+    const run = fake.dockerCalls.find(argv => argv[1] === "run")!;
+    assert.ok(run.includes("127.0.0.1:14588:4588"));
+    assert.ok(!run.join(" ").includes("docker.sock"));
+    const stopped = await runFactory(["down", "--json"], fake.deps);
+    assert.deepEqual(stopped.report.stopped, ["floci"]);
+    assert.ok(fake.dockerCalls.some(argv => argv.join(" ") === "docker rm -f inferos-factory-floci"));
+    assert.equal(existsSync(stateFile(root)), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("down signals the process group the factory launched and waits for it", async () => {
+  const root = tempRoot();
+  try {
+    mkdirSync(join(root, ".factory"));
+    writeFileSync(stateFile(root), JSON.stringify({ sandbox: "dev", startedAt: "x", services: { inferos: { pid: 900, startedByFactory: true } } }));
+    let alive = true;
+    const fake = fakeDeps(root, { alive: () => alive });
+    fake.deps.signal = (pid, signal) => { fake.signals.push([pid, signal]); alive = false; };
+    const result = await runFactory(["down"], fake.deps);
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(fake.signals, [[-900, "SIGTERM"]]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verify checks every tool image; a missing one is FAIL with the pull command", async () => {
+  const root = tempRoot();
+  try {
+    const { deps } = fakeDeps(root, {
+      listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200 },
+      docker: argv => ({ exitCode: argv.includes("aquasec/trivy:latest") ? 1 : 0, stdout: "", stderr: "" }),
+    });
+    const result = await runFactory(["doctor", "verify"], deps);
+    assert.equal(result.exitCode, 1);
+    const checks = result.report.checks as { name: string; status: string; detail: string }[];
+    for (const image of VERIFY_IMAGES) assert.ok(checks.some(c => c.name === `tool:${image}`), image);
+    assert.equal(checks.find(c => c.name === "tool:aquasec/trivy:latest")?.detail, "docker pull aquasec/trivy:latest");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stage-probe runs nothing and checks the smoke credentials by name only", async () => {
+  const root = tempRoot();
+  try {
+    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: { PATH: "/bin", CF_ACCESS_CLIENT_ID: "id-value-123" } }).deps);
+    assert.equal(missing.exitCode, 1);
+    assert.match(missing.headline, /FAIL\s+smoke-credentials: missing \(names only\): CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_USER, GROKBOT_PERSONA_PASSWORD/);
+    const env = { PATH: "/bin", CF_ACCESS_CLIENT_ID: "id-value-123", CF_ACCESS_CLIENT_SECRET: "secret-value-456", GROKBOT_PERSONA_USER: "u", GROKBOT_PERSONA_PASSWORD: "pw-value-789" };
+    const fake = fakeDeps(root, { env });
+    const ready = await runFactory(["up", "stage-probe", "--json"], fake.deps);
+    assert.equal(ready.exitCode, 0, ready.headline);
+    assert.equal(fake.launches.length, 0);
+    assert.equal(fake.dockerCalls.length, 0);
+    const text = JSON.stringify(ready.report) + ready.headline;
+    for (const value of Object.values(env).filter(v => v.includes("value"))) assert.ok(!text.includes(value));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pnpm local routes factory through lifecycle.ts with --json", async () => {
+  const root = tempRoot();
+  try {
+    const result = await runLifecycle(["factory", "status", "--json"], { ...defaultDeps, root, env: {} });
+    assert.equal(result.json, true);
+    assert.equal(result.exitCode, 1);
+    assert.match(String(result.report.error), /no sandbox is up/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the InferOps child loses pnpm's script environment", () => {
+  assert.deepEqual(inferopsChildEnv({ PATH: "/b", npm_lifecycle_event: "local", INIT_CWD: "/x", NODE_OPTIONS: "--x", HOME: "/h" }), { PATH: "/b", HOME: "/h" });
+});

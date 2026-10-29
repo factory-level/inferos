@@ -1,0 +1,37 @@
+# Factory node 8, browser profiling of the InferOS shell with Artillery's Playwright engine
+# (real Chromium, inside the artilleryio/artillery container on the host network). The flow is in
+# inferos-browser.mjs: shell boot -> sign-in page -> sign in as the seeded local user -> open the
+# workspace `pnpm local seed` prepared against the mock InferOps board (its approval request is the
+# board's pending move). The engine reports Web Vitals per page (FCP, LCP, CLS, TTFB, INP when an
+# interaction produced one) and each `test.step` as `browser.step.<name>`.
+#
+# The `ensure` ceilings are PROPOSED (factory-level/inferos#158 owns numeric budget agreement; the
+# Kanban budgets agreed under #28/#158 cover a different, 500-issue mock measurement). They are a
+# gross-regression tripwire for one local VU, not a budget.
+config:
+  target: "{{ $env.FACTORY_TARGET }}"
+  engines:
+    playwright:
+      launchOptions:
+        headless: true
+      aggregateByName: true
+  processor: "./inferos-browser.mjs"
+  phases:
+    - name: profile
+      duration: 20
+      arrivalRate: 1
+      maxVusers: 2
+  ensure:
+    thresholds:
+      - browser.step.shell_boot.p95: 5000
+      - browser.step.sign_in.p95: 8000
+      - browser.step.open_board_workspace.p95: 10000
+    conditions:
+      - expression: "vusers.failed == 0"
+        strict: true
+      - expression: "vusers.completed > 0"
+        strict: true
+scenarios:
+  - name: shell to mock board workspace
+    engine: playwright
+    testFunction: shellToBoardWorkspace
