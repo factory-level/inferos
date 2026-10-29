@@ -11,6 +11,7 @@ import { dockerRun, nodeContext } from "./lib.ts";
 import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
 import { smokeContainer, smokePreconditions } from "./stage-smoke.ts";
+import { DEFAULT_WIKI, missingWikiText, wikiDisagreement, wikiExpectedText } from "./stage-smoke-wiki.ts";
 import { cvssSeverity, dedupe, newFindings, parseGitleaks, parseOsv, parseSemgrep, parseTrivy, type Baseline } from "./security.ts";
 import { VERIFY_PARTS } from "./verify.ts";
 
@@ -211,4 +212,24 @@ test("stage-smoke containers get credentials by name only, the checkout read-onl
   assert.deepEqual(loopback.slice(-14, -2), ["--network", "host", "-e", "FACTORY_STAGE_URL", "-e", "GROKBOT_PERSONA_USER", "-e", "GROKBOT_VIEWER_USER", "-v", "/repo:/repo:ro", "-v", "/repo/.factory/runs/r/stage-smoke:/repo/.factory/runs/r/stage-smoke"]);
   assert.ok(!loopback.includes("/var/run/docker.sock") && !loopback.some(arg => arg.startsWith("-p")));
   assert.ok(!smokeContainer(ctx, { origin: "https://dev-os.example.test", kind: "remote" }, ["image"]).includes("--network"));
+});
+
+test("stage-smoke wiki: the canvas must show the page's title and first prose lines, body before sections", () => {
+  assert.equal(DEFAULT_WIKI, "inferops://grokbot.knowledge/knowledge/wiki");
+  const page = { slug: "handbook", title: "QA  Handbook", body: "# QA Handbook\n\nWork the **GROK** board via [InferOS](https://x.test).\n\n```\ncode\n```\n- [[runbook#start|the runbook]] first\n- fourth line", sections: ["ignored"] };
+  assert.deepEqual(wikiExpectedText(page), ["QA Handbook", "Work the GROK board via InferOS.", "the runbook first"]);
+  assert.deepEqual(wikiExpectedText({ ...page, body: "  ", sections: ["## Start\nRead `me`.", "| a | b |"] }), ["QA Handbook", "Start", "Read me."]);
+  const long = "word ".repeat(40).trim();
+  assert.ok(wikiExpectedText({ ...page, body: long })[1]!.length <= 120);
+  assert.deepEqual(missingWikiText("QA Handbook\nWork the GROK\n board via InferOS.", ["QA Handbook", "Work the GROK board via InferOS.", "absent"]), ["absent"]);
+});
+
+test("stage-smoke wiki: the gatekeeper's page must be InferOps' page, field by field", () => {
+  const page = { slug: "a", title: "A", body: "b", sections: ["s1", "s2"] };
+  assert.equal(wikiDisagreement(page, { ...page }), null);
+  assert.equal(wikiDisagreement(page, { ...page, slug: "z" }), "slug a vs z");
+  assert.equal(wikiDisagreement(page, { ...page, title: "B" }), "the title differs");
+  assert.equal(wikiDisagreement(page, { ...page, body: "c" }), "the body differs");
+  assert.equal(wikiDisagreement(page, { ...page, sections: ["s1"] }), "2 sections vs 1");
+  assert.equal(wikiDisagreement(page, { ...page, sections: ["s1", "x"] }), "section 2 differs");
 });

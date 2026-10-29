@@ -5,7 +5,8 @@
 //   node scripts/ci/stage-smoke-flow.ts <evidence dir>
 //
 // Environment: FACTORY_STAGE_URL, GROKBOT_PERSONA_USER (operator persona), GROKBOT_VIEWER_USER
-// (viewer persona), FACTORY_STAGE_BOARD (default the grokbot GROK board), and for a remote stage
+// (viewer persona), FACTORY_STAGE_BOARD (default the grokbot GROK board), FACTORY_STAGE_WIKI
+// (default the grokbot tenant's InferMind Wiki, `grokbot.knowledge`), and for a remote stage
 // CF_ACCESS_CLIENT_ID/SECRET, sent as Access service-token headers. No value is written anywhere:
 // the evidence names the personas by role.
 //
@@ -20,6 +21,10 @@
 //                          leaves the stage's board as it found it
 //   viewer.refused         the viewer's proposal is refused (at proposal, or when its approval is
 //                          applied), and InferOps' issue state and revision are unchanged
+//   operator.wikiReads,    the Wiki's first page, read through the person's own Wiki connection, is
+//   viewer.wikiReads       the page InferOps' knowledge API answers that persona, and its title and
+//                          first lines render on a canvas holding the `inferops.wiki` widget (a
+//                          read: the viewer's knowledge role allows it)
 // The move is proposed through the gatekeeper's issue session (the API the board widget calls),
 // and approved by clicking Approve in the workspace's Activity panel.
 
@@ -27,6 +32,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { DEFAULT_WIKI, missingWikiText, wikiDisagreement, wikiExpectedText, type WikiPageText } from "./stage-smoke-wiki.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const DEFAULT_BOARD = "inferops://grokbot.operations/project/board/GROK";
@@ -49,6 +55,7 @@ interface IssueState { stateId: string; revision: string }
 const env = process.env;
 const stage = new URL(env.FACTORY_STAGE_URL ?? "");
 const boardUrl = env.FACTORY_STAGE_BOARD ?? DEFAULT_BOARD;
+const wikiUrl = env.FACTORY_STAGE_WIKI ?? DEFAULT_WIKI;
 const out = resolve(process.argv[2] ?? ".");
 mkdirSync(out, { recursive: true });
 const oracles: Oracle[] = [];
@@ -159,7 +166,7 @@ async function connectInferOps(context: Any, page: Any, user: Any, role: string,
 }
 
 /** InferOps' own API as a persona (stub-mode persona login, bearer transport). */
-async function inferopsApi(origin: string, persona: string): Promise<{ issue(id: string): Promise<IssueState> } | string> {
+async function inferopsApi(origin: string, persona: string): Promise<{ issue(id: string): Promise<IssueState>; wikiPage(slug: string): Promise<WikiPageText | null> } | string> {
   const config = await (await fetch(`${origin}/auth/public-config`)).json() as { mode?: string };
   if (config.mode !== "stub") return `InferOps auth mode is ${config.mode}; its API is read here only through stub persona login`;
   const login = await fetch(`${origin}/auth/inferlab-login`, {
@@ -169,7 +176,25 @@ async function inferopsApi(origin: string, persona: string): Promise<{ issue(id:
   if (!login.ok) return `persona login answered ${login.status}`;
   const session = await login.json() as { token: string; user: { workspaces: { workspaceId: string; product: string }[] } };
   const workspaces = session.user.workspaces.filter(w => w.product === "inferops").map(w => w.workspaceId);
+  const knowledge = session.user.workspaces.filter(w => w.product === "infermind").map(w => w.workspaceId);
+  const read = async (workspaceId: string, path: string): Promise<unknown> => {
+    const response = await fetch(`${origin}${path}`, { headers: { authorization: `Bearer ${session.token}`, "x-workspace-id": workspaceId, accept: "application/json" } });
+    if (!response.ok) throw new Error(`InferOps answered ${response.status} for ${path.split("?")[0]}`);
+    return response.json();
+  };
   return {
+    // A Wiki page as InferOps' knowledge API answers this persona, from its InferMind workspaces.
+    async wikiPage(slug) {
+      for (const workspaceId of knowledge) {
+        const documents = await read(workspaceId, "/knowledge/documents") as { id: string; slug: string }[];
+        const listed = documents.find(d => d.slug === slug);
+        if (!listed) continue;
+        const document = await read(workspaceId, `/knowledge/documents/${listed.id}`) as { slug: string; title: string; body?: string | null };
+        const sections = await read(workspaceId, `/knowledge/sections?documentId=${listed.id}`) as { body: string }[];
+        return { slug: document.slug, title: document.title, body: document.body ?? "", sections: sections.map(s => s.body) };
+      }
+      return null;
+    },
     async issue(id) {
       for (const workspaceId of workspaces) {
         const response = await fetch(`${origin}/project/issues/${id}`, { headers: { authorization: `Bearer ${session.token}`, "x-workspace-id": workspaceId, accept: "application/json" } });
@@ -263,6 +288,51 @@ async function approveInBrowser(page: Any, workspaceId: string, shot: string): P
   await approve.click();
 }
 
+/**
+ * `<role>.wikiReads`: the person's own connection to the Wiki (made from their InferOps account when
+ * the workspace holds none) lists its pages; the first is read through the gatekeeper and through
+ * InferOps' knowledge API as the same persona, which must agree, and a saved canvas holding the
+ * `inferops.wiki` widget opened on that page must show its title and first lines.
+ */
+async function wikiReads(role: "operator" | "viewer", page: Any, user: Any, accountId: number, persona: string, inferops: string): Promise<void> {
+  const name = `${role}.wikiReads`;
+  const api = await inferopsApi(inferops, persona);
+  if (typeof api === "string") { record(name, false, api); return; }
+  const overseer = await ensureWorkspace(user, `Stage smoke (${role})`);
+  const workspaceId = (await overseer.getMetadata()).id as string;
+  const connection = await overseer.getGatekeeperByResourceUrl(wikiUrl) ?? await overseer.newGatekeeper(accountId, wikiUrl);
+  if (!connection) { record(name, false, `the InferOps account cannot open ${wikiUrl}`); return; }
+  const session = await connection.openSession();
+  const documents = await session.listDocuments() as { slug: string; parentId: string | null }[];
+  const first = documents.find(d => d.parentId === null) ?? documents[0];
+  if (!first) { record(name, false, `${wikiUrl} lists no page the ${role} can open (seed one: factory-sandboxes skill)`); return; }
+  const read = await session.readDocument(first.slug) as { slug: string; title: string; body: string; sections: { body: string }[] };
+  const gatekeeper: WikiPageText = { slug: read.slug, title: read.title, body: read.body, sections: read.sections.map(s => s.body) };
+  const inferopsPage = await api.wikiPage(first.slug);
+  if (!inferopsPage) { record(name, false, `InferOps' knowledge API answers the ${role} no page ${first.slug}`); return; }
+  const disagreement = wikiDisagreement(gatekeeper, inferopsPage);
+  if (disagreement) { record(name, false, `the gatekeeper's ${first.slug} is not InferOps' (${disagreement})`); return; }
+  const expected = wikiExpectedText(inferopsPage);
+  const screenTitle = `Stage smoke wiki (${first.slug})`;
+  const screens = await overseer.listCanvases() as { id: string; title: string }[];
+  const screen = screens.find(s => s.title === screenTitle) ?? await overseer.createCanvas({
+    title: screenTitle,
+    sections: [{ id: "main", title: screenTitle, columns: 2, widgets: [{ id: "wiki", kind: "inferops.wiki", version: 1, targetRef: wikiUrl, size: "full", params: { page: first.slug } }] }],
+  });
+  await page.goto(new URL(`/workspace/${workspaceId}/inferops-canvas?view=${screen.id}`, stage).toString());
+  const widget = page.getByRole("article", { name: `InferMind Wiki ${wikiUrl}` });
+  let missing = expected;
+  for (let attempt = 0; attempt < 30 && missing.length; attempt++) {
+    missing = missingWikiText(await widget.innerText({ timeout: 30_000 }).catch(() => ""), expected);
+    if (missing.length) await page.waitForTimeout(1_000);
+  }
+  await page.screenshot({ path: join(out, `${role}-09-wiki.png`) });
+  notes[`${role}Wiki`] = { wiki: wikiUrl, page: first.slug, pages: documents.length, sections: inferopsPage.sections.length, phrases: expected.length };
+  record(name, missing.length === 0, missing.length
+    ? `missing on the canvas: ${missing.map(m => JSON.stringify(m)).join(", ")}`
+    : `${first.slug} ("${inferopsPage.title}") read through the ${role}'s Wiki connection matches InferOps' knowledge API, and its ${expected.length} phrases rendered on the canvas`);
+}
+
 const until = async <T>(read: () => Promise<T>, done: (value: T) => boolean, ms = 60_000): Promise<T> => {
   const deadline = Date.now() + ms;
   let value = await read();
@@ -289,6 +359,8 @@ async function operatorFlow(browser: Any): Promise<void> {
     if (!await user.isOnboardingCompleted()) await user.completeOnboarding();
     const account = await connectInferOps(context, page, user, "operator", persona);
     if (!record("operator.signIn", Boolean(token && account), account ? `InferOS session, InferOps account connected (${account.displayName ?? "account"})` : "signed in, but no InferOps account is connected")) return;
+    // The Wiki read is independent of the board flow, so a board failure does not hide it.
+    await wikiReads("operator", page, user, account!.id, persona, inferops).catch((error: Error) => record("operator.wikiReads", false, error.message.split("\n")[0]!));
     const bound = await bindBoard(user, account!.id, "Stage smoke (operator)");
     const board = await bound.session.readBoard() as Board;
     const identifiers = board.columns.flatMap(c => c.issues.map(i => i.identifier));
@@ -357,6 +429,7 @@ async function viewerFlow(browser: Any): Promise<void> {
     if (!await user.isOnboardingCompleted()) await user.completeOnboarding();
     const account = await connectInferOps(context, page, user, "viewer", persona);
     if (!account) { record("viewer.refused", false, "the viewer has no InferOps account connected, so no refusal was exercised"); return; }
+    await wikiReads("viewer", page, user, account.id, persona, inferops).catch((error: Error) => record("viewer.wikiReads", false, error.message.split("\n")[0]!));
     // The oracle reads InferOps as the operator: the viewer's own read would not show a write it could not see.
     const operatorApi = await inferopsApi(inferops, env.GROKBOT_PERSONA_USER!);
     if (typeof operatorApi === "string") { record("viewer.refused", false, operatorApi); return; }
@@ -411,7 +484,7 @@ try {
 } finally {
   await browser.close();
 }
-const expected = ["operator.signIn", "operator.boardRenders", "operator.simulated", "operator.applied", "operator.restored", "viewer.refused"];
+const expected = ["operator.signIn", "operator.wikiReads", "operator.boardRenders", "operator.simulated", "operator.applied", "operator.restored", "viewer.wikiReads", "viewer.refused"];
 for (const name of expected) if (!oracles.some(o => o.name === name)) oracles.push({ name, ok: false, detail: "not reached" });
 const ok = oracles.every(o => o.ok);
 writeFileSync(join(out, "smoke.json"), JSON.stringify({ ok, stage: stage.origin, board: boardUrl, oracles, notes }, null, 2) + "\n");
