@@ -171,7 +171,7 @@
     "provider": {
       "name": "InferOps",
       "repository": "https://github.com/factory-level/inferops",
-      "revision": "29b01a024c377b9c37b8754e7001b290e15d1509",
+      "revision": "239de4858285e37ceea9c7305dc021ac7d2e8308",
       "apiVersion": null,
       "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin. Wiki proposal reads and approval need InferOps at or after 5483e7cd (factory-level/inferops#2368) with knowledge.wikiPublish.enabled on; otherwise those calls are NOT_FOUND."
     },
