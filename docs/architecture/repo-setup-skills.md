@@ -5,8 +5,9 @@ covers:
   - scripts/generate-worker-configs.ts
   - scripts/release/manifest-lib.ts
   - .agents/skills
+  - scripts/factory
   - packages/workshop-backend/scripts/upload-consumer-skills.ts
-updated: 2026-10-11
+updated: 2026-10-28
 ---
 
 # InferOS repository setup skills
@@ -29,6 +30,8 @@ InferOS supplies a bootstrap skill and deterministic consumer scripts. They crea
 | `scripts/consumer/settings.ts` | The executable settings table for the selected private customer, validated by wrapper `doctor` and generating the [configuration reference](../wiki/configuration-reference.md#selected-customer-settings) section; `settings.test.ts` fails on drift ([details](consumer-configuration.md#data-and-control-flow)). |
 | `scripts/consumer/skill-packs` | Starter `operate`, `build` and `shared` runtime skills that bootstrap copies to `skills/`. `build/coding-dispatch` drives coding dispatch through the InferOps gatekeeper and reports only the runner's patch and test evidence. |
 | `.agents/skills/iterate` | The edit-check loop for this repository itself: `pnpm check:fast` per change, `pnpm check:full` before hand-off (see [check tiers](local-development.md#check-tiers)). Not copied to wrappers. |
+| `.agents/skills/factory-feature` | The cross-repo factory feature entry (invoked only on request): InferOps issue → approved data model → one dispatch per stage to the coding runner or Claude → a verifier reading patches and recorded exit codes → two PRs; plus the InferOS-side stage rules. Its InferOps half is `inferops/.claude/skills/factory-feature`. Not copied to wrappers yet. |
+| `scripts/factory/gate.ts` | Runs one gate command without a shell and records `{command, exitCode, startedAt, durationMs}` and its output under `.factory/runs/<id>/feature/stage-<n>/` (git-ignored). |
 | `.agents/skills/local-coding` | Setup, operation and recovery of the local coding runner; see [local coding workflows](local-coding-workflows.md). |
 | `scripts/consumer/skills.ts`, `skill-manifest.ts` | Read `inferos.skills.json`, collect pack files (excludes, includes, limits, no links) and validate `SKILL.md` frontmatter. |
 | `packages/workshop-backend/scripts/upload-consumer-skills.ts` | Local administrator upload of packs into public Context Library collections. |
