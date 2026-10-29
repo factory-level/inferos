@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ProcessResult } from "./coding.ts";
-import { forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
+import { accessTokenFile, forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
 import { runLifecycle, defaultDeps } from "./lifecycle.ts";
 import type { DevServerRecord } from "./stack.ts";
 
@@ -21,6 +21,8 @@ function fakeDeps(root: string, opts: {
   bodies?: Record<string, unknown>;
   /** `Location` headers by `<port><path>`, for redirect answers. */
   redirects?: Record<string, string>;
+  /** Answers first, by URL and request headers (undefined falls through to the tables above). */
+  respond?: (url: URL, headers: Record<string, string>) => Response | undefined;
 } = {}) {
   const launches: { argv: string[]; env: Record<string, string>; cwd: string }[] = [];
   const signals: [number, NodeJS.Signals][] = [];
@@ -32,8 +34,10 @@ function fakeDeps(root: string, opts: {
     env: opts.env ?? { PATH: "/usr/bin" },
     isPortListening: async port => (opts.listening ?? []).includes(port),
     devServerRecord: () => opts.record ?? null,
-    fetchImpl: (async (input: string | URL) => {
+    fetchImpl: (async (input: string | URL, init?: RequestInit) => {
       const url = new URL(String(input));
+      const answered = opts.respond?.(url, (init?.headers ?? {}) as Record<string, string>);
+      if (answered) return answered;
       const key = `${url.port}${url.pathname}`;
       const status = opts.answers?.[key] ?? opts.answers?.[url.port];
       if (status === undefined) throw new Error("connection refused");
@@ -666,6 +670,97 @@ test("a second up keeps the InferOps container an earlier up started, so down st
     const services = again.report.services as Record<string, { container?: string; startedByFactory: boolean }>;
     assert.equal(services.inferops?.container, "inferos-factory-inferops");
     assert.equal(services.inferops?.startedByFactory, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+/** A fake Access emulator on :8789 in front of the loopback stage: the three behaviours by headers. */
+const EMULATOR_LOGIN = "https://factory-local.cloudflareaccess.com/cdn-cgi/access/login/127.0.0.1:8789?kid=k&redirect_url=%2F";
+function emulator(enforces = true) {
+  return (url: URL, headers: Record<string, string>): Response | undefined => {
+    if (url.port !== "8789") return undefined;
+    const id = headers["CF-Access-Client-Id"];
+    const secret = headers["CF-Access-Client-Secret"];
+    if (id === undefined && secret === undefined) return new Response(null, { status: 302, headers: { location: EMULATOR_LOGIN } });
+    if ((id !== "emu-id" || secret !== "emu-secret") && enforces) return new Response("Forbidden", { status: 403 });
+    return new Response(JSON.stringify({ path: url.pathname }), { status: 200 });
+  };
+}
+const EMULATED_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "http://127.0.0.1:8789", FACTORY_STAGE_ACCESS: "emulated", CF_ACCESS_CLIENT_ID: "emu-id", CF_ACCESS_CLIENT_SECRET: "emu-secret", GROKBOT_PERSONA_USER: "operator-value-1", GROKBOT_VIEWER_USER: "viewer-value-2", FACTORY_INFEROPS_URL: "http://127.0.0.1:8980" };
+
+test("an emulated stage is a loopback stage behind the Access emulator; never a remote one", () => {
+  assert.deepEqual(stageTarget("http://127.0.0.1:8789", "emulated"), { origin: "http://127.0.0.1:8789", kind: "emulated" });
+  assert.throws(() => stageTarget("https://dev-os.factorylevel.dev", "emulated"), /loopback stage only/);
+  assert.throws(() => stageTarget("http://127.0.0.1:8789", "cloudflare"), /must be "emulated" or unset/);
+  assert.deepEqual(stageTarget("https://dev-os.factorylevel.dev", null), { origin: "https://dev-os.factorylevel.dev", kind: "remote" });
+  assert.deepEqual(requiredSmokeCredentials("emulated"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
+});
+
+test("an emulated stage: Access redirect without a token, InferOS with it, 403 for a wrong one; no password", async () => {
+  const root = tempRoot();
+  try {
+    const fake = fakeDeps(root, { env: EMULATED_ENV, answers: { "8980/health/ready": 200, "8980/auth/public-config": 200 }, bodies: STUB, respond: emulator() });
+    const ready = await runFactory(["doctor", "stage-probe", "--json"], fake.deps);
+    assert.equal(ready.exitCode, 0, ready.headline);
+    const checks = ready.report.checks as { name: string; status: string; detail: string }[];
+    assert.deepEqual(checks.map(c => `${c.status} ${c.name}`), [
+      "READY credentials", "READY smoke-credentials", "READY stage", "READY stage:reachable", "READY stage:access", "READY stage:access-token", "READY stage:access-refused", "READY stage:inferos", "READY stage:inferops", "READY tool:docker", "READY tool:artilleryio/artillery:latest",
+    ]);
+    assert.match(ready.headline, /READY stage:access: unauthenticated GET \/ is redirected to Cloudflare Access \(factory-local.cloudflareaccess.com\)/);
+    assert.match(ready.headline, /READY stage:access-refused: GET \/ with a wrong service-token secret is refused \(403\)/);
+    assert.match(ready.headline, /READY stage:inferos: .* \(through the Access emulator, with the service token\)/);
+    const text = JSON.stringify(ready.report) + ready.headline;
+    for (const value of ["emu-id", "emu-secret", "operator-value-1"]) assert.ok(!text.includes(value), value);
+
+    const { CF_ACCESS_CLIENT_SECRET: _secret, ...noSecret } = EMULATED_ENV;
+    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: noSecret, answers: { "8980/health/ready": 200, "8980/auth/public-config": 200 }, bodies: STUB, respond: emulator() }).deps);
+    assert.equal(missing.exitCode, 1);
+    assert.match(missing.headline, /FAIL\s+smoke-credentials: emulated stage, missing \(names only\): CF_ACCESS_CLIENT_SECRET$/m);
+    assert.match(missing.headline, /FAIL\s+stage:access-token: GET \/ with the service token answered 403/);
+
+    const lax = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: EMULATED_ENV, answers: { "8980/health/ready": 200, "8980/auth/public-config": 200 }, bodies: STUB, respond: emulator(false) }).deps);
+    assert.match(lax.headline, /FAIL\s+stage:access-refused: .*answered 200, not 403/);
+    const open = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: EMULATED_ENV, answers: { 8789: 200, "8980/health/ready": 200, "8980/auth/public-config": 200 }, bodies: STUB }).deps);
+    assert.match(open.headline, /FAIL\s+stage:access: unauthenticated GET \/ answered 200, not an Access redirect; the Access emulator is not behind Access/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("up dev --access-emulator: a per-run token by name, InferOS answering as the emulator's origin, down removes the token", async () => {
+  const root = tempRoot();
+  const inferops = inferopsCheckout();
+  try {
+    let running = true;
+    const fake = fakeDeps(root, { env: { PATH: "/bin", HOME: "/home/x", VITE_BACKEND_HOST: "localhost:8797" }, alive: () => running, respond: emulator() });
+    const result = await runFactory(["up", "dev", "--inferops-dir", inferops, "--inferops-image", IMAGE, "--inferops-connect", "--access-emulator", "--timeout", "0", "--json"], fake.deps);
+    const [access, inferos] = fake.launches;
+    assert.match(access!.argv.join(" "), /scripts\/local\/access-emulator\.ts --port 8789 --upstream http:\/\/localhost:8797$/);
+    assert.deepEqual(Object.keys(access!.env).toSorted(), ["ACCESS_EMULATOR_CLIENT_ID", "ACCESS_EMULATOR_CLIENT_SECRET", "HOME", "PATH"]);
+    const file = accessTokenFile(root);
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    const token = readFileSync(file, "utf8");
+    assert.equal(token, `CF_ACCESS_CLIENT_ID=${access!.env.ACCESS_EMULATOR_CLIENT_ID}\nCF_ACCESS_CLIENT_SECRET=${access!.env.ACCESS_EMULATOR_CLIENT_SECRET}\n`);
+    assert.ok(!access!.argv.join(" ").includes(access!.env.ACCESS_EMULATOR_CLIENT_SECRET!));
+    assert.equal(inferos!.env.PUBLIC_BASE_URL, "http://127.0.0.1:8789");
+    assert.equal(inferos!.env.DEV_PUBLIC_HOST, "127.0.0.1:8789");
+    const run = fake.dockerCalls.find(argv => argv[1] === "run")!;
+    assert.ok(run.includes(`NODE_CONFIG=${inferopsSsoLayer("http://localhost:8797", "http://127.0.0.1:8789")}`), run.join(" "));
+    assert.match(result.headline, /READY service:access: http:\/\/127.0.0.1:8789\/ redirects an unauthenticated request to Cloudflare Access/);
+    const text = JSON.stringify(result.report) + result.headline;
+    assert.ok(!text.includes(access!.env.ACCESS_EMULATOR_CLIENT_SECRET!));
+
+    const stage = stageTarget("http://127.0.0.1:8789", "emulated");
+    assert.equal(stageInferopsUrl(stage, root, {}), "http://127.0.0.1:8080", "the emulator fronts the connected InferOS");
+    assert.equal(stageInferopsUrl(stageTarget("http://127.0.0.1:8789"), root, {}), null, "without Access the emulator is not the InferOS");
+
+    running = false;
+    assert.equal((await runFactory(["down"], fake.deps)).exitCode, 0);
+    assert.ok(!existsSync(file));
+    assert.equal((await runFactory(["doctor", "--access-emulator"], fake.deps)).exitCode, 2);
+    assert.equal((await runFactory(["up", "stage-probe", "--access-emulator"], fake.deps)).exitCode, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(inferops, { recursive: true, force: true });

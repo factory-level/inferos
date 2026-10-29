@@ -15,8 +15,10 @@
 //                checks the smoke credentials it needs are present, by name. A remote https stage
 //                sits behind Cloudflare Access (service token + persona); a loopback stage is the
 //                local `dev` sandbox started with --inferops-connect, whose InferOps runs stub
-//                persona login (persona names only). `stage-smoke` runs the scripted smoke
-//                (scripts/ci/stage-smoke.ts) once doctor is READY.
+//                persona login (persona names only). An emulated stage is that loopback stage
+//                behind the local Access emulator (`up dev --access-emulator`, then
+//                FACTORY_STAGE_ACCESS=emulated): Access's service token + persona names.
+//                `stage-smoke` runs the scripted smoke (scripts/ci/stage-smoke.ts) once doctor is READY.
 //
 // `doctor` reports one READY/FAIL line per check, each service's health JSON, and FAILS while a
 // cloud, model-provider or prod credential is in the environment (smoke credentials are allowed
@@ -24,9 +26,11 @@
 // report. What the factory started is recorded in `.factory/sandbox.json`; `down` stops exactly
 // that and leaves anything it merely reused running.
 
+import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { isAccessRedirect } from "../preview/smoke.ts";
 import type { CodingDeps, ProcessResult } from "./coding.ts";
 import { providerVariables } from "./runner.ts";
 import {
@@ -69,8 +73,11 @@ export const SMOKE_CREDENTIAL_VARS = [
   "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER",
 ] as const;
 
-/** Where a stage is: behind Cloudflare Access on the internet, or this machine's `dev` sandbox. */
-export type StageKind = "remote" | "loopback";
+/**
+ * Where a stage is: behind Cloudflare Access on the internet (`remote`), this machine's `dev`
+ * sandbox (`loopback`), or that sandbox behind the local Access emulator (`emulated`).
+ */
+export type StageKind = "remote" | "loopback" | "emulated";
 
 /** A stage origin and its kind. */
 export interface StageTarget { origin: string; kind: StageKind }
@@ -78,20 +85,23 @@ export interface StageTarget { origin: string; kind: StageKind }
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
 
 /**
- * Classify a stage URL: http(s) on a loopback host is `loopback`; any other host must be https and
- * is `remote`. Throws on anything else (plain http to a remote host would send the Access token in
- * the clear).
+ * Classify a stage URL: http(s) on a loopback host is `loopback`, or `emulated` when `access`
+ * (`FACTORY_STAGE_ACCESS`) is `emulated`; any other host must be https and is `remote`. Throws on
+ * anything else (plain http to a remote host would send the Access token in the clear, and an
+ * emulated Access is never a remote stage's).
  */
-export function stageTarget(url: string): StageTarget {
+export function stageTarget(url: string, access?: string | null): StageTarget {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     throw new Error(`FACTORY_STAGE_URL / --stage-url is not a URL: ${url}`);
   }
+  if (access && access !== "emulated") throw new Error(`FACTORY_STAGE_ACCESS must be "emulated" or unset, not ${JSON.stringify(access)}`);
   if (LOOPBACK_HOSTS.includes(parsed.hostname) && (parsed.protocol === "http:" || parsed.protocol === "https:")) {
-    return { origin: parsed.origin, kind: "loopback" };
+    return { origin: parsed.origin, kind: access ? "emulated" : "loopback" };
   }
+  if (access) throw new Error(`FACTORY_STAGE_ACCESS=emulated applies to a loopback stage only (the local Access emulator), not ${parsed.origin}`);
   if (parsed.protocol !== "https:") throw new Error(`a remote stage must be https: ${parsed.origin}`);
   return { origin: parsed.origin, kind: "remote" };
 }
@@ -100,11 +110,12 @@ export function stageTarget(url: string): StageTarget {
  * The smoke credentials a stage needs, by name. A remote stage: the Access service token and the
  * operator persona's sign-in, plus the viewer persona. A loopback stage has no Access in front and
  * its InferOps signs people in as stub personas, so only the persona names (operator and viewer).
+ * An emulated stage is a loopback stage behind the Access emulator: its service token plus the
+ * persona names (still no password: the InferOps behind it is the stub-auth sandbox one).
  */
 export function requiredSmokeCredentials(kind: StageKind): string[] {
-  return kind === "remote"
-    ? ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"]
-    : ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"];
+  if (kind === "remote") return ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"];
+  return [...(kind === "emulated" ? ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"] : []), "GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"];
 }
 
 /** The image whose bundled Playwright and Chromium the stage smoke runs on (also node 8's). */
@@ -167,6 +178,13 @@ export interface FactoryConfig {
   flociImage: string;
   /** `stage-probe`: the stage to probe (`--stage-url` or `FACTORY_STAGE_URL`), unparsed; null when unset. */
   stageUrl: string | null;
+  /** `stage-probe`: `FACTORY_STAGE_ACCESS` (`emulated` for a loopback stage behind the Access emulator), unparsed. */
+  stageAccess: string | null;
+  /**
+   * `up --access-emulator`: the local Access emulator's port (`FACTORY_ACCESS_EMULATOR_PORT`, 8789)
+   * when it is to front InferOS, else null.
+   */
+  accessEmulatorPort: number | null;
 }
 
 /**
@@ -175,7 +193,7 @@ export interface FactoryConfig {
  * ponytail: the offset is not read from the InferOps checkout's `config/local.json`, which also holds
  * that checkout's secrets; upgrade path is an InferOps CLI command that prints only its ports.
  */
-export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string, inferopsImage?: string, inferopsConnect = false, stageUrl?: string): FactoryConfig {
+export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?: string, inferopsImage?: string, inferopsConnect = false, stageUrl?: string, accessEmulator = false): FactoryConfig {
   const dir = inferopsDir ?? env.FACTORY_INFEROPS_DIR;
   const image = inferopsImage ?? env.FACTORY_INFEROPS_IMAGE ?? null;
   if (image !== null && !/^\w[\w.-]*(?::\d+)?(?:\/\w[\w.-]*)*(?::\w[\w.-]*)?(?:@sha256:[0-9a-f]{64})?$/.test(image)) {
@@ -191,6 +209,8 @@ export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?
   if (inferopsConnect && !isLoopbackHttp(inferopsUrl)) {
     throw new Error(`--inferops-connect connects only to an InferOps on loopback over http; ${inferopsUrl} is not one`);
   }
+  const accessEmulatorPort = Number(env.FACTORY_ACCESS_EMULATOR_PORT ?? 8789);
+  if (!Number.isInteger(accessEmulatorPort) || accessEmulatorPort < 1024 || accessEmulatorPort > 65535) throw new Error("FACTORY_ACCESS_EMULATOR_PORT must be a TCP port from 1024 to 65535");
   return {
     inferos: resolveLocalStack(root, [], env),
     inferopsDir: dir ? resolve(dir) : null,
@@ -202,6 +222,8 @@ export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?
     flociPort,
     flociImage: env.FACTORY_FLOCI_IMAGE ?? "floci/floci-gcp:latest",
     stageUrl: stageUrl ?? env.FACTORY_STAGE_URL ?? null,
+    stageAccess: env.FACTORY_STAGE_ACCESS ?? null,
+    accessEmulatorPort: accessEmulator ? accessEmulatorPort : null,
   };
 }
 
@@ -227,16 +249,32 @@ export function inferopsConnectEnv(inferopsUrl: string, env: NodeJS.ProcessEnv):
   return { INFERLAB_AUTH_ORIGIN: origin, INFEROPS_BASE_URL: origin, AUTH_GATEKEEPERS: vendors.join(",") };
 }
 
-/** The `NODE_CONFIG` layer that lets InferOps' central auth redirect back to the InferOS at `inferosUrl`. */
-export function inferopsSsoLayer(inferosUrl: string): string {
-  return JSON.stringify({ auth: { sso: { inferosOrigins: [new URL(inferosUrl).origin] } } });
+/** The `NODE_CONFIG` layer that lets InferOps' central auth redirect back to the InferOS at each of `inferosUrls`. */
+export function inferopsSsoLayer(...inferosUrls: string[]): string {
+  return JSON.stringify({ auth: { sso: { inferosOrigins: inferosUrls.map(url => new URL(url).origin) } } });
+}
+
+/** The origin the Access emulator serves on `port` (loopback only). */
+export const accessEmulatorUrl = (port: number) => `http://127.0.0.1:${port}`;
+
+/** Where `up --access-emulator` writes the run's service token (0600) for the smoke shell to source. */
+export const accessTokenFile = (root: string) => join(root, ".factory", "access-emulator.env");
+
+/**
+ * The variables that make InferOS behind the emulator answer as the emulator's origin, as a stage
+ * answers as its hostname: the connect handoff (`PUBLIC_BASE_URL`) and every gatekeeper's
+ * `BASE_URL` (`DEV_PUBLIC_HOST`, read by run-dev-server.ts) name it, so OAuth returns through Access.
+ */
+export function accessFrontEnv(emulatorUrl: string): Record<string, string> {
+  const url = new URL(emulatorUrl);
+  return { PUBLIC_BASE_URL: url.origin, DEV_PUBLIC_HOST: url.host };
 }
 
 /** What `up` started (or reused), so `down` stops exactly that. */
 export interface SandboxState {
   sandbox: Sandbox;
   startedAt: string;
-  services: Partial<Record<ServiceName, { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean; url?: string; inferops?: "mock" | "connected"; inferopsUrl?: string }>>;
+  services: Partial<Record<ServiceName | "access", { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean; url?: string; inferops?: "mock" | "connected"; inferopsUrl?: string; upstream?: string; tokenFile?: string }>>;
 }
 
 export const stateFile = (root: string) => join(root, ".factory", "sandbox.json");
@@ -374,9 +412,12 @@ function sameLoopback(a: string, b: string): boolean {
  */
 export function stageInferopsUrl(stage: StageTarget, root: string, env: NodeJS.ProcessEnv): string | null {
   if (env.FACTORY_INFEROPS_URL) return new URL(env.FACTORY_INFEROPS_URL).origin;
-  const inferos = readState(root)?.services.inferos;
+  const services = readState(root)?.services;
+  const inferos = services?.inferos;
   if (!inferos?.url || inferos.inferops !== "connected" || !inferos.inferopsUrl) return null;
-  return sameLoopback(inferos.url, stage.origin) ? inferos.inferopsUrl : null;
+  // An emulated stage is the Access emulator fronting that InferOS.
+  const front = stage.kind === "emulated" ? services?.access?.upstream === inferos.url && services.access.url : inferos.url;
+  return front && sameLoopback(front, stage.origin) ? inferos.inferopsUrl : null;
 }
 
 /**
@@ -391,7 +432,7 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
   }
   let target: StageTarget;
   try {
-    target = stageTarget(config.stageUrl);
+    target = stageTarget(config.stageUrl, config.stageAccess);
   } catch (error) {
     return { target: null, checks: [{ name: "stage", status: "FAIL", detail: (error as Error).message }] };
   }
@@ -402,24 +443,24 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
     detail: root.status === null ? `${target.origin}/ did not answer: ${String(root.body)}` : `${target.origin}/ answered ${root.status}`,
   });
   if (root.status === null) return { target, checks };
-  if (target.kind === "remote") {
-    const location = await redirectLocation(`${target.origin}/`, deps);
-    const access = location !== null && /(?:^|\.)cloudflareaccess\.com$/.test(location.hostname);
-    checks.push({
-      name: "stage:access", status: access ? "READY" : "FAIL",
-      detail: access ? `unauthenticated GET / is redirected to Cloudflare Access (${location!.hostname})`
-        : `unauthenticated GET / answered ${root.status}${location ? ` -> ${location.origin}` : ""}, not an Access redirect; the stage is not behind Access`,
-    });
-    return { target, checks };
-  }
+  if (target.kind !== "loopback") checks.push(await accessCheck(target, root.status, deps));
+  if (target.kind === "remote") return { target, checks };
+  // An emulated stage is reached the way the smoke reaches it: with the service token.
+  const token = { "CF-Access-Client-Id": deps.env.CF_ACCESS_CLIENT_ID ?? "", "CF-Access-Client-Secret": deps.env.CF_ACCESS_CLIENT_SECRET ?? "" };
+  const fetchStage: typeof fetch = target.kind === "emulated"
+    ? (input, init) => deps.fetchImpl(input, { ...init, headers: { ...init?.headers as Record<string, string>, ...token } })
+    : deps.fetchImpl;
+  if (target.kind === "emulated") checks.push(...await emulatedAccessChecks(target, fetchStage, deps));
+  const shell = target.kind === "emulated" ? (await getJson(`${target.origin}/`, { ...deps, fetchImpl: fetchStage })).status : root.status;
   const stack: LocalStack = { ...config.inferos, url: target.origin, port: Number(new URL(target.origin).port || 80) };
-  const workers = await probeWorkers(stack.url, configuredWorkers(deps.root), deps.fetchImpl);
+  const workers = await probeWorkers(stack.url, configuredWorkers(deps.root), fetchStage);
   const failing = workers.filter(worker => worker.state !== "up").map(worker => worker.name);
-  if (root.status !== 200) failing.push(`shell (/ answered ${root.status})`);
+  if (shell !== 200) failing.push(`shell (/ answered ${shell})`);
+  const via = target.kind === "emulated" ? " (through the Access emulator, with the service token)" : "";
   checks.push({
     name: "stage:inferos", status: failing.length ? "FAIL" : "READY",
-    detail: failing.length ? `${failing.join(", ")} not answering on ${target.origin}` : `${workers.length} Workers and the shell answering on ${target.origin}`,
-    health: { url: target.origin, shell: root.status, workers: workers.map(({ name, state, status }) => ({ name, state, status })) },
+    detail: failing.length ? `${failing.join(", ")} not answering on ${target.origin}${via}` : `${workers.length} Workers and the shell answering on ${target.origin}${via}`,
+    health: { url: target.origin, shell, workers: workers.map(({ name, state, status }) => ({ name, state, status })) },
   });
   const inferops = stageInferopsUrl(target, deps.root, deps.env);
   if (!inferops) {
@@ -440,15 +481,52 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
   return { target, checks };
 }
 
-/** Where `url` redirects to when fetched without following redirects, or null. */
-async function redirectLocation(url: string, deps: FactoryDeps): Promise<URL | null> {
+/** One GET of `url` without following redirects: the status and `Location`, or null status when nothing answered. */
+async function fetchHead(url: string, fetchImpl: typeof fetch): Promise<{ status: number | null; location: string | undefined }> {
   try {
-    const response = await deps.fetchImpl(url, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
-    const location = response.headers.get("location");
-    return response.status >= 300 && response.status < 400 && location ? new URL(location, url) : null;
+    const response = await fetchImpl(url, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
+    await response.body?.cancel();
+    return { status: response.status, location: response.headers.get("location") ?? undefined };
   } catch {
-    return null;
+    return { status: null, location: undefined };
   }
+}
+
+/** `stage:access`: an unauthenticated `GET /` is a Cloudflare Access login redirect (`isAccessRedirect`). */
+async function accessCheck(target: StageTarget, rootStatus: number, deps: FactoryDeps): Promise<Check> {
+  const { status, location } = await fetchHead(`${target.origin}/`, deps.fetchImpl);
+  const access = status !== null && isAccessRedirect({ status, headers: { location }, body: "" });
+  const host = access ? new URL(location!).hostname : null;
+  const what = target.kind === "emulated" ? "the Access emulator" : "the stage";
+  return {
+    name: "stage:access", status: access ? "READY" : "FAIL",
+    detail: access ? `unauthenticated GET / is redirected to Cloudflare Access (${host})`
+      : `unauthenticated GET / answered ${status ?? rootStatus}${location ? ` -> ${location}` : ""}, not an Access redirect; ${what} is not behind Access`,
+  };
+}
+
+/**
+ * An emulated stage's Service Auth policy: the service token reaches InferOS (`stage:access-token`,
+ * a 200 that is not a redirect), and a wrong secret beside the right client id is refused with 403
+ * (`stage:access-refused`). Neither line carries a token value.
+ */
+async function emulatedAccessChecks(target: StageTarget, fetchStage: typeof fetch, deps: FactoryDeps): Promise<Check[]> {
+  const granted = await fetchHead(`${target.origin}/`, fetchStage);
+  const wrong = await fetchHead(`${target.origin}/`, (input, init) => deps.fetchImpl(input, {
+    ...init, headers: { "CF-Access-Client-Id": deps.env.CF_ACCESS_CLIENT_ID ?? "", "CF-Access-Client-Secret": `wrong-${randomBytes(8).toString("hex")}` },
+  }));
+  return [
+    {
+      name: "stage:access-token", status: granted.status === 200 ? "READY" : "FAIL",
+      detail: granted.status === 200 ? "GET / with the service token (CF-Access-Client-Id/Secret) reaches InferOS (200)"
+        : `GET / with the service token answered ${granted.status ?? "nothing"}${granted.location ? ` -> ${granted.location}` : ""}; CF_ACCESS_CLIENT_ID/SECRET are not the emulator's token (source .factory/access-emulator.env)`,
+    },
+    {
+      name: "stage:access-refused", status: wrong.status === 403 ? "READY" : "FAIL",
+      detail: wrong.status === 403 ? "GET / with a wrong service-token secret is refused (403)"
+        : `GET / with a wrong service-token secret answered ${wrong.status ?? "nothing"}, not 403; the emulator does not enforce its Service Auth policy`,
+    },
+  ];
 }
 
 function toolChecks(sandbox: Sandbox, deps: FactoryDeps): Check[] {
@@ -475,8 +553,33 @@ function toolChecks(sandbox: Sandbox, deps: FactoryDeps): Check[] {
   return checks;
 }
 
+/**
+ * `service:access`: the Access emulator fronting this sandbox's InferOS answers an unauthenticated
+ * `GET /` with an Access login redirect. Checked when `up --access-emulator` asks for it or recorded it.
+ */
+async function accessHealth(url: string, deps: FactoryDeps): Promise<Check> {
+  const { status, location } = await fetchHead(`${url}/`, deps.fetchImpl);
+  const ok = status !== null && isAccessRedirect({ status, headers: { location }, body: "" });
+  return {
+    name: "service:access", status: ok ? "READY" : "FAIL",
+    detail: ok ? `${url}/ redirects an unauthenticated request to Cloudflare Access (emulated)` : `${url}/ ${status === null ? "did not answer" : `answered ${status}, not an Access redirect`}`,
+  };
+}
+
+/** The Access emulator's origin when this sandbox has one (asked for by `up`, or recorded). */
+function accessFront(sandbox: Sandbox, config: FactoryConfig, root: string): string | null {
+  if (sandbox === "stage-probe") return null;
+  if (config.accessEmulatorPort !== null) return accessEmulatorUrl(config.accessEmulatorPort);
+  const state = readState(root);
+  return state?.sandbox === sandbox ? state.services.access?.url ?? null : null;
+}
+
 async function allChecks(sandbox: Sandbox, config: FactoryConfig, deps: FactoryDeps): Promise<Check[]> {
-  const services = await Promise.all(SANDBOX_SERVICES[sandbox].map(name => HEALTH[name](config, deps)));
+  const front = accessFront(sandbox, config, deps.root);
+  const services = await Promise.all([
+    ...SANDBOX_SERVICES[sandbox].map(name => HEALTH[name](config, deps)),
+    ...(front ? [accessHealth(front, deps)] : []),
+  ]);
   const stage = sandbox === "stage-probe" ? await stageChecks(config, deps) : null;
   return [
     credentialCheck(sandbox, deps),
@@ -514,13 +617,36 @@ const asStringEnv = (env: NodeJS.ProcessEnv) =>
   Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined));
 
 /** Start this checkout's `run-local` detached, in its own process group, logging under `.factory/logs`. */
-export function launchInferos(stack: LocalStack, deps: Pick<FactoryDeps, "root" | "env" | "launch">, connectTo?: string): NonNullable<SandboxState["services"]["inferos"]> {
+export function launchInferos(stack: LocalStack, deps: Pick<FactoryDeps, "root" | "env" | "launch">, connectTo?: string, accessFrontUrl?: string): NonNullable<SandboxState["services"]["inferos"]> {
   const logDir = join(deps.root, ".factory", "logs");
   mkdirSync(logDir, { recursive: true });
   const log = join(logDir, "inferos.log");
-  const env = { ...asStringEnv(deps.env), ...(connectTo ? inferopsConnectEnv(connectTo, deps.env) : {}) };
+  const env = {
+    ...asStringEnv(deps.env), ...(connectTo ? inferopsConnectEnv(connectTo, deps.env) : {}),
+    ...(accessFrontUrl ? accessFrontEnv(accessFrontUrl) : {}),
+  };
   const pid = deps.launch([process.execPath, join(deps.root, "scripts", "run-local.ts"), "--port", String(stack.port)], env, log, deps.root);
   return { pid, log, startedByFactory: true, url: stack.url, ...(connectTo ? { inferops: "connected" as const, inferopsUrl: new URL(connectTo).origin } : { inferops: "mock" as const }) };
+}
+
+/**
+ * Start the local Access emulator (scripts/local/access-emulator.ts) on `port` in front of
+ * `upstream`, with a service token generated for this run. The token reaches the emulator by name
+ * (`ACCESS_EMULATOR_CLIENT_ID/SECRET`) and the smoke shell through `.factory/access-emulator.env`
+ * (mode 0600, as `CF_ACCESS_CLIENT_ID/SECRET`); it is never printed. It is valid only against this
+ * emulator, so it is not a cloud credential.
+ */
+export function launchAccessEmulator(port: number, upstream: string, deps: Pick<FactoryDeps, "root" | "env" | "launch">): NonNullable<SandboxState["services"]["access"]> {
+  const logDir = join(deps.root, ".factory", "logs");
+  mkdirSync(logDir, { recursive: true });
+  const log = join(logDir, "access-emulator.log");
+  const clientId = `${randomBytes(16).toString("hex")}.access`;
+  const clientSecret = randomBytes(32).toString("hex");
+  const tokenFile = accessTokenFile(deps.root);
+  writeFileSync(tokenFile, `CF_ACCESS_CLIENT_ID=${clientId}\nCF_ACCESS_CLIENT_SECRET=${clientSecret}\n`, { mode: 0o600 });
+  const env = { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "", ACCESS_EMULATOR_CLIENT_ID: clientId, ACCESS_EMULATOR_CLIENT_SECRET: clientSecret };
+  const pid = deps.launch([process.execPath, join(deps.root, "scripts", "local", "access-emulator.ts"), "--port", String(port), "--upstream", upstream], env, log, deps.root);
+  return { pid, log, startedByFactory: true, url: accessEmulatorUrl(port), upstream, tokenFile };
 }
 
 /** `postgres://user:pass@host:port/db?x` with the host and database swapped; the credentials stay as given. */
@@ -576,7 +702,8 @@ export function startInferopsImage(config: FactoryConfig, deps: FactoryDeps, log
     // --inferops-connect: register this InferOS's origin as InferOps' `inferos` SSO client redirect
     // (its default allows only http://localhost:8787). node-config's NODE_CONFIG layer; the image has
     // no secret layer to compete with it in `factory`.
-    ...(config.inferopsConnect ? ["-e", `NODE_CONFIG=${inferopsSsoLayer(config.inferos.url)}`] : []),
+    // With the Access emulator in front, InferOS is reached (and returns from OAuth) at its origin too.
+    ...(config.inferopsConnect ? ["-e", `NODE_CONFIG=${inferopsSsoLayer(config.inferos.url, ...(config.accessEmulatorPort !== null ? [accessEmulatorUrl(config.accessEmulatorPort)] : []))}`] : []),
     image,
   ], dockerEnv(deps));
   if (run.exitCode !== 0) return { problems: [`inferops: docker run ${image} failed: ${run.stderr.trim()}`] };
@@ -591,6 +718,16 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
   const problems: string[] = [];
   const logDir = join(deps.root, ".factory", "logs");
   mkdirSync(logDir, { recursive: true });
+  const front = config.accessEmulatorPort !== null ? accessEmulatorUrl(config.accessEmulatorPort) : undefined;
+  if (config.accessEmulatorPort !== null) {
+    if (state.services.access?.startedByFactory && state.services.access.pid !== undefined && deps.processAlive(state.services.access.pid)) {
+      // A second `up` keeps the emulator (and the token file) an earlier one started.
+    } else if (await deps.isPortListening(config.accessEmulatorPort)) {
+      problems.push(`access: port ${config.accessEmulatorPort} is in use by a process this checkout did not start (set FACTORY_ACCESS_EMULATOR_PORT)`);
+    } else {
+      state.services.access = launchAccessEmulator(config.accessEmulatorPort, config.inferos.url, deps);
+    }
+  }
   for (const service of SANDBOX_SERVICES[sandbox]) {
     if (service === "inferos") {
       const stack = config.inferos;
@@ -598,11 +735,11 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
       if (ownership === "running") {
         state.services.inferos = { pid: deps.devServerRecord(stack.recordPath)?.pid, startedByFactory: false };
         // An adopted server keeps the environment it was started with; connecting it means a restart.
-        if (config.inferopsConnect) problems.push(`inferos: --inferops-connect cannot rewire the InferOS already running on port ${stack.port}; stop it (pnpm local stop) and run up again`);
+        if (config.inferopsConnect || front) problems.push(`inferos: --inferops-connect/--access-emulator cannot rewire the InferOS already running on port ${stack.port}; stop it (pnpm local stop) and run up again`);
       } else if (ownership === "port-in-use-by-other") {
         problems.push(`inferos: port ${stack.port} is in use by a process this checkout did not start`);
       } else {
-        state.services.inferos = launchInferos(stack, deps, config.inferopsConnect ? config.inferopsUrl : undefined);
+        state.services.inferos = launchInferos(stack, deps, config.inferopsConnect ? config.inferopsUrl : undefined, front);
       }
     } else if (service === "inferops") {
       if ((await inferopsHealth(config, deps)).status === "READY") {
@@ -728,7 +865,10 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
       ((await stopGroup(service.pid, deps)) ? stopped : failed).push(name);
     }
   }
-  if (!failed.length) rmSync(stateFile(deps.root), { force: true });
+  if (!failed.length) {
+    rmSync(stateFile(deps.root), { force: true });
+    if (state.services.access?.tokenFile) rmSync(state.services.access.tokenFile, { force: true });
+  }
   const ok = failed.length === 0;
   return {
     exitCode: ok ? 0 : 1,
@@ -740,8 +880,9 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
   };
 }
 
-export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down|stage-smoke> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--stage-url URL] [--timeout SECONDS]
+export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down|stage-smoke> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--access-emulator] [--stage-url URL] [--timeout SECONDS]
   sandboxes: ${SANDBOXES.join(", ")}
+  --access-emulator: up only; the local Cloudflare Access emulator fronts InferOS (FACTORY_ACCESS_EMULATOR_PORT, 8789)
   stage-smoke: doctor stage-probe, then (when READY) the scripted smoke scripts/ci/stage-smoke.ts`;
 
 /** Run one factory command (argv after `factory`). Usage errors exit 2. */
@@ -751,7 +892,7 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   try {
     ({ values, positionals } = parseArgs({
       args: [...argv], allowPositionals: true,
-      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, "inferops-image": { type: "string" }, "inferops-connect": { type: "boolean", default: false }, "stage-url": { type: "string" }, timeout: { type: "string", default: "600" } },
+      options: { json: { type: "boolean", default: false }, "inferops-dir": { type: "string" }, "inferops-image": { type: "string" }, "inferops-connect": { type: "boolean", default: false }, "access-emulator": { type: "boolean", default: false }, "stage-url": { type: "string" }, timeout: { type: "string", default: "600" } },
     }));
   } catch (error) {
     return usage((error as Error).message);
@@ -762,10 +903,12 @@ export async function runFactory(argv: readonly string[], deps: FactoryDeps): Pr
   if (named !== undefined && !(SANDBOXES as readonly string[]).includes(named)) return usage(`Unknown sandbox "${named}"`);
   if (!/^\d+$/.test(values.timeout)) return usage("--timeout must be a whole number of seconds");
   if (values["inferops-connect"] && command !== "up") return usage("--inferops-connect applies to up only");
+  if (values["access-emulator"] && command !== "up") return usage("--access-emulator applies to up only");
+  if (values["access-emulator"] && named === "stage-probe") return usage("--access-emulator fronts a sandbox's InferOS; stage-probe runs none");
   if (command === "stage-smoke" && named !== undefined) return usage("stage-smoke takes no sandbox (it is stage-probe's smoke)");
   let config: FactoryConfig;
   try {
-    config = factoryConfig(deps.root, deps.env, values["inferops-dir"], values["inferops-image"], values["inferops-connect"], values["stage-url"]);
+    config = factoryConfig(deps.root, deps.env, values["inferops-dir"], values["inferops-image"], values["inferops-connect"], values["stage-url"], values["access-emulator"]);
   } catch (error) {
     return usage((error as Error).message);
   }
@@ -803,7 +946,7 @@ async function stageSmoke(config: FactoryConfig, deps: FactoryDeps, timeoutMs: n
     doctor.headline += "\n  note  the smoke did not run: doctor stage-probe is not READY";
     return doctor;
   }
-  const env = { ...asStringEnv(deps.env), FACTORY_STAGE_URL: config.stageUrl! };
+  const env = { ...asStringEnv(deps.env), FACTORY_STAGE_URL: config.stageUrl!, ...(config.stageAccess ? { FACTORY_STAGE_ACCESS: config.stageAccess } : {}) };
   const smoke = deps.runIn([process.execPath, join(deps.root, "scripts", "ci", "stage-smoke.ts")], env, deps.root, timeoutMs);
   // Only the smoke's own report lines: oracle verdicts and the evidence path, never the environment.
   const lines = `${smoke.stdout}${smoke.stderr}`.split("\n").filter(line => /^\[(?:stage-smoke|factory)\]/.test(line));

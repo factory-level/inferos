@@ -202,9 +202,13 @@ test("stage-smoke: a loopback stage needs the persona names, a remote one the Ac
   assert.match(String(smokePreconditions({ ...loopback, OPENAI_API_KEY: "sk-secret" }).problem), /present \(names only\): OPENAI_API_KEY$/);
   assert.match(String(smokePreconditions({ ...loopback, FACTORY_STAGE_URL: "https://dev-os.example.test" }).problem),
     /remote stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_PASSWORD$/);
+  const emulated = { ...loopback, FACTORY_STAGE_URL: "http://127.0.0.1:8789", FACTORY_STAGE_ACCESS: "emulated" };
+  assert.match(String(smokePreconditions(emulated).problem), /emulated stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET$/);
+  assert.deepEqual(smokePreconditions({ ...emulated, CF_ACCESS_CLIENT_ID: "i", CF_ACCESS_CLIENT_SECRET: "s" }), { target: { origin: "http://127.0.0.1:8789", kind: "emulated" }, problem: null });
+  assert.match(String(smokePreconditions({ ...emulated, FACTORY_STAGE_URL: "https://dev-os.example.test" }).problem), /loopback stage only/);
 });
 
-test("stage-smoke containers get credentials by name only, the checkout read-only, host network for loopback only", () => {
+test("stage-smoke containers get credentials by name only, the checkout read-only, host network for loopback and emulated stages only", () => {
   const env = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "operator-secret", GROKBOT_VIEWER_USER: "viewer-secret", PATH: "/bin" };
   const ctx = { root: "/repo", dir: "/repo/.factory/runs/r/stage-smoke", env };
   const loopback = smokeContainer(ctx, { origin: "http://localhost:8797", kind: "loopback" }, ["image", "cmd"]);
@@ -212,6 +216,8 @@ test("stage-smoke containers get credentials by name only, the checkout read-onl
   assert.deepEqual(loopback.slice(-14, -2), ["--network", "host", "-e", "FACTORY_STAGE_URL", "-e", "GROKBOT_PERSONA_USER", "-e", "GROKBOT_VIEWER_USER", "-v", "/repo:/repo:ro", "-v", "/repo/.factory/runs/r/stage-smoke:/repo/.factory/runs/r/stage-smoke"]);
   assert.ok(!loopback.includes("/var/run/docker.sock") && !loopback.some(arg => arg.startsWith("-p")));
   assert.ok(!smokeContainer(ctx, { origin: "https://dev-os.example.test", kind: "remote" }, ["image"]).includes("--network"));
+  const emulated = smokeContainer({ ...ctx, env: { ...env, CF_ACCESS_CLIENT_ID: "id-secret", CF_ACCESS_CLIENT_SECRET: "secret-secret" } }, { origin: "http://127.0.0.1:8789", kind: "emulated" }, ["image"]);
+  assert.ok(emulated.includes("--network") && emulated.includes("CF_ACCESS_CLIENT_SECRET") && !emulated.join(" ").includes("secret-secret"));
 });
 
 test("stage-smoke wiki: the canvas must show the page's title and first prose lines, body before sections", () => {

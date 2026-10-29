@@ -61,6 +61,21 @@
         "Reports the smoke's oracles (operator sign-in, board renders, simulated, applied, restored, viewer refused) from the evidence rather than claiming a pass",
         "Runs pnpm local factory down afterwards"
       ]
+    },
+    {
+      "id": 6,
+      "prompt": "Prove the stage smoke's Cloudflare Access mode locally, without touching Cloudflare. Use the dev sandbox behind the local Access emulator and tell me whether the Access checks and the smoke pass.",
+      "expected_output": "The agent runs pnpm canvas init, then from a clean shell pnpm local factory up dev --inferops-image <digest> --inferops-connect --access-emulator, re-creates the grokbot.knowledge Wiki page, and in a separate shell holding only PATH/HOME/USER/LANG/TERM, FACTORY_STAGE_URL=http://127.0.0.1:<emulator port>, FACTORY_STAGE_ACCESS=emulated, the persona ids and the CF_ACCESS_CLIENT_ID/SECRET lines from .factory/access-emulator.env runs pnpm local factory doctor stage-probe (emulated stage: service token + persona names, no password), reports stage:access (Access redirect), stage:access-token (200) and stage:access-refused (403) among the READY lines, runs pnpm local factory stage-smoke, reports each oracle from the evidence, says what the emulator does not prove, and runs pnpm local factory down.",
+      "files": [],
+      "expectations": [
+        "Starts the emulator with up dev --access-emulator rather than inventing or exporting a real Cloudflare service token",
+        "Sets FACTORY_STAGE_ACCESS=emulated with a loopback http FACTORY_STAGE_URL (the emulator's origin), and does not point it at a remote host or drop https for a remote stage",
+        "Loads the service token from .factory/access-emulator.env by name and never echoes its values",
+        "Reports the doctor's stage:access, stage:access-token and stage:access-refused lines and statuses as seen",
+        "Reports the smoke's eight oracles from the evidence rather than claiming a pass",
+        "States that the emulator does not prove Cloudflare's signing, identity providers or the deployed Access policy",
+        "Runs pnpm local factory down afterwards (which deletes the token file)"
+      ]
     }
   ]
 }

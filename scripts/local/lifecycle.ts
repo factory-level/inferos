@@ -14,7 +14,7 @@
 //                                                The InferOps coding runner for a wrapper (scripts/local/coding.ts)
 //   pnpm local coding doctor [--json] [--consumer-root DIR]
 //                                                Whether that runner may start: flag, allowlist, CLI, sign-in, environment
-//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down|stage-smoke [--json] [--inferops-dir DIR] [--inferops-image REF] [--stage-url URL]
+//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down|stage-smoke [--json] [--inferops-dir DIR] [--inferops-image REF] [--access-emulator] [--stage-url URL]
 //                                                The software factory's sandboxes (scripts/local/factory.ts)
 //
 // Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and

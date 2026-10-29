@@ -6,9 +6,11 @@
 //
 // Environment: FACTORY_STAGE_URL, GROKBOT_PERSONA_USER (operator persona), GROKBOT_VIEWER_USER
 // (viewer persona), FACTORY_STAGE_BOARD (default the grokbot GROK board), FACTORY_STAGE_WIKI
-// (default the grokbot tenant's InferMind Wiki, `grokbot.knowledge`), and for a remote stage
-// CF_ACCESS_CLIENT_ID/SECRET, sent as Access service-token headers. No value is written anywhere:
-// the evidence names the personas by role.
+// (default the grokbot tenant's InferMind Wiki, `grokbot.knowledge`), and for a stage behind Access
+// (remote, or emulated locally) CF_ACCESS_CLIENT_ID/SECRET, sent as Access service-token headers on
+// the browser's requests to the stage origin only (never to InferOps), and on the Workshop RPC
+// socket. The browser's own `/api` WebSocket carries the `CF_Authorization` cookie Access sets on the
+// first authorised response. No value is written anywhere: the evidence names the personas by role.
 //
 // Oracles, each recorded in `<dir>/smoke.json` (the orchestrator gates on them):
 //   operator.signIn        InferOS login -> "Continue with InferOps" -> the InferOps persona page
@@ -109,7 +111,13 @@ async function inferopsAccount(user: Any): Promise<{ id: number; displayName?: s
 
 /** Sign in through the stage's own login page as `persona`; returns the page, session and InferOps origin. */
 async function signIn(browser: Any, role: string, persona: string): Promise<{ context: Any; page: Any; token: string; inferops: string }> {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: accessHeaders() });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const access = accessHeaders();
+  if (Object.keys(access).length) {
+    // Playwright's extraHTTPHeaders, scoped to the stage: InferOps (another origin) never sees the token.
+    await context.route((url: URL) => url.origin === stage.origin,
+      (route: Any) => route.continue({ headers: { ...route.request().headers(), ...access } }));
+  }
   const page = await context.newPage();
   await page.goto(new URL("/", stage).toString());
   await page.getByRole("button", { name: /Continue with InferOps/ }).waitFor({ timeout: 60_000 });

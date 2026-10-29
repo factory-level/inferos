@@ -17,7 +17,9 @@
 // Artillery Playwright-engine run (load/stage-probe.yml, 2 VUs) of the sign-in, for latency.
 //
 // Credentials reach the container by name (`docker run -e NAME`), never on a command line or in a
-// log, and the evidence names personas by role. Required names follow the stage's kind
+// log, and the evidence names personas by role. An emulated stage (FACTORY_STAGE_ACCESS=emulated: the
+// loopback `dev` sandbox behind scripts/local/access-emulator.ts) sends the Access service token like
+// a remote one, with the loopback stage's stub personas. Required names follow the stage's kind
 // (`requiredSmokeCredentials` in scripts/local/factory.ts). Gate: every flow oracle passes and the
 // probe's `ensure` conditions hold. Evidence: `<run>/stage-smoke/` (smoke.json, screenshots, the
 // probe report, result.json).
@@ -36,7 +38,7 @@ export function smokePreconditions(env: NodeJS.ProcessEnv): { target: StageTarge
   if (!env.FACTORY_STAGE_URL) return { target: null, problem: "FACTORY_STAGE_URL names no stage" };
   let target: StageTarget;
   try {
-    target = stageTarget(env.FACTORY_STAGE_URL);
+    target = stageTarget(env.FACTORY_STAGE_URL, env.FACTORY_STAGE_ACCESS);
   } catch (error) {
     return { target: null, problem: (error as Error).message };
   }
@@ -47,11 +49,11 @@ export function smokePreconditions(env: NodeJS.ProcessEnv): { target: StageTarge
   return { target, problem: null };
 }
 
-/** The docker arguments for one smoke container: named variables only, loopback stages on the host network. */
+/** The docker arguments for one smoke container: named variables only, loopback and emulated stages on the host network. */
 export function smokeContainer(ctx: Pick<NodeContext, "root" | "dir" | "env">, target: StageTarget, command: string[]): string[] {
   const names = PASSED_VARS.filter(name => ctx.env[name]);
   return dockerRun(ctx as NodeContext, [
-    ...(target.kind === "loopback" ? ["--network", "host"] : []),
+    ...(target.kind !== "remote" ? ["--network", "host"] : []),
     ...names.flatMap(name => ["-e", name]),
     "-v", `${ctx.root}:${ctx.root}:ro`, "-v", `${ctx.dir}:${ctx.dir}`,
     ...command,

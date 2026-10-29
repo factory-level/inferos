@@ -9,7 +9,11 @@ const ACCESS = process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_S
 const escaped = PERSONA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export async function stageSignIn(page, _vuContext, _events, test) {
-  if (ACCESS) await page.context().setExtraHTTPHeaders(ACCESS);
+  // The stage origin only, so InferOps (another origin) never sees the token.
+  if (ACCESS) {
+    const stage = new URL(process.env.FACTORY_TARGET ?? "").origin;
+    await page.context().route(url => url.origin === stage, route => route.continue({ headers: { ...route.request().headers(), ...ACCESS } }));
+  }
   await test.step("stage_login_page", async () => {
     await page.goto("/");
     await page.getByRole("button", { name: /Continue with InferOps/ }).waitFor({ timeout: 30_000 });
