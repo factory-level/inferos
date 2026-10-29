@@ -54,14 +54,13 @@ jobs:
       - name: Node table
         if: ${{ always() }}
         run: |
-          # shellcheck disable=SC2016 # the single-quoted program is JavaScript, not shell
           f=".factory/runs/${RUN_ID}/state.json"
           [ -f "$f" ] || { echo "no state.json"; exit 0; }
-          node -e '
-            const s = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-            const rows = s.nodes.map(n => `| ${n.node} | ${n.ok ? "pass" : "fail"} (exit ${n.exitCode}) | ${(n.durationMs / 1000).toFixed(1)}s |`);
-            console.log([`### Factory run ${s.runId}: ${s.ok ? "GREEN" : "RED"}`, "", "| node | result | time |", "|---|---|---|", ...rows].join("\n"));
-          ' "$f" | tee -a "$GITHUB_STEP_SUMMARY"
+          node - "$f" <<'JS' | tee -a "$GITHUB_STEP_SUMMARY"
+          const s = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+          const rows = s.nodes.map(n => `| ${n.node} | ${n.ok ? "pass" : "fail"} (exit ${n.exitCode}) | ${(n.durationMs / 1000).toFixed(1)}s |`);
+          console.log([`### Factory run ${s.runId}: ${s.ok ? "GREEN" : "RED"}`, "", "| node | result | time |", "|---|---|---|", ...rows].join("\n"));
+          JS
 
       - name: Upload evidence
         if: ${{ always() }}
