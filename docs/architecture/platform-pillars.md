@@ -57,6 +57,8 @@ Verification: `router.test.ts` covers the router rewrite; `vite.config.test.ts` 
 
 This fork changes some Cloudflare OS files in place, which an upstream merge has to carry over:
 
+- `packages/workshop-frontend/src/resourceMatching.ts`: `normalizeResourceUrl` prepends `https://` only when the text has no `scheme://` at all, so a custom-scheme resource such as `inferops://<tenant>.<workspace>/project/board/<KEY>` reaches the kernel unchanged from the blueprint page's connection chooser and the composer (upstream turned it into `https://inferops://…`, which the gatekeeper refuses as not a board URL). `resourceMatching.test.ts` covers it.
+
 - `packages/workshop-frontend/src/FeatureFlagsContext.tsx`: while a replacement authenticated stub reloads the UI feature flags, the provider keeps the flags it last loaded when the stub is for the same account, so a reconnect does not switch flag-gated surfaces off and on (unmounting the Operate shell and closing an open host board). For another or an unknown account it uses the defaults at once, as upstream does for every replacement. Upstream always used the defaults until the new stub answered.
 - `packages/workshop-frontend/src/useAuth.ts`, `AuthContext.tsx`, `ProtectedRoute.tsx` and `routes/__root.tsx`: `useAuth` returns `accountKey`, an opaque object that is the same while the stub is re-authenticated with the same token and null without one (CF Access), and `AuthProvider` exposes it to the flags provider.
 
