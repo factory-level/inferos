@@ -67,6 +67,7 @@ covers:
   - packages/workshop-frontend/src/routes/workspace_.$id.publish.tsx
   - packages/workshop-frontend/src/routes/blueprint.$id.tsx
   - packages/workshop-frontend/src/BlueprintLandingPage.tsx
+  - packages/workshop-frontend/src/resourceMatching.ts
   - packages/workshop-frontend/src/hooks/useObserverPrompt.ts
   - packages/workshop-frontend/src/components/TestSpaceBadge.tsx
   - packages/integration-tests/__tests__/operate-subjects.test.ts
@@ -92,7 +93,7 @@ covers:
   - packages/workshop-frontend/src/features/chat/activity/toolCallLabels.ts
   - packages/integration-tests/__tests__/operate-console-flows.test.ts
   - packages/workshop-backend/__tests__/operate-flow-start.test.ts
-updated: 2026-10-14
+updated: 2026-10-30
 ---
 
 # Operate mode
@@ -328,6 +329,7 @@ No widget write, approval, new role or UI is involved.
 | `packages/workshop-frontend/src/features/operate-publish/` | The Publish to Operate review: `OperatePublishReview` (published version, Publish with a data contract, a space's installs with Upgrade, Install) and `operatePublish.ts` (`upgradeBlock`, which mirrors the kernel's upgrade checks, and `publicationFailure`, which maps the kernel's refusals to the review's failure states). |
 | `packages/workshop-frontend/src/pages/operate-publish/OperatePublishPage.tsx` | `/workspace/$id/publish?space=`: opens the source workspace and the chosen space with the person's own access and wires the review to them. |
 | `packages/workshop-frontend/src/BlueprintLandingPage.tsx` | The blueprint page; with `?space=` it installs into that space (`installBlueprint`) with the connections chosen there, instead of creating a workspace. |
+| `packages/workshop-frontend/src/resourceMatching.ts` | `normalizeResourceUrl`, applied to every binding URL the blueprint page and the chat composer send: a URL with no scheme gets `https://`, one with any scheme (a gatekeeper's own, such as `inferops://`) is kept, and a trailing `/*` is dropped. `resourceMatching.test.ts` covers it. |
 | `packages/integration-tests/__tests__/operate-space.test.ts` | Publish to Operate (#155): an install into another person's space by a build collaborator with their own binding, pinned while the source changes and moved only by an explicit upgrade with an equal data contract; refusals of a different and an undeclared contract, a wrong kind, a revoked account, a `use` collaborator, and mock dependencies outside a test-only space. |
 | `packages/integration-tests/__tests__/operate-subjects.test.ts` | Subjects (#64): two operators on one board see each other and a person without access neither sees nor appears, handovers recorded in both sessions that grant nothing, and the per-subject audit, readable only through the reader's own connection. |
 
