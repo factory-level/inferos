@@ -29,7 +29,7 @@ test("parseDeployTargets reads the deploy entries of an output file", () => {
   assert.equal(parseDeployTargets(JSON.stringify({ type: "wrangler-session" })), null);
 });
 
-test("deployTargetProblem allows the custom domain on the router and nothing anywhere else", () => {
+test("deployTargetProblem allows a worker its own custom domain and nothing anywhere else", () => {
   const host = "dev-os.factorylevel.dev";
   assert.equal(deployTargetProblem("inferos-dev-router", [`${host} (custom domain)`], host), null);
   assert.match(String(deployTargetProblem("inferos-dev-router",
@@ -37,7 +37,7 @@ test("deployTargetProblem allows the custom domain on the router and nothing any
   assert.match(String(deployTargetProblem("inferos-dev-router", [], host)), /no targets/);
   assert.equal(deployTargetProblem("inferos-dev-workshop-backend", [], null), null);
   assert.match(String(deployTargetProblem("inferos-dev-workshop-backend",
-      ["https://inferos-dev-workshop-backend.example.workers.dev"], null)), /only the router/);
+      ["https://inferos-dev-workshop-backend.example.workers.dev"], null)), /must have no URL/);
 });
 
 test("retryWhileDnsPending waits out ENOTFOUND, then returns the probe's answer", async () => {

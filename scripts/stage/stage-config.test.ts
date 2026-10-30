@@ -8,8 +8,8 @@ import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
-  stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers, stageWorkerName,
-  resolveStageAdmins,
+  stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers,
+  stageWorkerHost, stageWorkerName, resolveStageAdmins,
 } from "./stage-config.ts";
 import { STAGES, resolveStage, stageDefinitionProblems, type StageDefinition } from "./stages.ts";
 import { parseStageArgs } from "./stage.ts";
@@ -90,18 +90,36 @@ test("every worker is prefixed and every service binding names a sibling in the 
   assert.deepEqual(context?.props, { sharingDomain: "https://dev-os.factorylevel.dev" });
 });
 
-test("only the router is reachable, and only at the stage's custom domain", () => {
+test("only the router and the sign-in proxy are reachable, each only at its custom domain", () => {
   for (const stageName of ["dev", "prod"] as const) {
+    const stage = STAGES[stageName];
     for (const [pkgName, config] of build(stageName)) {
       assert.equal(config.workers_dev, false, `${pkgName} workers_dev`);
       assert.equal(config.preview_urls, false, `${pkgName} preview_urls`);
-      if (pkgName === "router") {
-        assert.deepEqual(config.routes, [{ pattern: STAGES[stageName].hostname, custom_domain: true }]);
-        assert.ok(config.assets?.directory, "the router still serves the frontend");
+      const host = stageWorkerHost(stage, pkgName);
+      if (host) {
+        assert.deepEqual(config.routes, [{ pattern: host, custom_domain: true }], pkgName);
       } else {
         assert.equal(config.routes, undefined, `${pkgName} has routes`);
       }
     }
+    assert.ok(build(stageName).get("router")?.assets?.directory, "the router still serves the frontend");
+  }
+  // Dev's sign-in proxy is the InferOps gatekeeper on its own hostname; prod has none.
+  assert.equal(stageWorkerHost(STAGES.dev, "gatekeeper-inferops"), "auth.dev-os.factorylevel.dev");
+  assert.equal(stageWorkerHost(STAGES.prod, "gatekeeper-inferops"), null);
+  assert.deepEqual(stageHostnames(STAGES.dev), ["dev-os.factorylevel.dev", "auth.dev-os.factorylevel.dev"]);
+  assert.deepEqual(stageHostnames(STAGES.prod), ["os.factorylevel.dev"]);
+  assert.equal(build("dev").get("gatekeeper-inferops")?.vars?.INFERLAB_AUTHORIZE_ORIGIN,
+    "https://auth.dev-os.factorylevel.dev");
+  assert.equal(build("prod").get("gatekeeper-inferops")?.vars?.INFERLAB_AUTHORIZE_ORIGIN, undefined);
+});
+
+test("an authorize origin must be a bare https origin on a hostname of its own", () => {
+  for (const authorizeOrigin of ["http://auth.dev-os.example", "https://auth.dev-os.example/x",
+    "https://dev-os.factorylevel.dev", "https://auth.dev.inferlab.io"]) {
+    const problems = stageDefinitionProblems({ ...STAGES.dev, inferops: { ...STAGES.dev.inferops, authorizeOrigin } });
+    assert.ok(problems.some((p) => p.includes("authorizeOrigin")), authorizeOrigin);
   }
 });
 
@@ -192,7 +210,7 @@ test("the InferLab edge secret is optional, validated, and named in the plan wit
   const plan = formatStagePlan({ stageName: "dev", stage: STAGES.dev, configs, secretNames: ["ADMINS"],
     gatekeeperSecretNames, kv });
   assert.ok(!plan.includes(value), "the edge secret reached the plan");
-  assert.match(plan, /inferos-dev-gatekeeper-inferops, secrets: INFEROPS_EDGE_SECRET \[vars:/);
+  assert.match(plan, /inferos-dev-gatekeeper-inferops at auth.dev-os.factorylevel.dev \(custom domain\), secrets: INFEROPS_EDGE_SECRET \[vars:/);
   assert.match(plan, /inferos-dev-gatekeeper-context \[vars:/);
   const unset = formatStagePlan({ stageName: "dev", stage: STAGES.dev, configs, secretNames: ["ADMINS"],
     gatekeeperSecretNames: { "gatekeeper-inferops": [] }, kv });

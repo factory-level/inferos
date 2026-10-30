@@ -21,7 +21,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-29
+updated: 2026-10-30
 ---
 
 # InferOps gatekeeper
@@ -76,7 +76,8 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | Path | Responsibility |
 | --- | --- |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
-| `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect, `/oauth` callback, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
+| `custom-gatekeepers/gatekeeper-inferops/src/auth-proxy.ts` | The sign-in proxy: on `INFERLAB_AUTHORIZE_ORIGIN`, forwards central-auth's `/authorize`, `/authorize/persona` and `/logout` to `INFERLAB_AUTH_ORIGIN` with the edge header. See [sign-in proxy](#sign-in-proxy). |
+| `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` and `INFERLAB_AUTHORIZE_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect (to the authorize origin when set), `/oauth` callback, the sign-in proxy's dispatch, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and the InferOps and InferMind workspaces InferLab reported with each one's slug (an InferMind one marked `product: "infermind"`), slug resolution per product (`resolveWorkspace(slug, product)`, InferOps by default), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure`, `updateDocument` and the proposal calls `listProposals`, `readProposal` and `approveProposal`, whose refusals read as `PROPOSAL_APPROVE_REFUSED` in both implementations) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`), with the facts a failure proves: its `WriteStage` (`unsent`, or `refused` by InferOps in answer to the write: a 401, or a 400, 403, 404 or 409 carrying InferOps' error envelope) and whether a `FORBIDDEN` is a workflow-policy refusal. They hold only in the isolate that raised the error; `atStage` restores a stage across the mock's RPC boundary. |
 | `custom-gatekeepers/gatekeeper-inferops/src/apply-attempts.ts` | What an unsuccessful apply proves (`classifyAttempt`), each kind's `ApplyPolicy` (`BOARD_WRITES`, `PROPOSAL_APPROVE`, `RECONCILE_ONLY`), `CheckRefused` for a gatekeeper check that refuses before sending, and which refusals can pass (`canPass`). |
@@ -411,6 +412,7 @@ sign-in flag (default `http://localhost:8080`, the local InferLab stack).
 | `INFEROPS_API_TOKEN` | Stopgap bearer token (a user access token or an `iex_` service-account key) for accounts with no identity. Requires the base URL, the workspace id and the workspace slug, else an error names the missing variable. |
 | `INFEROPS_WORKSPACE_ID` | The workspace UUID the stopgap sends as `X-Workspace-Id`. |
 | `INFEROPS_WORKSPACE_SLUG` | The stopgap workspace's slug: a resource URL whose `<workspace>` is this slug (for example `inferops://acme.operations/project/board/ENG` with `operations`) uses the stopgap connection. |
+| `INFERLAB_AUTHORIZE_ORIGIN` | Optional bare origin the browser is sent to for `/authorize` instead of `INFERLAB_AUTH_ORIGIN`, served by this gatekeeper's [sign-in proxy](#sign-in-proxy). Set but malformed, sign-in is off rather than falling back. Server-side calls never use it. |
 | `INFEROPS_EDGE_SECRET` | A **secret**, not a var. Optional. It is the shared value that InferLab's IP-allowlisting edge lets through (dev InferLab's Cloud Armor rule, InferOps `waf:inferosEdgeSecret`); see [edge header](#edge-header). Unset, no header is sent. |
 
 `demo.local` bindings keep working beside a configured API.
@@ -580,6 +582,17 @@ Workshop backend checks the same allowlist on its first API request
 report `providesAuth` fails every request with a clear message rather than a login page quietly
 missing a button.
 
+
+### Sign-in proxy
+
+A browser that InferLab's IP-allowlisting edge refuses cannot open central-auth's `/authorize` page either, since that is a browser leg and carries no edge header. With `INFERLAB_AUTHORIZE_ORIGIN` set (a hostname routed to this gatekeeper, behind the deployment's Access application), `src/auth-proxy.ts` serves it:
+
+- `inferLabAuthorizeOrigin(env)` is where the popup's `/authorize` redirect goes: the authorize origin when set and valid, the InferLab origin when unset, and null (sign-in off) when set but malformed. The code exchange, refresh, logout and `/workspaces` read still go to `INFERLAB_AUTH_ORIGIN` / `INFEROPS_BASE_URL` directly.
+- `handleInferLabLogin` (the gatekeeper's HTTP entry) tries `handleInferLabAuthProxy` first. It answers only requests whose origin is the authorize origin, and only `GET /authorize`, `POST /authorize/persona` and `GET /logout`; any other path or method there is a 404 without calling InferLab, because the InferLab origin also serves the API.
+- Upstream requests go through `inferLabFetch` (edge header, `redirect: "manual"`) with only `accept`, `accept-language`, `content-type`, `cookie` (minus Access's `CF_Authorization`), `origin`, `referer` and `user-agent`. An `Origin`/`Referer` naming the authorize origin is rewritten to the InferLab origin, which central-auth's same-origin check on the persona form accepts as its public origin; any other value passes unchanged and is refused there.
+- In the response, a `Location` on the InferLab origin is rewritten to the authorize origin (the `/oauth` callback is the deployment's own and passes through), and `Set-Cookie` loses any `Domain`, so central-auth's host-only cookies (CSRF, SSO) stay on the authorize host.
+- Only InferLab persona sign-in works through it; a provider sign-in (Google) returns to InferLab's own hostname.
+- `__tests__/auth-proxy.test.ts` covers the origin and path allowlist, the edge header and header filtering, the cookie, Origin, Referer, Location and Set-Cookie rewrites, and a foreign `Origin` passing unchanged; `inferlab-login.test.ts` covers the popup going to the authorize origin while the code is exchanged at the InferLab origin, and a malformed authorize origin turning sign-in off.
 ## Divergences from Design
 
 - `findBoards` is not in the design's API. It runs on a board session, so a person needs one board
