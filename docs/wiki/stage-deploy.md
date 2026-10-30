@@ -1,6 +1,6 @@
 ---
 title: Deploy a persistent stage
-updated: 2026-10-29
+updated: 2026-10-30
 ---
 
 # Deploy a persistent stage
@@ -16,8 +16,8 @@ How to deploy, update, roll back and delete the two persistent InferOS instances
 
 1. **Account.** The account holding the `factorylevel.dev` zone, on Workers Paid (bundle size, Browser Rendering and the Worker Loader). Nothing may already use the stage hostname as a DNS record or another Worker's custom domain.
 2. **Access application, one per hostname** (Zero Trust → Access → Applications → Self-hosted), created **before** the first deploy so the hostname is never reachable without it:
-   - Application domain: the stage hostname, all paths.
-   - An **Allow** policy for the people (and test agents' mailboxes) who may reach the stage, with One-time PIN or an identity provider as the login method.
+   - Application domain: the stage hostname, all paths. On `dev`, add the sign-in proxy's hostname `auth.dev-os.factorylevel.dev` to the **same** application, so one PIN covers both; it serves the persona picker and must never be reachable without Access.
+   - An **Allow** policy for the people (and test agents' mailboxes) who may reach the stage, with One-time PIN or an identity provider as the login method. Give each external test agent its own policy naming its own address (plus aliases such as `bot+owner@…` count as separate addresses), so Access logs say which one signed in.
    - A **Service Auth** policy for a service token (for example `inferos-dev-smoke`), used by the post-deploy smoke.
    The deploy cannot create these; it only checks afterwards that an unauthenticated request is redirected to Access, and fails loudly if not.
 3. **InferLab registration.** InferLab's `inferos` sign-in client must allow the stage origin (`auth.sso.inferosOrigins` in InferOps' `config/development.js` for `dev`, `config/production.js` for `prod`); the callback is `<origin>/gatekeeper/inferops/oauth`. Without it "Sign in with InferLab" is refused at InferLab.
@@ -35,7 +35,7 @@ How to deploy, update, roll back and delete the two persistent InferOS instances
 ## Steps
 
 1. Rehearse with no network: `pnpm stage:deploy dev --dry-run`. It prints every worker, its vars, the backend's secret names (never values), the KV namespaces and the bucket.
-2. Deploy: `pnpm stage:deploy dev`. It builds the workspace (frontend in non-Access mode), creates any missing KV namespace, writes `wrangler.stage-dev.jsonc` beside each package, deploys gatekeepers, then the backend, then the router, checks that only the router has a URL, checks the Access redirect, and runs the smoke when a service token is set. `dev` refuses a dirty tree unless `--allow-dirty`; `prod` always refuses one.
+2. Deploy: `pnpm stage:deploy dev`. It builds the workspace (frontend in non-Access mode), creates any missing KV namespace, writes `wrangler.stage-dev.jsonc` beside each package, deploys gatekeepers, then the backend, then the router, checks that only the router (and, on `dev`, the gatekeeper's sign-in proxy) has a URL, checks the Access redirect on every stage hostname, and runs the smoke when a service token is set. `dev` refuses a dirty tree unless `--allow-dirty`; `prod` always refuses one.
 3. Accept it by hand: sign in through Access, choose "Sign in with InferLab", and open a board you hold (`inferops://<tenant>.<workspace>/project/board/<KEY>`). A config that validates is not acceptance.
 4. Re-deploying is the same command; KV namespaces, the bucket and every Durable Object are kept.
 

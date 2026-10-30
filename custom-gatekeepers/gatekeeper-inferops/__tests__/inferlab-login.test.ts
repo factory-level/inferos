@@ -256,6 +256,26 @@ describe("sign-in flow", () => {
     expect(signIns.some(s => s.label === "unverified")).toBe(false);
   });
 
+  it("sends the browser to the authorize origin but exchanges the code at the InferLab origin", async () => {
+    const proxied = { ...LOGIN_ENV, INFERLAB_AUTHORIZE_ORIGIN: "http://127.0.0.1:8788" };
+    const popup = await handleInferLabLogin(new Request(await start("proxied")), proxied, env.INFERLAB_LOGIN);
+    const location = new URL(popup!.headers.get("Location")!);
+    expect(`${location.origin}${location.pathname}`).toBe("http://127.0.0.1:8788/authorize");
+    expect(location.searchParams.get("redirect_uri")).toBe(REDIRECT_URI);
+
+    const exchanges = tokenEndpoint(signedIn("ada@example.com"));
+    const done = await handleInferLabLogin(new Request(
+      `${REDIRECT_URI}?code=c1&state=${location.searchParams.get("state")}`), proxied, env.INFERLAB_LOGIN);
+    expect(done?.status).toBe(200);
+    expect(exchanges.map(e => e.url)).toEqual(["http://localhost:8080/auth/token"]);
+  });
+
+  it("turns sign-in off when the authorize origin is set but malformed", async () => {
+    const response = await handleInferLabLogin(new Request(await start("malformed")),
+      { ...LOGIN_ENV, INFERLAB_AUTHORIZE_ORIGIN: "http://auth.dev-os.example" }, env.INFERLAB_LOGIN);
+    expect(response?.status).toBe(503);
+  });
+
   it("leaves other paths to the RPC-only 404", async () => {
     expect(await get("http://localhost:8787/gatekeeper/inferops/elsewhere")).toBeNull();
     expect(await handleInferLabLogin(

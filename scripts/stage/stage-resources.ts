@@ -45,14 +45,14 @@ export function parseDeployTargets(outputFile: string): string[] | null {
 }
 
 /**
- * Why a worker's deploy targets are wrong, or null. The router must be reachable at exactly the
- * stage's hostname, and nothing else may be reachable at all: a workers.dev URL or a second route
- * on any worker is a way around the Access application in front of the hostname.
+ * Why a worker's deploy targets are wrong, or null. A worker with a hostname (the router, and the
+ * InferOps gatekeeper's sign-in proxy) must be reachable at exactly that hostname, and nothing else
+ * may be reachable at all: a workers.dev URL or a stray route is a way around Access.
  */
 export function deployTargetProblem(workerName: string, targets: readonly string[], expectedHost: string | null): string | null {
   if (expectedHost === null) {
     return targets.length === 0 ? null :
-      `${workerName} is reachable at ${targets.join(", ")}, but only the router may have a URL`;
+      `${workerName} is reachable at ${targets.join(", ")}, but it must have no URL`;
   }
   const hosts = targets.map((target) => target.replace(/^https?:\/\//, "").split(/[\s/]/)[0]);
   if (hosts.length === 0) return `${workerName} reported no targets; expected ${expectedHost}`;
