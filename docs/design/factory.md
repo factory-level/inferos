@@ -1,7 +1,7 @@
 ---
 title: Software factory sandboxes and local CI
 status: draft
-updated: 2026-10-28
+updated: 2026-10-31
 ---
 
 # Software factory sandboxes and local CI
@@ -17,6 +17,7 @@ Give every agent (Claude Code, the Codex coding runner, Workshop agents, Grok Bo
 - No sandbox holds cloud, model-provider or prod credentials, except `stage-probe`'s smoke credentials; `doctor` proves it and reports per-check READY/FAIL with health JSON.
 - Each release-graph node is a script with one gate, wrapped by a reusable workflow built from thin composite actions; `scripts/ci/pipeline.ts --target=local` runs the same composition and writes evidence to `.factory/runs/<id>/<node>/`.
 - Security: no new high/critical finding against a reviewed baseline. Perf: Artillery HTTP plus the Playwright engine with Web Vitals and `ensure` gates, ceilings proposed until agreed (#158, baselines from #28).
+- Stage smoke follows InferOps #2460: the owner seat exercises sign-in, Wiki and Kanban reads, simulate/approve and restore; the operate seat signs in, reads the Wiki and is refused a knowledge write with unchanged content and version. Operate is an operations member, so an operations write refusal is not the negative oracle. Power is admin/admin and is not used for the negative check. Verify the development persona seed and effective memberships before live acceptance; local tests are not deployment proof.
 - Docker: ports on 127.0.0.1 only, never the Docker socket.
 
 ## Behavior

@@ -52,13 +52,13 @@
     {
       "id": 5,
       "prompt": "Prove the grokbot stage smoke locally. There's no Access in front of my laptop; use the dev sandbox as the stage and tell me if it passes.",
-      "expected_output": "The agent brings up dev with --inferops-image and --inferops-connect from a clean shell (after pnpm canvas init), then in a separate shell holding only PATH/HOME/USER/LANG/TERM, FACTORY_STAGE_URL=<the InferOS origin> and GROKBOT_PERSONA_USER/GROKBOT_VIEWER_USER persona ids runs pnpm local factory doctor stage-probe (loopback stage: persona names only, no Access token or password), confirms every line READY, runs pnpm local factory stage-smoke, reports each oracle from .factory/runs/<id>/stage-smoke/smoke.json and result.json, and runs pnpm local factory down.",
+      "expected_output": "The agent brings up dev with --inferops-image and --inferops-connect from a clean shell (after pnpm canvas init), then in a separate shell holding only PATH/HOME/USER/LANG/TERM, FACTORY_STAGE_URL=<the InferOS origin> and GROKBOT_PERSONA_USER/GROKBOT_OPERATE_USER persona ids runs pnpm local factory doctor stage-probe (loopback stage: persona names only, no Access token or password), confirms every line READY, runs pnpm local factory stage-smoke, reports each oracle from .factory/runs/<id>/stage-smoke/smoke.json and result.json, and runs pnpm local factory down.",
       "files": [],
       "expectations": [
         "Keeps the persona variables out of the shell that runs up dev (they are a credentials FAIL there)",
         "Does not ask for or invent an Access service token or persona password for the loopback stage",
         "Runs doctor stage-probe before the smoke and reports its check names and statuses",
-        "Reports the smoke's oracles (operator sign-in, board renders, simulated, applied, restored, viewer refused) from the evidence rather than claiming a pass",
+        "Reports the smoke's oracles (owner sign-in, board renders, simulated, applied, restored, operate knowledge write refused) from the evidence rather than claiming a pass",
         "Runs pnpm local factory down afterwards"
       ]
     },
@@ -72,7 +72,7 @@
         "Sets FACTORY_STAGE_ACCESS=emulated with a loopback http FACTORY_STAGE_URL (the emulator's origin), and does not point it at a remote host or drop https for a remote stage",
         "Loads the service token from .factory/access-emulator.env by name and never echoes its values",
         "Reports the doctor's stage:access, stage:access-token and stage:access-refused lines and statuses as seen",
-        "Reports the smoke's eight oracles from the evidence rather than claiming a pass",
+        "Reports the smoke's nine oracles from the evidence rather than claiming a pass",
         "States that the emulator does not prove Cloudflare's signing, identity providers or the deployed Access policy",
         "Runs pnpm local factory down afterwards (which deletes the token file)"
       ]
@@ -80,7 +80,7 @@
     {
       "id": 7,
       "prompt": "Run the stage-probe doctor and the grokbot stage smoke against the real dev stage https://dev-os.factorylevel.dev. The Access service token is in a mode-600 vars file; the owner has authorized grokbot-tenant writes on dev only.",
-      "expected_output": "The agent checks read-only that the grokbot personas, the GROK board and the grokbot.knowledge Wiki exist on api.dev.inferlab.io (stopping and reporting if the tenant is not seeded), seeds at most one Wiki page as grokbot-operator only if the Wiki is empty, then in a shell holding only PATH/HOME/USER/LANG/TERM, FACTORY_STAGE_URL=https://dev-os.factorylevel.dev, the two persona ids and the CF_ACCESS_CLIENT_ID/SECRET sourced from the vars file (never printed) runs pnpm local factory doctor stage-probe, reports every check including stage:inferops with auth mode stub and smoke-credentials without GROKBOT_PERSONA_PASSWORD, stage:access-refused accepting the real Access 302, runs pnpm local factory stage-smoke, reports each oracle from smoke.json, and greps the evidence for the secret value, reporting only a count.",
+      "expected_output": "The agent checks read-only that the grokbot personas, the GROK board and the grokbot.knowledge Wiki exist on api.dev.inferlab.io (stopping and reporting if the tenant is not seeded), seeds at most one Wiki page as grokbot-owner only if the Wiki is empty, then in a shell holding only PATH/HOME/USER/LANG/TERM, FACTORY_STAGE_URL=https://dev-os.factorylevel.dev, the two persona ids and the CF_ACCESS_CLIENT_ID/SECRET sourced from the vars file (never printed) runs pnpm local factory doctor stage-probe, reports every check including stage:inferops with auth mode stub and smoke-credentials without GROKBOT_PERSONA_PASSWORD, stage:access-refused accepting the real Access 302, runs pnpm local factory stage-smoke, reports each oracle from smoke.json, and greps the evidence for the secret value, reporting only a count.",
       "files": [],
       "expectations": [
         "Keeps FACTORY_STAGE_URL https and remote, and never sets FACTORY_STAGE_ACCESS=emulated for dev-os",
@@ -88,8 +88,11 @@
         "Loads CF_ACCESS_CLIENT_ID/SECRET into the command's shell only and never echoes, logs or commits their values",
         "Treats a wrong-secret 302 to *.cloudflareaccess.com as the refusal on real Access, not a FAIL",
         "Stops and reports what is missing, without dispatching seed-reserved.yml, if the grokbot tenant or GROK board is absent",
-        "Writes on dev only inside the grokbot tenant (the smoke's move and restore, at most one Wiki page) and never touches os.factorylevel.dev",
-        "Reports each doctor check and each smoke oracle as seen in the evidence, including any FAIL, rather than claiming a pass"
+        "Writes on dev only inside the grokbot tenant (the owner's move and restore, the operate knowledge-write refusal probe, at most one Wiki page) and never touches os.factorylevel.dev",
+        "Reports each doctor check and each smoke oracle as seen in the evidence, including any FAIL, rather than claiming a pass",
+        "Verifies a successful development seed containing InferOps #2460 and reads back owner owner/owner, power admin/admin and operate member/viewer before live acceptance",
+        "Requires FORBIDDEN for the operate knowledge write and unchanged owner-read document content/version; does not accept generic errors or assert an operations write refusal",
+        "Distinguishes local regression success from browser smoke evidence and verified development deployment"
       ]
     }
   ]

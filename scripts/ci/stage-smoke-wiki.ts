@@ -1,4 +1,4 @@
-// The pure half of node 10's wiki oracles (`operator.wikiReads`, `viewer.wikiReads` in
+// The pure half of node 10's wiki oracles (`owner.wikiReads`, `operate.wikiReads` in
 // stage-smoke-flow.ts): which text a Wiki page must show on the canvas, and whether the page the
 // gatekeeper read is the page InferOps' own API answers. No I/O, so `ci.test.ts` covers it.
 

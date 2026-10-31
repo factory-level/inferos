@@ -5,8 +5,8 @@
 //   node scripts/ci/stage-smoke-flow.ts <evidence dir>
 //
 // Environment: FACTORY_STAGE_URL, FACTORY_INFEROPS_URL (the InferOps API the oracles read; else the
-// sign-in popup's origin), GROKBOT_PERSONA_USER (operator persona), GROKBOT_VIEWER_USER
-// (viewer persona), FACTORY_STAGE_BOARD (default the grokbot GROK board), FACTORY_STAGE_WIKI
+// sign-in popup's origin), GROKBOT_PERSONA_USER (owner persona), GROKBOT_OPERATE_USER
+// (operations member / knowledge viewer persona), FACTORY_STAGE_BOARD (default the grokbot GROK board), FACTORY_STAGE_WIKI
 // (default the grokbot tenant's InferMind Wiki, `grokbot.knowledge`), and for a stage behind Access
 // (remote, or emulated locally) CF_ACCESS_CLIENT_ID/SECRET, sent as Access service-token headers on
 // the browser's requests to the stage origin only (never to InferOps), and on the Workshop RPC
@@ -14,23 +14,25 @@
 // first authorised response. No value is written anywhere: the evidence names the personas by role.
 //
 // Oracles, each recorded in `<dir>/smoke.json` (the orchestrator gates on them):
-//   operator.signIn        InferOS login -> "Continue with InferOps" -> the InferOps persona page
+//   owner.signIn        InferOS login -> "Continue with InferOps" -> the InferOps persona page
 //                          -> back with an InferOS session and the InferOps account connected
-//   operator.boardRenders  every card the gatekeeper reads is visible on a canvas bound to the board
-//   operator.simulated     the proposed move shows on the board, and InferOps is unchanged before approval
-//   operator.applied       after approval InferOps (its own API, as the operator) has the new state
+//   owner.boardRenders  every card the gatekeeper reads is visible on a canvas bound to the board
+//   owner.simulated     the proposed move shows on the board, and InferOps is unchanged before approval
+//   owner.applied       after approval InferOps (its own API, as the owner) has the new state
 //                          and a higher revision
-//   operator.restored      the issue is moved back the same way (simulate -> approve), so a smoke
+//   owner.restored      the issue is moved back the same way (simulate -> approve), so a smoke
 //                          leaves the stage's board as it found it
-//   viewer.refused         the viewer's proposal is refused (at proposal, or when its approval is
-//                          applied), and InferOps' issue state and revision are unchanged
-//   operator.wikiReads,    the Wiki's first page, read through the person's own Wiki connection, is
-//   viewer.wikiReads       the page InferOps' knowledge API answers that persona, and its title and
+//   operate.signIn         the operate persona signs in and connects its own InferOps account
+//   operate.knowledgeWriteRefused  a Wiki body write is refused FORBIDDEN at proposal or apply,
+//                          and the owner's document content and version are unchanged
+//   owner.wikiReads,    the Wiki's first page, read through the person's own Wiki connection, is
+//   operate.wikiReads       the page InferOps' knowledge API answers that persona, and its title and
 //                          first lines render on a canvas holding the `inferops.wiki` widget (a
-//                          read: the viewer's knowledge role allows it)
+//                          read: the operate persona's knowledge viewer role allows it)
 // The move is proposed through the gatekeeper's issue session (the API the board widget calls),
 // and approved by clicking Approve in the workspace's Activity panel.
 
+import { checkKnowledgeWrite, smokeOraclesPass, smokePersonaProblem, STAGE_SMOKE_ORACLES, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -56,6 +58,8 @@ interface Board {
 interface IssueState { stateId: string; revision: string }
 
 const env = process.env;
+const personaProblem = smokePersonaProblem(env);
+if (personaProblem) throw new Error(personaProblem);
 const stage = new URL(env.FACTORY_STAGE_URL ?? "");
 const boardUrl = env.FACTORY_STAGE_BOARD ?? DEFAULT_BOARD;
 const wikiUrl = env.FACTORY_STAGE_WIKI ?? DEFAULT_WIKI;
@@ -180,7 +184,7 @@ async function connectInferOps(context: Any, page: Any, user: Any, role: string,
  * the InferLab the sign-in popup opened. Against a non-stub InferLab there is no persona token, so
  * the oracle using it FAILs with that reason, never passes.
  */
-async function inferopsApi(popupOrigin: string, persona: string): Promise<{ issue(id: string): Promise<IssueState>; wikiPage(slug: string): Promise<WikiPageText | null> } | string> {
+async function inferopsApi(popupOrigin: string, persona: string): Promise<{ issue(id: string): Promise<IssueState>; wikiPage(slug: string): Promise<WikiSnapshot | null> } | string> {
   const origin = env.FACTORY_INFEROPS_URL ? new URL(env.FACTORY_INFEROPS_URL).origin : popupOrigin;
   const config = await (await fetch(`${origin}/auth/public-config`)).json() as { mode?: string };
   if (config.mode !== "stub") return `InferOps (${origin}) auth mode is ${config.mode}; its API is read here only through stub persona login, so this oracle is unproven`;
@@ -204,9 +208,9 @@ async function inferopsApi(popupOrigin: string, persona: string): Promise<{ issu
         const documents = await read(workspaceId, "/knowledge/documents") as { id: string; slug: string }[];
         const listed = documents.find(d => d.slug === slug);
         if (!listed) continue;
-        const document = await read(workspaceId, `/knowledge/documents/${listed.id}`) as { slug: string; title: string; body?: string | null };
+        const document = await read(workspaceId, `/knowledge/documents/${listed.id}`) as { id: string; version: number; slug: string; title: string; body?: string | null };
         const sections = await read(workspaceId, `/knowledge/sections?documentId=${listed.id}`) as { body: string }[];
-        return { slug: document.slug, title: document.title, body: document.body ?? "", sections: sections.map(s => s.body) };
+        return { id: document.id, version: document.version, slug: document.slug, title: document.title, body: document.body ?? "", sections: sections.map(s => s.body) };
       }
       return null;
     },
@@ -274,12 +278,12 @@ async function pendingFor(overseer: Any, connectionId: number): Promise<{ id: nu
 }
 
 /** An action's state, found in the workspace's history. */
-async function actionState(overseer: Any, id: number): Promise<{ state?: string; lastAttempt?: { message?: string; code?: string } }> {
+async function actionState(overseer: Any, id: number): Promise<KnowledgeWriteOutcome> {
   let beforeId: number | undefined;
   for (let page = 0; page < 10; page++) {
-    const { entries, nextBeforeId } = await overseer.listActions({ beforeId, filter: "action" }) as { entries: { id: number; state?: string; lastAttempt?: { message?: string; code?: string } }[]; nextBeforeId?: number };
+    const { entries, nextBeforeId } = await overseer.listActions({ beforeId, filter: "action" }) as { entries: { id: number; state?: string; lastAttempt?: { message?: string; code?: string; outcome?: string } }[]; nextBeforeId?: number };
     const found = entries.find(entry => entry.id === id);
-    if (found) return { state: found.state, lastAttempt: found.lastAttempt && { message: found.lastAttempt.message, code: found.lastAttempt.code } };
+    if (found) return { state: found.state, lastAttempt: found.lastAttempt && { code: found.lastAttempt.code, outcome: found.lastAttempt.outcome } };
     if (nextBeforeId === undefined) break;
     beforeId = nextBeforeId;
   }
@@ -309,7 +313,7 @@ async function approveInBrowser(page: Any, workspaceId: string, shot: string): P
  * InferOps' knowledge API as the same persona, which must agree, and a saved canvas holding the
  * `inferops.wiki` widget opened on that page must show its title and first lines.
  */
-async function wikiReads(role: "operator" | "viewer", page: Any, user: Any, accountId: number, persona: string, inferops: string): Promise<void> {
+async function wikiReads(role: "owner" | "operate", page: Any, user: Any, accountId: number, persona: string, inferops: string): Promise<void> {
   const name = `${role}.wikiReads`;
   const api = await inferopsApi(inferops, persona);
   if (typeof api === "string") { record(name, false, api); return; }
@@ -358,26 +362,26 @@ const until = async <T>(read: () => Promise<T>, done: (value: T) => boolean, ms 
   return value;
 };
 
-async function operatorFlow(browser: Any): Promise<void> {
+async function ownerFlow(browser: Any): Promise<void> {
   const persona = env.GROKBOT_PERSONA_USER!;
-  const { context, page, token, inferops } = await signIn(browser, "operator", persona);
+  const { context, page, token, inferops } = await signIn(browser, "owner", persona);
   notes.inferopsOrigin = inferops;
   notes.inferopsApi = env.FACTORY_INFEROPS_URL ? new URL(env.FACTORY_INFEROPS_URL).origin : inferops;
   const { api, close } = connectWorkshop();
   try {
     const config = await api.getServerConfig() as { canvasFeatures?: { composableViews?: boolean; durableViews?: boolean } };
     if (!config.canvasFeatures?.durableViews) {
-      record("operator.boardRenders", false, "the stage has no saved canvases (composable + durable views off: no inferos.canvas.json)");
+      record("owner.boardRenders", false, "the stage has no saved canvases (composable + durable views off: no inferos.canvas.json)");
       return;
     }
     const user = await api.authenticate(token);
     // A first sign-in lands on the onboarding wizard; the smoke is not testing it.
     if (!await user.isOnboardingCompleted()) await user.completeOnboarding();
-    const account = await connectInferOps(context, page, user, "operator", persona);
-    if (!record("operator.signIn", Boolean(token && account), account ? `InferOS session, InferOps account connected (${account.displayName ?? "account"})` : "signed in, but no InferOps account is connected")) return;
+    const account = await connectInferOps(context, page, user, "owner", persona);
+    if (!record("owner.signIn", Boolean(token && account), account ? `InferOS session, InferOps account connected (${account.displayName ?? "account"})` : "signed in, but no InferOps account is connected")) return;
     // The Wiki read is independent of the board flow, so a board failure does not hide it.
-    await wikiReads("operator", page, user, account!.id, persona, inferops).catch((error: Error) => record("operator.wikiReads", false, error.message.split("\n")[0]!));
-    const bound = await bindBoard(user, account!.id, "Stage smoke (operator)");
+    await wikiReads("owner", page, user, account!.id, persona, inferops).catch((error: Error) => record("owner.wikiReads", false, error.message.split("\n")[0]!));
+    const bound = await bindBoard(user, account!.id, "Stage smoke (owner)");
     const board = await bound.session.readBoard() as Board;
     const identifiers = board.columns.flatMap(c => c.issues.map(i => i.identifier));
     await page.goto(new URL(`/workspace/${bound.workspaceId}/inferops-canvas?view=${bound.screenId}`, stage).toString());
@@ -387,20 +391,20 @@ async function operatorFlow(browser: Any): Promise<void> {
       missing = identifiers.filter(id => !text.includes(id));
       if (missing.length) await page.waitForTimeout(1_000);
     }
-    await page.screenshot({ path: join(out, "operator-04-board.png") });
+    await page.screenshot({ path: join(out, "owner-04-board.png") });
     notes.board = { project: board.project.identifier, columns: board.columns.length, issues: identifiers.length };
-    if (!record("operator.boardRenders", identifiers.length > 0 && missing.length === 0,
+    if (!record("owner.boardRenders", identifiers.length > 0 && missing.length === 0,
       missing.length ? `missing on the canvas: ${missing.join(", ")}` : `${identifiers.length} cards of ${board.project.identifier} rendered on the canvas (${identifiers.join(", ")})`)) return;
 
     const api2 = await inferopsApi(inferops, persona);
-    if (typeof api2 === "string") { record("operator.applied", false, api2); return; }
+    if (typeof api2 === "string") { record("owner.applied", false, api2); return; }
     const move = proposableMove(board);
-    if (!move) { record("operator.simulated", false, "no issue on the board has a next state to move to"); return; }
+    if (!move) { record("owner.simulated", false, "no issue on the board has a next state to move to"); return; }
     notes.move = { issue: move.identifier, from: move.fromName, to: move.toName };
 
     for (const [step, from, to, toName] of [["apply", move.from, move.to, move.toName], ["restore", move.to, move.from, move.fromName]] as const) {
       const before = await api2.issue(move.issueId);
-      if (before.stateId !== from) { record(step === "apply" ? "operator.simulated" : "operator.restored", false, `${move.identifier} is not in the expected state in InferOps`); return; }
+      if (before.stateId !== from) { record(step === "apply" ? "owner.simulated" : "owner.restored", false, `${move.identifier} is not in the expected state in InferOps`); return; }
       const issue = await bound.session.openIssue(move.issueId);
       await issue.transition(to, before.revision);
       const simulated = await bound.session.readBoard() as Board;
@@ -409,13 +413,13 @@ async function operatorFlow(browser: Any): Promise<void> {
       if (step === "apply") {
         await page.goto(new URL(`/workspace/${bound.workspaceId}/inferops-canvas?view=${bound.screenId}`, stage).toString());
         await page.getByText(/pending approval|Awaiting approval/).first().waitFor({ timeout: 30_000 }).catch(() => undefined);
-        await page.screenshot({ path: join(out, "operator-05-move-proposed.png") });
-        if (!record("operator.simulated", columnOf(simulated, move.issueId) === to && stillBefore.stateId === from && stillBefore.revision === before.revision && pending !== undefined,
+        await page.screenshot({ path: join(out, "owner-05-move-proposed.png") });
+        if (!record("owner.simulated", columnOf(simulated, move.issueId) === to && stillBefore.stateId === from && stillBefore.revision === before.revision && pending !== undefined,
           `board shows ${move.identifier} in ${toName} (simulated), InferOps still at state ${from === stillBefore.stateId ? "unchanged" : "CHANGED"} revision ${stillBefore.revision}; pending action ${pending?.id ?? "none"}`)) return;
       } else if (!pending) {
-        record("operator.restored", false, "the move back queued no action"); return;
+        record("owner.restored", false, "the move back queued no action"); return;
       }
-      await approveInBrowser(page, bound.workspaceId, `operator-0${step === "apply" ? 6 : 8}-approve-${step}.png`);
+      await approveInBrowser(page, bound.workspaceId, `owner-0${step === "apply" ? 6 : 8}-approve-${step}.png`);
       const after = await until(() => api2.issue(move.issueId), value => value.stateId === to);
       const applied = after.stateId === to && BigInt(after.revision) > BigInt(before.revision);
       const fresh = await bound.session.readBoard() as Board;
@@ -423,11 +427,11 @@ async function operatorFlow(browser: Any): Promise<void> {
         notes.applied = { revisionBefore: before.revision, revisionAfter: after.revision, boardRevision: revisionOf(fresh, move.issueId) };
         await page.goto(new URL(`/workspace/${bound.workspaceId}/inferops-canvas?view=${bound.screenId}`, stage).toString());
         await page.getByText(move.identifier).first().waitFor({ timeout: 30_000 }).catch(() => undefined);
-        await page.screenshot({ path: join(out, "operator-07-after-approve.png") });
-        if (!record("operator.applied", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `now in ${toName}` : "NOT moved"}, revision ${before.revision} -> ${after.revision}`)) return;
+        await page.screenshot({ path: join(out, "owner-07-after-approve.png") });
+        if (!record("owner.applied", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `now in ${toName}` : "NOT moved"}, revision ${before.revision} -> ${after.revision}`)) return;
       } else {
         notes.restored = { revisionBefore: before.revision, revisionAfter: after.revision };
-        record("operator.restored", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `back in ${toName}` : "NOT moved back"}, revision ${before.revision} -> ${after.revision}`);
+        record("owner.restored", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `back in ${toName}` : "NOT moved back"}, revision ${before.revision} -> ${after.revision}`);
       }
     }
   } finally {
@@ -435,54 +439,58 @@ async function operatorFlow(browser: Any): Promise<void> {
   }
 }
 
-async function viewerFlow(browser: Any): Promise<void> {
-  const persona = env.GROKBOT_VIEWER_USER!;
-  const { context, page, token, inferops } = await signIn(browser, "viewer", persona);
+async function operateFlow(browser: Any): Promise<void> {
+  const persona = env.GROKBOT_OPERATE_USER!;
+  const { context, page, token, inferops } = await signIn(browser, "operate", persona);
   const { api, close } = connectWorkshop();
   try {
     const user = await api.authenticate(token);
     // A first sign-in lands on the onboarding wizard; the smoke is not testing it.
     if (!await user.isOnboardingCompleted()) await user.completeOnboarding();
-    const account = await connectInferOps(context, page, user, "viewer", persona);
-    if (!account) { record("viewer.refused", false, "the viewer has no InferOps account connected, so no refusal was exercised"); return; }
-    await wikiReads("viewer", page, user, account.id, persona, inferops).catch((error: Error) => record("viewer.wikiReads", false, error.message.split("\n")[0]!));
-    // The oracle reads InferOps as the operator: the viewer's own read would not show a write it could not see.
-    const operatorApi = await inferopsApi(inferops, env.GROKBOT_PERSONA_USER!);
-    if (typeof operatorApi === "string") { record("viewer.refused", false, operatorApi); return; }
-    const bound = await bindBoard(user, account.id, "Stage smoke (viewer)");
-    const board = await bound.session.readBoard() as Board;
-    const move = proposableMove(board);
-    if (!move) { record("viewer.refused", false, "no issue on the board has a next state to move to"); return; }
-    const before = await operatorApi.issue(move.issueId);
-    let refusal: string | null = null;
+    const account = await connectInferOps(context, page, user, "operate", persona);
+    if (!record("operate.signIn", Boolean(token && account), account ? "InferOS session, own InferOps account connected" : "no InferOps account connected")) return;
+    await wikiReads("operate", page, user, account!.id, persona, inferops).catch((error: Error) => record("operate.wikiReads", false, error.message.split("\n")[0]!));
+    // Operate is an operations member, but a knowledge viewer. Exercise a Wiki body write,
+    // never a board transition. The owner's independent read detects an unauthorized change.
+    const ownerApi = await inferopsApi(inferops, env.GROKBOT_PERSONA_USER!);
+    if (typeof ownerApi === "string") { record("operate.knowledgeWriteRefused", false, ownerApi); return; }
+    const overseer = await ensureWorkspace(user, "Stage smoke (operate)");
+    const workspaceId = (await overseer.getMetadata()).id as string;
+    const connection = await overseer.getGatekeeperByResourceUrl(wikiUrl) ?? await overseer.newGatekeeper(account!.id, wikiUrl);
+    if (!connection) throw new Error(`the operate account cannot open ${wikiUrl}`);
+    const connectionId = await connection.getId() as number;
+    for (let stale = await pendingFor(overseer, connectionId); stale; stale = await pendingFor(overseer, connectionId)) {
+      await overseer.rejectAction(stale.id);
+    }
+    const session = await connection.openSession();
     try {
-      const issue = await bound.session.openIssue(move.issueId);
-      await issue.transition(move.to, before.revision);
-    } catch (error) {
-      const message = (error as Error).message;
-      // A conflict or stale revision is the smoke's own state, not the viewer being refused.
-      if (/CONFLICT|STALE_REVISION/.test(message)) throw error;
-      refusal = `proposal refused: ${message}`;
-    }
-    if (!refusal) {
-      const pending = await pendingFor(bound.overseer, bound.connectionId);
-      if (pending) {
-        await approveInBrowser(page, bound.workspaceId, "viewer-04-approve-attempt.png");
-        // A refused apply leaves the request pending with the provider's answer as its last attempt.
-        const outcome = await until(() => actionState(bound.overseer, pending.id),
-          value => (value.state !== undefined && value.state !== "pending") || value.lastAttempt !== undefined, 30_000);
-        if (outcome.state === "pending") await bound.overseer.rejectAction(pending.id);
-        const refused = outcome.state === "failed" || (outcome.state !== "approved" && outcome.lastAttempt !== undefined);
-        refusal = refused ? `approved in the browser, InferOps refused the apply (${outcome.lastAttempt?.code ?? outcome.state}: ${outcome.lastAttempt?.message ?? "no message"}); request ${outcome.state === "pending" ? "then rejected" : outcome.state}` : null;
-      } else {
-        refusal = null;
+      const documents = await session.listDocuments() as { slug: string; parentId: string | null }[];
+      const first = documents.find(d => d.parentId === null) ?? documents[0];
+      if (!first) throw new Error("the operate Wiki has no page; knowledge authorization is unproven");
+      const document = await session.readDocument(first.slug) as { id: string; version: number; body: string };
+      const before = await ownerApi.wikiPage(first.slug);
+      if (!before || before.id !== document.id || before.version !== document.version || before.body !== document.body) {
+        throw new Error("owner and operate disagree on the knowledge document identity, version or body");
       }
+      const proposedBody = `${before.body}\n\nStage smoke authorization probe ${crypto.randomUUID()}`;
+      if (proposedBody.length > 200_000) throw new Error("Wiki page too large for a valid body-write probe");
+      const result = await checkKnowledgeWrite(before, {
+        read: () => ownerApi.wikiPage(first.slug),
+        propose: () => session.updateDocumentBody(document.id, proposedBody, before.version),
+        pending: async () => (await pendingFor(overseer, connectionId))?.id,
+        approve: async (id) => {
+          await approveInBrowser(page, workspaceId, "operate-04-approve-knowledge-attempt.png");
+          return until(() => actionState(overseer, id),
+            value => (value.state !== undefined && value.state !== "pending") || value.lastAttempt !== undefined, 30_000);
+        },
+        reject: async (id) => { await overseer.rejectAction(id); },
+      });
+      await page.screenshot({ path: join(out, "operate-05-after-knowledge-attempt.png") });
+      record("operate.knowledgeWriteRefused", result.ok, result.detail);
+    } finally {
+      session[Symbol.dispose]();
+      connection[Symbol.dispose]();
     }
-    const after = await operatorApi.issue(move.issueId);
-    await page.screenshot({ path: join(out, "viewer-05-after.png") });
-    const unchanged = after.stateId === before.stateId && after.revision === before.revision;
-    record("viewer.refused", refusal !== null && unchanged,
-      `${refusal ?? "NOT refused"}; InferOps ${move.identifier} ${unchanged ? `unchanged (revision ${after.revision})` : `CHANGED (revision ${before.revision} -> ${after.revision})`}`);
   } finally {
     close();
   }
@@ -490,7 +498,7 @@ async function viewerFlow(browser: Any): Promise<void> {
 
 const browser = await chromium.launch({ headless: true });
 try {
-  for (const [name, flow] of [["operator", operatorFlow], ["viewer", viewerFlow]] as const) {
+  for (const [name, flow] of [["owner", ownerFlow], ["operate", operateFlow]] as const) {
     try {
       await flow(browser);
     } catch (error) {
@@ -500,8 +508,7 @@ try {
 } finally {
   await browser.close();
 }
-const expected = ["operator.signIn", "operator.wikiReads", "operator.boardRenders", "operator.simulated", "operator.applied", "operator.restored", "viewer.wikiReads", "viewer.refused"];
-for (const name of expected) if (!oracles.some(o => o.name === name)) oracles.push({ name, ok: false, detail: "not reached" });
-const ok = oracles.every(o => o.ok);
+for (const name of STAGE_SMOKE_ORACLES) if (!oracles.some(o => o.name === name)) oracles.push({ name, ok: false, detail: "not reached" });
+const ok = smokeOraclesPass(oracles);
 writeFileSync(join(out, "smoke.json"), JSON.stringify({ ok, stage: stage.origin, board: boardUrl, oracles, notes }, null, 2) + "\n");
 process.exitCode = ok ? 0 : 1;

@@ -321,11 +321,11 @@ test("a stage URL is loopback (http(s) on this machine) or remote (https only)",
 });
 
 test("a remote stage needs the Access token and persona sign-in; a loopback stage only the persona names", () => {
-  assert.deepEqual(requiredSmokeCredentials("remote"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"]);
-  assert.deepEqual(requiredSmokeCredentials("remote", "oauth"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"]);
-  assert.deepEqual(requiredSmokeCredentials("remote", "stub"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
-  assert.deepEqual(requiredSmokeCredentials("loopback", "oauth"), ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
-  assert.deepEqual(requiredSmokeCredentials("loopback"), ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("remote"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_OPERATE_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("remote", "oauth"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_OPERATE_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("remote", "stub"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_OPERATE_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("loopback", "oauth"), ["GROKBOT_PERSONA_USER", "GROKBOT_OPERATE_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("loopback"), ["GROKBOT_PERSONA_USER", "GROKBOT_OPERATE_USER"]);
 });
 
 test("stage-probe without a stage FAILs and names the variable", async () => {
@@ -340,7 +340,7 @@ test("stage-probe without a stage FAILs and names the variable", async () => {
   }
 });
 
-const LOOPBACK_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "http://127.0.0.1:8797", GROKBOT_PERSONA_USER: "operator-value-1", GROKBOT_VIEWER_USER: "viewer-value-2", FACTORY_INFEROPS_URL: "http://127.0.0.1:8980" };
+const LOOPBACK_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "http://127.0.0.1:8797", GROKBOT_PERSONA_USER: "grokbot-owner", GROKBOT_OPERATE_USER: "grokbot-operate", FACTORY_INFEROPS_URL: "http://127.0.0.1:8980" };
 const LOOPBACK_ANSWERS = { 8797: 200, "8980/health/ready": 200, "8980/auth/public-config": 200 };
 const STUB = { "8980/health/ready": { status: "ok" }, "8980/auth/public-config": { mode: "stub" } };
 
@@ -354,15 +354,15 @@ test("a loopback stage: persona names only, InferOS and its connected InferOps h
     assert.deepEqual(checks.map(c => `${c.status} ${c.name}`), [
       "READY credentials", "READY smoke-credentials", "READY stage", "READY stage:reachable", "READY stage:inferos", "READY stage:inferops", "READY tool:docker", "READY tool:artilleryio/artillery:latest",
     ]);
-    assert.match(checks[1]!.detail, /loopback stage, present \(names only\): GROKBOT_PERSONA_USER, GROKBOT_VIEWER_USER/);
+    assert.match(checks[1]!.detail, /loopback stage, present \(names only\): GROKBOT_PERSONA_USER, GROKBOT_OPERATE_USER/);
     assert.equal(fake.launches.length, 0);
     const text = JSON.stringify(ready.report) + ready.headline;
-    for (const value of ["operator-value-1", "viewer-value-2"]) assert.ok(!text.includes(value));
+    for (const value of ["grokbot-owner", "grokbot-operate"]) assert.ok(!text.includes(value));
 
-    const { GROKBOT_VIEWER_USER: _viewer, ...noViewer } = LOOPBACK_ENV;
-    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: noViewer, answers: LOOPBACK_ANSWERS, bodies: STUB }).deps);
+    const { GROKBOT_OPERATE_USER: _operate, ...noOperate } = LOOPBACK_ENV;
+    const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: noOperate, answers: LOOPBACK_ANSWERS, bodies: STUB }).deps);
     assert.equal(missing.exitCode, 1);
-    assert.match(missing.headline, /FAIL\s+smoke-credentials: loopback stage, missing \(names only\): GROKBOT_VIEWER_USER/);
+    assert.match(missing.headline, /FAIL\s+smoke-credentials: loopback stage, missing \(names only\): GROKBOT_OPERATE_USER/);
 
     const oauth = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: { ...STUB, "8980/auth/public-config": { mode: "oauth" } } }).deps);
     assert.match(oauth.headline, /FAIL\s+stage:inferops: .*auth mode is oauth/);
@@ -412,7 +412,7 @@ function remoteStage(mode: string | null, wrong: "302" | "403" | "200" = "302") 
     return new Response(null, { status: 302, headers: { location: REMOTE_LOGIN } });
   };
 }
-const REMOTE_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "https://dev-os.example.test", FACTORY_INFEROPS_URL: "https://inferlab.example.test", CF_ACCESS_CLIENT_ID: "id-value-123", CF_ACCESS_CLIENT_SECRET: "secret-value-456", GROKBOT_PERSONA_USER: "u", GROKBOT_VIEWER_USER: "v" };
+const REMOTE_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "https://dev-os.example.test", FACTORY_INFEROPS_URL: "https://inferlab.example.test", CF_ACCESS_CLIENT_ID: "id-value-123", CF_ACCESS_CLIENT_SECRET: "secret-value-456", GROKBOT_PERSONA_USER: "grokbot-owner", GROKBOT_OPERATE_USER: "grokbot-operate" };
 
 test("a remote stage's InferLab is its stages.ts entry's, or FACTORY_INFEROPS_URL", () => {
   const devos = stageTarget("https://dev-os.factorylevel.dev");
@@ -434,7 +434,7 @@ test("a remote stage in stub auth: Access redirect, token 200, wrong token redir
     ]);
     assert.match(ready.headline, /READY stage:access: unauthenticated GET \/ is redirected to Cloudflare Access \(team.cloudflareaccess.com\)/);
     assert.match(ready.headline, /READY stage:access-refused: GET \/ with a wrong service-token secret is refused \(302 to Cloudflare Access, team.cloudflareaccess.com\)/);
-    assert.match(ready.headline, /READY smoke-credentials: remote stage \(InferLab auth stub: persona ids, no password\), present \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_USER, GROKBOT_VIEWER_USER$/m);
+    assert.match(ready.headline, /READY smoke-credentials: remote stage \(InferLab auth stub: persona ids, no password\), present \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_USER, GROKBOT_OPERATE_USER$/m);
     assert.match(ready.headline, /READY stage:inferops: https:\/\/inferlab.example.test\/health\/ready answered 200; auth mode stub/);
     assert.equal(fake.launches.length, 0);
     const text = JSON.stringify(ready.report) + ready.headline;
@@ -479,11 +479,11 @@ test("a remote stage in oauth (or unknown) auth still needs the persona password
 test("persona variables are a credentials FAIL in every sandbox but stage-probe", async () => {
   const root = tempRoot();
   try {
-    const env = { PATH: "/bin", GROKBOT_PERSONA_USER: "operator-value-1", GROKBOT_VIEWER_USER: "viewer-value-2" };
+    const env = { PATH: "/bin", GROKBOT_PERSONA_USER: "grokbot-owner", GROKBOT_OPERATE_USER: "grokbot-operate" };
     assert.deepEqual(forbiddenCredentials(env, "stage-probe"), []);
-    for (const sandbox of ["dev", "infra", "verify"] as const) assert.deepEqual(forbiddenCredentials(env, sandbox), ["GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
+    for (const sandbox of ["dev", "infra", "verify"] as const) assert.deepEqual(forbiddenCredentials(env, sandbox), ["GROKBOT_OPERATE_USER", "GROKBOT_PERSONA_USER"]);
     const result = await runFactory(["doctor", "dev"], fakeDeps(root, { env }).deps);
-    assert.match(result.headline, /FAIL\s+credentials: cloud\/provider\/prod credentials present \(names only\): GROKBOT_PERSONA_USER, GROKBOT_VIEWER_USER/);
+    assert.match(result.headline, /FAIL\s+credentials: cloud\/provider\/prod credentials present \(names only\): GROKBOT_OPERATE_USER, GROKBOT_PERSONA_USER/);
     assert.ok(!result.headline.includes("value"));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -493,14 +493,14 @@ test("persona variables are a credentials FAIL in every sandbox but stage-probe"
 test("stage-smoke runs the smoke only when doctor stage-probe is READY, and reports only its verdict lines", async () => {
   const root = tempRoot();
   try {
-    const { GROKBOT_VIEWER_USER: _viewer, ...noViewer } = LOOPBACK_ENV;
-    const blocked = fakeDeps(root, { env: noViewer, answers: LOOPBACK_ANSWERS, bodies: STUB });
+    const { GROKBOT_OPERATE_USER: _operate, ...noOperate } = LOOPBACK_ENV;
+    const blocked = fakeDeps(root, { env: noOperate, answers: LOOPBACK_ANSWERS, bodies: STUB });
     const refused = await runFactory(["stage-smoke"], blocked.deps);
     assert.equal(refused.exitCode, 1);
     assert.equal(blocked.runInCalls.length, 0);
     assert.match(refused.headline, /the smoke did not run/);
 
-    const output = "noise with operator-value-1\n[stage-smoke] PASS operator.applied: moved\n[factory] stage-smoke: PASS (evidence /e)\n";
+    const output = "noise with grokbot-owner\n[stage-smoke] PASS owner.applied: moved\n[factory] stage-smoke: PASS (evidence /e)\n";
     for (const exitCode of [0, 1]) {
       const fake = fakeDeps(root, { env: { ...LOOPBACK_ENV, FACTORY_STAGE_URL: "http://127.0.0.1:1" }, answers: { ...LOOPBACK_ANSWERS, 1: 200 }, bodies: STUB, runIn: () => ({ exitCode, stdout: output, stderr: "" }) });
       const result = await runFactory(["stage-smoke", "--stage-url", "http://127.0.0.1:8797", "--json"], fake.deps);
@@ -508,8 +508,8 @@ test("stage-smoke runs the smoke only when doctor stage-probe is READY, and repo
       assert.equal(fake.runInCalls.length, 1);
       assert.match(fake.runInCalls[0]!.argv.at(-1)!, /scripts\/ci\/stage-smoke\.ts$/);
       assert.equal(fake.runInCalls[0]!.env.FACTORY_STAGE_URL, "http://127.0.0.1:8797", "--stage-url wins over the environment");
-      assert.deepEqual((result.report.smoke as { lines: string[] }).lines, ["[stage-smoke] PASS operator.applied: moved", "[factory] stage-smoke: PASS (evidence /e)"]);
-      assert.ok(!result.headline.includes("operator-value-1"));
+      assert.deepEqual((result.report.smoke as { lines: string[] }).lines, ["[stage-smoke] PASS owner.applied: moved", "[factory] stage-smoke: PASS (evidence /e)"]);
+      assert.ok(!result.headline.includes("grokbot-owner"));
     }
     assert.equal((await runFactory(["stage-smoke", "dev"], blocked.deps)).exitCode, 2);
   } finally {
@@ -755,14 +755,14 @@ function emulator(enforces = true) {
     return new Response(JSON.stringify({ path: url.pathname }), { status: 200 });
   };
 }
-const EMULATED_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "http://127.0.0.1:8789", FACTORY_STAGE_ACCESS: "emulated", CF_ACCESS_CLIENT_ID: "emu-id", CF_ACCESS_CLIENT_SECRET: "emu-secret", GROKBOT_PERSONA_USER: "operator-value-1", GROKBOT_VIEWER_USER: "viewer-value-2", FACTORY_INFEROPS_URL: "http://127.0.0.1:8980" };
+const EMULATED_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "http://127.0.0.1:8789", FACTORY_STAGE_ACCESS: "emulated", CF_ACCESS_CLIENT_ID: "emu-id", CF_ACCESS_CLIENT_SECRET: "emu-secret", GROKBOT_PERSONA_USER: "grokbot-owner", GROKBOT_OPERATE_USER: "grokbot-operate", FACTORY_INFEROPS_URL: "http://127.0.0.1:8980" };
 
 test("an emulated stage is a loopback stage behind the Access emulator; never a remote one", () => {
   assert.deepEqual(stageTarget("http://127.0.0.1:8789", "emulated"), { origin: "http://127.0.0.1:8789", kind: "emulated" });
   assert.throws(() => stageTarget("https://dev-os.factorylevel.dev", "emulated"), /loopback stage only/);
   assert.throws(() => stageTarget("http://127.0.0.1:8789", "cloudflare"), /must be "emulated" or unset/);
   assert.deepEqual(stageTarget("https://dev-os.factorylevel.dev", null), { origin: "https://dev-os.factorylevel.dev", kind: "remote" });
-  assert.deepEqual(requiredSmokeCredentials("emulated"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_VIEWER_USER"]);
+  assert.deepEqual(requiredSmokeCredentials("emulated"), ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_OPERATE_USER"]);
 });
 
 test("an emulated stage: Access redirect without a token, InferOS with it, 403 for a wrong one; no password", async () => {
@@ -779,7 +779,7 @@ test("an emulated stage: Access redirect without a token, InferOS with it, 403 f
     assert.match(ready.headline, /READY stage:access-refused: GET \/ with a wrong service-token secret is refused \(403\)/);
     assert.match(ready.headline, /READY stage:inferos: .* \(through the Access emulator, with the service token\)/);
     const text = JSON.stringify(ready.report) + ready.headline;
-    for (const value of ["emu-id", "emu-secret", "operator-value-1"]) assert.ok(!text.includes(value), value);
+    for (const value of ["emu-id", "emu-secret", "grokbot-owner"]) assert.ok(!text.includes(value), value);
 
     const { CF_ACCESS_CLIENT_SECRET: _secret, ...noSecret } = EMULATED_ENV;
     const missing = await runFactory(["doctor", "stage-probe"], fakeDeps(root, { env: noSecret, answers: { "8980/health/ready": 200, "8980/auth/public-config": 200 }, bodies: STUB, respond: emulator() }).deps);

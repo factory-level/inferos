@@ -1,5 +1,5 @@
 // Artillery Playwright-engine flow for load/stage-probe.yml (release-graph node 10's light probe):
-// the stage's login page, "Continue with InferOps", the operator persona on the InferOps persona
+// the stage's login page, "Continue with InferOps", the owner persona on the InferOps persona
 // page, back with an InferOS session. Persona and Access token come from the environment by name
 // (scripts/ci/stage-smoke.ts passes them with `docker run -e NAME`); nothing is logged.
 const PERSONA = process.env.GROKBOT_PERSONA_USER ?? "";

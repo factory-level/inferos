@@ -12,6 +12,7 @@ import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
 import { smokeContainer, smokePreconditions, stageInferlab } from "./stage-smoke.ts";
 import { DEFAULT_WIKI, missingWikiText, wikiDisagreement, wikiExpectedText } from "./stage-smoke-wiki.ts";
+import { checkKnowledgeWrite, forbiddenProposal, knowledgeWriteRefused, sameWikiSnapshot, smokeOraclesPass, STAGE_SMOKE_ORACLES, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { cvssSeverity, dedupe, newFindings, parseGitleaks, parseOsv, parseSemgrep, parseTrivy, type Baseline } from "./security.ts";
 import { VERIFY_PARTS } from "./verify.ts";
 
@@ -197,7 +198,7 @@ test("every load scenario enables the ensure plugin, without which Artillery ign
 test("stage-smoke: a loopback stage needs the persona names, a remote one the Access token too; forbidden keys refuse", () => {
   assert.match(String(smokePreconditions({}).problem), /names no stage/);
   assert.match(String(smokePreconditions({ FACTORY_STAGE_URL: "http://dev-os.example.test" }).problem), /must be https/);
-  const loopback = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "op", GROKBOT_VIEWER_USER: "vw" };
+  const loopback = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "grokbot-owner", GROKBOT_OPERATE_USER: "grokbot-operate" };
   assert.deepEqual(smokePreconditions(loopback), { target: { origin: "http://localhost:8797", kind: "loopback" }, problem: null });
   assert.match(String(smokePreconditions({ ...loopback, OPENAI_API_KEY: "sk-secret" }).problem), /present \(names only\): OPENAI_API_KEY$/);
   assert.match(String(smokePreconditions({ ...loopback, FACTORY_STAGE_URL: "https://dev-os.example.test" }).problem),
@@ -225,12 +226,116 @@ test("stage-smoke resolves a remote stage's InferOps API from stages.ts and read
   assert.deepEqual(await stageInferlab({ FACTORY_STAGE_URL: "https://dev-os.factorylevel.dev" }, "/nonexistent", down), { url: "https://api.dev.inferlab.io", authMode: null });
 });
 
+test("stage-smoke rejects obsolete, swapped and privileged negative-test personas", () => {
+  const env = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "grokbot-owner", GROKBOT_OPERATE_USER: "grokbot-operate" };
+  for (const owner of ["grokbot-operator", "grokbot-power", "grokbot-operate"]) {
+    assert.match(smokePreconditions({ ...env, GROKBOT_PERSONA_USER: owner }).problem!, /must select grokbot-owner/);
+  }
+  for (const operate of ["grokbot-viewer", "grokbot-owner", "grokbot-power"]) {
+    assert.match(smokePreconditions({ ...env, GROKBOT_OPERATE_USER: operate }).problem!, /must select grokbot-operate/);
+  }
+  assert.match(smokePreconditions({ ...env, GROKBOT_VIEWER_USER: "grokbot-viewer" }).problem!, /obsolete/);
+  const { GROKBOT_OPERATE_USER: _operate, ...legacy } = env;
+  assert.match(smokePreconditions({ ...legacy, GROKBOT_VIEWER_USER: "grokbot-viewer" }).problem!, /missing.*GROKBOT_OPERATE_USER/);
+});
+
+const KNOWLEDGE_PAGE: WikiSnapshot = { id: "page-1", version: 7, slug: "handbook", title: "QA handbook", body: "Original body", sections: ["Original section"] };
+
+test("stage smoke gates on every current persona oracle, not an old or incomplete green summary", () => {
+  const pass = STAGE_SMOKE_ORACLES.map(name => ({ name, ok: true }));
+  assert.equal(smokeOraclesPass(pass), true);
+  assert.equal(smokeOraclesPass([]), false);
+  for (const name of STAGE_SMOKE_ORACLES) {
+    assert.equal(smokeOraclesPass(pass.filter(o => o.name !== name)), false, name);
+    assert.equal(smokeOraclesPass(pass.map(o => ({ ...o, ok: o.name !== name }))), false, name);
+  }
+  assert.equal(smokeOraclesPass([...pass, pass[0]!]), false);
+  assert.equal(smokeOraclesPass([...pass, { name: "operate.error", ok: false }]), false);
+  assert.equal(smokeOraclesPass(pass.map(o => ({ ...o, name: o.name.replace("owner.", "operator.").replace("operate.", "viewer.") }))), false);
+});
+
+test("knowledge refusal requires FORBIDDEN/notApplied, never generic failed or pending actions", () => {
+  for (const state of ["pending", "failed"]) {
+    assert.equal(knowledgeWriteRefused({ state, lastAttempt: { code: "FORBIDDEN", outcome: "notApplied" } }), true);
+    for (const code of [undefined, "UNAUTHORIZED", "CONFLICT", "STALE_REVISION", "NOT_FOUND", "UNAVAILABLE", "INVALID_REQUEST", "DISABLED"]) {
+      assert.equal(knowledgeWriteRefused({ state, lastAttempt: { code, outcome: "notApplied" } }), false, String(code));
+    }
+  }
+  for (const state of [undefined, "approved", "rejected"]) {
+    assert.equal(knowledgeWriteRefused({ state, lastAttempt: { code: "FORBIDDEN", outcome: "notApplied" } }), false);
+  }
+  assert.equal(knowledgeWriteRefused({ state: "pending", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), false);
+  assert.equal(forbiddenProposal(new Error("FORBIDDEN: knowledge:write is required")), true);
+  assert.equal(forbiddenProposal({ code: "FORBIDDEN" }), true);
+  for (const error of [new Error("UNAUTHORIZED: expired"), new Error("request failed"), new Error("upstream mentioned FORBIDDEN"), { code: "CONFLICT", message: "FORBIDDEN: quoted" }]) {
+    assert.equal(forbiddenProposal(error), false);
+  }
+});
+
+test("the knowledge oracle detects content, identity and version-only mutations", () => {
+  assert.equal(sameWikiSnapshot(KNOWLEDGE_PAGE, { ...KNOWLEDGE_PAGE }), true);
+  for (const after of [null, { ...KNOWLEDGE_PAGE, id: "other" }, { ...KNOWLEDGE_PAGE, version: 8 }, { ...KNOWLEDGE_PAGE, body: "changed" }, { ...KNOWLEDGE_PAGE, sections: ["changed"] }]) {
+    assert.equal(sameWikiSnapshot(KNOWLEDGE_PAGE, after), false);
+  }
+});
+
+function knowledgeFixture(options: { proposalError?: Error; outcome?: KnowledgeWriteOutcome; after?: WikiSnapshot; beforeApproval?: WikiSnapshot; noPending?: boolean } = {}) {
+  const calls: string[] = [];
+  let pending: number | undefined;
+  let approved = false;
+  return {
+    calls,
+    steps: {
+      async read() { calls.push("owner.read"); return approved ? options.after ?? KNOWLEDGE_PAGE : options.beforeApproval ?? KNOWLEDGE_PAGE; },
+      async propose() { calls.push("operate.proposeKnowledgeWrite"); if (options.proposalError) throw options.proposalError; pending = options.noPending ? undefined : 42; },
+      async pending() { return pending; },
+      async approve(id: number) { assert.equal(id, 42); calls.push("operate.approve"); approved = true; return options.outcome ?? { state: "pending", lastAttempt: { code: "FORBIDDEN", outcome: "notApplied" } }; },
+      async reject(id: number) { assert.equal(id, 42); calls.push("operate.reject"); pending = undefined; },
+    },
+  };
+}
+
+test("operate knowledge write: approve, verify owner read, then reject the refused pending request", async () => {
+  const f = knowledgeFixture();
+  assert.equal((await checkKnowledgeWrite(KNOWLEDGE_PAGE, f.steps)).ok, true);
+  assert.deepEqual(f.calls, ["operate.proposeKnowledgeWrite", "owner.read", "operate.approve", "owner.read", "operate.reject"]);
+});
+
+test("operate knowledge write: explicit proposal refusal still needs an unchanged owner read", async () => {
+  const f = knowledgeFixture({ proposalError: new Error("FORBIDDEN: knowledge:write") });
+  assert.equal((await checkKnowledgeWrite(KNOWLEDGE_PAGE, f.steps)).ok, true);
+  assert.deepEqual(f.calls, ["operate.proposeKnowledgeWrite", "owner.read"]);
+  const changed = knowledgeFixture({ proposalError: new Error("FORBIDDEN: knowledge:write"), beforeApproval: { ...KNOWLEDGE_PAGE, version: 8 } });
+  assert.equal((await checkKnowledgeWrite(KNOWLEDGE_PAGE, changed.steps)).ok, false);
+});
+
+test("operate knowledge write fails for accepted, uncertain, stale, missing or mutated writes", async () => {
+  for (const options of [
+    { outcome: { state: "approved" } },
+    { outcome: { state: "pending" } },
+    { outcome: { state: "failed", lastAttempt: { code: "STALE_REVISION", outcome: "notApplied" } } },
+    { noPending: true },
+    { after: { ...KNOWLEDGE_PAGE, version: 8 } },
+    { after: { ...KNOWLEDGE_PAGE, body: "unauthorized change" } },
+    { beforeApproval: { ...KNOWLEDGE_PAGE, version: 8 } },
+  ]) {
+    const f = knowledgeFixture(options);
+    assert.equal((await checkKnowledgeWrite(KNOWLEDGE_PAGE, f.steps)).ok, false);
+    if (!options.noPending) assert.equal(f.calls.at(-1), "operate.reject");
+  }
+  for (const message of ["CONFLICT", "STALE_REVISION", "UNAUTHORIZED", "NOT_FOUND", "network down"]) {
+    const f = knowledgeFixture({ proposalError: new Error(message) });
+    await assert.rejects(checkKnowledgeWrite(KNOWLEDGE_PAGE, f.steps), new RegExp(message));
+    assert.deepEqual(f.calls, ["operate.proposeKnowledgeWrite"]);
+  }
+});
+
 test("stage-smoke containers get credentials by name only, the checkout read-only, host network for loopback and emulated stages only", () => {
-  const env = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "operator-secret", GROKBOT_VIEWER_USER: "viewer-secret", PATH: "/bin" };
+  const env = { FACTORY_STAGE_URL: "http://localhost:8797", GROKBOT_PERSONA_USER: "owner-secret", GROKBOT_OPERATE_USER: "operate-secret", PATH: "/bin" };
   const ctx = { root: "/repo", dir: "/repo/.factory/runs/r/stage-smoke", env };
   const loopback = smokeContainer(ctx, { origin: "http://localhost:8797", kind: "loopback" }, ["image", "cmd"]);
   assert.ok(!loopback.join(" ").includes("secret"));
-  assert.deepEqual(loopback.slice(-14, -2), ["--network", "host", "-e", "FACTORY_STAGE_URL", "-e", "GROKBOT_PERSONA_USER", "-e", "GROKBOT_VIEWER_USER", "-v", "/repo:/repo:ro", "-v", "/repo/.factory/runs/r/stage-smoke:/repo/.factory/runs/r/stage-smoke"]);
+  assert.deepEqual(loopback.slice(-14, -2), ["--network", "host", "-e", "FACTORY_STAGE_URL", "-e", "GROKBOT_PERSONA_USER", "-e", "GROKBOT_OPERATE_USER", "-v", "/repo:/repo:ro", "-v", "/repo/.factory/runs/r/stage-smoke:/repo/.factory/runs/r/stage-smoke"]);
   assert.ok(!loopback.includes("/var/run/docker.sock") && !loopback.some(arg => arg.startsWith("-p")));
   assert.ok(!smokeContainer(ctx, { origin: "https://dev-os.example.test", kind: "remote" }, ["image"]).includes("--network"));
   const emulated = smokeContainer({ ...ctx, env: { ...env, CF_ACCESS_CLIENT_ID: "id-secret", CF_ACCESS_CLIENT_SECRET: "secret-secret" } }, { origin: "http://127.0.0.1:8789", kind: "emulated" }, ["image"]);

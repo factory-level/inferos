@@ -26,6 +26,7 @@
 // report. What the factory started is recorded in `.factory/sandbox.json`; `down` stops exactly
 // that and leaves anything it merely reused running.
 
+import { smokePersonaProblem } from "../ci/stage-smoke-authorization.ts";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -67,11 +68,12 @@ export const VERIFY_IMAGES = [
 /**
  * The stage smoke credentials, by name. Only `stage-probe` may hold them; in every other sandbox
  * their presence is a failed credential check. Which of them a stage needs is
- * {@link requiredSmokeCredentials}. `GROKBOT_PERSONA_*` and `GROKBOT_VIEWER_USER` are proposed names.
+ * {@link requiredSmokeCredentials}. `GROKBOT_PERSONA_USER` selects owner; `GROKBOT_OPERATE_USER` selects operate.
+ * The obsolete viewer variable stays guarded, but is rejected by the smoke.
  * ponytail: the names are fixed here; upgrade path is reading them from the stage config.
  */
 export const SMOKE_CREDENTIAL_VARS = [
-  "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER",
+  "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_OPERATE_USER", "GROKBOT_VIEWER_USER",
 ] as const;
 
 /**
@@ -109,14 +111,14 @@ export function stageTarget(url: string, access?: string | null): StageTarget {
 
 /**
  * The smoke credentials a stage needs, by name. A remote stage: the Access service token and the
- * operator and viewer personas, plus the operator's password unless the stage's InferLab signs
+ * owner and operate personas, plus the owner's password unless the stage's InferLab signs
  * people in as stub personas (`authMode` `stub`, as `dev`'s does; any other or unknown mode, such as
  * `prod`'s oauth, keeps it required). A loopback stage has no Access in front and its InferOps signs
  * people in as stub personas, so only the persona names. An emulated stage is a loopback stage
  * behind the Access emulator: its service token plus the persona names.
  */
 export function requiredSmokeCredentials(kind: StageKind, authMode?: string | null): string[] {
-  const personas = ["GROKBOT_PERSONA_USER", ...(kind === "remote" && authMode !== "stub" ? ["GROKBOT_PERSONA_PASSWORD"] : []), "GROKBOT_VIEWER_USER"];
+  const personas = ["GROKBOT_PERSONA_USER", ...(kind === "remote" && authMode !== "stub" ? ["GROKBOT_PERSONA_PASSWORD"] : []), "GROKBOT_OPERATE_USER"];
   return [...(kind === "loopback" ? [] : ["CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"]), ...personas];
 }
 
@@ -416,6 +418,8 @@ function smokeCheck(target: StageTarget | null, authMode: string | null, deps: F
   if (!target) return { name: "smoke-credentials", status: "FAIL", detail: "no stage, so no credential set applies (set FACTORY_STAGE_URL or --stage-url)" };
   const required = requiredSmokeCredentials(target.kind, authMode);
   const missing = required.filter(name => !deps.env[name]);
+  const personaProblem = missing.length ? null : smokePersonaProblem(deps.env);
+  if (personaProblem) return { name: "smoke-credentials", status: "FAIL", detail: personaProblem };
   // Only a remote stage's set depends on the mode; say which mode decided it.
   const kind = target.kind === "remote" ? `remote stage (InferLab auth ${authMode ?? "unknown"}${authMode === "stub" ? ": persona ids, no password" : ""})` : `${target.kind} stage`;
   return {

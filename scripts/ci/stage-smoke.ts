@@ -7,11 +7,11 @@
 //
 // `flow` (scripts/ci/stage-smoke-flow.ts) runs in the artilleryio/artillery container with its
 // bundled Playwright and Chromium, this checkout mounted read-only at its own path (so `capnweb`
-// resolves) and the evidence directory writable: as the operator persona it signs in through the
+// resolves) and the evidence directory writable: as the owner persona it signs in through the
 // stage's own login page, opens the board on a canvas and asserts its cards render, proposes one
 // move (simulated on the board, InferOps unchanged), approves it in the Activity panel and confirms
 // through InferOps' own API that the state and revision changed, then moves it back the same way;
-// as the viewer persona it asserts a move is refused and InferOps is unchanged. As each persona it
+// as the operate persona it asserts a knowledge body write is refused and the page is unchanged. As each persona it
 // also reads the InferMind Wiki (`grokbot.knowledge`) through its own connection, checks the page
 // against InferOps' knowledge API and asserts it renders in the canvas Wiki widget. `probe` is a light
 // Artillery Playwright-engine run (load/stage-probe.yml, 2 VUs) of the sign-in, for latency.
@@ -26,6 +26,7 @@
 // probe's `ensure` conditions hold. Evidence: `<run>/stage-smoke/` (smoke.json, screenshots, the
 // probe report, result.json).
 
+import { smokeOraclesPass, smokePersonaProblem } from "./stage-smoke-authorization.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { forbiddenCredentials, inferlabAuthMode, remoteStageInferopsUrl, requiredSmokeCredentials, STAGE_SMOKE_IMAGE, stageInferopsUrl, stageTarget, type StageTarget } from "../local/factory.ts";
@@ -33,7 +34,7 @@ import { summarizeArtillery } from "./perf.ts";
 import { dockerRun, exec, finish, nodeContext, runAsMain, type CommandRecord, type NodeContext } from "./lib.ts";
 
 /** The variables passed into the smoke's container, by name only: whichever of these are set. */
-const PASSED_VARS = ["FACTORY_STAGE_URL", "FACTORY_INFEROPS_URL", "FACTORY_STAGE_BOARD", "FACTORY_STAGE_WIKI", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_VIEWER_USER"];
+const PASSED_VARS = ["FACTORY_STAGE_URL", "FACTORY_INFEROPS_URL", "FACTORY_STAGE_BOARD", "FACTORY_STAGE_WIKI", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "GROKBOT_PERSONA_USER", "GROKBOT_PERSONA_PASSWORD", "GROKBOT_OPERATE_USER"];
 
 /**
  * Why the smoke cannot start against `env`, or null: an unusable stage, forbidden or missing
@@ -52,7 +53,7 @@ export function smokePreconditions(env: NodeJS.ProcessEnv, authMode: string | nu
   if (forbidden.length) return { target, problem: `cloud/provider/prod credentials present (names only): ${forbidden.join(", ")}` };
   const missing = requiredSmokeCredentials(target.kind, authMode).filter(name => !env[name]);
   if (missing.length) return { target, problem: `${target.kind} stage${target.kind === "remote" ? ` (InferLab auth ${authMode ?? "unknown"})` : ""}, missing (names only): ${missing.join(", ")}` };
-  return { target, problem: null };
+  return { target, problem: smokePersonaProblem(env) };
 }
 
 /**
@@ -90,7 +91,7 @@ export async function main(argv: string[]): Promise<number> {
   // The flow's InferOps API oracles read this origin (by name into the container), not the sign-in popup's.
   if (inferlab) ctx.env.FACTORY_INFEROPS_URL = inferlab.url;
   const { target, problem } = smokePreconditions(ctx.env, inferlab?.authMode ?? null);
-  const gate = "node 10: as each persona the grokbot.knowledge Wiki page InferOps' knowledge API answers renders in the canvas Wiki widget; as the operator persona the board renders and a simulate -> approve transition is visible in InferOps' API (then reverted); the viewer persona is refused with InferOps unchanged; the light Artillery Playwright probe's ensure holds";
+  const gate = "node 10: as each persona the grokbot.knowledge Wiki page InferOps' knowledge API answers renders in the canvas Wiki widget; as the owner persona the board renders and a simulate -> approve transition is visible in InferOps' API (then reverted); the operate persona is refused a knowledge write with its document content and version unchanged; the light Artillery Playwright probe's ensure holds";
   if (problem || !target) return finish(ctx, { node: "stage-smoke", ok: false, gate, commands: [], details: { refused: problem } });
   const records: CommandRecord[] = [];
   const details: Record<string, unknown> = { stage: target.origin, kind: target.kind, inferops: inferlab?.url ?? null, inferlabAuth: inferlab?.authMode ?? null };
@@ -103,7 +104,7 @@ export async function main(argv: string[]): Promise<number> {
       const smoke = JSON.parse(readFileSync(join(ctx.dir, "smoke.json"), "utf8")) as { ok: boolean; oracles: { name: string; ok: boolean; detail: string }[]; notes?: unknown };
       details.oracles = smoke.oracles;
       details.notes = smoke.notes;
-      details.flowOk = smoke.ok && record.exitCode === 0;
+      details.flowOk = smoke.ok && smokeOraclesPass(smoke.oracles) && record.exitCode === 0;
     } catch {
       details.flowOk = false;
       details.oracles = "smoke.json was not written; see flow.log";
