@@ -60,3 +60,17 @@ Dev InferLab's WAF lets the stage through only when the InferOps side and this s
 - Only `gatekeeper-inferops`, `gatekeeper-context`, `gatekeeper-scheduler` and `gatekeeper-mcp` are deployed; the others need OAuth apps a stage does not configure.
 - No CI job deploys a stage, and two people deploying one stage at once are not prevented.
 - Wrapper gatekeepers are not packaged; a stage is this checkout.
+
+## Accept Records and workflow-policy bindings on dev
+
+Dev opts into `INFEROPS_TABLES_ENABLED` and `INFEROPS_WORKFLOW_POLICY_ENABLED`; prod keeps them
+disabled. Before live acceptance, confirm InferOps dev has `objects.enabled` enabled through its
+approved configuration path and seed an accessible custom table. Its committed default is off;
+InferOS advertising tables does not enable InferOps routes.
+
+After deploying dev through the steps above, sign in as the intended test persona and configure
+`inferops.records` and `inferops.workflow-policy` from their pickers using that person's own
+workspace table and project. The `demo.local` suggestions are local mock examples, not live
+resources. Confirm Save and workspace creation, then read rows and the published policy. Verify a
+resource outside that account's workspace and an unsupported kind remain refused. Do not change
+roles, disable Access, broaden grants or enable production to complete this acceptance.

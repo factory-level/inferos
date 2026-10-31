@@ -20,7 +20,7 @@ updated: 2026-10-30
 - **Real deploys, not Worker Previews.** Each package is deployed with `wrangler deploy` as `<workerPrefix><package>` (`inferos-dev-…`, `inferos-prod-…`), with every service binding renamed to match and binding names unchanged, so the router and backend discover gatekeepers exactly as they do elsewhere. The prefix is part of a stage's identity: Durable Objects belong to the worker name, so changing it starts an empty instance. `stage-config.ts` builds every config from the committed `wrangler.jsonc` files, reusing `backendGatekeeperServices`/`routerGatekeeperServices` from `scripts/preview/staging-config.ts` with a worker-name mapper; it writes a gitignored `wrangler.stage-<stage>.jsonc` beside each.
 - **Topology.** Tiers deploy gatekeepers concurrently, then the backend, then the router. Only the router is reachable, at the stage hostname as a custom domain, plus, on a stage with `inferops.authorizeOrigin`, the InferOps gatekeeper at that origin's hostname (`stageWorkerHost`); every worker sets `workers_dev: false` and `preview_urls: false`, and the deploy fails when Wrangler reports any other target (`WRANGLER_OUTPUT_FILE_PATH`). Gatekeepers are `BASE_URL=https://<host>/gatekeeper/<short>`, and the context gatekeeper's `sharingDomain` is the stage origin.
 - **Gatekeepers.** A stage deploys only the gatekeepers it lists: `gatekeeper-inferops`, `gatekeeper-context`, `gatekeeper-scheduler` and `gatekeeper-mcp`, the ones that need no third-party OAuth app. Others are neither deployed nor bound.
-- **Sign-in.** Cloudflare Access protects the hostname at the edge only. The backend gets no `CF_ACCESS_*`, because with `CF_ACCESS_AUD` set it takes the Access identity and refuses every other login; instead it gets `AUTH_GATEKEEPERS=inferops` and `DISABLE_PASSWORD_AUTH=true`, checked with `inferLabLoginStartupError` before deploying, and the frontend is built with `VITE_CF_ACCESS_MODE=false`. The InferOps gatekeeper gets `INFEROPS_BASE_URL`, `INFERLAB_AUTH_ORIGIN`, `INFERLAB_AUTHORIZE_ORIGIN` when the stage has an `authorizeOrigin`, `INFEROPS_ENABLED=true`, and every optional switch stated `false` (coding dispatch included). The local-development stopgap (`INFEROPS_API_TOKEN`, workspace id/slug, mock seed) is refused.
+- **Sign-in.** Cloudflare Access protects the hostname at the edge only. The backend gets no `CF_ACCESS_*`, because with `CF_ACCESS_AUD` set it takes the Access identity and refuses every other login; instead it gets `AUTH_GATEKEEPERS=inferops` and `DISABLE_PASSWORD_AUTH=true`, checked with `inferLabLoginStartupError` before deploying, and the frontend is built with `VITE_CF_ACCESS_MODE=false`. The InferOps gatekeeper gets `INFEROPS_BASE_URL`, `INFERLAB_AUTH_ORIGIN`, `INFERLAB_AUTHORIZE_ORIGIN` when the stage has an `authorizeOrigin`, `INFEROPS_ENABLED=true`, and explicit optional switches. Dev opts into private read-only tables and workflow policies via `inferops.tablesEnabled` and `inferops.workflowPolicyEnabled`; omitted or false stays disabled, including on prod. Coding dispatch, members and host boards remain off. The local-development stopgap (`INFEROPS_API_TOKEN`, workspace id/slug, mock seed) is refused.
 - **Sign-in proxy (dev).** Dev InferLab's Cloud Armor admits only allowlisted addresses and the edge header, so a browser elsewhere (an external test agent) cannot open central-auth. `dev` therefore sets `inferops.authorizeOrigin: https://auth.dev-os.factorylevel.dev`: the gatekeeper sends the sign-in popup there and forwards central-auth's three browser legs to InferLab with the edge header (see [InferOps gatekeeper](inferops-gatekeeper.md#sign-in-proxy)). `stageDefinitionProblems` requires it to be a bare https origin on a hostname of its own. The page exposes the persona picker, so the hostname must be in the stage's Access application.
 - **Backend.** `PUBLIC_BASE_URL` is the stage origin, `COMPOSABLE_VIEWS` and `DURABLE_VIEWS` are on, `CANVAS_CATALOG` comes from `inferos.canvas.json` when the checkout has one, and the `WORKERS_AI` binding is injected as in the manifest and previews.
 - **Resources.** KV namespaces are titled `<resourcePrefix><package>-<binding>`, found by title with `wrangler kv namespace list`, created when missing and bound by id; the R2 bucket is `<resourcePrefix>blueprint-content`, which Wrangler creates on first deploy. Committed Durable Object migrations pass through unchanged; a step that deletes, renames or transfers a class is refused unless `--allow-destructive-migrations` is passed.
@@ -39,3 +39,21 @@ updated: 2026-10-30
 
 - Whether stages should move to CI (dev on merge, prod on approved dispatch) once the first deploys are accepted.
 - Whether a stage should configure an AI Gateway or stay bring-your-own-key.
+
+## Binding regression (October 30)
+
+The Records and workflow-policy blueprints require exactly the resource patterns defined by the
+InferOps gatekeeper. The stage generator previously disabled both kinds, so vendor and account
+discovery correctly omitted them and Configure refused before attempting a resource read. This
+is separate from PR #289's scheme normalization. Dev now explicitly opts into both kinds; no URL
+matching, account authorization, tenant resolution or runtime switch enforcement changes.
+
+The blueprint examples under `demo.local` are mock fixtures, not live tenant resources. A signed-in
+development account must select its own accessible table or project. InferOps must also enable
+`objects.enabled` for table routes and provide a table fixture; advertising the type does not
+establish that those upstream prerequisites are met.
+
+Regression coverage checks generated dev/prod vars and exact bundled pattern compatibility.
+Gatekeeper table, workflow-policy and account suites cover bind/read, disabled kinds, unsupported
+URLs, unreadable resources, revocation and tenant isolation against local fixtures. Live acceptance
+still requires the supported stage deployment and authenticated Configure flows.

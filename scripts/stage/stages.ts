@@ -45,6 +45,10 @@ export interface StageDefinition {
      * persona picker, so it must be covered by the stage's Access application; the deploy checks.
      */
     authorizeOrigin?: string;
+    /** Opt in to private, read-only custom-table bindings; omitted means off. */
+    tablesEnabled?: boolean;
+    /** Opt in to private, read-only published workflow-policy bindings; omitted means off. */
+    workflowPolicyEnabled?: boolean;
   };
   /**
    * The gatekeepers this stage deploys. A gatekeeper left out is neither deployed nor bound, so it
@@ -78,6 +82,8 @@ export const STAGES = {
       authOrigin: "https://auth.dev.inferlab.io",
       // Dev InferLab's Cloud Armor admits only allowlisted addresses; external test agents sign in here.
       authorizeOrigin: "https://auth.dev-os.factorylevel.dev",
+      tablesEnabled: true,
+      workflowPolicyEnabled: true,
     },
     gatekeepers: STAGE_GATEKEEPERS,
     requireCleanTree: false,

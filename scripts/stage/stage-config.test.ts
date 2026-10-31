@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from "../release/manifest-lib.ts";
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
 import {
-  buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
+  inferOpsGatekeeperVars, buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
   stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers,
   stageWorkerHost, stageWorkerName, resolveStageAdmins,
 } from "./stage-config.ts";
@@ -240,4 +240,31 @@ test("the CLI parses its flags and refuses anything else", () => {
   assert.equal(parseStageArgs(["delete", "prod", "--confirm", "os.factorylevel.dev"]).confirm, "os.factorylevel.dev");
   assert.throws(() => parseStageArgs(["deploy"]), /Usage/);
   assert.throws(() => parseStageArgs(["deploy", "dev", "--force"]), /unknown argument: --force/);
+});
+
+test("dev enables the Records and policy resource kinds without enabling unrelated capabilities", () => {
+  const vars = build("dev").get("gatekeeper-inferops")?.vars;
+  assert.equal(vars?.INFEROPS_TABLES_ENABLED, "true");
+  assert.equal(vars?.INFEROPS_WORKFLOW_POLICY_ENABLED, "true");
+  for (const flag of ["CODING_WORKBENCH_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_HOST_BOARDS"]) {
+    assert.equal(vars?.[flag], "false", flag);
+  }
+});
+
+test("production keeps both optional binding kinds disabled", () => {
+  const vars = build("prod").get("gatekeeper-inferops")?.vars;
+  assert.equal(vars?.INFEROPS_TABLES_ENABLED, "false");
+  assert.equal(vars?.INFEROPS_WORKFLOW_POLICY_ENABLED, "false");
+});
+
+test("binding kinds require explicit independent opt-ins", () => {
+  for (const tablesEnabled of [undefined, false, true]) {
+    for (const workflowPolicyEnabled of [undefined, false, true]) {
+      const vars = inferOpsGatekeeperVars({
+        ...STAGES.dev, inferops: { ...STAGES.dev.inferops, tablesEnabled, workflowPolicyEnabled },
+      });
+      assert.equal(vars.INFEROPS_TABLES_ENABLED, tablesEnabled === true ? "true" : "false");
+      assert.equal(vars.INFEROPS_WORKFLOW_POLICY_ENABLED, workflowPolicyEnabled === true ? "true" : "false");
+    }
+  }
 });
