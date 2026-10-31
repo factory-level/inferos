@@ -18,6 +18,11 @@ export const ADMIN_CONFIG_KEY = '.adminConfig';
 
 const BLUEPRINT_ARCHIVE_MAGIC = 0xec2e2d3a2300e317n;
 const BLUEPRINT_ARCHIVE_VERSION = 1;
+/**
+ * `.gadget` format version 2: a version 1 archive whose metadata also carries an artifact revision
+ * block (ADR 0006). Version 1 readers refuse it, so no Workshop imports a revision unverified.
+ */
+export const ARTIFACT_ARCHIVE_VERSION = 2;
 const BLUEPRINT_ARCHIVE_PREFIX_BYTES = 24;
 const MAX_BLUEPRINT_METADATA_BYTES = 64 * 1024;
 const MAX_BLUEPRINT_CONTENT_BYTES = 32 * 1024 * 1024;
@@ -254,28 +259,35 @@ export function randomBlueprintId(): string {
   return idBytes.toHex();
 }
 
-function encodeBlueprintArchivePrefix(metadata: BlueprintMetadata, contentLength: number): Uint8Array {
+function encodeBlueprintArchivePrefix(metadata: BlueprintMetadata, contentLength: number,
+    version: number): Uint8Array {
   let metadataBytes = textEncoder.encode(JSON.stringify(metadata));
   let result = new Uint8Array(BLUEPRINT_ARCHIVE_PREFIX_BYTES + metadataBytes.byteLength);
   let view = new DataView(result.buffer);
   view.setBigUint64(0, BLUEPRINT_ARCHIVE_MAGIC);
-  view.setUint32(8, BLUEPRINT_ARCHIVE_VERSION);
+  view.setUint32(8, version);
   view.setUint32(12, metadataBytes.byteLength);
   view.setBigUint64(16, BigInt(contentLength));
   result.set(metadataBytes, BLUEPRINT_ARCHIVE_PREFIX_BYTES);
   return result;
 }
 
+/**
+ * Stream a `.gadget` archive: the prefix, `metadata` as JSON, then `content` (a gzip-compressed Yjs
+ * snapshot). `version` is BLUEPRINT_ARCHIVE_VERSION unless the metadata carries an artifact
+ * revision block, which only ARTIFACT_ARCHIVE_VERSION may.
+ */
 export function buildBlueprintArchiveStream(
   metadata: BlueprintMetadata,
   content: ReadableStream<Uint8Array>,
   contentLength: number,
+  version: number = BLUEPRINT_ARCHIVE_VERSION,
 ): ReadableStream<Uint8Array> {
   let archive = new TransformStream<Uint8Array, Uint8Array>();
 
   void (async () => {
     try {
-      await new Response(encodeBlueprintArchivePrefix(metadata, contentLength)).body!
+      await new Response(encodeBlueprintArchivePrefix(metadata, contentLength, version)).body!
           .pipeTo(archive.writable, { preventClose: true });
       await content.pipeTo(archive.writable);
     } catch (err) {
@@ -361,8 +373,26 @@ function makeStreamPrefixReader(stream: ReadableStream<Uint8Array>) {
   };
 }
 
+/** Read a `.gadget` format version 1 archive. Any other version, including 2, is refused unchanged. */
 export async function parseBlueprintArchive(archive: ReadableStream<Uint8Array>)
     : Promise<{metadata: BlueprintMetadata, contentLength: number, content: ReadableStream<Uint8Array>}> {
+  let {rawMetadata, contentLength, content} = await readArchive(archive, BLUEPRINT_ARCHIVE_VERSION);
+  let metadata = reviveBlueprintMetadata(rawMetadata as BlueprintMetadata);
+  return { metadata, contentLength, content };
+}
+
+/**
+ * Read a `.gadget` format version 2 archive, returning its metadata JSON unrevived and unchecked:
+ * the caller verifies the revision block against the decoded content (see
+ * OverseerImpl.importArtifact). Any other version is refused.
+ */
+export async function parseArtifactArchive(archive: ReadableStream<Uint8Array>)
+    : Promise<{rawMetadata: unknown, contentLength: number, content: ReadableStream<Uint8Array>}> {
+  return readArchive(archive, ARTIFACT_ARCHIVE_VERSION);
+}
+
+async function readArchive(archive: ReadableStream<Uint8Array>, expectedVersion: number)
+    : Promise<{rawMetadata: unknown, contentLength: number, content: ReadableStream<Uint8Array>}> {
   let reader = makeStreamPrefixReader(archive);
   let prefix = await reader.readExact(BLUEPRINT_ARCHIVE_PREFIX_BYTES);
   let view = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength);
@@ -372,7 +402,7 @@ export async function parseBlueprintArchive(archive: ReadableStream<Uint8Array>)
   }
 
   let version = view.getUint32(8);
-  if (version !== BLUEPRINT_ARCHIVE_VERSION) {
+  if (version !== expectedVersion) {
     throw new Error(`Unsupported gadget archive version: ${version}.`);
   }
 
@@ -393,13 +423,11 @@ export async function parseBlueprintArchive(archive: ReadableStream<Uint8Array>)
   }
 
   let metadataBytes = await reader.readExact(metadataSize);
-  let rawMetadata: BlueprintMetadata;
+  let rawMetadata: unknown;
   try {
     rawMetadata = JSON.parse(textDecoder.decode(metadataBytes));
   } catch {
     throw new Error("Gadget archive metadata is not valid JSON.");
   }
-
-  let metadata = reviveBlueprintMetadata(rawMetadata);
-  return { metadata, contentLength, content: reader.takeTail() };
+  return { rawMetadata, contentLength, content: reader.takeTail() };
 }

@@ -3,7 +3,7 @@ import {
   canonicalArtifactJson, fileDigest, MAX_ARTIFACT_REVISION_NUMBER, MAX_QUALIFICATION_DETAIL_LENGTH,
   type ArtifactBindingRequirement, type ArtifactChange, type ArtifactDigest, type ArtifactKind,
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactQualification,
-  type ArtifactRefusal, type ArtifactRevision,
+  type ArtifactArchiveRevision, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
 import type { BlueprintBinding } from "@gadgets/workshop-shared/api";
 import { keyString } from "@gadgets/typed-storage";
@@ -332,4 +332,68 @@ export class WorkspaceArtifactStore {
       return {created: true, record};
     });
   }
+}
+
+function requireString(value: unknown, what: string): string {
+  if (typeof value !== "string") throw new TypeError(`${what} must be a string.`);
+  return value;
+}
+
+/**
+ * Throws unless `raw` is a binding-name map of well-formed binding templates, as an untrusted
+ * archive's metadata carries them; returns them rebuilt with display text, `spawnerOnly`, the
+ * requirement fields and a spawner's symbolic env only.
+ */
+export function requireBindingTemplates(raw: unknown): Record<string, BlueprintBinding> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new TypeError("Invalid bindings.");
+  return Object.fromEntries(Object.entries(raw).map(([name, value]: [string, any]) => {
+    if (typeof value !== "object" || value === null) throw new TypeError(`Invalid binding ${name}.`);
+    let binding: BlueprintBinding;
+    let base = {title: requireString(value.title, "Binding title"), description: requireString(value.description ?? "", "Binding description")};
+    if (value.type === "gatekeeper") {
+      binding = {...base, type: "gatekeeper", gatekeeperName: requireString(value.gatekeeperName, "Gatekeeper name"),
+        typeUrlPattern: requireString(value.typeUrlPattern, "Type URL pattern")};
+    } else if (value.type === "aiModel") {
+      binding = {...base, type: "aiModel"};
+    } else if (value.type === "agentSpawner") {
+      if (typeof value.env !== "object" || value.env === null) throw new TypeError(`Invalid spawner env for ${name}.`);
+      binding = {...base, type: "agentSpawner", env: Object.fromEntries(Object.entries(value.env).map(([envName, target]: [string, any]) =>
+        [envName, target?.type === "gadget" ? {type: "gadget" as const}
+            : {type: "binding" as const, name: requireString(target?.name, "Spawner env target")}]))};
+    } else {
+      throw new TypeError(`Unknown binding type for ${name}.`);
+    }
+    return [name, value.spawnerOnly === true ? {...binding, spawnerOnly: true as const} : binding];
+  }));
+}
+
+/**
+ * Check an archive's claimed revision block against the files decoded from its snapshot. Returns
+ * the draft rebuilt from those files and the claim, or the first refusal: `unsupported_format`,
+ * `digest_mismatch` (the claimed manifest does not hash to the claimed digest, or the files and
+ * claim rebuild a different one), then the findings a publish would meet (secrets, pins resolved in
+ * this workspace, qualification).
+ */
+export async function verifyArchivedRevision(store: WorkspaceArtifactStore, raw: unknown, files: Map<string, string>)
+    : Promise<{draft: ArtifactDraft, name: string, number: number, qualification: ArtifactQualification} | RefusalFinding> {
+  let metadata = raw as {bindings?: unknown, revision?: ArtifactArchiveRevision} | null;
+  let revision = metadata?.revision;
+  if (typeof revision !== "object" || revision === null) {
+    return {refusal: "unsupported_format", detail: "the archive carries no revision block"};
+  }
+  let manifest = revision.manifest;
+  if (manifest?.format !== ARTIFACT_MANIFEST_FORMAT) {
+    return {refusal: "unsupported_format", detail: `manifest format ${String(manifest?.format)}`};
+  }
+  requireNameAndNumber(revision.name, revision.number);
+  let qualification = requireQualification({...revision.qualification,
+    completedAt: new Date(revision.qualification.completedAt)});
+  let draft = await store.draft(manifest.kind, files, manifest.pins, manifest.model,
+      requireBindingTemplates(metadata?.bindings ?? {}));
+  let claimed = await artifactDigest(manifest).catch(() => null);
+  if (claimed !== revision.digest || draft.digest !== revision.digest) {
+    return {refusal: "digest_mismatch", detail: `the archive's content does not match ${revision.digest}`};
+  }
+  let refused = [...draft.findings, ...qualificationFindings(qualification, draft.digest)][0];
+  return refused ?? {draft, name: revision.name, number: revision.number, qualification};
 }
