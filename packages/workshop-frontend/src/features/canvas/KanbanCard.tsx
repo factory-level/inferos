@@ -127,6 +127,7 @@ export const KanbanCard = ({ issue, position, onDialogOpenChange, state, targets
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-kumo-subtle">
       {issue.assigneeId && <span title={issue.assigneeId}>Assignee {issue.assigneeId.slice(0, 8)}</span>}
       {issue.targetDate && <span className={overdue ? 'text-kumo-danger' : ''}>{overdue ? 'Overdue' : 'Due'} {formatTargetDate(issue.targetDate)}</span>}
+      {issue.estimate !== undefined && <span title="Estimate in story points">{issue.estimate} {issue.estimate === 1 ? 'pt' : 'pts'}</span>}
     </div>
     {issue.blockedReason && <p className="rounded bg-kumo-danger-tint px-2 py-1 text-xs text-kumo-danger">Blocked: {issue.blockedReason}</p>}
     {waiting && <Badge variant="warning" icon={pending ? ArrowRight : undefined}>{waiting}</Badge>}

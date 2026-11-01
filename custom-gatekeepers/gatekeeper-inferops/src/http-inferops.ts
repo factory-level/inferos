@@ -275,7 +275,15 @@ function parseIssue(value: unknown): Issue {
     revision: text(issue.revision, "issue.revision", REVISION),
     assigneeId: nullable(issue.assigneeId, "issue.assigneeId", UUID),
     blockedReason: nullable(issue.blockedReason, "issue.blockedReason"),
+    // Absent from InferOps before the estimate field, and null when unsized; both read as unsized.
+    ...(issue.estimate === undefined || issue.estimate === null ? {} : { estimate: estimate(issue.estimate) }),
   };
+}
+
+function estimate(value: unknown): number {
+  const points = int(value, "issue.estimate");
+  if (points < 0 || points > 100) throw new Malformed("issue.estimate is not valid");
+  return points;
 }
 
 function int(value: unknown, what: string): number {

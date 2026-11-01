@@ -6,15 +6,22 @@ covers:
   - scripts/local/access-emulator.ts
   - scripts/local/access-emulator.test.ts
   - scripts/local/lifecycle.ts
+  - scripts/ci
+  - load
+  - .github/workflows/ci.yml
+  - .github/workflows/_verify.yml
+  - .github/workflows/factory.yml
+  - .github/actions
   - .agents/skills/factory-sandboxes
-updated: 2026-11-01
+  - .agents/skills/factory-ci
+updated: 2026-10-31
 ---
 
 # Software factory sandboxes and local CI
 
 ## Overview
 
-The factory is the skills agents consume plus the sandbox environments they run in (design in the authored Obsidian vault, tracking [#285](https://github.com/factory-level/inferos/issues/285)). This checkout is the vessel: `pnpm local factory` brings the sandboxes up and down. The local CI graph (`scripts/ci/pipeline.ts --target=local`, the reusable workflow and the composite actions) and the scripted stage smoke are still in draft [#286](https://github.com/factory-level/inferos/pull/286); `factory stage-smoke` reports their absence from this checkout instead of running. Nothing here deploys: there is no Cloudflare account in any step.
+The factory is the skills agents consume plus the sandbox environments they run in ([design](../design/factory.md), tracking [#285](https://github.com/factory-level/inferos/issues/285)). This checkout is the vessel: `pnpm local factory` brings the sandboxes up and down, and `scripts/ci/pipeline.ts --target=local` runs the InferOS side of release-graph nodes 1-5, 7 and 8 against them, writing evidence under `.factory/runs/<run-id>/`. GitHub Actions is a consumer of the same scripts through a reusable workflow and thin composite actions. Nothing here deploys: there is no Cloudflare account in any step.
 
 ## Components
 
@@ -22,6 +29,19 @@ The factory is the skills agents consume plus the sandbox environments they run 
 | --- | --- |
 | `scripts/local/factory.ts` | `pnpm local factory up <dev\|infra\|verify\|stage-probe>\|status\|doctor [sandbox]\|down\|stage-smoke`, dispatched from `lifecycle.ts` before its own parsing. Sandbox table, credential guard, health probes, stage probes, start/stop of what it started, state in `.factory/sandbox.json`. |
 | `scripts/local/access-emulator.ts` | A local stand-in for Cloudflare Access (as floci-gcp stands in for GCP), started by `up --access-emulator` in front of the sandbox's InferOS so `stage-probe` can exercise a remote stage's Access mode on this machine. |
+| `scripts/ci/lib.ts` | Shared node plumbing: run ids (`local-<utc>-<sha7>`), `--run-id/--part/--base/--target`, evidence directory, teeing `exec`, `result.json`, the GHA step summary line, and the Docker argument rules. |
+| `scripts/ci/verify.ts` | Node 1. Parts `all` (`pnpm lint`, `pnpm test`, `pnpm docs:check`), and CI's `lint`, `build`, `test`, `docs`; a failed `pnpm test` also runs `scripts/vp/last-run-report.ts`. |
+| `scripts/ci/security.ts` | Node 2. Semgrep (`p/default`), gitleaks (commits since `--base`, plus a copy of changed/untracked working-tree files), OSV-Scanner (`pnpm-lock.yaml`), Trivy fs (vuln, misconfig, secret). Normalized findings gated against `security-baseline.json`. |
+| `scripts/ci/build.ts` | Node 3. `scripts/release/build-release.ts` (wrangler dry-run bundles of every deployable Worker + Access-mode frontend + manifest) with Cloudflare variables stripped; records the manifest sha256. |
+| `scripts/ci/local-deploy.ts` | Node 5 (InferOS half). Reuses or starts this checkout's `run-local` stack, restarts a factory-started stack that predates this run's build, gates on every Worker answering, `/` serving the shell and `pnpm local seed`; records InferOps `/health/ready` ungated. |
+| `scripts/ci/bindings.ts` | Node 4 (InferOS half). Every binding in each committed `wrangler.jsonc` must appear in the local run's generated `wrangler.dev.jsonc` and resolve through Wrangler's `getPlatformProxy({ configPath })`, or (for `worker_loaders`) through its running Worker; every Worker must answer through the router. |
+| `scripts/ci/dast.ts` | Node 7. ZAP baseline against the local router; gate on high-risk alerts new against `dast-baseline.json`. |
+| `scripts/ci/perf.ts`, `load/` | Node 8. Artillery HTTP load (`inferos-http.yml`) and the Playwright engine (`inferos-browser.yml` + `inferos-browser.mjs`: shell boot, sign-in, the seeded mock-board workspace) with Web Vitals; gate is Artillery's `ensure`, enabled through `plugins.ensure` (without it Artillery 2 ignores the block and exits 0), and the node also fails when a log lacks Artillery's `Checks:` section. |
+| `scripts/ci/stage-smoke.ts`, `stage-smoke-flow.ts`, `stage-smoke-wiki.ts`, `stage-smoke-authorization.ts`, `load/stage-probe.{yml,mjs}` | Node 10, the scripted stage smoke: the grokbot owner and operate personas against the stage `FACTORY_STAGE_URL` names (`stage-smoke-wiki.ts` holds the Wiki oracle's pure comparisons), in the `artilleryio/artillery` container's Playwright, plus a 2-VU Artillery Playwright probe of the sign-in. Not part of `pipeline.ts`; run from `stage-probe` (`pnpm local factory stage-smoke`). |
+| `scripts/ci/pipeline.ts` | The orchestrator: credential refusal, node selection (`--only/--skip`), one child per node, fail-fast (`--keep-going`), `state.json`. `pnpm factory:ci` is `--target=local`. |
+| `scripts/ci/security-baseline.json`, `dast-baseline.json` | Reviewed accepted findings by fingerprint / ZAP plugin id. |
+| `.github/workflows/factory.yml` | The whole local graph (`pnpm factory:ci --keep-going`) as one job on GitHub-hosted `ubuntu-latest`, for PRs to `main` and `workflow_dispatch`. This repo is a public fork, so self-hosted runners are not allowed. It has `contents: read`, no secrets and `persist-credentials: false`, and uploads `.factory/runs/<id>/` as the `factory-run-<id>` artifact. |
+| `.github/workflows/_verify.yml`, `.github/actions/{setup,verify}` | Node 1 as a `workflow_call` workflow (jobs Lint and Build and test, unchanged commands) built from a toolchain setup action and an action that runs `scripts/ci/verify.ts --part <p>`. `ci.yml` keeps its triggers and concurrency and calls it. |
 | `.agents/skills/factory-sandboxes`, `factory-ci` | Agent SOPs with `evals/evals.json`. |
 
 ## Data and Control Flow

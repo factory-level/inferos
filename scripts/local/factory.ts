@@ -26,6 +26,7 @@
 // report. What the factory started is recorded in `.factory/sandbox.json`; `down` stops exactly
 // that and leaves anything it merely reused running.
 
+import { smokePersonaProblem } from "../ci/stage-smoke-authorization.ts";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -39,14 +40,6 @@ import {
   type DevServerRecord, type LocalStack,
 } from "./stack.ts";
 import { backendPorts, markWiring, processCommandLine, readBackendRecord, runInferopsBackend, wiringEnv, type BackendDeps } from "./inferops.ts";
-
-/** Only the two reserved seats specified by InferOps #2460 can exercise the stage smoke roles (shared with scripts/ci/stage-smoke-authorization.ts in the factory CI graph). */
-export function smokePersonaProblem(env: NodeJS.ProcessEnv): string | null {
-  if (env.GROKBOT_VIEWER_USER !== undefined) return "GROKBOT_VIEWER_USER is obsolete; use GROKBOT_OPERATE_USER=grokbot-operate";
-  if (env.GROKBOT_PERSONA_USER !== "grokbot-owner") return "GROKBOT_PERSONA_USER must select grokbot-owner";
-  if (env.GROKBOT_OPERATE_USER !== "grokbot-operate") return "GROKBOT_OPERATE_USER must select grokbot-operate";
-  return null;
-}
 
 export const SANDBOXES = ["dev", "infra", "verify", "stage-probe"] as const;
 export type Sandbox = (typeof SANDBOXES)[number];
@@ -1077,12 +1070,7 @@ async function stageSmoke(config: FactoryConfig, deps: FactoryDeps, timeoutMs: n
     return doctor;
   }
   const env = { ...asStringEnv(deps.env), FACTORY_STAGE_URL: config.stageUrl!, ...(config.stageAccess ? { FACTORY_STAGE_ACCESS: config.stageAccess } : {}) };
-  const script = join(deps.root, "scripts", "ci", "stage-smoke.ts");
-  if (!existsSync(script)) {
-    return { exitCode: 1, report: { ok: false, command: "factory stage-smoke", error: `the scripted stage smoke (${script}) is not in this checkout; it ships with the factory CI graph (draft #286)` },
-      headline: "factory stage-smoke: scripts/ci/stage-smoke.ts is not in this checkout" };
-  }
-  const smoke = deps.runIn([process.execPath, script], env, deps.root, timeoutMs);
+  const smoke = deps.runIn([process.execPath, join(deps.root, "scripts", "ci", "stage-smoke.ts")], env, deps.root, timeoutMs);
   // Only the smoke's own report lines: oracle verdicts and the evidence path, never the environment.
   const lines = `${smoke.stdout}${smoke.stderr}`.split("\n").filter(line => /^\[(?:stage-smoke|factory)\]/.test(line));
   const ok = smoke.exitCode === 0;

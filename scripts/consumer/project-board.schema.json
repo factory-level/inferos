@@ -1,8 +1,8 @@
 {
   "source": {
     "repository": "https://github.com/factory-level/inferops",
-    "revision": "3dae0f50d5b4fa467d734cbb2adf857f39942b31",
-    "path": "domain/ts/project/shared/board.dto.ts",
+    "revision": "239de4858285e37ceea9c7305dc021ac7d2e8308",
+    "path": "domains/project/shared/board.dto.ts",
     "export": "BoardResponseSchema"
   },
   "schema": {
@@ -162,6 +162,18 @@
                     "anyOf": [
                       {
                         "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "estimate": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
                       },
                       {
                         "type": "null"

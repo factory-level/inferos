@@ -56,6 +56,8 @@ export interface Issue {
   assigneeId: string | null;
   /** Explanation of a blocker, or null. */
   blockedReason: string | null;
+  /** Size in story points, a whole number from 0 to 100; absent when the issue is unsized. */
+  estimate?: number;
   /**
    * Set while a change requested through this connection has not taken effect yet; absent
    * otherwise. "create": the issue does not exist yet. Its id is provisional and not accepted by

@@ -202,6 +202,33 @@ describe("reads", () => {
   });
 });
 
+describe("issue estimate (factory run 20261028-estimate)", () => {
+  // InferOps sends `estimate` (story points 0..100, or null) on every card since the board DTO
+  // pinned in scripts/consumer/project-board.schema.json; older servers send none.
+  const boardWith = (estimate: unknown) => fakeInferOps(call => call.path === `/project/board?projectId=${DEMO.id}`
+    ? Response.json({
+      projectId: DEMO.id, projects: [DEMO],
+      columns: [{ state: state(READY, "Ready"), issues: [{ ...card(DEMO_1, "DEMO-1", READY, "1"), estimate }] }],
+    })
+    : undefined).client;
+
+  it("keeps a card's estimate", async () => {
+    const { issues } = await boardWith(8).readProject("DEMO");
+    expect(issues[0]?.estimate).toBe(8);
+  });
+
+  it("leaves it out when the issue is unsized or InferOps sends none", async () => {
+    expect(await boardWith(null).readProject("DEMO")).not.toHaveProperty("issues.0.estimate");
+    expect(await boardWith(undefined).readProject("DEMO")).not.toHaveProperty("issues.0.estimate");
+  });
+
+  it("refuses an estimate outside the contract like any malformed field", async () => {
+    for (const estimate of [101, -1, 2.5, "5"]) {
+      expect((await failure(boardWith(estimate).readProject("DEMO"))).code).not.toBeNull();
+    }
+  });
+});
+
 describe("project scope", () => {
   it("refuses an issue of another project exactly as an unknown one", async () => {
     const { client } = fakeInferOps();

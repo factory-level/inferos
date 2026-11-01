@@ -494,9 +494,6 @@ test("persona variables are a credentials FAIL in every sandbox but stage-probe"
 
 test("stage-smoke runs the smoke only when doctor stage-probe is READY, and reports only its verdict lines", async () => {
   const root = tempRoot();
-  // The scripted smoke ships with the factory CI graph; this checkout runs it only when the file exists.
-  mkdirSync(join(root, "scripts", "ci"), { recursive: true });
-  writeFileSync(join(root, "scripts", "ci", "stage-smoke.ts"), "");
   try {
     const { GROKBOT_OPERATE_USER: _operate, ...noOperate } = LOOPBACK_ENV;
     const blocked = fakeDeps(root, { env: noOperate, answers: LOOPBACK_ANSWERS, bodies: STUB });
@@ -927,20 +924,6 @@ test("up dev runs the pinned backend through the lifecycle, records it, and down
     assert.equal(readBackendRecord(root), null);
     assert.ok(fake.signals.some(([pid]) => pid === -api.pid!), "the API's process group was signalled");
     assert.ok(!existsSync(stateFile(root)));
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-
-test("stage-smoke reports the scripted smoke as absent when the factory CI graph is not in this checkout", async () => {
-  const root = tempRoot();
-  try {
-    const fake = fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: STUB });
-    const result = await runFactory(["stage-smoke", "--json"], fake.deps);
-    assert.equal(result.exitCode, 1);
-    assert.match(String(result.report.error), /stage-smoke\.ts.*not in this checkout/);
-    assert.equal(fake.runInCalls.length, 0, "nothing was run");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
