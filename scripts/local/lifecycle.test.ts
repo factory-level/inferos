@@ -27,6 +27,7 @@ function offlineDeps(overrides: Partial<LifecycleDeps> = {}): LifecycleDeps & { 
     isPortListening: async () => false,
     devServerRecord: () => null,
     backendRecord: () => null,
+    processIdentity: () => null,
     fetchImpl: async () => { throw new Error("offline"); },
     runOperator: (script, args) => {
       operatorCalls.push([script, ...args]);
@@ -541,6 +542,7 @@ function backendDeps(root: string, apiPort: number, overrides: Partial<Lifecycle
     root,
     env: { PATH: "/bin", HOME: "/home/me" },
     backendRecord: readBackendRecord,
+    processIdentity: () => `bun ${join(root, ".inferops", "checkout-3dae0f50d5b4")}/app/ts/shared-api/src/main.ts`,
     isPortListening: async port => port === apiPort,
     processAlive: () => true,
     fetchImpl: (async (input: string | URL | Request) => {
@@ -641,7 +643,8 @@ test("seed follows the wiring the stack was started with", async () => {
   const verifyReport = { ok: true, agentView: { inferops: "live", board: { project: "ENG", issues: 8, states: 5 }, approvalQueue: { pending: 0 } } };
   const run = async (root: string) => {
     const deps = offlineDeps({
-      root, backendRecord: readBackendRecord, isPortListening: async () => true, devServerRecord: () => ours(),
+      root, backendRecord: readBackendRecord, processIdentity: () => `bun ${join(root, ".inferops", "checkout-3dae0f50d5b4")}/app/ts/shared-api/src/main.ts`,
+      isPortListening: async () => true, devServerRecord: () => ours(),
       runOperator: (script, args) => { deps.operatorCalls.push([script, ...args]); return { exitCode: 0, report: script === "dev-setup.ts" ? setupReport : verifyReport, stderr: "" }; },
     });
     const result = await runLifecycle(["seed", "--json"], deps);
@@ -707,7 +710,7 @@ test("reset also clears a stopped backend's record and log, never a running one"
     withBackend(root, 18787);
     mkdirSync(backendPaths(root).logsDir, { recursive: true });
     writeFileSync(backendPaths(root).log, "old\n");
-    const running = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, backendRecord: readBackendRecord, processAlive: () => true }));
+    const running = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, backendRecord: readBackendRecord, processAlive: () => true, processIdentity: () => `bun ${join(root, ".inferops", "checkout-3dae0f50d5b4")}/app/ts/shared-api/src/main.ts` }));
     assert.equal(running.exitCode, EXIT_OK);
     assert.ok(existsSync(backendPaths(root).record), "a live backend keeps its record");
     const stopped = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, backendRecord: readBackendRecord, processAlive: () => false }));
@@ -726,6 +729,7 @@ test("a backend record on disk reaches status and seed only through deps.backend
   try {
     withBackend(root, 18787, { wiring: "sign-in" });
     const blind = offlineDeps({ root, backendRecord: () => null, isPortListening: async () => true, devServerRecord: () => ours(),
+      processIdentity: () => `bun ${join(root, ".inferops", "checkout-3dae0f50d5b4")}/app/ts/shared-api/src/main.ts`,
       fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch,
       runOperator: (script, args) => { blind.operatorCalls.push([script, ...args]); return { exitCode: 0, report: { ok: true }, stderr: "" }; } });
     const status = await runLifecycle(["status", "--json"], blind);
@@ -733,10 +737,65 @@ test("a backend record on disk reaches status and seed only through deps.backend
     await runLifecycle(["seed", "--json"], blind);
     assert.ok(blind.operatorCalls[0]!.includes("--inferops"));
     const seeing = offlineDeps({ root, backendRecord: readBackendRecord, isPortListening: async () => true, devServerRecord: () => ours(),
+      processIdentity: () => `bun ${join(root, ".inferops", "checkout-3dae0f50d5b4")}/app/ts/shared-api/src/main.ts`,
       fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch });
     const row = (await runLifecycle(["status", "--json"], seeing)).report.inferops as Record<string, unknown>;
     assert.equal((row.backend as Record<string, unknown>).wiring, "sign-in");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("the wiring is cleared by stop and by a plain start, and seed falls back to the shell's own wiring", async () => {
+  const root = tempRoot();
+  const { port, close } = await listen();
+  try {
+    recordDevServer(root, { port, mode: "run-local" });
+    withBackend(root, port + 10_000, { wiring: "sign-in" });
+    const identity = () => `bun ${join(root, ".inferops", "checkout-3dae0f50d5b4")}/app/ts/shared-api/src/main.ts`;
+    const stopDeps = offlineDeps({ root, backendRecord: readBackendRecord, processIdentity: identity, isPortListening: async () => true,
+      signal: () => {}, processAlive: () => false });
+    const stopped = await runLifecycle(["stop", "--json", "--port", String(port)], stopDeps);
+    assert.equal(stopped.exitCode, EXIT_OK, JSON.stringify(stopped.report));
+    assert.equal(readBackendRecord(root)?.wiring, undefined, "stop forgets how the stack was wired");
+  } finally {
+    await close();
+    rmSync(root, { recursive: true, force: true });
+  }
+  const root2 = tempRoot();
+  const free = await listen();
+  await free.close();
+  try {
+    withBackend(root2, free.port + 10_000, { wiring: "stopgap" });
+    const plain = backendDeps(root2, free.port + 10_000);
+    const started = await runLifecycle(["start", "--json", "--port", String(free.port)], plain.deps);
+    assert.equal(started.exitCode, EXIT_OK, JSON.stringify(started.report));
+    assert.equal(readBackendRecord(root2)?.wiring, undefined, "a plain start is a mock stack again");
+  } finally {
+    rmSync(root2, { recursive: true, force: true });
+  }
+  // No recorded wiring: the shell's own INFERLAB_AUTH_ORIGIN or stopgap variables decide what seed does.
+  const run = async (env: NodeJS.ProcessEnv) => {
+    const root3 = tempRoot();
+    try {
+      const deps = offlineDeps({ root: root3, env, isPortListening: async () => true, devServerRecord: () => ours(),
+        runOperator: (script, args) => { deps.operatorCalls.push([script, ...args]); return { exitCode: 0, report: { ok: true }, stderr: "" }; } });
+      await runLifecycle(["seed", "--json"], deps);
+      return deps.operatorCalls;
+    } finally {
+      rmSync(root3, { recursive: true, force: true });
+    }
+  };
+  const signIn = await run({ INFERLAB_AUTH_ORIGIN: "http://localhost:18787" });
+  assert.ok(!signIn[0]!.includes("--inferops"));
+  const stopgap = await run({ INFEROPS_BASE_URL: "http://localhost:18787", INFEROPS_API_TOKEN: "t", INFEROPS_WORKSPACE_ID: "w", INFEROPS_WORKSPACE_SLUG: "operations" });
+  assert.ok(stopgap[0]!.includes("--inferops"));
+  assert.equal(stopgap[1]![stopgap[1]!.indexOf("--board") + 1], "inferops://acme.operations/project/board/ENG");
+});
+
+test("start --stopgap without --inferops is a usage error", async () => {
+  const result = await runLifecycle(["start", "--stopgap"], offlineDeps());
+  assert.equal(result.exitCode, EXIT_USAGE);
+  assert.match(String(result.report.error), /--stopgap/);
 });

@@ -12,6 +12,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { parseEnv } from "node:util";
 import type { CodingDeps, ProcessResult } from "./coding.ts";
 import { providerVariables } from "./runner.ts";
 import { localEnv, type LocalStack } from "./stack.ts";
@@ -41,23 +42,36 @@ export function backendDatabase(inferosPort: number): string {
  */
 const DROPPED_ENV = /^(?:npm_|PNPM_|pnpm_)/;
 export const DROPPED_NAMES: readonly string[] = [
-  "INIT_CWD", "NODE_OPTIONS", "NODE_ENV", "AUTH_MODE", "WORKTREE_OFFSET", "API_PORT", "DATABASE_URL",
-  "NODE_CONFIG_DIR", "NODE_CONFIG", "NODE_CONFIG_ENV", "GCP_KMS_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+  "INIT_CWD", "NODE_OPTIONS", "NODE_ENV", "AUTH_MODE", "WORKTREE_OFFSET", "API_PORT", "DATABASE_URL", "DB_SCHEMA", "PGBOSS_SCHEMA",
+  "LOG_LEVEL", "CONFIG_AUDIT", "NODE_CONFIG_DIR", "NODE_CONFIG", "NODE_CONFIG_ENV", "GCP_KMS_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
 ];
 
-/** The environment every InferOps step runs with: the shell minus {@link DROPPED_NAMES}, pinned to `factory`, plus `extra`. */
-export function backendChildEnv(env: NodeJS.ProcessEnv, extra: Record<string, string> = {}): Record<string, string> {
+/** Every environment-variable name the checkout's `config/custom-environment-variables.json` maps into its cascade. */
+function mappedNames(checkout: string | undefined): Set<string> {
+  const names = new Set<string>();
+  if (!checkout) return names;
+  const walk = (node: unknown): void => {
+    if (typeof node === "string") names.add(node);
+    else if (Array.isArray(node)) node.forEach(walk);
+    else if (node && typeof node === "object") Object.values(node).forEach(walk);
+  };
+  walk(readJson(join(checkout, "config", "custom-environment-variables.json")));
+  return names;
+}
+
+/**
+ * The environment every InferOps step runs with: the shell minus {@link DROPPED_NAMES} and every
+ * name the checkout's own cascade would read (`custom-environment-variables.json`), pinned to
+ * `factory`, plus `extra`.
+ */
+export function backendChildEnv(env: NodeJS.ProcessEnv, extra: Record<string, string> = {}, checkout?: string): Record<string, string> {
+  const mapped = mappedNames(checkout);
   const child: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
-    if (value === undefined || DROPPED_ENV.test(name) || DROPPED_NAMES.includes(name)) continue;
+    if (value === undefined || DROPPED_ENV.test(name) || DROPPED_NAMES.includes(name) || mapped.has(name)) continue;
     child[name] = value;
   }
   return { ...child, NODE_CONFIG_ENV: "factory", SUPPRESS_NO_CONFIG_WARNING: "1", ...extra };
-}
-
-/** node-config's `NODE_CONFIG` layer registering the InferOS origin as the `inferos` SSO client's redirect origin. */
-export function ssoLayer(inferosOrigin: string): string {
-  return JSON.stringify({ auth: { sso: { inferosOrigins: [new URL(inferosOrigin).origin] } } });
 }
 
 function readJson(path: string): Record<string, unknown> | null {
@@ -66,6 +80,16 @@ function readJson(path: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * node-config's `NODE_CONFIG` layer registering the InferOS origin as the `inferos` SSO client's
+ * redirect origin, in both loopback spellings: InferOps matches the origin exactly, and the
+ * gatekeeper builds its `redirect_uri` from whichever host `VITE_BACKEND_HOST` names.
+ */
+export function ssoLayer(inferosOrigin: string): string {
+  const port = new URL(inferosOrigin).port || "80";
+  return JSON.stringify({ auth: { sso: { inferosOrigins: [`http://localhost:${port}`, `http://127.0.0.1:${port}`] } } });
 }
 
 /** The workspace package directories an InferOps checkout declares (`dir/*` globs and explicit paths). */
@@ -186,9 +210,25 @@ export function forbiddenCredentials(env: NodeJS.ProcessEnv): string[] {
 /** The gatekeeper wirings a shell may already carry (see the gatekeeper's `connectionFromEnv` and `inferLabAuthOrigin`). */
 const WIRING_NAMES = ["INFERLAB_AUTH_ORIGIN", "INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG"] as const;
 
-/** Which wiring variables `env` sets, by name, so `start --inferops` never silently overrides or doubles one. */
-export function existingWiring(env: NodeJS.ProcessEnv): string[] {
-  return WIRING_NAMES.filter(name => Boolean(env[name])).toSorted();
+/** The gatekeeper's own `.dev.vars`, where the dev server parks `INFEROPS_API_TOKEN` as a hidden secret (and a crash can leave it). */
+const GATEKEEPER_DEV_VARS = "custom-gatekeepers/gatekeeper-inferops/.dev.vars";
+
+/**
+ * Which wiring variables `env` sets, by name, so `start --inferops` never silently overrides or
+ * doubles one. With `root`, a name left in the gatekeeper's `.dev.vars` counts too: that file wins
+ * over a generated value, so a stale bearer there would quietly replace a fresh one.
+ */
+export function existingWiring(env: NodeJS.ProcessEnv, root?: string): string[] {
+  const names = WIRING_NAMES.filter(name => Boolean(env[name])).map(String);
+  if (root && existsSync(join(root, GATEKEEPER_DEV_VARS))) {
+    try {
+      const parked = parseEnv(readFileSync(join(root, GATEKEEPER_DEV_VARS), "utf8"));
+      for (const name of WIRING_NAMES) if (parked[name]) names.push(`${name} (${GATEKEEPER_DEV_VARS})`);
+    } catch {
+      // Unreadable: nothing to report from it.
+    }
+  }
+  return names.toSorted();
 }
 
 export type Wiring = { mode: "sign-in"; apiUrl: string } | { mode: "stopgap"; apiUrl: string; token: string };
@@ -222,6 +262,8 @@ export type BackendDeps = Pick<CodingDeps, "root" | "env" | "runCli" | "launch" 
   fetchImpl: typeof fetch;
   /** This checkout's backend record (see `readBackendRecord`), or null; injectable so an offline suite never sees a developer's live backend. */
   backendRecord: (root: string) => BackendRecord | null;
+  /** The command line of a live process, or null when it cannot be read; how a recorded pid is told from a reused one. */
+  processIdentity: (pid: number) => string | null;
 };
 
 export const BACKEND_SUBCOMMANDS = ["up", "status", "down", "verify", "env", "logs"] as const;
@@ -269,6 +311,32 @@ export function databaseUrl(adminUrl: string, database: string): string {
   url.pathname = `/${database}`;
   url.search = "sslmode=disable";
   return url.toString();
+}
+
+/** A `psql` invocation whose argv never carries the password: it travels as `PGPASSWORD` instead. */
+function psql(connection: string, args: string[], env: Record<string, string>): { argv: string[]; env: Record<string, string> } {
+  const url = new URL(connection);
+  const password = decodeURIComponent(url.password);
+  url.password = "";
+  return { argv: ["psql", url.toString(), ...args], env: password ? { ...env, PGPASSWORD: password } : env };
+}
+
+/** The only databases this module may drop: its own, named for a stack port. */
+const OWN_DATABASE = /^inferos_\d{1,5}$/;
+/** The highest stack port that leaves room for the API port. */
+const MAX_STACK_PORT = 65_535 - API_PORT_SHIFT;
+
+/** `/proc/<pid>/cmdline` on Linux, else `ps -o args=`; null when the process is gone or unreadable. */
+export function processCommandLine(pid: number, runCli?: BackendDeps["runCli"]): string | null {
+  try {
+    const line = readFileSync(`/proc/${pid}/cmdline`, "latin1").split("\0").filter(Boolean).join(" ");
+    if (line) return line;
+  } catch {
+    // Not Linux, or not ours to read.
+  }
+  if (!runCli) return null;
+  const result = runCli(["ps", "-o", "args=", "-p", String(pid)], { PATH: process.env.PATH ?? "" });
+  return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : null;
 }
 
 const fail = (command: string, report: Record<string, unknown>, headline: string): BackendResult =>
@@ -350,19 +418,28 @@ async function healthy(apiUrl: string, deps: BackendDeps): Promise<boolean> {
   }
 }
 
-/** Shared local Postgres: already answering, or started from the checkout's compose file under inferops' own project name. */
-async function ensurePostgres(checkout: string, deps: BackendDeps): Promise<string | null> {
-  const ready = () => deps.runCli(["pg_isready", "-h", "localhost", "-p", "5432", "-q"], { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" }).exitCode === 0;
+/**
+ * Shared local Postgres: already answering, or started from the sibling inferops repository's own
+ * compose file under inferops' project name (what its `platform:up` does from the main checkout).
+ * Never from the managed worktree: the service bind-mounts files from the compose file's directory,
+ * and a worktree under `.inferops/` is removable.
+ */
+async function ensurePostgres(deps: BackendDeps): Promise<string | null> {
+  const admin = new URL(pgAdminUrl(deps.env));
+  const host = admin.hostname || "localhost";
+  const port = admin.port || "5432";
+  const ready = () => deps.runCli(["pg_isready", "-h", host, "-p", port, "-q"], { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" }).exitCode === 0;
   if (ready()) return null;
-  const compose = join(checkout, "docker", "compose.dev.yml");
-  if (!existsSync(compose)) return `Postgres is not listening on localhost:5432 and ${compose} does not exist to start it; start the shared Postgres (bun run dev up in an inferops checkout) and retry`;
+  if (host !== "localhost" && host !== "127.0.0.1") return `Postgres is not answering at ${host}:${port} (INFEROPS_PG_ADMIN_URL); start it and retry`;
+  const compose = join(inferopsRepo(deps), "docker", "compose.dev.yml");
+  if (!existsSync(compose)) return `Postgres is not listening on ${host}:${port}, and ${compose} does not exist to start it; run bun run dev up (or bunx turbo run platform:up) in the inferops main checkout, or set INFEROPS_REPO, and retry`;
   const docker = { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" };
   deps.runCli(["docker", "network", "create", "inferlab"], docker);
   const composeUp = deps.runCli(["docker", "compose", "-p", "inferops", "-f", compose, "up", "-d", "postgres"], docker);
   if (composeUp.exitCode !== 0) return `docker compose up postgres failed: ${composeUp.stderr.trim().split("\n").at(-1) ?? ""}`;
   const deadline = deps.now() + 60_000;
   while (!ready()) {
-    if (deps.now() >= deadline) return "Postgres did not answer on localhost:5432 within 60 s of docker compose up";
+    if (deps.now() >= deadline) return `Postgres did not answer on ${host}:${port} within 60 s of docker compose up`;
     await deps.sleep(1_000);
   }
   return null;
@@ -397,19 +474,28 @@ function stampPath(root: string, database: string): string {
 
 interface Inspection {
   record: BackendRecord | null;
+  /** The recorded pid lives and is still our API (its command line names the recorded checkout). */
   alive: boolean;
   listening: boolean;
   backend: "running" | "not-running" | "port-in-use-by-other";
 }
 
+/** Whether the recorded pid is still the API we started, not a process that took the pid over after a reboot. */
+export function ownsRecord(record: BackendRecord | null, deps: Pick<BackendDeps, "processAlive" | "processIdentity">): record is BackendRecord {
+  if (!record || !deps.processAlive(record.pid)) return false;
+  const identity = deps.processIdentity(record.pid);
+  return identity !== null && identity.includes(record.checkout);
+}
+
 /**
- * Who holds the backend's port. A live record is the authority for where this checkout's backend
- * listens (it was written after readiness); without one, a listener on the derived port is a stranger.
+ * Who holds the backend's port. A live record of our own process is the authority for where this
+ * checkout's backend listens (it was written after readiness); without one, a listener on the
+ * derived port is a stranger. A record whose pid is gone or reused is stale, never signalled.
  */
 async function inspect(apiPort: number, deps: BackendDeps): Promise<Inspection> {
   const record = deps.backendRecord(deps.root);
-  const alive = record !== null && deps.processAlive(record.pid);
-  const listening = await deps.isPortListening(alive ? record!.port : apiPort);
+  const alive = ownsRecord(record, deps);
+  const listening = await deps.isPortListening(alive ? record.port : apiPort);
   const backend = !listening ? "not-running" : alive ? "running" : "port-in-use-by-other";
   return { record, alive, listening, backend };
 }
@@ -424,6 +510,9 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
     return fail(command, { credentials, error: `The shell holds credentials the backend must not run beside: ${credentials.join(", ")}. Unset them (a clean shell) and retry` },
       `inferops up refused: ${credentials.join(", ")} set`);
   }
+  if (!Number.isInteger(stack.port) || stack.port < 1 || stack.port > MAX_STACK_PORT) {
+    return fail(command, { error: `the stack port must be 1 to ${MAX_STACK_PORT} so the API port (stack port + ${API_PORT_SHIFT}) fits; got ${stack.port}` }, `inferops up: stack port ${stack.port} leaves no room for the API port`);
+  }
   const ports = backendPorts(stack.port);
   const database = backendDatabase(stack.port);
   const paths = backendPaths(deps.root);
@@ -432,8 +521,15 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
   if (inspection.backend === "port-in-use-by-other") {
     return fail(command, { backend: inspection.backend, apiUrl: ports.apiUrl, error: stranger(ports.apiPort) }, `inferops up: ${ports.apiPort} is in use by another process`);
   }
-  if (inspection.backend === "running" && inspection.record && await healthy(ports.apiUrl, deps)) {
+  if (inspection.backend === "running" && inspection.record && await healthy(inspection.record.apiUrl, deps)) {
     const { record } = inspection;
+    const asked = options.fresh ? "--fresh" : options.rev && options.rev !== record.revision ? `--rev ${options.rev.slice(0, 12)}`
+      : options.dir && resolve(options.dir) !== record.checkout ? `--dir ${resolve(options.dir)}` : null;
+    if (asked) {
+      return fail(command, { backend: "running", apiUrl: record.apiUrl, revision: record.revision, checkout: record.checkout,
+        error: `a backend is already running on ${record.apiUrl} at ${record.revision.slice(0, 12)} from ${record.checkout}; ${asked} needs a restart: run pnpm local inferops down first` },
+        `inferops up: already running; run down before ${asked}`);
+    }
     return {
       exitCode: OK,
       report: { ok: true, command, reused: true, apiUrl: record.apiUrl, port: record.port, database: record.database, checkout: record.checkout,
@@ -442,10 +538,10 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
     };
   }
   if (inspection.record && inspection.alive) {
-    return fail(command, { backend: "starting", apiUrl: ports.apiUrl, pid: inspection.record.pid, error: `A backend (pid ${inspection.record.pid}) is recorded but not answering on ${ports.apiPort}; wait for it, or run pnpm local inferops down` },
+    return fail(command, { backend: "starting", apiUrl: inspection.record.apiUrl, pid: inspection.record.pid, error: `A backend (pid ${inspection.record.pid}) is recorded but not answering on ${inspection.record.port}; wait for it, or run pnpm local inferops down` },
       `inferops up: pid ${inspection.record.pid} recorded but not answering`);
   }
-  if (inspection.record) rmSync(paths.record, { force: true }); // a dead pid: stale record
+  if (inspection.record) rmSync(paths.record, { force: true }); // a dead or reused pid: stale record
 
   const resolved = resolveCheckout(options, deps);
   if ("error" in resolved) return fail(command, { error: resolved.error }, `inferops up: ${resolved.error}`);
@@ -455,12 +551,12 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
   const migration = migrationCommands(checkout);
   if (!initDb || !migration) return fail(command, { error: `${checkout} lacks init-db.sql or the migration package scripts (migrate, seed, seed:reserved)` }, "inferops up: checkout is missing its database tooling");
 
-  const postgres = await ensurePostgres(checkout, deps);
+  const postgres = await ensurePostgres(deps);
   if (postgres) return fail(command, { error: postgres }, `inferops up: ${postgres}`);
 
   const admin = pgAdminUrl(deps.env);
   const dbUrl = databaseUrl(admin, database);
-  const childEnv = backendChildEnv(deps.env, { DATABASE_URL: dbUrl });
+  const childEnv = backendChildEnv(deps.env, { DATABASE_URL: dbUrl }, checkout);
   const log = paths.log;
   appendLog(log, `\n=== pnpm local inferops up ${new Date().toISOString()} rev ${revision} db ${database} api ${ports.apiUrl}\n`);
   const run = (name: string, argv: string[], env: Record<string, string>, cwd: string): string | null => {
@@ -468,7 +564,8 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
     appendLog(log, `$ ${name} (exit ${result.exitCode})\n${result.stdout}${result.stderr}\n`);
     return result.exitCode === 0 ? null : `${name} exited ${result.exitCode} in ${cwd}; see ${log}`;
   };
-  const exists = deps.runIn(["psql", admin, "-v", "ON_ERROR_STOP=1", "-tAc", `SELECT 1 FROM pg_database WHERE datname = '${database}'`], childEnv, checkout, STEP_TIMEOUT_MS);
+  const probe = psql(admin, ["-v", "ON_ERROR_STOP=1", "-tAc", `SELECT 1 FROM pg_database WHERE datname = '${database}'`], childEnv);
+  const exists = deps.runIn(probe.argv, probe.env, checkout, STEP_TIMEOUT_MS);
   if (exists.exitCode !== 0) return fail(command, { error: `psql could not reach ${new URL(admin).host}: ${exists.stderr.trim()}` }, "inferops up: psql failed");
   let stampedRevision: string | null = null;
   try {
@@ -479,11 +576,12 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
   const fresh = options.fresh || exists.stdout.trim() !== "1" || stampedRevision !== revision;
   const steps: [string, string[], Record<string, string>, string][] = [];
   if (fresh) {
-    steps.push(
-      ["drop database", ["psql", admin, "-v", "ON_ERROR_STOP=1", "-q", "-c", `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`], childEnv, checkout],
-      ["create database", ["psql", admin, "-v", "ON_ERROR_STOP=1", "-q", "-c", `CREATE DATABASE ${database}`], childEnv, checkout],
-      ["init-db.sql", ["psql", dbUrl, "-v", "ON_ERROR_STOP=1", "-q", "-f", initDb], childEnv, checkout],
-    );
+    // The old stamp goes first: an interrupted rebuild must not pass for a prepared database.
+    rmSync(stampPath(deps.root, database), { force: true });
+    const drop = psql(admin, ["-v", "ON_ERROR_STOP=1", "-q", "-c", `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`], childEnv);
+    const create = psql(admin, ["-v", "ON_ERROR_STOP=1", "-q", "-c", `CREATE DATABASE ${database}`], childEnv);
+    const init = psql(dbUrl, ["-v", "ON_ERROR_STOP=1", "-q", "-f", initDb], childEnv);
+    steps.push(["drop database", drop.argv, drop.env, checkout], ["create database", create.argv, create.env, checkout], ["init-db.sql", init.argv, init.env, checkout]);
   }
   steps.push(
     ["migrate", migration.migrate, childEnv, migration.cwd],
@@ -501,7 +599,7 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
 
   const apiEnv = backendChildEnv(deps.env, {
     DATABASE_URL: dbUrl, API_PORT: String(ports.apiPort), VERSION: "inferos-local", NODE_CONFIG: ssoLayer(ports.inferosOrigin),
-  });
+  }, checkout);
   mkdirSync(paths.logsDir, { recursive: true });
   const pid = deps.launch(["bun", entry], apiEnv, log, checkout);
   const deadline = deps.now() + options.timeoutSeconds * 1_000;
@@ -511,8 +609,9 @@ async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps)
     }
     if (await healthy(ports.apiUrl, deps)) break;
     if (deps.now() >= deadline) {
-      await stopGroup(pid, deps);
-      return fail(command, { pid, error: `the API was not ready within ${options.timeoutSeconds} s on ${ports.apiUrl}; stopped it. See ${log}`, logTail: tailFile(log, 30) },
+      const stopped = await stopGroup(pid, deps);
+      const outcome = stopped ? "stopped it" : `could not stop pid ${pid}; stop it by hand before the next up`;
+      return fail(command, { pid, error: `the API was not ready within ${options.timeoutSeconds} s on ${ports.apiUrl}; ${outcome}. See ${log}`, logTail: tailFile(log, 30) },
         `inferops up: not ready within ${options.timeoutSeconds} s`);
     }
     await deps.sleep(READY_POLL_MS);
@@ -538,15 +637,16 @@ function recipe(options: BackendOptions): string {
 async function status(stack: LocalStack, deps: BackendDeps): Promise<BackendResult> {
   const ports = backendPorts(stack.port);
   const { record, alive, listening, backend } = await inspect(ports.apiPort, deps);
-  const ok = backend === "running" && await healthy(ports.apiUrl, deps);
+  const where = alive ? { apiUrl: record!.apiUrl, port: record!.port } : { apiUrl: ports.apiUrl, port: ports.apiPort };
+  const ok = backend === "running" && await healthy(where.apiUrl, deps);
   const report = {
-    ok, command: "inferops status", backend, apiUrl: ports.apiUrl, port: ports.apiPort, listening, healthy: ok,
+    ok, command: "inferops status", backend, apiUrl: where.apiUrl, port: where.port, listening, healthy: ok,
     ...(backend === "port-in-use-by-other" ? { error: stranger(ports.apiPort) } : {}),
     ...(record ? { pid: record.pid, alive, database: record.database, checkout: record.checkout, revision: record.revision, managed: record.managed, dirty: record.dirty, startedAt: record.startedAt, log: record.log } : {}),
     ...(record && !alive ? { stale: true } : {}),
   };
-  const headline = backend === "running" && ok ? `inferops running: ${ports.apiUrl} (rev ${record!.revision.slice(0, 12)}, db ${record!.database})`
-    : backend === "running" ? `inferops degraded: ${ports.apiUrl} answers but /health/ready is not 200`
+  const headline = backend === "running" && ok ? `inferops running: ${where.apiUrl} (rev ${record!.revision.slice(0, 12)}, db ${record!.database})`
+    : backend === "running" ? `inferops degraded: ${where.apiUrl} answers but /health/ready is not 200`
     : backend === "port-in-use-by-other" ? `inferops port-in-use-by-other: ${ports.apiPort} answers, but not with this checkout's backend`
     : record && !alive ? `inferops not-running: stale record for pid ${record.pid}`
     : `inferops not-running: nothing listens on ${ports.apiPort} (pnpm local inferops up)`;
@@ -572,16 +672,24 @@ async function down(stack: LocalStack, options: BackendOptions, deps: BackendDep
   const purged: string[] = [];
   if (options.purge && !problem) {
     const database = record?.database ?? backendDatabase(stack.port);
-    const dropped = deps.runIn(["psql", pgAdminUrl(deps.env), "-v", "ON_ERROR_STOP=1", "-q", "-c", `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`],
-      backendChildEnv(deps.env), deps.root, STEP_TIMEOUT_MS);
-    if (dropped.exitCode === 0) {
-      purged.push(`database ${database}`);
-      rmSync(stampPath(deps.root, database), { force: true });
-    } else problem = `could not drop ${database}: ${dropped.stderr.trim()}`;
-    if (record?.managed && existsSync(record.checkout)) {
-      const removed = deps.git(["-C", inferopsRepo(deps), "worktree", "remove", "--force", record.checkout]);
-      if (removed.exitCode === 0) purged.push(`worktree ${record.checkout}`);
-      else problem = `could not remove ${record.checkout}: ${removed.stderr.trim()}`;
+    if (!OWN_DATABASE.test(database)) {
+      problem = `refusing to drop ${database}: only this module's own inferos_<port> databases are dropped`;
+    } else {
+      const drop = psql(pgAdminUrl(deps.env), ["-v", "ON_ERROR_STOP=1", "-q", "-c", `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`], backendChildEnv(deps.env));
+      const dropped = deps.runIn(drop.argv, drop.env, deps.root, STEP_TIMEOUT_MS);
+      if (dropped.exitCode === 0) {
+        purged.push(`database ${database}`);
+        rmSync(stampPath(deps.root, database), { force: true });
+      } else problem = `could not drop ${database}: ${dropped.stderr.trim()}`;
+    }
+    // Every managed worktree under .inferops/, whether or not a record still names one.
+    const managed = existsSync(paths.dir)
+      ? readdirSync(paths.dir, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith("checkout-")).map(entry => join(paths.dir, entry.name))
+      : [];
+    for (const checkout of managed) {
+      const removed = deps.git(["-C", inferopsRepo(deps), "worktree", "remove", "--force", checkout]);
+      if (removed.exitCode === 0) purged.push(`worktree ${checkout}`);
+      else problem = `could not remove ${checkout}: ${removed.stderr.trim()}`;
     }
   }
   const ok = problem === null;
@@ -638,7 +746,7 @@ async function call(deps: BackendDeps, step: string, url: string, init: RequestI
 async function callJson<T>(deps: BackendDeps, step: string, url: string, init: RequestInit = {}): Promise<T> {
   const response = await call(deps, step, url, init);
   const text = await response.text();
-  if (!response.ok) throw new StepFailure(step, `${init.method ?? "GET"} ${new URL(url).pathname} answered ${response.status}${text ? `: ${text.slice(0, 120)}` : ""}`);
+  if (!response.ok) throw new StepFailure(step, `${init.method ?? "GET"} ${new URL(url).pathname} answered ${response.status}`);
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -746,7 +854,7 @@ async function verify(stack: LocalStack, deps: BackendDeps): Promise<BackendResu
     report.stopgap = { ok: false, error: error.message };
     return failed(error);
   }
-  const redirectUri = `${backendPorts(stack.port).inferosOrigin}/gatekeeper/inferops/oauth`;
+  const redirectUri = `${backendPorts(record.inferosPort).inferosOrigin}/gatekeeper/inferops/oauth`;
   if (!signInSupported(record.checkout)) {
     report.signIn = { ok: false, skipped: `revision ${record.revision.slice(0, 12)} predates the stub persona sign-in (inferops #2445); only the stopgap wiring applies` };
   } else {
@@ -815,7 +923,7 @@ const SIGN_IN_FLOOR = "3cf153566";
  * already wires the gatekeeper somewhere: never two backends, never a silent override.
  */
 export async function wireStack(stack: LocalStack, { stopgap }: { stopgap: boolean }, deps: BackendDeps): Promise<{ env: Record<string, string>; record: BackendRecord } | BackendResult> {
-  const wired = existingWiring(localEnv(deps.root, deps.env));
+  const wired = existingWiring(localEnv(deps.root, deps.env), deps.root);
   if (wired.length) {
     return fail("start", { wiring: wired, error: `The gatekeeper is already wired by ${wired.join(", ")} (shell, .env.worktree, .dev.vars or .env); unset them to use --inferops, or start without it` },
       `start --inferops refused: ${wired.join(", ")} already set`);
@@ -854,16 +962,24 @@ export async function backendRow(stack: LocalStack, deps: BackendDeps): Promise<
 }
 
 /** The wiring the stack was last started with, while that backend still runs; null otherwise. */
-export function recordedWiring(deps: Pick<BackendDeps, "root" | "processAlive" | "backendRecord">): "sign-in" | "stopgap" | null {
+export function recordedWiring(deps: Pick<BackendDeps, "root" | "processAlive" | "processIdentity" | "backendRecord">): "sign-in" | "stopgap" | null {
   const record = deps.backendRecord(deps.root);
-  return record && deps.processAlive(record.pid) ? record.wiring ?? null : null;
+  return ownsRecord(record, deps) ? record.wiring ?? null : null;
+}
+
+/** `stop` and a plain `start` forget how the stack was wired; the backend itself keeps running. */
+export function clearWiring(deps: Pick<BackendDeps, "root" | "backendRecord">): void {
+  const record = deps.backendRecord(deps.root);
+  if (!record?.wiring) return;
+  const { wiring: _wiring, ...rest } = record;
+  writeBackendRecord(deps.root, rest);
 }
 
 /** `pnpm local reset`: drop a stopped backend's record and log (the database and checkout stay); a live one keeps both. */
-export function resetBackend(deps: Pick<BackendDeps, "root" | "processAlive" | "backendRecord">): string[] {
+export function resetBackend(deps: Pick<BackendDeps, "root" | "processAlive" | "processIdentity" | "backendRecord">): string[] {
   const paths = backendPaths(deps.root);
   const record = deps.backendRecord(deps.root);
-  if (record && deps.processAlive(record.pid)) return [];
+  if (ownsRecord(record, deps)) return [];
   const removed: string[] = [];
   for (const path of [paths.record, paths.logsDir]) {
     if (!existsSync(path)) continue;

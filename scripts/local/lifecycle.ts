@@ -39,7 +39,7 @@ import { assertLocalPortAvailable } from "../consumer/runtime.ts";
 import { relayTermination } from "../relay-termination.ts";
 import { withWorktreeEnv } from "../worktree-env.ts";
 import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
-import { BACKEND_SUBCOMMANDS, backendRow, readBackendRecord, recordedWiring, resetBackend, runInferopsBackend, wireStack, type BackendDeps } from "./inferops.ts";
+import { BACKEND_SUBCOMMANDS, backendRow, clearWiring, processCommandLine, readBackendRecord, recordedWiring, resetBackend, runInferopsBackend, wireStack, type BackendDeps } from "./inferops.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
   probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack, stackOwnership,
@@ -175,6 +175,7 @@ export const defaultDeps: LifecycleDeps = {
   runCli: runProcess,
   runIn: (argv, env, cwd, timeoutMs) => runProcess(argv, env, cwd, timeoutMs),
   backendRecord: readBackendRecord,
+  processIdentity: pid => processCommandLine(pid, runProcess),
   launch: launchDetached,
   git: args => runProcess(["git", ...args], process.env),
 };
@@ -256,7 +257,7 @@ function parse(argv: readonly string[]): Parsed {
   if (values["consumer-root"] !== undefined && !subcommands) throw new UsageError("--consumer-root applies to runner and coding only");
   if (values.once && sub !== "start") throw new UsageError("--once applies to runner start only");
   if (values.inferops && command !== "start") throw new UsageError("--inferops applies to start only");
-  if (values.stopgap && command !== "start" && command !== "inferops") throw new UsageError("--stopgap applies to start --inferops, inferops env and inferops verify");
+  if (values.stopgap && !(command === "inferops" || (command === "start" && values.inferops))) throw new UsageError("--stopgap applies to start --inferops, inferops env and inferops verify");
   if (!/^\d+$/.test(values.timeout)) throw new UsageError("--timeout must be a whole number of seconds");
   const backendOnly = { fresh: values.fresh, purge: values.purge, dir: values.dir !== undefined, rev: values.rev !== undefined, "allow-local-config": values["allow-local-config"], timeout: values.timeout !== "180" };
   const misplaced = Object.entries(backendOnly).filter(([, set]) => set).map(([name]) => `--${name}`);
@@ -372,6 +373,7 @@ async function start(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Pr
     };
   }
   if (!parsed.inferops) {
+    clearWiring(deps); // a plain start is a mock (or shell-wired) stack again, whatever the backend record said
     await deps.startStack(stack, parsed.passthrough);
     return { exitCode: EXIT_OK, report: { ok: true, command: "start", url: stack.url }, headline: `started ${stack.url}` };
   }
@@ -411,6 +413,7 @@ async function stop(stack: LocalStack, deps: LifecycleDeps): Promise<LifecycleRe
     }
     await deps.sleep(200);
   }
+  clearWiring(deps);
   return { exitCode: EXIT_OK, report: { ok: true, command: "stop", stopped: true, pid: record.pid }, headline: `stopped pid ${record.pid}` };
 }
 
@@ -421,7 +424,9 @@ async function seed(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Pro
   // The wiring `start --inferops` chose decides the InferOps part: under per-person sign-in no
   // account can be auto-provisioned (the gatekeeper's rule), and under the stopgap the seeded
   // acme board is the one to bind, not the gatekeeper's mock DEMO board.
-  const wiring = recordedWiring(deps);
+  // Without a recorded wiring, the shell's own variables (as the dev server would read them) decide.
+  const shellMode = inferOpsConfiguration(localEnv(deps.root, deps.env)).mode;
+  const wiring = recordedWiring(deps) ?? (shellMode === "sign-in" ? "sign-in" : shellMode === "live" ? "stopgap" : null);
   const setupArgs = [...credentialArgs(parsed, stack), "--mock-model", ...(wiring === "sign-in" ? [] : ["--inferops"])];
   if (screen) setupArgs.push("--screen", screen);
   const setup = deps.runOperator("dev-setup.ts", setupArgs, deps.env);

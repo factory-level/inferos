@@ -55,8 +55,21 @@ test("the child environment drops pnpm, turbo-global and credential names and pi
   });
 });
 
-test("the SSO layer registers exactly the InferOS origin", () => {
-  assert.equal(ssoLayer("http://localhost:8787"), JSON.stringify({ auth: { sso: { inferosOrigins: ["http://localhost:8787"] } } }));
+test("the child environment also drops every name the checkout's custom-environment-variables.json maps", () => {
+  const root = fixtureCheckout("new");
+  try {
+    mkdirSync(join(root, "config"), { recursive: true });
+    writeFileSync(join(root, "config", "custom-environment-variables.json"), JSON.stringify({ db: { schema: "DB_SCHEMA" }, auth: { accessToken: { secret: "AUTH_ACCESS_TOKEN_SECRET" } }, nested: [{ x: "LISTED_IN_ARRAY" }] }));
+    const child = backendChildEnv({ PATH: "/bin", DB_SCHEMA: "other", AUTH_ACCESS_TOKEN_SECRET: "s", LISTED_IN_ARRAY: "1", LOG_LEVEL: "debug", KEEP_ME: "yes" }, {}, root);
+    assert.deepEqual(child, { PATH: "/bin", KEEP_ME: "yes", NODE_CONFIG_ENV: "factory", SUPPRESS_NO_CONFIG_WARNING: "1" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the SSO layer registers the InferOS origin in both loopback spellings", () => {
+  assert.equal(ssoLayer("http://localhost:8787"), JSON.stringify({ auth: { sso: { inferosOrigins: ["http://localhost:8787", "http://127.0.0.1:8787"] } } }));
+  assert.equal(ssoLayer("http://127.0.0.1:8810"), JSON.stringify({ auth: { sso: { inferosOrigins: ["http://localhost:8810", "http://127.0.0.1:8810"] } } }));
 });
 
 test("the API entrypoint, init-db.sql and migration commands are found in both layouts", () => {
@@ -144,6 +157,16 @@ test("credentials are refused by name only, model-provider keys included", () =>
 
 test("an existing gatekeeper wiring in the environment is reported by name", () => {
   assert.deepEqual(existingWiring({}), []);
+  const root = mkdtempSync(join(tmpdir(), "inferos-root-"));
+  try {
+    const gk = join(root, "custom-gatekeepers", "gatekeeper-inferops");
+    mkdirSync(gk, { recursive: true });
+    writeFileSync(join(gk, ".dev.vars"), "INFEROPS_API_TOKEN=left-over-bearer\nOTHER=1\n");
+    assert.deepEqual(existingWiring({}, root), ["INFEROPS_API_TOKEN (custom-gatekeepers/gatekeeper-inferops/.dev.vars)"]);
+    assert.ok(!JSON.stringify(existingWiring({}, root)).includes("left-over"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
   assert.deepEqual(existingWiring({ INFERLAB_AUTH_ORIGIN: "http://localhost:8080" }), ["INFERLAB_AUTH_ORIGIN"]);
   assert.deepEqual(existingWiring({ INFEROPS_BASE_URL: "http://x", INFEROPS_API_TOKEN: "t", INFEROPS_WORKSPACE_ID: "", }), ["INFEROPS_API_TOKEN", "INFEROPS_BASE_URL"]);
 });
@@ -174,12 +197,17 @@ interface Harness {
   root: string;
   checkout: string;
   calls: { runIn: { argv: string[]; env: Record<string, string>; cwd: string }[]; runCli: string[][]; git: string[][]; launch: { argv: string[]; env: Record<string, string>; logPath: string; cwd: string }[]; signals: [number, string][] };
-  state: { dbExists: boolean; readyAfter: number; healthCalls: number; alive: boolean; listening: boolean; shaKnown: boolean };
+  state: { dbExists: boolean; readyAfter: number; healthCalls: number; alive: boolean; listening: boolean; shaKnown: boolean; pgReady: boolean; identity: string | null; killable: boolean };
+  repo: string;
 }
 
 /** An InferOS root with the pin, and (unless `managed: false`) the managed checkout already present with node_modules. */
 function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new" as "new" | "old" } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "inferos-root-"));
+  // The sibling inferops repository: only its compose file matters here.
+  const repo = mkdtempSync(join(tmpdir(), "inferops-repo-"));
+  mkdirSync(join(repo, "docker"), { recursive: true });
+  writeFileSync(join(repo, "docker", "compose.dev.yml"), "services: {postgres: {}}\n");
   const gk = join(root, "custom-gatekeepers", "gatekeeper-inferops");
   mkdirSync(gk, { recursive: true });
   writeFileSync(join(gk, "connection.json"), JSON.stringify({ compatibility: { provider: { revision: SHA } } }));
@@ -196,11 +224,12 @@ function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new"
     mkdirSync(join(checkout, "node_modules"));
   }
   const calls: Harness["calls"] = { runIn: [], runCli: [], git: [], launch: [], signals: [] };
-  const state: Harness["state"] = { dbExists: false, readyAfter: 2, healthCalls: 0, alive: true, listening: false, shaKnown: true };
+  const state: Harness["state"] = { dbExists: false, readyAfter: 2, healthCalls: 0, alive: true, listening: false, shaKnown: true, pgReady: true, identity: null, killable: true };
   const ok = { exitCode: 0, stdout: "", stderr: "" };
   const deps: BackendDeps = {
     root,
-    env: { PATH: "/bin", HOME: "/home/me", ...env },
+    env: { PATH: "/bin", HOME: "/home/me", INFEROPS_REPO: repo, ...env },
+    processIdentity: pid => state.identity ?? `bun ${checkout}/app/ts/shared-api/src/main.ts pid=${pid}`,
     runIn: (argv, childEnv, cwd) => {
       calls.runIn.push({ argv, env: childEnv, cwd });
       if (argv[0] === "psql" && argv.includes("-tAc")) return { ...ok, stdout: state.dbExists ? "1\n" : "" };
@@ -210,6 +239,8 @@ function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new"
     },
     runCli: argv => {
       calls.runCli.push(argv);
+      if (argv[0] === "pg_isready") return state.pgReady ? ok : { ...ok, exitCode: 2 };
+      if (argv[0] === "docker" && argv[1] === "compose") state.pgReady = true;
       return ok;
     },
     git: args => {
@@ -232,7 +263,7 @@ function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new"
     },
     signal: (pid, signal) => {
       calls.signals.push([pid, signal]);
-      if (signal === "SIGTERM") state.alive = false;
+      if (signal === "SIGTERM" && state.killable) state.alive = false;
     },
     processAlive: () => state.alive,
     sleep: async () => {},
@@ -248,7 +279,7 @@ function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new"
       return new Response("no", { status: 404 });
     }) as typeof fetch,
   };
-  return { deps, root, checkout, calls, state };
+  return { deps, root, checkout, calls, state, repo };
 }
 
 const stack8787: LocalStack = { root: "", backendHost: "localhost:8787", port: 8787, url: "http://localhost:8787", stateDir: "", recordPath: "" };
@@ -279,7 +310,11 @@ test("up prepares the database, starts the API from source and records it", asyn
     assert.match(lines[0]!, /^psql .* -tAc SELECT 1 FROM pg_database WHERE datname = 'inferos_8787'$/);
     assert.match(lines[1]!, /DROP DATABASE IF EXISTS inferos_8787 WITH \(FORCE\)$/);
     assert.match(lines[2]!, /CREATE DATABASE inferos_8787$/);
-    assert.match(lines[3]!, new RegExp(`^psql postgres://postgres:postgres@localhost:5432/inferos_8787\\?sslmode=disable -v ON_ERROR_STOP=1 -q -f ${h.checkout}/docker/postgres/init-db.sql$`));
+    assert.match(lines[3]!, new RegExp(`^psql postgres://postgres@localhost:5432/inferos_8787\\?sslmode=disable -v ON_ERROR_STOP=1 -q -f ${h.checkout}/docker/postgres/init-db.sql$`));
+    for (const call of h.calls.runIn.filter(c => c.argv[0] === "psql")) {
+      assert.ok(!call.argv.join(" ").includes("postgres:postgres@"), "the admin password never rides in argv");
+      assert.equal(call.env.PGPASSWORD, "postgres");
+    }
     assert.deepEqual(lines.slice(4), ["bun run src/cli/migrate.ts", "bun run src/cli/seed.ts", "bun run src/cli/seed-reserved.ts"]);
     for (const call of h.calls.runIn.slice(4)) {
       assert.equal(call.cwd, join(h.checkout, "migration"));
@@ -683,6 +718,169 @@ test("env prints the sign-in wiring, or with --stopgap a minted owner bearer and
     assert.ok(!shell.includes("INFERLAB_AUTH_ORIGIN"));
     assert.ok(!stopgap.headline.includes("owner-token"));
     assert.ok(!JSON.stringify(stopgap.report.exports).includes("owner-token"));
+  } finally {
+    await api.close();
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// The fix pass after the whole-branch review.
+
+test("up never runs compose from the managed checkout; the sibling repository's compose file starts Postgres", async () => {
+  const h = harness();
+  h.state.pgReady = false;
+  try {
+    const result = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.report));
+    const compose = h.calls.runCli.find(argv => argv[0] === "docker" && argv[1] === "compose")!;
+    assert.ok(compose, "compose was run");
+    const file = compose[compose.indexOf("-f") + 1]!;
+    assert.equal(file, join(h.repo, "docker", "compose.dev.yml"));
+    assert.ok(!file.includes(".inferops"), "never a file under the removable managed checkout");
+    assert.deepEqual(compose.slice(compose.indexOf("-p"), compose.indexOf("-p") + 2), ["-p", "inferops"]);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+  const bare = harness();
+  bare.state.pgReady = false;
+  rmSync(join(bare.repo, "docker"), { recursive: true, force: true });
+  try {
+    const result = await runInferopsBackend(stack8787, options("up"), bare.deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(String(result.report.error), /bun run dev up|platform:up/);
+    assert.ok(!bare.calls.runCli.some(argv => argv[1] === "compose"));
+  } finally {
+    rmSync(bare.root, { recursive: true, force: true });
+  }
+});
+
+test("a recorded pid that is no longer our API is a stale record: never signalled, replaced by up, cleared by down", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.state.identity = "/usr/bin/bash -l"; // the pid was reused after a reboot
+    h.state.listening = false;
+    const status = await runInferopsBackend(stack8787, options("status"), h.deps);
+    assert.equal(status.report.backend, "not-running");
+    assert.equal(status.report.stale, true);
+    const down = await runInferopsBackend(stack8787, options("down"), h.deps);
+    assert.equal(down.exitCode, 0, JSON.stringify(down.report));
+    assert.equal(h.calls.signals.length, 0, "an unrelated process group is never signalled");
+    assert.equal(readBackendRecord(h.root), null);
+    h.calls.launch.length = 0;
+    h.state.identity = null;
+    const again = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(again.exitCode, 0, JSON.stringify(again.report));
+    assert.equal(h.calls.launch.length, 1);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up refuses to silently keep a running backend when --rev, --dir or --fresh ask for something else", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.state.listening = true;
+    const other = "1111111111111111111111111111111111111111";
+    for (const extra of [{ rev: other }, { dir: h.checkout + "-other" }, { fresh: true }] as Partial<BackendOptions>[]) {
+      const result = await runInferopsBackend(stack8787, options("up", extra), h.deps);
+      assert.equal(result.exitCode, 1, JSON.stringify(extra));
+      assert.match(String(result.report.error), /down/);
+      assert.equal(result.report.reused, undefined);
+    }
+    const same = await runInferopsBackend(stack8787, options("up", { rev: SHA }), h.deps);
+    assert.equal(same.report.reused, true);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("down --purge removes every managed worktree and the database even without a record", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    await runInferopsBackend(stack8787, options("down"), h.deps);
+    assert.equal(readBackendRecord(h.root), null);
+    h.calls.git.length = 0;
+    h.calls.runIn.length = 0;
+    const purged = await runInferopsBackend(stack8787, options("down", { purge: true }), h.deps);
+    assert.equal(purged.exitCode, 0, JSON.stringify(purged.report));
+    assert.ok(h.calls.git.some(args => args.includes("worktree") && args.includes("remove") && args.includes(h.checkout)));
+    assert.ok(argvLines(h).some(line => line.includes("DROP DATABASE IF EXISTS inferos_8787 WITH (FORCE)")));
+    assert.deepEqual(purged.report.purged, ["database inferos_8787", `worktree ${h.checkout}`]);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("a fresh rebuild forgets the old stamp first, so an interrupted rebuild is redone", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.state.alive = false;
+    const failing = h.deps.runIn;
+    h.deps.runIn = (argv, env, cwd, timeout) => argv.includes("-f") ? { exitCode: 1, stdout: "", stderr: "boom" } : failing(argv, env, cwd, timeout);
+    const broken = await runInferopsBackend(stack8787, options("up", { fresh: true }), h.deps);
+    assert.equal(broken.exitCode, 1);
+    assert.equal(broken.report.step, "init-db.sql");
+    h.deps.runIn = failing;
+    h.calls.runIn.length = 0;
+    const repaired = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(repaired.exitCode, 0, JSON.stringify(repaired.report));
+    assert.equal(repaired.report.fresh, true, "the half-built database is rebuilt, not trusted");
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("only an inferos_<port> database is ever dropped, and a stack port that leaves no room for the API port is refused", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    const record = readBackendRecord(h.root)!;
+    writeBackendRecord(h.root, { ...record, database: "inferlab_7" });
+    const purged = await runInferopsBackend(stack8787, options("down", { purge: true }), h.deps);
+    assert.equal(purged.exitCode, 1);
+    assert.ok(!argvLines(h).some(line => line.includes("DROP DATABASE IF EXISTS inferlab_7")));
+    assert.match(String(purged.report.error), /inferlab_7/);
+    const tall = await runInferopsBackend({ ...stack8787, port: 60000 }, options("up"), h.deps);
+    assert.equal(tall.exitCode, 1);
+    assert.match(String(tall.report.error), /55535/);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up that times out and cannot stop what it started says so instead of claiming a stop", async () => {
+  const h = harness();
+  h.state.readyAfter = Number.MAX_SAFE_INTEGER;
+  h.state.killable = false;
+  try {
+    const result = await runInferopsBackend(stack8787, options("up", { timeoutSeconds: 4 }), h.deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(String(result.report.error), /could not stop pid 4242/);
+    assert.equal(result.report.pid, 4242);
+    assert.deepEqual(h.calls.signals.map(([, s]) => s), ["SIGTERM", "SIGKILL"]);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("status and verify follow the record's port and URL, and error text never carries a response body", async () => {
+  const api = await fakeInferOps({ refusePersona: true });
+  const h = recordedHarness(api);
+  try {
+    const status = await runInferopsBackend({ ...stack8787, port: 8810 }, options("status"), h.deps);
+    assert.equal(status.exitCode, 0, JSON.stringify(status.report));
+    assert.equal(status.report.healthy, true);
+    assert.equal(status.report.apiUrl, api.url);
+    const result = await runInferopsBackend(stack8787, options("verify"), h.deps);
+    assert.equal(result.exitCode, 1);
+    assert.match(String(result.report.error), /401/);
+    assert.ok(!String(result.report.error).includes("unknown persona"), "status code only, never the body");
   } finally {
     await api.close();
     rmSync(h.root, { recursive: true, force: true });
