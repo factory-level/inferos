@@ -913,6 +913,7 @@ test("up dev runs the pinned backend through the lifecycle, records it, and down
     assert.equal(inferos.env.INFERLAB_AUTH_ORIGIN, "http://localhost:18787");
     assert.equal(inferos.env.INFEROPS_BASE_URL, undefined);
     assert.equal(readBackendRecord(root)?.port, 18787);
+    assert.equal(readBackendRecord(root)?.wiring, "sign-in", "the backend record learns the factory's connect wiring");
     assert.ok(!JSON.stringify(result.report).includes("psql postgres://postgres:postgres@"), "no admin password in the report");
 
     // down: the lifecycle stops the backend (its group signalled, its record removed), run-local too.

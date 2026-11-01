@@ -39,7 +39,7 @@ import {
   configuredWorkers, probeWorkers, resolveLocalStack, stackOwnership,
   type DevServerRecord, type LocalStack,
 } from "./stack.ts";
-import { backendPorts, processCommandLine, readBackendRecord, runInferopsBackend, wiringEnv, type BackendDeps } from "./inferops.ts";
+import { backendPorts, markWiring, processCommandLine, readBackendRecord, runInferopsBackend, wiringEnv, type BackendDeps } from "./inferops.ts";
 
 export const SANDBOXES = ["dev", "infra", "verify", "stage-probe"] as const;
 export type Sandbox = (typeof SANDBOXES)[number];
@@ -843,6 +843,8 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
         problems.push(`inferos: port ${stack.port} is in use by a process this checkout did not start`);
       } else {
         state.services.inferos = launchInferos(stack, deps, config.inferopsConnect ? config.inferopsUrl : undefined, front);
+        // In pinned mode the backend's record learns the wiring, as `pnpm local start --inferops` would record it.
+        if (config.inferopsConnect && config.inferopsMode === "pinned") markWiring(backendDepsOf(deps), "sign-in");
       }
     } else if (service === "inferops") {
       if ((await inferopsHealth(config, deps)).status === "READY") {
