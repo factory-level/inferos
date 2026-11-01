@@ -201,8 +201,8 @@ function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new"
   const deps: BackendDeps = {
     root,
     env: { PATH: "/bin", HOME: "/home/me", ...env },
-    runIn: (argv, env, cwd) => {
-      calls.runIn.push({ argv, env, cwd });
+    runIn: (argv, childEnv, cwd) => {
+      calls.runIn.push({ argv, env: childEnv, cwd });
       if (argv[0] === "psql" && argv.includes("-tAc")) return { ...ok, stdout: state.dbExists ? "1\n" : "" };
       if (argv[0] === "psql" && argv.some(a => a.startsWith("CREATE DATABASE"))) state.dbExists = true;
       if (argv[0] === "psql" && argv.some(a => a.startsWith("DROP DATABASE"))) state.dbExists = false;
@@ -223,8 +223,8 @@ function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new"
       }
       return ok;
     },
-    launch: (argv, env, logPath, cwd) => {
-      calls.launch.push({ argv, env, logPath, cwd });
+    launch: (argv, childEnv, logPath, cwd) => {
+      calls.launch.push({ argv, env: childEnv, logPath, cwd });
       state.alive = true; // a fresh process; `signal` SIGTERM flips it back
       mkdirSync(join(logPath, ".."), { recursive: true });
       writeFileSync(logPath, "shared-api on http://localhost:18787 (auth: stub)\n");
@@ -504,6 +504,186 @@ test("logs tails the backend log", async () => {
     assert.deepEqual(tail.report.lines, ["shared-api on http://localhost:18787 (auth: stub)"]);
     assert.equal(tail.report.file, backendPaths(h.root).log);
   } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// verify and env, against an in-process stand-in for the InferOps API.
+
+import { createHash } from "node:crypto";
+import { createServer as createHttpServer, type IncomingMessage } from "node:http";
+
+const ACME_OPS = "00000000-0000-4000-8000-000000000011";
+const ACME_KNOWLEDGE = "00000000-0000-4000-8000-000000000012";
+const GROK_OPS = "00000000-0000-4000-8000-000000000c11";
+
+function readBody(request: IncomingMessage): Promise<string> {
+  return new Promise(resolve => {
+    let data = "";
+    request.on("data", chunk => { data += chunk; });
+    request.on("end", () => resolve(data));
+  });
+}
+
+/** Just enough of InferOps: health, persona bearers, workspaces, projects, boards and the stub SSO dance. */
+async function fakeInferOps({ refusePersona = false } = {}): Promise<{ url: string; port: number; close: () => Promise<void>; seen: string[] }> {
+  const seen: string[] = [];
+  let challenge = "";
+  const server = createHttpServer(async (request, response) => {
+    const url = new URL(request.url!, "http://localhost");
+    seen.push(`${request.method} ${url.pathname}`);
+    const json = (status: number, body: unknown, headers: Record<string, string> = {}) => {
+      response.writeHead(status, { "content-type": "application/json", ...headers });
+      response.end(JSON.stringify(body));
+    };
+    const bearer = request.headers.authorization?.replace(/^Bearer /, "");
+    if (url.pathname === "/health/ready") return json(200, { status: "ok" });
+    if (url.pathname === "/auth/inferlab-login" && request.method === "POST") {
+      const { personaId, transport } = JSON.parse(await readBody(request));
+      if (transport !== "bearer") return json(400, { error: "transport" });
+      if (personaId === "owner") return json(200, { token: "owner-token", refreshToken: "r", user: { workspaces: [{ workspaceId: ACME_OPS, product: "inferops", role: "owner" }, { workspaceId: ACME_KNOWLEDGE, product: "infermind", role: "owner" }] } });
+      if (personaId === "grokbot-owner") return json(200, { token: "grok-token", refreshToken: "r", user: { workspaces: [{ workspaceId: GROK_OPS, product: "inferops", role: "owner" }] } });
+      return json(401, { error: "unknown persona" });
+    }
+    if (url.pathname === "/workspaces") {
+      if (bearer === "owner-token") return json(200, [{ id: ACME_OPS, product: "inferops", name: "Field Ops", slug: "operations" }, { id: ACME_KNOWLEDGE, product: "infermind", name: "Knowledge", slug: "knowledge" }]);
+      if (bearer === "grok-token" || bearer === "sso-token") return json(200, [{ id: GROK_OPS, product: "inferops", name: "Grokbot Operations", slug: "operations" }]);
+      return json(401, { error: "unauthorized" });
+    }
+    if (url.pathname === "/project/projects") {
+      const workspace = request.headers["x-workspace-id"];
+      if (bearer === "owner-token" && workspace === ACME_OPS) return json(200, { projects: [{ id: "p-eng", identifier: "ENG", name: "Robotics Platform" }] });
+      if (bearer === "sso-token" && workspace === GROK_OPS) return json(200, { projects: [{ id: "p-grok", identifier: "GROK", name: "Grok Bot" }] });
+      return json(403, { error: "forbidden" });
+    }
+    if (url.pathname === "/project/board") {
+      const project = url.searchParams.get("projectId");
+      if (project === "p-eng" && bearer === "owner-token") return json(200, { projectId: project, states: [{ id: "s1", issues: [{}, {}, {}] }, { id: "s2", issues: [{}] }] });
+      if (project === "p-grok" && bearer === "sso-token") return json(200, { projectId: project, states: [{ id: "s1", issues: [{}] }, { id: "s2", issues: [] }, { id: "s3", issues: [] }] });
+      return json(403, { error: "forbidden" });
+    }
+    if (url.pathname === "/authorize" && request.method === "GET") {
+      const q = Object.fromEntries(url.searchParams);
+      if (q.client_id !== "inferos" || q.redirect_uri !== "http://localhost:8787/gatekeeper/inferops/oauth" || (q.state ?? "").length < 8 || (q.code_challenge ?? "").length < 43 || q.code_challenge_method !== "S256") {
+        response.writeHead(400); return response.end("invalid authorize request");
+      }
+      challenge = q.code_challenge!;
+      response.writeHead(200, { "content-type": "text/html", "set-cookie": "iex_authz_csrf=csrf-value; Max-Age=600; Path=/authorize; HttpOnly; SameSite=Strict" });
+      return response.end('<form><input name="csrf" value="csrf-value"></form>');
+    }
+    if (url.pathname === "/authorize/persona" && request.method === "POST") {
+      const form = new URLSearchParams(await readBody(request));
+      const origin = request.headers.origin;
+      const cookie = request.headers.cookie ?? "";
+      if (!cookie.includes("iex_authz_csrf=csrf-value") || form.get("csrf") !== "csrf-value" || origin !== `http://localhost:${port}`) { response.writeHead(403); return response.end("invalid sign-in request"); }
+      if (refusePersona || form.get("persona") !== "grokbot-owner") { response.writeHead(401); return response.end("unknown persona"); }
+      response.writeHead(302, { location: `${form.get("redirect_uri")}?code=CODE123&state=${form.get("state")}` });
+      return response.end();
+    }
+    if (url.pathname === "/auth/token" && request.method === "POST") {
+      const { clientId, code, codeVerifier, redirectUri } = JSON.parse(await readBody(request));
+      const expected = createHash("sha256").update(codeVerifier).digest("base64url");
+      if (clientId !== "inferos" || code !== "CODE123" || expected !== challenge || redirectUri !== "http://localhost:8787/gatekeeper/inferops/oauth") return json(400, { error: "invalid_grant" });
+      return json(200, { token: "sso-token", refreshToken: "r", user: { emailVerified: true, workspaces: [{ workspaceId: GROK_OPS, product: "inferops", role: "owner" }] } });
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  return { url: `http://localhost:${port}`, port, seen, close: () => new Promise(resolve => server.close(() => resolve())) };
+}
+
+/** A root whose backend record points at `api`, as a running backend of this checkout would. */
+function recordedHarness(api: { url: string; port: number }): Harness {
+  const h = harness();
+  writeBackendRecord(h.root, {
+    pid: 4242, port: api.port, apiUrl: api.url, inferosPort: 8787, database: "inferos_8787", checkout: h.checkout, revision: SHA, dirty: false, managed: true,
+    startedAt: "2026-11-01T00:00:00.000Z", log: backendPaths(h.root).log,
+  });
+  h.state.listening = true;
+  h.deps.fetchImpl = fetch;
+  return h;
+}
+
+test("verify proves both wirings headless: the acme ENG board by bearer, the GROK board through the PKCE persona sign-in", async () => {
+  const api = await fakeInferOps();
+  const h = recordedHarness(api);
+  try {
+    const result = await runInferopsBackend({ ...stack8787, port: 8787 }, options("verify"), h.deps);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.report));
+    const stopgap = result.report.stopgap as Record<string, unknown>;
+    assert.equal(stopgap.ok, true);
+    assert.equal(stopgap.persona, "owner");
+    assert.equal(stopgap.workspace, "operations");
+    assert.equal(stopgap.project, "ENG");
+    assert.equal(stopgap.states, 2);
+    assert.equal(stopgap.issues, 4);
+    const signIn = result.report.signIn as Record<string, unknown>;
+    assert.equal(signIn.ok, true, JSON.stringify(signIn));
+    assert.equal(signIn.persona, "grokbot-owner");
+    assert.equal(signIn.redirectUri, "http://localhost:8787/gatekeeper/inferops/oauth");
+    assert.equal(signIn.project, "GROK");
+    assert.equal(signIn.states, 3);
+    assert.equal(signIn.issues, 1);
+    assert.ok(api.seen.includes("GET /authorize") && api.seen.includes("POST /authorize/persona") && api.seen.includes("POST /auth/token"));
+    assert.ok(!JSON.stringify(result.report).includes("token"), "no bearer in the report");
+    assert.match(result.headline, /verified/);
+  } finally {
+    await api.close();
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("verify names the step that failed and needs a running backend", async () => {
+  const h = harness();
+  try {
+    const none = await runInferopsBackend(stack8787, options("verify"), h.deps);
+    assert.equal(none.exitCode, 1);
+    assert.equal(none.report.step, "backend");
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+  const api = await fakeInferOps({ refusePersona: true });
+  const refused = recordedHarness(api);
+  try {
+    const result = await runInferopsBackend(stack8787, options("verify"), refused.deps);
+    assert.equal(result.exitCode, 1);
+    assert.equal((result.report.stopgap as Record<string, unknown>).ok, true);
+    assert.equal((result.report.signIn as Record<string, unknown>).ok, false);
+    assert.equal(result.report.step, "sign-in");
+    assert.match(String(result.report.error), /401/);
+  } finally {
+    await api.close();
+    rmSync(refused.root, { recursive: true, force: true });
+  }
+});
+
+test("env prints the sign-in wiring, or with --stopgap a minted owner bearer and the live-suite variables", async () => {
+  const api = await fakeInferOps();
+  const h = recordedHarness(api);
+  try {
+    const signIn = await runInferopsBackend(stack8787, options("env"), h.deps);
+    assert.equal(signIn.exitCode, 0, JSON.stringify(signIn.report));
+    assert.equal(signIn.report.shell, [`export INFERLAB_AUTH_ORIGIN='${api.url}'`, "export AUTH_GATEKEEPERS='inferops'", "export INFEROPS_ENABLED='true'"].join("\n"));
+    assert.deepEqual(signIn.report.exports, ["INFERLAB_AUTH_ORIGIN", "AUTH_GATEKEEPERS", "INFEROPS_ENABLED"]);
+    const stopgap = await runInferopsBackend(stack8787, options("env", { stopgap: true }), h.deps);
+    assert.equal(stopgap.exitCode, 0, JSON.stringify(stopgap.report));
+    const shell = String(stopgap.report.shell);
+    assert.ok(shell.includes(`export INFEROPS_BASE_URL='${api.url}'`));
+    assert.ok(shell.includes("export INFEROPS_API_TOKEN='owner-token'"));
+    assert.ok(shell.includes(`export INFEROPS_WORKSPACE_ID='${ACME_OPS}'`));
+    assert.ok(shell.includes("export INFEROPS_WORKSPACE_SLUG='operations'"));
+    assert.ok(shell.includes("export INFEROPS_LIVE_TOKEN='owner-token'"));
+    assert.ok(shell.includes("export INFEROPS_LIVE_TENANT='acme'") && shell.includes("export INFEROPS_LIVE_PROJECT='ENG'"));
+    assert.ok(shell.includes(`export INFEROPS_LIVE_WIKI_WORKSPACE_ID='${ACME_KNOWLEDGE}'`) && shell.includes("export INFEROPS_LIVE_WIKI_WORKSPACE_SLUG='knowledge'"));
+    assert.ok(!shell.includes("INFERLAB_AUTH_ORIGIN"));
+    assert.ok(!stopgap.headline.includes("owner-token"));
+    assert.ok(!JSON.stringify(stopgap.report.exports).includes("owner-token"));
+  } finally {
+    await api.close();
     rmSync(h.root, { recursive: true, force: true });
   }
 });

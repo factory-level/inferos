@@ -9,6 +9,7 @@
 // a detached git worktree of the sibling inferops repository at the pinned SHA; nothing in it is
 // edited and its `config/local.json` (which does not exist there) is never read.
 
+import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { CodingDeps, ProcessResult } from "./coding.ts";
@@ -353,8 +354,8 @@ async function ensurePostgres(checkout: string, deps: BackendDeps): Promise<stri
   if (!existsSync(compose)) return `Postgres is not listening on localhost:5432 and ${compose} does not exist to start it; start the shared Postgres (bun run dev up in an inferops checkout) and retry`;
   const docker = { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" };
   deps.runCli(["docker", "network", "create", "inferlab"], docker);
-  const up = deps.runCli(["docker", "compose", "-p", "inferops", "-f", compose, "up", "-d", "postgres"], docker);
-  if (up.exitCode !== 0) return `docker compose up postgres failed: ${up.stderr.trim().split("\n").at(-1) ?? ""}`;
+  const composeUp = deps.runCli(["docker", "compose", "-p", "inferops", "-f", compose, "up", "-d", "postgres"], docker);
+  if (composeUp.exitCode !== 0) return `docker compose up postgres failed: ${composeUp.stderr.trim().split("\n").at(-1) ?? ""}`;
   const deadline = deps.now() + 60_000;
   while (!ready()) {
     if (deps.now() >= deadline) return "Postgres did not answer on localhost:5432 within 60 s of docker compose up";
@@ -397,11 +398,15 @@ interface Inspection {
   backend: "running" | "not-running" | "port-in-use-by-other";
 }
 
+/**
+ * Who holds the backend's port. A live record is the authority for where this checkout's backend
+ * listens (it was written after readiness); without one, a listener on the derived port is a stranger.
+ */
 async function inspect(apiPort: number, deps: BackendDeps): Promise<Inspection> {
   const record = readBackendRecord(deps.root);
   const alive = record !== null && deps.processAlive(record.pid);
-  const listening = await deps.isPortListening(apiPort);
-  const backend = !listening ? "not-running" : alive && record?.port === apiPort ? "running" : "port-in-use-by-other";
+  const listening = await deps.isPortListening(alive ? record!.port : apiPort);
+  const backend = !listening ? "not-running" : alive ? "running" : "port-in-use-by-other";
   return { record, alive, listening, backend };
 }
 
@@ -597,8 +602,199 @@ export async function runInferopsBackend(stack: LocalStack, options: BackendOpti
     case "status": return status(stack, deps);
     case "down": return down(stack, options, deps);
     case "logs": return logs(options, deps);
-    case "verify":
-    case "env":
-      return fail(`inferops ${options.sub}`, { error: "not implemented" }, "not implemented");
+    case "verify": return verify(stack, deps);
+    case "env": return envCommand(stack, options, deps);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// verify and env: the API as the gatekeeper sees it, without a browser and without InferOS.
+
+class StepFailure extends Error {
+  readonly step: string;
+  constructor(step: string, message: string) {
+    super(message);
+    this.step = step;
+  }
+}
+
+interface Session {
+  bearer: string;
+  workspaces: { workspaceId: string; product: string }[];
+}
+
+async function call(deps: BackendDeps, step: string, url: string, init: RequestInit = {}): Promise<Response> {
+  try {
+    return await deps.fetchImpl(url, { redirect: "manual", signal: AbortSignal.timeout(15_000), ...init });
+  } catch (error) {
+    throw new StepFailure(step, `${init.method ?? "GET"} ${new URL(url).pathname}: ${(error as Error).message}`);
+  }
+}
+
+async function callJson<T>(deps: BackendDeps, step: string, url: string, init: RequestInit = {}): Promise<T> {
+  const response = await call(deps, step, url, init);
+  const text = await response.text();
+  if (!response.ok) throw new StepFailure(step, `${init.method ?? "GET"} ${new URL(url).pathname} answered ${response.status}${text ? `: ${text.slice(0, 120)}` : ""}`);
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new StepFailure(step, `${new URL(url).pathname} did not answer JSON`);
+  }
+}
+
+/** A headless bearer for a catalog persona (`POST /auth/inferlab-login`, the stub-mode dev login). */
+async function personaSession(deps: BackendDeps, step: string, apiUrl: string, personaId: string): Promise<Session> {
+  const body = await callJson<{ token?: string; user?: { workspaces?: Session["workspaces"] } }>(deps, step, `${apiUrl}/auth/inferlab-login`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ personaId, product: "inferops", transport: "bearer" }),
+  });
+  if (!body.token) throw new StepFailure(step, `/auth/inferlab-login answered without a bearer for ${personaId}`);
+  return { bearer: body.token, workspaces: body.user?.workspaces ?? [] };
+}
+
+const authHeaders = (bearer: string, workspaceId?: string): Record<string, string> =>
+  ({ authorization: `Bearer ${bearer}`, ...(workspaceId ? { "x-workspace-id": workspaceId } : {}) });
+
+async function workspaceList(deps: BackendDeps, step: string, apiUrl: string, bearer: string): Promise<{ id: string; slug: string; product: string }[]> {
+  return callJson(deps, step, `${apiUrl}/workspaces`, { headers: authHeaders(bearer) });
+}
+
+/** The board `identifier` in `workspaceId`, read the way the gatekeeper reads it: project list, then the board. */
+async function boardSummary(deps: BackendDeps, step: string, apiUrl: string, bearer: string, workspaceId: string, identifier: string): Promise<{ project: string; states: number; issues: number }> {
+  const { projects } = await callJson<{ projects: { id: string; identifier: string }[] }>(deps, step, `${apiUrl}/project/projects`, { headers: authHeaders(bearer, workspaceId) });
+  const project = projects.find(p => p.identifier === identifier);
+  if (!project) throw new StepFailure(step, `project ${identifier} is not in workspace ${workspaceId} (seen: ${projects.map(p => p.identifier).join(", ") || "none"})`);
+  const board = await callJson<{ states?: { issues?: unknown[] }[]; columns?: { issues?: unknown[] }[] }>(deps, step, `${apiUrl}/project/board?${new URLSearchParams({ projectId: project.id })}`, { headers: authHeaders(bearer, workspaceId) });
+  const columns = board.states ?? board.columns ?? [];
+  return { project: identifier, states: columns.length, issues: columns.reduce((sum, column) => sum + (column.issues?.length ?? 0), 0) };
+}
+
+function inferopsWorkspace(session: Session, step: string): string {
+  const workspace = session.workspaces.find(w => w.product === "inferops");
+  if (!workspace) throw new StepFailure(step, "the persona holds no inferops workspace");
+  return workspace.workspaceId;
+}
+
+/** The record of a backend that is running and answering, or the failure to report. */
+async function requireBackend(stack: LocalStack, command: string, deps: BackendDeps): Promise<BackendRecord | BackendResult> {
+  const ports = backendPorts(stack.port);
+  const { record, backend } = await inspect(ports.apiPort, deps);
+  if (backend !== "running" || !record) {
+    return fail(command, { step: "backend", backend, apiUrl: ports.apiUrl, error: backend === "port-in-use-by-other" ? stranger(ports.apiPort) : `No backend of this checkout answers on ${ports.apiUrl}; start it with pnpm local inferops up` },
+      `${command}: backend ${backend}`);
+  }
+  if (!await healthy(record.apiUrl, deps)) return fail(command, { step: "health", apiUrl: record.apiUrl, error: `${record.apiUrl}/health/ready is not 200` }, `${command}: backend unhealthy`);
+  return record;
+}
+
+/** The stub SSO dance as InferOS's gatekeeper runs it in a browser: authorize page, persona form, PKCE code exchange. */
+async function personaSignIn(deps: BackendDeps, apiUrl: string, redirectUri: string, personaId: string): Promise<Session> {
+  const step = "sign-in";
+  const codeVerifier = randomBytes(32).toString("base64url");
+  const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+  const state = randomBytes(12).toString("base64url");
+  const authorize = { client_id: "inferos", redirect_uri: redirectUri, state, code_challenge: codeChallenge, code_challenge_method: "S256" };
+  const page = await call(deps, step, `${apiUrl}/authorize?${new URLSearchParams(authorize)}`);
+  await page.body?.cancel();
+  if (page.status !== 200) throw new StepFailure(step, `GET /authorize answered ${page.status}: is ${new URL(redirectUri).origin} in InferOps' auth.sso.inferosOrigins?`);
+  const cookies = typeof page.headers.getSetCookie === "function" ? page.headers.getSetCookie() : [page.headers.get("set-cookie") ?? ""];
+  const csrf = cookies.map(cookie => /iex_authz_csrf=([^;]+)/.exec(cookie)?.[1]).find(Boolean);
+  if (!csrf) throw new StepFailure(step, "GET /authorize set no persona CSRF cookie: this revision has no stub persona sign-in (inferops #2445)");
+  const form = await call(deps, step, `${apiUrl}/authorize/persona`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: `iex_authz_csrf=${csrf}`, origin: new URL(apiUrl).origin },
+    body: new URLSearchParams({ ...authorize, csrf, persona: personaId }).toString(),
+  });
+  await form.body?.cancel();
+  const location = form.headers.get("location");
+  if (form.status !== 302 || !location) throw new StepFailure(step, `POST /authorize/persona answered ${form.status} for ${personaId} (expected a 302 to ${redirectUri})`);
+  const callback = new URL(location);
+  if (callback.origin + callback.pathname !== redirectUri) throw new StepFailure(step, `the callback went to ${callback.origin}${callback.pathname}, not ${redirectUri}`);
+  if (callback.searchParams.get("state") !== state) throw new StepFailure(step, "the callback's state does not match");
+  const code = callback.searchParams.get("code");
+  if (!code) throw new StepFailure(step, `the callback carried no code (${callback.searchParams.get("error") ?? "no error either"})`);
+  const exchanged = await callJson<{ token?: string; user?: { workspaces?: Session["workspaces"] } }>(deps, step, `${apiUrl}/auth/token`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: "inferos", code, codeVerifier, redirectUri }),
+  });
+  if (!exchanged.token) throw new StepFailure(step, "POST /auth/token answered without a bearer");
+  return { bearer: exchanged.token, workspaces: exchanged.user?.workspaces ?? [] };
+}
+
+const SIGN_IN_PERSONA = "grokbot-owner";
+const SIGN_IN_BOARD = "GROK";
+const STOPGAP_BOARD = "ENG";
+
+async function verify(stack: LocalStack, deps: BackendDeps): Promise<BackendResult> {
+  const command = "inferops verify";
+  const record = await requireBackend(stack, command, deps);
+  if ("exitCode" in record) return record;
+  const { apiUrl } = record;
+  const report: Record<string, unknown> = { ok: false, command, apiUrl, revision: record.revision, health: { ok: true } };
+  const failed = (error: StepFailure): BackendResult =>
+    ({ exitCode: FAILED, report: { ...report, ok: false, step: error.step, error: error.message }, headline: `${command} failed at ${error.step}: ${error.message}` });
+  try {
+    const owner = await personaSession(deps, "stopgap", apiUrl, STOPGAP_WORKSPACE.persona);
+    const slugs = await workspaceList(deps, "stopgap", apiUrl, owner.bearer);
+    const workspace = slugs.find(w => w.id === STOPGAP_WORKSPACE.id)?.slug;
+    if (workspace !== STOPGAP_WORKSPACE.slug) throw new StepFailure("stopgap", `workspace ${STOPGAP_WORKSPACE.id} is not slug ${STOPGAP_WORKSPACE.slug} (seen ${workspace ?? "nothing"})`);
+    report.stopgap = { ok: true, persona: STOPGAP_WORKSPACE.persona, workspace, ...await boardSummary(deps, "stopgap", apiUrl, owner.bearer, STOPGAP_WORKSPACE.id, STOPGAP_BOARD) };
+  } catch (error) {
+    if (!(error instanceof StepFailure)) throw error;
+    report.stopgap = { ok: false, error: error.message };
+    return failed(error);
+  }
+  const redirectUri = `${backendPorts(stack.port).inferosOrigin}/gatekeeper/inferops/oauth`;
+  if (!signInSupported(record.checkout)) {
+    report.signIn = { ok: false, skipped: `revision ${record.revision.slice(0, 12)} predates the stub persona sign-in (inferops #2445); only the stopgap wiring applies` };
+  } else {
+    try {
+      const session = await personaSignIn(deps, apiUrl, redirectUri, SIGN_IN_PERSONA);
+      report.signIn = { ok: true, persona: SIGN_IN_PERSONA, redirectUri, ...await boardSummary(deps, "sign-in", apiUrl, session.bearer, inferopsWorkspace(session, "sign-in"), SIGN_IN_BOARD) };
+    } catch (error) {
+      if (!(error instanceof StepFailure)) throw error;
+      report.signIn = { ok: false, persona: SIGN_IN_PERSONA, redirectUri, error: error.message };
+      return failed(error);
+    }
+  }
+  const stopgap = report.stopgap as { states: number; issues: number };
+  const signIn = report.signIn as { ok: boolean; states?: number; issues?: number; skipped?: string };
+  return {
+    exitCode: OK,
+    report: { ...report, ok: true },
+    headline: `${command}: verified ${apiUrl}: ${STOPGAP_BOARD} ${stopgap.states} states/${stopgap.issues} issues by bearer; ` +
+      (signIn.ok ? `${SIGN_IN_BOARD} ${signIn.states} states/${signIn.issues} issues through persona sign-in` : `persona sign-in skipped (${signIn.skipped})`),
+  };
+}
+
+const shellLine = (name: string, value: string) => `export ${name}='${value.replace(/'/g, `'\\''`)}'`;
+
+async function envCommand(stack: LocalStack, options: BackendOptions, deps: BackendDeps): Promise<BackendResult> {
+  const command = "inferops env";
+  const record = await requireBackend(stack, command, deps);
+  if ("exitCode" in record) return record;
+  const { apiUrl } = record;
+  let variables: Record<string, string>;
+  if (!options.stopgap) {
+    variables = wiringEnv({ mode: "sign-in", apiUrl }, deps.env);
+  } else {
+    try {
+      const owner = await personaSession(deps, "stopgap", apiUrl, STOPGAP_WORKSPACE.persona);
+      const wiki = (await workspaceList(deps, "stopgap", apiUrl, owner.bearer)).find(w => w.product === "infermind");
+      variables = {
+        ...wiringEnv({ mode: "stopgap", apiUrl, token: owner.bearer }, deps.env),
+        INFEROPS_LIVE_BASE_URL: apiUrl, INFEROPS_LIVE_TOKEN: owner.bearer,
+        INFEROPS_LIVE_WORKSPACE_ID: STOPGAP_WORKSPACE.id, INFEROPS_LIVE_WORKSPACE_SLUG: STOPGAP_WORKSPACE.slug,
+        INFEROPS_LIVE_TENANT: "acme", INFEROPS_LIVE_PROJECT: STOPGAP_BOARD, INFEROPS_LIVE_POLICY_PROJECT: "CPOL", INFEROPS_LIVE_DISPATCH_PROJECT: "CODE",
+        ...(wiki ? { INFEROPS_LIVE_WIKI_WORKSPACE_ID: wiki.id, INFEROPS_LIVE_WIKI_WORKSPACE_SLUG: wiki.slug } : {}),
+      };
+    } catch (error) {
+      if (!(error instanceof StepFailure)) throw error;
+      return fail(command, { step: error.step, apiUrl, error: error.message }, `${command} failed at ${error.step}: ${error.message}`);
+    }
+  }
+  const mode = options.stopgap ? "stopgap" : "sign-in";
+  return {
+    exitCode: OK,
+    report: { ok: true, command, mode, apiUrl, exports: Object.keys(variables), shell: Object.entries(variables).map(([name, value]) => shellLine(name, value)).join("\n") },
+    headline: `${command}: ${mode} wiring for ${apiUrl} (${Object.keys(variables).length} variables; eval "$(pnpm local inferops env${options.stopgap ? " --stopgap" : ""})")`,
+  };
 }
