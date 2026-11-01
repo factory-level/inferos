@@ -843,8 +843,6 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
         problems.push(`inferos: port ${stack.port} is in use by a process this checkout did not start`);
       } else {
         state.services.inferos = launchInferos(stack, deps, config.inferopsConnect ? config.inferopsUrl : undefined, front);
-        // In pinned mode the backend's record learns the wiring, as `pnpm local start --inferops` would record it.
-        if (config.inferopsConnect && config.inferopsMode === "pinned") markWiring(backendDepsOf(deps), "sign-in");
       }
     } else if (service === "inferops") {
       if ((await inferopsHealth(config, deps)).status === "READY") {
@@ -867,6 +865,9 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
             pid: brought.report.pid as number | undefined, log: brought.report.log as string | undefined, url: brought.report.apiUrl as string,
             startedByFactory: brought.report.reused !== true, backend: "pinned",
           };
+          // InferOS was launched (or adopted) before this backend existed; its record learns the wiring
+          // the same way `pnpm local start --inferops` would record it.
+          if (config.inferopsConnect && state.services.inferos?.inferops === "connected") markWiring(backendDepsOf(deps), "sign-in");
         }
       } else if (!config.inferopsDir) {
         problems.push("inferops: no InferOps checkout configured (--inferops-dir or FACTORY_INFEROPS_DIR); not started");
