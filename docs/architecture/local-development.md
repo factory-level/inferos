@@ -279,10 +279,16 @@ with all 19 Workers; in a fresh browser context the login page's "Continue with 
 through `/connect/handoff` with an account, and the setup page's InferOps connect completed
 against the same backend without a second prompt. `pnpm local status` showed the backend row
 (`sign-in`, healthy). With `eval "$(pnpm -s local inferops env --stopgap)"`, `inferops-live.test.ts`
-ran against the backend three times (twice on a reused database, once after `up --fresh`): 11 of
-its 15 tests pass and 1 is skipped; `k` and `l` fail with "Apply an intake's pillars first
-(pillar.apply)", which the suite's own header lists as a prerequisite (apply an intake's pillars in
-the `knowledge` workspace through InferOps before running it; the seeds do not), and `m` fails with "No InferOps project ENG is available on acme.operations"
+ran against the backend: on the bare seeds 11 of its 15 tests pass and 1 is skipped, with `k` and
+`l` failing on "Apply an intake's pillars first (pillar.apply)", the prerequisite the suite's own
+header names. Met through the InferOps CLI against the backend (`INFEROPS_ENDPOINT` at the API,
+`inferops login --persona owner`; `inferops intake apply --file
+scripts/consumer/fixtures/intake/acme-field-ops.json --schema-version 1 --synthetic true
+--capabilities kanban --capabilities wiki` in `operations`; then in `knowledge` (`…0012`)
+`inferops pillar apply` with `{pillars:[{key,title}…]}` from that answer and its `intakeSha256`,
+`inferops page create --slug field-service-sop --title … --parent-id <the field-service Master>`,
+`inferops pillar add --pillar field-service --document-id <page>`, and `inferops page edit <page>
+--expected-version 1 --body …`), `k` and `l` pass: 13 of 15, 1 skipped. Only `m` fails with "No InferOps project ENG is available on acme.operations"
 while the backend's log shows every `GET /project/projects` answered 200 (the refusal is decided
 in the gatekeeper's `getGatekeeperClassFor` → `#hasProject` → `clientFor` for the binding made in
 step m's new gadget). `m` is an InferOS-side finding to take up separately; neither involves this lifecycle. The
