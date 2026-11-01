@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  apiEntrypoint, backendChildEnv, backendDatabase, backendPaths, backendPorts, existingWiring, forbiddenCredentials,
+  API_PORT_SHIFT, apiEntrypoint, BACKEND_USAGE, backendChildEnv, backendDatabase, backendPaths, backendPorts, existingWiring, forbiddenCredentials,
   initDbPath, migrationCommands, pinnedRevision, readBackendRecord, signInSupported, ssoLayer, wiringEnv, writeBackendRecord,
   type BackendRecord,
 } from "./inferops.ts";
@@ -33,6 +33,14 @@ function fixtureCheckout(layout: "new" | "old", { signIn = layout === "new" }: {
   }
   return root;
 }
+
+test("the backend usage names every verb and the shared resources it relies on", () => {
+  for (const needle of ["up", "status", "down [--purge]", "verify", "env [--stopgap]", "logs", "--dir", "--rev", "--fresh", "--allow-local-config", "--timeout",
+    `+ ${API_PORT_SHIFT}`, "inferos_<port>", ".inferops/", "INFEROPS_REPO", "INFEROPS_PG_ADMIN_URL", "connection.json", "`inferops`", "`inferlab`", "180"]) {
+    assert.ok(BACKEND_USAGE.includes(needle), `BACKEND_USAGE should mention ${needle}`);
+  }
+  assert.match(BACKEND_USAGE, /^Usage: pnpm local inferops/);
+});
 
 test("the backend's ports and database follow the InferOS stack port", () => {
   assert.deepEqual(backendPorts(8787), { inferosPort: 8787, inferosOrigin: "http://localhost:8787", apiPort: 18787, apiUrl: "http://localhost:18787" });

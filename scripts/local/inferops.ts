@@ -197,9 +197,10 @@ export function readBackendRecord(root: string): BackendRecord | null {
 
 /**
  * Cloud and deploy credentials the backend must not run beside, by name only (a value is never
- * read). Model-provider keys come from runner.ts's `providerVariables`, so the two guards agree.
+ * read). Model-provider keys come from runner.ts's `providerVariables`, so the two guards agree;
+ * `factory.ts` imports this same pattern for its sandboxes.
  */
-const CLOUD_VAR = /^(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE)|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CREDENTIALS|GOOGLE_OAUTH_ACCESS_TOKEN|CLOUDSDK_AUTH_ACCESS_TOKEN|CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE|CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_KEY|CF_API_TOKEN|CF_API_KEY|AZURE_CLIENT_SECRET|ARM_CLIENT_SECRET|PULUMI_ACCESS_TOKEN|NEON_API_KEY|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|VERCEL_TOKEN|FLY_API_TOKEN|DIGITALOCEAN_ACCESS_TOKEN|NPM_TOKEN)$/;
+export const CLOUD_VAR = /^(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE)|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CREDENTIALS|GOOGLE_OAUTH_ACCESS_TOKEN|CLOUDSDK_AUTH_ACCESS_TOKEN|CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE|CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_KEY|CF_API_TOKEN|CF_API_KEY|AZURE_CLIENT_SECRET|ARM_CLIENT_SECRET|PULUMI_ACCESS_TOKEN|NEON_API_KEY|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|VERCEL_TOKEN|FLY_API_TOKEN|DIGITALOCEAN_ACCESS_TOKEN|NPM_TOKEN)$/;
 
 export function forbiddenCredentials(env: NodeJS.ProcessEnv): string[] {
   const names = new Set(providerVariables(env));
@@ -300,6 +301,38 @@ const STOP_TIMEOUT_MS = 30_000;
 /** Throwaway reserved-seed keys: valid nowhere but this database (inferops CI uses the same shape). */
 const RESERVED_SEED_KEYS = { SYNTHETICS_PROBE_KEY: "iex_synthetic_inferos_local_0000", SMOKE_MCP_KEY: "iex_smoke_mcp_inferos_local_00000" } as const;
 const DEFAULT_PG_ADMIN_URL = "postgres://postgres:postgres@localhost:5432/postgres";
+
+/** What `pnpm local help inferops` prints: the verbs, and where the backend comes from and what it shares. */
+export const BACKEND_USAGE = `Usage: pnpm local inferops <up|status|down|verify|env|logs> [--json] [--port N]
+  up [--dir DIR] [--rev SHA] [--fresh] [--timeout S] [--allow-local-config]
+                          Run the InferOps API from source beside this stack, seeded, headless; a running one is adopted
+  status                  Ownership (running | not-running | port-in-use-by-other), pid, revision, database, /health/ready
+  down [--purge]          Stop it (SIGTERM, SIGKILL after 30 s); --purge also drops the database and the managed worktrees
+  verify [--stopgap]      Prove it without a browser: health, the acme ENG board with an owner bearer, the GROK board
+                          through the stub SSO dance the gatekeeper runs
+  env [--stopgap]         Print the wiring as export lines: sign-in, or with --stopgap the four connection variables
+                          and the INFEROPS_LIVE_* set for the opt-in live suite
+  logs [--lines N]        Tail .inferops/logs/inferops.log (every database step and the API's own log)
+
+Where it comes from and what it shares
+  Revision   custom-gatekeepers/gatekeeper-inferops/connection.json, compatibility.provider.revision (the contract
+             pin). --rev runs another revision; --dir runs an existing checkout as it is (refused while it holds
+             config/gcp-credentials.json unless --allow-local-config).
+  Checkout   A detached git worktree of the sibling inferops repository (INFEROPS_REPO, else ../inferops beside this
+             repository's main checkout) under .inferops/checkout-<sha12>, installed once with
+             bun install --frozen-lockfile --ignore-scripts; never edited, never bootstrapped, no cloud credential.
+  Port       This stack's port + ${API_PORT_SHIFT} (8787 → 18787; a pnpm wt worktree's 88xx → 188xx).
+  Database   inferos_<port> in inferops' shared local Postgres (INFEROPS_PG_ADMIN_URL, default
+             ${DEFAULT_PG_ADMIN_URL}). When nothing answers, up starts it the way
+             inferops' own dev up does: docker network create \`inferlab\`, then docker compose -p \`inferops\`
+             -f <sibling>/docker/compose.dev.yml up -d postgres. It is never stopped from here. The database is
+             created, migrated and seeded at the revision (stamp .inferops/db-<database>.json); --fresh rebuilds it.
+  Boot       NODE_CONFIG_ENV=factory (no secret layer, stub auth), the shell minus pnpm's variables and every name
+             inferops' own config cascade reads; ready when /health/ready answers 200 within --timeout (default 180 s).
+  State      .inferops/backend.json (0600), .inferops/logs/, .inferops/db-*.json, .inferops/checkout-*/
+  Wiring     pnpm local start --inferops: per-person sign-in (INFERLAB_AUTH_ORIGIN); --stopgap: one acme owner bearer.
+             Never both; a wiring already in the shell, .env.worktree, .dev.vars or .env is refused, not overridden.
+`;
 
 function pgAdminUrl(env: NodeJS.ProcessEnv): string {
   return env.INFEROPS_PG_ADMIN_URL || DEFAULT_PG_ADMIN_URL;
