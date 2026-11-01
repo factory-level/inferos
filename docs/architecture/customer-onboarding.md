@@ -116,7 +116,7 @@ Step 1's response carries InferOps' own report of the intake's requirements. Sin
 
 | Status | When |
 | --- | --- |
-| `reported` | The provider's strict shape holds (`IntakeRequirementReportSchema` in inferops `domains/project/shared/intake.dto.ts`, re-checked here without a dependency). Its `intakeSha256` is the response's. Every reviewed requirement appears exactly once, in intake order, with the intake's id, category and text |
+| `reported` | The provider's strict shape holds (`IntakeRequirementReportSchema` in inferops `domain/ts/project/shared/intake.dto.ts`, re-checked here without a dependency). Its `intakeSha256` is the response's. Every reviewed requirement appears exactly once, in intake order, with the intake's id, category and text |
 | `unavailable` | The response has no report: an InferOps from before #2380. No InferOps disposition is assumed |
 | `invalid` | Anything else, such as a hash mismatch, a missing, extra, duplicate, foreign or reordered entry, a changed category or text, or an unknown disposition or reason. `problem` names the position and rule, never a reported value, and `requirements` is empty |
 | `not-run` | Step 1 did not succeed |

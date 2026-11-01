@@ -1,4 +1,4 @@
-// The resource-URL grammar, InferOps' own (`_libs/widgets/shared/inferops-uri.ts`):
+// The resource-URL grammar, InferOps' own (`lib/ts/widgets/shared/inferops-uri.ts`):
 // `inferops://<tenant>.<workspace>/project/<kind>/<KEY>`, where `<kind>` is `board` (read the board,
 // propose issue changes) or `dispatch` (hand the project's software issues to the coding runner).
 // The two kinds are separate grants: a board binding can never dispatch. A third kind,

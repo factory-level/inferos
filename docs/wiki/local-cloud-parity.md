@@ -1,6 +1,6 @@
 ---
 title: Local development and Cloudflare parity
-updated: 2026-10-27
+updated: 2026-11-01
 ---
 
 # Local development and Cloudflare parity
@@ -45,6 +45,8 @@ A fresh checkout is: `pnpm install --frozen-lockfile`, `pnpm local start` in one
 
 Local state is `.wrangler/state` under the checkout; `reset` names it, requires `--yes`, refuses while the recorded dev server runs, and leaves Wrangler's build scratch and logs alone. Seeded boards and pending moves live in the mock InferOps Durable Object, so they survive restarts and go away with `reset`. The dev server records its pid in `.wrangler/local/dev-server.json` while it runs; `stop` only ever signals that pid, and a listener this checkout did not record is reported, not touched.
 
+To develop against a real InferOps instead of the gatekeeper's demo data, run the test backend the gatekeeper is pinned to: `pnpm local inferops up` (the pinned inferops revision from source, seeded, on this stack's port + 10000, no bootstrap and no cloud credential), then `pnpm local start --inferops` for per-person sign-in as a reserved persona on the `GROK` board, or `pnpm local start --inferops --stopgap` for the ambient account on the acme `ENG` board. `pnpm local inferops verify` proves both paths headless, `eval "$(pnpm -s local inferops env --stopgap)"` exports what `inferops-live.test.ts` needs, and `pnpm local inferops down` stops it. The architecture page's [InferOps test backend](../architecture/local-development.md#inferops-test-backend) section has the rules.
+
 Use synthetic settings and fixture accounts. A general upgrade, migration rollback or state-recovery command is not yet supplied. The [verification ledger](local-verification-evidence.md) distinguishes clean-pin proofs from earlier source overlays and records the exact scope of each result.
 
 ## Parity matrix
@@ -59,7 +61,7 @@ Each capability is placed in the column that describes how local development pro
 | Service bindings and RPC | Router → backend → gatekeeper bindings, `GatekeeperVendor` entrypoints | — | — | Deployed Worker names, preview ids, account wiring |
 | Durable Objects | Local SQLite-backed state, alarms, restart persistence | — | — | Distributed placement, migrations on a live namespace, recovery |
 | KV / R2 | Local simulated storage | — | — | Production consistency and permissions |
-| InferOps / InferLab | — | `src/inferops-fake.ts` (tests); the gatekeeper's built-in demo data (`pnpm local`) | A live InferOps through `INFEROPS_BASE_URL` (`inferops-live.test.ts`, opt-in) | Live auth domains and network failures |
+| InferOps / InferLab | — | `src/inferops-fake.ts` (tests); the gatekeeper's built-in demo data (`pnpm local`) | The pinned InferOps API run from source by `pnpm local inferops up` (stub auth, seeded, local Postgres), reached through `start --inferops` or `INFEROPS_LIVE_*` (`inferops-live.test.ts`, opt-in) | Live auth domains, the deployed WAF/edge header and network failures |
 | OAuth and connect handoff | State, nonce, single-use ticket, staged reconnect, `redirect_uri` from `BASE_URL` | Provider `/authorize` and token endpoints | — | Provider redirect registration, real domains and grants |
 | Cloudflare Access | — | `verifyCfAccessJwt` with a stub verifier (unit tests); the harness runs without Access | — | Real issuer, audience, policy and service tokens |
 | Workers AI | — | The scripted model (`pnpm dev:mock-model`) | `--use-workers-ai-binding` adds the `WORKERS_AI` binding, which reaches the account | No fully local Workers AI execution |

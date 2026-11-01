@@ -2,17 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { normalizeResourceUrl } from './resourceMatching'
 
 describe('normalizeResourceUrl', () => {
-  it('prepends https:// to a URL without a scheme', () => {
-    expect(normalizeResourceUrl(' docs.google.com/document/d/x ')).toBe('https://docs.google.com/document/d/x')
+  it('defaults a scheme-less URL to https and drops a trailing wildcard', () => {
+    expect(normalizeResourceUrl(' github.com/acme/* ')).toBe('https://github.com/acme')
+    expect(normalizeResourceUrl('http://localhost:8080/x')).toBe('http://localhost:8080/x')
   })
 
-  it('keeps an http(s) scheme and strips a trailing wildcard', () => {
-    expect(normalizeResourceUrl('http://localhost:8787/x/*')).toBe('http://localhost:8787/x')
-    expect(normalizeResourceUrl('HTTPS://example.com')).toBe('HTTPS://example.com')
-  })
-
-  it('keeps a custom scheme such as inferops://', () => {
+  it("keeps a gatekeeper's own scheme", () => {
     expect(normalizeResourceUrl('inferops://grokbot.operations/project/board/GROK'))
       .toBe('inferops://grokbot.operations/project/board/GROK')
+    expect(normalizeResourceUrl('inferops://demo.local/knowledge/wiki/*'))
+      .toBe('inferops://demo.local/knowledge/wiki')
+  })
+
+  it('leaves an empty value empty', () => {
+    expect(normalizeResourceUrl('   ')).toBe('')
   })
 })

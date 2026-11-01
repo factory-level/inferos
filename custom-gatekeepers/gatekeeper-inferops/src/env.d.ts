@@ -30,6 +30,13 @@ declare namespace Cloudflare {
      */
     INFERLAB_AUTH_ORIGIN?: string;
     /**
+     * Optional bare origin the browser is sent to for InferLab's `/authorize` instead of
+     * `INFERLAB_AUTH_ORIGIN`: a hostname routed to this gatekeeper, which forwards the sign-in pages
+     * to InferLab (auth-proxy.ts). Must sit behind the deployment's Access application. Set but
+     * malformed, sign-in is off.
+     */
+    INFERLAB_AUTHORIZE_ORIGIN?: string;
+    /**
      * A secret, not a var: the shared value InferLab's edge (an IP-allowlisting WAF) lets through
      * in the `x-inferos-edge` header. Set, every request to `INFERLAB_AUTH_ORIGIN` and
      * `INFEROPS_BASE_URL` carries it, and no other request does (see edge-header.ts). Unset, no

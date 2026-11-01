@@ -38,6 +38,13 @@ export interface StageDefinition {
     baseUrl: string;
     /** InferLab central-auth (`/authorize`, `/auth/token`), a bare HTTPS origin. */
     authOrigin: string;
+    /**
+     * Optional: a second hostname of this stage, served by the InferOps gatekeeper, that forwards
+     * InferLab's sign-in pages (gatekeeper-inferops `auth-proxy.ts`). Set it when InferLab's edge
+     * admits only allowlisted addresses, so a browser elsewhere can still sign in. It exposes the
+     * persona picker, so it must be covered by the stage's Access application; the deploy checks.
+     */
+    authorizeOrigin?: string;
   };
   /**
    * The gatekeepers this stage deploys. A gatekeeper left out is neither deployed nor bound, so it
@@ -66,7 +73,12 @@ export const STAGES = {
     workerPrefix: "inferos-dev-",
     resourcePrefix: "inferos-dev-",
     auth: { mode: "inferlab" },
-    inferops: { baseUrl: "https://api.dev.inferlab.io", authOrigin: "https://auth.dev.inferlab.io" },
+    inferops: {
+      baseUrl: "https://api.dev.inferlab.io",
+      authOrigin: "https://auth.dev.inferlab.io",
+      // Dev InferLab's Cloud Armor admits only allowlisted addresses; external test agents sign in here.
+      authorizeOrigin: "https://auth.dev-os.factorylevel.dev",
+    },
     gatekeepers: STAGE_GATEKEEPERS,
     requireCleanTree: false,
   },
@@ -102,6 +114,14 @@ export function stageDefinitionProblems(stage: StageDefinition): string[] {
   for (const [field, value] of [["inferops.baseUrl", stage.inferops.baseUrl], ["inferops.authOrigin", stage.inferops.authOrigin]]) {
     if (!isInferLabAuthOrigin(value) || !value.startsWith("https://")) {
       problems.push(`${field} "${value}" must be a bare https:// origin`);
+    }
+  }
+  const authorize = stage.inferops.authorizeOrigin;
+  if (authorize !== undefined) {
+    if (!isInferLabAuthOrigin(authorize) || !authorize.startsWith("https://")) {
+      problems.push(`inferops.authorizeOrigin "${authorize}" must be a bare https:// origin`);
+    } else if ([stage.hostname, new URL(stage.inferops.authOrigin).hostname].includes(new URL(authorize).hostname)) {
+      problems.push("inferops.authorizeOrigin must be a hostname of its own, not the stage's or InferLab's");
     }
   }
   if (!stage.gatekeepers.includes(INFEROPS_GATEKEEPER)) {

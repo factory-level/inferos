@@ -113,6 +113,7 @@ export function inferOpsGatekeeperVars(stage: StageDefinition): Record<string, s
   return {
     INFEROPS_BASE_URL: stage.inferops.baseUrl,
     INFERLAB_AUTH_ORIGIN: stage.inferops.authOrigin,
+    ...(stage.inferops.authorizeOrigin ? { INFERLAB_AUTHORIZE_ORIGIN: stage.inferops.authorizeOrigin } : {}),
     INFEROPS_ENABLED: "true",
     // Every optional switch is stated rather than left to the gatekeeper's "unset" default, so a
     // stage's behaviour never depends on a default changing. Coding dispatch stays off: it needs a
@@ -123,6 +124,25 @@ export function inferOpsGatekeeperVars(stage: StageDefinition): Record<string, s
     INFEROPS_WORKFLOW_POLICY_ENABLED: "false",
     INFEROPS_HOST_BOARDS: "false",
   };
+}
+
+/**
+ * The hostname a stage package is reachable at, or null when it must have no URL at all: the
+ * router at the stage's hostname, and the InferOps gatekeeper at the authorize origin's when the
+ * stage has one (the sign-in proxy). Every hostname here must be behind the Access application.
+ */
+export function stageWorkerHost(stage: StageDefinition, pkgName: string): string | null {
+  if (pkgName === "router") return stage.hostname;
+  if (pkgName === INFEROPS_GATEKEEPER && stage.inferops.authorizeOrigin) {
+    return new URL(stage.inferops.authorizeOrigin).hostname;
+  }
+  return null;
+}
+
+/** Every hostname a stage serves, each of which must answer with an Access login without credentials. */
+export function stageHostnames(stage: StageDefinition): string[] {
+  return [stage.hostname,
+    ...(stage.inferops.authorizeOrigin ? [new URL(stage.inferops.authorizeOrigin).hostname] : [])];
 }
 
 /** The backend's plain vars. Nothing in here is a secret: Wrangler prints every var it deploys. */
@@ -184,8 +204,8 @@ export function buildStageConfigs({
     Object.assign(config, {
       name: workerName(pkg.name),
       account_id: accountId,
-      // Only the router is reachable, and only at the stage's custom domain behind Access: a
-      // workers.dev or preview URL on any worker would be a way around Access.
+      // Only the router (and the sign-in proxy, see stageWorkerHost) is reachable, and only at a
+      // custom domain behind Access: a workers.dev or preview URL would be a way around Access.
       workers_dev: false,
       preview_urls: false,
       observability: stageObservability(config),
@@ -217,6 +237,8 @@ export function buildStageConfigs({
         BASE_URL: `${origin}/gatekeeper/${gatekeeperShortName(pkg.name)}`,
         ...(pkg.name === INFEROPS_GATEKEEPER ? inferOpsGatekeeperVars(stage) : {}),
       };
+      const host = stageWorkerHost(stage, pkg.name);
+      if (host) config.routes = [{ pattern: host, custom_domain: true }];
       for (const name of FORBIDDEN_GATEKEEPER_VARS) {
         if (config.vars[name] !== undefined) throw new Error(`${pkg.name} must not carry ${name} in a stage`);
       }
@@ -336,9 +358,10 @@ export function formatStagePlan({ stageName, stage, configs, secretNames, gateke
       const config = configs.get(pkgName) as StagingConfig;
       const vars = Object.keys(config.vars ?? {}).toSorted().join(", ");
       const gatekeeperSecrets = gatekeeperSecretNames[pkgName] ?? [];
-      const extra = pkgName === "router" ? ` at ${stage.hostname} (custom domain)` :
-        pkgName === "workshop-backend" ? `, secrets: ${secretNames.join(", ")}` :
-        gatekeeperSecrets.length > 0 ? `, secrets: ${gatekeeperSecrets.join(", ")}` : "";
+      const host = stageWorkerHost(stage, pkgName);
+      const extra = (host ? ` at ${host} (custom domain)` : "") +
+        (pkgName === "workshop-backend" ? `, secrets: ${secretNames.join(", ")}` :
+         gatekeeperSecrets.length > 0 ? `, secrets: ${gatekeeperSecrets.join(", ")}` : "");
       lines.push(`    ${config.name}${extra}${vars ? ` [vars: ${vars}]` : ""}`);
     }
   }
