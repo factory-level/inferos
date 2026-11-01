@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ProcessResult } from "./coding.ts";
-import { accessTokenFile, forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, remoteStageInferopsUrl, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
+import { accessTokenFile, factoryConfig, forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, remoteStageInferopsUrl, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
 import { runLifecycle, defaultDeps } from "./lifecycle.ts";
+import { readBackendRecord } from "./inferops.ts";
 import type { DevServerRecord } from "./stack.ts";
 
 /** A fake machine: which ports answer, which URLs return what, which processes live. */
@@ -24,7 +25,7 @@ function fakeDeps(root: string, opts: {
   /** Answers first, by URL and request headers (undefined falls through to the tables above). */
   respond?: (url: URL, headers: Record<string, string>) => Response | undefined;
 } = {}) {
-  const launches: { argv: string[]; env: Record<string, string>; cwd: string }[] = [];
+  const launches: { argv: string[]; env: Record<string, string>; cwd: string; pid?: number }[] = [];
   const signals: [number, NodeJS.Signals][] = [];
   const dockerCalls: string[][] = [];
   const runInCalls: { argv: string[]; env: Record<string, string>; cwd: string }[] = [];
@@ -53,8 +54,9 @@ function fakeDeps(root: string, opts: {
       return opts.runIn?.(argv) ?? { exitCode: 0, stdout: "", stderr: "" };
     },
     launch: (argv, env, _log, cwd) => {
-      launches.push({ argv, env, cwd });
-      return 4242 + launches.length;
+      const pid = 4242 + launches.length + 1;
+      launches.push({ argv, env, cwd, pid });
+      return pid;
     },
     signal: (pid, signal) => { signals.push([pid, signal]); },
     processAlive: pid => opts.alive?.(pid) ?? false,
@@ -107,7 +109,7 @@ test("credentials are detected by name: provider keys via runner.ts, cloud keys,
 test("doctor FAILS on a credential and never prints its value", async () => {
   const root = tempRoot();
   try {
-    const { deps } = fakeDeps(root, { env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk-ant-secret-value" }, listening: [8787], record: ours, answers: { 8787: 200, 8080: 200 } });
+    const { deps } = fakeDeps(root, { env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk-ant-secret-value" }, listening: [8787], record: ours, answers: { 8787: 200, 18787: 200 } });
     const result = await runFactory(["doctor", "dev", "--json"], deps);
     assert.equal(result.exitCode, 1);
     const text = JSON.stringify(result.report) + result.headline;
@@ -137,7 +139,7 @@ test("up refuses with a credential present, before launching anything", async ()
 test("doctor dev is READY when both services answer, with health JSON per service", async () => {
   const root = tempRoot();
   try {
-    const { deps } = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200 } });
+    const { deps } = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200, "18787/health/ready": 200 } });
     const result = await runFactory(["doctor", "dev", "--json"], deps);
     assert.equal(result.exitCode, 0, result.headline);
     const checks = result.report.checks as { name: string; status: string; health?: { status?: number; workers?: unknown[] } }[];
@@ -155,7 +157,7 @@ test("an InferOps that does not answer is an honest FAIL naming the missing chec
     const { deps } = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200 } });
     const result = await runFactory(["doctor", "dev"], deps);
     assert.equal(result.exitCode, 1);
-    assert.match(result.headline, /FAIL\s+service:inferops: http:\/\/127\.0\.0\.1:8080\/health\/ready did not answer; no InferOps checkout configured/);
+    assert.match(result.headline, /FAIL\s+service:inferops: http:\/\/localhost:18787\/health\/ready did not answer; the pinned test backend/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -164,7 +166,7 @@ test("an InferOps that does not answer is an honest FAIL naming the missing chec
 test("a foreign listener on the InferOS port is never adopted or probed as the stack", async () => {
   const root = tempRoot();
   try {
-    const fake = fakeDeps(root, { listening: [8787], record: null, answers: { 8787: 200, "8080/health/ready": 200 } });
+    const fake = fakeDeps(root, { listening: [8787], record: null, answers: { 8787: 200, "18787/health/ready": 200 } });
     const result = await runFactory(["up", "dev", "--timeout", "0"], fake.deps);
     assert.equal(result.exitCode, 1);
     assert.equal(fake.launches.length, 0);
@@ -226,7 +228,7 @@ test("up stops waiting when a launched service dies, and reports its log", async
 test("infra reuses a floci already answering, and down leaves it running", async () => {
   const root = tempRoot();
   try {
-    const fake = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200, "4588/health": 200 } });
+    const fake = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200, "18787/health/ready": 200, "4588/health": 200 } });
     const result = await runFactory(["up", "infra"], fake.deps);
     assert.equal(result.exitCode, 0, result.headline);
     assert.ok(!fake.dockerCalls.some(argv => argv[1] === "run"));
@@ -244,7 +246,7 @@ test("infra starts floci on loopback when none answers, and down removes only th
   try {
     let flociUp = false;
     const fake = fakeDeps(root, {
-      env: { PATH: "/bin", FACTORY_FLOCI_PORT: "14588" }, listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200 },
+      env: { PATH: "/bin", FACTORY_FLOCI_PORT: "14588" }, listening: [8787], record: ours, answers: { 8787: 200, "18787/health/ready": 200 },
       docker: argv => { if (argv[1] === "run") flociUp = true; return { exitCode: 0, stdout: "", stderr: "" }; },
     });
     const fetchImpl = fake.deps.fetchImpl;
@@ -299,7 +301,7 @@ test("verify checks every tool image; a missing one is FAIL with the pull comman
   const root = tempRoot();
   try {
     const { deps } = fakeDeps(root, {
-      listening: [8787], record: ours, answers: { 8787: 200, "8080/health/ready": 200 },
+      listening: [8787], record: ours, answers: { 8787: 200, "18787/health/ready": 200 },
       docker: argv => ({ exitCode: argv.includes("aquasec/trivy:latest") ? 1 : 0, stdout: "", stderr: "" }),
     });
     const result = await runFactory(["doctor", "verify"], deps);
@@ -621,7 +623,7 @@ test("/health/ready answering 200 with a non-ready body is a FAIL", async () => 
     const fake = fakeDeps(root, { listening: [8787], record: ours, answers: { 8787: 200 } });
     const fetchImpl = fake.deps.fetchImpl;
     fake.deps.fetchImpl = (async (input: string | URL, init?: RequestInit) =>
-      String(input).includes(":8080/health/ready") ? new Response(JSON.stringify({ status: "degraded" }), { status: 200 }) : fetchImpl(input, init)) as typeof fetch;
+      String(input).includes(":18787/health/ready") ? new Response(JSON.stringify({ status: "degraded" }), { status: 200 }) : fetchImpl(input, init)) as typeof fetch;
     const result = await runFactory(["doctor", "dev"], fake.deps);
     assert.equal(result.exitCode, 1);
     assert.match(result.headline, /FAIL\s+service:inferops: .*answered 200 but not ready/);
@@ -650,7 +652,9 @@ test("--inferops-connect starts run-local against the sandbox's InferOps with In
     assert.equal(result.exitCode, 0, result.headline);
     const [inferos] = fake.launches;
     assert.equal(inferos!.env.INFERLAB_AUTH_ORIGIN, "http://127.0.0.1:8980");
-    assert.equal(inferos!.env.INFEROPS_BASE_URL, "http://127.0.0.1:8980");
+    // The API endpoint derives from the auth origin; a base URL beside it makes `pnpm local status` call the stack misconfigured.
+    assert.equal(inferos!.env.INFEROPS_BASE_URL, undefined);
+    assert.equal(inferos!.env.INFEROPS_ENABLED, "true");
     assert.equal(inferos!.env.AUTH_GATEKEEPERS, "cloudflare,inferops");
     assert.equal(inferos!.env.INFEROPS_API_TOKEN, undefined);
     const services = result.report.services as Record<string, { inferops?: string; inferopsUrl?: string }>;
@@ -683,7 +687,7 @@ test("--inferops-connect refuses a non-loopback InferOps, other commands, and ca
     assert.match(String(remote.report.error), /loopback/);
     const doctor = await runFactory(["doctor", "dev", "--inferops-connect"], fakeDeps(root).deps);
     assert.equal(doctor.exitCode, 2);
-    const fake = fakeDeps(root, { env: { PATH: "/bin" }, listening: [8787], record: ours, answers: { 8787: 200, 8080: 200 } });
+    const fake = fakeDeps(root, { env: { PATH: "/bin" }, listening: [8787], record: ours, answers: { 8787: 200, 18787: 200 } });
     const adopted = await runFactory(["up", "dev", "--inferops-connect", "--json"], fake.deps);
     assert.equal(fake.launches.length, 0);
     assert.match(JSON.stringify(adopted.report.problems), /cannot rewire/);
@@ -692,9 +696,9 @@ test("--inferops-connect refuses a non-loopback InferOps, other commands, and ca
   }
 });
 
-test("inferopsConnectEnv keeps an existing inferops vendor once", () => {
+test("inferopsConnectEnv is the lifecycle's sign-in wiring: auth origin and vendor list, no base URL, no token", () => {
   assert.deepEqual(inferopsConnectEnv("http://localhost:8080/", { AUTH_GATEKEEPERS: "inferops" }),
-    { INFERLAB_AUTH_ORIGIN: "http://localhost:8080", INFEROPS_BASE_URL: "http://localhost:8080", AUTH_GATEKEEPERS: "inferops" });
+    { INFERLAB_AUTH_ORIGIN: "http://localhost:8080", AUTH_GATEKEEPERS: "inferops", INFEROPS_ENABLED: "true" });
 });
 
 test("image mode with --inferops-connect registers this InferOS's origin with InferOps' central auth", async () => {
@@ -831,5 +835,95 @@ test("up dev --access-emulator: a per-run token by name, InferOS answering as th
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(inferops, { recursive: true, force: true });
+  }
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// The default InferOps of the dev sandbox is the pinned test backend (scripts/local/inferops.ts).
+
+const PIN = "3dae0f50d5b4fa467d734cbb2adf857f39942b31";
+
+/** A root whose gatekeeper pins `PIN` and whose managed worktree for it is already in place and installed. */
+function pinnedRoot(): { root: string; checkout: string } {
+  const root = tempRoot();
+  const gk = join(root, "custom-gatekeepers", "gatekeeper-inferops");
+  mkdirSync(gk, { recursive: true });
+  writeFileSync(join(gk, "connection.json"), JSON.stringify({ compatibility: { provider: { revision: PIN } } }));
+  const checkout = join(root, ".inferops", `checkout-${PIN.slice(0, 12)}`);
+  for (const dir of ["app/ts/shared-api/src", "docker/postgres", "migration", "node_modules", "domain/ts/portal/shared"]) mkdirSync(join(checkout, dir), { recursive: true });
+  writeFileSync(join(checkout, "package.json"), JSON.stringify({ workspaces: { packages: ["app/ts/shared-api", "migration"] } }));
+  writeFileSync(join(checkout, "app/ts/shared-api/package.json"), JSON.stringify({ name: "@inferlab/shared-api" }));
+  writeFileSync(join(checkout, "app/ts/shared-api/src/main.ts"), "");
+  writeFileSync(join(checkout, "docker/postgres/init-db.sql"), "-- init");
+  writeFileSync(join(checkout, "migration/package.json"), JSON.stringify({ scripts: { migrate: "bun run src/cli/migrate.ts", seed: "bun run src/cli/seed.ts", "seed:reserved": "bun run src/cli/seed-reserved.ts" } }));
+  writeFileSync(join(checkout, "domain/ts/portal/shared/reserved-tenants.ts"), "export const SSO_SIGN_IN_PERSONAS = [];\n");
+  return { root, checkout };
+}
+
+test("without --inferops-dir or --inferops-image the dev sandbox's InferOps is the pinned test backend on the stack port + 10000", () => {
+  const { root } = pinnedRoot();
+  try {
+    const pinned = factoryConfig(root, { PATH: "/bin" });
+    assert.equal(pinned.inferopsMode, "pinned");
+    assert.equal(pinned.inferopsUrl, "http://localhost:18787");
+    const checkout = factoryConfig(root, { PATH: "/bin", FACTORY_INFEROPS_OFFSET: "9" }, "/some/inferops");
+    assert.equal(checkout.inferopsMode, "checkout");
+    assert.equal(checkout.inferopsUrl, "http://127.0.0.1:8980");
+    const image = factoryConfig(root, { PATH: "/bin" }, "/some/inferops", IMAGE);
+    assert.equal(image.inferopsMode, "image");
+    assert.equal(image.inferopsUrl, "http://127.0.0.1:8080");
+    assert.equal(factoryConfig(root, { PATH: "/bin", FACTORY_INFEROPS_URL: "http://127.0.0.1:9580" }).inferopsUrl, "http://127.0.0.1:9580");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("up dev runs the pinned backend through the lifecycle, records it, and down stops it through the lifecycle", async () => {
+  const { root, checkout } = pinnedRoot();
+  try {
+    const fake = fakeDeps(root, {
+      env: { PATH: "/bin", HOME: "/h" },
+      // A launched process lives until its group is signalled.
+      alive: pid => !fake.signals.some(([signalled]) => signalled === -pid),
+      runIn: argv => ({ exitCode: 0, stdout: argv.includes("-tAc") ? "1\n" : "", stderr: "" }),
+    });
+    const launched = (tool: string) => fake.launches.some(l => l.argv[0] === tool);
+    fake.deps.isPortListening = async port => port === 8787 ? launched(process.execPath) : port === 18787 ? launched("bun") : false;
+    fake.deps.devServerRecord = () => launched(process.execPath) ? ours : null;
+    fake.deps.fetchImpl = (async (input: string | URL) => {
+      const port = new URL(String(input)).port;
+      if (port === "8787" && launched(process.execPath) || port === "18787" && launched("bun")) return new Response("{}", { status: 200 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+    const result = await runFactory(["up", "dev", "--inferops-connect", "--json"], fake.deps);
+    assert.equal(result.exitCode, 0, result.headline);
+    const api = fake.launches.find(l => l.argv[0] === "bun")!;
+    assert.deepEqual(api.argv, ["bun", join(checkout, "app/ts/shared-api/src/main.ts")]);
+    assert.equal(api.cwd, checkout);
+    assert.equal(api.env.API_PORT, "18787");
+    assert.equal(api.env.NODE_CONFIG_ENV, "factory");
+    const services = result.report.services as Record<string, { url?: string; backend?: string; startedByFactory?: boolean; inferops?: string; inferopsUrl?: string }>;
+    assert.equal(services.inferops?.backend, "pinned");
+    assert.equal(services.inferops?.url, "http://localhost:18787");
+    assert.equal(services.inferops?.startedByFactory, true);
+    assert.equal(services.inferos?.inferops, "connected");
+    assert.equal(services.inferos?.inferopsUrl, "http://localhost:18787");
+    const inferos = fake.launches.find(l => l.argv[0] === process.execPath)!;
+    assert.equal(inferos.env.INFERLAB_AUTH_ORIGIN, "http://localhost:18787");
+    assert.equal(inferos.env.INFEROPS_BASE_URL, undefined);
+    assert.equal(readBackendRecord(root)?.port, 18787);
+    assert.ok(!JSON.stringify(result.report).includes("psql postgres://postgres:postgres@"), "no admin password in the report");
+
+    // down: the lifecycle stops the backend (its group signalled, its record removed), run-local too.
+    fake.deps.processIdentity = () => `bun ${checkout}/app/ts/shared-api/src/main.ts`;
+    const down = await runFactory(["down", "--json"], fake.deps);
+    assert.equal(down.exitCode, 0, down.headline);
+    assert.ok((down.report.stopped as string[]).includes("inferops"));
+    assert.equal(readBackendRecord(root), null);
+    assert.ok(fake.signals.some(([pid]) => pid === -api.pid!), "the API's process group was signalled");
+    assert.ok(!existsSync(stateFile(root)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
