@@ -554,6 +554,7 @@ import { createServer as createHttpServer, type IncomingMessage } from "node:htt
 const ACME_OPS = "00000000-0000-4000-8000-000000000011";
 const ACME_KNOWLEDGE = "00000000-0000-4000-8000-000000000012";
 const GROK_OPS = "00000000-0000-4000-8000-000000000c11";
+const CANARY_OPS = "00000000-0000-4000-8000-000000000211";
 
 function readBody(request: IncomingMessage): Promise<string> {
   return new Promise(resolve => {
@@ -564,9 +565,10 @@ function readBody(request: IncomingMessage): Promise<string> {
 }
 
 /** Just enough of InferOps: health, persona bearers, workspaces, projects, boards and the stub SSO dance. */
-async function fakeInferOps({ refusePersona = false } = {}): Promise<{ url: string; port: number; close: () => Promise<void>; seen: string[] }> {
+async function fakeInferOps({ refusePersona = false, personas = ["grokbot-owner"] as string[] } = {}): Promise<{ url: string; port: number; close: () => Promise<void>; seen: string[] }> {
   const seen: string[] = [];
   let challenge = "";
+  let challengePersona = "";
   const server = createHttpServer(async (request, response) => {
     const url = new URL(request.url!, "http://localhost");
     seen.push(`${request.method} ${url.pathname}`);
@@ -586,12 +588,14 @@ async function fakeInferOps({ refusePersona = false } = {}): Promise<{ url: stri
     if (url.pathname === "/workspaces") {
       if (bearer === "owner-token") return json(200, [{ id: ACME_OPS, product: "inferops", name: "Field Ops", slug: "operations" }, { id: ACME_KNOWLEDGE, product: "infermind", name: "Knowledge", slug: "knowledge" }]);
       if (bearer === "grok-token" || bearer === "sso-token") return json(200, [{ id: GROK_OPS, product: "inferops", name: "Grokbot Operations", slug: "operations" }]);
+      if (bearer === "canary-token") return json(200, [{ id: CANARY_OPS, product: "inferops", name: "Canary Operations", slug: "operations" }]);
       return json(401, { error: "unauthorized" });
     }
     if (url.pathname === "/project/projects") {
       const workspace = request.headers["x-workspace-id"];
       if (bearer === "owner-token" && workspace === ACME_OPS) return json(200, { projects: [{ id: "p-eng", identifier: "ENG", name: "Robotics Platform" }] });
       if (bearer === "sso-token" && workspace === GROK_OPS) return json(200, { projects: [{ id: "p-grok", identifier: "GROK", name: "Grok Bot" }] });
+      if (bearer === "canary-token" && workspace === CANARY_OPS) return json(200, { projects: [] });
       return json(403, { error: "forbidden" });
     }
     if (url.pathname === "/project/board") {
@@ -614,7 +618,8 @@ async function fakeInferOps({ refusePersona = false } = {}): Promise<{ url: stri
       const origin = request.headers.origin;
       const cookie = request.headers.cookie ?? "";
       if (!cookie.includes("iex_authz_csrf=csrf-value") || form.get("csrf") !== "csrf-value" || origin !== `http://localhost:${port}`) { response.writeHead(403); return response.end("invalid sign-in request"); }
-      if (refusePersona || form.get("persona") !== "grokbot-owner") { response.writeHead(401); return response.end("unknown persona"); }
+      if (refusePersona || !personas.includes(form.get("persona") ?? "")) { response.writeHead(401); return response.end("unknown persona"); }
+      challengePersona = form.get("persona") ?? "";
       response.writeHead(302, { location: `${form.get("redirect_uri")}?code=CODE123&state=${form.get("state")}` });
       return response.end();
     }
@@ -622,6 +627,7 @@ async function fakeInferOps({ refusePersona = false } = {}): Promise<{ url: stri
       const { clientId, code, codeVerifier, redirectUri } = JSON.parse(await readBody(request));
       const expected = createHash("sha256").update(codeVerifier).digest("base64url");
       if (clientId !== "inferos" || code !== "CODE123" || expected !== challenge || redirectUri !== "http://localhost:8787/gatekeeper/inferops/oauth") return json(400, { error: "invalid_grant" });
+      if (challengePersona === "canary-inspector") return json(200, { token: "canary-token", refreshToken: "r", user: { emailVerified: true, workspaces: [{ workspaceId: CANARY_OPS, product: "inferops", role: "owner" }] } });
       return json(200, { token: "sso-token", refreshToken: "r", user: { emailVerified: true, workspaces: [{ workspaceId: GROK_OPS, product: "inferops", role: "owner" }] } });
     }
     response.writeHead(404);
@@ -883,6 +889,38 @@ test("status and verify follow the record's port and URL, and error text never c
     assert.ok(!String(result.report.error).includes("unknown persona"), "status code only, never the body");
   } finally {
     await api.close();
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+
+test("verify's sign-in falls back to an older reserved persona when a revision predates the grokbot seats, and reports a workspace without a board honestly", async () => {
+  const api = await fakeInferOps({ personas: ["canary-inspector"] });
+  const h = recordedHarness(api);
+  try {
+    const result = await runInferopsBackend(stack8787, options("verify"), h.deps);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.report));
+    const signIn = result.report.signIn as Record<string, unknown>;
+    assert.equal(signIn.ok, true);
+    assert.equal(signIn.persona, "canary-inspector");
+    assert.equal(signIn.project, null);
+    assert.match(String(signIn.note), /no project board/);
+    assert.match(result.headline, /canary-inspector/);
+  } finally {
+    await api.close();
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("markWiring records how a stack was wired without touching the rest of the record", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    const { markWiring } = await import("./inferops.ts");
+    markWiring(h.deps, "sign-in");
+    assert.equal(readBackendRecord(h.root)?.wiring, "sign-in");
+    assert.equal(readBackendRecord(h.root)?.port, 18787);
+  } finally {
     rmSync(h.root, { recursive: true, force: true });
   }
 });

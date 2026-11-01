@@ -722,6 +722,15 @@ export async function runInferopsBackend(stack: LocalStack, options: BackendOpti
 // ---------------------------------------------------------------------------------------------
 // verify and env: the API as the gatekeeper sees it, without a browser and without InferOS.
 
+/** The persona form refused the persona id: this revision does not know it. */
+class UnknownPersona extends Error {
+  readonly personaId: string;
+  constructor(personaId: string) {
+    super(`persona ${personaId} is unknown to this revision`);
+    this.personaId = personaId;
+  }
+}
+
 class StepFailure extends Error {
   readonly step: string;
   constructor(step: string, message: string) {
@@ -818,6 +827,7 @@ async function personaSignIn(deps: BackendDeps, apiUrl: string, redirectUri: str
   });
   await form.body?.cancel();
   const location = form.headers.get("location");
+  if (form.status === 401) throw new UnknownPersona(personaId);
   if (form.status !== 302 || !location) throw new StepFailure(step, `POST /authorize/persona answered ${form.status} for ${personaId} (expected a 302 to ${redirectUri})`);
   const callback = new URL(location);
   if (callback.origin + callback.pathname !== redirectUri) throw new StepFailure(step, `the callback went to ${callback.origin}${callback.pathname}, not ${redirectUri}`);
@@ -831,7 +841,12 @@ async function personaSignIn(deps: BackendDeps, apiUrl: string, redirectUri: str
   return { bearer: exchanged.token, workspaces: exchanged.user?.workspaces ?? [] };
 }
 
-const SIGN_IN_PERSONA = "grokbot-owner";
+/**
+ * Reserved sign-in personas, newest first: the grokbot owner (inferops #2460) holds the GROK board;
+ * the internal and canary inspector seats exist since the stub persona sign-in itself (#2445) and
+ * hold no seeded board, so against an older revision the sign-in is still proven, the board is not.
+ */
+const SIGN_IN_PERSONAS = ["grokbot-owner", "internal-admin", "canary-inspector"] as const;
 const SIGN_IN_BOARD = "GROK";
 const STOPGAP_BOARD = "ENG";
 
@@ -858,22 +873,42 @@ async function verify(stack: LocalStack, deps: BackendDeps): Promise<BackendResu
   if (!signInSupported(record.checkout)) {
     report.signIn = { ok: false, skipped: `revision ${record.revision.slice(0, 12)} predates the stub persona sign-in (inferops #2445); only the stopgap wiring applies` };
   } else {
+    let persona: string = SIGN_IN_PERSONAS[0];
     try {
-      const session = await personaSignIn(deps, apiUrl, redirectUri, SIGN_IN_PERSONA);
-      report.signIn = { ok: true, persona: SIGN_IN_PERSONA, redirectUri, ...await boardSummary(deps, "sign-in", apiUrl, session.bearer, inferopsWorkspace(session, "sign-in"), SIGN_IN_BOARD) };
+      let session: Session | null = null;
+      const unknown: string[] = [];
+      for (const candidate of SIGN_IN_PERSONAS) {
+        persona = candidate;
+        try {
+          session = await personaSignIn(deps, apiUrl, redirectUri, candidate);
+          break;
+        } catch (error) {
+          if (!(error instanceof UnknownPersona)) throw error;
+          unknown.push(candidate);
+        }
+      }
+      if (!session) throw new StepFailure("sign-in", `POST /authorize/persona answered 401 for every reserved persona (${unknown.join(", ")})`);
+      const workspaceId = inferopsWorkspace(session, "sign-in");
+      const { projects } = await callJson<{ projects: { id: string; identifier: string }[] }>(deps, "sign-in", `${apiUrl}/project/projects`, { headers: authHeaders(session.bearer, workspaceId) });
+      const board = projects.find(p => p.identifier === SIGN_IN_BOARD) ?? projects[0];
+      report.signIn = board
+        ? { ok: true, persona, redirectUri, ...await boardSummary(deps, "sign-in", apiUrl, session.bearer, workspaceId, board.identifier) }
+        : { ok: true, persona, redirectUri, project: null, states: null, issues: null, note: `signed in, but ${persona}'s workspace has no project board at this revision (the GROK board needs the grokbot seats, inferops #2460)` };
     } catch (error) {
       if (!(error instanceof StepFailure)) throw error;
-      report.signIn = { ok: false, persona: SIGN_IN_PERSONA, redirectUri, error: error.message };
+      report.signIn = { ok: false, persona, redirectUri, error: error.message };
       return failed(error);
     }
   }
   const stopgap = report.stopgap as { states: number; issues: number };
-  const signIn = report.signIn as { ok: boolean; states?: number; issues?: number; skipped?: string };
+  const signIn = report.signIn as { ok: boolean; persona?: string; project?: string | null; states?: number | null; issues?: number | null; skipped?: string };
   return {
     exitCode: OK,
     report: { ...report, ok: true },
     headline: `${command}: verified ${apiUrl}: ${STOPGAP_BOARD} ${stopgap.states} states/${stopgap.issues} issues by bearer; ` +
-      (signIn.ok ? `${SIGN_IN_BOARD} ${signIn.states} states/${signIn.issues} issues through persona sign-in` : `persona sign-in skipped (${signIn.skipped})`),
+      (!signIn.ok ? `persona sign-in skipped (${signIn.skipped})`
+        : signIn.project ? `${signIn.project} ${signIn.states} states/${signIn.issues} issues through persona sign-in as ${signIn.persona}`
+        : `persona sign-in as ${signIn.persona} (no board in that workspace at this revision)`),
   };
 }
 
@@ -965,6 +1000,12 @@ export async function backendRow(stack: LocalStack, deps: BackendDeps): Promise<
 export function recordedWiring(deps: Pick<BackendDeps, "root" | "processAlive" | "processIdentity" | "backendRecord">): "sign-in" | "stopgap" | null {
   const record = deps.backendRecord(deps.root);
   return ownsRecord(record, deps) ? record.wiring ?? null : null;
+}
+
+/** Record how a stack was just wired to the backend (by `start --inferops`, or the factory's connect). */
+export function markWiring(deps: Pick<BackendDeps, "root" | "backendRecord">, wiring: "sign-in" | "stopgap"): void {
+  const record = deps.backendRecord(deps.root);
+  if (record) writeBackendRecord(deps.root, { ...record, wiring });
 }
 
 /** `stop` and a plain `start` forget how the stack was wired; the backend itself keeps running. */
