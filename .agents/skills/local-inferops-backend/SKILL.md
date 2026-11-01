@@ -48,9 +48,13 @@ procedure.
    stack runs under (`inferops.mode`, and the backend row with its `wiring`).
 4. For the live suite: `eval "$(pnpm -s local inferops env --stopgap)"` then
    `pnpm --filter @gadgets/integration-tests test:run -- inferops-live`. The bearer is printed to
-   that shell only. Against the pinned revision's seeds, steps `k`, `l` (no applied intake for the
-   Wiki) and `m` (the gatekeeper refuses the ENG binding in a new gadget) fail today; the other
-   eleven pass. Report that split, not "the live suite failed".
+   that shell only. Steps `k` and `l` need an intake's pillars applied in the `knowledge` workspace
+   first (the suite's header says so; the seeds do not do it), and step `m` fails today (the
+   gatekeeper refuses the ENG binding in a new gadget, an open InferOS finding); the other eleven
+   pass. Report that split, not "the live suite failed".
+6. To prove the backend itself on a machine, run the repeatable proof instead of a hand session:
+   `INFEROPS_BACKEND_LIVE=1 node --test scripts/local/inferops.live.test.ts` (its own port, 8797 by
+   default; `INFEROPS_BACKEND_LIVE_PORT` changes it). It must pass before any claim that case 1 works.
 5. Finish with `pnpm local stop` and `pnpm -s local inferops down` (`--purge` also drops the
    database and removes the managed worktree). `pnpm -s local inferops status --json` must then
    say `not-running` and the API port must be free.

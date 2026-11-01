@@ -281,12 +281,13 @@ against the same backend without a second prompt. `pnpm local status` showed the
 (`sign-in`, healthy). With `eval "$(pnpm -s local inferops env --stopgap)"`, `inferops-live.test.ts`
 ran against the backend three times (twice on a reused database, once after `up --fresh`): 11 of
 its 15 tests pass and 1 is skipped; `k` and `l` fail with "Apply an intake's pillars first
-(pillar.apply)" (the pinned revision's knowledge seeds carry no applied intake, which those two
-Wiki steps expect) and `m` fails with "No InferOps project ENG is available on acme.operations"
+(pillar.apply)", which the suite's own header lists as a prerequisite (apply an intake's pillars in
+the `knowledge` workspace through InferOps before running it; the seeds do not), and `m` fails with "No InferOps project ENG is available on acme.operations"
 while the backend's log shows every `GET /project/projects` answered 200 (the refusal is decided
 in the gatekeeper's `getGatekeeperClassFor` → `#hasProject` → `clientFor` for the binding made in
-step m's new gadget). Both are InferOS-side findings to take up separately; neither involves this
-lifecycle. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
+step m's new gadget). `m` is an InferOS-side finding to take up separately; neither involves this lifecycle. The
+suite's header still says per-person connect cannot complete against a stub-auth InferOps (ADR
+0012); since inferops #2445 it can, as the browser check above shows. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
 Both directions then ran at once on this machine: this stack and its backend (8787, 18787,
 `inferos_8787`) beside an inferops worktree at offset 15 (`bun run dev up --docker`: API 9580,
 worker 9590, database `inferlab_15`) whose launcher started a second InferOS checkout as its sidecar
@@ -303,7 +304,12 @@ bootstrap, the `@inferlab/shared-api` workspace's `src/main.ts`, `API_PORT`/`DAT
 in its cascade, the `factory` environment having no secret layer, `/health/ready`,
 `/auth/inferlab-login` and the central SSO routes. Both the current and the pre-rename layout
 (`apps/_shared-api`, `db/init-db.sql`) are found. `scripts/local/inferops.test.ts` runs the
-commands against fakes and `verify` against an in-process stand-in for those routes.
+commands against fakes and `verify` against an in-process stand-in for those routes;
+`INFEROPS_BACKEND_LIVE=1 node --test scripts/local/inferops.live.test.ts` is the repeatable local
+proof against the real sibling repository (its own stack port, 8797 by default, so a developer's
+8787 stack is never touched; up, status, adoption, verify, env, down; about 16 s once the managed
+worktree exists). It is skipped without the flag and is what to run before claiming the backend
+works on a machine.
 
 ## Readiness as an agent sees it
 
