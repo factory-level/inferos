@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -159,4 +159,351 @@ test("sign-in wiring names only the auth origin and the gatekeeper list; stopgap
     INFEROPS_WORKSPACE_ID: "00000000-0000-4000-8000-000000000011", INFEROPS_WORKSPACE_SLUG: "operations", INFEROPS_ENABLED: "true",
   });
   assert.equal("INFERLAB_AUTH_ORIGIN" in stopgap, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The commands, against fakes: no Postgres, no bun, no git, no network.
+
+import { runInferopsBackend, type BackendDeps, type BackendOptions } from "./inferops.ts";
+import type { LocalStack } from "./stack.ts";
+
+const SHA = "3dae0f50d5b4fa467d734cbb2adf857f39942b31";
+
+interface Harness {
+  deps: BackendDeps;
+  root: string;
+  checkout: string;
+  calls: { runIn: { argv: string[]; env: Record<string, string>; cwd: string }[]; runCli: string[][]; git: string[][]; launch: { argv: string[]; env: Record<string, string>; logPath: string; cwd: string }[]; signals: [number, string][] };
+  state: { dbExists: boolean; readyAfter: number; healthCalls: number; alive: boolean; listening: boolean; shaKnown: boolean };
+}
+
+/** An InferOS root with the pin, and (unless `managed: false`) the managed checkout already present with node_modules. */
+function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new" as "new" | "old" } = {}): Harness {
+  const root = mkdtempSync(join(tmpdir(), "inferos-root-"));
+  const gk = join(root, "custom-gatekeepers", "gatekeeper-inferops");
+  mkdirSync(gk, { recursive: true });
+  writeFileSync(join(gk, "connection.json"), JSON.stringify({ compatibility: { provider: { revision: SHA } } }));
+  const checkout = join(root, ".inferops", `checkout-${SHA.slice(0, 12)}`);
+  const materialize = () => {
+    const fixture = fixtureCheckout(layout);
+    mkdirSync(join(root, ".inferops"), { recursive: true });
+    rmSync(checkout, { recursive: true, force: true });
+    // Move the fixture into place (rename across tmp is fine: same filesystem).
+    renameSync(fixture, checkout);
+  };
+  if (managed) {
+    materialize();
+    mkdirSync(join(checkout, "node_modules"));
+  }
+  const calls: Harness["calls"] = { runIn: [], runCli: [], git: [], launch: [], signals: [] };
+  const state: Harness["state"] = { dbExists: false, readyAfter: 2, healthCalls: 0, alive: true, listening: false, shaKnown: true };
+  const ok = { exitCode: 0, stdout: "", stderr: "" };
+  const deps: BackendDeps = {
+    root,
+    env: { PATH: "/bin", HOME: "/home/me", ...env },
+    runIn: (argv, env, cwd) => {
+      calls.runIn.push({ argv, env, cwd });
+      if (argv[0] === "psql" && argv.includes("-tAc")) return { ...ok, stdout: state.dbExists ? "1\n" : "" };
+      if (argv[0] === "psql" && argv.some(a => a.startsWith("CREATE DATABASE"))) state.dbExists = true;
+      if (argv[0] === "psql" && argv.some(a => a.startsWith("DROP DATABASE"))) state.dbExists = false;
+      return ok;
+    },
+    runCli: argv => {
+      calls.runCli.push(argv);
+      return ok;
+    },
+    git: args => {
+      calls.git.push(args);
+      if (args.includes("rev-parse") && args.includes("HEAD")) return { ...ok, stdout: `${SHA}\n` };
+      if (args.includes("--git-common-dir")) return { ...ok, stdout: `${join(root, "..", "inferOS", ".git")}\n` };
+      if (args.includes("cat-file")) return state.shaKnown ? ok : { ...ok, exitCode: 1 };
+      if (args.includes("worktree") && args.includes("add")) {
+        materialize();
+        return ok;
+      }
+      return ok;
+    },
+    launch: (argv, env, logPath, cwd) => {
+      calls.launch.push({ argv, env, logPath, cwd });
+      state.alive = true; // a fresh process; `signal` SIGTERM flips it back
+      mkdirSync(join(logPath, ".."), { recursive: true });
+      writeFileSync(logPath, "shared-api on http://localhost:18787 (auth: stub)\n");
+      return 4242;
+    },
+    signal: (pid, signal) => {
+      calls.signals.push([pid, signal]);
+      if (signal === "SIGTERM") state.alive = false;
+    },
+    processAlive: () => state.alive,
+    sleep: async () => {},
+    now: (() => { let t = 0; return () => (t += 1000); })(),
+    isPortListening: async () => state.listening,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.pathname === "/health/ready") {
+        state.healthCalls += 1;
+        return new Response(JSON.stringify({ status: "ok" }), { status: state.healthCalls >= state.readyAfter ? 200 : 503 });
+      }
+      return new Response("no", { status: 404 });
+    }) as typeof fetch,
+  };
+  return { deps, root, checkout, calls, state };
+}
+
+const stack8787: LocalStack = { root: "", backendHost: "localhost:8787", port: 8787, url: "http://localhost:8787", stateDir: "", recordPath: "" };
+const options = (sub: BackendOptions["sub"], extra: Partial<BackendOptions> = {}): BackendOptions =>
+  ({ sub, fresh: false, purge: false, stopgap: false, allowLocalConfig: false, timeoutSeconds: 180, lines: 50, ...extra });
+
+const argvLines = (h: Harness) => h.calls.runIn.map(c => c.argv.join(" "));
+
+test("up refuses a shell holding a credential before touching anything", async () => {
+  const h = harness({ env: { OPENAI_API_KEY: "sk-x" } });
+  try {
+    const result = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(result.report.credentials, ["OPENAI_API_KEY"]);
+    assert.equal(h.calls.runIn.length + h.calls.launch.length + h.calls.git.length, 0);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up prepares the database, starts the API from source and records it", async () => {
+  const h = harness();
+  try {
+    const result = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.report));
+    assert.deepEqual(h.calls.runCli[0], ["pg_isready", "-h", "localhost", "-p", "5432", "-q"]);
+    const lines = argvLines(h);
+    assert.match(lines[0]!, /^psql .* -tAc SELECT 1 FROM pg_database WHERE datname = 'inferos_8787'$/);
+    assert.match(lines[1]!, /DROP DATABASE IF EXISTS inferos_8787 WITH \(FORCE\)$/);
+    assert.match(lines[2]!, /CREATE DATABASE inferos_8787$/);
+    assert.match(lines[3]!, new RegExp(`^psql postgres://postgres:postgres@localhost:5432/inferos_8787\\?sslmode=disable -v ON_ERROR_STOP=1 -q -f ${h.checkout}/docker/postgres/init-db.sql$`));
+    assert.deepEqual(lines.slice(4), ["bun run src/cli/migrate.ts", "bun run src/cli/seed.ts", "bun run src/cli/seed-reserved.ts"]);
+    for (const call of h.calls.runIn.slice(4)) {
+      assert.equal(call.cwd, join(h.checkout, "migration"));
+      assert.equal(call.env.NODE_CONFIG_ENV, "factory");
+      assert.equal(call.env.DATABASE_URL, "postgres://postgres:postgres@localhost:5432/inferos_8787?sslmode=disable");
+    }
+    assert.equal(h.calls.runIn.at(-1)!.env.SYNTHETICS_PROBE_KEY, "iex_synthetic_inferos_local_0000");
+    assert.equal(h.calls.runIn.at(-2)!.env.SYNTHETICS_PROBE_KEY, undefined);
+    assert.equal(h.calls.launch.length, 1);
+    const launched = h.calls.launch[0]!;
+    assert.deepEqual(launched.argv, ["bun", join(h.checkout, "app/ts/shared-api/src/main.ts")]);
+    assert.equal(launched.cwd, h.checkout);
+    assert.equal(launched.env.API_PORT, "18787");
+    assert.equal(launched.env.NODE_CONFIG, ssoLayer("http://localhost:8787"));
+    assert.equal(launched.env.VERSION, "inferos-local");
+    assert.equal(launched.env.NODE_OPTIONS, undefined);
+    assert.equal(launched.logPath, backendPaths(h.root).log);
+    const record = readBackendRecord(h.root);
+    assert.equal(record?.pid, 4242);
+    assert.equal(record?.port, 18787);
+    assert.equal(record?.revision, SHA);
+    assert.equal(record?.managed, true);
+    assert.equal(record?.database, "inferos_8787");
+    assert.equal(result.report.apiUrl, "http://localhost:18787");
+    assert.equal(result.report.reused, false);
+    assert.equal(result.report.fresh, true);
+    assert.equal(result.report.signIn, true);
+    assert.ok(!JSON.stringify(result.report).includes("TOKEN"));
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up reuses a database prepared at the same revision, and --fresh recreates it", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.calls.runIn.length = 0;
+    h.calls.launch.length = 0;
+    h.state.alive = false; // the first API is gone; the record is stale
+    const second = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(second.exitCode, 0);
+    assert.equal(second.report.fresh, false);
+    assert.deepEqual(argvLines(h).slice(1), ["bun run src/cli/migrate.ts", "bun run src/cli/seed.ts", "bun run src/cli/seed-reserved.ts"]);
+    h.calls.runIn.length = 0;
+    h.state.alive = false;
+    const third = await runInferopsBackend(stack8787, options("up", { fresh: true }), h.deps);
+    assert.equal(third.report.fresh, true);
+    assert.ok(argvLines(h).some(line => line.includes("DROP DATABASE")));
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up adopts a backend that is already running and refuses a stranger on the port", async () => {
+  const h = harness();
+  try {
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.calls.launch.length = 0;
+    h.calls.runIn.length = 0;
+    h.state.listening = true;
+    const again = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(again.exitCode, 0);
+    assert.equal(again.report.reused, true);
+    assert.equal(h.calls.launch.length, 0);
+    assert.equal(h.calls.runIn.length, 0);
+    rmSync(backendPaths(h.root).record);
+    const stranger = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(stranger.exitCode, 1);
+    assert.equal(stranger.report.backend, "port-in-use-by-other");
+    assert.match(String(stranger.report.error), /18787/);
+    assert.equal(h.calls.launch.length, 0);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up that never becomes ready stops what it started and records nothing", async () => {
+  const h = harness();
+  h.state.readyAfter = Number.MAX_SAFE_INTEGER;
+  try {
+    const result = await runInferopsBackend(stack8787, options("up", { timeoutSeconds: 4 }), h.deps);
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(h.calls.signals[0], [-4242, "SIGTERM"]);
+    assert.equal(readBackendRecord(h.root), null);
+    assert.match(String(result.report.error), /not ready|ready within/);
+    assert.ok(Array.isArray(result.report.logTail));
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up creates the managed worktree at the pin and installs it once", async () => {
+  const h = harness({ managed: false, env: { INFEROPS_REPO: "/repos/inferops" } });
+  try {
+    const result = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.report));
+    assert.deepEqual(h.calls.git[0], ["-C", "/repos/inferops", "cat-file", "-e", `${SHA}^{commit}`]);
+    assert.deepEqual(h.calls.git[1], ["-C", "/repos/inferops", "worktree", "add", "--detach", h.checkout, SHA]);
+    assert.deepEqual(h.calls.runIn[0]!.argv, ["bun", "install", "--frozen-lockfile", "--ignore-scripts"]);
+    assert.equal(h.calls.runIn[0]!.cwd, h.checkout);
+    assert.equal(readBackendRecord(h.root)?.managed, true);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up fetches a pin the sibling repository does not have yet", async () => {
+  const h = harness({ managed: false, env: { INFEROPS_REPO: "/repos/inferops" } });
+  h.state.shaKnown = false;
+  try {
+    const result = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.report));
+    assert.deepEqual(h.calls.git[1], ["-C", "/repos/inferops", "fetch", "origin", SHA]);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("up --dir uses a checkout as it is, and refuses one carrying a cloud credential unless allowed", async () => {
+  const dir = fixtureCheckout("new");
+  mkdirSync(join(dir, "config"));
+  writeFileSync(join(dir, "config", "gcp-credentials.json"), "{}");
+  const h = harness({ managed: false });
+  try {
+    const refused = await runInferopsBackend(stack8787, options("up", { dir }), h.deps);
+    assert.equal(refused.exitCode, 1);
+    assert.match(String(refused.report.error), /gcp-credentials\.json/);
+    assert.equal(h.calls.launch.length, 0);
+    const allowed = await runInferopsBackend(stack8787, options("up", { dir, allowLocalConfig: true }), h.deps);
+    assert.equal(allowed.exitCode, 0, JSON.stringify(allowed.report));
+    assert.ok(h.calls.git.some(args => args[0] === "-C" && args[1] === dir && args.includes("rev-parse")));
+    assert.equal(readBackendRecord(h.root)?.managed, false);
+    assert.equal(readBackendRecord(h.root)?.checkout, dir);
+    assert.ok(!h.calls.runIn.some(c => c.argv[1] === "install"), "a --dir checkout is never installed by us");
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("up on a checkout without the reserved-persona sign-in reports signIn false", async () => {
+  const h = harness({ layout: "old" });
+  try {
+    const result = await runInferopsBackend(stack8787, options("up"), h.deps);
+    assert.equal(result.exitCode, 0, JSON.stringify(result.report));
+    assert.equal(result.report.signIn, false);
+    assert.deepEqual(h.calls.launch[0]!.argv, ["bun", join(h.checkout, "apps/_shared-api/src/main.ts")]);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("status classifies the backend like the stack: running, not-running, port-in-use-by-other", async () => {
+  const h = harness();
+  try {
+    const none = await runInferopsBackend(stack8787, options("status"), h.deps);
+    assert.equal(none.exitCode, 1);
+    assert.equal(none.report.backend, "not-running");
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.state.listening = true;
+    const running = await runInferopsBackend(stack8787, options("status"), h.deps);
+    assert.equal(running.exitCode, 0, JSON.stringify(running.report));
+    assert.equal(running.report.backend, "running");
+    assert.equal(running.report.revision, SHA);
+    assert.equal(running.report.apiUrl, "http://localhost:18787");
+    assert.equal(running.report.healthy, true);
+    assert.match(running.headline, /running/);
+    rmSync(backendPaths(h.root).record);
+    const stranger = await runInferopsBackend(stack8787, options("status"), h.deps);
+    assert.equal(stranger.exitCode, 1);
+    assert.equal(stranger.report.backend, "port-in-use-by-other");
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("down stops the group it recorded, never a stranger, and --purge drops the database and worktree", async () => {
+  const h = harness();
+  try {
+    const nothing = await runInferopsBackend(stack8787, options("down"), h.deps);
+    assert.equal(nothing.exitCode, 0);
+    assert.equal(nothing.report.stopped, false);
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    const stopped = await runInferopsBackend(stack8787, options("down"), h.deps);
+    assert.equal(stopped.exitCode, 0, JSON.stringify(stopped.report));
+    assert.deepEqual(h.calls.signals, [[-4242, "SIGTERM"]]);
+    assert.equal(readBackendRecord(h.root), null);
+    assert.ok(existsSync(h.checkout), "the managed checkout survives down");
+    // A dead pid with a stranger on the port: nothing is signalled, the stale record goes, exit 1.
+    h.state.alive = true;
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.state.alive = false;
+    h.state.listening = true;
+    h.calls.signals.length = 0;
+    const stale = await runInferopsBackend(stack8787, options("down"), h.deps);
+    assert.equal(stale.exitCode, 1);
+    assert.equal(h.calls.signals.length, 0);
+    assert.equal(readBackendRecord(h.root), null);
+    // --purge
+    h.state.listening = false;
+    h.state.alive = true;
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    h.calls.runIn.length = 0;
+    h.calls.git.length = 0;
+    const purged = await runInferopsBackend(stack8787, options("down", { purge: true }), h.deps);
+    assert.equal(purged.exitCode, 0, JSON.stringify(purged.report));
+    assert.ok(argvLines(h).some(line => line.includes("DROP DATABASE IF EXISTS inferos_8787 WITH (FORCE)")));
+    assert.ok(h.calls.git.some(args => args.includes("worktree") && args.includes("remove") && args.includes(h.checkout)));
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test("logs tails the backend log", async () => {
+  const h = harness();
+  try {
+    const empty = await runInferopsBackend(stack8787, options("logs"), h.deps);
+    assert.equal(empty.exitCode, 0);
+    assert.deepEqual(empty.report.lines, []);
+    await runInferopsBackend(stack8787, options("up"), h.deps);
+    const tail = await runInferopsBackend(stack8787, options("logs", { lines: 1 }), h.deps);
+    assert.deepEqual(tail.report.lines, ["shared-api on http://localhost:18787 (auth: stub)"]);
+    assert.equal(tail.report.file, backendPaths(h.root).log);
+  } finally {
+    rmSync(h.root, { recursive: true, force: true });
+  }
 });

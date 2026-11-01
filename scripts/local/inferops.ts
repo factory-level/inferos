@@ -9,9 +9,11 @@
 // a detached git worktree of the sibling inferops repository at the pinned SHA; nothing in it is
 // edited and its `config/local.json` (which does not exist there) is never read.
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import type { CodingDeps, ProcessResult } from "./coding.ts";
 import { providerVariables } from "./runner.ts";
+import type { LocalStack } from "./stack.ts";
 
 /** The API listens at the InferOS stack port plus this: 8787 → 18787, a `pnpm wt` 88xx → 188xx. */
 export const API_PORT_SHIFT = 10_000;
@@ -204,4 +206,399 @@ export function wiringEnv(wiring: Wiring, env: NodeJS.ProcessEnv): Record<string
     INFEROPS_BASE_URL: wiring.apiUrl, INFEROPS_API_TOKEN: wiring.token,
     INFEROPS_WORKSPACE_ID: STOPGAP_WORKSPACE.id, INFEROPS_WORKSPACE_SLUG: STOPGAP_WORKSPACE.slug, INFEROPS_ENABLED: "true",
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The commands.
+
+/** What the commands touch outside their own logic; `pnpm local`'s deps satisfy it. */
+export type BackendDeps = Pick<CodingDeps, "root" | "env" | "runCli" | "launch" | "git" | "signal" | "processAlive" | "sleep" | "now"> & {
+  /** Run argv to completion in `cwd` (the InferOps checkout's install, migrate and seed), bounded by `timeoutMs`. */
+  runIn: (argv: string[], env: Record<string, string>, cwd: string, timeoutMs: number) => ProcessResult;
+  isPortListening: (port: number) => Promise<boolean>;
+  fetchImpl: typeof fetch;
+};
+
+export const BACKEND_SUBCOMMANDS = ["up", "status", "down", "verify", "env", "logs"] as const;
+
+export interface BackendOptions {
+  sub: (typeof BACKEND_SUBCOMMANDS)[number];
+  /** `--dir`: an existing InferOps checkout to run as it is, instead of the managed worktree at the pin. */
+  dir?: string;
+  /** `--rev`: the revision for the managed worktree, instead of the pinned one. */
+  rev?: string;
+  /** `--fresh`: drop and recreate the database even when it was prepared at this revision. */
+  fresh: boolean;
+  /** `down --purge`: also drop the database and remove the managed worktree. */
+  purge: boolean;
+  /** `env`/`verify --stopgap`: the acme owner bearer instead of per-person sign-in. */
+  stopgap: boolean;
+  /** `--allow-local-config`: run a `--dir` checkout even though it holds `config/gcp-credentials.json`. */
+  allowLocalConfig: boolean;
+  timeoutSeconds: number;
+  lines: number;
+}
+
+export interface BackendResult {
+  exitCode: number;
+  report: Record<string, unknown>;
+  headline: string;
+}
+
+const OK = 0;
+const FAILED = 1;
+const STEP_TIMEOUT_MS = 15 * 60_000;
+const READY_POLL_MS = 2_000;
+const STOP_TIMEOUT_MS = 30_000;
+/** Throwaway reserved-seed keys: valid nowhere but this database (inferops CI uses the same shape). */
+const RESERVED_SEED_KEYS = { SYNTHETICS_PROBE_KEY: "iex_synthetic_inferos_local_0000", SMOKE_MCP_KEY: "iex_smoke_mcp_inferos_local_00000" } as const;
+const DEFAULT_PG_ADMIN_URL = "postgres://postgres:postgres@localhost:5432/postgres";
+
+function pgAdminUrl(env: NodeJS.ProcessEnv): string {
+  return env.INFEROPS_PG_ADMIN_URL || DEFAULT_PG_ADMIN_URL;
+}
+
+/** The admin URL with the database swapped in and TLS off (the compose Postgres serves a self-signed certificate). */
+export function databaseUrl(adminUrl: string, database: string): string {
+  const url = new URL(adminUrl);
+  url.pathname = `/${database}`;
+  url.search = "sslmode=disable";
+  return url.toString();
+}
+
+const fail = (command: string, report: Record<string, unknown>, headline: string): BackendResult =>
+  ({ exitCode: FAILED, report: { ok: false, command, ...report }, headline });
+
+function tailFile(path: string, lines: number): string[] {
+  if (!existsSync(path)) return [];
+  const all = readFileSync(path, "utf8").split("\n");
+  if (all.at(-1) === "") all.pop();
+  return all.slice(-lines);
+}
+
+function appendLog(log: string, text: string): void {
+  mkdirSync(dirname(log), { recursive: true });
+  appendFileSync(log, text);
+}
+
+/** Where the sibling inferops repository is: `INFEROPS_REPO`, else `inferops` beside the InferOS main checkout. */
+function inferopsRepo(deps: BackendDeps): string {
+  if (deps.env.INFEROPS_REPO) return deps.env.INFEROPS_REPO;
+  const common = deps.git(["-C", deps.root, "rev-parse", "--path-format=absolute", "--git-common-dir"]).stdout.trim();
+  const main = common ? dirname(common) : deps.root;
+  return join(dirname(main), "inferops");
+}
+
+interface ResolvedCheckout {
+  checkout: string;
+  revision: string;
+  managed: boolean;
+  dirty: boolean;
+  installed: boolean;
+}
+
+/** The InferOps checkout to run: `--dir` as it is, else the managed worktree at the pin (created and installed once). */
+function resolveCheckout(options: BackendOptions, deps: BackendDeps): ResolvedCheckout | { error: string } {
+  if (options.dir) {
+    const checkout = resolve(options.dir);
+    if (!apiEntrypoint(checkout)) return { error: `${checkout} is not an InferOps checkout (no @inferlab/shared-api workspace with src/main.ts)` };
+    if (existsSync(join(checkout, "config", "gcp-credentials.json")) && !options.allowLocalConfig) {
+      return { error: `${checkout} holds config/gcp-credentials.json; its config/local.json and credentials would apply to the backend. Use the managed worktree (no --dir), or pass --allow-local-config knowingly` };
+    }
+    const head = deps.git(["-C", checkout, "rev-parse", "HEAD"]);
+    if (head.exitCode !== 0) return { error: `${checkout}: git rev-parse HEAD failed: ${head.stderr.trim()}` };
+    const dirty = deps.git(["-C", checkout, "status", "--porcelain"]).stdout.trim() !== "";
+    return { checkout, revision: head.stdout.trim(), managed: false, dirty, installed: false };
+  }
+  const revision = options.rev ?? pinnedRevision(deps.root);
+  if (!revision) return { error: "No InferOps revision: custom-gatekeepers/gatekeeper-inferops/connection.json has no compatibility.provider.revision, and --rev was not given" };
+  if (!/^[0-9a-f]{40}$/.test(revision)) return { error: `--rev must be a full 40-character commit SHA, got ${revision}` };
+  const checkout = join(backendPaths(deps.root).dir, `checkout-${revision.slice(0, 12)}`);
+  if (!existsSync(join(checkout, "package.json"))) {
+    const repo = inferopsRepo(deps);
+    if (deps.git(["-C", repo, "cat-file", "-e", `${revision}^{commit}`]).exitCode !== 0) {
+      const fetched = deps.git(["-C", repo, "fetch", "origin", revision]);
+      if (fetched.exitCode !== 0) return { error: `${repo} does not have ${revision} and could not fetch it: ${fetched.stderr.trim() || "git fetch failed"}. Set INFEROPS_REPO to an inferops clone that has it` };
+    }
+    mkdirSync(dirname(checkout), { recursive: true });
+    const added = deps.git(["-C", repo, "worktree", "add", "--detach", checkout, revision]);
+    if (added.exitCode !== 0) return { error: `git worktree add failed for ${checkout}: ${added.stderr.trim()}` };
+  }
+  if (!apiEntrypoint(checkout)) return { error: `${checkout} at ${revision} has no @inferlab/shared-api workspace; this revision cannot serve as the backend` };
+  let installed = false;
+  if (!existsSync(join(checkout, "node_modules"))) {
+    // --ignore-scripts: the root `prepare` would install git hooks into the developer's own inferops clone.
+    const install = deps.runIn(["bun", "install", "--frozen-lockfile", "--ignore-scripts"], backendChildEnv(deps.env), checkout, STEP_TIMEOUT_MS);
+    if (install.exitCode !== 0) return { error: `bun install failed in ${checkout} (exit ${install.exitCode}): ${install.stderr.trim().split("\n").at(-1) ?? ""}` };
+    installed = true;
+  }
+  return { checkout, revision, managed: true, dirty: false, installed };
+}
+
+async function healthy(apiUrl: string, deps: BackendDeps): Promise<boolean> {
+  try {
+    const response = await deps.fetchImpl(`${apiUrl}/health/ready`, { redirect: "manual", signal: AbortSignal.timeout(3_000) });
+    await response.body?.cancel();
+    return response.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+/** Shared local Postgres: already answering, or started from the checkout's compose file under inferops' own project name. */
+async function ensurePostgres(checkout: string, deps: BackendDeps): Promise<string | null> {
+  const ready = () => deps.runCli(["pg_isready", "-h", "localhost", "-p", "5432", "-q"], { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" }).exitCode === 0;
+  if (ready()) return null;
+  const compose = join(checkout, "docker", "compose.dev.yml");
+  if (!existsSync(compose)) return `Postgres is not listening on localhost:5432 and ${compose} does not exist to start it; start the shared Postgres (bun run dev up in an inferops checkout) and retry`;
+  const docker = { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" };
+  deps.runCli(["docker", "network", "create", "inferlab"], docker);
+  const up = deps.runCli(["docker", "compose", "-p", "inferops", "-f", compose, "up", "-d", "postgres"], docker);
+  if (up.exitCode !== 0) return `docker compose up postgres failed: ${up.stderr.trim().split("\n").at(-1) ?? ""}`;
+  const deadline = deps.now() + 60_000;
+  while (!ready()) {
+    if (deps.now() >= deadline) return "Postgres did not answer on localhost:5432 within 60 s of docker compose up";
+    await deps.sleep(1_000);
+  }
+  return null;
+}
+
+/** Signal a process group we launched and wait for its leader to exit. */
+async function stopGroup(pid: number, deps: BackendDeps): Promise<boolean> {
+  const send = (signal: NodeJS.Signals) => {
+    try {
+      deps.signal(-pid, signal);
+    } catch {
+      // Already gone.
+    }
+  };
+  send("SIGTERM");
+  const deadline = deps.now() + STOP_TIMEOUT_MS;
+  while (deps.processAlive(pid)) {
+    if (deps.now() >= deadline) {
+      send("SIGKILL");
+      await deps.sleep(500);
+      return !deps.processAlive(pid);
+    }
+    await deps.sleep(250);
+  }
+  return true;
+}
+
+/** The revision a database was last prepared at, so `up` reuses it instead of reseeding from scratch. */
+function stampPath(root: string, database: string): string {
+  return join(backendPaths(root).dir, `db-${database}.json`);
+}
+
+interface Inspection {
+  record: BackendRecord | null;
+  alive: boolean;
+  listening: boolean;
+  backend: "running" | "not-running" | "port-in-use-by-other";
+}
+
+async function inspect(apiPort: number, deps: BackendDeps): Promise<Inspection> {
+  const record = readBackendRecord(deps.root);
+  const alive = record !== null && deps.processAlive(record.pid);
+  const listening = await deps.isPortListening(apiPort);
+  const backend = !listening ? "not-running" : alive && record?.port === apiPort ? "running" : "port-in-use-by-other";
+  return { record, alive, listening, backend };
+}
+
+const stranger = (apiPort: number) =>
+  `Port ${apiPort} is in use by a process this checkout did not start (no live backend record for it); stop that process or move this stack to another port`;
+
+async function up(stack: LocalStack, options: BackendOptions, deps: BackendDeps): Promise<BackendResult> {
+  const command = "inferops up";
+  const credentials = forbiddenCredentials(deps.env);
+  if (credentials.length) {
+    return fail(command, { credentials, error: `The shell holds credentials the backend must not run beside: ${credentials.join(", ")}. Unset them (a clean shell) and retry` },
+      `inferops up refused: ${credentials.join(", ")} set`);
+  }
+  const ports = backendPorts(stack.port);
+  const database = backendDatabase(stack.port);
+  const paths = backendPaths(deps.root);
+  const started = deps.now();
+  const inspection = await inspect(ports.apiPort, deps);
+  if (inspection.backend === "port-in-use-by-other") {
+    return fail(command, { backend: inspection.backend, apiUrl: ports.apiUrl, error: stranger(ports.apiPort) }, `inferops up: ${ports.apiPort} is in use by another process`);
+  }
+  if (inspection.backend === "running" && inspection.record && await healthy(ports.apiUrl, deps)) {
+    const { record } = inspection;
+    return {
+      exitCode: OK,
+      report: { ok: true, command, reused: true, apiUrl: record.apiUrl, port: record.port, database: record.database, checkout: record.checkout,
+        revision: record.revision, managed: record.managed, dirty: record.dirty, signIn: signInSupported(record.checkout), fresh: false, log: record.log, recipe: recipe(options) },
+      headline: `inferops up: already running on ${record.apiUrl} (rev ${record.revision.slice(0, 12)})`,
+    };
+  }
+  if (inspection.record && inspection.alive) {
+    return fail(command, { backend: "starting", apiUrl: ports.apiUrl, pid: inspection.record.pid, error: `A backend (pid ${inspection.record.pid}) is recorded but not answering on ${ports.apiPort}; wait for it, or run pnpm local inferops down` },
+      `inferops up: pid ${inspection.record.pid} recorded but not answering`);
+  }
+  if (inspection.record) rmSync(paths.record, { force: true }); // a dead pid: stale record
+
+  const resolved = resolveCheckout(options, deps);
+  if ("error" in resolved) return fail(command, { error: resolved.error }, `inferops up: ${resolved.error}`);
+  const { checkout, revision, managed, dirty } = resolved;
+  const entry = apiEntrypoint(checkout)!;
+  const initDb = initDbPath(checkout);
+  const migration = migrationCommands(checkout);
+  if (!initDb || !migration) return fail(command, { error: `${checkout} lacks init-db.sql or the migration package scripts (migrate, seed, seed:reserved)` }, "inferops up: checkout is missing its database tooling");
+
+  const postgres = await ensurePostgres(checkout, deps);
+  if (postgres) return fail(command, { error: postgres }, `inferops up: ${postgres}`);
+
+  const admin = pgAdminUrl(deps.env);
+  const dbUrl = databaseUrl(admin, database);
+  const childEnv = backendChildEnv(deps.env, { DATABASE_URL: dbUrl });
+  const log = paths.log;
+  appendLog(log, `\n=== pnpm local inferops up ${new Date().toISOString()} rev ${revision} db ${database} api ${ports.apiUrl}\n`);
+  const run = (name: string, argv: string[], env: Record<string, string>, cwd: string): string | null => {
+    const result = deps.runIn(argv, env, cwd, STEP_TIMEOUT_MS);
+    appendLog(log, `$ ${name} (exit ${result.exitCode})\n${result.stdout}${result.stderr}\n`);
+    return result.exitCode === 0 ? null : `${name} exited ${result.exitCode} in ${cwd}; see ${log}`;
+  };
+  const exists = deps.runIn(["psql", admin, "-v", "ON_ERROR_STOP=1", "-tAc", `SELECT 1 FROM pg_database WHERE datname = '${database}'`], childEnv, checkout, STEP_TIMEOUT_MS);
+  if (exists.exitCode !== 0) return fail(command, { error: `psql could not reach ${new URL(admin).host}: ${exists.stderr.trim()}` }, "inferops up: psql failed");
+  let stampedRevision: string | null = null;
+  try {
+    stampedRevision = (JSON.parse(readFileSync(stampPath(deps.root, database), "utf8")) as { revision?: string }).revision ?? null;
+  } catch {
+    stampedRevision = null;
+  }
+  const fresh = options.fresh || exists.stdout.trim() !== "1" || stampedRevision !== revision;
+  const steps: [string, string[], Record<string, string>, string][] = [];
+  if (fresh) {
+    steps.push(
+      ["drop database", ["psql", admin, "-v", "ON_ERROR_STOP=1", "-q", "-c", `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`], childEnv, checkout],
+      ["create database", ["psql", admin, "-v", "ON_ERROR_STOP=1", "-q", "-c", `CREATE DATABASE ${database}`], childEnv, checkout],
+      ["init-db.sql", ["psql", dbUrl, "-v", "ON_ERROR_STOP=1", "-q", "-f", initDb], childEnv, checkout],
+    );
+  }
+  steps.push(
+    ["migrate", migration.migrate, childEnv, migration.cwd],
+    ["seed", migration.seed, childEnv, migration.cwd],
+    ["seed:reserved", migration.seedReserved, { ...childEnv, ...RESERVED_SEED_KEYS }, migration.cwd],
+  );
+  const timings: Record<string, number> = {};
+  for (const [name, argv, env, cwd] of steps) {
+    const t0 = deps.now();
+    const problem = run(name, argv, env, cwd);
+    timings[name] = deps.now() - t0;
+    if (problem) return fail(command, { step: name, error: problem, logTail: tailFile(log, 20) }, `inferops up failed at ${name}`);
+  }
+  writeFileSync(stampPath(deps.root, database), JSON.stringify({ database, revision, preparedAt: new Date().toISOString() }, null, 2) + "\n");
+
+  const apiEnv = backendChildEnv(deps.env, {
+    DATABASE_URL: dbUrl, API_PORT: String(ports.apiPort), VERSION: "inferos-local", NODE_CONFIG: ssoLayer(ports.inferosOrigin),
+  });
+  mkdirSync(paths.logsDir, { recursive: true });
+  const pid = deps.launch(["bun", entry], apiEnv, log, checkout);
+  const deadline = deps.now() + options.timeoutSeconds * 1_000;
+  for (;;) {
+    if (!deps.processAlive(pid)) {
+      return fail(command, { pid, error: `the API exited before answering on ${ports.apiUrl}; see ${log}`, logTail: tailFile(log, 30) }, "inferops up: the API exited");
+    }
+    if (await healthy(ports.apiUrl, deps)) break;
+    if (deps.now() >= deadline) {
+      await stopGroup(pid, deps);
+      return fail(command, { pid, error: `the API was not ready within ${options.timeoutSeconds} s on ${ports.apiUrl}; stopped it. See ${log}`, logTail: tailFile(log, 30) },
+        `inferops up: not ready within ${options.timeoutSeconds} s`);
+    }
+    await deps.sleep(READY_POLL_MS);
+  }
+  const record: BackendRecord = {
+    pid, port: ports.apiPort, apiUrl: ports.apiUrl, inferosPort: ports.inferosPort, database, checkout, revision, dirty, managed,
+    startedAt: new Date().toISOString(), log,
+  };
+  writeBackendRecord(deps.root, record);
+  const signIn = signInSupported(checkout);
+  return {
+    exitCode: OK,
+    report: { ok: true, command, reused: false, apiUrl: ports.apiUrl, port: ports.apiPort, database, checkout, revision, managed, dirty, installed: resolved.installed,
+      fresh, signIn, pid, log, elapsedMs: deps.now() - started, timings, recipe: recipe(options) },
+    headline: `inferops up: ${ports.apiUrl} (rev ${revision.slice(0, 12)}, db ${database}${fresh ? ", fresh seeds" : ""}${signIn ? "" : ", no persona sign-in at this revision: use --stopgap"})`,
+  };
+}
+
+function recipe(options: BackendOptions): string {
+  return options.stopgap ? "pnpm local start --inferops --stopgap" : "pnpm local start --inferops";
+}
+
+async function status(stack: LocalStack, deps: BackendDeps): Promise<BackendResult> {
+  const ports = backendPorts(stack.port);
+  const { record, alive, listening, backend } = await inspect(ports.apiPort, deps);
+  const ok = backend === "running" && await healthy(ports.apiUrl, deps);
+  const report = {
+    ok, command: "inferops status", backend, apiUrl: ports.apiUrl, port: ports.apiPort, listening, healthy: ok,
+    ...(backend === "port-in-use-by-other" ? { error: stranger(ports.apiPort) } : {}),
+    ...(record ? { pid: record.pid, alive, database: record.database, checkout: record.checkout, revision: record.revision, managed: record.managed, dirty: record.dirty, startedAt: record.startedAt, log: record.log } : {}),
+    ...(record && !alive ? { stale: true } : {}),
+  };
+  const headline = backend === "running" && ok ? `inferops running: ${ports.apiUrl} (rev ${record!.revision.slice(0, 12)}, db ${record!.database})`
+    : backend === "running" ? `inferops degraded: ${ports.apiUrl} answers but /health/ready is not 200`
+    : backend === "port-in-use-by-other" ? `inferops port-in-use-by-other: ${ports.apiPort} answers, but not with this checkout's backend`
+    : record && !alive ? `inferops not-running: stale record for pid ${record.pid}`
+    : `inferops not-running: nothing listens on ${ports.apiPort} (pnpm local inferops up)`;
+  return { exitCode: ok ? OK : FAILED, report, headline };
+}
+
+async function down(stack: LocalStack, options: BackendOptions, deps: BackendDeps): Promise<BackendResult> {
+  const command = "inferops down";
+  const ports = backendPorts(stack.port);
+  const paths = backendPaths(deps.root);
+  const { record, alive, listening } = await inspect(ports.apiPort, deps);
+  let stopped = false;
+  let problem: string | null = null;
+  if (record && alive) {
+    stopped = await stopGroup(record.pid, deps);
+    if (!stopped) problem = `pid ${record.pid} did not exit within ${STOP_TIMEOUT_MS / 1000} s`;
+  } else if (listening) {
+    problem = record
+      ? `pid ${record.pid} is gone but something else listens on ${ports.apiPort}; it was not signalled`
+      : `Something listens on ${ports.apiPort} but this checkout recorded no backend; stop it from its own terminal`;
+  }
+  if (record && (stopped || !alive)) rmSync(paths.record, { force: true });
+  const purged: string[] = [];
+  if (options.purge && !problem) {
+    const database = record?.database ?? backendDatabase(stack.port);
+    const dropped = deps.runIn(["psql", pgAdminUrl(deps.env), "-v", "ON_ERROR_STOP=1", "-q", "-c", `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`],
+      backendChildEnv(deps.env), deps.root, STEP_TIMEOUT_MS);
+    if (dropped.exitCode === 0) {
+      purged.push(`database ${database}`);
+      rmSync(stampPath(deps.root, database), { force: true });
+    } else problem = `could not drop ${database}: ${dropped.stderr.trim()}`;
+    if (record?.managed && existsSync(record.checkout)) {
+      const removed = deps.git(["-C", inferopsRepo(deps), "worktree", "remove", "--force", record.checkout]);
+      if (removed.exitCode === 0) purged.push(`worktree ${record.checkout}`);
+      else problem = `could not remove ${record.checkout}: ${removed.stderr.trim()}`;
+    }
+  }
+  const ok = problem === null;
+  return {
+    exitCode: ok ? OK : FAILED,
+    report: { ok, command, stopped, ...(record ? { pid: record.pid } : {}), listening, purged, ...(problem ? { error: problem } : {}) },
+    headline: !ok ? `inferops down: ${problem}` : stopped ? `inferops down: stopped pid ${record!.pid}${purged.length ? `, purged ${purged.join(", ")}` : ""}`
+      : purged.length ? `inferops down: nothing was running; purged ${purged.join(", ")}` : "inferops down: nothing to stop",
+  };
+}
+
+function logs(options: BackendOptions, deps: BackendDeps): BackendResult {
+  const file = backendPaths(deps.root).log;
+  const lines = tailFile(file, options.lines);
+  return { exitCode: OK, report: { ok: true, command: "inferops logs", file, lines }, headline: lines.length ? `inferops log: ${file}` : `inferops log: nothing written yet at ${file}` };
+}
+
+/** Run one `pnpm local inferops <sub>` command for the InferOS stack `stack`. */
+export async function runInferopsBackend(stack: LocalStack, options: BackendOptions, deps: BackendDeps): Promise<BackendResult> {
+  switch (options.sub) {
+    case "up": return up(stack, options, deps);
+    case "status": return status(stack, deps);
+    case "down": return down(stack, options, deps);
+    case "logs": return logs(options, deps);
+    case "verify":
+    case "env":
+      return fail(`inferops ${options.sub}`, { error: "not implemented" }, "not implemented");
+  }
 }
