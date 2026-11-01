@@ -786,7 +786,10 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       method: "PATCH", body: { priority: "medium", expectedRevision: afterCancel.revision },
     }) as { issue: LiveIssue };
     const staleApply = await approveOrRefusal(again.id);
-    expect(staleApply).toMatch(/changed in InferOps after this dispatch was proposed/);
+    // Since #188 a dispatch InferOps refuses as stale is reported as a truthful apply outcome
+    // ("may or may not have been applied: InferOps refused it (STALE_REVISION) …"), not as a
+    // decided refusal; the run list and the revision below are the proof that nothing happened.
+    expect(staleApply).toMatch(/InferOps refused it \(STALE_REVISION\)/);
     expect((await liveRunsOf(issueId)).map(r => r.id)).toEqual([run.id]);
     expect((await liveIssue(issueId)).revision).toBe(changed.revision);
 
