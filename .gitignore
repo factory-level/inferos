@@ -54,6 +54,8 @@ wrangler.dev.jsonc
 **/.dev.vars
 **/.dev.vars.*
 
+# Software factory evidence, sandbox state and tool caches (scripts/local/factory.ts, scripts/ci/).
+/.factory/
 # The test InferOps backend `pnpm local inferops` runs beside this checkout: its record, logs and
 # managed InferOps worktrees (scripts/local/inferops.ts). Never committed.
 /.inferops/

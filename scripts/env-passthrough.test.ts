@@ -108,6 +108,8 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_USE_BINDING",
       "CI_COMMIT_SHA", "CI_PIPELINE_IID", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
       // run-dev-server.ts checks the sign-in configuration before starting anything.
+      // run-dev-server.ts names a fronting proxy's host (the factory's Access emulator) in gatekeeper BASE_URLs.
+      "DEV_PUBLIC_HOST",
       "DISABLE_PASSWORD_AUTH",
       // run-dev-server.ts starts the companion at runtime; the frontend reads its flag over RPC.
       "ENABLE_OPENAI_ASSISTANT_PLUGIN",
@@ -137,6 +139,9 @@ const EXPECTED: Record<string, ExpectedArea> = {
       // The MOCK `inferops` and `codex` binaries in local/testdata, started as processes by the runner
       // tests with the environment the lifecycle builds; never part of a build.
       "CODEX_HOME", "CODEX_PATH", "HOME", "INFEROPS_API_KEY", "INFEROPS_ENDPOINT", "INFEROPS_WORKSPACE_ID",
+      // scripts/local/inferops.ts hands PATH alone to `ps` when /proc cannot be read (a process-identity
+      // check for the test backend's record); never part of a build.
+      "PATH",
     ],
   },
 };
