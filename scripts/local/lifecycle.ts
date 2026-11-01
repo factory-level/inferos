@@ -39,7 +39,7 @@ import { assertLocalPortAvailable } from "../consumer/runtime.ts";
 import { relayTermination } from "../relay-termination.ts";
 import { withWorktreeEnv } from "../worktree-env.ts";
 import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
-import { BACKEND_SUBCOMMANDS, backendRow, recordedWiring, resetBackend, runInferopsBackend, wireStack, type BackendDeps } from "./inferops.ts";
+import { BACKEND_SUBCOMMANDS, backendRow, readBackendRecord, recordedWiring, resetBackend, runInferopsBackend, wireStack, type BackendDeps } from "./inferops.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
   probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack, stackOwnership,
@@ -174,6 +174,7 @@ export const defaultDeps: LifecycleDeps = {
   now: Date.now,
   runCli: runProcess,
   runIn: (argv, env, cwd, timeoutMs) => runProcess(argv, env, cwd, timeoutMs),
+  backendRecord: readBackendRecord,
   launch: launchDetached,
   git: args => runProcess(["git", ...args], process.env),
 };

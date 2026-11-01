@@ -220,6 +220,8 @@ export type BackendDeps = Pick<CodingDeps, "root" | "env" | "runCli" | "launch" 
   runIn: (argv: string[], env: Record<string, string>, cwd: string, timeoutMs: number) => ProcessResult;
   isPortListening: (port: number) => Promise<boolean>;
   fetchImpl: typeof fetch;
+  /** This checkout's backend record (see `readBackendRecord`), or null; injectable so an offline suite never sees a developer's live backend. */
+  backendRecord: (root: string) => BackendRecord | null;
 };
 
 export const BACKEND_SUBCOMMANDS = ["up", "status", "down", "verify", "env", "logs"] as const;
@@ -405,7 +407,7 @@ interface Inspection {
  * listens (it was written after readiness); without one, a listener on the derived port is a stranger.
  */
 async function inspect(apiPort: number, deps: BackendDeps): Promise<Inspection> {
-  const record = readBackendRecord(deps.root);
+  const record = deps.backendRecord(deps.root);
   const alive = record !== null && deps.processAlive(record.pid);
   const listening = await deps.isPortListening(alive ? record!.port : apiPort);
   const backend = !listening ? "not-running" : alive ? "running" : "port-in-use-by-other";
@@ -820,7 +822,7 @@ export async function wireStack(stack: LocalStack, { stopgap }: { stopgap: boole
   }
   const brought = await up(stack, { sub: "up", fresh: false, purge: false, stopgap, allowLocalConfig: false, timeoutSeconds: 180, lines: 50 }, deps);
   if (brought.exitCode !== OK) return brought;
-  const record = readBackendRecord(deps.root);
+  const record = deps.backendRecord(deps.root);
   if (!record) return fail("start", { error: "the backend came up but left no record" }, "start --inferops: no backend record");
   if (!stopgap && !signInSupported(record.checkout)) {
     return fail("start", { apiUrl: record.apiUrl, revision: record.revision, error: `InferOps ${record.revision.slice(0, 12)} predates the stub persona sign-in (inferops ${SIGN_IN_FLOOR}, #2445): use --stopgap, or pnpm local inferops up --rev <newer sha>` },
@@ -852,15 +854,15 @@ export async function backendRow(stack: LocalStack, deps: BackendDeps): Promise<
 }
 
 /** The wiring the stack was last started with, while that backend still runs; null otherwise. */
-export function recordedWiring(deps: Pick<BackendDeps, "root" | "processAlive">): "sign-in" | "stopgap" | null {
-  const record = readBackendRecord(deps.root);
+export function recordedWiring(deps: Pick<BackendDeps, "root" | "processAlive" | "backendRecord">): "sign-in" | "stopgap" | null {
+  const record = deps.backendRecord(deps.root);
   return record && deps.processAlive(record.pid) ? record.wiring ?? null : null;
 }
 
 /** `pnpm local reset`: drop a stopped backend's record and log (the database and checkout stay); a live one keeps both. */
-export function resetBackend(deps: Pick<BackendDeps, "root" | "processAlive">): string[] {
+export function resetBackend(deps: Pick<BackendDeps, "root" | "processAlive" | "backendRecord">): string[] {
   const paths = backendPaths(deps.root);
-  const record = readBackendRecord(deps.root);
+  const record = deps.backendRecord(deps.root);
   if (record && deps.processAlive(record.pid)) return [];
   const removed: string[] = [];
   for (const path of [paths.record, paths.logsDir]) {

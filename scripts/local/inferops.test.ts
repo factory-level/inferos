@@ -238,6 +238,7 @@ function harness({ managed = true, env = {} as NodeJS.ProcessEnv, layout = "new"
     sleep: async () => {},
     now: (() => { let t = 0; return () => (t += 1000); })(),
     isPortListening: async () => state.listening,
+    backendRecord: readBackendRecord,
     fetchImpl: (async (input: string | URL | Request) => {
       const url = new URL(String(input instanceof Request ? input.url : input));
       if (url.pathname === "/health/ready") {

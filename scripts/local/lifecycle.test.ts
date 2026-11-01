@@ -26,6 +26,7 @@ function offlineDeps(overrides: Partial<LifecycleDeps> = {}): LifecycleDeps & { 
     env: {},
     isPortListening: async () => false,
     devServerRecord: () => null,
+    backendRecord: () => null,
     fetchImpl: async () => { throw new Error("offline"); },
     runOperator: (script, args) => {
       operatorCalls.push([script, ...args]);
@@ -539,6 +540,7 @@ function backendDeps(root: string, apiPort: number, overrides: Partial<Lifecycle
   const deps = offlineDeps({
     root,
     env: { PATH: "/bin", HOME: "/home/me" },
+    backendRecord: readBackendRecord,
     isPortListening: async port => port === apiPort,
     processAlive: () => true,
     fetchImpl: (async (input: string | URL | Request) => {
@@ -639,7 +641,7 @@ test("seed follows the wiring the stack was started with", async () => {
   const verifyReport = { ok: true, agentView: { inferops: "live", board: { project: "ENG", issues: 8, states: 5 }, approvalQueue: { pending: 0 } } };
   const run = async (root: string) => {
     const deps = offlineDeps({
-      root, isPortListening: async () => true, devServerRecord: () => ours(),
+      root, backendRecord: readBackendRecord, isPortListening: async () => true, devServerRecord: () => ours(),
       runOperator: (script, args) => { deps.operatorCalls.push([script, ...args]); return { exitCode: 0, report: script === "dev-setup.ts" ? setupReport : verifyReport, stderr: "" }; },
     });
     const result = await runLifecycle(["seed", "--json"], deps);
@@ -705,14 +707,35 @@ test("reset also clears a stopped backend's record and log, never a running one"
     withBackend(root, 18787);
     mkdirSync(backendPaths(root).logsDir, { recursive: true });
     writeFileSync(backendPaths(root).log, "old\n");
-    const running = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, processAlive: () => true }));
+    const running = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, backendRecord: readBackendRecord, processAlive: () => true }));
     assert.equal(running.exitCode, EXIT_OK);
     assert.ok(existsSync(backendPaths(root).record), "a live backend keeps its record");
-    const stopped = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, processAlive: () => false }));
+    const stopped = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, backendRecord: readBackendRecord, processAlive: () => false }));
     assert.equal(stopped.exitCode, EXIT_OK);
     assert.equal(existsSync(backendPaths(root).record), false);
     assert.equal(existsSync(backendPaths(root).log), false);
     assert.ok((stopped.report.removed as string[]).some(path => path.endsWith("backend.json")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a backend record on disk reaches status and seed only through deps.backendRecord", async () => {
+  // A developer running `pnpm test` beside a live backend must not change what the offline suite sees.
+  const root = tempRoot();
+  try {
+    withBackend(root, 18787, { wiring: "sign-in" });
+    const blind = offlineDeps({ root, backendRecord: () => null, isPortListening: async () => true, devServerRecord: () => ours(),
+      fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch,
+      runOperator: (script, args) => { blind.operatorCalls.push([script, ...args]); return { exitCode: 0, report: { ok: true }, stderr: "" }; } });
+    const status = await runLifecycle(["status", "--json"], blind);
+    assert.deepEqual(status.report.inferops, { mode: "mock", missing: [] });
+    await runLifecycle(["seed", "--json"], blind);
+    assert.ok(blind.operatorCalls[0]!.includes("--inferops"));
+    const seeing = offlineDeps({ root, backendRecord: readBackendRecord, isPortListening: async () => true, devServerRecord: () => ours(),
+      fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch });
+    const row = (await runLifecycle(["status", "--json"], seeing)).report.inferops as Record<string, unknown>;
+    assert.equal((row.backend as Record<string, unknown>).wiring, "sign-in");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
