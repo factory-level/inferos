@@ -1,12 +1,12 @@
 // The Wiki's read projections, ported from InferOps so InferOS reads a page the way InferOps does
 // (pure: no request, no storage).
 //
-// - Wikilinks: InferOps' v1 `[[target#tag]]` grammar (`domains/knowledge/shared/wikilinks.ts`),
+// - Wikilinks: InferOps' v1 `[[target#tag]]` grammar (`domain/ts/knowledge/shared/wikilinks.ts`),
 //   deduplicated on (target, tag), first occurrence wins.
-// - Embedded references: InferOps' block-embed rule (`_libs/widgets/shared/resolve.ts`): a
+// - Embedded references: InferOps' block-embed rule (`lib/ts/widgets/shared/resolve.ts`): a
 //   paragraph, split on blank lines, that is solely `[label](inferops://…)` is an embed; a link
 //   inside prose is not. The href must parse as InferOps' `parseInferopsUri` would accept it.
-// - Page text: InferOps' one page-text contract (`domains/knowledge/shared/document-text.ts`,
+// - Page text: InferOps' one page-text contract (`domain/ts/knowledge/shared/document-text.ts`,
 //   mirrored exactly by `composeDocumentText` and `masterStructureText`): `# <title>`, then the
 //   page's body without a leading `# <title>` line, or the visible section bodies when it has no body,
 //   then a Master's generated structure block. InferOps' `renderDocumentAsText` then replaces each

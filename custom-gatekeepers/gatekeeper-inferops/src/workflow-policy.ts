@@ -4,7 +4,7 @@
 // - Source. InferOps' `workflow.get` (`GET /project/projects/:id/workflow?workflow=content`, under
 //   the reader's own `project:read`) answers `{ head }`: the head of the project's policy, with the
 //   v2 policy document or null. The parse below is the provider's own schema at inferops b0189cc2
-//   (`domains/project/shared/workflow-policy-v2.ts`, `workflow-policy.dto.ts`), kept here on purpose:
+//   (`domain/ts/project/shared/workflow-policy-v2.ts`, `workflow-policy.dto.ts`), kept here on purpose:
 //   every object must have exactly its source keys, every enum, pattern, length and array cap is the
 //   source's, and the guard refinement is the source's. A field InferOps adds later is therefore
 //   refused (UNAVAILABLE) until this file is updated. It checks the document's shape only: lane
