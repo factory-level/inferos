@@ -38,7 +38,7 @@ import {
   configuredWorkers, probeWorkers, resolveLocalStack, stackOwnership,
   type DevServerRecord, type LocalStack,
 } from "./stack.ts";
-import { backendPorts, markWiring, processCommandLine, readBackendRecord, runInferopsBackend, wiringEnv, type BackendDeps } from "./inferops.ts";
+import { backendPorts, CLOUD_VAR, markWiring, processCommandLine, readBackendRecord, runInferopsBackend, wiringEnv, type BackendDeps } from "./inferops.ts";
 
 /** Only the two reserved seats specified by InferOps #2460 can exercise the stage smoke roles (shared with scripts/ci/stage-smoke-authorization.ts in the factory CI graph). */
 export function smokePersonaProblem(env: NodeJS.ProcessEnv): string | null {
@@ -157,13 +157,11 @@ export async function inferlabAuthMode(inferops: string, fetchImpl: typeof fetch
 export const STAGE_SMOKE_IMAGE = "artilleryio/artillery:latest";
 
 /**
- * Cloud and deploy credentials no sandbox may hold. Model-provider keys come from runner.ts's
- * `providerVariables`, so the two guards cannot drift.
+ * Cloud and deploy credentials no sandbox may hold: the backend's `CLOUD_VAR` (scripts/local/inferops.ts).
+ * Model-provider keys come from runner.ts's `providerVariables`, so the guards cannot drift.
  * ponytail: a name list, not value scanning; a credential under an unlisted name passes. Upgrade
  * path: also run gitleaks over the environment dump in `doctor`.
  */
-const CLOUD_VAR = /^(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE)|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CREDENTIALS|GOOGLE_OAUTH_ACCESS_TOKEN|CLOUDSDK_AUTH_ACCESS_TOKEN|CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE|CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_KEY|CF_API_TOKEN|CF_API_KEY|AZURE_CLIENT_SECRET|ARM_CLIENT_SECRET|PULUMI_ACCESS_TOKEN|NEON_API_KEY|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|VERCEL_TOKEN|FLY_API_TOKEN|DIGITALOCEAN_ACCESS_TOKEN|NPM_TOKEN)$/;
-
 /** The credential variables `sandbox` must not hold, by name only, sorted. */
 export function forbiddenCredentials(env: NodeJS.ProcessEnv, sandbox: Sandbox): string[] {
   const names = new Set(providerVariables(env));
@@ -1009,14 +1007,24 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
   };
 }
 
-export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down|stage-smoke> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--access-emulator] [--stage-url URL] [--timeout SECONDS]
+export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down|stage-smoke|help> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--access-emulator] [--stage-url URL] [--timeout SECONDS]
   sandboxes: ${SANDBOXES.join(", ")}
   InferOps: by default the pinned test backend (pnpm local inferops up, this stack's port + 10000); --inferops-dir runs that checkout's bun run dev up; --inferops-image runs a prebuilt API image
+  --inferops-connect: up only; InferOS signs people in through that InferOps instead of reading the gatekeeper's mock board
   --access-emulator: up only; the local Cloudflare Access emulator fronts InferOS (FACTORY_ACCESS_EMULATOR_PORT, 8789)
-  stage-smoke: doctor stage-probe, then (when READY) the scripted smoke scripts/ci/stage-smoke.ts`;
+  stage-smoke: doctor stage-probe, then (when READY) the scripted smoke scripts/ci/stage-smoke.ts
+  credentials: up refuses and doctor FAILs while the shell holds a cloud, deploy or model-provider credential name (values are never read); the smoke credentials belong to stage-probe only
+  state: .factory/sandbox.json (what up started, read by status, doctor and down), .factory/logs/<service>.log, .factory/access-emulator.env (0600)
+  port: this stack's, from the worktree overlay (.env.worktree / VITE_BACKEND_HOST), else 8787; pnpm local help explains the rest`;
+
+/** The words that ask for {@link FACTORY_USAGE} instead of a command, anywhere in the arguments. */
+const HELP_WORDS = ["help", "--help", "-h"] as const;
 
 /** Run one factory command (argv after `factory`). Usage errors exit 2. */
 export async function runFactory(argv: readonly string[], deps: FactoryDeps): Promise<FactoryResult> {
+  if (argv.some(arg => (HELP_WORDS as readonly string[]).includes(arg))) {
+    return { exitCode: 0, report: { ok: true, command: "factory", topic: "factory", usage: FACTORY_USAGE }, headline: FACTORY_USAGE };
+  }
   let values;
   let positionals: string[];
   try {

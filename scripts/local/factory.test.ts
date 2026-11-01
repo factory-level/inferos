@@ -100,6 +100,25 @@ test("usage errors exit 2", async () => {
   }
 });
 
+test("help exits 0 with the usage and starts nothing", async () => {
+  const root = tempRoot();
+  try {
+    for (const argv of [["help"], ["--help"], ["-h"], ["up", "dev", "--help"]]) {
+      const { deps, launches, runInCalls, dockerCalls } = fakeDeps(root);
+      const result = await runFactory(argv, deps);
+      assert.equal(result.exitCode, 0, argv.join(" "));
+      assert.equal(result.report.ok, true);
+      assert.equal(result.report.command, "factory");
+      assert.match(String(result.report.usage), /^Usage: pnpm local factory/);
+      assert.match(String(result.report.usage), /\.factory\/sandbox\.json/);
+      assert.match(String(result.report.usage), /credential/);
+      assert.deepEqual([launches.length, runInCalls.length, dockerCalls.length], [0, 0, 0]);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("credentials are detected by name: provider keys via runner.ts, cloud keys, smoke keys outside stage-probe", () => {
   const env = { OPENAI_API_KEY: "sk-x", AWS_SECRET_ACCESS_KEY: "y", CLOUDFLARE_API_TOKEN: "z", CF_ACCESS_CLIENT_SECRET: "s", PATH: "/bin", INFEROPS_API_KEY: "ok", EMPTY_API_KEY: "" };
   assert.deepEqual(forbiddenCredentials(env, "dev"), ["AWS_SECRET_ACCESS_KEY", "CF_ACCESS_CLIENT_SECRET", "CLOUDFLARE_API_TOKEN", "OPENAI_API_KEY"]);

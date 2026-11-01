@@ -189,6 +189,10 @@ To quickly run Cloudflare OS locally, [install pnpm](https://pnpm.io/), then do:
 
 Then visit: http://localhost:8787
 
+`pnpm local help` lists the lifecycle commands (`start`, `status`, `stop`, `seed`, `verify`, the pinned
+InferOps test backend, the factory sandboxes) and explains how a checkout boots with its shared
+resources; the same commands work in every `pnpm wt` worktree.
+
 This runs Cloudflare OS using `wrangler`, the Workers developer tooling CLI. This is not the right way to run the OS on a production server, but it works fine for trying it out on your local machine.
 
 Your data will be stored in a subdirectory named `.wrangler`.

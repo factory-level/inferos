@@ -15,6 +15,9 @@ procedure.
 
 ## Before you start
 
+0. `pnpm local help inferops` prints the verbs, the defaults and what the backend shares with the
+   sibling inferops repository (its Compose project and network, the per-stack database); read it
+   once per checkout.
 1. Use a clean shell: `env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 bash` is enough. `up` refuses
    a shell holding cloud, deploy or model-provider credentials (by name) and reports a gatekeeper
    wiring already present in the shell, `.env.worktree`, `.dev.vars`, `.env` or the gatekeeper's
@@ -59,10 +62,10 @@ procedure.
    --slug live-suite --git-url https://github.com/factory-level/inferos.git --default-base-ref main`)
    and export its id as `INFEROPS_LIVE_REPO_ID` for 15 of 15. Report the counts, never a bare "the
    live suite failed".
-6. To prove the backend itself on a machine, run the repeatable proof instead of a hand session:
+5. To prove the backend itself on a machine, run the repeatable proof instead of a hand session:
    `INFEROPS_BACKEND_LIVE=1 node --test scripts/local/inferops.live.test.ts` (its own port, 8797 by
    default; `INFEROPS_BACKEND_LIVE_PORT` changes it). It must pass before any claim that case 1 works.
-5. Finish with `pnpm local stop` and `pnpm -s local inferops down` (`--purge` also drops the
+6. Finish with `pnpm local stop` and `pnpm -s local inferops down` (`--purge` also drops the
    database and removes the managed worktree). `pnpm -s local inferops status --json` must then
    say `not-running` and the API port must be free.
 

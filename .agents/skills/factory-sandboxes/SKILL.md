@@ -9,7 +9,7 @@ The factory is the skills agents consume plus the sandboxes they run in; InferOS
 
 | Sandbox | Runs | Extra checks |
 | --- | --- | --- |
-| `dev` | InferOS `pnpm run-local` (this checkout, :8787) + InferOps `bun run dev up --docker --seed` in **its own checkout**, or with `--inferops-image` the built InferOps API image (no KMS); with `--access-emulator` the local Cloudflare Access emulator in front of InferOS (127.0.0.1:8789) | `service:access` (with the emulator) |
+| `dev` | InferOS `pnpm run-local` (this checkout, :8787 or the worktree's port) + InferOps: by default the pinned test backend (`pnpm local inferops up`: the API from source at the gatekeeper's pin, port + 10000, database `inferos_<port>`, no bootstrap, no credential); with `--inferops-dir` that checkout's own `bun run dev up`; with `--inferops-image` the built InferOps API image (no KMS); with `--access-emulator` the local Cloudflare Access emulator in front of InferOS (127.0.0.1:8789) | `service:access` (with the emulator) |
 | `infra` | `dev` + floci-gcp (reuses whatever answers `127.0.0.1:<port>/health`, else starts `floci/floci-gcp:latest` published on 127.0.0.1 only) | wrangler, docker |
 | `verify` | `dev` | wrangler, docker, the six tool images (Semgrep, gitleaks, OSV-Scanner, Trivy, ZAP, Artillery) |
 | `stage-probe` | nothing; targets the stage `FACTORY_STAGE_URL` (or `--stage-url`) names | the stage's smoke credentials are present **by name only**; the stage answers; remote: unauthenticated `/` redirects to Cloudflare Access, the service token reaches InferOS, a wrong one is refused (302 to the Access login, or 403), and its InferLab (from `scripts/stage/stages.ts`) is healthy and says its auth mode (stub: no persona password); emulated: that, the service token reaches InferOS, a wrong one is 403, then as loopback through the emulator; loopback: InferOS and its connected InferOps healthy, InferOps in stub auth; docker + the Artillery image |
@@ -17,6 +17,7 @@ The factory is the skills agents consume plus the sandboxes they run in; InferOS
 ## Commands
 
 ```bash
+pnpm local factory --help               # the usage, the sandboxes, where state and logs live
 pnpm local factory up <sandbox> [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--access-emulator] [--timeout SECONDS]   # start, then wait for health
 pnpm local factory doctor [sandbox]     # one READY/FAIL line per check + health JSON per service
 pnpm local factory status               # the recorded sandbox's services only

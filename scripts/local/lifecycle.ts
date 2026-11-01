@@ -1,28 +1,13 @@
 #!/usr/bin/env node
 
-// Lifecycle of this checkout's local stack, for people and agents alike:
+// Lifecycle of this checkout's local stack, for people and agents alike. `pnpm local help` prints
+// `USAGE` below: every command, and how the stack boots with the resources it shares (the sibling
+// inferops repository's Postgres, the worktree port block, the state directories).
 //
-//   pnpm local status [--json]                   Is this checkout's stack up, which Workers answer, mock or live InferOps
-//   pnpm local start [-- <run-local flags>]      Start the public origin (scripts/run-local.ts) after a port check
-//   pnpm local stop [--json]                     Signal the recorded dev server and wait for it to exit
-//   pnpm local seed [--json] [--screen ID] [--no-approval]
-//                                                Local user, mock model, InferOps account, demo screen and board connection
-//   pnpm local verify [--json] [--board URL]     Readiness over the authenticated RPC: what an agent would see
-//   pnpm local reset [--json] --yes              Delete this checkout's .wrangler/state (and nothing else)
-//   pnpm local logs [--json] [--lines N]         Where Wrangler's log files are, and the newest one's tail
-//   pnpm local runner start|status|stop [--json] [--consumer-root DIR] [--once]
-//                                                The InferOps coding runner for a wrapper (scripts/local/coding.ts)
-//   pnpm local coding doctor [--json] [--consumer-root DIR]
-//                                                Whether that runner may start: flag, allowlist, CLI, sign-in, environment
-//   pnpm local factory up <sandbox>|status|doctor [sandbox]|down|stage-smoke [--json] [--inferops-dir DIR] [--inferops-image REF] [--access-emulator] [--stage-url URL]
-//                                                The software factory's sandboxes (scripts/local/factory.ts)
-//   pnpm local inferops up|status|down|verify|env|logs [--json] [--dir DIR] [--rev SHA] [--fresh] [--purge] [--stopgap]
-//                                                The test InferOps backend this checkout develops against (scripts/local/inferops.ts)
-//   pnpm local start --inferops [--stopgap]       Start the stack wired to that backend (per-person sign-in, or the stopgap bearer)
-//
-// Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and
-// exits 0 when its check passed, 1 when it failed, 2 on a usage error. With `--json` the only
-// stdout is one JSON object; without it a headline precedes the same object, pretty-printed.
+// Every command but `factory` honours `--port N` / `VITE_BACKEND_HOST` (the factory follows the
+// worktree overlay only), uses the dev server's own port rules, and exits 0 when its check passed,
+// 1 when it failed, 2 on a usage error. With `--json` the only stdout is one JSON object; without it
+// a headline precedes the same object, pretty-printed (`help` prints its text alone).
 //
 // `start` and `stop` are thin: the stack itself is `scripts/run-local.ts` and
 // `scripts/run-dev-server.ts`, which records its pid so `stop` and `status` can find it. That
@@ -41,8 +26,8 @@ import { assertLocalPortAvailable } from "../consumer/runtime.ts";
 import { relayTermination } from "../relay-termination.ts";
 import { withWorktreeEnv } from "../worktree-env.ts";
 import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
-import { runFactory } from "./factory.ts";
-import { BACKEND_SUBCOMMANDS, backendRow, clearWiring, processCommandLine, readBackendRecord, recordedWiring, resetBackend, runInferopsBackend, wireStack, type BackendDeps } from "./inferops.ts";
+import { FACTORY_USAGE, runFactory } from "./factory.ts";
+import { BACKEND_SUBCOMMANDS, BACKEND_USAGE, backendRow, clearWiring, processCommandLine, readBackendRecord, recordedWiring, resetBackend, runInferopsBackend, wireStack, type BackendDeps } from "./inferops.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
   probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack, stackOwnership,
@@ -52,7 +37,7 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OPERATORS = join(ROOT, "packages", "workshop-backend", "scripts");
 
-export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs", "runner", "coding", "factory", "inferops"] as const;
+export const COMMANDS = ["help", "status", "start", "stop", "seed", "verify", "reset", "logs", "runner", "coding", "factory", "inferops"] as const;
 export type Command = (typeof COMMANDS)[number];
 
 /** Exit codes every command shares. */
@@ -61,6 +46,7 @@ export const EXIT_FAILED = 1;
 export const EXIT_USAGE = 2;
 
 export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
+  help [inferops|factory] This text (also --help, -h); the backend's or the factory's own usage with a topic
   status                  Report the stack: port, Workers, InferOps mode, state directory
   start [--inferops [--stopgap]] [-- flags]
                           Start the public origin via scripts/run-local.ts (checks the port first);
@@ -76,12 +62,31 @@ export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
                           Run the InferOps coding runner (patch mode) for a wrapper's codingWorkbench.repos
   coding doctor [--consumer-root DIR]
                           Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env
-  factory up <dev|infra|verify|stage-probe>|status|doctor [sandbox]|down|stage-smoke [--inferops-dir DIR] [--inferops-image REF] [--stage-url URL] [--timeout S]
+  factory up <dev|infra|verify|stage-probe>|status|doctor [sandbox]|down|stage-smoke
+          [--inferops-connect] [--inferops-dir DIR] [--inferops-image REF] [--access-emulator] [--stage-url URL] [--timeout S]
                           The factory sandboxes: start, report READY/FAIL per check, stop what was started; the stage smoke
   inferops up [--dir DIR] [--rev SHA] [--fresh] [--timeout S] [--allow-local-config]
                           Run the pinned InferOps API from source beside this stack (port + 10000), seeded, headless
   inferops status|down [--purge]|verify|env [--stopgap]|logs [--lines N]
-                          Inspect, stop (--purge drops its database and worktree), prove, export or tail that backend`;
+                          Inspect, stop (--purge drops its database and worktree), prove, export or tail that backend
+
+How the stack boots (the same in the main checkout and in every pnpm wt worktree)
+  Port       8787, or this worktree's block from .env.worktree (written by pnpm wt new; VITE_BACKEND_HOST), or --port N.
+             The factory follows the overlay only.
+  State      .wrangler/local/dev-server.json says who owns the port; .wrangler/state holds the Workers' data; logs
+             shows Wrangler's log directory. reset --yes deletes the state, never a database or a checkout.
+  InferOps   By default the gatekeeper's mock board. start --inferops first runs inferops up: the InferOps API from
+             the sibling repository (../inferops beside the main checkout, or INFEROPS_REPO) at the pinned contract
+             revision, in a managed worktree .inferops/checkout-<sha>, on port + 10000, with its own database
+             inferos_<port> in inferops' shared local Postgres (Compose project \`inferops\`, network \`inferlab\`;
+             started when down, never stopped from here). Wiring is per-person sign-in, or --stopgap; never both.
+  Factory    factory up dev = that backend + this stack (infra adds floci-gcp, verify the tool images); state in
+             .factory/. It refuses while the shell holds a cloud, deploy or model-provider credential name.
+  Worktrees  Every pnpm wt worktree has its own port block, backend (+10000), database and state directories, and
+             runs beside an inferops worktree's fleet (ports x00/x01/x80/x81/x90, its InferOS sidecar at x87)
+             without sharing a port, a database or a checkout.
+  Now        pnpm local status, pnpm local inferops status and pnpm local factory doctor report the live state.
+`;
 
 /** The subcommands of the two-word commands. */
 const SUBCOMMANDS: Partial<Record<Command, readonly string[]>> = {
@@ -219,6 +224,31 @@ type Parsed = {
 };
 
 class UsageError extends Error {}
+
+/** The words that ask for help instead of a command, anywhere before `--`. */
+const HELP_WORDS = ["help", "--help", "-h"] as const;
+type HelpTopic = "inferops" | "factory";
+
+/** What `help` prints for a topic: the backend's or the factory's own usage, else {@link USAGE}. */
+export function helpText(topic: HelpTopic | null): string {
+  return topic === "inferops" ? BACKEND_USAGE : topic === "factory" ? FACTORY_USAGE : USAGE;
+}
+
+/**
+ * Whether `argv` asks for help (`help`, `--help` or `-h` before any `--`), and for which topic
+ * (`inferops` or `factory`, wherever it appears). Null when it is an ordinary command.
+ */
+function helpRequest(argv: readonly string[]): { topic: HelpTopic | null } | null {
+  const separator = argv.indexOf("--");
+  const own = separator === -1 ? argv : argv.slice(0, separator);
+  if (!own.some(arg => (HELP_WORDS as readonly string[]).includes(arg))) return null;
+  const topic = (own.find(arg => arg === "inferops" || arg === "factory") as HelpTopic | undefined) ?? null;
+  if (own[0] === "help") {
+    const other = own.slice(1).find(arg => !arg.startsWith("-") && arg !== topic);
+    if (other !== undefined) throw new UsageError(`help takes inferops or factory, not "${other}".\n${USAGE}`);
+  }
+  return { topic };
+}
 
 function parse(argv: readonly string[]): Parsed {
   const [command, ...afterCommand] = argv;
@@ -523,11 +553,17 @@ function logs(parsed: Parsed, deps: LifecycleDeps): LifecycleResult {
 
 /** Run one command. Usage errors surface as exit 2 with the usage text in `report.error`. */
 export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps = defaultDeps): Promise<LifecycleResult & { json: boolean }> {
-  // The factory has its own argument shape (a sandbox positional), so it parses for itself.
-  if (argv[0] === "factory") return { ...await runFactory(argv.slice(1), deps), json: argv.includes("--json") };
   let parsed: Parsed;
   let stack: LocalStack;
   try {
+    // Help first: it reads nothing, resolves no stack and starts nothing, in any checkout.
+    const help = helpRequest(argv);
+    if (help) {
+      const usage = helpText(help.topic);
+      return { exitCode: EXIT_OK, json: argv.includes("--json"), headline: usage, report: { ok: true, command: "help", topic: help.topic, usage } };
+    }
+    // The factory has its own argument shape (a sandbox positional), so it parses for itself.
+    if (argv[0] === "factory") return { ...await runFactory(argv.slice(1), deps), json: argv.includes("--json") };
     parsed = parse(argv);
     stack = resolveLocalStack(deps.root, parsed.port === undefined ? [] : ["--port", parsed.port], deps.env);
   } catch (error) {
@@ -547,8 +583,9 @@ export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps 
       case "runner":
       case "coding":
         return runCoding(parsed.command, parsed.sub!, { consumerRoot: parsed.consumerRoot, once: parsed.once }, deps);
+      case "help":
       case "factory":
-        throw new Error("factory is dispatched before parsing");
+        throw new Error(`${parsed.command} is dispatched before parsing`);
       case "inferops":
         return runInferopsBackend(stack, {
           sub: parsed.sub as (typeof BACKEND_SUBCOMMANDS)[number], dir: parsed.dir, rev: parsed.rev, fresh: parsed.fresh, purge: parsed.purge,
@@ -572,10 +609,11 @@ export interface CliOutput {
  */
 export async function main(argv: readonly string[], deps: LifecycleDeps = defaultDeps, out: CliOutput = console): Promise<number> {
   const { exitCode, report, headline, json } = await runLifecycle(argv, deps);
+  // `inferops env`: export lines alone, so `eval "$(pnpm local inferops env)"` works; `help`: the text alone.
+  const text = typeof report.shell === "string" ? report.shell : report.command === "help" && typeof report.usage === "string" ? report.usage : null;
   if (exitCode === EXIT_USAGE) out.error(headline);
-  else if (!json && typeof report.shell === "string") {
-    // `inferops env`: export lines alone, so `eval "$(pnpm local inferops env)"` works.
-    out.log(report.shell);
+  else if (!json && text !== null) {
+    out.log(text);
     return exitCode;
   } else if (!json) out.log(headline);
   out.log(json ? JSON.stringify(report) : JSON.stringify(report, null, 2));

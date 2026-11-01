@@ -70,6 +70,44 @@ test("usage errors exit 2 and name the command set", async () => {
   assert.match(String(usage.report.error), /status.*start.*stop.*seed.*verify.*reset.*logs/s);
 });
 
+test("help explains the commands and how the stack boots, exits 0 and touches nothing", async () => {
+  for (const argv of [["help"], ["--help"], ["-h"], ["status", "--help"], ["help", "--json"]]) {
+    const result = await runLifecycle(argv, offlineDeps());
+    assert.equal(result.exitCode, EXIT_OK, argv.join(" "));
+    assert.equal(result.report.ok, true);
+    assert.equal(result.report.command, "help");
+    assert.equal(result.report.topic, null);
+    assert.match(String(result.report.usage), /Usage: pnpm local/);
+    assert.match(String(result.report.usage), /help \[inferops\|factory\]/);
+    assert.match(String(result.report.usage), /How the stack boots/);
+    for (const needle of ["8787", ".env.worktree", "pnpm wt new", "+ 10000", "inferos_<port>", "../inferops", "INFEROPS_REPO", ".inferops/", "`inferops`", "`inferlab`", ".factory/", ".wrangler/local", "--inferops-connect", "--access-emulator", "pnpm local status"]) {
+      assert.ok(String(result.report.usage).includes(needle), `help should mention ${needle}`);
+    }
+    assert.equal(result.json, argv.includes("--json"));
+  }
+  for (const argv of [["help", "inferops"], ["inferops", "--help"], ["inferops", "up", "--help"], ["inferops", "-h"]]) {
+    const result = await runLifecycle(argv, offlineDeps());
+    assert.equal(result.exitCode, EXIT_OK, argv.join(" "));
+    assert.equal(result.report.topic, "inferops");
+    assert.match(String(result.report.usage), /Usage: pnpm local inferops/);
+    assert.match(String(result.report.usage), /INFEROPS_PG_ADMIN_URL/);
+    assert.match(String(result.report.usage), /connection\.json/);
+  }
+  for (const argv of [["help", "factory"], ["factory", "--help"], ["factory", "help"], ["factory", "up", "dev", "--help"], ["factory", "-h"]]) {
+    const result = await runLifecycle(argv, offlineDeps());
+    assert.equal(result.exitCode, EXIT_OK, argv.join(" "));
+    assert.equal(result.report.topic, "factory");
+    assert.match(String(result.report.usage), /Usage: pnpm local factory/);
+    assert.match(String(result.report.usage), /dev, infra, verify, stage-probe/);
+    assert.match(String(result.report.usage), /\.factory\/sandbox\.json/);
+  }
+  const unknown = await runLifecycle(["help", "bogus"], offlineDeps());
+  assert.equal(unknown.exitCode, EXIT_USAGE);
+  assert.match(String(unknown.report.error), /help takes inferops or factory/);
+  const none = await runLifecycle([], offlineDeps());
+  assert.equal(none.exitCode, EXIT_USAGE);
+});
+
 test("status reports a stopped stack with a stable JSON shape and exit 1", async () => {
   // A temp root: no dev-server record, and only the two Workers every checkout has.
   const root = tempRoot();
@@ -487,6 +525,20 @@ test("the CLI entry prints one JSON object with --json and exits with the comman
     assert.equal(usage.exitCode, EXIT_USAGE);
     assert.match(usage.stderr.join("\n"), /Usage: pnpm local/);
     assert.equal(JSON.parse(usage.stdout.join("\n")).ok, false);
+    // help: the text alone on stdout, nothing on stderr; with --json the one-line report carries it.
+    const help = await run(["help"]);
+    assert.equal(help.exitCode, EXIT_OK);
+    assert.deepEqual(help.stderr, []);
+    assert.equal(help.stdout.length, 1);
+    assert.match(help.stdout[0]!, /^Usage: pnpm local/);
+    assert.doesNotMatch(help.stdout[0]!, /"ok"/);
+    const helpJson = await run(["help", "factory", "--json"]);
+    assert.equal(helpJson.exitCode, EXIT_OK);
+    assert.equal(helpJson.stdout.length, 1);
+    const helpReport = JSON.parse(helpJson.stdout[0]!);
+    assert.equal(helpReport.ok, true);
+    assert.equal(helpReport.topic, "factory");
+    assert.match(helpReport.usage, /Usage: pnpm local factory/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -499,6 +551,9 @@ test("the CLI entry runs main and sets its exit code", () => {
   assert.equal(usage.status, EXIT_USAGE);
   assert.match(usage.stderr, /Usage: pnpm local/);
   assert.equal(JSON.parse(usage.stdout).ok, false);
+  const help = spawnSync(process.execPath, [join(REPO, "scripts", "local", "lifecycle.ts"), "help", "--json"], { cwd: REPO, encoding: "utf8" });
+  assert.equal(help.status, EXIT_OK, help.stderr);
+  assert.equal(JSON.parse(help.stdout).ok, true);
 });
 
 test("a wedged record file is ignored by status", () => {
