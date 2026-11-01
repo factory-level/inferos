@@ -14,6 +14,9 @@
 //                                                The InferOps coding runner for a wrapper (scripts/local/coding.ts)
 //   pnpm local coding doctor [--json] [--consumer-root DIR]
 //                                                Whether that runner may start: flag, allowlist, CLI, sign-in, environment
+//   pnpm local inferops up|status|down|verify|env|logs [--json] [--dir DIR] [--rev SHA] [--fresh] [--purge] [--stopgap]
+//                                                The test InferOps backend this checkout develops against (scripts/local/inferops.ts)
+//   pnpm local start --inferops [--stopgap]       Start the stack wired to that backend (per-person sign-in, or the stopgap bearer)
 //
 // Every command honours `--port N` / `VITE_BACKEND_HOST`, the dev server's own port rules, and
 // exits 0 when its check passed, 1 when it failed, 2 on a usage error. With `--json` the only
@@ -36,6 +39,7 @@ import { assertLocalPortAvailable } from "../consumer/runtime.ts";
 import { relayTermination } from "../relay-termination.ts";
 import { withWorktreeEnv } from "../worktree-env.ts";
 import { runCoding, type CodingDeps, type ProcessResult } from "./coding.ts";
+import { BACKEND_SUBCOMMANDS, backendRow, clearWiring, processCommandLine, readBackendRecord, recordedWiring, resetBackend, runInferopsBackend, wireStack, type BackendDeps } from "./inferops.ts";
 import {
   configuredWorkers, inferOpsConfiguration, isPortListening, latestWranglerLog, localEnv,
   probeWorkers, processAlive, readDevServerRecord, resetLocalState, resolveLocalStack, stackOwnership,
@@ -45,7 +49,7 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OPERATORS = join(ROOT, "packages", "workshop-backend", "scripts");
 
-export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs", "runner", "coding"] as const;
+export const COMMANDS = ["status", "start", "stop", "seed", "verify", "reset", "logs", "runner", "coding", "inferops"] as const;
 export type Command = (typeof COMMANDS)[number];
 
 /** Exit codes every command shares. */
@@ -55,7 +59,9 @@ export const EXIT_USAGE = 2;
 
 export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
   status                  Report the stack: port, Workers, InferOps mode, state directory
-  start [-- flags]        Start the public origin via scripts/run-local.ts (checks the port first)
+  start [--inferops [--stopgap]] [-- flags]
+                          Start the public origin via scripts/run-local.ts (checks the port first);
+                          --inferops first brings the test InferOps backend up and wires the stack to it
   stop                    Stop the recorded dev server and wait for it to exit
   seed [--screen ID] [--no-approval] [--user U] [--password P]
                           Prepare a running stack: account, mock model, InferOps account, demo screen, board connection
@@ -66,12 +72,17 @@ export const USAGE = `Usage: pnpm local <command> [--json] [--port N]
   runner start|status|stop [--consumer-root DIR] [--once]
                           Run the InferOps coding runner (patch mode) for a wrapper's codingWorkbench.repos
   coding doctor [--consumer-root DIR]
-                          Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env`;
+                          Check the runner can start: flag, allowlist, CLI version, Codex sign-in, child env
+  inferops up [--dir DIR] [--rev SHA] [--fresh] [--timeout S] [--allow-local-config]
+                          Run the pinned InferOps API from source beside this stack (port + 10000), seeded, headless
+  inferops status|down [--purge]|verify|env [--stopgap]|logs [--lines N]
+                          Inspect, stop (--purge drops its database and worktree), prove, export or tail that backend`;
 
 /** The subcommands of the two-word commands. */
 const SUBCOMMANDS: Partial<Record<Command, readonly string[]>> = {
   runner: ["start", "status", "stop"],
   coding: ["doctor"],
+  inferops: BACKEND_SUBCOMMANDS,
 };
 
 /** What one operator script run produced: its JSON report, or why there is none. */
@@ -82,7 +93,7 @@ export interface OperatorResult {
 }
 
 /** Everything the commands touch outside their own logic, injectable so tests need no stack. */
-export interface LifecycleDeps extends CodingDeps {
+export interface LifecycleDeps extends CodingDeps, BackendDeps {
   root: string;
   env: NodeJS.ProcessEnv;
   isPortListening: (port: number) => Promise<boolean>;
@@ -91,8 +102,8 @@ export interface LifecycleDeps extends CodingDeps {
   fetchImpl: typeof fetch;
   /** Run an operator script from packages/workshop-backend/scripts and parse its JSON. */
   runOperator: (script: string, args: string[], env: NodeJS.ProcessEnv) => OperatorResult;
-  /** Start the stack in the foreground; resolves only in tests, which stub it. */
-  startStack: (stack: LocalStack, passthrough: string[]) => Promise<void>;
+  /** Start the stack in the foreground with `env` (the shell's, plus a backend wiring); resolves only in tests, which stub it. */
+  startStack: (stack: LocalStack, passthrough: string[], env?: NodeJS.ProcessEnv) => Promise<void>;
   signal: (pid: number, signal: NodeJS.Signals) => void;
   processAlive: (pid: number) => boolean;
   sleep: (ms: number) => Promise<void>;
@@ -119,17 +130,17 @@ function runOperatorScript(script: string, args: string[], env: NodeJS.ProcessEn
   return { exitCode: result.status ?? 1, report, stderr: result.stderr.trim() };
 }
 
-function startStackForeground(stack: LocalStack, passthrough: string[]): Promise<void> {
+function startStackForeground(stack: LocalStack, passthrough: string[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const child = spawn(process.execPath,
     [join(ROOT, "scripts", "run-local.ts"), "--port", String(stack.port), ...passthrough],
-    { cwd: ROOT, stdio: "inherit" });
+    { cwd: ROOT, stdio: "inherit", env });
   relayTermination(child);
   // The relay exits this process the way the child did; nothing resolves before that.
   return new Promise(() => {});
 }
 
-function runProcess(argv: string[], env: Record<string, string> | NodeJS.ProcessEnv): ProcessResult {
-  const result = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
+function runProcess(argv: string[], env: Record<string, string> | NodeJS.ProcessEnv, cwd?: string, timeout = 120_000): ProcessResult {
+  const result = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", env, cwd, stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer: 64 * 1024 * 1024 });
   return { exitCode: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? (result.error ? String(result.error.message) : "") };
 }
 
@@ -162,6 +173,9 @@ export const defaultDeps: LifecycleDeps = {
   wranglerLogDir: () => wranglerLogDir(),
   now: Date.now,
   runCli: runProcess,
+  runIn: (argv, env, cwd, timeoutMs) => runProcess(argv, env, cwd, timeoutMs),
+  backendRecord: readBackendRecord,
+  processIdentity: pid => processCommandLine(pid, runProcess),
   launch: launchDetached,
   git: args => runProcess(["git", ...args], process.env),
 };
@@ -181,6 +195,15 @@ type Parsed = {
   yes: boolean;
   lines: number;
   passthrough: string[];
+  /** `start --inferops`: wire the stack to the test InferOps backend. */
+  inferops: boolean;
+  stopgap: boolean;
+  fresh: boolean;
+  purge: boolean;
+  dir?: string;
+  rev?: string;
+  allowLocalConfig: boolean;
+  timeout: number;
 };
 
 class UsageError extends Error {}
@@ -216,6 +239,14 @@ function parse(argv: readonly string[]): Parsed {
         lines: { type: "string", default: "50" },
         "consumer-root": { type: "string" },
         once: { type: "boolean", default: false },
+        inferops: { type: "boolean", default: false },
+        stopgap: { type: "boolean", default: false },
+        fresh: { type: "boolean", default: false },
+        purge: { type: "boolean", default: false },
+        dir: { type: "string" },
+        rev: { type: "string" },
+        "allow-local-config": { type: "boolean", default: false },
+        timeout: { type: "string", default: "180" },
       },
       allowNegative: true,
     }));
@@ -225,9 +256,17 @@ function parse(argv: readonly string[]): Parsed {
   if (!/^\d+$/.test(values.lines)) throw new UsageError("--lines must be a whole number");
   if (values["consumer-root"] !== undefined && !subcommands) throw new UsageError("--consumer-root applies to runner and coding only");
   if (values.once && sub !== "start") throw new UsageError("--once applies to runner start only");
+  if (values.inferops && command !== "start") throw new UsageError("--inferops applies to start only");
+  if (values.stopgap && !(command === "inferops" || (command === "start" && values.inferops))) throw new UsageError("--stopgap applies to start --inferops, inferops env and inferops verify");
+  if (!/^\d+$/.test(values.timeout)) throw new UsageError("--timeout must be a whole number of seconds");
+  const backendOnly = { fresh: values.fresh, purge: values.purge, dir: values.dir !== undefined, rev: values.rev !== undefined, "allow-local-config": values["allow-local-config"], timeout: values.timeout !== "180" };
+  const misplaced = Object.entries(backendOnly).filter(([, set]) => set).map(([name]) => `--${name}`);
+  if (misplaced.length && command !== "inferops") throw new UsageError(`${misplaced.join(", ")} appl${misplaced.length === 1 ? "ies" : "y"} to inferops only`);
   return { command: command as Command, sub, consumerRoot: values["consumer-root"], once: values.once, json: values.json, port: values.port, screen: values.screen,
     approval: values.approval, user: values.user, password: values.password, board: values.board,
-    yes: values.yes, lines: Number(values.lines), passthrough };
+    yes: values.yes, lines: Number(values.lines), passthrough,
+    inferops: values.inferops, stopgap: values.stopgap, fresh: values.fresh, purge: values.purge, dir: values.dir, rev: values.rev,
+    allowLocalConfig: values["allow-local-config"], timeout: Number(values.timeout) };
 }
 
 function credentialArgs(parsed: Parsed, stack: LocalStack): string[] {
@@ -298,7 +337,8 @@ async function status(stack: LocalStack, deps: LifecycleDeps): Promise<Lifecycle
   const probes = ownership === "running"
     ? await probeWorkers(stack.url, workers, deps.fetchImpl)
     : workers.map(worker => ({ ...worker, state: "down" as const }));
-  const inferops = inferOpsConfiguration(localEnv(deps.root, deps.env));
+  const backend = await backendRow(stack, deps);
+  const inferops = { ...inferOpsConfiguration(localEnv(deps.root, deps.env)), ...(backend ? { backend } : {}) };
   const down = probes.filter(probe => probe.state !== "up").map(probe => probe.name);
   const ok = ownership === "running" && down.length === 0 && inferops.missing.length === 0 && !selectionError;
   const report = {
@@ -332,8 +372,20 @@ async function start(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Pr
       headline: `start: port ${stack.port} is busy`,
     };
   }
-  await deps.startStack(stack, parsed.passthrough);
-  return { exitCode: EXIT_OK, report: { ok: true, command: "start", url: stack.url }, headline: `started ${stack.url}` };
+  if (!parsed.inferops) {
+    clearWiring(deps); // a plain start is a mock (or shell-wired) stack again, whatever the backend record said
+    await deps.startStack(stack, parsed.passthrough);
+    return { exitCode: EXIT_OK, report: { ok: true, command: "start", url: stack.url }, headline: `started ${stack.url}` };
+  }
+  const wired = await wireStack(stack, { stopgap: parsed.stopgap }, deps);
+  if ("exitCode" in wired) return { ...wired, report: { ...wired.report, command: "start", url: stack.url } };
+  const { record } = wired;
+  await deps.startStack(stack, parsed.passthrough, { ...deps.env, ...wired.env });
+  return {
+    exitCode: EXIT_OK,
+    report: { ok: true, command: "start", url: stack.url, inferops: { apiUrl: record.apiUrl, wiring: record.wiring, revision: record.revision } },
+    headline: `started ${stack.url} wired to InferOps ${record.apiUrl} (${record.wiring})`,
+  };
 }
 
 const STOP_TIMEOUT_MS = 30_000;
@@ -361,6 +413,7 @@ async function stop(stack: LocalStack, deps: LifecycleDeps): Promise<LifecycleRe
     }
     await deps.sleep(200);
   }
+  clearWiring(deps);
   return { exitCode: EXIT_OK, report: { ok: true, command: "stop", stopped: true, pid: record.pid }, headline: `stopped pid ${record.pid}` };
 }
 
@@ -368,7 +421,13 @@ async function seed(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Pro
   const notListening = await requireOwnStack(stack, deps, "seed");
   if (notListening) return notListening;
   const screen = seedScreenTemplate(deps.root, parsed.screen);
-  const setupArgs = [...credentialArgs(parsed, stack), "--mock-model", "--inferops"];
+  // The wiring `start --inferops` chose decides the InferOps part: under per-person sign-in no
+  // account can be auto-provisioned (the gatekeeper's rule), and under the stopgap the seeded
+  // acme board is the one to bind, not the gatekeeper's mock DEMO board.
+  // Without a recorded wiring, the shell's own variables (as the dev server would read them) decide.
+  const shellMode = inferOpsConfiguration(localEnv(deps.root, deps.env)).mode;
+  const wiring = recordedWiring(deps) ?? (shellMode === "sign-in" ? "sign-in" : shellMode === "live" ? "stopgap" : null);
+  const setupArgs = [...credentialArgs(parsed, stack), "--mock-model", ...(wiring === "sign-in" ? [] : ["--inferops"])];
   if (screen) setupArgs.push("--screen", screen);
   const setup = deps.runOperator("dev-setup.ts", setupArgs, deps.env);
   if (setup.exitCode !== 0 || !setup.report?.ok) {
@@ -381,6 +440,7 @@ async function seed(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Pro
   // The session token is for `pnpm dev:setup` users; a lifecycle report should be safe to share.
   const { browserLogin: _token, ...prepared } = setup.report;
   const verifyArgs = [...credentialArgs(parsed, stack), "--ensure-board"];
+  if (wiring === "stopgap") verifyArgs.push("--board", "inferops://acme.operations/project/board/ENG");
   if (parsed.approval) verifyArgs.push("--approval-scenario");
   const verified = deps.runOperator("dev-verify.ts", verifyArgs, deps.env);
   const ok = verified.exitCode === 0 && verified.report?.ok === true;
@@ -389,6 +449,7 @@ async function seed(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): Pro
     report: {
       ok, command: "seed", url: stack.url,
       screen: screen ?? "skipped: no screen template in inferos.canvas.json (pnpm canvas add-screen)",
+      ...(wiring === "sign-in" ? { inferops: "sign-in: no InferOps account is provisioned; sign in through the browser (Continue with InferOps)" } : {}),
       setup: prepared,
       verify: verified.report ?? { ok: false, error: verified.stderr || "dev-verify.ts failed" },
     },
@@ -419,9 +480,10 @@ async function verify(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): P
   };
 }
 
-function reset(stack: LocalStack, parsed: Parsed): LifecycleResult {
+function reset(stack: LocalStack, parsed: Parsed, deps: LifecycleDeps): LifecycleResult {
   try {
     const { removed } = resetLocalState(stack, { confirm: parsed.yes });
+    removed.push(...resetBackend(deps));
     return {
       exitCode: EXIT_OK,
       report: { ok: true, command: "reset", stateDir: stack.stateDir, removed },
@@ -466,11 +528,16 @@ export async function runLifecycle(argv: readonly string[], deps: LifecycleDeps 
       case "stop": return stop(stack, deps);
       case "seed": return seed(stack, parsed, deps);
       case "verify": return verify(stack, parsed, deps);
-      case "reset": return reset(stack, parsed);
+      case "reset": return reset(stack, parsed, deps);
       case "logs": return logs(parsed, deps);
       case "runner":
       case "coding":
         return runCoding(parsed.command, parsed.sub!, { consumerRoot: parsed.consumerRoot, once: parsed.once }, deps);
+      case "inferops":
+        return runInferopsBackend(stack, {
+          sub: parsed.sub as (typeof BACKEND_SUBCOMMANDS)[number], dir: parsed.dir, rev: parsed.rev, fresh: parsed.fresh, purge: parsed.purge,
+          stopgap: parsed.stopgap, allowLocalConfig: parsed.allowLocalConfig, timeoutSeconds: parsed.timeout, lines: parsed.lines,
+        }, deps);
     }
   })();
   return { ...result, json: parsed.json };
@@ -490,7 +557,11 @@ export interface CliOutput {
 export async function main(argv: readonly string[], deps: LifecycleDeps = defaultDeps, out: CliOutput = console): Promise<number> {
   const { exitCode, report, headline, json } = await runLifecycle(argv, deps);
   if (exitCode === EXIT_USAGE) out.error(headline);
-  else if (!json) out.log(headline);
+  else if (!json && typeof report.shell === "string") {
+    // `inferops env`: export lines alone, so `eval "$(pnpm local inferops env)"` works.
+    out.log(report.shell);
+    return exitCode;
+  } else if (!json) out.log(headline);
   out.log(json ? JSON.stringify(report) : JSON.stringify(report, null, 2));
   return exitCode;
 }
