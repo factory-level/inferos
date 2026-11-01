@@ -1022,6 +1022,12 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       "readDocument still answered, a pending-edit read still composed here");
   });
   it("m. AG-UI explicitly approves one live transition, rejects foreign callers and replays without another revision", async () => {
+    // Step j pointed the stopgap connection at the InferMind workspace for the Wiki steps; a board
+    // binding on acme.operations needs the project workspace back, or the gatekeeper answers from the
+    // mock and refuses the host.
+    if (WIKI_LIVE) {
+      await restartGatekeeper({ INFEROPS_WORKSPACE_ID: LIVE.workspaceId, INFEROPS_WORKSPACE_SLUG: LIVE.workspaceSlug });
+    }
     using approvalSpace = await api.newGadget();
     using connection = await approvalSpace.newGatekeeper(accountId, boardUrl(LIVE.project));
     if (!connection) throw new Error("No live approval binding");

@@ -55,8 +55,8 @@ procedure.
    --synthetic true --capabilities kanban --capabilities wiki`) in workspace `…0011`, then in
    `…0012` `pillar apply` with `{pillars:[{key,title}]}` from that answer, `page create` under the
    field-service Master, `pillar add`, and `page edit --expected-version 1 --body …`. With that,
-   13 of 15 pass and 1 is skipped; step `m` still fails (the gatekeeper refuses the ENG binding in a
-   new gadget, an open InferOS finding). Report that split, not "the live suite failed".
+   the suite passes: 14 of 15, with step `i` skipped unless `INFEROPS_LIVE_REPO_ID` names an enrolled
+   repository. Report the counts, never a bare "the live suite failed".
 6. To prove the backend itself on a machine, run the repeatable proof instead of a hand session:
    `INFEROPS_BACKEND_LIVE=1 node --test scripts/local/inferops.live.test.ts` (its own port, 8797 by
    default; `INFEROPS_BACKEND_LIVE_PORT` changes it). It must pass before any claim that case 1 works.

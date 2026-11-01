@@ -288,12 +288,15 @@ scripts/consumer/fixtures/intake/acme-field-ops.json --schema-version 1 --synthe
 `inferops pillar apply` with `{pillars:[{key,title}…]}` from that answer and its `intakeSha256`,
 `inferops page create --slug field-service-sop --title … --parent-id <the field-service Master>`,
 `inferops pillar add --pillar field-service --document-id <page>`, and `inferops page edit <page>
---expected-version 1 --body …`), `k` and `l` pass: 13 of 15, 1 skipped. Only `m` fails with "No InferOps project ENG is available on acme.operations"
-while the backend's log shows every `GET /project/projects` answered 200 (the refusal is decided
-in the gatekeeper's `getGatekeeperClassFor` → `#hasProject` → `clientFor` for the binding made in
-step m's new gadget). `m` is an InferOS-side finding to take up separately; neither involves this lifecycle. The
-suite's header still says per-person connect cannot complete against a stub-auth InferOps (ADR
-0012); since inferops #2445 it can, as the browser check above shows. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
+--expected-version 1 --body …`), `k` and `l` pass. Step `m` failed on every run with "No InferOps
+project ENG is available on acme.operations" although the backend answered every project list with
+200: carrying the gatekeeper's view in the error showed the stopgap workspace was `knowledge` at that
+point, because step j restarts the gatekeeper with the InferMind workspace for the Wiki steps and
+nothing restored the project workspace, so the board binding fell through to the mock. Step m now
+restores it first (this change); the suite then passes 14 of 15 with step i skipped (it needs an
+enrolled repository, `INFEROPS_LIVE_REPO_ID`). The suite's header still says per-person connect
+cannot complete against a stub-auth InferOps (ADR 0012); since inferops #2445 it can, as the browser
+check above shows. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
 Both directions then ran at once on this machine: this stack and its backend (8787, 18787,
 `inferos_8787`) beside an inferops worktree at offset 15 (`bun run dev up --docker`: API 9580,
 worker 9590, database `inferlab_15`) whose launcher started a second InferOS checkout as its sidecar
