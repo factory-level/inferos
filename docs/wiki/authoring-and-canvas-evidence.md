@@ -33,15 +33,15 @@ Inspected revision: `29b01a024c377b9c37b8754e7001b290e15d1509`. The sibling work
 
 | Evidence | Current behavior | Adapter gap |
 | --- | --- | --- |
-| `_libs/widgets/shared/define-widget.ts` | Registered kind, params schema, contractVersion, supported sizes, permission, freshness and action metadata | InferOS runtime/host integration |
-| `_libs/widgets/shared/inferops-uri.ts` | Stable domain target reference grammar | URI is an identifier, not authorization |
-| `_libs/widgets/shared/resolve.ts` | Repeated-URI dedupe, separate distinct projections | No single bulk database query or bounded load contract proven |
-| `domains/project/shared/board-widget.ts` | project/board visual/text projection, transition action, freshness 60s | Shared host adapter and approval integration |
-| `domains/project/shared/board.dto.ts` | Full board with string revisions; expectedRevision optional | Pagination/deltas and mandatory revision policy for approved writes need decisions |
-| `domains/project/backend/board.ts` | Domain scope/business-rule checks and revision-aware writes | Agree externally supported auth/API/idempotency boundary |
-| `domains/project/client/kanban.tsx` | Existing interactive board with embedded mode | InferOps authFetch/UI dependencies prevent direct drop-in reuse |
-| `domains/project/client/use-project-board.ts` | Polling/focus handling and revision merge protecting pending edits | Cross-widget dedupe and measured payload strategy |
-| `domains/knowledge/backend/canvas-pins.ts` | Personal tenant/workspace/principal-scoped pins | Shared guarded composition is a different contract |
+| `lib/ts/widgets/shared/define-widget.ts` | Registered kind, params schema, contractVersion, supported sizes, permission, freshness and action metadata | InferOS runtime/host integration |
+| `lib/ts/widgets/shared/inferops-uri.ts` | Stable domain target reference grammar | URI is an identifier, not authorization |
+| `lib/ts/widgets/shared/resolve.ts` | Repeated-URI dedupe, separate distinct projections | No single bulk database query or bounded load contract proven |
+| `domain/ts/project/shared/board-widget.ts` | project/board visual/text projection, transition action, freshness 60s | Shared host adapter and approval integration |
+| `domain/ts/project/shared/board.dto.ts` | Full board with string revisions; expectedRevision optional | Pagination/deltas and mandatory revision policy for approved writes need decisions |
+| `domain/ts/project/backend/board.ts` | Domain scope/business-rule checks and revision-aware writes | Agree externally supported auth/API/idempotency boundary |
+| `domain/ts/project/client/kanban.tsx` | Existing interactive board with embedded mode | InferOps authFetch/UI dependencies prevent direct drop-in reuse |
+| `domain/ts/project/client/use-project-board.ts` | Polling/focus handling and revision merge protecting pending edits | Cross-widget dedupe and measured payload strategy |
+| `domain/ts/knowledge/backend/canvas-pins.ts` | Personal tenant/workspace/principal-scoped pins | Shared guarded composition is a different contract |
 
 Existing coordination issues: [operational-space pins #1698](https://github.com/factory-level/inferops/issues/1698), [chat/pinning #1627](https://github.com/factory-level/inferops/issues/1627), [templates #1166](https://github.com/factory-level/inferops/issues/1166), [layout persistence #1152](https://github.com/factory-level/inferops/issues/1152). The InferOS backlog links these; it does not claim to close or replace them.
 
