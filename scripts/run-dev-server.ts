@@ -24,6 +24,9 @@
 //   DEV_CLIENT_PORT=3001              Where Vite listens, for the default PUBLIC_BASE_URL.
 //   DEV_INSPECTOR_PORT=9300           Pass --inspector-port 9300 to wrangler dev instead of letting
 //                                     it probe from 9229, which races a dev server starting beside it.
+//   DEV_PUBLIC_HOST=127.0.0.1:8789    The host people reach the stack through when a proxy fronts it
+//                                     (the factory's Access emulator): every gatekeeper's BASE_URL
+//                                     names it instead of the backend host, so OAuth returns through it.
 
 import {
   existsSync, readFileSync, writeFileSync,
@@ -666,7 +669,7 @@ for (const gk of gatekeepers) {
   const config = parse(readFileSync(srcPath, "utf8"));
   config.build = devBuildConfig(config.build, gk.dir);
   config.vars = config.vars || {};
-  config.vars.BASE_URL = gatekeeperBaseUrl(backendHost, gk.name);
+  config.vars.BASE_URL = gatekeeperBaseUrl(process.env.DEV_PUBLIC_HOST?.trim() || backendHost, gk.name);
 
   const shared = SHARED_GATEKEEPER_CREDS[gk.name];
   if (shared && process.env[shared.id] && process.env[shared.secret]) {
