@@ -279,9 +279,14 @@ with all 19 Workers; in a fresh browser context the login page's "Continue with 
 through `/connect/handoff` with an account, and the setup page's InferOps connect completed
 against the same backend without a second prompt. `pnpm local status` showed the backend row
 (`sign-in`, healthy). With `eval "$(pnpm -s local inferops env --stopgap)"`, `inferops-live.test.ts`
-ran against the backend: one of its tests failed ("m. AG-UI explicitly approves one live
-transition…" with "No InferOps project ENG is available on acme.operations"), the rest passed; the
-cause was not investigated here. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
+ran against the backend three times (twice on a reused database, once after `up --fresh`): 11 of
+its 15 tests pass and 1 is skipped; `k` and `l` fail with "Apply an intake's pillars first
+(pillar.apply)" (the pinned revision's knowledge seeds carry no applied intake, which those two
+Wiki steps expect) and `m` fails with "No InferOps project ENG is available on acme.operations"
+while the backend's log shows every `GET /project/projects` answered 200 (the refusal is decided
+in the gatekeeper's `getGatekeeperClassFor` → `#hasProject` → `clientFor` for the binding made in
+step m's new gadget). Both are InferOS-side findings to take up separately; neither involves this
+lifecycle. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
 Both directions then ran at once on this machine: this stack and its backend (8787, 18787,
 `inferos_8787`) beside an inferops worktree at offset 15 (`bun run dev up --docker`: API 9580,
 worker 9590, database `inferlab_15`) whose launcher started a second InferOS checkout as its sidecar
