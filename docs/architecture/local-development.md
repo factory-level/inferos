@@ -294,8 +294,12 @@ project ENG is available on acme.operations" although the backend answered every
 200: carrying the gatekeeper's view in the error showed the stopgap workspace was `knowledge` at that
 point, because step j restarts the gatekeeper with the InferMind workspace for the Wiki steps and
 nothing restored the project workspace, so the board binding fell through to the mock. Step m now
-restores it first (this change); the suite then passes 14 of 15 with step i skipped (it needs an
-enrolled repository, `INFEROPS_LIVE_REPO_ID`). The suite's header still says per-person connect
+restores it first (this change); the suite then passes 14 of 15 with step i skipped. With a
+repository enrolled in `operations` (`inferops repo create --slug live-suite --git-url
+https://github.com/factory-level/inferos.git --default-base-ref main`, its id exported as
+`INFEROPS_LIVE_REPO_ID`) step i runs too, and after its stale-dispatch expectation was aligned with
+the gatekeeper's post-#188 apply outcomes ("InferOps refused it (STALE_REVISION)") the suite passes
+15 of 15. The suite's header still says per-person connect
 cannot complete against a stub-auth InferOps (ADR 0012); since inferops #2445 it can, as the browser
 check above shows. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
 Both directions then ran at once on this machine: this stack and its backend (8787, 18787,
