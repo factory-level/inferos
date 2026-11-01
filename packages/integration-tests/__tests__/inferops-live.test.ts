@@ -786,7 +786,10 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       method: "PATCH", body: { priority: "medium", expectedRevision: afterCancel.revision },
     }) as { issue: LiveIssue };
     const staleApply = await approveOrRefusal(again.id);
-    expect(staleApply).toMatch(/changed in InferOps after this dispatch was proposed/);
+    // Since #188 a dispatch InferOps refuses as stale is reported as a truthful apply outcome
+    // ("may or may not have been applied: InferOps refused it (STALE_REVISION) …"), not as a
+    // decided refusal; the run list and the revision below are the proof that nothing happened.
+    expect(staleApply).toMatch(/InferOps refused it \(STALE_REVISION\)/);
     expect((await liveRunsOf(issueId)).map(r => r.id)).toEqual([run.id]);
     expect((await liveIssue(issueId)).revision).toBe(changed.revision);
 
@@ -1022,6 +1025,12 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       "readDocument still answered, a pending-edit read still composed here");
   });
   it("m. AG-UI explicitly approves one live transition, rejects foreign callers and replays without another revision", async () => {
+    // Step j pointed the stopgap connection at the InferMind workspace for the Wiki steps; a board
+    // binding on acme.operations needs the project workspace back, or the gatekeeper answers from the
+    // mock and refuses the host.
+    if (WIKI_LIVE) {
+      await restartGatekeeper({ INFEROPS_WORKSPACE_ID: LIVE.workspaceId, INFEROPS_WORKSPACE_SLUG: LIVE.workspaceSlug });
+    }
     using approvalSpace = await api.newGadget();
     using connection = await approvalSpace.newGatekeeper(accountId, boardUrl(LIVE.project));
     if (!connection) throw new Error("No live approval binding");

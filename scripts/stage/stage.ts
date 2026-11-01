@@ -34,8 +34,8 @@ import { ROOT, type StagingConfig } from "../preview/staging-config.ts";
 import { isAccessRedirect, runSmoke, smokeRequest } from "../preview/smoke.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageConfigDigest,
-  stageConfigFileName, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers,
-  stageWorkerName,
+  stageConfigFileName, stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages,
+  stageTiers, stageWorkerHost, stageWorkerName,
 } from "./stage-config.ts";
 import { INFEROPS_GATEKEEPER } from "../dev-server-config.ts";
 import {
@@ -238,20 +238,22 @@ async function deployWorker(
   const targets = parseDeployTargets(existsSync(outputFile) ? readFileSync(outputFile, "utf8") : "");
   if (targets === null) throw new Error(`wrangler reported no deployment for ${config.name}`);
   const problem = deployTargetProblem(config.name as string, targets,
-      pkg.name === "router" ? prepared.stage.hostname : null);
+      stageWorkerHost(prepared.stage, pkg.name));
   if (problem) throw new Error(problem);
 }
 
-/** Without credentials the hostname must answer with an Access login, never the app. */
+/** Without credentials every stage hostname must answer with an Access login, never the app. */
 async function assertBehindAccess(stage: StageDefinition): Promise<void> {
-  const response = await retryWhileDnsPending(() =>
-    smokeRequest(new URL(`https://${stage.hostname}/`), { headers: {}, timeoutMs: 15_000 }));
-  if (!isAccessRedirect(response)) {
-    throw new Error(`https://${stage.hostname}/ answered ${response.status} without credentials: the ` +
-        "stage is deployed but NOT behind Cloudflare Access. Create the Access application now " +
-        "(docs/wiki/stage-deploy.md) before anyone else finds the URL.");
+  for (const hostname of stageHostnames(stage)) {
+    const response = await retryWhileDnsPending(() =>
+      smokeRequest(new URL(`https://${hostname}/`), { headers: {}, timeoutMs: 15_000 }));
+    if (!isAccessRedirect(response)) {
+      throw new Error(`https://${hostname}/ answered ${response.status} without credentials: the ` +
+          "stage is deployed but NOT behind Cloudflare Access. Add the hostname to the Access " +
+          "application now (docs/wiki/stage-deploy.md) before anyone else finds the URL.");
+    }
+    console.log(`https://${hostname}/ redirects to Cloudflare Access without credentials`);
   }
-  console.log(`https://${stage.hostname}/ redirects to Cloudflare Access without credentials`);
 }
 
 async function smoke(prepared: Prepared): Promise<void> {

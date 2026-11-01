@@ -177,7 +177,7 @@
     },
     "inferos": { "gatekeeperApi": [1] },
     "contracts": [
-      { "path": "scripts/consumer/project-board.schema.json", "source": "domains/project/shared/board.dto.ts#BoardResponseSchema" }
+      { "path": "scripts/consumer/project-board.schema.json", "source": "domain/ts/project/shared/board.dto.ts#BoardResponseSchema" }
     ]
   },
   "conformance": {

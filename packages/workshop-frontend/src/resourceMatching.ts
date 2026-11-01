@@ -209,8 +209,8 @@ export function matchesResource(search: string, resource: SupportedResource): bo
 
 /**
  * Normalize a resource URL for sending to the backend. Prepends https:// if no scheme
- * is present (any `scheme://`, such as `inferops://`, is kept), and strips a trailing /*
- * wildcard (which is just "everything under here").
+ * is present (a gatekeeper's own scheme, such as `inferops://`, is kept), and strips a
+ * trailing /* wildcard (which is just "everything under here").
  */
 export function normalizeResourceUrl(url: string): string {
   let normalized = url.trim()

@@ -5,6 +5,8 @@
 // - InferOS is the public client `inferos` (no secret). Its redirect URI is this gatekeeper's
 //   `<BASE_URL>/oauth`, which InferLab registers exactly; `INFERLAB_AUTH_ORIGIN` names the auth
 //   server. With no valid origin configured the vendor offers neither sign-in nor a connect flow.
+//   `INFERLAB_AUTHORIZE_ORIGIN`, when set, is where the browser is sent for `/authorize` instead
+//   (the sign-in proxy, auth-proxy.ts); every server-side call still goes to the InferLab origin.
 // - `InferLabLogin` is one short-lived Durable Object per attempt. It holds the flow's purpose, the
 //   Workshop's callback, the single-use initiation and OAuth nonces, and the PKCE verifier, and
 //   deletes itself by alarm.
@@ -39,6 +41,7 @@ import {
 } from "./inferops-credentials";
 import { endpointFromEnv, listWorkspaceSlugs, type InferOpsEndpoint } from "./http-inferops";
 import { inferLabFetch } from "./edge-header";
+import { handleInferLabAuthProxy } from "./auth-proxy";
 
 const logger = createLogger<{ vendorId: string }>({
   component: "gatekeeper.inferops.login", vendorId: "inferops",
@@ -64,7 +67,7 @@ const CALLBACK_KEY = "callback";
 /** The deployment settings this flow reads. */
 export type InferLabLoginEnv = {
   INFERLAB_AUTH_ORIGIN?: string; BASE_URL?: string; INFEROPS_BASE_URL?: string;
-  INFEROPS_EDGE_SECRET?: string;
+  INFEROPS_EDGE_SECRET?: string; INFERLAB_AUTHORIZE_ORIGIN?: string;
 };
 
 /**
@@ -97,6 +100,17 @@ export function inferLabAuthOrigin(env: InferLabLoginEnv): string | null {
     return null;
   }
   return url.origin;
+}
+
+/**
+ * Where the browser is sent for `/authorize`: `INFERLAB_AUTHORIZE_ORIGIN` when set (the sign-in
+ * proxy, auth-proxy.ts), otherwise the InferLab origin itself. Null when sign-in is off, and also
+ * when the authorize origin is set but malformed, so a typo fails closed rather than falling back.
+ */
+export function inferLabAuthorizeOrigin(env: InferLabLoginEnv): string | null {
+  const origin = inferLabAuthOrigin(env);
+  if (!origin || !env.INFERLAB_AUTHORIZE_ORIGIN?.trim()) return origin;
+  return inferLabAuthOrigin({ INFERLAB_AUTH_ORIGIN: env.INFERLAB_AUTHORIZE_ORIGIN });
 }
 
 /**
@@ -419,20 +433,24 @@ const invalidLink = () => htmlResponse(INVALID_LINK_HTML, 400);
 
 /**
  * Serves the two browser legs of the flow under BASE_URL: `/<attempt>/<nonce>` redirects to InferLab's
- * `/authorize`, and `/oauth` is the registered redirect URI. Returns null for any other path.
+ * `/authorize`, and `/oauth` is the registered redirect URI. A request on the authorize origin is the
+ * sign-in proxy's (auth-proxy.ts). Returns null for any other path.
  */
 export async function handleInferLabLogin(request: Request, env: InferLabLoginEnv,
                                           namespace: LoginNamespace): Promise<Response | null> {
+  const proxied = await handleInferLabAuthProxy(request, env);
+  if (proxied) return proxied;
   const url = new URL(request.url);
   const prefix = basePath(env);
   if (request.method !== "GET" || !url.pathname.startsWith(`${prefix}/`)) return null;
   const segments = url.pathname.slice(prefix.length + 1).split("/");
 
   if (segments.length === 2 && HEX_64.test(segments[1])) {
-    const origin = inferLabAuthOrigin(env);
+    const origin = inferLabAuthorizeOrigin(env);
     if (!origin) {
       return htmlResponse(errorPageHtml("InferLab sign-in is not configured",
-        "Ask the administrator of this deployment to set INFERLAB_AUTH_ORIGIN."), 503);
+        "Ask the administrator of this deployment to check INFERLAB_AUTH_ORIGIN and " +
+        "INFERLAB_AUTHORIZE_ORIGIN."), 503);
     }
     const stub = attemptStub(namespace, segments[0]);
     if (!stub) return invalidLink();

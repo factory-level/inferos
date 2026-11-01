@@ -32,7 +32,7 @@ covers:
   - scripts/check-fast.ts
   - scripts/check-fast.test.ts
   - scripts/check-full.ts
-updated: 2026-10-29
+updated: 2026-11-01
 ---
 
 # Cloudflare-like local development
@@ -53,6 +53,7 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `scripts/vp/run.ts`, `scripts/vp/own-output.ts`, `scripts/vp/concurrency.ts` | The root `pnpm build`/`test`/`clean` runner: `vp run` with a machine-derived concurrency limit, its output captured to temp files and tailed, and termination relayed through `scripts/relay-termination.ts`. |
 | `scripts/local/lifecycle.ts`, `scripts/local/stack.ts` | `pnpm local <command>`: status, start, stop, seed, verify, reset and logs for this checkout's stack, with JSON reports and stable exit codes. |
 | `scripts/local/coding.ts`, `scripts/local/runner.ts` | `pnpm local runner start\|status\|stop` and `pnpm local coding doctor`: the InferOps coding runner for a wrapper (see [local coding workflows](local-coding-workflows.md#runner-lifecycle)). |
+| `scripts/local/inferops.ts` | `pnpm local inferops up\|status\|down\|verify\|env\|logs` and `pnpm local start --inferops`: the test InferOps backend this checkout develops against (see [InferOps test backend](#inferops-test-backend)). |
 | `packages/workshop-backend/scripts/dev-setup.ts` | `pnpm dev:setup`: prepares a running local Workshop (account, onboarding, mock model, InferOps, demo screen). |
 | `packages/workshop-backend/scripts/dev-verify.ts` | `pnpm dev:verify`: readiness over the authenticated RPC, reported as what an agent sees (InferOps account, board read, approval queue). |
 | `packages/workshop-backend/scripts/dev-workshop.ts` | What the two operator scripts share: local-only URL check, the browser's password hash, the RPC connection, and finding the seeded workspace and board connection. |
@@ -115,15 +116,21 @@ This is the Workshop's Cap'n Web Operate chat, not an AG-UI client. The model an
 | Command | What it does | Fails (exit 1) when |
 | --- | --- | --- |
 | `status` | Probes the port and decides whose listener it is: `stack` is `running` only when this checkout's dev-server record is alive and was written for that port, `port-in-use-by-other` when something answers without such a record (an unrelated server on 8787 accepts the connection just the same), and `not-running` otherwise. Only `running` probes every configured Worker through the router (`/`, `/api`, `/gatekeeper/<name>`: any answer is `up`, including a 500 an RPC-only gatekeeper throws for lack of a `fetch()`; a 502/503/504 from the dev proxy is `error`; no answer is `down`). Reports the recorded dev server, the InferOps mode (`mock`, or `live` when `INFEROPS_BASE_URL` is set in the shell, `.dev.vars` or `.env`, naming only which of `INFEROPS_API_TOKEN`/`INFEROPS_WORKSPACE_ID`/`INFEROPS_WORKSPACE_SLUG` are missing, never a value), the state directory and the Wrangler log directory. | Nothing listens, the listener is `port-in-use-by-other` (reported with an `error` naming the port, and never probed), a Worker is not `up`, or a live connection is incomplete. |
-| `start [-- flags]` | Checks the port on both loopback families (`assertLocalPortAvailable`) and then runs `scripts/run-local.ts --port N` in the foreground with the flags after `--`. It is a thin wrapper: the stack is run-local and run-dev-server. | The port is busy (naming this checkout's own dev server when its record owns it). |
+| `start [--inferops [--stopgap]] [-- flags]` | Checks the port on both loopback families (`assertLocalPortAvailable`) and then runs `scripts/run-local.ts --port N` in the foreground with the flags after `--`. It is a thin wrapper: the stack is run-local and run-dev-server. `--inferops` first runs `inferops up` (adopting a running backend), then starts the stack with the sign-in wiring (`INFERLAB_AUTH_ORIGIN` at the backend, `inferops` in `AUTH_GATEKEEPERS`, `INFEROPS_ENABLED=true`), or with `--stopgap` the four connection variables and a freshly minted acme owner bearer; the record keeps which (see [InferOps test backend](#inferops-test-backend)). | The port is busy (naming this checkout's own dev server when its record owns it); with `--inferops`, the backend did not come up, the shell (or `.env.worktree`/`.dev.vars`/`.env`) already wires the gatekeeper, or sign-in was asked of a revision without the stub persona sign-in. |
 | `stop` | Sends SIGTERM to the pid in `.wrangler/local/dev-server.json`, which `run-dev-server.ts` writes at startup and removes on exit, and waits up to 30 s for it to be gone; the dev server's own handlers tear down Wrangler and the watchers. | The process survives the wait, or something listens that this checkout did not record (it is never signalled). |
-| `seed [--screen ID] [--no-approval]` | Runs `dev-setup.ts --mock-model --inferops [--screen ID]` (the screen is the explicit id, else the first screen in `inferos.canvas.json`, else skipped), then `dev-verify.ts --ensure-board [--approval-scenario]`. The session token is dropped from the report. | Nothing listens, the listener is not this checkout's (`stack: "port-in-use-by-other"`, no operator runs), or either operator fails; the report names the step. |
+| `seed [--screen ID] [--no-approval]` | Runs `dev-setup.ts --mock-model --inferops [--screen ID]` (the screen is the explicit id, else the first screen in `inferos.canvas.json`, else skipped), then `dev-verify.ts --ensure-board [--approval-scenario]`. The session token is dropped from the report. While a backend started by `start --inferops` runs, the wiring it recorded decides the InferOps part: under sign-in `--inferops` is left out (no account can be auto-provisioned beside an auth origin; the report says so) and under the stopgap the board bound is `inferops://acme.operations/project/board/ENG`, not the mock DEMO board. | Nothing listens, the listener is not this checkout's (`stack: "port-in-use-by-other"`, no operator runs), or either operator fails; the report names the step. |
 | `verify [--board URL]` | Runs `dev-verify.ts` and passes its report through. | The stack is not this checkout's running one (as for `seed`), or any readiness step fails. |
-| `reset --yes` | Deletes `.wrangler/state` (Wrangler's Durable Object, KV, R2 and cache state; the dev server starts Wrangler from the repo root, so every Worker's state lives there) and the dev-server record, nothing else. | `--yes` is missing, or the recorded dev server is still running. |
+| `reset --yes` | Deletes `.wrangler/state` (Wrangler's Durable Object, KV, R2 and cache state; the dev server starts Wrangler from the repo root, so every Worker's state lives there) and the dev-server record, plus a stopped test backend's record and log under `.inferops/` (never its database or checkout; a running backend keeps both). | `--yes` is missing, or the recorded dev server is still running. |
 | `runner start\|status\|stop [--consumer-root DIR] [--once]` | The local InferOps coding runner of a wrapper, detached and recorded in `.inferos/state/runner/` ([local coding workflows](local-coding-workflows.md#runner-lifecycle)). | Start: refused (flag off, settings missing, not ready). Status: not running, not ready or paused. Stop: it survives 30 s. |
 | `coding doctor [--consumer-root DIR]` | Whether that runner may start: flag, allowlist, settings, child environment, CLI version, Codex sign-in, pause file. | Any check fails. |
 | `factory up <sandbox>\|status\|doctor [sandbox]\|down` | The software factory's sandboxes (`scripts/local/factory.ts`, parsed by itself before the rest of `lifecycle.ts`): this stack plus the InferOps stack in its own checkout, floci-gcp, tool images or smoke credentials by name ([software factory](factory.md)). | `up`: a credential is present, a port is foreign, or a service is not healthy before `--timeout`. `doctor`/`status`: any check FAILs. `down`: a started process survives. |
 | `logs [--lines N]` | Reports Wrangler's log directory (`WRANGLER_LOG_PATH`, else `logs/` under its global config directory, which is per user, not per checkout) and the newest file's tail. The terminal running `start` holds the request log. | Never. |
+| `inferops up [--dir DIR] [--rev SHA] [--fresh] [--timeout S] [--allow-local-config]` | Runs the pinned InferOps API from source beside this stack: see [InferOps test backend](#inferops-test-backend). | A credential is set in the shell, a stranger holds the port, the checkout cannot be resolved or installed, Postgres cannot be reached or started, a database step fails (the report names it), or the API is not ready within `--timeout` (default 180 s; it is stopped again). |
+| `inferops status` | The backend's ownership (`running`, `not-running`, `port-in-use-by-other`, by its record and port like the stack's), its pid, revision, database, checkout and `/health/ready`. | Anything but a running, healthy backend of this checkout. |
+| `inferops down [--purge]` | SIGTERM to the recorded process group (only while its command line still names the recorded checkout), SIGKILL after 30 s; removes the record. `--purge` also drops this stack's `inferos_<port>` database and removes every managed worktree under `.inferops/`, record or not. The database and checkout otherwise survive, so the next `up` reuses them. | The process survives the wait, a stranger holds the port (never signalled; a stale record is still removed), or the recorded database is not an `inferos_<port>` one. |
+| `inferops verify` | Headless proof against the API, without InferOS: `/health/ready`; the acme `ENG` board read with an `owner` bearer from `POST /auth/inferlab-login` (the stopgap path); and the `GROK` board read through the stub SSO dance InferOS's gatekeeper runs in a browser (`GET /authorize` with this stack's `redirect_uri`, the CSRF cookie, `POST /authorize/persona` as `grokbot-owner`, the PKCE exchange at `POST /auth/token`), which fails here, not in the browser, when `auth.sso.inferosOrigins` or the callback path is wrong. A revision without persona sign-in reports that path skipped. | The backend is not running, or a step fails (the report names `health`, `stopgap` or `sign-in`). |
+| `inferops env [--stopgap]` | Prints the wiring as `export` lines, and nothing else without `--json`, so `eval "$(pnpm -s local inferops env)"` takes it: the sign-in variables, or with `--stopgap` the four connection variables with a freshly minted owner bearer plus the `INFEROPS_LIVE_*` set the opt-in `inferops-live.test.ts` reads. | The backend is not running, or the bearer cannot be minted. |
+| `inferops logs [--lines N]` | The tail of `.inferops/logs/inferops.log`: every database step's output and the API's own log. | Never. |
 
 A generated wrapper's `pnpm local` runs this operator from its pinned submodule, with the wrapper's `local.port`; `start` adds `--consumer-root <wrapper>` after the wrapper's own startup refusals, and `seed` defaults `--screen` to the wrapper's first screen template, and `runner`/`coding` get `--consumer-root <wrapper>` ([consumer configuration](consumer-configuration.md#data-and-control-flow), [walkthrough](../wiki/consumer-bootstrap.md#wrapper-pnpm-local)).
 
@@ -164,6 +171,159 @@ The dev server writes the selection into its `.wrangler/local/dev-server.json` r
   - **How it deletes.** The only deletion is `git worktree remove [--force] <path>`. Nothing in `wt` deletes recursively.
   - **Tests.** `scripts/wt/wt.test.ts` runs these refusals against a throwaway clone with a sibling worktree as the target: `..`, `../..`, `../<sibling>`, an absolute path, `a/b`, `a\b`, an empty name, a dotted name, a symlink in `.worktrees/`, a symlinked `.worktrees/`, a registry entry pointing outside or at another child, and the overlay write a tampered entry must not get.
 - **Doctor.** `wt doctor` compares the registry with `git worktree list` (a tampered entry counts as stale), flags `.worktrees/` entries `wt` did not create, checks each overlay against its registry block and each secrets link against its target, warns on secrets readable by other users and reports duplicate blocks. It is read-only apart from `--fix`, which edits only the registry. `--build` runs `vp run --cache @gadgets/typed-storage#build` in the current checkout only, never in another worktree, and reads `vp run --last-details` for hit or miss.
+
+## InferOps test backend
+
+InferOS features are developed against a real InferOps, not the gatekeeper's demo data, and the
+backend to develop against is the one the gatekeeper is pinned to: `scripts/local/inferops.ts`
+runs the InferOps API from source at `compatibility.provider.revision` in
+`custom-gatekeepers/gatekeeper-inferops/connection.json` (the same revision
+`scripts/consumer/project-board.schema.json` was generated from). Moving that pin is a contract
+step (regenerate the schema in the same change); `--rev <sha>` or `--dir <checkout>` run another
+revision for cross-repo work, and the report records which.
+
+- **Checkout.** By default a detached git worktree of the sibling inferops repository
+  (`INFEROPS_REPO`, else `inferops` beside this repository's main checkout) at the pin, under this
+  checkout's gitignored `.inferops/checkout-<sha12>/`, created once and installed once with
+  `bun install --frozen-lockfile --ignore-scripts` (`--ignore-scripts` keeps inferops' `prepare`
+  from installing git hooks into the developer's own clone). A revision the sibling does not have
+  is fetched first. That worktree has no `config/local.json` and is never edited, so nothing in it
+  can carry a credential; inferops' own worktree discovery ignores it (no offset recorded).
+  `--dir` runs an existing checkout as it is, whose `config/local.json` then applies; a checkout
+  holding `config/gcp-credentials.json` is refused unless `--allow-local-config` says so knowingly.
+- **No bootstrap, no credential.** The API boots with `NODE_CONFIG_ENV=factory`, an inferops
+  config environment that has no secret layer, so inferops runs its stub auth on `config/default.js`
+  and decrypts nothing (`lib/ts/backend/config/secret-layer.ts` reports the layer `absent`, which
+  is allowed off Cloud Run). The child environment is the shell minus what pnpm injects, a fixed
+  list of names inferops' turbo `globalEnv` reads (`NODE_ENV`, `AUTH_MODE`, `WORKTREE_OFFSET`,
+  `API_PORT`, `DATABASE_URL`, `DB_SCHEMA`, `PGBOSS_SCHEMA`, `LOG_LEVEL`, `CONFIG_AUDIT`,
+  `NODE_CONFIG*`, `GCP_KMS_KEY`), every name the checkout's own
+  `config/custom-environment-variables.json` maps into its cascade, and
+  `GOOGLE_APPLICATION_CREDENTIALS` (`HOME` stays, so gcloud's well-known ADC file is reachable in
+  principle; nothing in the `factory` cascade asks for it). Before anything starts, a credential guard refuses a shell
+  holding cloud, deploy or model-provider credentials, by name only (the same names as the coding
+  runner's guard plus the cloud ones draft #286 listed).
+- **Ports and database.** The API listens on this stack's port + 10000 (8787 → 18787; a
+  `pnpm wt` block port 88xx → 188xx, which keeps the block's last two digits, so it never meets an
+  inferops worktree's `8080|8000|8001|8090|8081|30xx + offset × 100` bands nor inferops' own InferOS
+  sidecar at `8787 + offset × 100`). The database is `inferos_<stack port>` on the shared local
+  Postgres (`postgres://postgres:postgres@localhost:5432`, the inferops compose stack;
+  `INFEROPS_PG_ADMIN_URL` overrides; the password travels to `psql` as `PGPASSWORD`, never in
+  argv), beside inferops' `inferlab_<offset>` databases. When nothing listens there, `up` starts the
+  `postgres` service of the **sibling repository's** `docker/compose.dev.yml` (`INFEROPS_REPO`, else
+  `inferops` beside the main checkout) under inferops' compose project name, so the container is the
+  one inferops' own `platform:up` would start, with its bind mounts in that repository; it never
+  runs compose from the removable managed worktree, and refuses with the `bun run dev up` remedy when
+  that file is missing. One backend per stack port; a stranger on the backend port is reported as
+  `port-in-use-by-other` and never signalled, and a recorded pid whose command line no longer names
+  the recorded checkout (a pid reused after a reboot) is a stale record, never signalled either. The
+  only databases ever dropped match `inferos_<port>`.
+- **What `up` does.** Guard, resolve the checkout, ensure Postgres, then: reuse the database when
+  it exists and was prepared at this revision (recorded in `.inferops/db-<name>.json`), else, or
+  with `--fresh`, `DROP DATABASE … WITH (FORCE)`, `CREATE DATABASE`, `init-db.sql`; always
+  `migrate`, `seed` (acme persona matrix, the `ENG` board) and `seed:reserved` with throwaway keys
+  (the reserved tenants, among them grokbot's `GROK` board), run directly with `bun` from the
+  migration package as its own scripts name them (no turbo: no daemon, no prefixes). Every step is
+  bounded (15 min) and appended to `.inferops/logs/inferops.log`; the first failure stops `up`
+  before the API starts. The API is `bun <shared-api>/src/main.ts` in its own process group with
+  `API_PORT`, `DATABASE_URL`, `VERSION=inferos-local` and `NODE_CONFIG={"auth":{"sso":
+  {"inferosOrigins":["http://localhost:<stack port>","http://127.0.0.1:<stack port>"]}}}`, which
+  registers this stack as the `inferos` SSO client's redirect origin in both loopback spellings
+  (the gatekeeper builds its `redirect_uri` from `VITE_BACKEND_HOST`). Readiness is `GET /health/ready` answering 200, polled
+  every 2 s; only then is `.inferops/backend.json` (0600; pid, ports, database, checkout,
+  revision, log, later the wiring) written. An `up` while the backend runs adopts it, unless
+  `--fresh`, another `--rev` or another `--dir` was asked for, which needs `down` first. A fresh
+  rebuild forgets the old stamp before it drops the database, so an interrupted rebuild is redone.
+- **Two wirings, exclusive.** The gatekeeper auto-provisions an account only while no auth origin
+  is configured, so per-person sign-in and the stopgap connection cannot be set together.
+  `start --inferops` (default) sets `INFERLAB_AUTH_ORIGIN` to the backend and adds `inferops` to
+  `AUTH_GATEKEEPERS`; the API endpoint derives from the origin, so `INFEROPS_BASE_URL` stays
+  unset (set, `status` would call the stack misconfigured). In the browser, "Continue with
+  InferOps" opens the backend's stub `/authorize` page, which lists the reserved sign-in personas:
+  `grokbot-owner`, `grokbot-power`, `grokbot-operate` and the canary, internal and load seats. None
+  of them holds the acme workspace, so the board a signed-in person reaches is
+  `inferops://grokbot.operations/project/board/GROK`. `start --inferops --stopgap` instead mints an
+  acme `owner` bearer (`POST /auth/inferlab-login`) and sets
+  `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` (`…0011`) and
+  `INFEROPS_WORKSPACE_SLUG=operations`: the ambient account then reads
+  `inferops://acme.operations/project/board/ENG` headless (`pnpm local seed`, `pnpm local verify
+  --board …`, `dev-verify.ts`). Sign-in needs a revision at or after inferops `3cf153566`
+  (#2445, stub-mode reserved-persona sign-in on the central SSO page); an older `--rev` is refused
+  for sign-in with that floor named, and works with `--stopgap`. The bearer reaches the gatekeeper
+  the way every stopgap token does: `run-dev-server.ts` parks it, mode 0600, in
+  `custom-gatekeepers/gatekeeper-inferops/.dev.vars` for the run and removes it on exit; after a
+  crash it can stay there, and because that file wins over a generated value, `start --inferops`
+  reports it (`existingWiring` reads that file too) instead of silently running on a stale bearer.
+  `stop` and a plain `start` forget the recorded wiring; without one, `seed` follows the shell's own
+  variables.
+- **The live suite.** `eval "$(pnpm -s local inferops env --stopgap)"` (`-s`: pnpm 10 prints a
+  script banner on stdout that `eval` would run) exports `INFEROPS_LIVE_*`
+  (acme, `ENG`, the `CPOL` and `CODE` projects the suite names, the `knowledge` Wiki workspace), so
+  `pnpm --filter @gadgets/integration-tests test:run -- inferops-live` runs against this backend.
+  The bearer is a 24 h stub-auth token; `env` prints it and writes nothing itself.
+- **Beside inferops' own sandboxes.** inferops has the inverse: `bun run dev inferos --path` makes
+  its `bun run dev up` start an InferOS checkout beside its fleet. An inferops worktree (its API at
+  `8080 + offset × 100`, database `inferlab_<offset>`, sidecar InferOS at `8787 + offset × 100`) and
+  an InferOS worktree with its test backend run on one machine at once without sharing a port, a
+  database or a checkout. Neither direction has a CI proof: it would need both repositories
+  checked out.
+
+Checked on 2026-11-01 from this checkout (port 8787) against the sibling inferops at the pin
+`3dae0f50d`, in a shell reduced to `PATH`, `HOME` and `LANG`: the first `pnpm local inferops up`
+took 15.6 s end to end (migrate 6.8 s, seed 0.7 s, reserved seed 2.3 s, API ready about 1 s after
+launch; the managed worktree and its `bun install` were already in place from an earlier spike, which
+added about 50 s once), and the next `up` after `down` reused the database in 10.1 s (migrate
+1.0 s). `inferops verify` read `ENG` (5 states, 6 issues) by bearer and `GROK` (5 states, 4
+issues) through the PKCE persona sign-in. `pnpm local start --inferops -- --no-ui-watchers` came up
+with all 19 Workers; in a fresh browser context the login page's "Continue with InferOps" opened
+`http://localhost:18787/authorize` listing the eight reserved personas, Grokbot Owner returned
+through `/connect/handoff` with an account, and the setup page's InferOps connect completed
+against the same backend without a second prompt. `pnpm local status` showed the backend row
+(`sign-in`, healthy). With `eval "$(pnpm -s local inferops env --stopgap)"`, `inferops-live.test.ts`
+ran against the backend: on the bare seeds 11 of its 15 tests pass and 1 is skipped, with `k` and
+`l` failing on "Apply an intake's pillars first (pillar.apply)", the prerequisite the suite's own
+header names. Met through the InferOps CLI against the backend (`INFEROPS_ENDPOINT` at the API,
+`inferops login --persona owner`; `inferops intake apply --file
+scripts/consumer/fixtures/intake/acme-field-ops.json --schema-version 1 --synthetic true
+--capabilities kanban --capabilities wiki` in `operations`; then in `knowledge` (`…0012`)
+`inferops pillar apply` with `{pillars:[{key,title}…]}` from that answer and its `intakeSha256`,
+`inferops page create --slug field-service-sop --title … --parent-id <the field-service Master>`,
+`inferops pillar add --pillar field-service --document-id <page>`, and `inferops page edit <page>
+--expected-version 1 --body …`), `k` and `l` pass. Step `m` failed on every run with "No InferOps
+project ENG is available on acme.operations" although the backend answered every project list with
+200: carrying the gatekeeper's view in the error showed the stopgap workspace was `knowledge` at that
+point, because step j restarts the gatekeeper with the InferMind workspace for the Wiki steps and
+nothing restored the project workspace, so the board binding fell through to the mock. Step m now
+restores it first (this change); the suite then passes 14 of 15 with step i skipped. With a
+repository enrolled in `operations` (`inferops repo create --slug live-suite --git-url
+https://github.com/factory-level/inferos.git --default-base-ref main`, its id exported as
+`INFEROPS_LIVE_REPO_ID`) step i runs too, and after its stale-dispatch expectation was aligned with
+the gatekeeper's post-#188 apply outcomes ("InferOps refused it (STALE_REVISION)") the suite passes
+15 of 15. The suite's header still says per-person connect
+cannot complete against a stub-auth InferOps (ADR 0012); since inferops #2445 it can, as the browser
+check above shows. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
+Both directions then ran at once on this machine: this stack and its backend (8787, 18787,
+`inferos_8787`) beside an inferops worktree at offset 15 (`bun run dev up --docker`: API 9580,
+worker 9590, database `inferlab_15`) whose launcher started a second InferOS checkout as its sidecar
+on 10287 with the stopgap wiring. `inferops sandbox status` in that worktree showed its `inferos`
+row `ok` with session `stopgap`/`live` against 9580; `pnpm local status --port 10287` in that
+checkout showed 19/19 Workers and `pnpm local seed` there connected the account as "InferOps
+(localhost:9580)"; here, `pnpm local status` kept its backend row and `inferops verify` still read
+`ENG` and `GROK` from 18787. No port, database or checkout was shared. Ctrl+C on the inferops
+launcher stopped its fleet and sidecar in 14 s and `stop` + `inferops down` here freed the rest.
+
+The dependency on inferops is a contract, not a code import: its `migration/package.json` scripts
+`migrate`, `seed` and `seed:reserved` (and the keys the reserved seed reads), the `init-db.sql`
+bootstrap, the `@inferlab/shared-api` workspace's `src/main.ts`, `API_PORT`/`DATABASE_URL`/`NODE_CONFIG`
+in its cascade, the `factory` environment having no secret layer, `/health/ready`,
+`/auth/inferlab-login` and the central SSO routes. Both the current and the pre-rename layout
+(`apps/_shared-api`, `db/init-db.sql`) are found. `scripts/local/inferops.test.ts` runs the
+commands against fakes and `verify` against an in-process stand-in for those routes;
+`INFEROPS_BACKEND_LIVE=1 node --test scripts/local/inferops.live.test.ts` is the repeatable local
+proof against the real sibling repository (its own stack port, 8797 by default, so a developer's
+8787 stack is never touched; up, status, adoption, verify, env, down; about 16 s once the managed
+worktree exists). It is skipped without the flag and is what to run before claiming the backend
+works on a machine.
 
 ## Readiness as an agent sees it
 
@@ -255,6 +415,8 @@ The dev server resolves these before it writes the per-Worker dev configs:
 - The cloud smoke recipe has not been run against a Cloudflare deployment, and no CI job runs it; Cloudflare Access, real OAuth provider registration and deployed bindings remain unproven. A wrapper's own gatekeeper is not booted by the router-parity suite (it needs a generated wrapper and its build); its routing rests on the same `GATEKEEPER_<NAME>` rule and on `scripts/consumer/gatekeepers.test.ts`.
 - Offline interception of external traffic is enforced in the integration harness, where Worker subrequests pass through Node. `pnpm local verify` against a running Wrangler cannot intercept the Workers' own traffic; it reports the configured mode instead.
 - `seed` creates the demo canvas screen only when `inferos.canvas.json` declares one; the synthetic board itself comes from the InferOps gatekeeper's mock data, which is the "mock business operations" the MVP note on #10 excludes from the final walkthrough.
+- The factory `dev` sandbox (`scripts/local/factory.ts`, [software factory](factory.md)) runs this test backend by default and wires InferOS to it with the same sign-in wiring; its checkout and image modes remain opt-in for a bootstrapped checkout or a prebuilt image. The `local-inferops-backend` skill is the runbook agents follow for the backend alone, `factory-sandboxes` for the sandbox around it.
+- The test InferOps backend is the API alone: no InferOps web clients and no pg-boss worker. The gatekeeper's routes (board, issues, transitions, approvals, Wiki) complete without the worker; Operate cards, webhook delivery and the email lane do not run there. `pnpm local inferops verify` proves the API as the gatekeeper calls it, not the browser flow end to end; the browser step stays a person's check.
 
 ## Open Questions
 

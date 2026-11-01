@@ -39,6 +39,7 @@ import {
   configuredWorkers, probeWorkers, resolveLocalStack, stackOwnership,
   type DevServerRecord, type LocalStack,
 } from "./stack.ts";
+import { backendPorts, markWiring, processCommandLine, readBackendRecord, runInferopsBackend, wiringEnv, type BackendDeps } from "./inferops.ts";
 
 export const SANDBOXES = ["dev", "infra", "verify", "stage-probe"] as const;
 export type Sandbox = (typeof SANDBOXES)[number];
@@ -174,7 +175,23 @@ export type FactoryDeps = Pick<CodingDeps, "root" | "env" | "runCli" | "launch" 
   isPortListening: (port: number) => Promise<boolean>;
   devServerRecord: (recordPath: string) => DevServerRecord | null;
   fetchImpl: typeof fetch;
+  /** The test backend's record and process identity (scripts/local/inferops.ts); the lifecycle's defaults when absent. */
+  backendRecord?: BackendDeps["backendRecord"];
+  processIdentity?: BackendDeps["processIdentity"];
 };
+
+/** The pinned test backend's dependencies, from the factory's: git runs through `runCli`. */
+function backendDepsOf(deps: FactoryDeps): BackendDeps {
+  return {
+    root: deps.root, env: deps.env, runIn: deps.runIn, runCli: deps.runCli, launch: deps.launch, signal: deps.signal,
+    processAlive: deps.processAlive, sleep: deps.sleep, now: deps.now, isPortListening: deps.isPortListening, fetchImpl: deps.fetchImpl,
+    git: args => deps.runCli(["git", ...args], asStringEnv(deps.env)),
+    backendRecord: deps.backendRecord ?? readBackendRecord,
+    processIdentity: deps.processIdentity ?? (pid => processCommandLine(pid, deps.runCli)),
+  };
+}
+
+const BACKEND_OPTIONS = { fresh: false, purge: false, stopgap: false, allowLocalConfig: false, timeoutSeconds: 180, lines: 50 } as const;
 
 /** One factory command's outcome, shaped like the rest of `pnpm local`. */
 export interface FactoryResult {
@@ -186,7 +203,14 @@ export interface FactoryResult {
 /** Where the services of a sandbox are, from flags and the environment. */
 export interface FactoryConfig {
   inferos: LocalStack;
-  /** The InferOps checkout `bun run dev up` runs in (image mode: migrate + seed run there); unset means the inferops service FAILs. */
+  /**
+   * Where the dev sandbox's InferOps comes from. `pinned` (the default, neither `--inferops-dir` nor
+   * `--inferops-image`): the test backend `pnpm local inferops up` runs from source at the gatekeeper's
+   * pinned revision, on this stack's port + 10000 (scripts/local/inferops.ts). `checkout`: that
+   * checkout's own `bun run dev up`. `image`: a prebuilt API image.
+   */
+  inferopsMode: "pinned" | "checkout" | "image";
+  /** The InferOps checkout `bun run dev up` runs in (image mode: migrate + seed run there). */
   inferopsDir: string | null;
   /** Image mode: the InferOps API image to run (best by digest); null runs `bun run dev up`. */
   inferopsImage: string | null;
@@ -232,14 +256,17 @@ export function factoryConfig(root: string, env: NodeJS.ProcessEnv, inferopsDir?
   if (!Number.isInteger(offset) || offset < 0 || offset > 500) throw new Error("FACTORY_INFEROPS_OFFSET must be a whole number from 0 to 500");
   const flociPort = Number(env.FACTORY_FLOCI_PORT ?? 4588);
   if (!Number.isInteger(flociPort) || flociPort < 1 || flociPort > 65535) throw new Error("FACTORY_FLOCI_PORT must be a TCP port");
-  const inferopsUrl = env.FACTORY_INFEROPS_URL ?? `http://127.0.0.1:${8080 + offset * 100}`;
+  const inferos = resolveLocalStack(root, [], env);
+  const inferopsMode = image !== null ? "image" : dir ? "checkout" : "pinned";
+  const inferopsUrl = env.FACTORY_INFEROPS_URL ?? (inferopsMode === "pinned" ? backendPorts(inferos.port).apiUrl : `http://127.0.0.1:${8080 + offset * 100}`);
   if (inferopsConnect && !isLoopbackHttp(inferopsUrl)) {
     throw new Error(`--inferops-connect connects only to an InferOps on loopback over http; ${inferopsUrl} is not one`);
   }
   const accessEmulatorPort = Number(env.FACTORY_ACCESS_EMULATOR_PORT ?? 8789);
   if (!Number.isInteger(accessEmulatorPort) || accessEmulatorPort < 1024 || accessEmulatorPort > 65535) throw new Error("FACTORY_ACCESS_EMULATOR_PORT must be a TCP port from 1024 to 65535");
   return {
-    inferos: resolveLocalStack(root, [], env),
+    inferos,
+    inferopsMode,
     inferopsDir: dir ? resolve(dir) : null,
     inferopsImage: image,
     inferopsDb,
@@ -270,10 +297,9 @@ function isLoopbackHttp(url: string): boolean {
  * password form. No token: every person brings their own session, and the stopgap stays unset.
  */
 export function inferopsConnectEnv(inferopsUrl: string, env: NodeJS.ProcessEnv): Record<string, string> {
-  const origin = new URL(inferopsUrl).origin;
-  const vendors = (env.AUTH_GATEKEEPERS ?? "").split(",").map(vendor => vendor.trim()).filter(Boolean);
-  if (!vendors.includes("inferops")) vendors.push("inferops");
-  return { INFERLAB_AUTH_ORIGIN: origin, INFEROPS_BASE_URL: origin, AUTH_GATEKEEPERS: vendors.join(",") };
+  // The lifecycle's own sign-in wiring (scripts/local/inferops.ts): the API endpoint derives from the
+  // auth origin, so no base URL rides beside it, and no stopgap token is set.
+  return wiringEnv({ mode: "sign-in", apiUrl: new URL(inferopsUrl).origin }, env);
 }
 
 /** The `NODE_CONFIG` layer that lets InferOps' central auth redirect back to the InferOS at each of `inferosUrls`. */
@@ -301,7 +327,7 @@ export function accessFrontEnv(emulatorUrl: string): Record<string, string> {
 export interface SandboxState {
   sandbox: Sandbox;
   startedAt: string;
-  services: Partial<Record<ServiceName | "access", { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean; url?: string; inferops?: "mock" | "connected"; inferopsUrl?: string; upstream?: string; tokenFile?: string }>>;
+  services: Partial<Record<ServiceName | "access", { pid?: number; container?: string; image?: string; database?: string; log?: string; startedByFactory: boolean; url?: string; inferops?: "mock" | "connected"; inferopsUrl?: string; upstream?: string; tokenFile?: string; /** The pinned test backend (`pnpm local inferops`), stopped through the lifecycle. */ backend?: "pinned" }>>;
 }
 
 export const stateFile = (root: string) => join(root, ".factory", "sandbox.json");
@@ -381,8 +407,8 @@ async function inferopsHealth(config: FactoryConfig, deps: FactoryDeps): Promise
   const url = `${config.inferopsUrl}/health/ready`;
   const { status, body } = await getJson(url, deps);
   const ready = status === 200 && readyBodyOk(body);
-  const configured = config.inferopsImage ? `image ${config.inferopsImage} on database ${config.inferopsDb}`
-    : config.inferopsDir ? `checkout ${config.inferopsDir}` : "no InferOps checkout configured (--inferops-dir or FACTORY_INFEROPS_DIR)";
+  const configured = config.inferopsMode === "image" ? `image ${config.inferopsImage} on database ${config.inferopsDb}`
+    : config.inferopsMode === "checkout" ? `checkout ${config.inferopsDir}` : "the pinned test backend (pnpm local inferops up, scripts/local/inferops.ts)";
   return {
     name: "service:inferops", status: ready ? "READY" : "FAIL",
     detail: ready ? `${url} answered 200 (${configured})`
@@ -828,6 +854,21 @@ async function startServices(sandbox: Sandbox, config: FactoryConfig, deps: Fact
         const started = startInferopsImage(config, deps, log);
         problems.push(...started.problems);
         if (started.service) state.services.inferops = started.service;
+      } else if (config.inferopsMode === "pinned") {
+        // The default: the test backend at the gatekeeper's pinned revision, brought up by the lifecycle
+        // (its own readiness wait, record and ownership rules), on this stack's port + 10000.
+        const brought = await runInferopsBackend(config.inferos, { sub: "up", ...BACKEND_OPTIONS }, backendDepsOf(deps));
+        if (brought.exitCode !== 0) {
+          problems.push(`inferops: ${String(brought.report.error ?? brought.headline)}`);
+        } else {
+          state.services.inferops = {
+            pid: brought.report.pid as number | undefined, log: brought.report.log as string | undefined, url: brought.report.apiUrl as string,
+            startedByFactory: brought.report.reused !== true, backend: "pinned",
+          };
+          // InferOS was launched (or adopted) before this backend existed; its record learns the wiring
+          // the same way `pnpm local start --inferops` would record it.
+          if (config.inferopsConnect && state.services.inferos?.inferops === "connected") markWiring(backendDepsOf(deps), "sign-in");
+        }
       } else if (!config.inferopsDir) {
         problems.push("inferops: no InferOps checkout configured (--inferops-dir or FACTORY_INFEROPS_DIR); not started");
       } else if (!existsSync(join(config.inferopsDir, "scripts", "dev.mjs"))) {
@@ -935,6 +976,10 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
     } else if (service.container) {
       const removed = deps.runCli(["docker", "rm", "-f", service.container], dockerEnv(deps));
       (removed.exitCode === 0 ? stopped : failed).push(name);
+    } else if (service.backend === "pinned") {
+      // The lifecycle owns the backend's record and ownership rules; a reused pid is never signalled.
+      const result = await runInferopsBackend(resolveLocalStack(deps.root, [], deps.env), { sub: "down", ...BACKEND_OPTIONS }, backendDepsOf(deps));
+      (result.exitCode === 0 ? stopped : failed).push(name);
     } else if (service.pid !== undefined && !deps.processAlive(service.pid)) {
       // Already gone: never signal a group id the kernel may have handed to someone else.
       exited.push(name);
@@ -959,6 +1004,7 @@ async function down(deps: FactoryDeps): Promise<FactoryResult> {
 
 export const FACTORY_USAGE = `Usage: pnpm local factory <up <sandbox>|status|doctor [sandbox]|down|stage-smoke> [--json] [--inferops-dir DIR] [--inferops-image REF] [--inferops-connect] [--access-emulator] [--stage-url URL] [--timeout SECONDS]
   sandboxes: ${SANDBOXES.join(", ")}
+  InferOps: by default the pinned test backend (pnpm local inferops up, this stack's port + 10000); --inferops-dir runs that checkout's bun run dev up; --inferops-image runs a prebuilt API image
   --access-emulator: up only; the local Cloudflare Access emulator fronts InferOS (FACTORY_ACCESS_EMULATOR_PORT, 8789)
   stage-smoke: doctor stage-probe, then (when READY) the scripted smoke scripts/ci/stage-smoke.ts`;
 

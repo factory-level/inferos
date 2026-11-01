@@ -141,29 +141,37 @@ export const INFEROPS_CONNECTION_VARS = [
 
 /** How the InferOps gatekeeper is configured. Reports which variables are set, never their values. */
 export interface InferOpsConfiguration {
-  /** `mock`: the bundled demo board. `live`: an InferOps instance named by `INFEROPS_BASE_URL`. */
-  mode: "mock" | "live";
-  /** The live instance's host, when configured. Display only: a board URL never names it. */
+  /**
+   * `mock`: the bundled demo board. `live`: the stopgap connection to an InferOps named by
+   * `INFEROPS_BASE_URL`. `sign-in`: per-person sign-in through `INFERLAB_AUTH_ORIGIN` (the API
+   * endpoint derives from it; the stopgap variables are not expected).
+   */
+  mode: "mock" | "live" | "sign-in";
+  /** The InferOps host, when configured. Display only: a board URL never names it. */
   host?: string;
   /** Variables a live connection needs that are unset; the gatekeeper refuses to start with these. */
   missing: string[];
 }
 
+function hostOf(url: string | undefined): string | undefined {
+  try {
+    return url ? new URL(url).host : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Mock unless `INFEROPS_BASE_URL` is set. The token, workspace id and workspace slug are checked
- * for presence only -- this mirrors the gatekeeper's own rule that a base URL without them is an error, not a
- * silent fallback to demo data.
+ * `sign-in` when `INFERLAB_AUTH_ORIGIN` is set (the gatekeeper's per-person wiring, which the
+ * stopgap must not accompany), else mock unless `INFEROPS_BASE_URL` is set. For the stopgap, the
+ * token, workspace id and workspace slug are checked for presence only -- this mirrors the
+ * gatekeeper's own rule that a base URL without them is an error, not a silent fallback to demo data.
  */
 export function inferOpsConfiguration(env: NodeJS.ProcessEnv): InferOpsConfiguration {
+  if (env.INFERLAB_AUTH_ORIGIN) return { mode: "sign-in", host: hostOf(env.INFERLAB_AUTH_ORIGIN), missing: [] };
   const [baseUrl, ...rest] = INFEROPS_CONNECTION_VARS;
   if (!env[baseUrl]) return { mode: "mock", missing: [] };
-  let host: string | undefined;
-  try {
-    host = new URL(env[baseUrl]).host;
-  } catch {
-    host = undefined;
-  }
-  return { mode: "live", host, missing: rest.filter(name => !env[name]) };
+  return { mode: "live", host: hostOf(env[baseUrl]), missing: rest.filter(name => !env[name]) };
 }
 
 /** What a running dev server records about itself, so `status` and `stop` can find it. */

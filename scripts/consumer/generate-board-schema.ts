@@ -15,13 +15,13 @@ if (git("rev-parse", "HEAD") !== revision || git("status", "--porcelain", "--unt
 }
 // Bun resolves InferOps workspace packages without introducing them into the InferOS runtime.
 const program = `
- const { BoardResponseSchema } = await import(process.argv[1] + '/domains/project/shared/board.dto.ts');
- const { z } = await import(process.argv[1] + '/domains/project/node_modules/zod/index.js');
+ const { BoardResponseSchema } = await import(process.argv[1] + '/domain/ts/project/shared/board.dto.ts');
+ const { z } = await import(process.argv[1] + '/domain/ts/project/node_modules/zod/index.js');
  console.log(JSON.stringify(z.toJSONSchema(BoardResponseSchema)));
 `;
 const schema = JSON.parse(execFileSync("bun", ["--eval", program, root], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 const output = JSON.stringify({
-  source: { repository: "https://github.com/factory-level/inferops", revision, path: "domains/project/shared/board.dto.ts", export: "BoardResponseSchema" },
+  source: { repository: "https://github.com/factory-level/inferops", revision, path: "domain/ts/project/shared/board.dto.ts", export: "BoardResponseSchema" },
   schema,
 }, null, 2) + "\n";
 const destination = join(here, "project-board.schema.json");
