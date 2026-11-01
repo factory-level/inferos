@@ -264,6 +264,15 @@ against the same backend without a second prompt. `pnpm local status` showed the
 ran against the backend: one of its tests failed ("m. AG-UI explicitly approves one live
 transition…" with "No InferOps project ENG is available on acme.operations"), the rest passed; the
 cause was not investigated here. `pnpm local stop` and `inferops down` left 8787 and 18787 free.
+Both directions then ran at once on this machine: this stack and its backend (8787, 18787,
+`inferos_8787`) beside an inferops worktree at offset 15 (`bun run dev up --docker`: API 9580,
+worker 9590, database `inferlab_15`) whose launcher started a second InferOS checkout as its sidecar
+on 10287 with the stopgap wiring. `inferops sandbox status` in that worktree showed its `inferos`
+row `ok` with session `stopgap`/`live` against 9580; `pnpm local status --port 10287` in that
+checkout showed 19/19 Workers and `pnpm local seed` there connected the account as "InferOps
+(localhost:9580)"; here, `pnpm local status` kept its backend row and `inferops verify` still read
+`ENG` and `GROK` from 18787. No port, database or checkout was shared. Ctrl+C on the inferops
+launcher stopped its fleet and sidecar in 14 s and `stop` + `inferops down` here freed the rest.
 
 The dependency on inferops is a contract, not a code import: its `migration/package.json` scripts
 `migrate`, `seed` and `seed:reserved` (and the keys the reserved seed reads), the `init-db.sql`
