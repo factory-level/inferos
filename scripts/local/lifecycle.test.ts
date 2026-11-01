@@ -510,3 +510,210 @@ test("a wedged record file is ignored by status", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// The test InferOps backend (scripts/local/inferops.ts) through the lifecycle: `inferops <sub>`,
+// `start --inferops`, mode-aware `seed`, `status`, `reset` and the shell output of `env`.
+
+import { backendPaths, readBackendRecord, writeBackendRecord } from "./inferops.ts";
+
+/** A root whose backend record says a backend of this checkout runs on `apiPort` (pid = this process, so it is alive). */
+function withBackend(root: string, apiPort: number, { signIn = true, wiring }: { signIn?: boolean; wiring?: "sign-in" | "stopgap" } = {}): string {
+  const checkout = join(root, ".inferops", "checkout-3dae0f50d5b4");
+  mkdirSync(checkout, { recursive: true });
+  if (signIn) {
+    mkdirSync(join(checkout, "domain", "ts", "portal", "shared"), { recursive: true });
+    writeFileSync(join(checkout, "domain", "ts", "portal", "shared", "reserved-tenants.ts"), "export const SSO_SIGN_IN_PERSONAS = [];\n");
+  }
+  writeBackendRecord(root, {
+    pid: process.pid, port: apiPort, apiUrl: `http://localhost:${apiPort}`, inferosPort: apiPort - 10_000, database: `inferos_${apiPort - 10_000}`,
+    checkout, revision: "3dae0f50d5b4fa467d734cbb2adf857f39942b31", dirty: false, managed: true, startedAt: "2026-11-01T00:00:00.000Z",
+    log: backendPaths(root).log, ...(wiring ? { wiring } : {}),
+  });
+  return checkout;
+}
+
+/** Deps where only the backend's port answers (health 200, persona bearers) and the stack's port is free. */
+function backendDeps(root: string, apiPort: number, overrides: Partial<LifecycleDeps> = {}) {
+  const started: { env: NodeJS.ProcessEnv; passthrough: string[] }[] = [];
+  const deps = offlineDeps({
+    root,
+    env: { PATH: "/bin", HOME: "/home/me" },
+    isPortListening: async port => port === apiPort,
+    processAlive: () => true,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.pathname === "/health/ready") return new Response("{}", { status: 200 });
+      if (url.pathname === "/auth/inferlab-login") return new Response(JSON.stringify({ token: "owner-token", user: { workspaces: [] } }), { status: 200 });
+      if (url.pathname === "/workspaces") return new Response("[]", { status: 200 });
+      return new Response("no", { status: 404 });
+    }) as typeof fetch,
+    startStack: async (_stack, passthrough, env) => { started.push({ env: env ?? {}, passthrough }); },
+    ...overrides,
+  });
+  return { deps, started };
+}
+
+test("inferops is a two-word command whose flags apply to it alone", async () => {
+  const usage = await runLifecycle(["inferops"], offlineDeps());
+  assert.equal(usage.exitCode, EXIT_USAGE);
+  assert.match(String(usage.report.error), /inferops needs one of: up, status, down, verify, env, logs/);
+  assert.equal((await runLifecycle(["inferops", "bogus"], offlineDeps())).exitCode, EXIT_USAGE);
+  for (const flag of ["--fresh", "--purge", "--dir", "--rev", "--allow-local-config", "--timeout"]) {
+    const misplaced = await runLifecycle(["status", flag, ...(["--dir", "--rev", "--timeout"].includes(flag) ? ["x"] : [])], offlineDeps());
+    assert.equal(misplaced.exitCode, EXIT_USAGE, flag);
+  }
+  assert.equal((await runLifecycle(["stop", "--stopgap"], offlineDeps())).exitCode, EXIT_USAGE);
+  const root = tempRoot();
+  try {
+    const status = await runLifecycle(["inferops", "status", "--json", "--port", "8787"], offlineDeps({ root }));
+    assert.equal(status.exitCode, EXIT_FAILED);
+    assert.equal(status.report.command, "inferops status");
+    assert.equal(status.report.backend, "not-running");
+    assert.equal(status.report.apiUrl, "http://localhost:18787");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("start --inferops adopts the running backend and hands the stack the sign-in wiring, or the stopgap with --stopgap", async () => {
+  const root = tempRoot();
+  const { port, close } = await listen();
+  await close();
+  const apiPort = port + 10_000;
+  withBackend(root, apiPort);
+  try {
+    const { deps, started } = backendDeps(root, apiPort);
+    const signIn = await runLifecycle(["start", "--inferops", "--json", "--port", String(port), "--", "--no-ui-watchers"], deps);
+    assert.equal(signIn.exitCode, EXIT_OK, JSON.stringify(signIn.report));
+    assert.equal(started.length, 1);
+    assert.deepEqual(started[0]!.passthrough, ["--no-ui-watchers"]);
+    assert.equal(started[0]!.env.INFERLAB_AUTH_ORIGIN, `http://localhost:${apiPort}`);
+    assert.equal(started[0]!.env.AUTH_GATEKEEPERS, "inferops");
+    assert.equal(started[0]!.env.INFEROPS_ENABLED, "true");
+    assert.equal(started[0]!.env.INFEROPS_BASE_URL, undefined);
+    assert.equal(started[0]!.env.PATH, "/bin");
+    assert.equal(readBackendRecord(root)?.wiring, "sign-in");
+    assert.deepEqual(signIn.report.inferops, { apiUrl: `http://localhost:${apiPort}`, wiring: "sign-in", revision: "3dae0f50d5b4fa467d734cbb2adf857f39942b31" });
+    const stopgap = await runLifecycle(["start", "--inferops", "--stopgap", "--json", "--port", String(port)], deps);
+    assert.equal(stopgap.exitCode, EXIT_OK, JSON.stringify(stopgap.report));
+    assert.equal(started[1]!.env.INFEROPS_API_TOKEN, "owner-token");
+    assert.equal(started[1]!.env.INFEROPS_BASE_URL, `http://localhost:${apiPort}`);
+    assert.equal(started[1]!.env.INFEROPS_WORKSPACE_SLUG, "operations");
+    assert.equal(started[1]!.env.INFERLAB_AUTH_ORIGIN, undefined);
+    assert.equal(readBackendRecord(root)?.wiring, "stopgap");
+    assert.equal(JSON.stringify(stopgap.report).includes("owner-token"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("start --inferops refuses a shell already wired to InferOps, and sign-in against a revision without persona sign-in", async () => {
+  const root = tempRoot();
+  const { port, close } = await listen();
+  await close();
+  const apiPort = port + 10_000;
+  try {
+    withBackend(root, apiPort);
+    const wired = backendDeps(root, apiPort, { env: { PATH: "/bin", INFEROPS_BASE_URL: "http://elsewhere:8080", INFEROPS_API_TOKEN: "t" } });
+    const refused = await runLifecycle(["start", "--inferops", "--json", "--port", String(port)], wired.deps);
+    assert.equal(refused.exitCode, EXIT_FAILED);
+    assert.deepEqual(refused.report.wiring, ["INFEROPS_API_TOKEN", "INFEROPS_BASE_URL"]);
+    assert.equal(wired.started.length, 0);
+    rmSync(join(root, ".inferops"), { recursive: true, force: true });
+    withBackend(root, apiPort, { signIn: false });
+    const old = backendDeps(root, apiPort);
+    const noSignIn = await runLifecycle(["start", "--inferops", "--json", "--port", String(port)], old.deps);
+    assert.equal(noSignIn.exitCode, EXIT_FAILED);
+    assert.match(String(noSignIn.report.error), /3cf153566|--stopgap/);
+    assert.equal(old.started.length, 0);
+    const stopgap = await runLifecycle(["start", "--inferops", "--stopgap", "--json", "--port", String(port)], old.deps);
+    assert.equal(stopgap.exitCode, EXIT_OK, JSON.stringify(stopgap.report));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("seed follows the wiring the stack was started with", async () => {
+  const setupReport = { ok: true, url: "http://localhost:8787/", user: "dev" };
+  const verifyReport = { ok: true, agentView: { inferops: "live", board: { project: "ENG", issues: 8, states: 5 }, approvalQueue: { pending: 0 } } };
+  const run = async (root: string) => {
+    const deps = offlineDeps({
+      root, isPortListening: async () => true, devServerRecord: () => ours(),
+      runOperator: (script, args) => { deps.operatorCalls.push([script, ...args]); return { exitCode: 0, report: script === "dev-setup.ts" ? setupReport : verifyReport, stderr: "" }; },
+    });
+    const result = await runLifecycle(["seed", "--json"], deps);
+    assert.equal(result.exitCode, EXIT_OK, JSON.stringify(result.report));
+    return { result, calls: deps.operatorCalls };
+  };
+  const plain = tempRoot();
+  const signIn = tempRoot();
+  const stopgap = tempRoot();
+  try {
+    assert.ok((await run(plain)).calls[0]!.includes("--inferops"), "no backend: the mock InferOps account as before");
+    withBackend(signIn, 18787, { wiring: "sign-in" });
+    const s = await run(signIn);
+    assert.ok(!s.calls[0]!.includes("--inferops"), "sign-in: no auto-provisioned account");
+    assert.equal(s.result.report.inferops, "sign-in: no InferOps account is provisioned; sign in through the browser (Continue with InferOps)");
+    withBackend(stopgap, 18787, { wiring: "stopgap" });
+    const t = await run(stopgap);
+    assert.ok(t.calls[0]!.includes("--inferops"));
+    const verifyArgs = t.calls[1]!;
+    assert.equal(verifyArgs[verifyArgs.indexOf("--board") + 1], "inferops://acme.operations/project/board/ENG");
+  } finally {
+    for (const root of [plain, signIn, stopgap]) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("status recognises the sign-in wiring and reports the backend row", async () => {
+  assert.deepEqual(inferOpsConfiguration({ INFERLAB_AUTH_ORIGIN: "http://localhost:18787" }), { mode: "sign-in", host: "localhost:18787", missing: [] });
+  assert.deepEqual(inferOpsConfiguration({ INFERLAB_AUTH_ORIGIN: "http://localhost:18787", INFEROPS_BASE_URL: "http://localhost:18787" }), { mode: "sign-in", host: "localhost:18787", missing: [] });
+  const root = tempRoot();
+  try {
+    withBackend(root, 18787, { wiring: "sign-in" });
+    const { deps } = backendDeps(root, 18787, { isPortListening: async () => true, devServerRecord: () => ours(), fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch });
+    const result = await runLifecycle(["status", "--json"], deps);
+    const inferops = result.report.inferops as Record<string, unknown>;
+    assert.deepEqual(inferops.backend, { apiUrl: "http://localhost:18787", revision: "3dae0f50d5b4fa467d734cbb2adf857f39942b31", wiring: "sign-in", healthy: true });
+    assert.equal(inferops.mode, "mock", "the shell itself carries no wiring; the record does");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CLI prints env's export lines alone, so eval can take them", async () => {
+  const root = tempRoot();
+  try {
+    withBackend(root, 18787);
+    const { deps } = backendDeps(root, 18787);
+    const stdout: string[] = [];
+    const exitCode = await main(["inferops", "env", "--port", "8787"], deps, { log: line => stdout.push(line), error: () => {} });
+    assert.equal(exitCode, EXIT_OK);
+    assert.deepEqual(stdout, ["export INFERLAB_AUTH_ORIGIN='http://localhost:18787'\nexport AUTH_GATEKEEPERS='inferops'\nexport INFEROPS_ENABLED='true'"]);
+    const json: string[] = [];
+    await main(["inferops", "env", "--json", "--port", "8787"], deps, { log: line => json.push(line), error: () => {} });
+    assert.equal(json.length, 1);
+    assert.equal(JSON.parse(json[0]!).mode, "sign-in");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reset also clears a stopped backend's record and log, never a running one", async () => {
+  const root = tempRoot();
+  try {
+    withBackend(root, 18787);
+    mkdirSync(backendPaths(root).logsDir, { recursive: true });
+    writeFileSync(backendPaths(root).log, "old\n");
+    const running = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, processAlive: () => true }));
+    assert.equal(running.exitCode, EXIT_OK);
+    assert.ok(existsSync(backendPaths(root).record), "a live backend keeps its record");
+    const stopped = await runLifecycle(["reset", "--yes", "--json"], offlineDeps({ root, processAlive: () => false }));
+    assert.equal(stopped.exitCode, EXIT_OK);
+    assert.equal(existsSync(backendPaths(root).record), false);
+    assert.equal(existsSync(backendPaths(root).log), false);
+    assert.ok((stopped.report.removed as string[]).some(path => path.endsWith("backend.json")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
