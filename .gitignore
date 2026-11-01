@@ -53,3 +53,7 @@ wrangler.dev.jsonc
 .dev.vars.*
 **/.dev.vars
 **/.dev.vars.*
+
+# The test InferOps backend `pnpm local inferops` runs beside this checkout: its record, logs and
+# managed InferOps worktrees (scripts/local/inferops.ts). Never committed.
+/.inferops/
