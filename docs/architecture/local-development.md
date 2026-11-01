@@ -324,6 +324,15 @@ checkout showed 19/19 Workers and `pnpm local seed` there connected the account 
 `ENG` and `GROK` from 18787. No port, database or checkout was shared. Ctrl+C on the inferops
 launcher stopped its fleet and sidecar in 14 s and `stop` + `inferops down` here freed the rest.
 
+Checked on 2026-11-01 from a `pnpm wt new help-check` worktree of this branch (port block 8810,
+`.env.worktree` `VITE_BACKEND_HOST=localhost:8810`), in a shell without the agent's
+credential-looking names: `pnpm local help` was byte-identical to the main checkout's;
+`pnpm local inferops up` was ready after 101 s at `http://localhost:18810` with database
+`inferos_8810` at `3dae0f50d`; `inferops status` and `inferops verify` (health, stopgap `ENG`,
+sign-in `GROK`) exited 0; `inferops down --purge` left 18810 free, dropped `inferos_8810` and left
+only `.inferops/logs/`. The same worktree then served as the sidecar of an inferops worktree
+(offset 15) through `bun run dev inferos --path`, which the inferops architecture page records.
+
 The dependency on inferops is a contract, not a code import: its `migration/package.json` scripts
 `migrate`, `seed` and `seed:reserved` (and the keys the reserved seed reads), the `init-db.sql`
 bootstrap, the `@inferlab/shared-api` workspace's `src/main.ts`, `API_PORT`/`DATABASE_URL`/`NODE_CONFIG`
