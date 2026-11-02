@@ -14,7 +14,7 @@ Proposed 2026-10-03. Accepted as proposed by the owner on 2026-10-05 ([#15](http
 
 AI Trader's registry (factory-level/ai-trader `libs/backend/registry`) already enforces the rules this needs. Each revision has a `<kind>/<name>@<N>` name and one SHA-256 identity. The receiver recomputes the hash. Pins carry hashes. Qualification names the hash. It hashes one canonical JSON blob of base64 file contents. Its `canonicalJson` silently encodes a `Date` as `{}` and an `undefined` array element as nothing.
 
-The design's two open questions were the smallest authoring API, and digest canonicalisation and compatibility. The owner asked for contract PRs this wave. This record decides the second. The first is in the [design](../design/agent-authoring.md#operation-mapping).
+The design's two open questions were the smallest authoring API, and digest canonicalisation and compatibility. The owner asked for contract PRs this wave. This record decides the second. The first is in the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md#operation-mapping).
 
 ## Decision
 
@@ -44,6 +44,6 @@ The design's two open questions were the smallest authoring API, and digest cano
 
 ## Related
 
-- Design: [`../design/agent-authoring.md`](../design/agent-authoring.md)
+- Design: [`agent-authoring.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md)
 - Architecture: [`../architecture/agent-authoring.md`](../architecture/agent-authoring.md)
 - Blueprint archive format: [`../blueprints.md`](../blueprints.md)

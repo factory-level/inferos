@@ -1,4 +1,4 @@
-// Publication records (docs/design/feature-capabilities.md, "Publication destinations"; ADR 0008).
+// Publication records (InferOps docs/human/architecture/inferos/feature-capabilities.md, "Publication destinations"; ADR 0008).
 //
 // A blueprint reaches beyond its owner and the installs made inside the deployment only while one
 // of its records is active for the destination asked about, at the blueprint's current version.

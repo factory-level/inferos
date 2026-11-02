@@ -1,5 +1,6 @@
 ---
 title: Cloudflare-like local development
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md
 covers:
   - scripts/run-dev-server.ts
   - scripts/gatekeeper-dev-secrets.ts
@@ -39,7 +40,7 @@ updated: 2026-11-01
 
 ## Overview
 
-The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)). For local-to-cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)), the production router's request path is exercised in workerd and an opt-in smoke recipe checks a deployed instance (see [router-path parity](#router-path-parity)); wrapper-aware cloud packaging is not implemented. Two persistent cloud stages (`pnpm stage:deploy dev|prod`) deploy this checkout to custom domains behind Cloudflare Access (see [stage deploy](stage-deploy.md)). Proposed work is recorded in the [design](../design/local-development.md), not asserted as implemented here.
+The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` start every Worker under one Wrangler process, `pnpm dev:setup` and `pnpm dev:mock-model` prepare a test-ready Workshop ([#42](https://github.com/factory-level/inferos/pull/42)), and `pnpm local` is a machine-readable lifecycle for this checkout ([#95](https://github.com/factory-level/inferos/pull/95)). Wrapper-owned gatekeepers are discovered for local development ([#9](https://github.com/factory-level/inferos/issues/9), see [wrapper topology](#wrapper-topology)). For local-to-cloud parity ([#11](https://github.com/factory-level/inferos/issues/11)), the production router's request path is exercised in workerd and an opt-in smoke recipe checks a deployed instance (see [router-path parity](#router-path-parity)); wrapper-aware cloud packaging is not implemented. Two persistent cloud stages (`pnpm stage:deploy dev|prod`) deploy this checkout to custom domains behind Cloudflare Access (see [stage deploy](stage-deploy.md)). Proposed work is recorded in the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md), not asserted as implemented here.
 
 ## Components
 

@@ -195,27 +195,28 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
   Exception messages and stacks reach the external Reporter, so never intentionally put secrets,
   prompts, tokens, headers, or request/response bodies in thrown errors or report metadata.
 
-Documentation Loop (`docs/design/`, `docs/architecture/`, `docs/adr/`, `docs/wiki/`), from the `factory-level/doc-starter.template`:
+Documentation Loop (`docs/architecture/`, `docs/adr/`, `docs/wiki/`), from the `factory-level/doc-starter.template`:
+
+* InferOS keeps no design of its own and has no `docs/design/` or `docs/human/` ([ADR 0010](docs/adr/0010-design-lives-in-inferops.md)). The target design state is the InferOps repository's `docs/human/` on `develop`, its default branch: the product design in its architecture pages and journeys, and the InferOS specifications in `docs/human/architecture/inferos/`. Every architecture doc names its design in a `design:` front matter URL on that branch, and any link into InferOps `docs/` uses `develop`. `pnpm docs:check`, the CI `Docs` job, enforces this, and InferOps CI proves the references resolve. Propose a change to intent as a pull request in InferOps. When code and design disagree, record the gap under the architecture doc's "Divergences from Design" and propose the change there; never rewrite either to match.
 
 * Each folder has a `README.md` index and a template (`_template.md`, or `0000-template.md` for ADRs). Start every new document from its template, keep its YAML front matter, and add it to the folder index. The flat `docs/*.md` files and `plans/` predate the loop and sit outside it.
 
   | Folder | Holds | Filename | Required front matter |
   | --- | --- | --- | --- |
-  | `docs/design/` | Intended behavior and requirements | `<topic>.md` | `title`, `status` (`draft`, `accepted`, `superseded`), `updated` |
-  | `docs/architecture/` | The current implementation | `<topic>.md`, same name as its design doc | `title`, `covers` (list of repo paths), `updated` |
+  | `docs/architecture/` | The current implementation | `<topic>.md`, same name as its InferOps specification | `title`, `design` (URL of its target design in InferOps on `develop`), `covers` (list of repo paths), `updated` |
   | `docs/adr/` | Rationale for significant design changes | `NNNN-<slug>.md`, sequential | `title`, `status` (`proposed`, `accepted`, `superseded`, `deprecated`), `date` |
   | `docs/wiki/` | Setup, conventions, shared knowledge | `<topic>.md` | `title`, `updated` |
 
   Dates are `YYYY-MM-DD`; filenames are lowercase and hyphen-separated.
-* Every functionality change to the default branch updates the architecture docs covering its paths **in the same commit or merge**. Update a design doc only when the change's stated intent (issue, PR description, commit message, explicit instruction) says intended behavior changed; never rewrite one to match code — record the gap under the architecture doc's "Divergences from Design". Add an ADR only when the intended design changed and the decision needs durable rationale.
+* Every functionality change to the default branch updates the architecture docs covering its paths **in the same commit or merge**. Change the design only when the change's stated intent (issue, PR description, commit message, explicit instruction) says intended behavior changed, and do it as a pull request in InferOps `docs/human/`; never rewrite it to match code — record the gap under the architecture doc's "Divergences from Design". Add an ADR only when the intended design changed and the decision needs durable rationale.
 * Documentation agent procedure, per change (commit range, branch, or PR):
     1. Read the full diff and any linked issue, PR description, or commit messages; list every changed path.
-    2. Find architecture docs whose `covers` contains or is a parent of each path; each one's design counterpart shares its filename.
+    2. Find architecture docs whose `covers` contains or is a parent of each path; each one's `design:` names its target design in InferOps.
     3. Classify: functionality change, intended-behavior change, or neither (formatting, comments, behavior-neutral bumps).
     4. For functionality changes, revise each matched architecture doc to describe the result and refresh `updated`. An uncovered path extends the closest topic's `covers` or gets a new topic from the template.
-    5. Touch design docs only on stated intent; otherwise record divergences.
+    5. Propose design changes in InferOps only on stated intent; otherwise record divergences.
     6. Draft an ADR only per the rule above, with `status: proposed` — a human accepts it.
     7. Update folder indexes and fix links broken by moved or deleted files.
-    8. Run `pnpm docs:check` (front matter, design/architecture pairing, covered paths, indexes, relative links under `docs/`) and `git diff --check`; fix every error.
+    8. Run `pnpm docs:check` (front matter, design references on InferOps `develop`, covered paths, indexes, relative links under `docs/`, no design folder in this repository) and `git diff --check`; fix every error.
     9. Report documents changed, divergences recorded, ADRs proposed, and open questions.
-* Agents must not invent behavior, requirements, or rationale the code, diff, or stated intent doesn't support (record uncertainty under "Open Questions"); set a design doc or ADR to `accepted` without human instruction; delete docs for removed functionality without updating their design counterparts and indexes (prefer marking design docs `superseded`); or defer an architecture update to a later commit.
+* Agents must not invent behavior, requirements, or rationale the code, diff, or stated intent doesn't support (record uncertainty under "Open Questions"); set an ADR to `accepted` without human instruction; delete docs for removed functionality without updating their indexes and proposing the matching change to the InferOps specification (prefer marking it `superseded`); or defer an architecture update to a later commit.

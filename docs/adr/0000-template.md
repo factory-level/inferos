@@ -24,4 +24,4 @@ What becomes easier, harder, or newly required as a result.
 
 ## Related
 
-- Design: [`../design/topic-name.md`](../design/topic-name.md)
+- Design: [`topic-name.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/topic-name.md)

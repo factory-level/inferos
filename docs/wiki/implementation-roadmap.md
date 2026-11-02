@@ -1,6 +1,6 @@
 ---
 title: Implementation roadmap
-updated: 2026-10-05
+updated: 2026-11-02
 ---
 
 # Implementation roadmap
@@ -8,6 +8,8 @@ updated: 2026-10-05
 The MVP release walkthrough, the wave milestones that group the work, and what has merged so far.
 
 Roadmap: [#1](https://github.com/factory-level/inferos/issues/1). Its MVP decision (2026-10-02) is the canonical release scope: **InferOps Kanban and the InferMind Wiki are the customer-facing MVP, and InferOS is the configurable private shell that boots and hosts them.** The wave milestones below are work groupings, not release gates; an issue's own phase note decides which slice of it is release-critical.
+
+On 2026-11-02 the InferLab product design in InferOps [`docs/human/`](https://github.com/factory-level/inferops/tree/develop/docs/human) became the product-level scope above #1's MVP decision: each company's InferOS environment with workspaces and canvas pages under draft and publish, Workflows, configured agents under two authority contexts, a personal Dot on OpenDots, global record pages in InferOps and the CRM module; the agent self-improvement loop is removed. The InferOS work this implies (I06 target selector and Canvas Builder, I07 progression and callbacks, I08 configured agents and authority, I09 and I10 background workflows, views, sharing and TTL, I11 Dot) is recorded in InferOps' repository map and in each architecture document's "Against the 2026-11-02 product design" list; the wave milestones below keep tracking merge state of the existing issues.
 
 This page tracks merge state only. A merged pull request is implementation evidence for a slice of an issue, not acceptance of the issue or of a walkthrough step. The Wave 4 and Wave 5 sections record their 2026-10-04 implementation and disposition status; earlier waves retain their evidence boundaries.
 
@@ -158,9 +160,9 @@ The authorized research, design preparation and synthetic recipe work is complet
 | [#30](https://github.com/factory-level/inferos/issues/30) Capability wiki | Closed on research acceptance | [Capability inventory](extension-capabilities.md), pinned baseline and dated [source ledger](research-sources.md); stale/product-note claims separated from implementation |
 | [#31](https://github.com/factory-level/inferos/issues/31) Vertical matrix | Closed on research acceptance | [36 workflows across 12 areas](vertical-decision-matrix.md), three each, with surfaces, owner, authority, gap, proof and source; priority primary-source constraints refreshed |
 | [#32](https://github.com/factory-level/inferos/issues/32) Recipes | Synthetic preparation delivered; open/deferred | [Runbook and local evidence](vertical-recipes.md); cloud proof (#11), customer/provider choices and actual domain operations remain |
-| [#155](https://github.com/factory-level/inferos/issues/155) Operate container/Publish UI | Design accepted 2026-10-05; implementation resuming | [Publication design](../design/operate-publication.md) decisions recorded (workspace container, build-access install across owners, integer `dataContract`, mock rejection outside test-only spaces); next the separate kernel/UI slices |
-| [#65](https://github.com/factory-level/inferos/issues/65) Roles/restricted data | Design and acceptance specifications delivered; enforcement deferred | Review [policy design](../design/operate-policy.md): trusted policy source, identity/role mapping, action classes and provider restrictions |
-| [#79](https://github.com/factory-level/inferos/issues/79), [#80](https://github.com/factory-level/inferos/issues/80) External-agent contract/auth | Provider-neutral design and specifications delivered; runtime deferred | [Contract proposal](../design/external-agent-contract.md), linked to [inferops#2326](https://github.com/factory-level/inferops/issues/2326); actual delegation, schema, revision and retry agreement required; no bridge/SDK/auth endpoint |
+| [#155](https://github.com/factory-level/inferos/issues/155) Operate container/Publish UI | Design accepted 2026-10-05; implementation resuming | [Publication design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-publication.md) decisions recorded (workspace container, build-access install across owners, integer `dataContract`, mock rejection outside test-only spaces); next the separate kernel/UI slices |
+| [#65](https://github.com/factory-level/inferos/issues/65) Roles/restricted data | Design and acceptance specifications delivered; enforcement deferred | Review [policy design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-policy.md): trusted policy source, identity/role mapping, action classes and provider restrictions |
+| [#79](https://github.com/factory-level/inferos/issues/79), [#80](https://github.com/factory-level/inferos/issues/80) External-agent contract/auth | Provider-neutral design and specifications delivered; runtime deferred | [Contract proposal](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/external-agent-contract.md), linked to [inferops#2326](https://github.com/factory-level/inferops/issues/2326); actual delegation, schema, revision and retry agreement required; no bridge/SDK/auth endpoint |
 | [#81](https://github.com/factory-level/inferos/issues/81) Harness HG and independent client | Entirely deferred | Explicit owner resumption required; no part silently carried into #79/#80 |
 | [#12](https://github.com/factory-level/inferos/issues/12), [#13](https://github.com/factory-level/inferos/issues/13), [#14](https://github.com/factory-level/inferos/issues/14) Hosted ChatGPT | Local audit delivered; hosted work/live sign-in deferred | [Feasibility and audit](chatgpt-feasibility.md): 39 tests/166 assertions; official supported deployment, token custody, entitlement and owner live validation remain |
 | [#29](https://github.com/factory-level/inferos/issues/29) Maps | Deferred | Provider/viewport choices and unresolved live performance validation |
@@ -174,20 +176,20 @@ Milestone 5 remains open only for the eleven deferred issues above. Earlier unre
 
 | Epic | Design |
 | --- | --- |
-| [#2](https://github.com/factory-level/inferos/issues/2) Cloudflare-like local development | [local-development](../design/local-development.md) |
-| [#3](https://github.com/factory-level/inferos/issues/3) Personal ChatGPT connection | [chatgpt-connection](../design/chatgpt-connection.md) |
-| [#4](https://github.com/factory-level/inferos/issues/4) Reusable native agent authoring | [agent-authoring](../design/agent-authoring.md) |
-| [#5](https://github.com/factory-level/inferos/issues/5) InferOS repository setup skills | [repo-setup-skills](../design/repo-setup-skills.md) |
-| [#6](https://github.com/factory-level/inferos/issues/6) Scoped real InferOps issue operations | [inferops-gatekeeper](../design/inferops-gatekeeper.md) |
-| [#7](https://github.com/factory-level/inferos/issues/7) MVP Kanban and live operational widgets | [inferops-canvas](../design/inferops-canvas.md) |
-| [#8](https://github.com/factory-level/inferos/issues/8) Vertical extension research | [vertical-extension-research](../design/vertical-extension-research.md) |
-| [#48](https://github.com/factory-level/inferos/issues/48) Local coding workflows | [local-coding-workflows](../design/local-coding-workflows.md) |
-| [#51](https://github.com/factory-level/inferos/issues/51) Connection packages and reviewed fork updates | [connection-extensions](../design/connection-extensions.md) |
-| [#52](https://github.com/factory-level/inferos/issues/52) External-agent platform integrations | [agent-platform-integrations](../design/agent-platform-integrations.md) |
-| [#53](https://github.com/factory-level/inferos/issues/53) Native agent deployments | [agent-deployments](../design/agent-deployments.md) |
-| [#55](https://github.com/factory-level/inferos/issues/55) One useful Operate view | [operate-mode](../design/operate-mode.md) |
+| [#2](https://github.com/factory-level/inferos/issues/2) Cloudflare-like local development | [local-development](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md) |
+| [#3](https://github.com/factory-level/inferos/issues/3) Personal ChatGPT connection | [chatgpt-connection](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/chatgpt-connection.md) |
+| [#4](https://github.com/factory-level/inferos/issues/4) Reusable native agent authoring | [agent-authoring](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md) |
+| [#5](https://github.com/factory-level/inferos/issues/5) InferOS repository setup skills | [repo-setup-skills](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/repo-setup-skills.md) |
+| [#6](https://github.com/factory-level/inferos/issues/6) Scoped real InferOps issue operations | [inferops-gatekeeper](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md) |
+| [#7](https://github.com/factory-level/inferos/issues/7) MVP Kanban and live operational widgets | [inferops-canvas](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-canvas.md) |
+| [#8](https://github.com/factory-level/inferos/issues/8) Vertical extension research | [vertical-extension-research](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/vertical-extension-research.md) |
+| [#48](https://github.com/factory-level/inferos/issues/48) Local coding workflows | [local-coding-workflows](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-coding-workflows.md) |
+| [#51](https://github.com/factory-level/inferos/issues/51) Connection packages and reviewed fork updates | [connection-extensions](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/connection-extensions.md) |
+| [#52](https://github.com/factory-level/inferos/issues/52) External-agent platform integrations | [agent-platform-integrations](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-platform-integrations.md) |
+| [#53](https://github.com/factory-level/inferos/issues/53) Native agent deployments | [agent-deployments](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-deployments.md) |
+| [#55](https://github.com/factory-level/inferos/issues/55) One useful Operate view | [operate-mode](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md) |
 
-Customer capability flags are specified in [feature-capabilities](../design/feature-capabilities.md) (#33) and consumer configuration in [consumer-configuration](../design/consumer-configuration.md) (#33 to #36).
+Customer capability flags are specified in [feature-capabilities](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md) (#33) and consumer configuration in [consumer-configuration](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/consumer-configuration.md) (#33 to #36).
 
 ## Release evidence
 

@@ -1,5 +1,6 @@
 ---
 title: Reusable native agent authoring
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md
 covers:
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/agent-artifact.ts
@@ -11,14 +12,14 @@ covers:
   - packages/gatekeeper-scheduler
   - packages/gatekeeper-context/src/agent-skill.ts
   - docs/blueprints.md
-updated: 2026-10-06
+updated: 2026-11-02
 ---
 
 # Reusable native agent authoring
 
 ## Overview
 
-Current state after the revision-storage slice of [#16](https://github.com/factory-level/inferos/issues/16), built on the inventory of [#15](https://github.com/factory-level/inferos/issues/15) (InferOS `c340758`, AI Trader `c1301c8`). The six authoring methods of the [design](../design/agent-authoring.md) are members of `Overseer` and are implemented by each workspace's Overseer: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Revisions are stored per workspace. An agent asks for a publish through a built-in artifact publisher gatekeeper, and a person approves it in the approval queue. `.gadget` format version 2 (#17) and Context Library skill revisions are not implemented yet (see [Divergences from Design](#divergences-from-design)).
+Current state after the revision-storage slice of [#16](https://github.com/factory-level/inferos/issues/16), built on the inventory of [#15](https://github.com/factory-level/inferos/issues/15) (InferOS `c340758`, AI Trader `c1301c8`). The six authoring methods of the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md) are members of `Overseer` and are implemented by each workspace's Overseer: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Revisions are stored per workspace. An agent asks for a publish through a built-in artifact publisher gatekeeper, and a person approves it in the approval queue. `.gadget` format version 2 (#17) and Context Library skill revisions are not implemented yet (see [Divergences from Design](#divergences-from-design)).
 
 ## Components
 
@@ -86,7 +87,6 @@ InferOS already provides native Gadgets, Blueprint import/export, bindings and c
 - Storage is the Overseer's `artifactRevisions` collection, keyed `<kind>/<name>@<keyString(number)>` so one name lists in number order. A record is the wire `ArtifactRevision` plus `commitId` (the commit its files were read from; git objects are never collected, so the record keeps them) and `bindingTemplates` (titles, `spawnerOnly` and spawner env, with source `resourceUrl` and `suggestedModel` dropped). Neither extra field crosses RPC. Revisions are never edited or deleted. The author-chosen number plays the part of the canvas and console stores' expected revision: `WorkspaceArtifactStore.publish()` checks it against the stored name and number and writes in one `transactionSync`, so two racing publishes cannot both land. An identical republish returns the stored revision with `created: false`.
 - `bindArtifactRevision` runs every compatibility check before it creates anything, so a refusal leaves nothing behind. The assignments must name exactly the revision's binding requirements with matching types. Each chosen account is resolved through `getGatekeeperClassFor` (the admin-policy chokepoint, which creates no state) and must be of the requirement's `gatekeeperName` vendor. Every assigned model must meet an `exact` model requirement, checked through the person's model configuration, and every spawner env entry must name an assigned connection. Only then does it create a permanent gadget at the revision's commit and bind in `newGadgetFromBlueprint()`'s two phases. Connections are created from the already-resolved accounts (`newGatekeeper`'s second half), and through `newAiModelGatekeeper` and `newAgentSpawnerGatekeeper`. Rolling back is binding an earlier exact revision. Blueprint install behaviour is unchanged.
 
-
 ## Configuration
 
 Model and gatekeeper bindings are installed in the destination workspace. Scheduler hooks must be enabled through Connections. `BUNDLED_BLUEPRINTS_DIR` selects deployment bundles, and does not establish artifact qualification.
@@ -97,9 +97,17 @@ Model and gatekeeper bindings are installed in the destination workspace. Schedu
 - The design lands each method in its own kernel PR. The owner's implementation plan for #16 delivered all six in one PR, together with their storage.
 - Still unimplemented: `.gadget` format version 2 and its import verification, skill revisions served from the Context Library, and server-run qualification.
 
+### Against the 2026-11-02 product design
+
+Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/architecture/agent-operations.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md).
+
+- Agents are created from a Gadget, a model and resource bindings in the spawner form, not configured by a Company Admin from gatekeeper capability bundles with assigned authority (I08).
+- No personal Dot: the OpenDots integration (identity and persistence isolation, gatekeeper capabilities, UI dispatch and approval callbacks, Intelligence hosting) is unstarted (I11).
+- `spawn` and `spawnCallable` acknowledge a queued task; actual run progress and results to configured destinations are not tracked (I09).
+
 ## Open Questions
 
-- See the [design's open questions](../design/agent-authoring.md#open-questions). The two baseline questions were decided by the owner on 2026-10-05: the design's contract and [ADR 0006](../adr/0006-agent-artifact-revisions.md) are accepted as proposed.
+- See the [design's open questions](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md#open-questions). The two baseline questions were decided by the owner on 2026-10-05: the design's contract and [ADR 0006](../adr/0006-agent-artifact-revisions.md) are accepted as proposed.
 - The agent route uses a built-in gatekeeper binding modelled on the agent spawner (owner decision, 2026-10-06). The Workshop has no UI yet for creating the publisher connection.
 
 ## Evidence

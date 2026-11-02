@@ -35,4 +35,4 @@ A stage is a real `wrangler deploy`, with the workspace's pinned Wrangler, of ev
 
 - Architecture: [`../architecture/stage-deploy.md`](../architecture/stage-deploy.md)
 - Runbook: [`../wiki/stage-deploy.md`](../wiki/stage-deploy.md)
-- Design: [`../design/local-development.md`](../design/local-development.md)
+- Design: [`local-development.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md)

@@ -42,6 +42,6 @@ Persona and skills are behavior, not permissions.
 
 ## Related
 
-- Design: [`../design/agent-deployments.md`](../design/agent-deployments.md)
-- Design: [`../design/agent-platform-integrations.md`](../design/agent-platform-integrations.md)
-- Design: [`../design/local-coding-workflows.md`](../design/local-coding-workflows.md)
+- Design: [`agent-deployments.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-deployments.md)
+- Design: [`agent-platform-integrations.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-platform-integrations.md)
+- Design: [`local-coding-workflows.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-coding-workflows.md)

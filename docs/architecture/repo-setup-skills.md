@@ -1,5 +1,6 @@
 ---
 title: InferOS repository setup skills
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/repo-setup-skills.md
 covers:
   - scripts/run-dev-server.ts
   - scripts/generate-worker-configs.ts
@@ -13,7 +14,7 @@ updated: 2026-10-11
 
 ## Overview
 
-InferOS supplies a bootstrap skill and deterministic consumer scripts. They create a pinned wrapper, validate its configuration and synthetic board, run native local development, and verify, upgrade and recover the wrapper locally. Cloud workflows are tracked in the [design](../design/repo-setup-skills.md).
+InferOS supplies a bootstrap skill and deterministic consumer scripts. They create a pinned wrapper, validate its configuration and synthetic board, run native local development, and verify, upgrade and recover the wrapper locally. Cloud workflows are tracked in the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/repo-setup-skills.md).
 
 ## Components
 

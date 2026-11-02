@@ -52,7 +52,7 @@ The source run-local flow now derives ASSETS ownership, SPA fallback and worker-
 | Personal Cloudflare ChatGPT subscription | Eligibility and approved target topology unresolved |
 | Full cloud parity | No cloud deployment or live provider verification performed |
 
-See the [roadmap](implementation-roadmap.md) and [consumer design](../design/consumer-configuration.md) for the remaining work. A healthy native home page is not a substitute for the required InferOps board read/propose/approve/refresh flow.
+See the [roadmap](implementation-roadmap.md) and [consumer design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/consumer-configuration.md) for the remaining work. A healthy native home page is not a substitute for the required InferOps board read/propose/approve/refresh flow.
 
 ## Consumer doctor verification
 

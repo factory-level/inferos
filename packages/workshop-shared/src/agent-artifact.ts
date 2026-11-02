@@ -4,7 +4,7 @@
 // operations are members of Overseer (api.ts) and are implemented by the workspace's Overseer
 // (workshop-backend/src/artifact-store.ts). This module holds the wire types and the pure helpers
 // both sides share: the canonical-JSON digest, the qualification predicate and the reference form.
-// See docs/design/agent-authoring.md.
+// See InferOps docs/human/architecture/inferos/agent-authoring.md.
 
 import type { AiChatAuthorInfo, BlueprintBinding } from "./api";
 

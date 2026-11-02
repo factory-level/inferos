@@ -1,6 +1,6 @@
 # Architecture
 
-Current implementation and explicit gaps against the paired draft designs.
+Current implementation and explicit gaps against the target design, which is the InferOps repository's `docs/human/` on `develop`, starting at [`docs/human/architecture/inferos/`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/README.md). Each page names its design in a `design:` front matter URL.
 
 Create documents from [`_template.md`](_template.md).
 
@@ -33,4 +33,4 @@ These draft designs from the 2026-10-02 baseline have no architecture page becau
 
 | Design | Current state |
 | --- | --- |
-| [External-agent platform integrations](../design/agent-platform-integrations.md) | Provider-neutral design/fixtures only (#79/#80); all HG/#81 work is deferred. No bridge code. `HARNESS_HG_ENABLED` is accepted by the configuration schema and reported unsupported. Tracked by [#52](https://github.com/factory-level/inferos/issues/52). |
+| [External-agent platform integrations](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-platform-integrations.md) | Provider-neutral design/fixtures only (#79/#80); all HG/#81 work is deferred. No bridge code. `HARNESS_HG_ENABLED` is accepted by the configuration schema and reported unsupported. Tracked by [#52](https://github.com/factory-level/inferos/issues/52). |

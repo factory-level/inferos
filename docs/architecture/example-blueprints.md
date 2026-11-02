@@ -1,5 +1,6 @@
 ---
 title: Example blueprints and the MVP-28 demo views
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/journeys/operator/inferos/finops-metrics-tech-support.md
 covers:
   - packages/bundled-blueprints/examples
   - packages/bundled-blueprints/src/example-archive.ts

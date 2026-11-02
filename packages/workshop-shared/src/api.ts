@@ -442,7 +442,7 @@ export type OperateReadRun = {
 };
 
 /**
- * A person's operate session (docs/design/operate-mode.md, "Sessions"): one continuous operate
+ * A person's operate session (InferOps docs/human/architecture/inferos/operate-mode.md, "Sessions"): one continuous operate
  * chat plus a page state that is the replay of an ordered event log. The person's tabs and devices
  * change the page through `dispatch()`, and the operate agent through the same log, each applied by
  * the shared `applyOperateEvent`. The session holds references only and grants no access.
@@ -1181,7 +1181,7 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getBlueprintScreenshot(blueprintId: string): Promise<BlueprintScreenshotUpload | null>;
 
-  // --- Publication (docs/design/feature-capabilities.md, "Publication destinations") ---
+  // --- Publication (InferOps docs/human/architecture/inferos/feature-capabilities.md, "Publication destinations") ---
 
   /**
    * Ask a deployment admin to publish the current version of one of the caller's own published

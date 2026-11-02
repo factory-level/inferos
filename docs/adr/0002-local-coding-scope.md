@@ -40,5 +40,5 @@ The following are not requirements or blockers: a hosted coding service, a remot
 
 ## Related
 
-- Design: [`../design/local-coding-workflows.md`](../design/local-coding-workflows.md)
-- Design: [`../design/feature-capabilities.md`](../design/feature-capabilities.md)
+- Design: [`local-coding-workflows.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-coding-workflows.md)
+- Design: [`feature-capabilities.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md)

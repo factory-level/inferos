@@ -12,7 +12,7 @@ Proposed 2026-10-03. Accepted by the owner on 2026-10-05 ([#68](https://github.c
 
 [ADR 0001](0001-customer-capability-flag-vocabulary.md) names `PUBLISH_CLOUDFLAREOS_WIDGET` and `PUBLISH_CLOUDFLAREOS_APP` and says publication destinations are separate configuration fields, but it does not say what the destinations are. [#68](https://github.com/factory-level/inferos/issues/68) requires that, with a flag off, publication is denied at the server, CLI, tools and UI; that a publication records what, where and to whom and can be withdrawn; and that nothing is published by a deploy, profile or flag change alone. It leaves the destinations open.
 
-The upstream Workshop already publishes. A blueprint is a versioned snapshot of a gadget's code. Anyone holding its 128-bit id can read its metadata and download its `.gadget` archive through `PublicApi.getBlueprint` and `downloadBlueprint` without signing in, and an admin can feature it to every user of the deployment. Publish to Operate is built on the same blueprints but stays inside the deployment ([operate mode](../design/operate-mode.md)). So the flags cannot be satisfied by adding new destinations alone: with both flags off, a blueprint link would still send code out of the deployment.
+The upstream Workshop already publishes. A blueprint is a versioned snapshot of a gadget's code. Anyone holding its 128-bit id can read its metadata and download its `.gadget` archive through `PublicApi.getBlueprint` and `downloadBlueprint` without signing in, and an admin can feature it to every user of the deployment. Publish to Operate is built on the same blueprints but stays inside the deployment ([operate mode](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md)). So the flags cannot be satisfied by adding new destinations alone: with both flags off, a blueprint link would still send code out of the deployment.
 
 ## Decision
 
@@ -28,7 +28,7 @@ Decided by the owner on 2026-10-05:
 - A record holds the artifact, destination, audience, requester, approver and time. It is append-only and withdrawn by adding the withdrawal. Withdrawing stops new reach but cannot uninstall copies or recall downloaded archives, and says so.
 - With a flag off, every surface refuses: server, CLI, agent tools and UI. Turning a flag off suspends reach without changing records, and turning it on again resumes nothing without fresh confirmation. A flag, profile, deploy, migration or intake never publishes.
 
-The full design and the decision checklist are in [feature capabilities: publication destinations](../design/feature-capabilities.md#publication-destinations).
+The full design and the decision checklist are in [feature capabilities: publication destinations](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md#publication-destinations).
 
 ## Consequences
 
@@ -46,7 +46,7 @@ The full design and the decision checklist are in [feature capabilities: publica
 
 ## Related
 
-- Design: [`../design/feature-capabilities.md`](../design/feature-capabilities.md)
-- Design: [`../design/operate-mode.md`](../design/operate-mode.md)
+- Design: [`feature-capabilities.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md)
+- Design: [`operate-mode.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md)
 - [Blueprints](../blueprints.md), [Sharing](../sharing.md)
 - [ADR 0001](0001-customer-capability-flag-vocabulary.md)

@@ -1,5 +1,6 @@
 ---
 title: Local coding workflows and agent dispatch
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-coding-workflows.md
 covers:
   - custom-gatekeepers/gatekeeper-inferops/src/coding-workbench.ts
   - custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx
@@ -24,7 +25,7 @@ updated: 2026-10-03
 
 ## Overview
 
-The InferOS half of the [design](../design/local-coding-workflows.md) is the governed dispatch path ([#70](https://github.com/factory-level/inferos/issues/70)) and the deployment switch for it (the flag part of [#69](https://github.com/factory-level/inferos/issues/69)). A human or an agent with a coding-dispatch binding proposes handing a software issue of one InferOps project to the local coding runner; on approval the InferOps gatekeeper sends the dispatch with the person's own token, and InferOps queues a run that its runner pulls. The same binding lists the project's runs and their results and proposes cancels.
+The InferOS half of the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-coding-workflows.md) is the governed dispatch path ([#70](https://github.com/factory-level/inferos/issues/70)) and the deployment switch for it (the flag part of [#69](https://github.com/factory-level/inferos/issues/69)). A human or an agent with a coding-dispatch binding proposes handing a software issue of one InferOps project to the local coding runner; on approval the InferOps gatekeeper sends the dispatch with the person's own token, and InferOps queues a run that its runner pulls. The same binding lists the project's runs and their results and proposes cancels.
 
 The runner itself is InferOps' (`inferops runner codex`), extended in InferOps by [factory-level/inferops#2327](https://github.com/factory-level/inferops/issues/2327). Its patch-result mode, local worktree, environment allowlist and captured test evidence are not part of this repository. InferOS runs it locally ([#72](https://github.com/factory-level/inferos/issues/72)): `pnpm local runner start|status|stop` writes its `runner.json` from the wrapper's allowlist and starts it with an allowlisted environment, `pnpm local coding doctor` says whether it may start, and two skills tell agents how to dispatch (`coding-dispatch`) and how to set up and recover the runner (`local-coding`). Its control surface is the Kanban's coding task dialog on the workspace's own canvas (step 7 below; [InferOps canvas](inferops-canvas.md#coding-control-surface)). The runbook is [Run the local coding runner](../wiki/local-coding-runner.md).
 

@@ -17,6 +17,12 @@ Cloudflare OS provides three things in particular:
 
 We are making Cloudflare OS open source so that others can copy it and customize it for their own company. The idea is not that your company uses Cloudflare OS, but rather that you make it "*Your Company* OS".
 
+## InferOS in InferLab
+
+InferOS is this fork of Cloudflare OS, configured for InferLab. In InferLab each company gets its own InferOS environment, where its operational team works through configured workspaces and canvas pages, conventional controls, chat, configured agents, Workflows and a personal Dot. InferOps holds the company's operational records and InferMind its knowledge; InferOS composes them and reaches them only through a gatekeeper.
+
+The target design state for InferOS is the private InferOps repository's [`docs/human/`](https://github.com/factory-level/inferops/tree/develop/docs/human) on `develop`, its default branch. InferOS has no design folder of its own. This repository records what is built and where it diverges in [`docs/architecture/`](docs/architecture/README.md), its decisions in [`docs/adr/`](docs/adr/README.md) and its runbooks in [`docs/wiki/`](docs/wiki/README.md).
+
 ## Quick Start
 
 To quickly run Cloudflare OS locally, [install pnpm](https://pnpm.io/), then do:

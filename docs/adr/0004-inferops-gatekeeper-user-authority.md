@@ -8,7 +8,7 @@ date: 2026-10-02
 
 ## Context
 
-The InferOps gatekeeper reads project boards and applies approved issue transitions through the InferOps HTTP API ([design](../design/inferops-gatekeeper.md), [#21](https://github.com/factory-level/inferos/issues/21)). That API authenticates a bearer token, either a person's access token or a service-account key, and authorizes it against the workspace named by `X-Workspace-Id`. The design left "service versus user authority" as an open question.
+The InferOps gatekeeper reads project boards and applies approved issue transitions through the InferOps HTTP API ([design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md), [#21](https://github.com/factory-level/inferos/issues/21)). That API authenticates a bearer token, either a person's access token or a service-account key, and authorizes it against the workspace named by `X-Workspace-Id`. The design left "service versus user authority" as an open question.
 
 Three facts bear on the choice:
 
@@ -41,10 +41,10 @@ The decision was made by the operator on 2026-10-02. This record is `proposed` u
 
 - Access-token lifetime, refresh and the reconnect flow are not specified here; [#66](https://github.com/factory-level/inferos/issues/66) owns them.
 - Whether a project-bound assumption should be layered on top of the person's token, so InferOps also enforces the binding's project.
-- What authority scheduled or other unattended work uses.
+- What authority scheduled or other unattended work uses. The InferLab product design of 2026-11-02 answers this with a second, explicit context: the authority assigned to the workflow and its permitted trigger ([agent operations](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md)). Its design in the gatekeeper is open, and it extends this record rather than replacing it.
 - InferOps has not yet confirmed the contract this decision is part of ([factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326)).
 
 ## Related
 
-- Design: [`../design/inferops-gatekeeper.md`](../design/inferops-gatekeeper.md)
-- Design: [`../design/feature-capabilities.md`](../design/feature-capabilities.md) (`INFEROPS_AUTH`)
+- Design: [`inferops-gatekeeper.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md)
+- Design: [`feature-capabilities.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md) (`INFEROPS_AUTH`)

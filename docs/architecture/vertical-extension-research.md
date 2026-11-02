@@ -1,5 +1,6 @@
 ---
 title: Vertical extension research and decision matrix
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/vertical-extension-research.md
 covers:
   - docs/blueprints.md
   - packages/gatekeeper-kit
@@ -14,7 +15,7 @@ updated: 2026-10-04
 
 ## Overview
 
-Current-state baseline inspected at InferOS `21708d3449a482843e13cb2268d1ae79451c7dfb`. Proposed work is recorded in the [design](../design/vertical-extension-research.md), not asserted as implemented here.
+Current-state baseline inspected at InferOS `21708d3449a482843e13cb2268d1ae79451c7dfb`. Proposed work is recorded in the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/vertical-extension-research.md), not asserted as implemented here.
 
 ## Components
 
