@@ -21,7 +21,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-10-30
+updated: 2026-11-02
 ---
 
 # InferOps gatekeeper
@@ -582,7 +582,6 @@ Workshop backend checks the same allowlist on its first API request
 report `providesAuth` fails every request with a clear message rather than a login page quietly
 missing a button.
 
-
 ### Sign-in proxy
 
 A browser that InferLab's IP-allowlisting edge refuses cannot open central-auth's `/authorize` page either, since that is a browser leg and carries no edge header. With `INFERLAB_AUTHORIZE_ORIGIN` set (a hostname routed to this gatekeeper, behind the deployment's Access application), `src/auth-proxy.ts` serves it:
@@ -648,6 +647,14 @@ A browser that InferLab's IP-allowlisting edge refuses cannot open central-auth'
 - InferOps' 403 on a Wiki call does not say whether the product or the permission refused it, so
   InferOS reports both with one message. Only a connected account's own InferOps workspace is
   told apart before any request; a stopgap or demo binding learns it from InferOps.
+
+### Against the 2026-11-02 product design
+
+Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/architecture/agent-operations.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md).
+
+- Every call carries the person's own authority (ADR 0004); the assigned system-workflow authority context does not exist (I08).
+- Reads and proposals return acceptance and approval outcomes; there is no run-progress or completion callback contract for delegates (I07, I09).
+- Agents are not configured by a Company Admin from gatekeeper capability bundles; connections are bound per person and per gadget.
 
 ## Open Questions
 

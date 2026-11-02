@@ -1,6 +1,6 @@
 # Design
 
-Intended behavior and requirements. All new pillar specifications remain draft.
+Intended behavior and requirements for InferOS. The product-level design these documents implement is authoritative in the InferOps repository's `docs/human/` ([architecture pages](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture), [journeys by role](https://github.com/factory-level/inferops/tree/develop/docs/human/journeys)), decided on 2026-11-02; where a document here predates it, a note dated 2026-11-02 at its top says what the product design confirmed, changed or superseded. All new pillar specifications remain draft.
 
 Create documents from [`_template.md`](_template.md).
 
@@ -23,7 +23,7 @@ Create documents from [`_template.md`](_template.md).
 | [Customer OS onboarding](customer-onboarding.md) | draft | Operations-first sequence from reviewed intake to an explicitly deployed private InferOS |
 | [Connection packages and reviewed fork updates](connection-extensions.md) | draft | Repeatable Gatekeeper connection packages and reviewed upgrades of customized customer repositories |
 | [External-agent platform integrations](agent-platform-integrations.md) | draft | Governed capability bridge for Harness HG and other external agent platforms |
-| [Native agent deployments](agent-deployments.md) | draft | Persistent native persona/skill agent deployments with scoped identity and lifecycle controls |
+| [Native agent deployments](agent-deployments.md) | superseded | Persistent native persona/skill agent deployments; superseded on 2026-11-02 by configured agents and the personal Dot, kept for its lifecycle input |
 
 ## Wave 5 review artifacts
 

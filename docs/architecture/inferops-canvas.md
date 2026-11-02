@@ -27,7 +27,7 @@ covers:
   - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-10-14
+updated: 2026-11-02
 ---
 
 # InferOps canvas and transactional widgets
@@ -69,6 +69,14 @@ Console board and issue continuity (#63) covers one board and one issue in the s
 Durable views are released as a bounded slice (#34, MVP scope in #1): the one private Kanban/Operate view keeps its definition through reload and Worker restart, refuses stale expected revisions and inherits the workspace's build-access boundary (see the evidence under [Resolving a board reference](#resolving-a-board-reference)). The durable-view requirements in the [consumer configuration design](../design/consumer-configuration.md) for generalized export/import/rebind, independent view-sharing controls, deployment-update recovery, schema migrations and cross-customer upgrade matrices are post-release and not implemented; today a view is shared only by sharing its workspace, and import always creates a new definition.
 
 Bound views ([Bound view](#bound-view)) diverge from the bound-view contract (r8) in these ways. The contract's merge-sort figure (at most 3,989 element comparisons at n = 500) is the top-down bound; a bottom-up merge sort can make 3,993. Both stay under the n⌈log₂ n⌉ = 4,500 per sort key that is pre-charged, so the 176,000 budget holds. The cohort's acceptance rule needs the selection's `changeSeq` at the time a read is sent, which the three hook changes of #203 did not expose, so `onRequest` gained a second argument and `useHostBoard` returns `changeSeq` (additive). A table column's `as: date` and `as: flag` render as text: the contract types them but gives them no other rendering. The Build preview reads the committed head, not a chat's unsaved changes. The connection-accept `GatekeeperModal` case is tested with a portaled iframe standing in for its configurator, not the modal itself. The two-user browser pass, its proof note and the COOP assertions (contract §7) are not done yet; Firefox and WebKit are deferred to MVP-35. The frontend's TypeScript `lib` adds `ES2024.String`, because the shared parser uses `String.prototype.isWellFormed`.
+
+### Against the 2026-11-02 product design
+
+Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/architecture/workspaces-and-canvases.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workspaces-and-canvases.md).
+
+- The guarded canvas definition is a flat layout of sections and widget instances; there are no nested objects, no attached hooks, events or effects, no explicit target selector and no dedicated Canvas Builder (I06).
+- Canvases themselves have no draft and published states, and there is no widget-progression or canvas-progression contract with completion callbacks (I07).
+- The board adapter resolves one board reference; no company-wide record pages are reached from here, and InferOps' record-list contract (default 100, maximum 500, no cursor) bounds what paging could show (I03).
 
 ## Open Questions
 
@@ -280,7 +288,6 @@ Ten keyboard moves on distinct issues per row, measured from the actual Enter ev
 | PERF x4 | 4× | after | 81 / 144 ms | 330 / 461 ms |
 
 Windowing reduces initial DOM elements by 83.5% for x1 and 85.1% for x4; heap drops from about 31/55MiB to 12/16MiB. The p95 local move badge falls from 107→29ms and 233→36ms unthrottled, and 570→83ms and 952→144ms at 4× CPU. Startup still includes a worst 1,148ms task under the throttled x4 profile (down from 2,075ms); reducing issue-card rendering does not eliminate the page’s initial load cost. Host contention and ten-sample tails remain noisy. The earlier proposed 100ms move limit holds for both unthrottled views and throttled x1, but throttled x4 needs an explicit budget decision. The ceilings below were agreed by the owner on 2026-10-05 for this measurement scope.
-
 
 <a id="kanban-budget-decision"></a>**Budget decision: AGREED for the local mock measurement scope, decided by the owner on 2026-10-05 ([#158](https://github.com/factory-level/inferos/issues/158)).** The ceilings were proposed on 2026-10-04 and are agreed unchanged. The agreed scope is exactly the measurement above: the local mock InferOps gatekeeper, 500 synthetic issues (`MOCK_INFEROPS_SYNTHETIC_ISSUES=500`), production frontend assets, Chromium headless at 1440×900 (DPR 1), the PERF x1/x4 **initial viewport** (x4 initially loads two widgets), and 10 measured samples after one warm-up per row. The 4× CPU + Fast 4G profile is **HTTP-shaped, not WebSocket-shaped**: CDP delays the page and its assets but not the Workshop WebSocket that carries board reads and moves.
 

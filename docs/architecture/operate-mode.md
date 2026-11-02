@@ -93,7 +93,7 @@ covers:
   - packages/workshop-frontend/src/features/chat/activity/toolCallLabels.ts
   - packages/integration-tests/__tests__/operate-console-flows.test.ts
   - packages/workshop-backend/__tests__/operate-flow-start.test.ts
-updated: 2026-10-30
+updated: 2026-11-02
 ---
 
 # Operate mode
@@ -448,7 +448,6 @@ Further details:
 - `listAutoApprovedActionKinds` and `listPreApprovableActions().alreadyEnabled` show only rules the same check honours (the restricted latch aside), so a rule that cannot fire is not shown as enabled.
 - Actions that would have been auto-approved stay pending for a manual decision; nothing is replayed. `auto-approval-policy.test.ts` covers removal, a share-link downgrade to Use, a transitive loss, the `ownerInvitesOnly` observation, a queued action behind a manual gate, the listings, re-adding, re-enabling by a current Build user, and the owner's rule on a restarted instance that only a collaborator opened. `workshop-agent-actions.test.ts` covers an agent turn suspending instead of carrying on, and `auto-approval.test.ts` the predicate and the drain's role resolution.
 
-
 A stored snapshot may predate a page-state field. The user DO fills missing fields from `INITIAL_OPERATE_PAGE` whenever it reads the snapshot, so such a session reads as if it always had the field (a session stored before approvals reads `reviewing` and `lastApprovalOutcome` as null).
 
 A session can show a **board** (#61): `openBoard` names `{workspaceId, boardRef}`, the board's canonical reference and the workspace whose connection reads it, and `closeBoard` stops showing it. Opening a console, another view or screen, closing the console or going home closes the board too, so a board never outlives the context it was opened in. The board carries an optional `issueId`: `openIssue` shows one issue over it (a board must be shown) and `closeIssue` returns to the same board; `openBoard` starts with none. Board, issue and Back are therefore session events, restored on reload and reconnect from the log, and a tab acting on an old sequence number is refused with `conflict`. The reducer checks only lengths. Before a person's `openBoard` reaches the user DO, `OperateSessionImpl` opens the named workspace with the caller's own access and requires `getGatekeeperByResourceUrl(boardRef)` to find a connection there; otherwise it rejects with `boardUnavailable` and appends nothing. A use-role operator is denied that lookup on a console workspace, so their boards name their own session workspace, where a connection exists only if they made it from their own account. The operate agent's `openBoard` (`operatePage` with a `boardRef`) is rewritten by the Overseer to name the session workspace itself and refused, as an agent-readable tool error, unless one of that workspace's connections reports exactly that reference; the agent is told to ask the person to connect it rather than open another board. So a stale, unconnected or removed target is refused explicitly and never replaced by a default; a board whose project was since deleted or whose access was revoked opens as a reference and fails on its first read, which the board surface shows as such.
@@ -683,6 +682,17 @@ Against [the design](../design/operate-mode.md):
 - Console publication is decided by the workspace's `build` collaborator role, not a publisher permission issued through an InferOS gatekeeper, and a published console is shared with the workspace's collaborators only; there is no other sharing audience. There is no rollback to an earlier published revision (only the current one is kept) and no retirement short of deletion. An open console adopts a new published revision only by being reopened (its sessions are told at once, see `consoleRevision`, and its next navigation is refused); a running flow is not affected. A console's revision changes only when the console itself is replaced or published, so a screen edited since the last publish does not show as an unpublished change in the console's revisions (comparing `getConsoleScreen` for `draft` and `published` shows it, as the builder's launcher does); publishing an unchanged console again republishes its screens at a new revision.
 - Preview has no separate data or side-effect contract: a draft opened as a preview reads through the builder's own access, and its actions queue for approval like any other.
 - Build still offers the bundled `inferops.kanban` blueprint as a creatable output, and it does not yet offer Widgets or Agent workflows as outputs.
+
+### Against the 2026-11-02 product design
+
+Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/architecture/workspaces-and-canvases.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workspaces-and-canvases.md) and [`workflows.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workflows.md).
+
+- No workspace → canvas page → widget instance hierarchy with nested objects, hooks, events and effects; the Operate session holds a page state and consoles reference installed artifacts.
+- No draft and publish on canvases beyond pinned console installs (#136, #149); no Workflows views, sharing, duplication or save-or-expire TTL.
+- One authority context: every request carries the person's own token (ADR 0004); no assigned system-workflow authority exists.
+- No personal Dot; the Operate agent beside the person is the only chat.
+- Build is not gated by role, and the five-role model (Superuser, Admin, Operator, System, Agent) is not represented.
+- Background work is acknowledged on enqueue; progress and actual completion do not return to a configured destination.
 
 ## Open Questions
 

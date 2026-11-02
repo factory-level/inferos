@@ -197,6 +197,8 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
 
 Documentation Loop (`docs/design/`, `docs/architecture/`, `docs/adr/`, `docs/wiki/`), from the `factory-level/doc-starter.template`:
 
+* The product-level design InferOS implements is authoritative in the InferOps repository's `docs/human/` (architecture pages and journeys at `docs/human/journeys/<role>/<app>/` for the roles superuser, admin, operator, system and agent; decided 2026-11-02). `docs/design/` here holds InferOS-specific design under it. When the two disagree, record the gap under the architecture doc's "Divergences from Design" and propose the change in InferOps `docs/human/`; never rewrite either to match code.
+
 * Each folder has a `README.md` index and a template (`_template.md`, or `0000-template.md` for ADRs). Start every new document from its template, keep its YAML front matter, and add it to the folder index. The flat `docs/*.md` files and `plans/` predate the loop and sit outside it.
 
   | Folder | Holds | Filename | Required front matter |

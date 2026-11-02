@@ -1,7 +1,7 @@
 ---
 title: InferOS platform pillars
 status: draft
-updated: 2026-10-02
+updated: 2026-11-02
 ---
 
 # InferOS platform pillars
@@ -26,6 +26,14 @@ This is a draft specification and implementation backlog. It does not claim the 
 | [InferOps canvas and transactional widgets](inferops-canvas.md) | Make operational data easy to load, compose and act on through a simple canvas, starting with Kanban and later maps. |
 | [Operate mode](operate-mode.md) | Run operations from what Build published, on three distinct surfaces: full-page apps, widgets for screens and the operate chat, and an optional ChatGPT-style full chat that each console can offer. Each operator role gets its own console of views, and Build stays with admins and leads. |
 | [Vertical extension research and decision matrix](vertical-extension-research.md) | Make extension choices from documented native capabilities and concrete workflow requirements instead of assuming every vertical requires a kernel fork. |
+| Workspaces, canvases and widgets ([product design](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workspaces-and-canvases.md)) | A workspace of named canvas pages with nested objects and widget instances; widget progression and canvas progression as distinct families; deterministic Build with an explicit target and a dedicated Canvas Builder; shared canvases with draft and published states. |
+| Workflows ([product design](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workflows.md)) | Definition, trigger, run, delegate and result kept distinct; Scheduled, Shared with me, Saved and Recent views; sharing, duplication and save-or-expire; runs that continue without an open canvas. |
+| Agents and Dot ([product design](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md)) | Agents configured by a Company Admin from gatekeeper capabilities; two execution-authority contexts; one personal Dot per user on CopilotKit/OpenDots that acts only through gatekeepers. |
+| CRM module ([product design](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/domain-boundaries.md)) | The first business module, bootstrapped from trycompai/crm, resolving the same canonical InferOps record as canvases and global pages. |
+
+## 2026-11-02 baseline
+
+The InferLab product design decided on 2026-11-02 ([InferOps `docs/human/`](https://github.com/factory-level/inferops/tree/develop/docs/human)) sets the product-level scope these pillars serve. InferOS is each company's environment. One shared role model applies across InferOS, InferOps, InferMind, the CRM module and Dot: Superuser (InferLab internal; onboards companies), Admin (a company; configures its data, access, agents, workspaces and workflows), Operator (a company; daily work through the permitted tools), System (schedules, backups, expiry, callbacks under assigned authority) and Agent (agents and Dot, under the user's permissions or assigned system-workflow authority). Building, approving, publishing and read-only viewing are permissions, so Build and Use map to the Admin's build permission and the Operator role; existing owner and admin labels map to Admin and member labels to Operator. The five product surfaces are InferOS, the InferOps global pages, the InferMind global view, Build and Workflows; a custom canvas must never become the only way to find a record. The agent self-improvement loop is removed from the product. The work this implies for InferOS (I06 to I11) is recorded in InferOps' repository map; the rows above that predate the baseline are unchanged and the architecture documents record the divergences.
 
 ## Behavior
 

@@ -1,10 +1,12 @@
 ---
 title: Operate space and publication review
 status: accepted
-updated: 2026-10-05
+updated: 2026-11-02
 ---
 
 # Operate space and publication review
+
+> Confirmed by the InferLab product design on 2026-11-02 ([workspaces, canvases and widgets](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workspaces-and-canvases.md)): shared canvases and workflows have draft and published states; Admin edits remain in draft until the Admin explicitly publishes them for Operators; editing a draft never changes the currently published configuration; new workflow runs use the published update and runs already underway finish with the definition they started with. Keep it simple: detailed version handling and active canvas refresh timing are implementation details. A space maps to a workspace and its canvas pages in that vocabulary.
 
 Design for [#155](https://github.com/factory-level/inferos/issues/155). Proposed 2026-10-04; **accepted by the owner on 2026-10-05**, with the four review decisions answered under [Decisions](#decisions-2026-10-05). It is not yet a runtime implementation; implementation is resuming in the ordered slices below. Existing pinned installs and explicit upgrades are implemented by #136/#149; the separate publication-destination flags (#68, draft #134) remain deferred.
 

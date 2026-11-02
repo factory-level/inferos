@@ -1,10 +1,12 @@
 ---
 title: InferOps gatekeeper
 status: draft
-updated: 2026-10-13
+updated: 2026-11-02
 ---
 
 # InferOps gatekeeper
+
+> Extension required by the InferLab product design of 2026-11-02 ([agent operations, two authority contexts](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md)): besides each person's own authority ([ADR 0004](../adr/0004-inferops-gatekeeper-user-authority.md)), a predefined system workflow started by an authorized event, schedule or configured control runs with the authority explicitly assigned to that workflow and permitted trigger. Permission to invoke a workflow and the authority its execution uses are separate, and an arbitrary prompt, event name or delegation never creates a privileged context. This is a second, explicit context to design, not a bypass of the gatekeeper. Callbacks also need to distinguish a request being accepted from the action completing.
 
 Tracking epic: [#6](https://github.com/factory-level/inferos/issues/6); roadmap: [#1](https://github.com/factory-level/inferos/issues/1).
 

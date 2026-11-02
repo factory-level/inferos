@@ -1,6 +1,6 @@
 ---
 title: Implementation roadmap
-updated: 2026-10-05
+updated: 2026-11-02
 ---
 
 # Implementation roadmap
@@ -8,6 +8,8 @@ updated: 2026-10-05
 The MVP release walkthrough, the wave milestones that group the work, and what has merged so far.
 
 Roadmap: [#1](https://github.com/factory-level/inferos/issues/1). Its MVP decision (2026-10-02) is the canonical release scope: **InferOps Kanban and the InferMind Wiki are the customer-facing MVP, and InferOS is the configurable private shell that boots and hosts them.** The wave milestones below are work groupings, not release gates; an issue's own phase note decides which slice of it is release-critical.
+
+On 2026-11-02 the InferLab product design in InferOps [`docs/human/`](https://github.com/factory-level/inferops/tree/develop/docs/human) became the product-level scope above #1's MVP decision: each company's InferOS environment with workspaces and canvas pages under draft and publish, Workflows, configured agents under two authority contexts, a personal Dot on OpenDots, global record pages in InferOps and the CRM module; the agent self-improvement loop is removed. The InferOS work this implies (I06 target selector and Canvas Builder, I07 progression and callbacks, I08 configured agents and authority, I09 and I10 background workflows, views, sharing and TTL, I11 Dot) is recorded in InferOps' repository map and in each architecture document's "Against the 2026-11-02 product design" list; the wave milestones below keep tracking merge state of the existing issues.
 
 This page tracks merge state only. A merged pull request is implementation evidence for a slice of an issue, not acceptance of the issue or of a walkthrough step. The Wave 4 and Wave 5 sections record their 2026-10-04 implementation and disposition status; earlier waves retain their evidence boundaries.
 

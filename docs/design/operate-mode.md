@@ -1,10 +1,12 @@
 ---
 title: Operate mode
 status: draft
-updated: 2026-10-03
+updated: 2026-11-02
 ---
 
 # Operate mode
+
+> Reconciled with the InferLab product design on 2026-11-02 ([workspaces, canvases and widgets](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workspaces-and-canvases.md), [workflows](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workflows.md)): "console" maps to the workspace and canvas-page vocabulary (a workspace contains named canvas pages; a page contains nested objects and widget instances with attached behavior); Build and Use map to the Admin role's build permission and the Operator role; shared canvases and workflows have draft and published states, with Admin edits in draft until explicitly published; widget progression and canvas progression are distinct families; UI state and navigation are personal to each Operator by default and synchronized multi-user UI is not baseline; both deterministic controls and agents drive supported transitions through dispatch and callback contracts that distinguish accepted from completed. The text below is kept as written and the architecture document records the divergences.
 
 Tracking epic: [#7](https://github.com/factory-level/inferos/issues/7); roadmap: [#1](https://github.com/factory-level/inferos/issues/1).
 

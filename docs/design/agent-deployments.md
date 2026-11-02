@@ -1,10 +1,12 @@
 ---
 title: Native agent deployments
-status: draft
-updated: 2026-10-05
+status: superseded
+updated: 2026-11-02
 ---
 
 # Native agent deployments
+
+> Superseded on 2026-11-02 by the InferLab product design ([agent operations](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md)): a Company Admin builds agents by selecting the gatekeeper capabilities they need; a custom action runs with the requesting user's authority and a predefined system workflow with the authority explicitly assigned to it; each user has one personal Dot on CopilotKit/OpenDots. The vault's "Agent Dots" release is superseded with it. The definition / deployment / run distinction, the rule that persona and skills are behavior and not permissions, and the lifecycle controls below remain input to background and scheduled execution (I09); the persistent persona/skill deployment product is not a target. Text below is kept as written.
 
 Tracking epic: [#53](https://github.com/factory-level/inferos/issues/53); roadmap: [#1](https://github.com/factory-level/inferos/issues/1). Decision records: [ADR 0003](../adr/0003-distinct-agent-capabilities.md), [ADR 0007](../adr/0007-agent-deployment-lifecycle.md) (accepted).
 
