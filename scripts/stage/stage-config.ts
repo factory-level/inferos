@@ -119,9 +119,9 @@ export function inferOpsGatekeeperVars(stage: StageDefinition): Record<string, s
     // stage's behaviour never depends on a default changing. Coding dispatch stays off: it needs a
     // separate `project/dispatch` grant and a local runner a stage does not have.
     CODING_WORKBENCH_ENABLED: "false",
-    INFEROPS_TABLES_ENABLED: "false",
+    INFEROPS_TABLES_ENABLED: stage.inferops.tablesEnabled === true ? "true" : "false",
     INFEROPS_MEMBERS_ENABLED: "false",
-    INFEROPS_WORKFLOW_POLICY_ENABLED: "false",
+    INFEROPS_WORKFLOW_POLICY_ENABLED: stage.inferops.workflowPolicyEnabled === true ? "true" : "false",
     INFEROPS_HOST_BOARDS: "false",
   };
 }
