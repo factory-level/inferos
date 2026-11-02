@@ -692,7 +692,7 @@ Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/
 - No draft and publish on canvases beyond pinned console installs (#136, #149); no Workflows views, sharing, duplication or save-or-expire TTL.
 - One authority context: every request carries the person's own token (ADR 0004); no assigned system-workflow authority exists.
 - No personal Dot; the Operate agent beside the person is the only chat.
-- Build is not gated by role, and the five-role model (Superuser, Admin, Operator, System, Agent) is not represented.
+- Build is not gated by role, and the role model (the primary roles Superuser, Admin and Operator, and the actors System and Agent) is not represented.
 - Background work is acknowledged on enqueue; progress and actual completion do not return to a configured destination.
 
 ## Open Questions
