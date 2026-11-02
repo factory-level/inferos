@@ -19,3 +19,4 @@ Create records from [`0000-template.md`](0000-template.md).
 | [0009. Persistent stages deploy real prefixed Workers](0009-persistent-stage-deploys.md) | proposed | 2026-10-27 |
 | [0010. InferOS keeps no design of its own](0010-design-lives-in-inferops.md) | accepted | 2026-11-02 |
 | [0011. Configured system work uses its assigned principal, apart from each person's token](0011-system-workflow-authority.md) | proposed | 2026-11-02 |
+| [0012. Workflow runs share one correlation record and seven observable outcomes](0012-run-correlation-and-outcomes.md) | proposed | 2026-11-02 |
