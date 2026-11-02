@@ -17,4 +17,4 @@ Create records from [`0000-template.md`](0000-template.md).
 | [0007. Agent deployment lifecycle and flag-off semantics](0007-agent-deployment-lifecycle.md) | accepted | 2026-10-05 |
 | [0008. Publication destinations for the widget and app flags](0008-publication-destinations.md) | accepted | 2026-10-05 |
 | [0009. Persistent stages deploy real prefixed Workers](0009-persistent-stage-deploys.md) | proposed | 2026-10-27 |
-| [0010. InferOS keeps no design of its own](0010-design-lives-in-inferops.md) | proposed | 2026-11-02 |
+| [0010. InferOS keeps no design of its own](0010-design-lives-in-inferops.md) | accepted | 2026-11-02 |
