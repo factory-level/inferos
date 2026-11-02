@@ -50,6 +50,6 @@ Four native facts constrain it:
 
 ## Related
 
-- Design: [`../design/agent-deployments.md`](../design/agent-deployments.md)
+- Design: [`agent-deployments.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-deployments.md)
 - Architecture: [`../architecture/agent-deployments.md`](../architecture/agent-deployments.md)
 - Decisions: [ADR 0001](0001-customer-capability-flag-vocabulary.md), [ADR 0003](0003-distinct-agent-capabilities.md), [ADR 0006](0006-agent-artifact-revisions.md)

@@ -1,5 +1,6 @@
 ---
 title: Software factory sandboxes and local CI
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md
 covers:
   - scripts/local/factory.ts
   - scripts/local/factory.test.ts
@@ -14,7 +15,7 @@ updated: 2026-11-01
 
 ## Overview
 
-The factory is the skills agents consume plus the sandbox environments they run in (design in the authored Obsidian vault, tracking [#285](https://github.com/factory-level/inferos/issues/285)). This checkout is the vessel: `pnpm local factory` brings the sandboxes up and down. The local CI graph (`scripts/ci/pipeline.ts --target=local`, the reusable workflow and the composite actions) and the scripted stage smoke are still in draft [#286](https://github.com/factory-level/inferos/pull/286); `factory stage-smoke` reports their absence from this checkout instead of running. Nothing here deploys: there is no Cloudflare account in any step.
+The factory is the skills agents consume plus the sandbox environments they run in (target design under [local development](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md) in InferOps; its fuller note is still in the vision-manager vault and not yet migrated; tracking [#285](https://github.com/factory-level/inferos/issues/285)). This checkout is the vessel: `pnpm local factory` brings the sandboxes up and down. The local CI graph (`scripts/ci/pipeline.ts --target=local`, the reusable workflow and the composite actions) and the scripted stage smoke are still in draft [#286](https://github.com/factory-level/inferos/pull/286); `factory stage-smoke` reports their absence from this checkout instead of running. Nothing here deploys: there is no Cloudflare account in any step.
 
 ## Components
 

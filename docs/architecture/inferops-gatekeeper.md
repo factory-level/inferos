@@ -1,5 +1,6 @@
 ---
 title: InferOps gatekeeper
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md
 covers:
   - custom-gatekeepers/gatekeeper-inferops
   - packages/bundled-blueprints/blueprints/inferops-kanban
@@ -30,7 +31,7 @@ updated: 2026-11-02
 
 `custom-gatekeepers/gatekeeper-inferops` (package `@inferos/gatekeeper-inferops`, vendor id
 `inferops`) implements the reviewed agent-facing API from the
-[design](../design/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
+[design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
 `inferops-gatekeeper-api.d.ts` verbatim, plus `findBoards` (below): `InferOpsProjectSession` (`readBoard`, `openIssue`,
 `createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`), with `Issue.pending`
 marking simulated changes. The gatekeeper code is written against a data-source

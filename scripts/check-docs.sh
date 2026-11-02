@@ -91,21 +91,22 @@ for file in docs/*/*.md; do
   fi
 done
 
-for file in docs/design/*.md; do
-  is_template "$file" && continue
-  check_keys "$file" title status updated
-  check_enum "$file" status draft accepted superseded
-  check_date "$file" updated
-  check_indexed "$file"
+# InferOS keeps no design: the target design state is InferOps docs/human/ on develop (ADR 0010).
+for dir in docs/design docs/human; do
+  if [ -e "$dir" ]; then
+    error "$dir: InferOS keeps no design; the target design state is factory-level/inferops docs/human/ on develop"
+  fi
 done
+design_ref='^https://github\.com/factory-level/inferops/blob/develop/docs/human/[A-Za-z0-9/_.-]+\.md$'
 
 for file in docs/architecture/*.md; do
   is_template "$file" && continue
-  check_keys "$file" title covers updated
+  check_keys "$file" title design covers updated
   check_date "$file" updated
   check_indexed "$file"
-  if [ ! -f "docs/design/$(basename "$file")" ]; then
-    warn "$file: no matching design document docs/design/$(basename "$file")"
+  design="$(fm_value "$file" design)"
+  if [ -n "$design" ] && ! [[ "$design" =~ $design_ref ]]; then
+    error "$file: design '$design' is not a factory-level/inferops docs/human/ URL on develop"
   fi
   covered=0
   while IFS= read -r path; do
@@ -139,6 +140,12 @@ for file in docs/wiki/*.md; do
   check_date "$file" updated
   check_indexed "$file"
 done
+
+# A link into InferOps docs/ names its default branch, never another branch or a commit.
+while IFS= read -r hit; do
+  error "$hit: links to InferOps docs/ on a ref other than develop"
+done < <(grep -rnoE 'factory-level/inferops/(blob|tree)/[^/[:space:])]+/docs/[^[:space:])]*' docs README.md AGENTS.md |
+  grep -vE ':factory-level/inferops/(blob|tree)/develop/docs/')
 
 # Relative links in all Markdown files outside templates must resolve.
 while IFS= read -r file; do

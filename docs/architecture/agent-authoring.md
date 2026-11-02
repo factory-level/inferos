@@ -1,5 +1,6 @@
 ---
 title: Reusable native agent authoring
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md
 covers:
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/agent-artifact.ts
@@ -18,7 +19,7 @@ updated: 2026-11-02
 
 ## Overview
 
-Current state after the revision-storage slice of [#16](https://github.com/factory-level/inferos/issues/16), built on the inventory of [#15](https://github.com/factory-level/inferos/issues/15) (InferOS `c340758`, AI Trader `c1301c8`). The six authoring methods of the [design](../design/agent-authoring.md) are members of `Overseer` and are implemented by each workspace's Overseer: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Revisions are stored per workspace. An agent asks for a publish through a built-in artifact publisher gatekeeper, and a person approves it in the approval queue. `.gadget` format version 2 (#17) and Context Library skill revisions are not implemented yet (see [Divergences from Design](#divergences-from-design)).
+Current state after the revision-storage slice of [#16](https://github.com/factory-level/inferos/issues/16), built on the inventory of [#15](https://github.com/factory-level/inferos/issues/15) (InferOS `c340758`, AI Trader `c1301c8`). The six authoring methods of the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md) are members of `Overseer` and are implemented by each workspace's Overseer: `validateArtifact`, `diffArtifactRevisions`, `publishArtifactRevision`, `listArtifactRevisions`, `getArtifactRevision` and `bindArtifactRevision`. Revisions are stored per workspace. An agent asks for a publish through a built-in artifact publisher gatekeeper, and a person approves it in the approval queue. `.gadget` format version 2 (#17) and Context Library skill revisions are not implemented yet (see [Divergences from Design](#divergences-from-design)).
 
 ## Components
 
@@ -106,7 +107,7 @@ Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/
 
 ## Open Questions
 
-- See the [design's open questions](../design/agent-authoring.md#open-questions). The two baseline questions were decided by the owner on 2026-10-05: the design's contract and [ADR 0006](../adr/0006-agent-artifact-revisions.md) are accepted as proposed.
+- See the [design's open questions](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md#open-questions). The two baseline questions were decided by the owner on 2026-10-05: the design's contract and [ADR 0006](../adr/0006-agent-artifact-revisions.md) are accepted as proposed.
 - The agent route uses a built-in gatekeeper binding modelled on the agent spawner (owner decision, 2026-10-06). The Workshop has no UI yet for creating the publisher connection.
 
 ## Evidence

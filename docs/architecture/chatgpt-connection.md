@@ -1,5 +1,6 @@
 ---
 title: Personal ChatGPT connection
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/chatgpt-connection.md
 covers:
   - packages/workshop-backend/src/ai-models.ts
   - packages/workshop-backend/src/openai-plugin.ts
@@ -21,7 +22,7 @@ updated: 2026-10-04
 
 ChatGPT plan usage exists for a **locally run** InferOS only ([#40](https://github.com/factory-level/inferos/pull/40)). An opt-in Bun companion (`assistant-plugins/openai`) implements OpenAI's OSS Sign in with ChatGPT flow on the developer's machine. It owns OAuth, credential files, refresh, revocation, model discovery and the streamed Responses requests. The Workshop Worker reaches it only over a loopback bridge, and no OAuth token crosses that boundary. A local developer can also use an Anthropic API key from the repository's `.env` as managed models, and pick an API-key model as an explicit fallback while ChatGPT is disconnected.
 
-No Cloudflare-hosted connection exists. The bridge accepts only a `127.0.0.1` URL, and the deployed Worker configurations do not set the companion's variables, so the feature is off on every deployment. The feasibility question for a personal Workers install ([#12](https://github.com/factory-level/inferos/issues/12)) is unresolved, and live ChatGPT OAuth and inference are unverified: they need the user's interactive account connection. The [design](../design/chatgpt-connection.md)'s Cloudflare target is not implemented.
+No Cloudflare-hosted connection exists. The bridge accepts only a `127.0.0.1` URL, and the deployed Worker configurations do not set the companion's variables, so the feature is off on every deployment. The feasibility question for a personal Workers install ([#12](https://github.com/factory-level/inferos/issues/12)) is unresolved, and live ChatGPT OAuth and inference are unverified: they need the user's interactive account connection. The [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/chatgpt-connection.md)'s Cloudflare target is not implemented.
 
 ## Components
 

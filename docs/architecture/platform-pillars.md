@@ -1,5 +1,6 @@
 ---
 title: InferOS platform baseline
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/platform-pillars.md
 covers:
   - packages/workshop-backend
   - packages/workshop-frontend
@@ -12,7 +13,7 @@ updated: 2026-10-09
 
 ## Overview
 
-InferOS is a Cloudflare Workers application with a browser SPA and sandboxed Gadgets. This page describes the native mechanisms every pillar builds on, separately from the [intended pillars](../design/platform-pillars.md). Each topic page records what its pillar has implemented; the [implementation roadmap](../wiki/implementation-roadmap.md) tracks merged work against the MVP walkthrough in [#1](https://github.com/factory-level/inferos/issues/1).
+InferOS is a Cloudflare Workers application with a browser SPA and sandboxed Gadgets. This page describes the native mechanisms every pillar builds on, separately from the [intended pillars](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/platform-pillars.md). Each topic page records what its pillar has implemented; the [implementation roadmap](../wiki/implementation-roadmap.md) tracks merged work against the MVP walkthrough in [#1](https://github.com/factory-level/inferos/issues/1).
 
 ## Components
 
@@ -86,6 +87,6 @@ The opener policy in deployments built by the release pipeline is also an open q
 
 - Deployments built by the release pipeline ship `_headers` as an ordinary asset in the router's asset manifest (`scripts/release/manifest-lib.ts` carries only `not_found_handling` and `run_worker_first`). Whether the deploy service turns it into header rules, as `wrangler deploy` does, is unverified. Until it does, `smoke.ts`'s `opener-policy` check is the way to confirm a deployed instance. If it does not, the fallback is to route document navigations through the router with `run_worker_first` patterns so `withOpenerPolicy` sets the header; that costs a Worker invocation per navigation and needs an owner decision before it is adopted.
 
-See each [draft pillar](../design/platform-pillars.md) and the [roadmap](../wiki/implementation-roadmap.md).
+See each [draft pillar](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/platform-pillars.md) and the [roadmap](../wiki/implementation-roadmap.md).
 
 The consumer bootstrap, parser and skills are described in [consumer configuration](consumer-configuration.md); applied profiles and styling ([#35](https://github.com/factory-level/inferos/issues/35)) are still outstanding.

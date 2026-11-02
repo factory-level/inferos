@@ -41,5 +41,5 @@ Provider and adapter versions, resource references, policies, publication destin
 
 ## Related
 
-- Design: [`../design/feature-capabilities.md`](../design/feature-capabilities.md)
-- Design: [`../design/consumer-configuration.md`](../design/consumer-configuration.md)
+- Design: [`feature-capabilities.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md)
+- Design: [`consumer-configuration.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/consumer-configuration.md)

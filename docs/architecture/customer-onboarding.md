@@ -1,5 +1,6 @@
 ---
 title: Customer OS onboarding
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/customer-onboarding.md
 covers:
   - scripts/consumer/intake.ts
   - scripts/consumer/intake-inferops.ts
@@ -18,7 +19,7 @@ updated: 2026-10-15
 
 ## Overview
 
-Steps 6 and 7 of the [onboarding sequence](../design/customer-onboarding.md) have code: a wrapper derives its configuration from a reviewed intake with `pnpm inferos intake apply <file>`. The command writes a report with every requirement's disposition and can file the drafted gap issues. With `--inferops` it also applies the intake to InferOps: the operations, then the Wiki's company root, selected pillars and their Master pages, read back and recorded. Bootstrap (step 5), local customization and the local checks (steps 8 and 9) are described in [consumer configuration](consumer-configuration.md). There is no upgrade or deploy command.
+Steps 6 and 7 of the [onboarding sequence](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/customer-onboarding.md) have code: a wrapper derives its configuration from a reviewed intake with `pnpm inferos intake apply <file>`. The command writes a report with every requirement's disposition and can file the drafted gap issues. With `--inferops` it also applies the intake to InferOps: the operations, then the Wiki's company root, selected pillars and their Master pages, read back and recorded. Bootstrap (step 5), local customization and the local checks (steps 8 and 9) are described in [consumer configuration](consumer-configuration.md). There is no upgrade or deploy command.
 
 ## Components
 
@@ -131,7 +132,7 @@ The intake file is the input. Keeping it in the wrapper (for example `intake/<cu
 
 ## Divergences from Design
 
-- The [design](../design/customer-onboarding.md) has the intake yield a modeled tenant. With `--inferops` the command models the projects, operations, pillars and Masters in an existing tenant and workspaces; it does not create the tenant or workspaces. The wrapper's requirement dispositions stay InferOS-side; InferOps' own report is carried beside them and, until a later #2324 slice, says only `unresolved` (factory-level/inferops#2324).
+- The [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/customer-onboarding.md) has the intake yield a modeled tenant. With `--inferops` the command models the projects, operations, pillars and Masters in an existing tenant and workspaces; it does not create the tenant or workspaces. The wrapper's requirement dispositions stay InferOS-side; InferOps' own report is carried beside them and, until a later #2324 slice, says only `unresolved` (factory-level/inferops#2324).
 - `inferops.targetRef` and `fixtures/project-board.json` keep naming the synthetic fixture board, because fixture validation requires the fixture's project to match the reference and remote mode cannot start yet. The customer references live in the starter view and screen template only.
 - Branding is not derived: `styling` stays as written.
 - Without `--inferops`, the operational inventory and pillars are recorded in the report only. The InferOS Wiki widget and gatekeeper still read documents, not the root, pillars or Masters ([#87](https://github.com/factory-level/inferos/issues/87)), and coverage is [factory-level/inferops#2325](https://github.com/factory-level/inferops/issues/2325).

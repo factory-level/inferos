@@ -1,5 +1,6 @@
 ---
 title: Operate mode
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md
 covers:
   - packages/workshop-backend/src/operate-agui-approval.ts
   - packages/workshop-backend/src/operate-agui-approval.md
@@ -653,7 +654,7 @@ Otherwise none. Limits are constants in `operate-session.ts`: references and scr
 
 ## Divergences from Design
 
-Against [the design](../design/operate-mode.md):
+Against [the design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md):
 
 - A console is stored in, and references screens of, one workspace; there is no operate space yet. It has no state machine (`consoleEvent`, `navigateBack`), no app assignments (widgets are registered as above), no role assignment, and no derived inventory. Operators with only the use role read a workspace's consoles and the screens they show, but not its flows, and they never reach its connections; their boards resolve only through a connection in their own session workspace (above). The operate agent's `operatePage` offers `showHome` but not the other console events.
 - Full chat is a page presentation only: the conversation does not yet render widgets inline.
@@ -701,7 +702,7 @@ Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/
 
 ## Wave 5 design boundary
 
-The [publication review](../design/operate-publication.md) design was accepted by the owner on 2026-10-05. Its kernel slice is implemented as described above: a space is a workspace that build collaborators install into, upgrades need equal declared data contracts, and mock dependencies are refused outside test-only spaces. The client's review page and actions are described above. The [approval/provider policy](../design/operate-policy.md) is a proposed review artifact, not new runtime behavior. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.
+The [publication review](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-publication.md) design was accepted by the owner on 2026-10-05. Its kernel slice is implemented as described above: a space is a workspace that build collaborators install into, upgrades need equal declared data contracts, and mock dependencies are refused outside test-only spaces. The client's review page and actions are described above. The [approval/provider policy](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-policy.md) is a proposed review artifact, not new runtime behavior. A unified company-role/IAM administration surface and restricted-data provider allowlisting remain unimplemented. Company-specific roles are not equivalent to Build/Use or deployment ADMINS. Each person still owns one separate Operate session.
 
 ## Explicit AG-UI approval bridge
 

@@ -59,6 +59,19 @@ jobs:
       - name: Check generated worker configs
         run: pnpm configs:check
 
+  # Documentation structure and the InferOps design references (docs/adr/0010). Needs no install.
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check documentation and design references
+        run: bash scripts/check-docs.sh
+
   test:
     name: Build and test
     runs-on: ubuntu-latest

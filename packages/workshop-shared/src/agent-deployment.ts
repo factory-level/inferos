@@ -5,7 +5,7 @@
 // AuthenticatedApi or AdminApi, and AGENT_DEPLOYMENTS stays unsupported (its capabilitySources
 // entry is null). The only runtime code is two pure tables and their helpers, which pin the
 // lifecycle and grant carry-forward rules down precisely enough to test. See
-// docs/design/agent-deployments.md and docs/adr/0007-agent-deployment-lifecycle.md.
+// InferOps docs/human/architecture/inferos/agent-deployments.md and docs/adr/0007-agent-deployment-lifecycle.md.
 //
 // Built on agent-artifact.ts: a definition is a published `agent` artifact revision.
 

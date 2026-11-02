@@ -1,5 +1,6 @@
 ---
 title: Persistent stage deploys
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/journeys/superuser/inferos-shell/deploy-cloud-tenant.md
 covers:
   - scripts/stage
   - scripts/preview/staging-config.ts
@@ -30,7 +31,7 @@ updated: 2026-10-30
 
 ## Divergences from Design
 
-- There is no design document for stages; the owner's stated intent (two Zero-Trust instances wired to InferLab dev and prod, deployed from a workstation) is recorded in [ADR 0009](../adr/0009-persistent-stage-deploys.md), which is proposed. The cloud-parity requirements in [local development](../design/local-development.md) remain the nearest design.
+- There is no design document for stages; the owner's stated intent (two Zero-Trust instances wired to InferLab dev and prod, deployed from a workstation) is recorded in [ADR 0009](../adr/0009-persistent-stage-deploys.md), which is proposed. The cloud-parity requirements in [local development](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md) remain the nearest design.
 - No CI job deploys a stage. Access applications are created by hand in Zero Trust; a deploy can only probe that one is in front of the hostname.
 - Stages deploy this checkout's packages only, not wrapper gatekeepers.
 - Both stages were first deployed on 2026-10-28 (`inferos-dev-*` at dev-os.factorylevel.dev, `inferos-prod-*` at os.factorylevel.dev); each answered an unauthenticated `/`, `/api/` and `/gatekeeper/inferops/oauth` with an Access login redirect. InferLab sign-in and the deployed InferOps bindings remain unproven in the cloud.

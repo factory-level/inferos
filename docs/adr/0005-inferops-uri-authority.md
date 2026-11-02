@@ -42,7 +42,7 @@ Constraints: a URL must never grant anything ([ADR 0004](0004-inferops-gatekeepe
 
 ## Related
 
-- Design: [`../design/inferops-gatekeeper.md`](../design/inferops-gatekeeper.md#resource-grammar)
-- Design: [`../design/inferops-canvas.md`](../design/inferops-canvas.md)
+- Design: [`inferops-gatekeeper.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md#resource-grammar)
+- Design: [`inferops-canvas.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-canvas.md)
 - Architecture: [`../architecture/inferops-gatekeeper.md`](../architecture/inferops-gatekeeper.md)
 - [ADR 0004](0004-inferops-gatekeeper-user-authority.md)

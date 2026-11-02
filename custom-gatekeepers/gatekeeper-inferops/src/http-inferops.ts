@@ -1,5 +1,5 @@
 // LIVE InferOps data source: `InferOpsClient` over the InferOps HTTP API (the contract in
-// docs/design/inferops-gatekeeper.md). The only module that talks HTTP.
+// InferOps docs/human/architecture/inferos/inferops-gatekeeper.md). The only module that talks HTTP.
 //
 // - Every response is parsed field by field; nothing is cast. A response that does not match is a
 //   provider failure (`UNAVAILABLE`), never partial data.

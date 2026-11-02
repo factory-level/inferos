@@ -1,5 +1,6 @@
 ---
 title: Native agent deployments
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-deployments.md
 covers:
   - packages/workshop-shared/src/agent-deployment.ts
 updated: 2026-10-05
@@ -9,7 +10,7 @@ updated: 2026-10-05
 
 ## Overview
 
-Nothing in the [design](../design/agent-deployments.md) is implemented. `packages/workshop-shared/src/agent-deployment.ts` holds the accepted contract (owner decision 2026-10-05) and nothing else: the types for definitions, deployments, runs and triggers, the operator interface `AgentDeploymentApiProposal`, and two pure rules with tests (`agentDeploymentTransition` over `AGENT_DEPLOYMENT_TRANSITIONS`, and `carryForwardGrants`). No backend code imports it, and no RPC interface exposes it.
+Nothing in the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-deployments.md) is implemented. `packages/workshop-shared/src/agent-deployment.ts` holds the accepted contract (owner decision 2026-10-05) and nothing else: the types for definitions, deployments, runs and triggers, the operator interface `AgentDeploymentApiProposal`, and two pure rules with tests (`agentDeploymentTransition` over `AGENT_DEPLOYMENT_TRANSITIONS`, and `carryForwardGrants`). No backend code imports it, and no RPC interface exposes it.
 
 ## Components
 
@@ -31,4 +32,4 @@ The whole accepted contract is unimplemented: storage, the operator capability, 
 
 ## Open Questions
 
-- See the [design's open questions](../design/agent-deployments.md#open-questions).
+- See the [design's open questions](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-deployments.md#open-questions).

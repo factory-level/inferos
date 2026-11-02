@@ -1,5 +1,6 @@
 ---
 title: Customer feature capabilities
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md
 covers:
   - scripts/consumer/config.ts
   - scripts/consumer/runtime.ts
@@ -105,7 +106,7 @@ The trusted host renderer and its freshness rules (refresh, expiry and resume) b
 
 ## Publication records
 
-Option A of the [publication destinations design](../design/feature-capabilities.md#publication-destinations) ([ADR 0008](../adr/0008-publication-destinations.md), decided by the owner on 2026-10-05 in [#68](https://github.com/factory-level/inferos/issues/68)): a blueprint is reachable beyond its owner and the installs made inside the deployment only while it has an active, approved publication record pinning its current version.
+Option A of the [publication destinations design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md#publication-destinations) ([ADR 0008](../adr/0008-publication-destinations.md), decided by the owner on 2026-10-05 in [#68](https://github.com/factory-level/inferos/issues/68)): a blueprint is reachable beyond its owner and the installs made inside the deployment only while it has an active, approved publication record pinning its current version.
 
 **Records.** `PublicationRecord` (`workshop-shared/src/api.ts`) holds the artifact (`blueprintId`, `version`, `digest` as `sha256:` of the version's code snapshot, `kind`, and the title the reviewer saw), the destination (`deployment` or `export`), the audience in words, `publishedBy`, `requestedAt`, `approvedBy`, `selfApproved`, `at`, re-confirmations, and `withdrawnBy`/`withdrawnAt`/`reason`. Each field is written once and a record is never deleted. The owner's User DO holds the authoritative copy (`publications` collection, `decidePublication` writes each decision). `AdminSettings` mirrors every record for review (`mirrorPublication`) and writes the approved, unwithdrawn ones, with the flag history, to the reserved BLUEPRINTS KV key `.publications`, which the reach checks read. `status` is derived on read and never stored: `requested`, `active`, `suspended` (flag off), `unconfirmed` (flag seen off since the last approval or re-confirmation) or `withdrawn`.
 
@@ -127,7 +128,7 @@ Option A of the [publication destinations design](../design/feature-capabilities
 
 ## Divergences from Design
 
-- The [design](../design/feature-capabilities.md) still says current code accepts only the legacy flags. Since #84 the eight names are accepted in version 2; that sentence describes the state before #84.
+- The [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md) still says current code accepts only the legacy flags. Since #84 the eight names are accepted in version 2; that sentence describes the state before #84.
 - The design requires each capability to be enforced at server operations, declared tools, the CLI and the UI, with a named owner, default and disable policy. Only `INFEROPS_ENABLED` has all of these recorded. `INFEROPS_AUTH` has startup and sign-in enforcement only. `CODING_WORKBENCH_ENABLED` is enforced by the gatekeeper and has a default (off), but no declared-tool, CLI or UI surface yet. The publication flags are enforced by the server and default off; there is no publication CLI command or agent tool (the agent never publishes); the UI hides what a flag turns off. None has a cloud deployment path: the release manifest sets neither `INFEROPS_ENABLED` (so cloud installs are always on) nor `CODING_WORKBENCH_ENABLED` nor the publication flags (always off).
 - Publication: the proposal says a blueprint reaches beyond its owner and its Operate installs only with an active record. Inside the deployment, any signed-in person holding a blueprint id can still read it (`getBlueprintInfo`) and install it (`newGadgetFromBlueprint`), published or not, because there is no operate space to tell an Operate install from any other; so the `deployment` destination gates the featured listing, not installs by id.
 - Publication: a flag seen off is recorded only when `AdminSettings` starts while it is off. A deployment switched off and on again with no `/api` traffic in between resumes its records without re-confirmation.

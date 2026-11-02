@@ -1,5 +1,6 @@
 ---
 title: Connection packages and reviewed fork updates
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/connection-extensions.md
 covers:
   - packages/gatekeeper-kit/src/conformance.ts
   - packages/gatekeeper-kit/__tests__/workerd/conformance/adapter.ts
@@ -36,7 +37,7 @@ A contract's `status` is a ladder only a person climbs: `scaffold` (generated, n
 `scaffold` and nothing else, and only `reference` and `production` packages are released or bound
 by default.
 
-Not implemented from the [design](../design/connection-extensions.md): file classification, the
+Not implemented from the [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/connection-extensions.md): file classification, the
 upgrade and reconciliation CLI, and cloud packaging of wrapper gatekeepers. Parts of
 [#73](https://github.com/factory-level/inferos/issues/73) and
 [#74](https://github.com/factory-level/inferos/issues/74), under

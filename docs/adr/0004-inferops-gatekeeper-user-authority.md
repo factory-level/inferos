@@ -8,7 +8,7 @@ date: 2026-10-02
 
 ## Context
 
-The InferOps gatekeeper reads project boards and applies approved issue transitions through the InferOps HTTP API ([design](../design/inferops-gatekeeper.md), [#21](https://github.com/factory-level/inferos/issues/21)). That API authenticates a bearer token, either a person's access token or a service-account key, and authorizes it against the workspace named by `X-Workspace-Id`. The design left "service versus user authority" as an open question.
+The InferOps gatekeeper reads project boards and applies approved issue transitions through the InferOps HTTP API ([design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md), [#21](https://github.com/factory-level/inferos/issues/21)). That API authenticates a bearer token, either a person's access token or a service-account key, and authorizes it against the workspace named by `X-Workspace-Id`. The design left "service versus user authority" as an open question.
 
 Three facts bear on the choice:
 
@@ -46,5 +46,5 @@ The decision was made by the operator on 2026-10-02. This record is `proposed` u
 
 ## Related
 
-- Design: [`../design/inferops-gatekeeper.md`](../design/inferops-gatekeeper.md)
-- Design: [`../design/feature-capabilities.md`](../design/feature-capabilities.md) (`INFEROPS_AUTH`)
+- Design: [`inferops-gatekeeper.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md)
+- Design: [`feature-capabilities.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/feature-capabilities.md) (`INFEROPS_AUTH`)

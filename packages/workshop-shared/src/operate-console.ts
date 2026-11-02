@@ -46,7 +46,7 @@ export type OperateConsoleRead = {
 // workspace's screens (canvas ids), stored in that workspace beside its screens and flows. Opening
 // one copies what the page needs into the opener's operate session (see `openConsole` in
 // operate-session.ts); the console itself holds references, order and settings only, and grants
-// nothing. See docs/design/operate-mode.md ("Role consoles").
+// nothing. See InferOps docs/human/architecture/inferos/operate-mode.md ("Role consoles").
 //
 // A console is edited as a draft and reaches operators only when a builder publishes it: the
 // stored record's top-level content is the draft, and `published` holds the content (and, in the
