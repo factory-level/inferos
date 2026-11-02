@@ -39,7 +39,7 @@ One record per run, written when the run is admitted, stored with the deployment
 | --- | --- | --- |
 | `runId` | Server-minted, opaque, never reused | **Missing.** `AgentRun.id` is declared (`agent-deployment.ts:209`) and not stored |
 | `definition` | The exact revision, pinned at admission. Null for a custom request, as ADR 0011's envelope says | **Partial.** Declared, unstored. Artifact pins exist |
-| `occurrence` | `(trigger id, occurrence key)`, unique within the deployment, so a repeated delivery maps to the existing run. Schedule: the Scheduler's `runId`. Control: the server's id for that press. Custom request: a client request id, whose replay must match the original | **Partial.** Declared (`agent-deployment.ts:217`). **Event triggers can't have one yet:** hooks carry no delivery identity (ADR 0007) |
+| `occurrence` | `(trigger id, occurrence key)`, unique within the deployment, or within that person for a custom request, so a repeated delivery maps to the existing run. Schedule: the Scheduler's `runId`. Control: the server's id for that press. Custom request: a client request id, whose replay must match the original | **Partial.** Declared (`agent-deployment.ts:217`). **Event triggers can't have one yet:** hooks carry no delivery identity (ADR 0007) |
 | `envelope` | Requester, execution principal, context and bound, as ADR 0011 defines them. **This record stores it and doesn't redefine it** | **Missing** |
 | `delegates` | `(delegateId, parentDelegateId or null, chatId, outcome)`. A delegate's envelope is its parent's or narrower (ADR 0011) | **Missing** |
 | `actionIds` | The action-log entries this run created, including delegates' | **Partial.** `waitingOn` holds only waiting ones (`agent-deployment.ts:223`) |
@@ -70,7 +70,7 @@ InferOps stays authoritative. A `runId` sent to it is a correlation claim and au
 
 **Delegates.** Each has an outcome with these meanings, and a parent can't succeed past an unfinished or uncertain one. **Proposed default D1: within a run, a delegate is `spawnCallable` with a completion callback.** `spawn()` has no way to report (`agent-spawner-binding.d.ts:12`), so it's refused inside a run.
 
-**A completion callback** is a persistent stub bound to one run and delegate. A second call is a no-op. An agent saying "done" in chat sets nothing. **Its report is a claim, not proof,** which is why `succeeded` also checks the action log, and why a person sees the actions and not only the summary. Effects made outside gatekeeper actions aren't visible to this check.
+**A completion callback** is a persistent stub bound to one run and delegate. A second call is a no-op. An agent saying "done" in chat sets nothing. **A success report that arrives early,** while an action is pending or a delegate hasn't ended, doesn't set `succeeded`: the server records it and evaluates it again as each one settles. The run's limits still apply. **Its report is a claim, not proof,** which is why `succeeded` also checks the action log, and why a person sees the actions and not only the summary. Effects made outside gatekeeper actions aren't visible to this check.
 
 | Today's code for this section | |
 | --- | --- |
@@ -87,6 +87,8 @@ InferOps stays authoritative. A `runId` sent to it is a correlation claim and au
 - the runtime was lost after anything may have been sent;
 - a cancel or flag-off stopped a run while an action's result was unknown.
 
+**Entering `uncertain` closes the run.** Its and its delegates' next guarded step is refused, as for a cancel, and a pending action not yet sent is rejected. An action already sent stays as it is. So the list a person reads can't grow from anything guarded while they read it.
+
 **What a person sees:** "We can't tell whether this finished." Then what's known: each action as applied, rejected, pending or unknown, with a link to its record; the last thing heard and when; and what they can do. **It's never shown green, never shown as failed, and never counted as either.** It stays visible until someone resolves it, including after a reconnect.
 
 **What may happen, in order:**
@@ -96,11 +98,11 @@ InferOps stays authoritative. A `runId` sent to it is a correlation claim and au
 | R1 | **Nothing restarts by itself.** No automatic rerun, whatever the trigger. The occurrence stays bound to this run, so a repeated delivery maps here and starts nothing | The occurrence key |
 | R2 | **Reconcile first.** For each unknown action, read the target and compare, using what its connection contract says about it. **A reconcile only reads.** A clean answer for every action and delegate lets the server settle the outcome, recording why | Reads have no effect |
 | R3 | **Resending one action is allowed only if its contract says so:** same idempotency key, `retryable` on its last attempt, and a provider replay verified for that kind. **Reconcile-only kinds are never resent** | `api.ts:2441-2447`; `connection.json` declares each kind. Coding dispatch and cancel are reconcile-only (`docs/architecture/inferops-gatekeeper.md:311-316`) |
-| R4 | **A person may resolve it,** to `succeeded`, `failed` or `cancelled`, with a note. The record keeps `uncertain`, who resolved it, when and why. **Proposed default D2:** the requester for a custom request, a deployment operator for system work. A label or flag grants nothing | The person is asserting what they checked, and it's attributed |
-| R5 | **"Run again" is a new run,** only after R4, by a person allowed to invoke it: a new `runId`, a new occurrence, the same pinned revision, with `retryOf` naming the old run. The confirmation lists what the old run applied. **Denied:** reusing the old occurrence, or running again from `uncertain` without resolving it | It's visibly a second run, by a person who has seen the first one's effects |
+| R4 | **A person may resolve it,** to `succeeded`, `failed` or `cancelled`, with a note. The record keeps `uncertain`, who resolved it, when and why. **Proposed default D2:** the requester for a custom request, a deployment operator (ADR 0007 rule 8, the deployment admins) for system work. A label or flag grants nothing | The person is asserting what they checked, and it's attributed |
+| R5 | **"Run again" is a new run and a fresh admission under ADR 0011,** only after R4. For system work it comes only through a control trigger the assignment already permits, by a person allowed to invoke it, and with the revision that trigger pins. A definition with no such control has no "Run again". For a custom request it runs with the authority of the person running it, not the first requester's. It gets a new `runId` and occurrence. `retryOf` names the old run, and is a note that carries nothing. The confirmation lists what the old run applied. **Denied:** reusing the old occurrence; running again from `uncertain` without resolving it; a schedule-only definition gaining a manual start | It's visibly a second run, by a person who has seen the first one's effects |
 | R6 | **A late callback** on an uncertain run is evidence: it can settle it under `succeeded`'s rule. After a person resolved it, it's recorded and changes nothing | Final stays final |
 
-**`failed` isn't automatically safe to retry either,** because of partial effects. **Proposed default D3: automatic retry only before anything is sent.** After that, R5 applies.
+**`failed` isn't automatically safe to retry either,** because of partial effects, including any the action log can't see. **Proposed default D3: automatic retry only when the run never reached the runtime, because the queueing call itself failed. Once queued, a run is never retried automatically.** After that, R5 applies.
 
 ### 5. Waiting, pins and retirement
 
@@ -138,12 +140,21 @@ InferOps stays authoritative. A `runId` sent to it is a correlation claim and au
 
 1. **D1:** delegates in a run report through a callback; `spawn()` is refused there. The cost: existing one-way spawning can't be used inside a run.
 2. **D2:** the requester or a deployment operator resolves an uncertain run.
-3. **D3:** automatic retry only before anything is sent.
+3. **D3:** automatic retry only when the queueing call itself failed.
 4. **D4:** waiting has its own limit, and hitting it cancels.
 5. **D5:** retiring is refused while a run is unresolved. The cost: an unresolved run has to be resolved first, which D2's person can do by hand.
 6. **D6:** an uncertain run doesn't block later scheduled occurrences. The cost: a definition that isn't safe to overlap could repeat an effect. A definition that needs otherwise needs a stated rule, not built here.
 
-**Dependencies on undecided records:** InferOps ADR 0011 and this repository's ADR 0011 for the envelope, including its D4 (agents propose, people confirm), D6 (waiting on a credential) and pinned triggers. Inferops ADR 0008's G8 means a background run reaches only its own workspace's records. Inferops ADR 0010's P1 and D4 for the CRM patterns. **ADR 0007 is accepted, and this record proposes three changes to its contract:** an `uncertain` status, `completion_timeout` becoming uncertain when anything may have been sent, and `maxWaitMs`.
+**Dependencies on undecided records:** InferOps ADR 0011 and this repository's ADR 0011 for the envelope, including its D4 (agents propose, people confirm), D6 (waiting on a credential) and pinned triggers. Inferops ADR 0008's G8 means a background run reaches only its own workspace's records. Inferops ADR 0010's P1 and D4 for the CRM patterns. **ADR 0007 is accepted, and this record proposes eight changes to it or its contract.** None takes effect until a person accepts this record:
+
+1. a new `uncertain` status;
+2. `completion_timeout` becoming uncertain when anything may have been sent;
+3. `waitingApproval` becoming `waiting`, with a reason;
+4. `succeeded` needing the action log and delegates as well as the callback (ADR 0007 rule 5 names only the callback);
+5. a new `maxWaitMs` limit;
+6. `maxRunMs` no longer counting time spent waiting (D4);
+7. a new refusal on retire while a run is unresolved (D5, against rule 2's retire conditions);
+8. refusing `spawn()` inside a run (D1).
 
 ## Consequences
 
