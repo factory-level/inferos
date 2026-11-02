@@ -1,10 +1,12 @@
 ---
 title: InferOS keeps no design of its own
-status: proposed
+status: accepted
 date: 2026-11-02
 ---
 
 # 0010. InferOS keeps no design of its own
+
+Proposed 2026-11-02. Accepted as proposed by the owner on 2026-11-02.
 
 ## Context
 
