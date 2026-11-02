@@ -41,7 +41,7 @@ The decision was made by the operator on 2026-10-02. This record is `proposed` u
 
 - Access-token lifetime, refresh and the reconnect flow are not specified here; [#66](https://github.com/factory-level/inferos/issues/66) owns them.
 - Whether a project-bound assumption should be layered on top of the person's token, so InferOps also enforces the binding's project.
-- What authority scheduled or other unattended work uses. The InferLab product design of 2026-11-02 answers this with a second, explicit context: the authority assigned to the workflow and its permitted trigger ([agent operations](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md)). Its design in the gatekeeper is open, and it extends this record rather than replacing it.
+- What authority scheduled or other unattended work uses. The InferLab product design of 2026-11-02 answers this with a second, explicit context: the authority assigned to the workflow and its permitted trigger ([agent operations](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md)). [ADR 0011](0011-system-workflow-authority.md), proposed, records it for the gatekeeper, and it extends this record rather than replacing it.
 - InferOps has not yet confirmed the contract this decision is part of ([factory-level/inferops#2326](https://github.com/factory-level/inferops/issues/2326)).
 
 ## Related
