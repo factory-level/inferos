@@ -7132,8 +7132,38 @@ class OverseerImpl implements AgentHooks {
       id: number, facet: Fetcher<Gatekeeper<Session>>, caller: GatekeeperCaller)
       : Promise<RpcStub<Session>> {
     this.assertGatekeeperUsable(id);
+    // Recheck stored spawners at use time too: configs written before bindWorkpiece enforced
+    // scope must not remain a route to another gadget's connections.
+    if (caller.from === "gadget" && caller.gadgetId !== undefined) {
+      this.assertSpawnerScope(id, caller.gadgetId, caller.chatId);
+    }
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     return facet.startSession(new ApprovalQueueImpl(this, id, caller));
+  }
+
+  private assertSpawnerScope(id: WorkpieceId, gadgetId: WorkpieceId, chatId?: number): void {
+    let gadget = this.getGadgetRecord(gadgetId);
+    let allowed = new Set<WorkpieceId>([
+      gadgetId,
+      ...this.visibleBindings(gadget, chatId).map(([, edge]) => edge.target),
+    ]);
+    let pending = [id];
+    let checked = new Set<WorkpieceId>();
+    while (pending.length) {
+      let spawnerId = pending.pop()!;
+      if (checked.has(spawnerId)) continue;
+      checked.add(spawnerId);
+      let spec = this.storage.gatekeepers.get(spawnerId)?.creationSpec;
+      if (spec?.type !== "agentSpawner") continue;
+      for (let [name, target] of Object.entries(spec.config.env)) {
+        if (!allowed.has(target)) {
+          throw new Error(`Agent spawner exposes "${name}" outside gadget ${gadgetId}'s available bindings.`);
+        }
+        if (this.storage.gatekeepers.get(target)?.creationSpec?.type === "agentSpawner") {
+          pending.push(target);
+        }
+      }
+    }
   }
 
   // Sessions are authorized and verified only at open(), so widening what a live session's holder

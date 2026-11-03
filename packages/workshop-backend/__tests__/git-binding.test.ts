@@ -404,6 +404,24 @@ describe("env.GIT presence", () => {
         /exposes "OTHER" outside gadget 100's available bindings/);
   }));
 
+  it("refuses a legacy stored spawner at use time when its env escapes the calling gadget",
+      () => withImpl(async impl => {
+    seedGadget(impl, 100);
+    seedGadget(impl, 200);
+    impl.storage.gatekeepers.put({
+      id: 2,
+      class: {},
+      // Simulate a record persisted before the bind-time scope check existed.
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Legacy", modelId: null, env: { OTHER: 200 } },
+      },
+    });
+
+    expect(() => impl.openGatekeeperSession(2, {} as any, {from: "gadget", gadgetId: 100}))
+        .toThrow(/exposes "OTHER" outside gadget 100's available bindings/);
+  }));
+
   it("allows a spawner to expose only its gadget and bound connections",
       () => withImpl(async impl => {
     seedGadget(impl, 100, { DB: { target: 1 } });
