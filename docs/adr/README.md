@@ -20,3 +20,4 @@ Create records from [`0000-template.md`](0000-template.md).
 | [0010. InferOS keeps no design of its own](0010-design-lives-in-inferops.md) | accepted | 2026-11-02 |
 | [0011. Configured system work uses its assigned principal, apart from each person's token](0011-system-workflow-authority.md) | proposed | 2026-11-02 |
 | [0012. Workflow runs share one correlation record and seven observable outcomes](0012-run-correlation-and-outcomes.md) | proposed | 2026-11-02 |
+| [0013. The nested canvas model separates containment from behavior and passes nothing down the tree](0013-nested-canvas-model.md) | proposed | 2026-11-02 |

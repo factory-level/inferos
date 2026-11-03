@@ -1,0 +1,432 @@
+[
+  {
+    "name": "containment cycle between two objects",
+    "group": "containment",
+    "expected": { "code": "containment-cycle", "at": "a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [
+        { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": ["b"], "attachments": [] },
+        { "nodeType": "object", "id": "b", "title": "B", "columns": 1, "children": ["a"], "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "object containing itself",
+    "group": "containment",
+    "expected": { "code": "containment-cycle", "at": "a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": ["a"], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "containment cycle nothing on the page reaches",
+    "group": "containment",
+    "expected": { "code": "containment-cycle", "at": "a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [], "attachments": [],
+      "nodes": [
+        { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": ["b"], "attachments": [] },
+        { "nodeType": "object", "id": "b", "title": "B", "columns": 1, "children": ["a"], "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "object containing the page",
+    "group": "containment",
+    "expected": { "code": "invalid-nesting", "at": "a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": ["p"], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "widget with children",
+    "group": "containment",
+    "expected": { "code": "invalid-nesting", "at": "g" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["g"], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "g", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": {}, "children": [], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "node with two parents",
+    "group": "containment",
+    "expected": { "code": "multiple-parents", "at": "g" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a", "b"], "attachments": [],
+      "nodes": [
+        { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": ["g"], "attachments": [] },
+        { "nodeType": "object", "id": "b", "title": "B", "columns": 1, "children": ["g"], "attachments": [] },
+        { "nodeType": "widget", "id": "g", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": {}, "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "node nothing contains",
+    "group": "containment",
+    "expected": { "code": "orphan-node", "at": "g" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "g", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": {}, "attachments": [] } ]
+    }
+  },
+  {
+    "name": "child that doesn't exist",
+    "group": "containment",
+    "expected": { "code": "missing-reference", "at": "p" },
+    "page": { "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["ghost"], "attachments": [], "nodes": [] }
+  },
+  {
+    "name": "objects nested past the limit",
+    "group": "containment",
+    "expected": { "code": "nesting-too-deep", "at": "e" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [
+        { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": ["b"], "attachments": [] },
+        { "nodeType": "object", "id": "b", "title": "B", "columns": 1, "children": ["c"], "attachments": [] },
+        { "nodeType": "object", "id": "c", "title": "C", "columns": 1, "children": ["d"], "attachments": [] },
+        { "nodeType": "object", "id": "d", "title": "D", "columns": 1, "children": ["e"], "attachments": [] },
+        { "nodeType": "object", "id": "e", "title": "E", "columns": 1, "children": [], "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "two nodes with one ID",
+    "group": "identity",
+    "expected": { "code": "duplicate-id", "at": "a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [
+        { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [] },
+        { "nodeType": "object", "id": "a", "title": "A again", "columns": 1, "children": [], "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "an attachment reusing a node's ID",
+    "group": "identity",
+    "expected": { "code": "duplicate-id", "at": "a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"],
+      "attachments": [ { "id": "a", "version": 1, "on": "go", "effect": { "kind": "raise-event", "target": "a", "event": "go" } } ],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "a node ID that isn't one",
+    "group": "identity",
+    "expected": { "code": "invalid-id", "at": "nodes[0]" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [], "attachments": [],
+      "nodes": [ { "nodeType": "object", "id": "../a", "title": "A", "columns": 1, "children": [], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "a schema version from the future",
+    "group": "versioning",
+    "expected": { "code": "unknown-version", "at": "page" },
+    "page": { "schemaVersion": 3, "id": "p", "revision": "0", "title": "P", "children": [], "attachments": [], "nodes": [] }
+  },
+  {
+    "name": "a version 1 definition",
+    "group": "versioning",
+    "expected": { "code": "unknown-version", "at": "page" },
+    "page": { "schemaVersion": 1, "id": "p", "revision": "0", "title": "P", "sections": [] }
+  },
+  {
+    "name": "a node type that isn't registered",
+    "group": "versioning",
+    "expected": { "code": "unknown-node-type", "at": "a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [ { "nodeType": "page", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "a widget kind that isn't registered",
+    "group": "versioning",
+    "expected": { "code": "invalid-widget", "at": "w" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "w", "kind": "custom.html", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": {}, "attachments": [] } ]
+    }
+  },
+  {
+    "name": "a widget reference outside the grammar",
+    "group": "versioning",
+    "expected": { "code": "invalid-widget", "at": "w" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "https://example.com/board", "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] } ]
+    }
+  },
+  {
+    "name": "an object asking to inherit from its parent",
+    "group": "inheritance",
+    "expected": { "code": "undefined-inheritance", "at": "a.inherit" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [], "inherit": true } ]
+    }
+  },
+  {
+    "name": "an attachment asking its event to bubble",
+    "group": "inheritance",
+    "expected": { "code": "undefined-inheritance", "at": "link.bubbles" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"],
+      "attachments": [ { "id": "link", "version": 1, "on": "go", "bubbles": true, "effect": { "kind": "raise-event", "target": "a", "event": "go" } } ],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "a page override with no defined rule",
+    "group": "inheritance",
+    "expected": { "code": "undefined-inheritance", "at": "p.overrides" },
+    "page": { "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [], "attachments": [], "nodes": [], "overrides": {} }
+  },
+  {
+    "name": "an object carrying a grant",
+    "group": "authority",
+    "expected": { "code": "authority-field", "at": "a.grants" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [], "grants": ["board:write"] } ]
+    }
+  },
+  {
+    "name": "an attachment naming who it runs as",
+    "group": "authority",
+    "expected": { "code": "authority-field", "at": "link.runAs" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [
+        {
+          "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false },
+          "attachments": [ { "id": "link", "version": 1, "on": "action-completed", "runAs": "system", "effect": { "kind": "navigate", "page": "q" } } ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "an effect carrying a scope",
+    "group": "authority",
+    "expected": { "code": "authority-field", "at": "link.scope" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [
+        {
+          "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false },
+          "attachments": [ { "id": "link", "version": 1, "on": "action-failed", "effect": { "kind": "navigate", "page": "q", "scope": "all" } } ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a widget parameter claiming a permission",
+    "group": "authority",
+    "expected": { "code": "authority-field", "at": "w.params.permission" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "w", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": { "permission": "write" }, "attachments": [] } ]
+    }
+  },
+  {
+    "name": "an attachment carrying a prompt",
+    "group": "authority",
+    "expected": { "code": "unknown-field", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"],
+      "attachments": [ { "id": "link", "version": 1, "on": "go", "prompt": "Do this for me", "effect": { "kind": "raise-event", "target": "a", "event": "go" } } ],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "a widget holding a copy of issues",
+    "group": "data",
+    "expected": { "code": "entity-copy", "at": "w.issues" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [], "issues": [ { "id": "1" } ] } ]
+    }
+  },
+  {
+    "name": "a widget parameter holding a record",
+    "group": "data",
+    "expected": { "code": "entity-copy", "at": "w.params.record" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "w", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": { "record": { "id": "1" } }, "attachments": [] } ]
+    }
+  },
+  {
+    "name": "a page holding a field nobody defined",
+    "group": "data",
+    "expected": { "code": "unknown-field", "at": "p" },
+    "page": { "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [], "attachments": [], "nodes": [], "css": "body{}" }
+  },
+  {
+    "name": "two links raising each other's events",
+    "group": "reference",
+    "expected": { "code": "reference-cycle", "at": "b-to-a" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a", "b"], "attachments": [],
+      "nodes": [
+        { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [ { "id": "a-to-b", "version": 1, "on": "ping", "effect": { "kind": "raise-event", "target": "b", "event": "pong" } } ] },
+        { "nodeType": "object", "id": "b", "title": "B", "columns": 1, "children": [], "attachments": [ { "id": "b-to-a", "version": 1, "on": "pong", "effect": { "kind": "raise-event", "target": "a", "event": "ping" } } ] }
+      ]
+    }
+  },
+  {
+    "name": "a link raising its own event",
+    "group": "reference",
+    "expected": { "code": "reference-cycle", "at": "self" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [],
+      "attachments": [ { "id": "self", "version": 1, "on": "go", "effect": { "kind": "raise-event", "target": "p", "event": "go" } } ],
+      "nodes": []
+    }
+  },
+  {
+    "name": "an action requested again whenever it completes",
+    "group": "reference",
+    "expected": { "code": "reference-cycle", "at": "again" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [
+        {
+          "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false },
+          "attachments": [ { "id": "again", "version": 1, "on": "action-completed", "effect": { "kind": "request-action", "target": "w", "action": "create-issue" } } ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "an action retried automatically whenever it fails",
+    "group": "reference",
+    "expected": { "code": "reference-cycle", "at": "retry" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"], "attachments": [],
+      "nodes": [
+        {
+          "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false },
+          "attachments": [ { "id": "retry", "version": 1, "on": "action-failed", "effect": { "kind": "request-action", "target": "w", "action": "transition-issue" } } ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "an attachment targeting a node that doesn't exist",
+    "group": "attachment",
+    "expected": { "code": "missing-reference", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [],
+      "attachments": [ { "id": "link", "version": 1, "on": "go", "effect": { "kind": "raise-event", "target": "ghost", "event": "go" } } ],
+      "nodes": []
+    }
+  },
+  {
+    "name": "an action requested of an object",
+    "group": "attachment",
+    "expected": { "code": "invalid-target", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"],
+      "attachments": [ { "id": "link", "version": 1, "on": "go", "effect": { "kind": "request-action", "target": "a", "action": "create-issue" } } ],
+      "nodes": [ { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": [], "attachments": [] } ]
+    }
+  },
+  {
+    "name": "an action the widget doesn't offer",
+    "group": "attachment",
+    "expected": { "code": "unavailable-action", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"],
+      "attachments": [ { "id": "link", "version": 1, "on": "go", "effect": { "kind": "request-action", "target": "w", "action": "delete-board" } } ],
+      "nodes": [ { "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] } ]
+    }
+  },
+  {
+    "name": "any action requested of a gadget",
+    "group": "attachment",
+    "expected": { "code": "unavailable-action", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["g"],
+      "attachments": [ { "id": "link", "version": 1, "on": "go", "effect": { "kind": "request-action", "target": "g", "action": "create-issue" } } ],
+      "nodes": [ { "nodeType": "widget", "id": "g", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": {}, "attachments": [] } ]
+    }
+  },
+  {
+    "name": "an effect kind that isn't registered",
+    "group": "attachment",
+    "expected": { "code": "unknown-effect", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [],
+      "attachments": [ { "id": "link", "version": 1, "on": "go", "effect": { "kind": "run-code", "source": "x" } } ],
+      "nodes": []
+    }
+  },
+  {
+    "name": "an attachment version that isn't registered",
+    "group": "attachment",
+    "expected": { "code": "unknown-version", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [],
+      "attachments": [ { "id": "link", "version": 2, "on": "go", "effect": { "kind": "navigate", "page": "q" } } ],
+      "nodes": []
+    }
+  },
+  {
+    "name": "an event name outside the grammar",
+    "group": "attachment",
+    "expected": { "code": "invalid-attachment", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [],
+      "attachments": [ { "id": "link", "version": 1, "on": "Not An Event", "effect": { "kind": "navigate", "page": "q" } } ],
+      "nodes": []
+    }
+  },
+  {
+    "name": "listening for an event nothing raises",
+    "group": "attachment",
+    "expected": { "code": "unknown-event", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": [],
+      "attachments": [ { "id": "link", "version": 1, "on": "nothing-raises-this", "effect": { "kind": "navigate", "page": "q" } } ],
+      "nodes": []
+    }
+  },
+  {
+    "name": "an object listening for a child's action, as if events bubbled",
+    "group": "attachment",
+    "expected": { "code": "unknown-event", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["a"], "attachments": [],
+      "nodes": [
+        { "nodeType": "object", "id": "a", "title": "A", "columns": 1, "children": ["w"], "attachments": [ { "id": "link", "version": 1, "on": "action-completed", "effect": { "kind": "navigate", "page": "q" } } ] },
+        { "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "a gadget listening for an action event it doesn't declare",
+    "group": "attachment",
+    "expected": { "code": "unknown-event", "at": "link" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["g"], "attachments": [],
+      "nodes": [ { "nodeType": "widget", "id": "g", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:1", "size": "normal", "params": {}, "attachments": [ { "id": "link", "version": 1, "on": "action-completed", "effect": { "kind": "navigate", "page": "q" } } ] } ]
+    }
+  },
+  {
+    "name": "a link claiming a widget's action completed",
+    "group": "attachment",
+    "expected": { "code": "reserved-event", "at": "forged" },
+    "page": {
+      "schemaVersion": 2, "id": "p", "revision": "0", "title": "P", "children": ["w"],
+      "attachments": [ { "id": "forged", "version": 1, "on": "go", "effect": { "kind": "raise-event", "target": "w", "event": "action-completed" } } ],
+      "nodes": [ { "nodeType": "widget", "id": "w", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] } ]
+    }
+  }
+]

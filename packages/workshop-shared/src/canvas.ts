@@ -156,9 +156,13 @@ const record = (value: unknown, keys: string[], field: string): Record<string, u
   if (actual.length !== keys.length || keys.some(key => !Object.hasOwn(result, key))) return invalid(field);
   return result;
 };
-const id = (value: unknown): string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value) ? value : invalid("ID");
+/** Stable ID syntax shared by views, sections and widgets. */
+export const CANVAS_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+/** Canonical decimal composition revision syntax. */
+export const CANVAS_REVISION = /^(0|[1-9][0-9]{0,63})$/;
+const id = (value: unknown): string => typeof value === "string" && CANVAS_ID.test(value) ? value : invalid("ID");
 const title = (value: unknown): string => typeof value === "string" && value.trim().length > 0 && value.length <= 120 ? value.trim() : invalid("title");
-const revision = (value: unknown): string => typeof value === "string" && /^(0|[1-9][0-9]{0,63})$/.test(value) ? value : invalid("revision");
+const revision = (value: unknown): string => typeof value === "string" && CANVAS_REVISION.test(value) ? value : invalid("revision");
 const columns = (value: unknown): 1 | 2 | 3 => value === 1 || value === 2 || value === 3 ? value : invalid("columns");
 const position = (value: unknown, length: number): number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= length ? value : invalid("position");
 
@@ -186,6 +190,9 @@ function widget(value: unknown): CanvasWidget {
   return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size,
     params: { workflow: params.workflow, showCompleted: params.showCompleted } };
 }
+
+/** Validate and detach one widget instance under the registered kind and version rules. It resolves nothing. */
+export const parseCanvasWidget = (value: unknown): CanvasWidget => widget(value);
 
 function section(value: unknown): CanvasSection {
   const s = record(value, ["id", "title", "columns", "widgets"], "section");

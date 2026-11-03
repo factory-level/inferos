@@ -17,6 +17,8 @@ covers:
   - packages/workshop-frontend/src/components/GadgetPresence.tsx
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/canvas.ts
+  - packages/workshop-shared/src/canvas-model.ts
+  - packages/workshop-shared/src/canvas-model-fixtures
   - packages/workshop-shared/src/workspace-kind.ts
   - scripts/consumer/views.ts
   - packages/workshop-backend/src/overseer.ts
@@ -75,7 +77,7 @@ Bound views ([Bound view](#bound-view)) diverge from the bound-view contract (r8
 
 Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/architecture/workspaces-and-canvases.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workspaces-and-canvases.md).
 
-- The guarded canvas definition is a flat layout of sections and widget instances; there are no nested objects, no attached hooks, events or effects, no explicit target selector and no dedicated Canvas Builder (I06).
+- The guarded canvas definition is a flat layout of sections and widget instances; there are no nested objects, no attached hooks, events or effects, no explicit target selector and no dedicated Canvas Builder (I06). A [nested model contract](#nested-canvas-model-contract) exists, and nothing stores, renders or runs it.
 - Canvases themselves have no draft and published states, and there is no widget-progression or canvas-progression contract with completion callbacks (I07).
 - The board adapter resolves one board reference; no company-wide record pages are reached from here, and InferOps' record-list contract (default 100, maximum 500, no cursor) bounds what paging could show (I03).
 
@@ -105,6 +107,16 @@ Edits add/remove/move/configure sections or widgets, rename the view, or restore
 This engine performs no storage, authorization or feature enforcement. Its result is suitable for preview. Before persisting, a server caller must check installation flags and workspace edit authority, resolve resource capabilities independently, and compare/write inside one storage transaction. A test of this pure engine is not evidence that concurrent durable writes are safe.
 
 Bootstrap writes `views/operations.json` with the configured target reference. `views:check` runs the pinned validator, bounds file count/size, rejects links/executable files, duplicate view IDs and any widget other than a project board (gadget references are workspace-local, so a portable starter cannot carry one), and reports runtime readiness false. It does not load the InferOps fixture, connect a provider or publish a view. Supporting pins expose a builder Canvas page when composable views are enabled; importing the starter creates a new definition.
+
+## Nested canvas model contract
+
+`@gadgets/workshop-shared/canvas-model` is schema version 2, proposed in [ADR 0013](../adr/0013-nested-canvas-model.md). **Nothing imports it yet.** Saved canvases, the operation engine, the renderer, consoles and the agent's tools all still use version 1, so no behavior has changed. `canvas.ts` only gained three exports for it (`CANVAS_ID`, `CANVAS_REVISION`, `parseCanvasWidget`).
+
+`parseCanvasPage` validates one page and `parseCanvasWorkspacePages` validates a page collection, including navigation targets. Both are pure, take no viewer and throw `CanvasModelError` with a stable `code` and a location `at` that holds only validated IDs and known field names. Accepting a page says its shape is sound and nothing about who may see what it references: a reference to another company's board parses, and is refused later, when it's resolved through a connection. `parseCanvasTarget`, `formatCanvasTarget` and `resolveCanvasTarget` handle explicit edit targets, which also authorize nothing.
+
+The fixtures in `src/canvas-model-fixtures/` are the executable statement of the rules: `valid.json`, `rejected.json` with each case's expected code and location, and `section-mapping.json` pairing version 1 definitions with their version 2 pages. `canvas-model.test.ts` runs them all, reads each mapped page back into the same version 1 definition, and checks malformed input only ever produces a `CanvasModelError`. That is local unit evidence for the contract, not evidence of a migration: conversion, storage and repeat-migration identity are FAC-81's.
+
+The action events and declared actions in `CANVAS_WIDGET_ACTIONS` describe what the gatekeeper offers today. No widget emits those events and nothing runs an attachment yet.
 
 ## Workspace-scoped definition storage
 

@@ -1,0 +1,75 @@
+[
+  {
+    "name": "empty page",
+    "why": "A page may start empty, as a version 1 canvas may.",
+    "page": { "schemaVersion": 2, "id": "page-empty", "revision": "0", "title": "Empty", "children": [], "attachments": [], "nodes": [] }
+  },
+  {
+    "name": "nested objects with widgets at every permitted level",
+    "why": "Objects nest inside objects to the depth limit, a widget can sit directly under the page, and all three registered kinds stay as version 1 widgets.",
+    "page": {
+      "schemaVersion": 2, "id": "page-operations", "revision": "7", "title": "Operations",
+      "children": ["board-direct", "level-1"],
+      "attachments": [],
+      "nodes": [
+        { "nodeType": "widget", "id": "board-direct", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "full", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] },
+        { "nodeType": "object", "id": "level-1", "title": "Level one", "columns": 2, "children": ["level-2", "wiki-1"], "attachments": [] },
+        { "nodeType": "widget", "id": "wiki-1", "kind": "inferops.wiki", "version": 1, "targetRef": "inferops://acme.knowledge/knowledge/wiki", "size": "normal", "params": { "page": "runbook" }, "attachments": [] },
+        { "nodeType": "object", "id": "level-2", "title": "Level two", "columns": 1, "children": ["level-3"], "attachments": [] },
+        { "nodeType": "object", "id": "level-3", "title": "Level three", "columns": 3, "children": ["level-4"], "attachments": [] },
+        { "nodeType": "object", "id": "level-4", "title": "Level four", "columns": 1, "children": ["gadget-1"], "attachments": [] },
+        { "nodeType": "widget", "id": "gadget-1", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:12", "size": "wide", "params": {}, "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "a widget event drives a page effect through an explicit link",
+    "why": "The board's completion reaches the page only because an attachment names the page, and the page then navigates. The object between them hears nothing.",
+    "page": {
+      "schemaVersion": 2, "id": "page-triage", "revision": "3", "title": "Triage",
+      "children": ["group-1"],
+      "attachments": [
+        { "id": "on-triaged", "version": 1, "on": "triaged", "effect": { "kind": "navigate", "page": "page-operations" } }
+      ],
+      "nodes": [
+        { "nodeType": "object", "id": "group-1", "title": "Queue", "columns": 1, "children": ["board-1"], "attachments": [] },
+        {
+          "nodeType": "widget", "id": "board-1", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "wide", "params": { "workflow": "software", "showCompleted": true },
+          "attachments": [
+            { "id": "link-completed", "version": 1, "on": "action-completed", "effect": { "kind": "raise-event", "target": "page-triage", "event": "triaged" } }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "an attachment requests a declared action on another widget",
+    "why": "Naming the action requests it and grants nothing: the second board's approval path and the actor's authority still decide.",
+    "page": {
+      "schemaVersion": 2, "id": "page-handoff", "revision": "1", "title": "Handoff",
+      "children": ["board-a", "board-b"],
+      "attachments": [],
+      "nodes": [
+        {
+          "nodeType": "widget", "id": "board-a", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false },
+          "attachments": [
+            { "id": "request-create", "version": 1, "on": "action-completed", "effect": { "kind": "request-action", "target": "board-b", "action": "create-issue" } }
+          ]
+        },
+        { "nodeType": "widget", "id": "board-b", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/OPS", "size": "normal", "params": { "workflow": "content", "showCompleted": false }, "attachments": [] }
+      ]
+    }
+  },
+  {
+    "name": "a reference to another company's board",
+    "why": "Accepted, because parsing checks shape and never access. The reference authorizes nothing, and resolving it is refused later without a connection the viewer holds.",
+    "page": {
+      "schemaVersion": 2, "id": "page-reference", "revision": "0", "title": "Reference",
+      "children": ["board-other"],
+      "attachments": [],
+      "nodes": [
+        { "nodeType": "widget", "id": "board-other", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://othercompany.operations/project/board/SECRET", "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] }
+      ]
+    }
+  }
+]
