@@ -341,6 +341,10 @@ type GatekeeperRecord = {
   // Records how this gatekeeper was originally created, enabling blueprint metadata derivation.
   creationSpec?: GatekeeperCreationSpec;
 
+  // The user whose model/account a spawned chat uses. Older records fall back to the workspace
+  // owner, as the original AgentSpawnerGatekeeper props did after migration.
+  agentSpawnerCreatorUserId?: string;
+
   // Set when its creator's account or model reported it as a mock dependency (see
   // Overseer.installBlueprint): binding it into an install is refused outside a test-only
   // workspace (bindWorkpiece). Records created before this was kept have none.
@@ -2978,6 +2982,15 @@ class OverseerImpl implements AgentHooks {
       }
       throw new Error(`No such gatekeeper: ${target}`);
     }
+    // An agent spawner can hand every configured env binding to a new agent, so its env must
+    // stay within the gadget that exposes the spawner. The modal offers exactly this gadget and
+    // its current bindings, but this check is the authoritative boundary for direct RPC callers
+    // and nested spawners too.
+    let allowed = new Set<WorkpieceId>([
+      gadgetId,
+      ...this.visibleBindings(gadget, chatId).map(([, edge]) => edge.target),
+    ]);
+    this.assertSpawnerScope(target, allowed, `gadget ${gadgetId}`, name);
     // An install in a workspace that is not test-only never depends on mock data or models, however
     // the binding arrives: at install (Overseer.installBlueprint) or added later.
     if (targetRecord.mock && gadget.installedFrom && !this.storage.testOnly.get()) {
@@ -6113,13 +6126,15 @@ class OverseerImpl implements AgentHooks {
   // GadgetClientImpl). `actorUserId` is who the returned client acts for, for analytics only.
   async addGatekeeper(
       cls: GatekeeperClass, creationSpec: GatekeeperCreationSpec, actorUserId: string,
-      joinAs?: SessionKind, mock = false, hostBoardMint?: HostBoardMint)
+      joinAs?: SessionKind, mock = false, hostBoardMint?: HostBoardMint,
+      agentSpawnerCreatorUserId?: string)
       : Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
       id,
       class: cls,
       creationSpec,
+      ...(agentSpawnerCreatorUserId ? {agentSpawnerCreatorUserId} : {}),
       ...(mock ? {mock: true} : {}),
       ...(hostBoardMint ? {hostBoardMint} : {}),
     };
@@ -6230,6 +6245,7 @@ class OverseerImpl implements AgentHooks {
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
+          this.assertAgentBindingStillAvailable(caller.chatId, target.id);
           this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
         }
         let chatId = "chatId" in caller ? caller.chatId : undefined;
@@ -6237,6 +6253,7 @@ class OverseerImpl implements AgentHooks {
       }
 
       case "gatekeeper":
+        if (caller.from === "agent") this.assertAgentBindingStillAvailable(caller.chatId, target.id);
         if (caller.from === "agent" && this.storage.operateSession.get()) {
           this.#assertExecutionLive(target, caller);
           return this.#assertUsableInOperateChat(target.id).then(() =>
@@ -7125,12 +7142,107 @@ class OverseerImpl implements AgentHooks {
   // Every gatekeeper session -- GatekeeperClientImpl.openSession and binding loopbacks via
   // startGatekeeperSession alike -- passes through here, so this is where a connection still
   // blocked pending a scope-widening restart is refused (see #gatekeepersPendingRestart).
-  openGatekeeperSession<Session extends RpcCompatible<Session>>(
+  async openGatekeeperSession<Session extends RpcCompatible<Session>>(
       id: number, facet: Fetcher<Gatekeeper<Session>>, caller: GatekeeperCaller)
       : Promise<RpcStub<Session>> {
     this.assertGatekeeperUsable(id);
+    // Recheck stored spawners at the common entry point: configs written before bindWorkpiece
+    // enforced scope must not remain a route to another caller's connections.
+    let record = this.storage.gatekeepers.get(id);
+    if (record?.creationSpec?.type === "agentSpawner") {
+      this.assertSpawnerCallScope(id, caller);
+      // The normal gatekeeper stub has no caller identity, so it cannot enforce revocation on
+      // later spawn() calls. Return a caller-bound façade whose RPC methods re-enter the overseer
+      // and validate the live gadget bindings every time.
+      let props: AgentSpawnerScopedBindingProps = {
+        overseerId: this.ctx.id.toString(), id, caller,
+      };
+      let binding = new AgentSpawnerScopedBindingImpl(this.ctx, props);
+      // @ts-expect-error NativeRpcStub still has infinite recursion problems, fixed in Cap'n Web.
+      return new NativeRpcStub(binding) as RpcStub<Session>;
+    }
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
-    return facet.startSession(new ApprovalQueueImpl(this, id, caller));
+    return await facet.startSession(new ApprovalQueueImpl(this, id, caller));
+  }
+
+  assertSpawnerCallScope(id: WorkpieceId, caller: GatekeeperCaller): AiChatAgentContext | undefined {
+    let allowed: Set<WorkpieceId>;
+    let scope: string;
+    let context: AiChatAgentContext | undefined;
+    let gadgetId: WorkpieceId;
+    if (caller.from === "gadget") {
+      if (caller.gadgetId === undefined) throw new Error("Agent spawner has no calling gadget scope.");
+      gadgetId = caller.gadgetId;
+      let gadget = this.getGadgetRecord(gadgetId);
+      allowed = new Set([gadgetId,
+        ...this.visibleBindings(gadget, caller.chatId).map(([, edge]) => edge.target)]);
+      scope = `gadget ${gadgetId}`;
+    } else if (caller.from === "agent") {
+      let live = this.agentAvailableBindings(caller.chatId);
+      context = live?.context;
+      if (!live) throw new Error(`Agent chat ${caller.chatId} has no live gadget scope.`);
+      gadgetId = context!.spawnerScope!.gadgetId;
+      allowed = live.bindings;
+      scope = `agent chat ${caller.chatId} and gadget ${gadgetId}`;
+    } else {
+      throw new Error("Agent spawner has no calling gadget scope.");
+    }
+    if (!allowed.has(id)) throw new Error(`Agent spawner is outside ${scope}'s available bindings.`);
+    this.assertSpawnerScope(id, allowed, scope);
+    return context;
+  }
+
+  // Spawned agents hold a snapshot of their seed bindings for execution setup. Keep that
+  // snapshot as an upper bound, but intersect it with the originating gadget's live bindings
+  // before every gatekeeper call so an unbind or rebind takes effect immediately.
+  assertAgentBindingStillAvailable(chatId: number, target: WorkpieceId): void {
+    let live = this.agentAvailableBindings(chatId);
+    if (!live) return;
+    if (!live.bindings.has(target)) {
+      throw new Error(`Workpiece ${target} is no longer available to agent chat ${chatId}.`);
+    }
+  }
+
+  private agentAvailableBindings(chatId: number)
+      : {context: AiChatAgentContext, bindings: Set<WorkpieceId>} | undefined {
+    let context = this.storage.chatContext.get(chatId);
+    if (!context?.spawnerScope) {
+      if (context?.spawnerConfig) {
+        throw new Error(
+            `Legacy spawned agent chat ${chatId} has no recorded gadget scope; ` +
+            `re-spawn it to restore gatekeeper access.`);
+      }
+      return undefined;
+    }
+    if (!context.bindings) throw new Error(`Agent chat ${chatId} has no available bindings.`);
+    let gadgetId = context.spawnerScope.gadgetId;
+    let gadget = this.getGadgetRecord(gadgetId);
+    let current = new Set<WorkpieceId>([
+      gadgetId, ...this.visibleBindings(gadget).map(([, edge]) => edge.target),
+    ]);
+    return {context, bindings: new Set(Object.values(context.bindings).filter(id => current.has(id)))};
+  }
+
+  private assertSpawnerScope(id: WorkpieceId, allowed: Set<WorkpieceId>, scope: string,
+      bindingName?: string): void {
+    let pending = [id];
+    let checked = new Set<WorkpieceId>();
+    while (pending.length) {
+      let spawnerId = pending.pop()!;
+      if (checked.has(spawnerId)) continue;
+      checked.add(spawnerId);
+      let spec = this.storage.gatekeepers.get(spawnerId)?.creationSpec;
+      if (spec?.type !== "agentSpawner") continue;
+      for (let [name, target] of Object.entries(spec.config.env)) {
+        if (!allowed.has(target)) {
+          throw new Error(`Agent spawner${bindingName ? ` "${bindingName}"` : ``} exposes ` +
+              `"${name}" outside ${scope}'s available bindings.`);
+        }
+        if (this.storage.gatekeepers.get(target)?.creationSpec?.type === "agentSpawner") {
+          pending.push(target);
+        }
+      }
+    }
   }
 
   // Sessions are authorized and verified only at open(), so widening what a live session's holder
@@ -11981,10 +12093,25 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** Implements AgentSpawnerBinding.spawn(): the agent starts at once on `prompt`. */
   async spawnAgent(
-      title: string, prompt: string, config: AgentSpawnerConfig,
-      creatorUserId?: string): Promise<void> {
+      _title: string, _prompt: string, _config: AgentSpawnerConfig,
+      _creatorUserId?: string): Promise<void> {
+    throw new Error("Agent spawners must be invoked through a caller-scoped session.");
+  }
+
+  async spawnScopedAgent(
+      title: string, prompt: string, spawnerId: WorkpieceId, caller: GatekeeperCaller): Promise<void> {
+    let record = this.impl.storage.gatekeepers.get(spawnerId);
+    if (record?.creationSpec?.type !== "agentSpawner") throw new Error("Agent spawner was removed.");
+    this.impl.assertSpawnerCallScope(spawnerId, caller);
+    let config = record.creationSpec.config;
+    let creatorUserId = record.agentSpawnerCreatorUserId;
+    let scopeGadgetId = caller.from === "gadget" ? caller.gadgetId
+        : caller.from === "agent"
+            ? this.impl.storage.chatContext.get(caller.chatId)?.spawnerScope?.gadgetId
+            : undefined;
+    if (scopeGadgetId === undefined) throw new Error("Agent spawner has no calling gadget scope.");
     let {chatId, meta, userMeta, author, initiatorUserId} =
-        await this.#createSpawnedChat(title, config, creatorUserId);
+        await this.#createSpawnedChat(title, config, creatorUserId, undefined, scopeGadgetId);
 
     if (userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
@@ -12015,10 +12142,26 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * implements are frozen on the chat context, where the system-prompt builder reads them.
    */
   async spawnCallableAgent(
-      title: string, options: SpawnCallableOptions, config: AgentSpawnerConfig,
-      creatorUserId?: string): Promise<CallableAgent> {
+      _title: string, _options: SpawnCallableOptions, _config: AgentSpawnerConfig,
+      _creatorUserId?: string): Promise<CallableAgent> {
+    throw new Error("Agent spawners must be invoked through a caller-scoped session.");
+  }
+
+  async spawnScopedCallableAgent(
+      title: string, options: SpawnCallableOptions, spawnerId: WorkpieceId,
+      caller: GatekeeperCaller): Promise<CallableAgent> {
+    let record = this.impl.storage.gatekeepers.get(spawnerId);
+    if (record?.creationSpec?.type !== "agentSpawner") throw new Error("Agent spawner was removed.");
+    this.impl.assertSpawnerCallScope(spawnerId, caller);
+    let config = record.creationSpec.config;
+    let creatorUserId = record.agentSpawnerCreatorUserId;
+    let scopeGadgetId = caller.from === "gadget" ? caller.gadgetId
+        : caller.from === "agent"
+            ? this.impl.storage.chatContext.get(caller.chatId)?.spawnerScope?.gadgetId
+            : undefined;
+    if (scopeGadgetId === undefined) throw new Error("Agent spawner has no calling gadget scope.");
     let {chatId, initiatorUserId} =
-        await this.#createSpawnedChat(title, config, creatorUserId, options);
+        await this.#createSpawnedChat(title, config, creatorUserId, options, scopeGadgetId);
 
     // A stub that delivers calls to the new chat thread, like the `self` magic object. Each call
     // is recorded by deliverAgentCallback(), which starts the agent when it is idle; with no
@@ -12036,7 +12179,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   // Writes no messages; the caller decides how the chat starts.
   async #createSpawnedChat(
       title: string, config: AgentSpawnerConfig, creatorUserId: string | undefined,
-      spawnerTypes?: SpawnCallableOptions) {
+      spawnerTypes?: SpawnCallableOptions, scopeGadgetId?: WorkpieceId) {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
 
     // Resolve the model from the creating user's account (falls back to owner for
@@ -12068,7 +12211,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
 
-    let context: AiChatAgentContext = {chatId, spawnerConfig: config, bindings};
+    let context: AiChatAgentContext = {chatId, spawnerConfig: config, bindings,
+      ...(scopeGadgetId !== undefined ? {spawnerScope: {gadgetId: scopeGadgetId}} : {})};
     if (spawnerTypes) context.spawnerTypes = spawnerTypes;
     this.impl.storage.chatContext.put(context);
 
@@ -13359,7 +13503,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
-        this.clientUserId, this.#mintedCapabilityKind(), mock);
+        this.clientUserId, this.#mintedCapabilityKind(), mock, undefined,
+        props.creatorUserId);
     await this.recordConnectionCreated(result, "agent_spawner");
     return result;
   }
@@ -15932,6 +16077,41 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
 }
 
 // =======================================================================================
+
+type AgentSpawnerScopedBindingProps = {
+  overseerId: string;
+  id: WorkpieceId;
+  caller: GatekeeperCaller;
+};
+
+// Caller-bound session returned by OverseerImpl.openGatekeeperSession. Calls are routed back
+// through the workspace DO so authorization is re-evaluated against current gadget bindings.
+@validateRpc()
+class AgentSpawnerScopedBindingImpl extends NativeRpcTarget {
+  constructor(private ctx: DurableObjectState<unknown>,
+              private props: AgentSpawnerScopedBindingProps) { super(); }
+
+  #getOverseer() {
+    let ns = this.ctx.exports.OverseerDurableObject;
+    return ns.get(ns.idFromString(this.props.overseerId));
+  }
+
+  spawn(title: string, prompt: string): Promise<void> {
+    return this.#getOverseer().spawnScopedAgent(title, prompt, this.props.id, this.props.caller);
+  }
+
+  spawnCallable(title: string, options: SpawnCallableOptions | string): Promise<CallableAgent> {
+    if (typeof options === "string") {
+      throw new Error(
+          "spawnCallable(title, prompt) has been replaced by spawnCallable(title, " +
+          "{types, mainType}); the agent no longer receives a prompt and calls no longer return " +
+          "values. Update the calling code -- call describeBinding on the spawner for the new " +
+          "interface.");
+    }
+    return this.#getOverseer().spawnScopedCallableAgent(
+        title, options, this.props.id, this.props.caller);
+  }
+}
 
 type AgentSpawnerBindingProps = {
   // ID of the overseer under which this agent should run.

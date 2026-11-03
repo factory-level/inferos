@@ -735,7 +735,7 @@ describe("hooks widen use scope", () => {
 // collaborator can spawn an agent seeded with the env's connections (connectToGadget ->
 // spawn/spawnCallable), so those connections join their verification scope transitively -- and
 // binding the spawner is the widening moment, exactly like binding the connection itself.
-describe("agent spawner envs widen use scope", () => {
+describe("agent spawner envs stay within gadget use scope", () => {
   function seedSpawner(impl: any, id: number, env: Record<string, number>): void {
     impl.storage.gatekeepers.put({
       id,
@@ -748,23 +748,23 @@ describe("agent spawner envs widen use scope", () => {
     });
   }
 
-  it("binding a spawner restarts a connected use collaborator and quarantines its env targets",
+  it("refuses a spawner whose env exposes a connection outside its gadget",
       () => withImpl(async (impl, restarts) => {
     joinSession(impl, "use");
     seedGatekeeper(impl, 1);
     seedSpawner(impl, 2, { DB: 1 });
     seedGadget(impl, 100);
 
-    impl.bindWorkpiece(100, "SPAWN", 2);
+    expect(() => impl.bindWorkpiece(100, "SPAWN", 2)).toThrow(
+      /exposes "DB" outside gadget 100's available bindings/
+    );
 
-    expect(restarts).toHaveLength(1);
-    // The env target is what the widening exposed, so it is blocked until the reset lands; the
-    // spawner itself is vendorless -- nobody is ever verified against it -- and stays usable.
-    expect(() => impl.assertGatekeeperUsable(1)).toThrow(/restarting/);
+    expect(restarts).toEqual([]);
+    expect(impl.storage.gadgets.get(100).bindings).toEqual({});
     expect(() => impl.assertGatekeeperUsable(2)).not.toThrow();
   }));
 
-  it("spawner-to-spawner env edges widen transitively",
+  it("refuses a nested spawner whose env reaches outside the gadget",
       () => withImpl(async (impl, restarts) => {
     joinSession(impl, "use");
     seedGatekeeper(impl, 1);
@@ -772,12 +772,13 @@ describe("agent spawner envs widen use scope", () => {
     seedSpawner(impl, 3, { INNER: 2 });
     seedGadget(impl, 100);
 
-    // Binding the outer spawner reaches the connection through the inner one: the spawned agent's
-    // env includes the inner spawner, whose own spawns seed from *its* env.
-    impl.bindWorkpiece(100, "SPAWN", 3);
+    expect(() => impl.bindWorkpiece(100, "SPAWN", 3)).toThrow(
+      /exposes "INNER" outside gadget 100's available bindings/
+    );
 
-    expect(restarts).toHaveLength(1);
-    expect(() => impl.assertGatekeeperUsable(1)).toThrow(/restarting/);
+    expect(restarts).toEqual([]);
+    expect(impl.storage.gadgets.get(100).bindings).toEqual({});
+    expect(() => impl.assertGatekeeperUsable(1)).not.toThrow();
   }));
 
   it("binding a spawner whose env targets are already in scope widens nothing",

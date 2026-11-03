@@ -177,6 +177,9 @@ export type AiChatAgentContext = {
    */
   spawnerConfig?: AgentSpawnerConfig;
 
+  /** Gadget whose live bindings bound this chat's spawner lineage. */
+  spawnerScope?: {gadgetId: number};
+
   /**
    * If present, this chat was spawned with `spawnCallable()`, and these are the TypeScript
    * declarations of the interface the agent implements, frozen at spawn time like
