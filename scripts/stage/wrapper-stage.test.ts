@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { stageKvNamespaces, stagePackages, stageWorkerName } from "./stage-config.ts";
+import { buildStageConfigs, stageKvNamespaces, stagePackages, stageWorkerName } from "./stage-config.ts";
 import { STAGES } from "./stages.ts";
 import {
   claimMarkers, claimProblem, companyPrefix, conflictingInputs, inputSources, ownershipMarkers, ownershipProblem,
@@ -19,7 +19,13 @@ const ACME = {
   schemaVersion: 1,
   company: "acme",
   hostname: "os.acme.example",
-  inferops: { baseUrl: "https://api.inferlab.io", authOrigin: "https://auth.inferlab.io", resources: ["tables"] },
+  inferops: {
+    baseUrl: "https://api.inferlab.io",
+    authOrigin: "https://auth.inferlab.io",
+    // A fictional tenant id: the one InferLab company this deployment serves (FAC-160).
+    tenantId: "00000000-0000-4000-8000-0000000000ac",
+    resources: ["tables"],
+  },
 };
 
 const parsed = (raw: unknown): WrapperDeployment => {
@@ -296,4 +302,31 @@ test("the pinned revision is read from the wrapper's gitlink only", () => {
   assert.equal(pinnedRevisionFromLsTree(`160000 commit ${sha}\tinferos\n`), sha);
   assert.equal(pinnedRevisionFromLsTree(`100644 blob ${sha}\tinferos\n`), null);
   assert.equal(pinnedRevisionFromLsTree(""), null);
+});
+
+test("a wrapper names its company's tenant id, and never internal", () => {
+  const withTenant = (tenantId: unknown) => ({ ...ACME, inferops: { ...ACME.inferops, tenantId } });
+  const { tenantId: _omitted, ...withoutTenant } = ACME.inferops;
+  // Missing: refused, saying what it is for.
+  assert.ok(problemsOf({ ...ACME, inferops: withoutTenant }).some((p) => p.includes("inferops.tenantId is required")));
+  // `internal` admits every tenant: refused for a company's deployment.
+  assert.ok(problemsOf(withTenant("internal")).some((p) => p.includes('can\'t be "internal"')));
+  // Not a lowercase tenant id: refused, without echoing the value.
+  for (const bad of ["acme", "00000000-0000-4000-8000-0000000000AC", "", 42]) {
+    const problems = problemsOf(withTenant(bad));
+    assert.ok(problems.some((p) => p.startsWith("inferops.tenantId")), String(bad));
+    if (typeof bad === "string" && bad) assert.ok(problems.every((p) => !p.includes(bad)), String(bad));
+  }
+});
+
+test("the company's tenant id becomes the stage's company and the gatekeeper's INFEROPS_COMPANY", () => {
+  const result = wrapperStage(parsed(ACME));
+  if ("problems" in result) throw new Error(result.problems.join("; "));
+  assert.equal(result.stage.stage.inferops.company, ACME.inferops.tenantId);
+  const packages = stagePackages(result.stage.stage, readDeployablePackages(ROOT));
+  const kvIds = new Map(stageKvNamespaces(result.stage.stage, packages).map((ns, i) => [ns.title, `kv-${i}`]));
+  const configs = buildStageConfigs({
+    stageName: result.stage.name, stage: result.stage.stage, packages, accountId: "0".repeat(32), kvIds,
+  });
+  assert.equal(configs.get("gatekeeper-inferops")?.vars?.INFEROPS_COMPANY, ACME.inferops.tenantId);
 });

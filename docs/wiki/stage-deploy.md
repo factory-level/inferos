@@ -60,12 +60,19 @@ A company's InferOS is deployed from its wrapper repository, at the InferOS revi
      "schemaVersion": 1,
      "company": "acme",
      "hostname": "os.acme.example",
-     "inferops": { "baseUrl": "https://api.inferlab.io", "authOrigin": "https://auth.inferlab.io", "resources": ["tables"] }
+     "inferops": {
+       "baseUrl": "https://api.inferlab.io",
+       "authOrigin": "https://auth.inferlab.io",
+       "tenantId": "<the company's InferLab tenant id>",
+       "resources": ["tables"]
+     }
    }
    ```
 
-   `company` is 2 to 31 lowercase letters and digits, no hyphen. Every worker and resource is named `inferos-<company>-…`, so the slug is the deployment's identity: never change it once deployed. `inferops.authorizeOrigin` (a sign-in proxy hostname) and `inferops.resources` (`tables`, `members`, `workflowPolicy`) are optional, as on the persistent stages.
-2. **Do the account steps above** for the company's hostname: the account on Workers Paid holding the hostname's zone, an Access application for the hostname (and the sign-in proxy's, if any), and InferLab's `inferos` sign-in client allowing the origin.
+   `company` is 2 to 31 lowercase letters and digits, no hyphen. Every worker and resource is named `inferos-<company>-…`, so the slug is the deployment's identity: never change it once deployed. `inferops.tenantId` is required: the company's InferLab tenant id, the one company this deployment serves (FAC-160). It becomes the stage's `inferops.company` and the gatekeeper's `INFEROPS_COMPANY`. A missing value, anything but a lowercase tenant id, and `internal` are refused: `internal` admits every tenant and is for InferLab's own stages only. `inferops.authorizeOrigin` (a sign-in proxy hostname) and `inferops.resources` (`tables`, `members`, `workflowPolicy`) are optional, as on the persistent stages.
+2. **Do the account steps above** for the company's hostname: the account on Workers Paid holding the hostname's zone, and an Access application for the hostname (and the sign-in proxy's, if any). **And register the origin with InferLab**, in InferOps' config for that environment (`config/production.js` for prod), two entries for `https://<hostname>`:
+   - in `auth.sso.inferosOrigins`, so InferLab's `inferos` sign-in client allows it;
+   - in `auth.sso.inferosCompanies`, mapped to the same tenant id as `inferops.tenantId`. Without it InferOps refuses every sign-in from that origin; with a different tenant id it refuses everyone but that tenant's people.
 3. **Put the inputs** in a gitignored `.inferos-deploy.vars` at the wrapper root, with the same names as the table above (`CLOUDFLARE_ACCOUNT_ID`, `STAGE_ADMINS`, and the optional ones), and **run from a clean shell**. A name the shell also sets to a different value stops the deploy, naming it, so another stage's exported account id, admin list or edge secret never deploys into this company. Values are never printed.
 4. **Rehearse:** `pnpm inferos:deploy --dry-run` in the wrapper. It checks the pin, then prints the plan: every `inferos-<company>-…` worker, its vars, the secret names, the KV namespaces, the bucket and the ownership marker it will check.
 5. **Deploy:** `pnpm inferos:deploy`. It refuses a dirty wrapper or pinned checkout, checks the account (below), builds, deploys the three tiers, and checks the Access redirect. Rerunning it is the update: the marker, the namespaces, the bucket and every Durable Object are kept.
@@ -89,7 +96,8 @@ A company's InferOS is deployed from its wrapper repository, at the InferOS revi
 | A Wrangler login with access to that account (`wrangler login`) and `CLOUDFLARE_ACCOUNT_ID` | The person deploying | Running the deploy |
 | An Access application covering the hostname | The account admin, in the dashboard | Gating the instance; the deploy only checks it |
 | `STAGE_ADMINS` | The company | The instance's `/admin` users |
-| InferLab registering the origin in `auth.sso.inferosOrigins` | InferLab (an InferOps configuration change) | "Sign in with InferLab" |
+| The company's InferLab tenant id (`inferops.tenantId`) | InferLab | Binding the deployment to its one company |
+| InferLab registering the origin in `auth.sso.inferosOrigins` and mapping it to the tenant id in `auth.sso.inferosCompanies` | InferLab (an InferOps configuration change) | "Sign in with InferLab", for that company's people only |
 | Optional: `CF_ACCESS_CLIENT_ID`/`_SECRET`, `CF_AI_GATEWAY*`, `INFEROPS_EDGE_SECRET` | As above | The smoke, server-managed models, an edge-restricted InferLab |
 
 **What it costs.** The account must be on Workers Paid (the deploy uses bundle sizes, Browser Rendering and the Worker Loader that need it): $5 a month per account at the time of writing, plus usage beyond the plan's included requests, Durable Objects, KV, R2 storage and Workers AI. Access is free up to its free plan's seat limit. The custom domain has no charge of its own, but the zone and domain are the company's. Check Cloudflare's current pricing before a deploy; this deploy adds nothing on the InferLab side but a configuration entry.

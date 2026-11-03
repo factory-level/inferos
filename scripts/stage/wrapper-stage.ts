@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { stageHostnames } from "./stage-config.ts";
 import { parseKvNamespaceList } from "./stage-resources.ts";
 import {
-  INFEROPS_OPTIONAL_RESOURCES, STAGE_GATEKEEPERS, STAGES, stageDefinitionProblems,
+  INFEROPS_OPTIONAL_RESOURCES, isDeploymentCompany, STAGE_GATEKEEPERS, STAGES, stageDefinitionProblems,
   type InferOpsOptionalResource, type StageDefinition,
 } from "./stages.ts";
 
@@ -47,6 +47,13 @@ export interface WrapperDeployment {
   inferops: {
     baseUrl: string;
     authOrigin: string;
+    /**
+     * The company's InferLab tenant id: the one company this deployment serves (inferops ADR 0009
+     * T6, FAC-160), set as the stage's `inferops.company` and so the gatekeeper's `INFEROPS_COMPANY`.
+     * Required, and never `internal`: a company's deployment that admitted every tenant would undo
+     * the binding.
+     */
+    tenantId: string;
     authorizeOrigin?: string;
     resources: InferOpsOptionalResource[];
   };
@@ -91,11 +98,21 @@ export function parseWrapperDeployment(raw: unknown): { deployment: WrapperDeplo
     problems.push("inferops must be an object with baseUrl and authOrigin");
     return { problems };
   }
-  for (const key of extraKeys(inferops, ["baseUrl", "authOrigin", "authorizeOrigin", "resources"])) {
+  for (const key of extraKeys(inferops, ["baseUrl", "authOrigin", "tenantId", "authorizeOrigin", "resources"])) {
     problems.push(`unknown field "inferops.${key}"`);
   }
   for (const key of ["baseUrl", "authOrigin"] as const) {
     if (typeof inferops[key] !== "string") problems.push(`inferops.${key} is required`);
+  }
+  // The company's tenant id: required, a lowercase tenant id, and never `internal` (the value that
+  // admits every tenant, kept for InferLab's own stages). Not echoed: only slug and hostname are.
+  const tenantId = typeof inferops.tenantId === "string" ? inferops.tenantId : "";
+  if (!tenantId) {
+    problems.push("inferops.tenantId is required: the company's InferLab tenant id, which this deployment serves alone");
+  } else if (tenantId === "internal") {
+    problems.push('inferops.tenantId can\'t be "internal": a company\'s deployment serves its own tenant only');
+  } else if (!isDeploymentCompany(tenantId)) {
+    problems.push("inferops.tenantId must be the company's InferLab tenant id (a lowercase UUID)");
   }
   if (inferops.authorizeOrigin !== undefined && typeof inferops.authorizeOrigin !== "string") {
     problems.push("inferops.authorizeOrigin must be a string");
@@ -115,6 +132,7 @@ export function parseWrapperDeployment(raw: unknown): { deployment: WrapperDeplo
       inferops: {
         baseUrl: inferops.baseUrl as string,
         authOrigin: inferops.authOrigin as string,
+        tenantId,
         ...(inferops.authorizeOrigin === undefined ? {} : { authorizeOrigin: inferops.authorizeOrigin as string }),
         resources: resources as InferOpsOptionalResource[],
       },
@@ -140,6 +158,7 @@ export function wrapperStage(deployment: WrapperDeployment): { stage: WrapperSta
     inferops: {
       baseUrl: deployment.inferops.baseUrl,
       authOrigin: deployment.inferops.authOrigin,
+      company: deployment.inferops.tenantId,
       ...(deployment.inferops.authorizeOrigin === undefined ? {} : { authorizeOrigin: deployment.inferops.authorizeOrigin }),
       resources: deployment.inferops.resources,
     },

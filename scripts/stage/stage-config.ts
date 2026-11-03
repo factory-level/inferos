@@ -352,7 +352,9 @@ export function formatStagePlan({ stageName, stage, configs, secretNames, gateke
   gatekeeperSecretNames?: Readonly<Record<string, readonly string[]>>;
   kv: readonly StageKvNamespace[];
 }): string {
-  const lines = [`stage "${stageName}" -> https://${stage.hostname} (InferLab ${stage.inferops.baseUrl})`];
+  const lines = [
+    `stage "${stageName}" -> https://${stage.hostname} (InferLab ${stage.inferops.baseUrl}, company ${stage.inferops.company})`,
+  ];
   for (const tier of stageTiers(configs)) {
     lines.push(`  ${tier.label}:`);
     for (const pkgName of tier.packages) {
