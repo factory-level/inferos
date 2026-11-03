@@ -11,7 +11,7 @@ const FIELD_LABELS: Record<string, string> = {
 
 const ACTOR_LABELS = { person: 'A person', agent: 'An agent', system: 'InferOps' } as const
 
-/** A long value is cut for the list; the issue itself holds the whole of it. */
+/** A long value is cut further for the list; the issue itself holds the whole of it. */
 const VALUE_MAX = 200
 
 const valueText = (entry: IssueActivityEntry, states: readonly State[]): string => {
@@ -75,6 +75,7 @@ export const KanbanIssueDetails = ({ issue, state, states, onActivity }: {
             {entry.kind === 'comment'
               ? <p className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{entry.body}</p>
               : <p className="mt-1 [overflow-wrap:anywhere]">Set {FIELD_LABELS[entry.field ?? ''] ?? entry.field ?? 'a field'} to {valueText(entry, states)}</p>}
+            {entry.shortened && <p className="mt-1 text-xs text-kumo-subtle">{entry.kind === 'comment' ? 'Comment' : 'Value'} shortened; the issue in InferOps has the whole text.</p>}
           </li>)}
           {loaded.activity.omitted > 0 && <li className="text-xs text-kumo-subtle">{loaded.activity.omitted} earlier {loaded.activity.omitted === 1 ? 'entry' : 'entries'} not shown.</li>}
         </ol>)}

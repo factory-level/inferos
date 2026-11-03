@@ -277,8 +277,8 @@ it('keeps the form open with the reason when a proposal is refused: a stale revi
 
 it('opens an issue read-only with its activity, newest first, naming states and marking agents', async () => {
   onActivity.mockResolvedValueOnce({ ok: true, activity: { omitted: 2, entries: [
-    { kind: 'comment', at: '2026-11-03T09:05:00.000Z', actor: 'agent', field: null, value: null, body: 'Picked this up.' },
-    { kind: 'change', at: '2026-11-03T09:00:00.000Z', actor: 'person', field: 'stateId', value: 'doing', body: null },
+    { kind: 'comment', at: '2026-11-03T09:05:00.000Z', actor: 'agent', field: null, value: null, body: 'Picked this up.', shortened: true },
+    { kind: 'change', at: '2026-11-03T09:00:00.000Z', actor: 'person', field: 'stateId', value: 'doing', body: null, shortened: false },
   ] } })
   await render(basic)
   await act(async () => button('Details of DEMO-1')!.click())
@@ -291,6 +291,8 @@ it('opens an issue read-only with its activity, newest first, naming states and 
   const entries = [...shown.querySelectorAll('ol > li')].map(li => li.textContent)
   expect(entries[0]).toContain('Agent')
   expect(entries[0]).toContain('Picked this up.')
+  expect(entries[0]).toContain('Comment shortened; the issue in InferOps has the whole text.')
+  expect(entries[1]).not.toContain('shortened')
   expect(entries[1]).toContain('A person')
   expect(entries[1]).toContain('Set State to Doing')
   expect(entries[2]).toBe('2 earlier entries not shown.')

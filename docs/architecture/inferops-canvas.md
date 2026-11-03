@@ -229,7 +229,7 @@ Each column header has a **New issue** button (`aria-label` *New issue in Todo*)
 
 Each card that exists in InferOps also has a **Details** button (*Details of ENG-12*). It opens `KanbanIssueDialog` in `details` mode, which renders `KanbanIssueDetails` (FAC-157).
 - **Read-only.** The card's fields (state, priority, target date, assignee, blocked reason) and its activity, with no form and nothing proposed.
-- **The activity** is read when the dialog opens, through the board's own connection (`BoardData.activity`, `InferOpsIssueSession.activity()`), so it's limited by the reader's InferOps access. Each entry says whether a person, an agent or InferOps acted and when, names the state a move set, shows a comment's text, and notes how many earlier entries were left out.
+- **The activity** is read when the dialog opens, through the board's own connection (`BoardData.activity`, `InferOpsIssueSession.activity()`), so it's limited by the reader's InferOps access. Each entry says whether a person, an agent or InferOps acted and when, names the state a move set, shows a comment's text, notes a comment or value the gatekeeper shortened, and notes how many earlier entries were left out.
 - **A refused or failed read** shows in the gatekeeper's words with Try again, never as "Nothing recorded on this issue yet." A provisional card has no Details button.
 - **Tests:** `KanbanBoard.test.tsx` covers the details view, a refusal and retry, and a provisional card.
 

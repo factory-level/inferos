@@ -468,6 +468,9 @@ export interface InferOpsClient {
 /** The most recent activity entries an issue's `activity()` returns. */
 export const ISSUE_ACTIVITY_LIMIT = 100;
 
+/** The longest comment or value an activity entry keeps; a longer one is shortened and marked. */
+export const ACTIVITY_TEXT_MAX = 2000;
+
 /** One `issue.history` entry as InferOps returns it (only the fields the gatekeeper reads). */
 export interface HistoryEntryRecord {
   kind: "claim" | "comment";
@@ -480,22 +483,54 @@ export interface HistoryEntryRecord {
 
 const ACTORS = { user: "person", service_account: "agent", system: "system" } as const;
 
-/**
- * An issue's history, oldest first as InferOps pages it, as the activity `activity()` returns:
- * newest first, the most recent ISSUE_ACTIVITY_LIMIT only. Who acted is reduced to person, agent or
- * system; no principal id leaves the gatekeeper.
- */
-export function toIssueActivity(oldestFirst: readonly HistoryEntryRecord[]): IssueActivity {
-  const kept = oldestFirst.slice(-ISSUE_ACTIVITY_LIMIT);
-  const entries = kept.toReversed().map((entry): IssueActivityEntry => ({
+const shorten = (text: string | null): { text: string | null; shortened: boolean } =>
+  text !== null && text.length > ACTIVITY_TEXT_MAX
+    ? { text: text.slice(0, ACTIVITY_TEXT_MAX), shortened: true }
+    : { text, shortened: false };
+
+/** One history record as an activity entry, its long text already shortened. */
+export function toActivityEntry(entry: HistoryEntryRecord): IssueActivityEntry {
+  const value = entry.kind === "claim"
+    ? shorten(typeof entry.value === "string" ? entry.value : entry.value == null ? null : JSON.stringify(entry.value))
+    : { text: null, shortened: false };
+  const body = entry.kind === "comment" ? shorten(entry.body) : { text: null, shortened: false };
+  return {
     kind: entry.kind === "claim" ? "change" : "comment",
     at: entry.at,
     actor: entry.actorType ? ACTORS[entry.actorType] : null,
     field: entry.kind === "claim" ? entry.field : null,
-    value: entry.kind === "claim"
-      ? (typeof entry.value === "string" ? entry.value : entry.value == null ? null : JSON.stringify(entry.value))
-      : null,
-    body: entry.kind === "comment" ? entry.body : null,
-  }));
-  return { entries, omitted: oldestFirst.length - kept.length };
+    value: value.text,
+    body: body.text,
+    shortened: value.shortened || body.shortened,
+  };
+}
+
+/**
+ * The newest ISSUE_ACTIVITY_LIMIT of a history read oldest first, as it streams in: `add` keeps a
+ * rolling window of already-shortened entries, so however long the history, what is held stays
+ * within ISSUE_ACTIVITY_LIMIT entries of ACTIVITY_TEXT_MAX characters each. `result` is newest first.
+ * Who acted is reduced to person, agent or system; no principal id is kept.
+ */
+export class ActivityWindow {
+  #kept: IssueActivityEntry[] = [];
+  #seen = 0;
+
+  add(records: readonly HistoryEntryRecord[]): void {
+    for (const record of records) {
+      this.#seen++;
+      this.#kept.push(toActivityEntry(record));
+      if (this.#kept.length > ISSUE_ACTIVITY_LIMIT) this.#kept.shift();
+    }
+  }
+
+  result(): IssueActivity {
+    return { entries: this.#kept.toReversed(), omitted: this.#seen - this.#kept.length };
+  }
+}
+
+/** A whole history at once, oldest first (the mock's), as `activity()` returns it. */
+export function toIssueActivity(oldestFirst: readonly HistoryEntryRecord[]): IssueActivity {
+  const window = new ActivityWindow();
+  window.add(oldestFirst);
+  return window.result();
 }

@@ -144,6 +144,8 @@ export interface IssueActivityEntry {
   value: string | null;
   /** The comment's text. Null on a change. */
   body: string | null;
+  /** Whether `value` or `body` was cut to its first 2000 characters; the issue keeps the whole. */
+  shortened: boolean;
 }
 
 /** An issue's recent activity, newest first. */

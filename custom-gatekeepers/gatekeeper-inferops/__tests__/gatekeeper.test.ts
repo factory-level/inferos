@@ -92,7 +92,7 @@ describe("board reads", () => {
 
     const activity = await session.openIssue(DEMO_1).activity();
     expect(activity.entries).toEqual([
-      { kind: "change", at: expect.any(String), actor: "person", field: "stateId", value: STATE.working, body: null },
+      { kind: "change", at: expect.any(String), actor: "person", field: "stateId", value: STATE.working, body: null, shortened: false },
     ]);
     expect((await hooks.log()).observations).toEqual([
       "Read activity of InferOps issue DEMO-1",

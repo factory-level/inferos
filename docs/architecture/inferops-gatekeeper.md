@@ -218,8 +218,13 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   - **Shape:** it returns the most recent 100 entries, newest first (`toIssueActivity` in
     `inferops-client.ts`), with how many earlier ones were left out. Who acted is reduced to person,
     agent (a service account) or system, and no principal id leaves the gatekeeper.
-  - **Paging:** InferOps pages history oldest first, so the HTTP client reads up to ten pages of
-    500. A longer history fails `UNAVAILABLE` rather than show older entries as the latest.
+  - **Paging and bounds:** InferOps pages history oldest first, so the HTTP client reads up to 50
+    pages of 100. Each page's body is already capped at 256 KiB by `request`.
+    - Each page goes straight into `ActivityWindow`, a rolling window of the newest 100 entries.
+    - Comments and values are cut to 2,000 characters as they're kept (`shortened: true`).
+    - So one read holds one page plus the window, however long the history.
+    - A history longer than 5,000 entries fails `UNAVAILABLE` rather than show older entries as the latest.
+    - A newest-first `issue.history` in InferOps would make this one request; that's an InferOps change.
   - **Refusal and logging:** InferOps' refusal of the history is passed on as `FORBIDDEN`. One
     observation names the issue and the count. Pending changes aren't activity until applied.
   - **The mock** records each applied write's fields as a person's change.

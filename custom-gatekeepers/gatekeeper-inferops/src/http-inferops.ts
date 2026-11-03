@@ -56,7 +56,7 @@ import {
   type WorkspaceMemberRecord, type WorkspaceMembersRead,
   type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
-  type HistoryEntryRecord, toIssueActivity,
+  ActivityWindow, type HistoryEntryRecord,
 } from "./inferops-client";
 import { membersNotFound } from "./members";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound, type WorkflowHeadRecord } from "./workflow-policy";
@@ -206,9 +206,13 @@ function runNotFound(): InferOpsError {
 
 class Malformed extends Error {}
 
-/** The largest `issue.history` page InferOps serves, and how many pages one activity read takes. */
-const HISTORY_PAGE_SIZE = 500;
-const HISTORY_PAGES = 10;
+/**
+ * One activity read's bounds. A page is one `issue.history` request, its body already capped at
+ * HOST_BOARD_LIMITS.bytes by `request`; HISTORY_PAGES of HISTORY_PAGE_SIZE bounds the records read,
+ * and `ActivityWindow` bounds what is kept across pages to the newest ISSUE_ACTIVITY_LIMIT, shortened.
+ */
+const HISTORY_PAGE_SIZE = 100;
+const HISTORY_PAGES = 50;
 
 /** One `issue.history` page: its entries, and the cursor to the next page (null on the last). */
 function parseHistoryPage(raw: unknown): { entries: HistoryEntryRecord[]; nextCursor: string | null } {
@@ -1260,12 +1264,13 @@ export function openHttpInferOpsClient(
   /**
    * The issue's `issue.history`, after `readIssue` has placed it in `projectKey`'s project (so an
    * issue elsewhere is the same NOT_FOUND). InferOps pages it oldest first, so the newest entries
-   * come last: it reads up to HISTORY_PAGES pages and, if the history is longer still, fails
+   * come last: each page goes straight into a rolling window of the newest ISSUE_ACTIVITY_LIMIT,
+   * and only one page is held at a time. A history longer than HISTORY_PAGES pages fails
    * UNAVAILABLE rather than show older entries as the latest.
    */
   async function readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity> {
     await readIssue(projectKey, issueId);
-    const all: HistoryEntryRecord[] = [];
+    const window = new ActivityWindow();
     let after: string | null = null;
     for (let page = 0; page < HISTORY_PAGES; page++) {
       const query = `limit=${HISTORY_PAGE_SIZE}${after ? `&afterSeq=${after}` : ""}`;
@@ -1277,8 +1282,8 @@ export function openHttpInferOpsClient(
         throw error;
       }
       const { entries, nextCursor } = parsed("issue.history", body, parseHistoryPage);
-      all.push(...entries);
-      if (!nextCursor) return toIssueActivity(all);
+      window.add(entries);
+      if (!nextCursor) return window.result();
       after = nextCursor;
     }
     throw new InferOpsError("UNAVAILABLE", "This issue's history is too long to show here.");

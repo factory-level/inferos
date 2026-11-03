@@ -237,30 +237,50 @@ describe("activity", () => {
     expect(activity).toEqual({
       omitted: 0,
       entries: [
-        { kind: "change", at: "2026-11-03T08:04:00.000Z", actor: "system", field: "priority", value: '{"level":2}', body: null },
-        { kind: "comment", at: "2026-11-03T08:03:00.000Z", actor: "agent", field: null, value: null, body: "Started on this." },
-        { kind: "change", at: "2026-11-03T08:02:00.000Z", actor: "agent", field: "stateId", value: WORKING, body: null },
-        { kind: "change", at: "2026-11-03T08:01:00.000Z", actor: "person", field: "title", value: "title 1", body: null },
+        { kind: "change", at: "2026-11-03T08:04:00.000Z", actor: "system", field: "priority", value: '{"level":2}', body: null, shortened: false },
+        { kind: "comment", at: "2026-11-03T08:03:00.000Z", actor: "agent", field: null, value: null, body: "Started on this.", shortened: false },
+        { kind: "change", at: "2026-11-03T08:02:00.000Z", actor: "agent", field: "stateId", value: WORKING, body: null, shortened: false },
+        { kind: "change", at: "2026-11-03T08:01:00.000Z", actor: "person", field: "title", value: "title 1", body: null, shortened: false },
       ],
     });
     expect(JSON.stringify(activity)).not.toContain(AGENT);
     expect(JSON.stringify(activity)).not.toContain(PERSON);
-    expect(calls.map(c => c.path)).toContain(`/project/issues/${DEMO_1}/history?limit=500`);
+    expect(calls.map(c => c.path)).toContain(`/project/issues/${DEMO_1}/history?limit=100`);
   });
 
-  it("pages the history to its end and keeps the most recent 100", async () => {
-    const page = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => entry(from + i));
-    const { client } = fakeInferOps(historyOf({
-      start: { entries: page(1, 500), nextCursor: "500" },
-      500: { entries: page(501, 620), nextCursor: null },
-    }));
+  it("keeps only the newest 100 of a 5,000-record history with long comments, shortened, holding one page at a time", async () => {
+    // InferOps' own bounds: 100 per page here, comments up to 20,000 characters (2,000 shown).
+    const long = (n: number) => `comment ${n} ` + "x".repeat(2400);
+    const record = (n: number) => n % 2 === 0
+      ? { kind: "comment", id: String(n), at: "2026-11-03T08:00:00.000Z", actorId: PERSON, actorType: "user",
+        field: null, value: null, body: long(n), correlationId: null }
+      : entry(n);
+    let largestPage = 0;
+    const { client, calls } = fakeInferOps(call => {
+      const match = /^\/project\/issues\/[^/]+\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const query = new URLSearchParams(match[1]);
+      const after = Number(query.get("afterSeq") ?? 0);
+      const limit = Number(query.get("limit"));
+      const page = Array.from({ length: Math.max(0, Math.min(limit, 5000 - after)) }, (_, i) => record(after + i + 1));
+      const body = JSON.stringify({ entries: page, nextCursor: after + page.length < 5000 ? String(after + page.length) : null });
+      largestPage = Math.max(largestPage, body.length);
+      return new Response(body, { headers: { "content-type": "application/json" } });
+    });
 
     const activity = await client.readIssueActivity("DEMO", DEMO_1);
 
     expect(activity.entries).toHaveLength(100);
-    expect(activity.omitted).toBe(520);
-    expect(activity.entries[0]?.value).toBe("title 620");
-    expect(activity.entries.at(-1)?.value).toBe("title 521");
+    expect(activity.omitted).toBe(4900);
+    expect(activity.entries[0]).toMatchObject({ kind: "comment", shortened: true });
+    expect(activity.entries[0]!.body).toHaveLength(2000);
+    expect(activity.entries[0]!.body!.startsWith("comment 5000 ")).toBe(true);
+    expect(activity.entries[1]).toMatchObject({ kind: "change", value: "title 4999", shortened: false });
+    // What is kept is bounded by the window, whatever the history's length.
+    expect(JSON.stringify(activity).length).toBeLessThan(100 * 2200);
+    // Every page fits under the response cap the client already enforces.
+    expect(largestPage).toBeLessThan(256 * 1024);
+    expect(calls.filter(c => c.path.includes("/history"))).toHaveLength(50);
   });
 
   it("refuses another project's issue as NOT_FOUND without asking for its history", async () => {
