@@ -39,6 +39,14 @@ it('restores a stored width, clamped so the workspace pane keeps its minimum', a
   expect(split.width).toBe(800)
 })
 
+it('removes the hidden resize handle from keyboard navigation while the pane is closed', async () => {
+  await act(async () => root.render(<Probe enabled={false} />))
+  expect(split.handleProps.tabIndex).toBe(-1)
+
+  await act(async () => root.render(<Probe enabled />))
+  expect(split.handleProps.tabIndex).toBe(0)
+})
+
 it('drags within bounds and persists the released width, but ignores drags while disabled', async () => {
   await act(async () => root.render(<Probe enabled={false} />))
   const event = handle() as never

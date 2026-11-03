@@ -89,7 +89,7 @@ export const useResizableSplit = (enabled: boolean, side: SplitSide = 'left') =>
     width,
     isResizing,
     handleProps: {
-      tabIndex: 0,
+      tabIndex: enabled ? 0 : -1,
       onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
         if (!enabled || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
         event.preventDefault()

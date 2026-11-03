@@ -40,7 +40,6 @@ import GadgetUI from './GadgetUI'
 import GadgetUseView from './GadgetUseView'
 import Connections from './Connections'
 import Activity, { type ActivityView } from './Activity'
-import { CountBadge } from './components/CountBadge'
 import ActivityNotifications from './ActivityNotifications'
 import WorkpiecePicker, {
   WORKPIECE_RAIL_COLLAPSED_WIDTH,
@@ -66,6 +65,7 @@ import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
 import { useWorkspaceOpen } from './useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from './hooks/useWorkspaceWorkpieces'
 import { useResizableSplit } from './hooks/useResizableSplit'
+import { PaneTab } from './PaneTab'
 import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
@@ -276,31 +276,6 @@ function PaneWorkpieceTabs({
         )
       })}
     </div>
-  )
-}
-
-function PaneTab({
-  active,
-  label,
-  count,
-  onClick,
-}: {
-  active: boolean
-  label: string
-  count?: number
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`relative flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12.5px] font-medium tracking-[-0.15px] transition-colors duration-150 ${
-        active ? 'bg-kumo-tint text-kumo-default' : 'text-kumo-subtle hover:text-kumo-default'
-      }`}
-    >
-      {label}
-      <CountBadge count={count ?? 0} />
-    </button>
   )
 }
 
@@ -1696,6 +1671,8 @@ export default function GadgetEditor() {
         <div
           className={`relative flex-shrink-0 touch-none cursor-col-resize overflow-visible bg-kumo-line max-md:hidden ${workspaceTransitionClass}`}
           style={{ width: showFullEditor ? 1 : 0 }}
+          aria-hidden={!showFullEditor}
+          inert={!showFullEditor}
           {...resizeHandleProps}
         >
           <div className="absolute inset-y-0 -left-2 -right-2" />
@@ -1704,6 +1681,8 @@ export default function GadgetEditor() {
         {/* ── RIGHT: App / Code / Connections tabs ───────────────────────────── */}
         <div
           className={`flex flex-shrink-0 min-w-0 overflow-hidden bg-kumo-base max-md:!w-full max-md:!opacity-100 ${!showFullEditor ? 'max-md:hidden' : ''} ${workspaceTransitionClass}`}
+          aria-hidden={!showFullEditor}
+          inert={!showFullEditor}
           style={{
             width: showFullEditor ? `calc(100% - ${chatWidth}px - 1px)` : 0,
             opacity: showFullEditor ? 1 : 0,
