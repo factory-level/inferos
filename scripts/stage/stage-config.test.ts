@@ -165,9 +165,9 @@ test("gatekeepers live under the stage origin; InferOps points at the stage's In
 test("each stage offers only the optional InferOps resource kinds it lists, and states every switch", () => {
   const vars = (stageName: "dev" | "prod") =>
     (build(stageName).get("gatekeeper-inferops") as StagingConfig).vars ?? {};
-  // FAC-149: dev offers workflow policy; custom tables wait for dev InferOps objects; prod offers none.
+  // FAC-149: dev offers workflow policy and custom tables; prod offers none.
   assert.equal(vars("dev").INFEROPS_WORKFLOW_POLICY_ENABLED, "true");
-  assert.equal(vars("dev").INFEROPS_TABLES_ENABLED, "false");
+  assert.equal(vars("dev").INFEROPS_TABLES_ENABLED, "true");
   assert.equal(vars("dev").INFEROPS_MEMBERS_ENABLED, "false");
   for (const name of ["INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED"]) {
     assert.equal(vars("prod")[name], "false", `${name} on prod`);
