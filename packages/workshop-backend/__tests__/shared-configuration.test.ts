@@ -217,6 +217,8 @@ describe("a build session in a shared workspace", () => {
       () => overseer.newGatekeeper(1, "inferops://acme.operations/project/board/ENG"),
       () => overseer.newAiModelGatekeeper("model"),
       () => overseer.newAgentSpawnerGatekeeper({ displayName: "agent", modelId: null, env: {} }),
+      () => overseer.updateAgentSpawner(1 as never, { displayName: "agent", modelId: null, env: {} }, { instructions: "x" }),
+      () => overseer.setAgentSpawnerEnv(1 as never, { displayName: "agent", modelId: null, env: {} }, {}),
       () => overseer.newArtifactPublisherGatekeeper(),
       () => overseer.acceptConnectionRequest("request", { gatekeeperId: 1 as never }),
     ];

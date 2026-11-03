@@ -36,7 +36,7 @@ import { consoleScreens, type ConsoleSource, type HostBoardReadAudit, type HostB
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -326,6 +326,24 @@ function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: st
 // Storage key of a chat's compaction checkpoint. See the `chatCompactions` collection.
 function compactionKey(chatId: number, compactedTo: number): string {
   return `${keyString(chatId)}.${keyString(compactedTo)}`;
+}
+
+// Whether two agent spawner configurations are the same (Overseer.updateAgentSpawner's
+// precondition). Absent and empty instructions are the same; env order doesn't matter.
+function sameAgentSpawnerConfig(a: AgentSpawnerConfig, b: AgentSpawnerConfig): boolean {
+  let envOf = (config: AgentSpawnerConfig) =>
+      JSON.stringify(Object.entries(config.env ?? {}).toSorted(([x], [y]) => x < y ? -1 : x > y ? 1 : 0));
+  return a.displayName === b.displayName && a.modelId === b.modelId &&
+      (a.instructions ?? "") === (b.instructions ?? "") && envOf(a) === envOf(b);
+}
+
+// An agent's instructions are behaviour only, and bounded like the deployment-wide instructions.
+function validateAgentSpawnerInstructions(instructions: unknown): void {
+  if (instructions === undefined) return;
+  if (typeof instructions !== "string") throw new Error("An agent's instructions must be text.");
+  if (instructions.length > MAX_INSTANCE_INSTRUCTIONS_LENGTH) {
+    throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
+  }
 }
 
 // A gatekeeper (connection) workpiece. IDs are allocated from the shared workpiece counter (see
@@ -6235,6 +6253,44 @@ class OverseerImpl implements AgentHooks {
     this.ctx.facets.delete(`gatekeeper${id}`);
     this.storage.gatekeepers.delete(id);
     if (this.storage.operateSession.get() && this.ownerId) this.hostBoardDesk().connectionRemoved(id);
+  }
+
+  // Replace an agent spawner's configuration (Overseer.updateAgentSpawner, setAgentSpawnerEnv),
+  // refused unless the stored one still equals `expected`, so an edit never overwrites a change its
+  // author didn't see. Props can't be edited in place, so the stub is recreated as
+  // newAgentSpawnerGatekeeper() creates it, keeping its creator (the storage migration does the
+  // same), and the running facet restarts onto it. A changed env widens "use" scope through any
+  // gadget binding the spawner, which restarts the sessions it reaches, as binding does; whether
+  // the env stays within each gadget's bindings is checked on every call (assertSpawnerCallScope).
+  // Synchronous, so the compare, the write and the restart can't interleave with another request.
+  replaceAgentSpawnerConfig(id: WorkpieceId, expected: AgentSpawnerConfig, config: AgentSpawnerConfig,
+      model?: {modelProvider?: string, modelName?: string, mock: boolean}): AgentSpawnerConfig {
+    let record = this.storage.gatekeepers.get(id);
+    if (record?.creationSpec?.type !== "agentSpawner") throw new Error(`Workpiece ${id} is not an agent.`);
+    if (!sameAgentSpawnerConfig(record.creationSpec.config, expected)) {
+      throw new Error("This agent was changed since you opened it. Reopen it and try again.");
+    }
+    let useScopeBefore = this.#accountRequiringUseScope();
+    let creatorUserId = record.agentSpawnerCreatorUserId;
+    let props: AgentSpawnerBindingProps = {
+      overseerId: this.ctx.id.toString(), config, ...(creatorUserId ? {creatorUserId} : {}),
+    };
+    let {modelProvider: _provider, modelName: _name, ...spec} = record.creationSpec;
+    let creationSpec: GatekeeperCreationSpec = model
+      ? {...spec, config,
+         ...(model.modelProvider ? {modelProvider: model.modelProvider} : {}),
+         ...(model.modelName ? {modelName: model.modelName} : {})}
+      : {...record.creationSpec, config};
+    let {mock: _mock, ...rest} = record;
+    let mock = model ? model.mock : record.mock === true;
+    this.storage.gatekeepers.put({
+      ...rest, class: this.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
+      resourceTitle: config.displayName, ...(mock ? {mock: true} : {}),
+    });
+    this.ctx.facets.abort(`gatekeeper${id}`, new Error("The agent's configuration changed."));
+    this.#restartIfUseScopeWidened(useScopeBefore,
+        "Gadget restarted because an agent's capabilities changed.");
+    return config;
   }
 
   // Open the session behind a binding loopback.
@@ -13452,11 +13508,100 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     await this.#requireSharedConfiguration("build", "shared");
-    // Validate the configured env: names must be valid binding names and targets must exist --
-    // and must not be gadgets still provisional to some chat, which belong to that chat's
-    // unaccepted proposal, not (yet) to the workspace. (Spawn-time snapshotting tolerates targets
-    // deleted later; this just catches bad input.)
-    for (let [name, target] of Object.entries(config.env)) {
+    this.#validateAgentSpawnerEnv(config.env);
+    validateAgentSpawnerInstructions(config.instructions);
+
+    let props: AgentSpawnerBindingProps = {
+      overseerId: this.impl.ctx.id.toString(),
+      config,
+      creatorUserId: this.#clientUser.id.toString(),
+    };
+
+    // Resolve model provider/name for blueprint metadata.
+    let {mock, ...model} = await this.#resolveAgentSpawnerModel(config.modelId);
+    let creationSpec: GatekeeperCreationSpec = {type: "agentSpawner", config, ...model};
+
+    let result = await this.impl.addGatekeeper(
+        this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
+        this.clientUserId, this.#mintedCapabilityKind(), mock, undefined,
+        props.creatorUserId);
+    await this.recordConnectionCreated(result, "agent_spawner");
+    return result;
+  }
+
+  async updateAgentSpawner(id: WorkpieceId, expected: AgentSpawnerConfig,
+      behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig> {
+    await this.#requireSharedConfiguration("build", "shared");
+    // The RPC input is untyped at runtime: a capability can't ride along with a behaviour edit.
+    for (let key of Object.keys(behaviour)) {
+      if (key === "env") {
+        throw new Error("An agent's capabilities change only through setAgentSpawnerEnv, never " +
+            "with its name, model or instructions.");
+      }
+      if (!["displayName", "modelId", "instructions"].includes(key)) {
+        throw new Error(`"${key}" is not an agent setting that can be changed.`);
+      }
+    }
+    let record = this.#agentSpawnerRecord(id);
+    let current = record.creationSpec.config;
+    let config: AgentSpawnerConfig = {...current};
+    if (behaviour.displayName !== undefined) {
+      if (typeof behaviour.displayName !== "string" || !behaviour.displayName.trim()) {
+        throw new Error("An agent needs a name.");
+      }
+      config.displayName = behaviour.displayName;
+    }
+    if (behaviour.instructions !== undefined) {
+      validateAgentSpawnerInstructions(behaviour.instructions);
+      if (behaviour.instructions.trim()) config.instructions = behaviour.instructions;
+      else delete config.instructions;
+    }
+    let model;
+    if (behaviour.modelId !== undefined && behaviour.modelId !== current.modelId) {
+      this.#requireAgentSpawnerCreator(record, "model");
+      config.modelId = behaviour.modelId;
+      model = await this.#resolveAgentSpawnerModel(behaviour.modelId);
+    }
+    return this.impl.replaceAgentSpawnerConfig(id, expected, config, model);
+  }
+
+  async setAgentSpawnerEnv(id: WorkpieceId, expected: AgentSpawnerConfig,
+      env: Record<string, WorkpieceId>): Promise<AgentSpawnerConfig> {
+    await this.#requireSharedConfiguration("build", "shared");
+    let record = this.#agentSpawnerRecord(id);
+    this.#requireAgentSpawnerCreator(record, "capabilities");
+    this.#validateAgentSpawnerEnv(env);
+    return this.impl.replaceAgentSpawnerConfig(
+        id, expected, {...record.creationSpec.config, env: {...env}});
+  }
+
+  // The stored record of agent spawner `id`, with its spec narrowed to the spawner's.
+  #agentSpawnerRecord(id: WorkpieceId)
+      : GatekeeperRecord & {creationSpec: Extract<GatekeeperCreationSpec, {type: "agentSpawner"}>} {
+    let record = this.impl.storage.gatekeepers.get(id);
+    if (record?.creationSpec?.type !== "agentSpawner") throw new Error(`Workpiece ${id} is not an agent.`);
+    return record as GatekeeperRecord &
+        {creationSpec: Extract<GatekeeperCreationSpec, {type: "agentSpawner"}>};
+  }
+
+  // Spawned agents run on their creator's account and reach their bindings with the creator's
+  // authority, so only the creator may change what those are: another editor would otherwise
+  // choose them under someone else's authority. Records from before creators were kept fall back
+  // to the workspace owner, as spawning does.
+  #requireAgentSpawnerCreator(record: GatekeeperRecord, what: "model" | "capabilities"): void {
+    let creator = record.agentSpawnerCreatorUserId ?? this.impl.ownerId;
+    if (creator !== this.#clientUser.id.toString()) {
+      throw new Error(`Only the person who created this agent can change its ${what}: its agents ` +
+          `run with that person's account and authority.`);
+    }
+  }
+
+  // Validate a spawner's env: names must be valid binding names and targets must exist -- and must
+  // not be gadgets still provisional to some chat, which belong to that chat's unaccepted proposal,
+  // not (yet) to the workspace. (Spawn-time snapshotting tolerates targets deleted later; this just
+  // catches bad input.)
+  #validateAgentSpawnerEnv(env: Record<string, WorkpieceId>): void {
+    for (let [name, target] of Object.entries(env)) {
       validateBindingName(name);
       if (name === GIT_BINDING_NAME) {
         // The spawned chat's env already has the automatic env.GIT, which this would shadow.
@@ -13478,35 +13623,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
             `which does not exist.`);
       }
     }
+  }
 
-    let props: AgentSpawnerBindingProps = {
-      overseerId: this.impl.ctx.id.toString(),
-      config,
-      creatorUserId: this.#clientUser.id.toString(),
+  // The model provider and name a spawner's blueprint metadata records, from the calling user's
+  // account, and whether that account reports it as a mock.
+  async #resolveAgentSpawnerModel(modelId: string | null)
+      : Promise<{modelProvider?: string, modelName?: string, mock: boolean}> {
+    if (!modelId) return {mock: false};
+    let chatMeta = await retryOnDoReset(
+        () => this.#clientUser.getChatContext(modelId), this.impl.logger);
+    if (!chatMeta.aiModel) return {mock: false};
+    return {
+      modelProvider: chatMeta.aiModel.config.provider,
+      modelName: chatMeta.aiModel.config.model,
+      mock: isMockModel(chatMeta.aiModel.config),
     };
-
-    // Resolve model provider/name for blueprint metadata.
-    let creationSpec: GatekeeperCreationSpec = {
-      type: "agentSpawner",
-      config,
-    };
-    let mock = false;
-    if (config.modelId) {
-      let chatMeta = await retryOnDoReset(
-          () => this.#clientUser.getChatContext(config.modelId), this.impl.logger);
-      if (chatMeta.aiModel) {
-        creationSpec.modelProvider = chatMeta.aiModel.config.provider;
-        creationSpec.modelName = chatMeta.aiModel.config.model;
-        mock = isMockModel(chatMeta.aiModel.config);
-      }
-    }
-
-    let result = await this.impl.addGatekeeper(
-        this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
-        this.clientUserId, this.#mintedCapabilityKind(), mock, undefined,
-        props.creatorUserId);
-    await this.recordConnectionCreated(result, "agent_spawner");
-    return result;
   }
 
   async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
@@ -15135,6 +15266,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     this.#deny();
   }
+  async updateAgentSpawner(_id: WorkpieceId, _expected: AgentSpawnerConfig,
+      _behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig> { this.#deny(); }
+  async setAgentSpawnerEnv(_id: WorkpieceId, _expected: AgentSpawnerConfig,
+      _env: Record<string, WorkpieceId>): Promise<AgentSpawnerConfig> { this.#deny(); }
   // Pending actions are queried eagerly for the badge; resolved history is demand-loaded. Return
   // an empty terminal page so this speculative read does not fail for "use" collaborators.
   async listActions(_options?: {beforeId?: number, filter?: ActionHistoryFilter})
@@ -15457,6 +15592,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     this.#deny();
   }
+  async updateAgentSpawner(_id: WorkpieceId, _expected: AgentSpawnerConfig,
+      _behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig> { this.#deny(); }
+  async setAgentSpawnerEnv(_id: WorkpieceId, _expected: AgentSpawnerConfig,
+      _env: Record<string, WorkpieceId>): Promise<AgentSpawnerConfig> { this.#deny(); }
   async listHooks(): Promise<BoundHookInfo[]> { this.#deny(); }
   async enableHook(_id: number): Promise<void> { this.#deny(); }
   async disableHook(_id: number): Promise<void> { this.#deny(); }

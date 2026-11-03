@@ -2587,7 +2587,23 @@ export type AgentSpawnerConfig = {
    * agent reads these bindings with the spawner creator's authority.
    */
   env: Record<string, WorkpieceId>,
+
+  /**
+   * What spawned agents are for, written by whoever configures the agent: added to each spawned
+   * agent's system prompt, framed as its configured instructions. At most
+   * MAX_INSTANCE_INSTRUCTIONS_LENGTH characters. Behaviour only: it grants nothing. A spawned
+   * agent reaches exactly `env`, whatever the instructions say, and changing them never changes
+   * `env` (see Overseer.updateAgentSpawner). Absent on agents configured without instructions.
+   */
+  instructions?: string,
 };
+
+/**
+ * The parts of an agent spawner's configuration that describe its behaviour, which
+ * Overseer.updateAgentSpawner changes. `env` (what the agent can reach) is deliberately not one of
+ * them: it changes only through Overseer.setAgentSpawnerEnv.
+ */
+export type AgentSpawnerBehaviour = Partial<Pick<AgentSpawnerConfig, "displayName" | "modelId" | "instructions">>;
 
 /**
  * Interface to a workspace's Overseer, used to display the Gadget Workshop shell UI around that
@@ -3012,6 +3028,28 @@ export interface Overseer extends RpcTarget {
    * programmatically spawn AI agents to complete tasks.
    */
   newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>>;
+
+  /**
+   * Change an agent spawner's name, model or instructions, and nothing else: its `env` stays as it
+   * is, and any other field is refused. `expected` is the configuration the caller last read (from
+   * GatekeeperClient.getCreationSpec()); if the spawner has changed since, the update is refused, so
+   * two editors never overwrite each other unseen. Only the agent's creator may change its model,
+   * because spawned agents run on the creator's account. Agents already spawned keep the
+   * configuration they started with. Returns the new configuration.
+   */
+  updateAgentSpawner(id: WorkpieceId, expected: AgentSpawnerConfig,
+      behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig>;
+
+  /**
+   * Replace what an agent spawner's agents can reach: its `env`, validated as
+   * newAgentSpawnerGatekeeper validates it. Kept apart from updateAgentSpawner so a capability
+   * change is always its own, explicit step. Only the agent's creator may make it, because spawned
+   * agents reach these bindings with the creator's authority. `expected` is as for
+   * updateAgentSpawner. Agents already spawned keep the bindings they started with. Returns the new
+   * configuration.
+   */
+  setAgentSpawnerEnv(id: WorkpieceId, expected: AgentSpawnerConfig,
+      env: Record<string, WorkpieceId>): Promise<AgentSpawnerConfig>;
 
   /**
    * Fetch one page of action history, newest first by id (creation order). "all" (the default)
