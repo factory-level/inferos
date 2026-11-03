@@ -162,6 +162,25 @@ test("gatekeepers live under the stage origin; InferOps points at the stage's In
   assert.equal(STAGES.prod.inferops.authOrigin, "https://auth.inferlab.io");
 });
 
+test("each stage offers only the optional InferOps resource kinds it lists, and states every switch", () => {
+  const vars = (stageName: "dev" | "prod") =>
+    (build(stageName).get("gatekeeper-inferops") as StagingConfig).vars ?? {};
+  // FAC-149: dev offers workflow policy; custom tables wait for dev InferOps objects; prod offers none.
+  assert.equal(vars("dev").INFEROPS_WORKFLOW_POLICY_ENABLED, "true");
+  assert.equal(vars("dev").INFEROPS_TABLES_ENABLED, "false");
+  assert.equal(vars("dev").INFEROPS_MEMBERS_ENABLED, "false");
+  for (const name of ["INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED"]) {
+    assert.equal(vars("prod")[name], "false", `${name} on prod`);
+  }
+  const listed: StageDefinition = { ...STAGES.dev, inferops: { ...STAGES.dev.inferops, resources: ["tables", "workflowPolicy"] } };
+  const withTables = buildStageConfigs({ stageName: "dev", stage: listed, packages: ALL_PACKAGES,
+    accountId: ACCOUNT_ID,
+    kvIds: new Map(stageKvNamespaces(listed, ALL_PACKAGES).map((ns, i) => [ns.title, `kv-${i}`])) })
+    .get("gatekeeper-inferops") as StagingConfig;
+  assert.equal(withTables.vars?.INFEROPS_TABLES_ENABLED, "true");
+  assert.equal(withTables.vars?.INFEROPS_MEMBERS_ENABLED, "false");
+});
+
 test("the backend signs in with InferLab only and carries no secret in its vars", () => {
   const backend = build("dev", JSON.stringify({ widgets: [] })).get("workshop-backend") as StagingConfig;
   assert.equal(backend.vars?.PUBLIC_BASE_URL, "https://dev-os.factorylevel.dev");
