@@ -52,7 +52,7 @@ describe("OverseerDurableObject.startHook", () => {
     let durable = makeMockStorage();
     let definitions = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
     let head = "a".repeat(40);
-    let owner = { id: "owner-profile", name: "Owner" };
+    let owner = { type: "user" as const, id: "owner-profile", name: "Owner" };
     let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head);
     definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1 });
     let config = async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG);
