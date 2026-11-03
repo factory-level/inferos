@@ -217,10 +217,10 @@ describe("hooks keep an unbound connection in use scope", () => {
 });
 
 // A bound agent spawner's env hands the connections it names to any agent a "use" collaborator
-// spawns through the gadget (connectToGadget -> spawn/spawnCallable seeds the chat from
-// config.env), so those connections stay in their verification scope even with no direct binding
-// edge -- both for exclusion and for what a fresh open verifies them against.
-describe("a bound agent spawner's env keeps its targets in use scope", () => {
+// Old persisted gadget records can predate bind-time spawner scope validation. Their env targets
+// still count for observer verification and exclusion, even though new binding attempts reject
+// this configuration.
+describe("legacy bound agent spawner envs remain in use scope", () => {
   function bindSpawnerIntoGadget(impl: any): void {
     impl.storage.gatekeepers.put({
       id: 200,
@@ -231,9 +231,11 @@ describe("a bound agent spawner's env keeps its targets in use scope", () => {
         config: { displayName: "S", modelId: null, env: { DB: GATEKEEPER_ID } },
       },
     });
-    impl.storage.gadgets.put(
-        { type: "gadget", id: 100, title: "G", created: new Date(0), bindingName: "G", bindings: {} });
-    impl.bindWorkpiece(100, "SPAWN", 200);
+    impl.storage.gadgets.put({
+      type: "gadget", id: 100, title: "G", created: new Date(0), bindingName: "G",
+      // Legacy persisted edge: new bindWorkpiece calls reject its out-of-scope env target.
+      bindings: { SPAWN: { target: 200 } },
+    });
   }
 
   it("a use observer blocks an observation from a connection reachable only through the env",
