@@ -105,7 +105,7 @@ import { createLogger } from "@gadgets/observability/logger";
 import type {
   AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
-  ResourceDescription, SupportedResource, VendorDescription,
+  ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
@@ -1049,6 +1049,27 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   /** The InferLab-verified email of a sign-in or connected account; null without one. */
   async getAuthenticatedEmail(): Promise<string | null> {
     return this.ctx.props.email ?? null;
+  }
+
+  /**
+   * Whether the connected person may `build` or `publish` configuration other people use in
+   * InferOS: InferOps' `configuration:<action>` (only an Admin's grant holds it, and a grant deny
+   * removes it), asked with their own token in each of their workspaces until one says yes. An
+   * account without a connected person (demo data, a sign-in) holds nothing. A workspace InferOps
+   * refuses the question in is a no; any other failure throws, so the Workshop refuses rather than
+   * guessing. Workspaces granted since the person connected count after they reconnect.
+   */
+  async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<boolean> {
+    if (action !== "build" && action !== "publish") return false;
+    const endpoint = inferOpsApiEndpoint(this.env);
+    if (!this.ctx.props.connected || !endpoint) return false;
+    const identity = await this.#credentials().identity();
+    for (const { workspaceId } of identity?.workspaces ?? []) {
+      const client = whileInferOpsEnabled(this.env, () =>
+        accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
+      if (await client.holdsPermission(`configuration:${action}`)) return true;
+    }
+    return false;
   }
 
   /** No grantable resource types, so nothing to authorize and no URL to return. */

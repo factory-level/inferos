@@ -414,6 +414,17 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return this.#account(props).describe();
   }
 
+  /** The account's answer to the Workshop's shared-configuration question, or its failure message. */
+  async holdsSharedConfiguration(props: AccountProps, action: "build" | "publish"): Promise<boolean | string> {
+    const account = this.#account(props) as unknown as
+      Required<Pick<GatekeeperUser, "holdsSharedConfiguration">>;
+    try {
+      return await account.holdsSharedConfiguration(action);
+    } catch (error) {
+      return String(error instanceof Error ? error.message : error);
+    }
+  }
+
   /** The resource URL patterns the account offers now. */
   async supportedPatterns(props: AccountProps): Promise<string[]> {
     return (await this.#account(props).getSupportedResources()).map(r => r.urlPattern);
