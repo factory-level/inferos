@@ -1,5 +1,5 @@
 /**
- * The versioned nested canvas model (ADR 0013, proposed). Nothing stores, renders or runs it yet:
+ * The versioned nested canvas model (ADR 0014, proposed). Nothing stores, renders or runs it yet:
  * saved canvases stay `CanvasDefinition` until the migration that wires this in.
  *
  * Containment says only where a node sits and what is removed with it. Nothing passes along it:

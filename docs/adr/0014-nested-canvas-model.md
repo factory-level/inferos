@@ -4,7 +4,7 @@ status: proposed
 date: 2026-11-02
 ---
 
-# 0013. The nested canvas model separates containment from behavior and passes nothing down the tree
+# 0014. The nested canvas model separates containment from behavior and passes nothing down the tree
 
 ## Context
 

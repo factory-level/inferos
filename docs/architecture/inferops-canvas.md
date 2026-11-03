@@ -110,7 +110,7 @@ Bootstrap writes `views/operations.json` with the configured target reference. `
 
 ## Nested canvas model contract
 
-`@gadgets/workshop-shared/canvas-model` is schema version 2, proposed in [ADR 0013](../adr/0013-nested-canvas-model.md). **Nothing imports it yet.** Saved canvases, the operation engine, the renderer, consoles and the agent's tools all still use version 1, so no behavior has changed. `canvas.ts` only gained three exports for it (`CANVAS_ID`, `CANVAS_REVISION`, `parseCanvasWidget`).
+`@gadgets/workshop-shared/canvas-model` is schema version 2, proposed in [ADR 0014](../adr/0014-nested-canvas-model.md). **Nothing imports it yet.** Saved canvases, the operation engine, the renderer, consoles and the agent's tools all still use version 1, so no behavior has changed. `canvas.ts` only gained three exports for it (`CANVAS_ID`, `CANVAS_REVISION`, `parseCanvasWidget`).
 
 `parseCanvasPage` validates one page and `parseCanvasWorkspacePages` validates a page collection, including navigation targets. Both are pure, take no viewer and throw `CanvasModelError` with a stable `code` and a location `at` that holds only validated IDs and known field names. Accepting a page says its shape is sound and nothing about who may see what it references: a reference to another company's board parses, and is refused later, when it's resolved through a connection. `parseCanvasTarget`, `formatCanvasTarget` and `resolveCanvasTarget` handle explicit edit targets, which also authorize nothing.
 
