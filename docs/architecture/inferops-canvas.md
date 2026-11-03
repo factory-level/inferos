@@ -45,6 +45,8 @@ Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa
 | Path | Responsibility |
 | --- | --- |
 | `packages/workshop-frontend/src/GadgetUI.tsx` | Sandboxed iframe host and RPC handshake; also hosts gadget widgets on the canvas page. |
+| `packages/workshop-frontend/src/GadgetEditor.tsx` | Workspace editor; its right pane and resize handle become inert and leave keyboard navigation while the pane is closed. |
+| `packages/workshop-frontend/src/PaneTab.tsx` | Accessible button behavior for the editor's app, code, connections, and activity tabs. |
 | `packages/workshop-frontend/src/pages/inferops-canvas/InferOpsCanvasPage.tsx` | InferOps Canvas page at `/workspace/$id/inferops-canvas`: workspace chat beside the composed views. |
 | `packages/workshop-frontend/src/pages/inferops-canvas/InferOpsCanvasHome.tsx` | Top-level InferOps Canvas page at `/inferops-canvas` (sidebar entry): screens across workspaces and screen creation. |
 | `packages/workshop-frontend/src/features/canvas/` | View picker, read-only renderer, gadget widget host, board data adapter, Kanban board with issue create and edit, board activity, the coding control surface (coding dispatch and run status), the InferMind Wiki widget with live board and issue embeds, and layout editor. |
@@ -61,6 +63,8 @@ InferOS hosts sandboxed Gadgets and human participant presence; these are not an
 ## Configuration
 
 Current board widget freshness is 60 seconds. The InferOps board hook pauses polling when the document is hidden and merges revisions while protecting pending changes. Existing personal pins have their own RLS boundary. InferOS frontend changes must follow frontend-conventions and reuse Kumo/@gadgets/ui.
+
+The workspace editor keeps its app, Code, and Connections controls in the right pane. While that pane is closed, the pane is `inert` and hidden from assistive technology; its resize handle is also inert and excluded from keyboard navigation. The split handle remains keyboard-adjustable while the pane is open.
 
 ## Divergences from Design
 
