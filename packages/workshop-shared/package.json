@@ -63,6 +63,10 @@
       "types": "./src/canvas.ts",
       "import": "./src/canvas.ts"
     },
+    "./canvas-model": {
+      "types": "./src/canvas-model.ts",
+      "import": "./src/canvas-model.ts"
+    },
     "./password-salt": {
       "types": "./src/password-salt.ts",
       "import": "./src/password-salt.ts"
