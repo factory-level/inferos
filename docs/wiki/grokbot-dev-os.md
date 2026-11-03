@@ -75,6 +75,14 @@ as another persona replaces its session. A dev-os deploy from before 2026-11-02 
 persona without asking: open `https://auth.dev-os.factorylevel.dev/logout` in the same browser
 first, then reconnect.
 
+**Signing in as yourself with Google.** The same page's "Continue with Google" works through
+`auth.dev-os` once three things hold: dev InferLab lists `https://auth.dev-os.factorylevel.dev` in
+`auth.sso.proxyOrigins` (factory-level/inferops#2528), dev's Google OAuth client (inferlab-dev) has
+`https://auth.dev-os.factorylevel.dev/auth/oauth/callback/google` as an authorized redirect URI, and
+the Google account is already a user in dev InferLab (a first Google sign-in creates no account).
+Without the first, Google sends the browser to `auth.dev.inferlab.io`, which dev's edge refuses;
+without the second, Google itself refuses the sign-in with `redirect_uri_mismatch`.
+
 ## Check the data
 
 The seed creates the seats and workspaces but no project and no Wiki page. Check read-only as each
