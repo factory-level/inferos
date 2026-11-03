@@ -7,8 +7,8 @@
 //   server. With no valid origin configured the vendor offers neither sign-in nor a connect flow.
 //   `INFERLAB_AUTHORIZE_ORIGIN`, when set, is where the browser is sent for `/authorize` instead
 //   (the sign-in proxy, auth-proxy.ts); every server-side call still goes to the InferLab origin.
-//   Through the proxy the popup first passes `/logout?return=/authorize?…`, ending whatever
-//   central-auth session that host still holds, so a person can choose another persona.
+//   Through the proxy `/authorize` carries `prompt=select_account`, so the sign-in page is shown
+//   even while that host holds a central-auth session, and a person can choose another persona.
 // - `InferLabLogin` is one short-lived Durable Object per attempt. It holds the flow's purpose, the
 //   Workshop's callback, the single-use initiation and OAuth nonces, and the PKCE verifier, and
 //   deletes itself by alarm.
@@ -467,14 +467,11 @@ export async function handleInferLabLogin(request: Request, env: InferLabLoginEn
     authorize.searchParams.set("code_challenge", begun.codeChallenge);
     authorize.searchParams.set("code_challenge_method", "S256");
     // Through the sign-in proxy, the browser's central-auth session lives on the proxy's own host,
-    // and a live one makes `/authorize` answer at once as whoever signed in last. Ending it first
-    // shows the persona picker on every attempt; the host serves nothing else, so no other
-    // InferLab app is signed out. Without a proxy the session is InferLab's own and is left alone.
-    if (origin !== inferLabAuthOrigin(env)) {
-      const logout = new URL("/logout", origin);
-      logout.searchParams.set("return", `${authorize.pathname}${authorize.search}`);
-      return Response.redirect(logout.toString(), 302);
-    }
+    // and a live one makes `/authorize` answer at once as whoever signed in last. `prompt=
+    // select_account` asks InferLab for the sign-in page anyway (factory-level/inferops#2528), so a
+    // person can choose another persona, while that session, and every connection opened under it,
+    // stays live. Without a proxy the session is InferLab's own, shared with its apps, and reused.
+    if (origin !== inferLabAuthOrigin(env)) authorize.searchParams.set("prompt", "select_account");
     return Response.redirect(authorize.toString(), 302);
   }
 

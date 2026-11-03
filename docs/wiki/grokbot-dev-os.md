@@ -68,12 +68,12 @@ Check these in order. Each one, when missing, breaks sign-in in a different way.
 3. Choose the persona, finish onboarding, then connect the InferOps account from the same picker.
 4. Open the GROK board or the Wiki by the references above.
 
-**Switching persona.** Every sign-in, connect and reconnect through `auth.dev-os` starts by ending
-the InferLab session that host holds, so the picker is shown each time
+**Switching persona.** Every sign-in, connect and reconnect through `auth.dev-os` asks InferLab for
+the sign-in page (`prompt=select_account`), so the picker is shown each time
 ([sign-in proxy](../architecture/inferops-gatekeeper.md#sign-in-proxy)). Reconnecting the account
-as another persona replaces its session. A dev-os deploy from before 2026-11-02 reuses the last
-persona without asking: open `https://auth.dev-os.factorylevel.dev/logout` in the same browser
-first, then reconnect.
+as another persona replaces its session. Do not open `https://auth.dev-os.factorylevel.dev/logout`
+to switch: it ends the InferLab session behind every InferOps account connected through that host,
+which then shows "Credentials expired" until it is reconnected.
 
 **Signing in as yourself with Google.** The same page's "Continue with Google" works through
 `auth.dev-os` once three things hold: dev InferLab lists `https://auth.dev-os.factorylevel.dev` in

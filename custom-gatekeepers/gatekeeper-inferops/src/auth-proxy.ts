@@ -16,9 +16,10 @@
 // - Every forwarded request names this origin in `x-inferos-authorize-origin`. InferLab answers the
 //   Google legs on that origin only when it is listed in its `auth.sso.proxyOrigins`, so Google sends
 //   the browser back here (its callback, `<origin>/auth/oauth/callback/google`, is registered on
-//   InferLab's Google client). Anywhere else the header is ignored. Every sign-in starts at `/logout` (inferlab-login.ts), which
-//   ends the session central-auth keeps for this host and then redirects to the relative
-//   `/authorize?…`, so the persona picker is shown each time instead of the last persona.
+//   InferLab's Google client). Anywhere else the header is ignored.
+// - Every sign-in asks for `/authorize?…&prompt=select_account` (inferlab-login.ts), so the sign-in
+//   page is shown each time instead of the last persona, without ending the session central-auth
+//   keeps for this host (opening `/logout` here would also end every connected account's session).
 // - Only a fixed set of request headers is forwarded, with Access's `CF_Authorization` cookie
 //   removed. `Origin` and `Referer` naming the authorize origin are rewritten to the InferLab origin,
 //   so central-auth's same-origin check on the persona form holds; anything else passes unchanged

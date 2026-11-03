@@ -259,12 +259,11 @@ describe("sign-in flow", () => {
   it("sends the browser to the authorize origin but exchanges the code at the InferLab origin", async () => {
     const proxied = { ...LOGIN_ENV, INFERLAB_AUTHORIZE_ORIGIN: "http://127.0.0.1:8788" };
     const popup = await handleInferLabLogin(new Request(await start("proxied")), proxied, env.INFERLAB_LOGIN);
-    // The proxy's host first ends its central-auth session, then lands on /authorize.
-    const logout = new URL(popup!.headers.get("Location")!);
-    expect(`${logout.origin}${logout.pathname}`).toBe("http://127.0.0.1:8788/logout");
-    const back = logout.searchParams.get("return")!;
-    expect(back.startsWith("/authorize?")).toBe(true);
-    const location = new URL(back, logout.origin);
+    // Straight to /authorize on the proxy, asking for the sign-in page: no /logout, which would also
+    // end the InferLab session behind an account already connected through this host.
+    const location = new URL(popup!.headers.get("Location")!);
+    expect(`${location.origin}${location.pathname}`).toBe("http://127.0.0.1:8788/authorize");
+    expect(location.searchParams.get("prompt")).toBe("select_account");
     expect(location.searchParams.get("client_id")).toBe("inferos");
     expect(location.searchParams.get("redirect_uri")).toBe(REDIRECT_URI);
     expect(location.searchParams.get("code_challenge_method")).toBe("S256");
