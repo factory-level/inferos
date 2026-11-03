@@ -88,7 +88,7 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
   const failed = (list.status === 'ready' ? list.error : undefined) ?? (page?.status === 'ready' ? page.error : undefined)
     ?? (structure.status === 'ready' ? structure.error : undefined)
   const body = document ? authoredBody(document) : null
-  return <article aria-label={`InferMind Wiki ${widget.targetRef}`} className="flex min-w-0 flex-col rounded-lg border border-kumo-line bg-kumo-base">
+  return <article aria-label={`InferMind Wiki ${widget.targetRef}`} className="flex h-full min-w-0 flex-col rounded-lg border border-kumo-line bg-kumo-base">
     <header className="flex flex-wrap items-center gap-2 border-b border-kumo-line px-3 py-2">
       <div className="min-w-0 flex-1">
         <h3 className="truncate text-sm font-medium text-kumo-default">{document ? document.title : 'InferMind Wiki'}</h3>
@@ -100,7 +100,7 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       <Button size="sm" shape="square" variant="ghost" icon={ArrowClockwise} aria-label="Refresh Wiki"
         disabled={list.status === 'loading'} onClick={() => data?.refresh()} />
     </header>
-    <div className="p-3">
+    <div className="min-h-0 flex-1 p-3">
       {list.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the Wiki…</p>}
       {list.status === 'unbound' && <p className="text-sm text-kumo-subtle">
         Not connected. This workspace has no connection to this Wiki. Connect it, for example by asking in the chat, to read it here.

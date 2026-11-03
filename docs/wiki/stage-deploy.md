@@ -1,6 +1,6 @@
 ---
 title: Deploy a persistent stage
-updated: 2026-10-30
+updated: 2026-11-02
 ---
 
 # Deploy a persistent stage
@@ -36,7 +36,7 @@ How to deploy, update, roll back and delete the two persistent InferOS instances
 
 1. Rehearse with no network: `pnpm stage:deploy dev --dry-run`. It prints every worker, its vars, the backend's secret names (never values), the KV namespaces and the bucket.
 2. Deploy: `pnpm stage:deploy dev`. It builds the workspace (frontend in non-Access mode), creates any missing KV namespace, writes `wrangler.stage-dev.jsonc` beside each package, deploys gatekeepers, then the backend, then the router, checks that only the router (and, on `dev`, the gatekeeper's sign-in proxy) has a URL, checks the Access redirect on every stage hostname, and runs the smoke when a service token is set. `dev` refuses a dirty tree unless `--allow-dirty`; `prod` always refuses one.
-3. Accept it by hand: sign in through Access, choose "Sign in with InferLab", and open a board you hold (`inferops://<tenant>.<workspace>/project/board/<KEY>`). A config that validates is not acceptance.
+3. Accept it by hand: sign in through Access, choose "Sign in with InferLab", and open a board you hold (`inferops://<tenant>.<workspace>/project/board/<KEY>`). A config that validates is not acceptance. On `dev`, the reserved grokbot personas and their board are set up as in [set up the grokbot tenant for dev-os](grokbot-dev-os.md).
 4. Re-deploying is the same command; KV namespaces, the bucket and every Durable Object are kept.
 
 ## InferLab edge secret

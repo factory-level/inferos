@@ -241,4 +241,58 @@ describe('BlueprintLandingPage model configuration', () => {
     expect(installBlueprint).not.toHaveBeenCalled()
     expect(document.body.textContent).toContain('You must choose connected accounts for the services this workspace uses.')
   })
+
+  // FAC-149: Configure finds the binding's resource type among what the gatekeeper advertises. A
+  // stage that doesn't switch a kind on doesn't advertise it, and the binding must still be refused.
+  const WORKFLOW_PATTERN = 'inferops://*/project/workflow/*'
+  const policyBlueprint = (): BlueprintPublicInfo => ({
+    ...BLUEPRINT,
+    metadata: {
+      ...BLUEPRINT.metadata,
+      title: 'Workflow policy',
+      bindings: {
+        policy: {
+          type: 'gatekeeper',
+          title: 'InferOps workflow policy',
+          description: '',
+          gatekeeperName: 'inferops',
+          typeUrlPattern: WORKFLOW_PATTERN,
+          resourceUrl: 'inferops://demo.local/project/workflow/DEMO',
+        },
+      },
+    } as BlueprintPublicInfo['metadata'],
+  })
+  const inferops = (patterns: string[]) => ({
+    id: 'inferops',
+    description: { displayName: 'InferOps' },
+    supportedResources: patterns.map(urlPattern => ({ urlPattern, name: urlPattern })),
+  })
+
+  async function openConfigure(patterns: string[]): Promise<void> {
+    testState.authenticatedApi = {
+      ...(authenticatedApi() as unknown as Record<string, unknown>),
+      getBlueprintInfo: async () => policyBlueprint(),
+      listGatekeeperVendors: async () => [inferops(patterns)],
+    } as unknown as RpcStub<AuthenticatedApi>
+    rootContainer = document.createElement('div')
+    document.body.appendChild(rootContainer)
+    root = createRoot(rootContainer)
+    await act(async () => root!.render(<BlueprintLandingPage rpcStub={publicApi()} />))
+    await act(async () => { await Promise.resolve() })
+    const configure = Array.from(document.body.querySelectorAll('button'))
+      .find(button => button.textContent === 'Configure')!
+    await act(async () => configure.click())
+  }
+
+  it('refuses a binding whose resource type the gatekeeper does not offer, in the same words', async () => {
+    await openConfigure(['inferops://*/project/board/*'])
+    expect(document.body.textContent).toContain(
+      "The required resource type for this binding isn't offered by InferOps.")
+  })
+
+  it('accepts the same binding once the gatekeeper offers its resource type', async () => {
+    await openConfigure(['inferops://*/project/board/*', WORKFLOW_PATTERN])
+    expect(document.body.textContent).toContain('InferOps workflow policy')
+    expect(document.body.textContent).not.toContain("isn't offered by")
+  })
 })

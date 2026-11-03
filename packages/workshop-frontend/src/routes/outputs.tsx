@@ -32,7 +32,21 @@ import { WorkshopButton, WorkshopIconButton } from '../components/WorkshopContro
 // have to remember which workspace they made a thing in. Backed by an index in the user's own
 // account that each workspace pushes to (AuthenticatedApi.listOutputs()).
 
+/**
+ * The Outputs filters live in the URL, so a reload, Back or a shared link keeps them. Absent means
+ * "all". A format id is kept as given, since formats are deployment-configured; one the page does
+ * not offer reads as all.
+ */
+export type OutputsSearch = { type?: string; owner?: 'mine' | 'shared' }
+
+export const outputsSearchFrom = (search: Record<string, unknown>): OutputsSearch => ({
+  type: typeof search.type === 'string' && search.type.length > 0 && search.type.length <= 64
+    ? search.type : undefined,
+  owner: search.owner === 'mine' || search.owner === 'shared' ? search.owner : undefined,
+})
+
 export const Route = createFileRoute('/outputs')({
+  validateSearch: outputsSearchFrom,
   component: OutputsPage,
 })
 
@@ -389,6 +403,10 @@ function RenameOutputDialog({
 type TypeFilter = 'all' | string
 
 function OutputsPage() {
+  return <OutputsPageContent search={Route.useSearch()} />
+}
+
+export function OutputsPageContent({ search: { type: typeParam, owner } }: { search: OutputsSearch }) {
   useDocumentTitle('Outputs')
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
@@ -403,8 +421,13 @@ function OutputsPage() {
     if (typeof window === 'undefined') return 'grid'
     return localStorage.getItem('outputs-view') === 'list' ? 'list' : 'grid'
   })
-  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
-  const [ownerFilter, setOwnerFilter] = useState<OwnerFilter>('all')
+  const ownerFilter: OwnerFilter = owner ?? 'all'
+  // Replace rather than push: flipping filters is refining one page, not a trail to walk back.
+  const setFilters = (next: OutputsSearch) =>
+    navigate({ to: '/outputs', search: (prev) => ({ ...prev, ...next }), replace: true })
+  const setTypeFilter = (id: TypeFilter) => setFilters({ type: id === 'all' ? undefined : id })
+  const setOwnerFilter = (value: OwnerFilter) =>
+    setFilters({ owner: value === 'all' ? undefined : value })
   const [search, setSearch] = useState('')
   const [outputs, setOutputs] = useState<OutputSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -541,6 +564,8 @@ function OutputsPage() {
     return [...byId]
   }, [formats, outputs])
   const showTypeFilters = presentTypes.length > 1
+  const typeFilter: TypeFilter =
+    typeParam !== undefined && presentTypes.some(([id]) => id === typeParam) ? typeParam : 'all'
   const showToolbar = outputs.length > 0 || showTypeFilters
   // Keep ownership scopes available alongside categories even when one or both counts are zero.
   const showOwnerFilters = showToolbar
