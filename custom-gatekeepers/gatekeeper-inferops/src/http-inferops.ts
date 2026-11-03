@@ -56,12 +56,13 @@ import {
   type WorkspaceMemberRecord, type WorkspaceMembersRead,
   type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
+  type HistoryEntryRecord, toIssueActivity,
 } from "./inferops-client";
 import { membersNotFound } from "./members";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound, type WorkflowHeadRecord } from "./workflow-policy";
 import { isSlug } from "./resources";
 import type {
-  Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
+  Issue, IssueActivity, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
   State, StateGroup, TableTargetKind, WikiPillar, WikiPillarMember, WikiProposalFreshness,
   WikiProposalSource, WikiStructurePage, Workflow,
 } from "./types";
@@ -204,6 +205,30 @@ function runNotFound(): InferOpsError {
 // Response parsing. Each parser copies the fields it names and nothing else.
 
 class Malformed extends Error {}
+
+/** The largest `issue.history` page InferOps serves, and how many pages one activity read takes. */
+const HISTORY_PAGE_SIZE = 500;
+const HISTORY_PAGES = 10;
+
+/** One `issue.history` page: its entries, and the cursor to the next page (null on the last). */
+function parseHistoryPage(raw: unknown): { entries: HistoryEntryRecord[]; nextCursor: string | null } {
+  const response = record(raw, "response");
+  if (!Array.isArray(response.entries)) throw new Error("entries is not an array");
+  const entries = response.entries.map((item): HistoryEntryRecord => {
+    const entry = record(item, "entry");
+    const actor = entry.actorType;
+    return {
+      kind: entry.kind === "comment" ? "comment" : "claim",
+      at: text(entry.at, "entry.at"),
+      actorType: actor === "user" || actor === "service_account" || actor === "system" ? actor : null,
+      field: typeof entry.field === "string" ? entry.field : null,
+      value: entry.value ?? null,
+      body: typeof entry.body === "string" ? entry.body : null,
+    };
+  });
+  const cursor = response.nextCursor;
+  return { entries, nextCursor: typeof cursor === "string" && /^\d+$/.test(cursor) ? cursor : null };
+}
 
 function record(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -1232,6 +1257,33 @@ export function openHttpInferOpsClient(
     return issue;
   }
 
+  /**
+   * The issue's `issue.history`, after `readIssue` has placed it in `projectKey`'s project (so an
+   * issue elsewhere is the same NOT_FOUND). InferOps pages it oldest first, so the newest entries
+   * come last: it reads up to HISTORY_PAGES pages and, if the history is longer still, fails
+   * UNAVAILABLE rather than show older entries as the latest.
+   */
+  async function readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity> {
+    await readIssue(projectKey, issueId);
+    const all: HistoryEntryRecord[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < HISTORY_PAGES; page++) {
+      const query = `limit=${HISTORY_PAGE_SIZE}${after ? `&afterSeq=${after}` : ""}`;
+      let body: unknown;
+      try {
+        body = await request("issue.history", { method: "GET", path: `/project/issues/${issueId}/history?${query}` });
+      } catch (error) {
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw issueNotFound();
+        throw error;
+      }
+      const { entries, nextCursor } = parsed("issue.history", body, parseHistoryPage);
+      all.push(...entries);
+      if (!nextCursor) return toIssueActivity(all);
+      after = nextCursor;
+    }
+    throw new InferOpsError("UNAVAILABLE", "This issue's history is too long to show here.");
+  }
+
   /** The run, provided its issue belongs to `projectKey`'s project; otherwise the one NOT_FOUND. */
   async function readRun(projectKey: string, runId: string): Promise<RunRecord> {
     if (!UUID.test(runId)) throw runNotFound();
@@ -1276,6 +1328,7 @@ export function openHttpInferOpsClient(
     },
 
     readIssue,
+    readIssueActivity,
 
     async transition(
       projectKey: string, issueId: string, toStateId: string, expectedRevision: Revision,

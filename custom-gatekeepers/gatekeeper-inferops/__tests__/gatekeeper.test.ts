@@ -79,6 +79,27 @@ describe("board reads", () => {
     expect(issue).toMatchObject({ identifier: "DEMO-1", stateId: STATE.ready, revision: "1" });
     expect((await hooks.log()).observations).toEqual(["Read InferOps issue DEMO-1"]);
   });
+
+  it("reads an issue's activity as one observation: an applied move, not a pending one", async () => {
+    const { props, hooks, session } = setup();
+    expect(await session.openIssue(DEMO_1).activity()).toEqual({ entries: [], omitted: 0 });
+
+    await session.openIssue(DEMO_1).transition(STATE.working, "1");
+    // Waiting for approval is not activity yet.
+    expect((await session.openIssue(DEMO_1).activity()).entries).toEqual([]);
+    const { actions } = await hooks.log();
+    expect(await hooks.apply(props, actions[0]!.id)).toBeNull();
+
+    const activity = await session.openIssue(DEMO_1).activity();
+    expect(activity.entries).toEqual([
+      { kind: "change", at: expect.any(String), actor: "person", field: "stateId", value: STATE.working, body: null },
+    ]);
+    expect((await hooks.log()).observations).toEqual([
+      "Read activity of InferOps issue DEMO-1",
+      "Read activity of InferOps issue DEMO-1",
+      "Read activity of InferOps issue DEMO-1",
+    ]);
+  });
 });
 
 describe("scope", () => {
@@ -90,6 +111,17 @@ describe("scope", () => {
 
     expect(otherProject).toContain("NOT_FOUND: No such issue in this project.");
     expect(unknown.replace(/^.*NOT_FOUND/, "")).toBe(otherProject.replace(/^.*NOT_FOUND/, ""));
+  });
+
+  it("refuses the activity of another project's issue exactly as an unknown one, observing nothing", async () => {
+    const { hooks, session } = setup();
+
+    const otherProject = await failure(session.openIssue(ENG_41).activity());
+    const unknown = await failure(session.openIssue(crypto.randomUUID()).activity());
+
+    expect(otherProject).toContain("NOT_FOUND: No such issue in this project.");
+    expect(unknown.replace(/^.*NOT_FOUND/, "")).toBe(otherProject.replace(/^.*NOT_FOUND/, ""));
+    expect((await hooks.log()).observations).toEqual([]);
   });
 
   it("reads another project only through a binding for that project", async () => {

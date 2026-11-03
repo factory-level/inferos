@@ -1,9 +1,9 @@
 import { useState, type KeyboardEvent } from 'react'
 import { Badge, Button, DropdownMenu } from '@cloudflare/kumo'
-import { ArrowRight, Code, DotsThree, PencilSimple } from '@phosphor-icons/react'
+import { ArrowRight, Code, DotsThree, Info, PencilSimple } from '@phosphor-icons/react'
 import type { Issue, IssueChanges, Run, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
-import type { PendingChange, PendingMove, ProposalResult } from './boardData'
+import type { ActivityResult, PendingChange, PendingMove, ProposalResult } from './boardData'
 import { CodingRunBadge } from './CodingRunStatus'
 import type { CodingControl } from './KanbanCodingForm'
 import { KanbanIssueDialog, type IssueDialogControl } from './KanbanIssueDialog'
@@ -33,6 +33,10 @@ export type KanbanCardProps = {
   onUpdate?: (changes: IssueChanges) => Promise<ProposalResult>
   /** Holds the edit dialog's open state outside the card (see `IssueDialogControl`). */
   editControl?: IssueDialogControl
+  /** Reads the issue's activity for its read-only details; absent for a card with no issue behind it yet. */
+  onActivity?: () => Promise<ActivityResult>
+  /** The board's states, to name a state an activity entry set. */
+  states: readonly State[]
   /**
    * Coding dispatch for the issue's project, with the issue's latest run. Absent when the board's
    * workspace holds no coding-dispatch connection for the project, or the surface offers none.
@@ -68,7 +72,7 @@ const pendingBadge = ({ issue, pending, edit, proposed }: Pick<KanbanCardProps, 
  * With coding dispatch offered, it shows the issue's latest coding run, and a software issue's
  * Coding button opens its coding task, which a pending move or edit does not withhold.
  */
-export const KanbanCard = ({ issue, position, onDialogOpenChange, state, targets, pending, proposed, decision, edit, editDecision, coding, today, instructionsId, onMove, onUpdate, editControl, onDragStart, onDragEnd }: KanbanCardProps) => {
+export const KanbanCard = ({ issue, position, onDialogOpenChange, state, targets, pending, proposed, decision, edit, editDecision, coding, today, instructionsId, onMove, onUpdate, editControl, onActivity, states, onDragStart, onDragEnd }: KanbanCardProps) => {
   const [choice, setChoice] = useState<State | null>(null)
   const movable = targets.length > 0 && !pending
   const chosen = choice && targets.find(target => target.id === choice.id) ? choice : null
@@ -109,15 +113,17 @@ export const KanbanCard = ({ issue, position, onDialogOpenChange, state, targets
     <div className="flex items-center gap-2">
       <span className="font-mono text-xs text-kumo-subtle">{issue.identifier}</span>
       {issue.priority !== 'none' && <Badge variant={PRIORITY_VARIANT[issue.priority]}>{PRIORITY_LABELS[issue.priority]}</Badge>}
+      {onActivity && <KanbanIssueDialog onOpenChange={onDialogOpenChange} kind="details" issue={issue} state={state} states={states} onActivity={onActivity}
+        trigger={<Button size="xs" shape="square" variant="ghost" className="ml-auto" aria-label={`Details of ${issue.identifier}`} icon={Info} />} />}
       {codable && <KanbanIssueDialog onOpenChange={onDialogOpenChange} kind="code" issue={issue} run={coding.run} coding={coding.control}
-        trigger={<Button size="xs" shape="square" variant="ghost" className="ml-auto" aria-label={`Coding task for ${issue.identifier}`} icon={Code} />} />}
+        trigger={<Button size="xs" shape="square" variant="ghost" className={onActivity ? '' : 'ml-auto'} aria-label={`Coding task for ${issue.identifier}`} icon={Code} />} />}
       {onUpdate && <KanbanIssueDialog onOpenChange={open => {
         // Controlled edits are retained by the board's openIssue value, including remote closes.
         if (!editControl || !open) onDialogOpenChange(open)
       }} kind="edit" issue={issue} onUpdate={onUpdate} control={editControl}
-        trigger={<Button size="xs" shape="square" variant="ghost" className={codable ? '' : 'ml-auto'} aria-label={`Edit ${issue.identifier}`} icon={PencilSimple} />} />}
+        trigger={<Button size="xs" shape="square" variant="ghost" className={onActivity || codable ? '' : 'ml-auto'} aria-label={`Edit ${issue.identifier}`} icon={PencilSimple} />} />}
       {movable && <DropdownMenu>
-        <DropdownMenu.Trigger render={<Button size="xs" shape="square" variant="ghost" className={onUpdate || codable ? '' : 'ml-auto'} aria-label={`Move ${issue.identifier} to…`} icon={DotsThree} />} />
+        <DropdownMenu.Trigger render={<Button size="xs" shape="square" variant="ghost" className={onActivity || onUpdate || codable ? '' : 'ml-auto'} aria-label={`Move ${issue.identifier} to…`} icon={DotsThree} />} />
         <DropdownMenu.Content align="end">
           {targets.map(target => <DropdownMenu.Item key={target.id} onClick={() => onMove(target)}>Move to {target.name}</DropdownMenu.Item>)}
         </DropdownMenu.Content>

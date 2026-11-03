@@ -55,7 +55,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   // A card reads nothing (the board, its coding runs) until it first comes near the screen, and
   // stays subscribed after (see the Kanban performance notes); the full view is always on screen.
   const nearScreen = useHasBeenOnScreen(ref, presentation === 'full', props.scrollRoot)
-  const { state, refresh, move, create, update } = useBoardData(overseer, widget, nearScreen)
+  const { state, refresh, move, create, update, activity: issueActivity } = useBoardData(overseer, widget, nearScreen)
   const dispatchRef = props.codingDispatch && nearScreen ? dispatchRefOf(widget.targetRef) : null
   const coding = useCodingDispatch(overseer, dispatchRef)
   const board = 'board' in state ? state.board : undefined
@@ -118,6 +118,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
           onMove={(issue, toState) => move(issue.id, toState.id, issue.revision)}
           onCreate={create}
           onUpdate={(issue, changes) => update(issue.id, changes, issue.revision)}
+          onActivity={issue => issueActivity(issue.id)}
           openIssue={openIssue}
           coding={coding.state.status === 'unavailable' ? undefined : {
             state: coding.state, activity: codingActivity,

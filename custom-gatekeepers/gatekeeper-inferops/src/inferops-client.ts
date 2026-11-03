@@ -4,7 +4,7 @@
 // place that chooses between them.
 
 import type {
-  Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
+  Board, Issue, IssueActivity, IssueActivityEntry, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
   WikiDocumentNode, WikiProposal, WikiProposalFreshness, WikiProposalSource, WikiProposalState,
   WikiStructure,
 } from "./types";
@@ -289,6 +289,13 @@ export interface InferOpsClient {
   readIssue(projectKey: string, issueId: string): Promise<Issue>;
 
   /**
+   * One issue's recorded activity (`issue.history`: field changes and comments), newest first, at
+   * most ISSUE_ACTIVITY_LIMIT entries. The issue must belong to the project, with readIssue's one
+   * NOT_FOUND otherwise. Read with the connection's own InferOps access.
+   */
+  readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity>;
+
+  /**
    * Move an issue to another state of its project, after checking scope, state membership,
    * workflow and the expected revision. The returned issue carries its new revision, which is
    * opaque: nothing may assume how far a move advances it. A repeated `idempotencyKey` for the same
@@ -456,4 +463,39 @@ export interface InferOpsClient {
 
   /** Delete everything held for this account (the mock's data; nothing for a remote service). */
   forget(): Promise<void>;
+}
+
+/** The most recent activity entries an issue's `activity()` returns. */
+export const ISSUE_ACTIVITY_LIMIT = 100;
+
+/** One `issue.history` entry as InferOps returns it (only the fields the gatekeeper reads). */
+export interface HistoryEntryRecord {
+  kind: "claim" | "comment";
+  at: string;
+  actorType: "user" | "service_account" | "system" | null;
+  field: string | null;
+  value: unknown;
+  body: string | null;
+}
+
+const ACTORS = { user: "person", service_account: "agent", system: "system" } as const;
+
+/**
+ * An issue's history, oldest first as InferOps pages it, as the activity `activity()` returns:
+ * newest first, the most recent ISSUE_ACTIVITY_LIMIT only. Who acted is reduced to person, agent or
+ * system; no principal id leaves the gatekeeper.
+ */
+export function toIssueActivity(oldestFirst: readonly HistoryEntryRecord[]): IssueActivity {
+  const kept = oldestFirst.slice(-ISSUE_ACTIVITY_LIMIT);
+  const entries = kept.toReversed().map((entry): IssueActivityEntry => ({
+    kind: entry.kind === "claim" ? "change" : "comment",
+    at: entry.at,
+    actor: entry.actorType ? ACTORS[entry.actorType] : null,
+    field: entry.kind === "claim" ? entry.field : null,
+    value: entry.kind === "claim"
+      ? (typeof entry.value === "string" ? entry.value : entry.value == null ? null : JSON.stringify(entry.value))
+      : null,
+    body: entry.kind === "comment" ? entry.body : null,
+  }));
+  return { entries, omitted: oldestFirst.length - kept.length };
 }

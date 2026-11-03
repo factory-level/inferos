@@ -202,6 +202,96 @@ describe("reads", () => {
   });
 });
 
+describe("activity", () => {
+  const AGENT = "40000000-0000-4000-8000-000000000001";
+  const PERSON = "40000000-0000-4000-8000-000000000002";
+  const entry = (n: number, over: Record<string, unknown> = {}) => ({
+    kind: "claim", id: String(n), at: `2026-11-03T08:${String(n % 60).padStart(2, "0")}:00.000Z`,
+    actorId: PERSON, actorType: "user", field: "title", value: `title ${n}`, body: null,
+    correlationId: null, ...over,
+  });
+  const historyOf = (pages: Record<string, { entries: unknown[]; nextCursor: string | null }>) =>
+    (call: Call) => {
+      const match = /^\/project\/issues\/([^/]+)\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const after = new URLSearchParams(match[2]).get("afterSeq") ?? "start";
+      return Response.json(pages[after] ?? { entries: [], nextCursor: null });
+    };
+
+  it("reads the issue's history newest first, as person, agent or system, with no principal id", async () => {
+    const { client, calls } = fakeInferOps(historyOf({
+      start: {
+        entries: [
+          entry(1),
+          entry(2, { actorId: AGENT, actorType: "service_account", field: "stateId", value: WORKING }),
+          { kind: "comment", id: "3", at: "2026-11-03T08:03:00.000Z", actorId: AGENT, actorType: "service_account",
+            field: null, value: null, body: "Started on this.", correlationId: null },
+          entry(4, { actorId: null, actorType: "system", field: "priority", value: { level: 2 } }),
+        ],
+        nextCursor: null,
+      },
+    }));
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity).toEqual({
+      omitted: 0,
+      entries: [
+        { kind: "change", at: "2026-11-03T08:04:00.000Z", actor: "system", field: "priority", value: '{"level":2}', body: null },
+        { kind: "comment", at: "2026-11-03T08:03:00.000Z", actor: "agent", field: null, value: null, body: "Started on this." },
+        { kind: "change", at: "2026-11-03T08:02:00.000Z", actor: "agent", field: "stateId", value: WORKING, body: null },
+        { kind: "change", at: "2026-11-03T08:01:00.000Z", actor: "person", field: "title", value: "title 1", body: null },
+      ],
+    });
+    expect(JSON.stringify(activity)).not.toContain(AGENT);
+    expect(JSON.stringify(activity)).not.toContain(PERSON);
+    expect(calls.map(c => c.path)).toContain(`/project/issues/${DEMO_1}/history?limit=500`);
+  });
+
+  it("pages the history to its end and keeps the most recent 100", async () => {
+    const page = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => entry(from + i));
+    const { client } = fakeInferOps(historyOf({
+      start: { entries: page(1, 500), nextCursor: "500" },
+      500: { entries: page(501, 620), nextCursor: null },
+    }));
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity.entries).toHaveLength(100);
+    expect(activity.omitted).toBe(520);
+    expect(activity.entries[0]?.value).toBe("title 620");
+    expect(activity.entries.at(-1)?.value).toBe("title 521");
+  });
+
+  it("refuses another project's issue as NOT_FOUND without asking for its history", async () => {
+    const { client, calls } = fakeInferOps(historyOf({}));
+
+    const refused = await failure(client.readIssueActivity("DEMO", ENG_41));
+
+    expect(refused).toEqual({ code: "NOT_FOUND", message: "InferOpsError: NOT_FOUND: No such issue in this project." });
+    expect(calls.some(c => c.path.includes("/history"))).toBe(false);
+  });
+
+  it("passes InferOps' refusal of the history on as FORBIDDEN, without the server's detail", async () => {
+    const { client } = fakeInferOps(call => call.path.includes("/history")
+      ? Response.json({ success: false, error: { code: "FORBIDDEN", message: "server detail for FORBIDDEN" } }, { status: 403 })
+      : undefined);
+
+    const refused = await failure(client.readIssueActivity("DEMO", DEMO_1));
+
+    expect(refused.code).toBe("FORBIDDEN");
+    expect(refused.message).not.toContain("server detail");
+  });
+
+  it("fails UNAVAILABLE rather than show older entries as the latest when the history is too long", async () => {
+    const { client } = fakeInferOps(call => call.path.includes("/history")
+      ? Response.json({ entries: [entry(1)], nextCursor: "1" })
+      : undefined);
+
+    expect((await failure(client.readIssueActivity("DEMO", DEMO_1))).code).toBe("UNAVAILABLE");
+  });
+});
+
 describe("project scope", () => {
   it("refuses an issue of another project exactly as an unknown one", async () => {
     const { client } = fakeInferOps();

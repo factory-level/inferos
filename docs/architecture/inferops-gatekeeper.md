@@ -33,7 +33,7 @@ updated: 2026-11-03
 `inferops`) implements the reviewed agent-facing API from the
 [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
 `inferops-gatekeeper-api.d.ts` verbatim, plus `findBoards` (below): `InferOpsProjectSession` (`readBoard`, `openIssue`,
-`createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`), with `Issue.pending`
+`createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`, `activity`), with `Issue.pending`
 marking simulated changes. The gatekeeper code is written against a data-source
 contract (`src/inferops-client.ts`) with two implementations: `src/mock-inferops.ts` (**demo data**,
 the default, and what the tests and the demo use) and `src/http-inferops.ts` (the InferOps HTTP
@@ -211,6 +211,18 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `authorizeObservation` before returning. `openIssue(id)` is not an observation (UUID existence) and
   fails with the same `NOT_FOUND: No such issue in this project.` for an unknown issue and for an
   issue of another project.
+- **Activity** (FAC-157). `InferOpsIssueSession.activity()` reads InferOps' `issue.history` (field
+  changes and comments) with the connection's own InferOps access.
+  - **Placement:** it reads the issue first, so an unknown issue or one of another project is the
+    same `NOT_FOUND`, and nothing is observed.
+  - **Shape:** it returns the most recent 100 entries, newest first (`toIssueActivity` in
+    `inferops-client.ts`), with how many earlier ones were left out. Who acted is reduced to person,
+    agent (a service account) or system, and no principal id leaves the gatekeeper.
+  - **Paging:** InferOps pages history oldest first, so the HTTP client reads up to ten pages of
+    500. A longer history fails `UNAVAILABLE` rather than show older entries as the latest.
+  - **Refusal and logging:** InferOps' refusal of the history is passed on as `FORBIDDEN`. One
+    observation names the issue and the count. Pending changes aren't activity until applied.
+  - **The mock** records each applied write's fields as a person's change.
 - **Writes.** Every write is staged in the facet's KV as an `ActionRecord` (actions.ts) with the
   request it will send and its fingerprint, then submitted with `submitAction`; if submission
   throws, the record is deleted. None is auto-approvable.
