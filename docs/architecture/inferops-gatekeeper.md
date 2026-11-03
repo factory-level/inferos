@@ -86,6 +86,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | --- | --- |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
 | `custom-gatekeepers/gatekeeper-inferops/src/auth-proxy.ts` | The sign-in proxy: on `INFERLAB_AUTHORIZE_ORIGIN`, forwards central-auth's `/authorize`, `/authorize/persona`, `/logout` and the Google edge's `/auth/oauth/sign-in/social` and `/auth/oauth/callback/google` to `INFERLAB_AUTH_ORIGIN` with the edge header and `x-inferos-authorize-origin`. See [sign-in proxy](#sign-in-proxy). |
+| `custom-gatekeepers/gatekeeper-inferops/src/deployment-company.ts` | `INFEROPS_COMPANY`: the one company the deployment belongs to (a tenant id, `internal`, unset or malformed), `companyAdmits`, and the refusal messages, which name no company. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` and `INFERLAB_AUTHORIZE_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect (to the authorize origin when set), `/oauth` callback, the sign-in proxy's dispatch, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and the InferOps and InferMind workspaces InferLab reported with each one's slug (an InferMind one marked `product: "infermind"`), slug resolution per product (`resolveWorkspace(slug, product)`, InferOps by default), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure`, `updateDocument` and the proposal calls `listProposals`, `readProposal` and `approveProposal`, whose refusals read as `PROPOSAL_APPROVE_REFUSED` in both implementations) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`), with the facts a failure proves: its `WriteStage` (`unsent`, or `refused` by InferOps in answer to the write: a 401, or a 400, 403, 404 or 409 carrying InferOps' error envelope) and whether a `FORBIDDEN` is a workflow-policy refusal. They hold only in the isolate that raised the error; `atStage` restores a stage across the mock's RPC boundary. |
@@ -137,8 +138,19 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `tenantId`, the `product: "inferops"` entries of `user.workspaces`, `emailVerified`). A connect
   or reconnect then reads `GET <api>/workspaces` with the new token (no `X-Workspace-Id`) and
   stores each membership's `slug` beside it; a listed workspace that is not a membership is
-  ignored, and a failed or malformed list fails the attempt and signs the new session out. Then,
-  by purpose:
+  ignored, and a failed or malformed list fails the attempt and signs the new session out.
+  - **Company (FAC-160, inferops ADR 0009 T6).** A deployment belongs to one company:
+    `INFEROPS_COMPANY` is a tenant id or `internal` (InferLab's own, reserved tenants only), and
+    `deployment-company.ts` reads it. InferOps is the authority: its token exchange refuses a
+    session in any other company, or for an origin it has no company for, with
+    `company_not_this_deployment` (403), which the flow shows as "This InferOS belongs to another
+    company…", naming neither. With a tenant id set, the gatekeeper checks again: a session from
+    another company is signed out and refused before any purpose uses it, and
+    `InferOpsCredentials.getCredentials` refuses a stored connection from another company.
+    `internal` and unset (local) leave the decision to InferOps, which holds the reserved list.
+    Set but malformed, the code isn't exchanged and sign-in is off. It only refuses.
+
+  Then, by purpose:
   - **Sign-in** requires `emailVerified: true` (InferLab also issues sessions for emails nobody
     proved, such as invitations and impersonation), signs the session out again with
     `POST /auth/logout`, and hands `callback.complete` an account carrying only the normalized

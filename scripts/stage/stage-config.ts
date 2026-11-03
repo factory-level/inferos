@@ -115,6 +115,7 @@ export function inferOpsGatekeeperVars(stage: StageDefinition): Record<string, s
     INFERLAB_AUTH_ORIGIN: stage.inferops.authOrigin,
     ...(stage.inferops.authorizeOrigin ? { INFERLAB_AUTHORIZE_ORIGIN: stage.inferops.authorizeOrigin } : {}),
     INFEROPS_ENABLED: "true",
+    INFEROPS_COMPANY: stage.inferops.company,
     // Every optional switch is stated rather than left to the gatekeeper's "unset" default, so a
     // stage's behaviour never depends on a default changing. Coding dispatch stays off: it needs a
     // separate `project/dispatch` grant and a local runner a stage does not have.
