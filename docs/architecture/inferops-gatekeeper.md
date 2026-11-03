@@ -22,7 +22,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 
 # InferOps gatekeeper
@@ -67,6 +67,14 @@ resolves only among the person's InferMind workspaces. A page is referenced as
 `…/knowledge/document/<slug>`, which `parseWikiDocumentUrl` parses for the canvas; a reference is
 never bound.
 
+An account kind, `inferops://<tenant>/account` (`inferops://demo.local/account` for the demo data),
+binds an `InferOpsAccountGatekeeper` whose `InferOpsAccountSession` (`listWorkspaces`, `findBoards`,
+`openBoard`, `openWiki`) serves every board and Wiki the person's own account can open in that
+organization through one connection, each checked when it is opened
+(ADR 0015, `docs/adr/0015-inferops-account-connection.md`, proposed in [inferos#308](https://github.com/factory-level/inferos/pull/308); see
+[InferOps account](#inferops-account)). Dispatch, workflow policy, custom tables and members keep
+their own bindings.
+
 The package is the reference [connection package](connection-extensions.md): `connection.json`
 states its contract (resource kinds, reads and writes, approval, provider errors, simulation limits,
 configuration names, the pinned InferOps revision), and `__tests__/conformance.test.ts` runs
@@ -99,6 +107,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | `custom-gatekeepers/gatekeeper-inferops/src/simulation.ts` | Board ordering and read-time overlay of pending actions: an issue's live pending transition or update (`pending` `transition` or `update`), and pending creates as provisional cards (`pending: "create"`). |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/wiki-ui.tsx` | The Wiki picker: organization and workspace only, building `…/knowledge/wiki`; the account lists only the person's InferMind workspaces for it (and only InferOps ones for the project pickers). |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/dispatch-ui.tsx` | The same picker for a dispatch binding, building `…/project/dispatch/<KEY>`; offered only while coding dispatch is on. |
+| `custom-gatekeepers/gatekeeper-inferops/src/configurator/account-ui.tsx` | The account picker: the organization only, pre-filled from an agent's request, building `inferops://<organization>/account` (or the demo account when left empty and the account offers demo data); no workspace or project picker. |
 | `custom-gatekeepers/gatekeeper-inferops/src/configurator/project-ui.tsx` | Organization, workspace and project picker built by the shared `build:configurator` task. It builds `inferops://<organization>.<workspace>/project/board/<KEY>` from an organization label, a workspace slug from the account's list and a project; with both left empty it asks the gatekeeper for a default host, which only a demo account has (`demo.local`). It duplicates the URL grammar for prefilling, kept in step by `__tests__/resources.test.ts`. |
 | `scripts/run-dev-server.ts` | Passes `INFEROPS_BASE_URL`, `INFEROPS_API_TOKEN`, `INFEROPS_WORKSPACE_ID` and `INFEROPS_WORKSPACE_SLUG` from the shell or root `.dev.vars` into the gatekeeper's generated dev config, resolves `INFERLAB_AUTH_ORIGIN` and `AUTH_GATEKEEPERS` for a wrapper's sign-in flag, and refuses to start when InferOps sign-in is asked for without the gatekeeper or an InferLab origin. |
 | `packages/bundled-blueprints/blueprints/inferops-kanban` | Kanban gadget expecting a `board` binding of type `InferOpsProjectSession`. |
@@ -583,6 +592,60 @@ Workshop backend checks the same allowlist on its first API request
 report `providesAuth` fails every request with a clear message rather than a login page quietly
 missing a button.
 
+### InferOps account
+
+`inferops://<tenant>/account` (ADR 0015, `docs/adr/0015-inferops-account-connection.md`, proposed in [inferos#308](https://github.com/factory-level/inferos/pull/308);
+design "InferOps account" in the linked specification) is one binding per person and organization.
+`InferOpsAccount.getGatekeeperClassFor` parses it (`parseAccountUrl`: one tenant slug, or exactly
+`demo.local`) and mints an `InferOpsAccountGatekeeper` whose props are the account and the tenant
+label only. A tenant other than the demo needs a connected person and a configured API; the stopgap
+connection is refused. The resource is offered while InferOps is on and is `excludeFromOperateChat`,
+so Operate and host boards keep exact board bindings.
+
+- **Opening.** `openBoard(ref)` and `openWiki(ref)` are the only methods in the package that take a
+  reference. Each parses it with its own kind's parser (`parseProjectBoardUrl`, `parseWikiUrl`), so a
+  dispatch, workflow, table, members, page or account reference is refused; requires its host to
+  belong to the binding's tenant (`hostInTenant`: the demo host only to the demo account); resolves
+  the workspace slug among the person's own workspaces of the right product
+  (`InferOpsCredentials.resolveWorkspace`, `inferops` for a board, `infermind` for a Wiki), and
+  confirms the project (`hasProject`) or the Wiki (`listDocuments`) with the person's own token.
+  Every refusal, including InferOps' NOT_FOUND or FORBIDDEN, is NOT_FOUND with one message per kind
+  ("No such InferOps board is available to this connection.", and the same for a Wiki). Opening is
+  not an observation. The result is the board facet's `ProjectSessionImpl` or the Wiki facet's
+  `WikiSessionImpl` over a binding built from the resolved target, holding its own duplicate of the
+  approval queue, so it outlives the account session.
+- **Actions.** Each resolved target has its own `ScopedActionStore` (`scope:<key>/action:<id>`, key
+  `board:<host>:<workspaceId>:<KEY>` or `wiki:<host>:<workspaceId>`), and `actionScope:<id>` indexes
+  each action id to its store, so one board's pending moves never show on another and the
+  overseer's `applyAction`, `rejectAction` and `revertAction`, which name the id only, reach the
+  right board or Wiki. The id counter and `instanceId` stay facet-wide, so action ids and
+  `<instance>:<action>` idempotency keys are unique across the binding. Each record carries its
+  resolved `scope` (`kind`, `host`, `workspaceId`, `projectKey`), and its fingerprint is computed
+  over that scope instead of the facet's fixed project key or `knowledge/wiki` (`fingerprintOf`;
+  the board and Wiki facets' fingerprints are unchanged). Apply runs the board or Wiki facet's own
+  apply (`applyBoardAction`, `applyWikiAction`) after the fingerprint and then resolves the workspace
+  again: a person who no longer holds it, or a slug that now names another workspace, refuses the
+  action unsent and for good. Reverting an applied action makes the same check first and writes
+  nothing when it fails. Every approval names its target first ("Target: Board GROK on
+  grokbot.operations", or "Wiki of …").
+- **Collaborators (strategy C).** gatekeeper-kit's `ObserverTracker` keeps the binding's
+  collaborators (with their verifiers) and one data set per board and per Wiki read, keyed as the
+  stores are. A collaborator is admitted against every set read so far (`hasProjectAccess`,
+  `hasWikiAccess` on their own verifier); the first read of a new set checks every stored
+  collaborator again and excludes those who fail. `listWorkspaces`, `findBoards` (on the account and
+  on a board it opened) and `readDocumentText` on a Wiki it opened reveal more than any set, so they
+  go through the tracker's withhold fence (`prepareWithheld`): every current collaborator is
+  excluded, and once such a read is recorded the binding is owner-only for good, refusing every
+  later collaborator whatever they can open. Until then admission follows the per-set rule above.
+  A Wiki proposal approval is refused while the binding has any collaborator, as on the facets.
+- **Administration.** Disabling the board or Wiki kind in the admin settings does not reach an
+  account binding already made, since that policy is checked when a binding is minted; disabling
+  the account kind is the switch for it.
+
+The board, dispatch and Wiki facets build the same bindings from their props: `ProjectBinding` and
+`WikiBinding` take their target and their parts (store, client, observers, an optional observation
+hook) as arguments, and apply, reject and revert are functions over a binding.
+
 ### Sign-in proxy
 
 A browser that InferLab's IP-allowlisting edge refuses cannot open central-auth's `/authorize` page either, since that is a browser leg and carries no edge header. With `INFERLAB_AUTHORIZE_ORIGIN` set (a hostname routed to this gatekeeper, behind the deployment's Access application), `src/auth-proxy.ts` serves it:
@@ -595,6 +658,13 @@ A browser that InferLab's IP-allowlisting edge refuses cannot open central-auth'
 - **Google through the proxy.** Every forwarded request carries `x-inferos-authorize-origin: <authorize origin>`, set by the proxy, never taken from the browser. InferLab answers its Google edge on that origin when the origin is listed in its `auth.sso.proxyOrigins` (factory-level/inferops#2528; dev lists `https://auth.dev-os.factorylevel.dev`), so Google's redirect URI is `<authorize origin>/auth/oauth/callback/google`, which must also be registered on InferLab's Google client. The callback returns to the relative `/authorize?…` on this host, and the sign-in finishes as a persona one does. Against an InferLab without that change, or an origin it does not list, Google returns to InferLab's own hostname, which the edge refuses for most browsers. InferLab creates no account on a first Google sign-in, so the Google account must already be an InferLab user.
 - `__tests__/auth-proxy.test.ts` covers the origin and path allowlist (including the two Google legs and the other edge paths staying a 404), the edge and authorize-origin headers (a browser-sent authorize-origin header is replaced), header filtering, the cookie, Origin, Referer, Location and Set-Cookie rewrites, a relative `/logout` redirect staying on the authorize host, and a foreign `Origin` passing unchanged; `inferlab-login.test.ts` covers the popup going to the authorize origin's `/authorize` with `prompt=select_account` while the code is exchanged at the InferLab origin, and a malformed authorize origin turning sign-in off.
 ## Divergences from Design
+
+- The account session's `findBoards` returns the package's existing `BoardCandidate` (`tenant`,
+  `workspace`, `projectKey`, `boardRef`, `title`, `reasons`), which the board session's `findBoards`
+  already returns, not the design's `{ ref, key, name, workspace }`: the agent types are one
+  self-contained file and cannot hold two types of that name.
+- For the demo account, `listWorkspaces` returns the demo's one workspace twice, once per product,
+  since the demo serves both a board and a Wiki on `demo.local`.
 
 - `findBoards` is not in the design's API. It runs on a board session, so a person needs one board
   connection before they can discover the others; from it, a connected person's search covers every

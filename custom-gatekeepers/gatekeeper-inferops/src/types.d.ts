@@ -146,7 +146,10 @@ export interface InferOpsProjectSession {
    * they cannot read is never named or counted. Returns at most 8 candidates, best first, each with why it matched; an empty
    * list means nothing matched. Several candidates mean the person must choose: never pick one for
    * them. A candidate names a board but grants nothing; open it only through a connection made for
-   * its boardRef. Recorded as an observation, and refused in a workspace shared with others.
+   * its boardRef, or with openBoard(boardRef) of an account connection of its organization.
+   * Recorded as an observation, and refused in a workspace shared with others. On a board opened
+   * through an account connection, calling it makes that whole connection no longer shareable
+   * with anyone from then on.
    */
   findBoards(query: string): Promise<BoardCandidate[]>;
 }
@@ -554,7 +557,9 @@ export interface InferOpsWikiSession {
    * of the operations it measures, as your access allows, or a line saying coverage is unavailable
    * or could not be loaded. Embedded widgets read as their live text. A page with an edit of yours
    * not yet in effect reads with that edit, and then without coverage and with embeds as the links
-   * they are written as. Fails with NOT_FOUND for a page with nothing you can read.
+   * they are written as. Fails with NOT_FOUND for a page with nothing you can read. On a Wiki
+   * opened through an account connection, calling it makes that whole connection no longer
+   * shareable with anyone from then on.
    */
   readDocumentText(slugOrId: string): Promise<string>;
   /**
@@ -595,6 +600,48 @@ export interface InferOpsWikiSession {
    * InferOps refuses an approval by the person who requested the draft or wrote its revision.
    */
   approveProposal(proposalId: string, proposalHash: string): Promise<void>;
+}
+
+/** One of your own InferOps or InferMind workspaces, as an account connection lists it. */
+export interface AccountWorkspace {
+  /** The workspace slug used in references, e.g. "operations" in inferops://acme.operations/…. */
+  slug: string;
+  name: string;
+  /** "inferops" workspaces hold project boards; "infermind" workspaces hold a Wiki. */
+  product: "inferops" | "infermind";
+}
+
+/**
+ * Every InferOps board and InferMind Wiki your own account can open in one organization, through
+ * one connection. Each open checks the reference against your own workspaces and fails with
+ * NOT_FOUND, exactly as for a missing project or Wiki, when it names another organization, a
+ * workspace you do not hold, something that does not exist, or a kind other than a board or a Wiki.
+ * Coding dispatch is not included: it needs its own connection.
+ */
+export interface InferOpsAccountSession {
+  /**
+   * Your workspaces in this organization. Refused in a workspace shared with others, and once
+   * called, this connection is no longer shared with anyone.
+   */
+  listWorkspaces(): Promise<AccountWorkspace[]>;
+  /**
+   * Boards that match what the person described, across your InferOps workspaces in this
+   * organization, as InferOpsProjectSession.findBoards matches them (1-200 characters, at most 8,
+   * best first). Several candidates mean the person must choose. Open one with openBoard(boardRef).
+   * Refused in a workspace shared with others, and once called, this connection is no longer
+   * shared with anyone.
+   */
+  findBoards(query: string): Promise<BoardCandidate[]>;
+  /**
+   * One project board, e.g. openBoard("inferops://acme.operations/project/board/ENG"), as a board
+   * connection would give it.
+   */
+  openBoard(boardRef: string): Promise<InferOpsProjectSession>;
+  /**
+   * One InferMind workspace's Wiki, e.g. openWiki("inferops://acme.mind/knowledge/wiki"), as a Wiki
+   * connection would give it.
+   */
+  openWiki(wikiRef: string): Promise<InferOpsWikiSession>;
 }
 
 /** What a relation of a custom table links to: an issue, a project, or a row of a custom table. */

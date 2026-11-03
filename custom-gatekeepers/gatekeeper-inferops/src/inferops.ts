@@ -100,6 +100,7 @@ import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/op
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
+import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
   AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
@@ -135,7 +136,7 @@ import {
   assertCodingWorkbenchEnabled, assertRepoAllowlisted, codingRepoAllowlist, codingWorkbenchEnabled,
   whileCodingWorkbenchEnabled,
 } from "./coding-workbench";
-import { InferOpsCredentials, type InferOpsWorkspace } from "./inferops-credentials";
+import { InferOpsCredentials, type InferOpsWorkspace, type WorkspaceProduct } from "./inferops-credentials";
 import {
   assertTablesEnabled, describeTable, projectRows, tableReadOptions, tablesEnabled, whileTablesEnabled,
 } from "./table";
@@ -150,17 +151,18 @@ import {
   InferLabLogin, handleInferLabLogin, inferLabAuthOrigin, inferOpsApiEndpoint, startInferLabLogin,
 } from "./inferlab-login";
 import {
-  DEMO_HOST, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE, PORTAL_MEMBERS_RESOURCE,
-  PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, PROJECT_WORKFLOW_RESOURCE, membersUrl, parseHost,
-  parseMembersUrl, parseProjectBoardUrl, parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl,
-  parseWikiUrl, projectBoardUrl, projectDispatchUrl, projectWorkflowUrl, resourceKind, tableUrl, wikiUrl,
+  DEMO_HOST, INFEROPS_ACCOUNT_RESOURCE, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE,
+  PORTAL_MEMBERS_RESOURCE, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, PROJECT_WORKFLOW_RESOURCE,
+  accountUrl, hostInTenant, membersUrl, parseAccountUrl, parseHost, parseMembersUrl, parseProjectBoardUrl,
+  parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl, parseWikiUrl, projectBoardUrl,
+  projectDispatchUrl, projectWorkflowUrl, resourceKind, tableUrl, wikiUrl, type ProjectBoardRef, type WikiRef,
 } from "./resources";
 import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
 } from "./simulation";
 import {
   fingerprintOf, isCodingAction, isIssueChange, isWikiAction, isWikiEdit, matchesFingerprint, readAction,
-  sortedSources, type ActionRecord, type CancelRunAction, type CreateAction, type DispatchAction,
+  sortedSources, type ActionRecord, type ActionScope, type CancelRunAction, type FingerprintScope, type CreateAction, type DispatchAction,
   type DocumentUpdateAction, type ProposalApproveAction, type SectionUpdateAction, type StagedAction,
   type StoredFailure, type UpdateAction, type WikiEditAction,
 } from "./actions";
@@ -173,7 +175,7 @@ import {
 } from "./board-discovery";
 import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-configurator-types";
 import type {
-  Board, BoardCandidate, DispatchTarget, InferOpsDispatchSession, InferOpsIssueSession,
+  AccountWorkspace, Board, BoardCandidate, DispatchTarget, InferOpsAccountSession, InferOpsDispatchSession, InferOpsIssueSession,
   InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession,
   InferOpsWorkflowPolicySession, Issue, IssueChanges, ListRecordsOptions, NewIssue, Repo,
   WorkflowPolicyHead, WorkspaceMembers,
@@ -188,6 +190,7 @@ import WIKI_CONFIGURATOR_HTML from "./generated/wiki-ui.txt";
 import TABLE_CONFIGURATOR_HTML from "./generated/table-ui.txt";
 import MEMBERS_CONFIGURATOR_HTML from "./generated/members-ui.txt";
 import WORKFLOW_CONFIGURATOR_HTML from "./generated/workflow-ui.txt";
+import ACCOUNT_CONFIGURATOR_HTML from "./generated/account-ui.txt";
 
 export { InferLabLogin, InferOpsCredentials, MockInferOps };
 
@@ -266,6 +269,12 @@ type MembersGatekeeperProps = AccountRef & { host: string; workspaceId?: string 
  * key and, for a connected account, the InferOps workspace the host's slug resolved to.
  */
 type WorkflowPolicyGatekeeperProps = AccountRef & { host: string; projectKey: string; workspaceId?: string };
+
+/**
+ * One account binding, fixed when the Workshop mints it: the account and the organization's tenant
+ * label (or `demo.local`). No workspace, project or Wiki: each is resolved when it is opened.
+ */
+type AccountGatekeeperProps = AccountRef & { tenant: string };
 
 type ExportsWithStores = {
   MockInferOps: DurableObjectNamespace<MockInferOps>;
@@ -580,7 +589,10 @@ async function hostBoardFence(env: Cloudflare.Env, exports: ExportsWithStores,
   }
 }
 
-/** The resource kinds offered now: coding dispatch and custom tables only while each is on. */
+/**
+ * The resource kinds offered now: coding dispatch, custom tables, members and workflow policies only
+ * while each is on.
+ */
 function supportedResources(env: Cloudflare.Env): SupportedResource[] {
   return [
     PROJECT_BOARD_RESOURCE,
@@ -589,6 +601,7 @@ function supportedResources(env: Cloudflare.Env): SupportedResource[] {
     ...(tablesEnabled(env) ? [OBJECT_TABLE_RESOURCE] : []),
     ...(membersEnabled(env) ? [PORTAL_MEMBERS_RESOURCE] : []),
     ...(workflowPolicyEnabled(env) ? [PROJECT_WORKFLOW_RESOURCE] : []),
+    INFEROPS_ACCOUNT_RESOURCE,
   ];
 }
 
@@ -786,6 +799,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   }> {
     assertInferOpsEnabled(this.env);
     const kind = resourceKind(url);
+    if (kind === "account") return this.#accountClassFor(url);
     if (kind === "wiki") return this.#wikiClassFor(url);
     if (kind === "table") return this.#tableClassFor(url);
     if (kind === "members") return this.#membersClassFor(url);
@@ -806,6 +820,28 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     return dispatch
       ? { class: this.ctx.exports.InferOpsDispatchGatekeeper({ props }), resource: PROJECT_DISPATCH_RESOURCE, mock }
       : { class: this.ctx.exports.InferOpsProjectGatekeeper({ props }), resource: PROJECT_BOARD_RESOURCE, mock };
+  }
+
+  /**
+   * Bind one account (inferos ADR 0015): the demo data, or the boards and Wikis of a connected
+   * person's own workspaces in the URL's organization. Nothing is resolved now: each reference is
+   * checked when it is opened. The stopgap connection is refused, since no person stands behind it.
+   */
+  async #accountClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+    mock: boolean;
+  }> {
+    const { tenant } = parseAccountUrl(url);
+    const { accountId, connected } = this.ctx.props;
+    if (tenant !== DEMO_HOST && !(connected && inferOpsApiEndpoint(this.env))) {
+      throw new Error(`No InferOps account is available to you in ${tenant}.`);
+    }
+    const props: AccountGatekeeperProps = { accountId, connected, tenant };
+    return {
+      class: this.ctx.exports.InferOpsAccountGatekeeper({ props }), resource: INFEROPS_ACCOUNT_RESOURCE,
+      mock: tenant === DEMO_HOST,
+    };
   }
 
   /**
@@ -940,7 +976,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
             ? MEMBERS_CONFIGURATOR_HTML
             : resourceUrlPattern === PROJECT_WORKFLOW_RESOURCE.urlPattern && workflowPolicyEnabled(this.env)
               ? WORKFLOW_CONFIGURATOR_HTML
-              : wiki ? WIKI_CONFIGURATOR_HTML : null;
+              : resourceUrlPattern === INFEROPS_ACCOUNT_RESOURCE.urlPattern
+                ? ACCOUNT_CONFIGURATOR_HTML
+                : wiki ? WIKI_CONFIGURATOR_HTML : null;
     if (!iframeHtml) {
       throw new Error(`Unsupported InferOps resource configurator type: ${resourceUrlPattern}`);
     }
@@ -949,8 +987,10 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     return {
       iframeHtml,
       ui: new RpcStub(new InferOpsProjectConfiguratorUI({
-        // Demo data needs no organization or workspace; every other account must name both.
-        defaultHost: store || stopgap ? null : DEMO_HOST,
+        // Demo data needs no organization or workspace; every other account must name both. An
+        // account binding never uses the stopgap, so without a sign-in it is the demo's.
+        defaultHost: store || (stopgap && resourceUrlPattern !== INFEROPS_ACCOUNT_RESOURCE.urlPattern)
+          ? null : DEMO_HOST,
         // The Wiki picker offers InferMind workspaces, the project pickers InferOps ones.
         workspaces: async () => store
           ? ((await store.identity())?.workspaces ?? [])
@@ -1177,6 +1217,11 @@ function admittedObservers(kv: SyncKvStorage): string[] {
 
 /** What a binding is made of, besides its target. */
 type BindingParts = {
+  /**
+   * For a board or Wiki opened through an account binding: the resolved target its actions record
+   * and are fingerprinted within, and how approvals name it (the binding itself no longer does).
+   */
+  account?: { scope: ActionScope; label: string };
   /** Where its action records live. */
   store: ActionStore;
   /** Its data source, as the person (or the demo) in its workspace. */
@@ -1188,23 +1233,45 @@ type BindingParts = {
   observers: () => string[];
   /** Authorizes one observation; the approval queue's own, unchanged, unless given. */
   observe?: (queue: RpcStub<ApprovalQueue>, description: ObservationDescription) => Promise<void>;
+  /**
+   * Authorizes an observation no collaborator's admission covers (a board search, a page's
+   * composed text). Unless given: excluding every current collaborator, through `observe`.
+   */
+  withhold?: (queue: RpcStub<ApprovalQueue>, description: ObservationDescription) => Promise<void>;
 };
 
 /**
  * A binding's action store and data source: the parts every kind of binding shares. `scope` keys
- * the fingerprints: the bound project's key, or `knowledge/wiki`.
+ * the fingerprints: the bound project's key, or `knowledge/wiki`, or for a board or Wiki opened
+ * through an account binding its resolved target, which every record then carries.
  */
 class ActionBinding {
   readonly store: ActionStore;
   readonly client: InferOpsClient;
   readonly observers: () => string[];
+  readonly scope: FingerprintScope;
+  /** How an approval names the target, for an account binding's board or Wiki; else undefined. */
+  readonly targetLabel: string | undefined;
   readonly #observe: BindingParts["observe"];
+  readonly #withhold: BindingParts["withhold"];
 
-  constructor(parts: BindingParts, readonly scope: string) {
+  constructor(parts: BindingParts, facetScope: string) {
     this.store = parts.store;
     this.client = parts.client;
     this.observers = parts.observers;
+    this.scope = parts.account?.scope ?? facetScope;
+    this.targetLabel = parts.account?.label;
     this.#observe = parts.observe;
+    this.#withhold = parts.withhold;
+  }
+
+  /**
+   * An approval description introduced by `intro`, naming the target first when the binding does
+   * not name it itself (a board or Wiki opened through an account binding).
+   */
+  description(intro: string): ReturnType<typeof buildDescription> {
+    const builder = buildDescription(intro);
+    return this.targetLabel === undefined ? builder : builder.inline("Target", this.targetLabel);
   }
 
   get kv(): SyncKvStorage {
@@ -1214,6 +1281,16 @@ class ActionBinding {
   /** Authorize an observation of this binding's data before it is returned. */
   observe(queue: RpcStub<ApprovalQueue>, description: ObservationDescription): Promise<void> {
     return this.#observe ? this.#observe(queue, description) : queue.authorizeObservation(description);
+  }
+
+  /**
+   * Authorize an observation that reveals more than any collaborator was admitted for: by default
+   * excluding every current one, or as the binding's `withhold` part decides.
+   */
+  observeWithheld(queue: RpcStub<ApprovalQueue>, description: ObservationDescription): Promise<void> {
+    if (this.#withhold) return this.#withhold(queue, description);
+    const observers = this.observers();
+    return this.observe(queue, observers.length > 0 ? { ...description, excludeObservers: observers } : description);
   }
 
   /** A random id for this facet, so two bindings of one account never share idempotency keys. */
@@ -1272,7 +1349,8 @@ class ActionBinding {
     }
     const actionId = this.kv.get<number>(NEXT_ACTION_KEY) ?? 1;
     this.kv.put(NEXT_ACTION_KEY, actionId + 1);
-    this.putAction({ ...staged, actionId, status: "pending", fingerprint, attempts: {} } as ActionRecord);
+    const scope = typeof this.scope === "string" ? {} : { scope: this.scope };
+    this.putAction({ ...staged, ...scope, actionId, status: "pending", fingerprint, attempts: {} } as ActionRecord);
     onStaged?.(actionId);
     return { actionId, joined: false };
   }
@@ -1777,7 +1855,7 @@ function detailOf(error: unknown): string | undefined {
  * Refuse, unsent, an apply whose request no longer matches the fingerprint staged with it. A
  * legacy record without one passes, unless `required`.
  */
-async function assertFingerprint(scope: string, record: ActionRecord, fields: Partial<LogFields>,
+async function assertFingerprint(scope: FingerprintScope, record: ActionRecord, fields: Partial<LogFields>,
                                  { required = false } = {}): Promise<void> {
   if (!(required && record.fingerprint === undefined) && await matchesFingerprint(scope, record)) return;
   logger.error("action no longer matches its fingerprint", {
@@ -2001,6 +2079,67 @@ function checkDescription(description: string | null | undefined): void {
   }
 }
 
+/** A board search's query, trimmed, or INVALID_REQUEST when empty or too long. */
+function boardQuery(query: string): string {
+  const text = query.trim();
+  if (text.length === 0 || text.length > MAX_DISCOVERY_QUERY_LENGTH) {
+    fail("INVALID_REQUEST", `A board search must be 1-${MAX_DISCOVERY_QUERY_LENGTH} characters.`);
+  }
+  return text;
+}
+
+/**
+ * Ranks the projects each source's own token lists (see `rankBoards`). Only bindable keys are
+ * candidates, and the issue titles read for matching never leave the gatekeeper. A source InferOps
+ * refuses (FORBIDDEN or NOT_FOUND: a membership removed since connect) is left out when
+ * `skippable(index)` says so, and fails the search otherwise.
+ */
+async function searchBoards(text: string, sources: DiscoverySource[], skippable: (index: number) => boolean):
+    Promise<{ candidates: BoardCandidate[]; workspaces: DiscoveryWorkspace[]; count: number }> {
+  const listed = await Promise.all(sources.map(async (source, index) => {
+    try {
+      return { source, projects: await source.client.listProjects() };
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      if (skippable(index) && (code === "FORBIDDEN" || code === "NOT_FOUND")) return null;
+      throw error;
+    }
+  }));
+  let scanned = 0;
+  const workspaces = await Promise.all(listed.flatMap(entry => entry ? [entry] : [])
+    .map(async ({ source, projects }): Promise<DiscoveryWorkspace> => {
+      const labels = source.host === DEMO_HOST
+        ? { tenant: "demo", workspace: "local" } : parseHost(source.host)!;
+      const boardRef = (projectKey: string) => projectBoardUrl({ host: source.host, projectKey });
+      const bindable = projects.filter(project => {
+        try {
+          parseProjectBoardUrl(boardRef(project.identifier));
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      const read = bindable.map(() => scanned++ < MAX_DISCOVERY_SCANNED_PROJECTS);
+      return {
+        scope: { ...labels, boardRef },
+        projects: await Promise.all(bindable.map(async (project, index): Promise<DiscoveryProject> => ({
+          identifier: project.identifier,
+          name: project.name,
+          openIssueTitles: read[index] ? await openIssueTitles(source.client, project.identifier) : null,
+        }))),
+      };
+    }));
+  const count = workspaces.reduce((sum, workspace) => sum + workspace.projects.length, 0);
+  return { candidates: rankBoards(text, workspaces), workspaces, count };
+}
+
+/** What a board search's observation says it matched against. */
+function searchedText(count: number, workspaces: DiscoveryWorkspace[], candidates: BoardCandidate[]): string {
+  return `Matched a search against the ${count} projects listed on ` +
+    `${workspaces.map(workspace => `${workspace.scope.tenant}.${workspace.scope.workspace}`).join(", ")}: ` +
+    `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}.`;
+}
+
 @validateRpc()
 class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   #binding: ProjectBinding;
@@ -2038,62 +2177,20 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
    * workspace refuses the search.
    */
   async findBoards(query: string): Promise<BoardCandidate[]> {
-    const text = query.trim();
-    if (text.length === 0 || text.length > MAX_DISCOVERY_QUERY_LENGTH) {
-      fail("INVALID_REQUEST", `A board search must be 1-${MAX_DISCOVERY_QUERY_LENGTH} characters.`);
-    }
+    const text = boardQuery(query);
     const binding = this.#binding;
     const { host } = binding.target;
     if (host !== DEMO_HOST && !parseHost(host)) {
       fail("INVALID_REQUEST", "This connection's workspace cannot be searched.");
     }
     const sources = [{ host, client: binding.client }, ...await binding.otherWorkspaces()];
-    const listed = await Promise.all(sources.map(async (source, index) => {
-      try {
-        return { source, projects: await source.client.listProjects() };
-      } catch (error) {
-        const code = inferOpsErrorCode(error);
-        if (index > 0 && (code === "FORBIDDEN" || code === "NOT_FOUND")) return null;
-        throw error;
-      }
-    }));
-    let scanned = 0;
-    const workspaces = await Promise.all(listed.flatMap(entry => entry ? [entry] : [])
-      .map(async ({ source, projects }): Promise<DiscoveryWorkspace> => {
-        const labels = source.host === DEMO_HOST
-          ? { tenant: "demo", workspace: "local" } : parseHost(source.host)!;
-        const boardRef = (projectKey: string) => projectBoardUrl({ host: source.host, projectKey });
-        const bindable = projects.filter(project => {
-          try {
-            parseProjectBoardUrl(boardRef(project.identifier));
-            return true;
-          } catch {
-            return false;
-          }
-        });
-        const read = bindable.map(() => scanned++ < MAX_DISCOVERY_SCANNED_PROJECTS);
-        return {
-          scope: { ...labels, boardRef },
-          projects: await Promise.all(bindable.map(async (project, index): Promise<DiscoveryProject> => ({
-            identifier: project.identifier,
-            name: project.name,
-            openIssueTitles: read[index] ? await openIssueTitles(source.client, project.identifier) : null,
-          }))),
-        };
-      }));
-    const candidates = rankBoards(text, workspaces);
-    const count = workspaces.reduce((sum, workspace) => sum + workspace.projects.length, 0);
+    const { candidates, workspaces, count } = await searchBoards(text, sources, index => index > 0);
     const others = workspaces.length - 1;
     const where = others > 0
       ? `${host} and ${others} other workspace${others === 1 ? "" : "s"}` : host;
-    const observers = binding.observers();
-    await this.#binding.observe(this.#queue, {
+    await binding.observeWithheld(this.#queue, {
       title: `Searched InferOps boards on ${where}`,
-      description:
-        `Matched a search against the ${count} projects listed on ` +
-        `${workspaces.map(workspace => `${workspace.scope.tenant}.${workspace.scope.workspace}`).join(", ")}: ` +
-        `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}.`,
-      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
+      description: searchedText(count, workspaces, candidates),
     });
     return candidates;
   }
@@ -2139,7 +2236,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     // such step, since a pending change to an issue already refuses another (`refuseIfPending`).
     const { actionId, joined } = await binding.stageOnce({ kind: "create", issue: request, stateName: state.name });
     if (joined) return;
-    const description = buildDescription(
+    const description = binding.description(
       `Create an issue in InferOps project ${binding.projectKey}.`)
       .inline("Project", binding.projectKey)
       .inline("Title", title)
@@ -2232,7 +2329,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       toStateName: target.name,
       expectedRevision,
     });
-    const rendered = buildDescription(
+    const rendered = binding.description(
       `Move an issue of InferOps project ${binding.projectKey} to another workflow state. It is ` +
       `applied only if the issue is still at the revision below when approved.`)
       .inline("Issue", issue.identifier)
@@ -2281,7 +2378,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       changes: sent,
       previous,
     });
-    const description = buildDescription(
+    const description = binding.description(
       `Change fields of an issue of InferOps project ${binding.projectKey}. It is applied only if ` +
       `the issue is still at the revision below when approved.`)
       .inline("Issue", issue.identifier);
@@ -3126,13 +3223,11 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     const text = await binding.client.readDocumentText(documentId).catch(hideDocumentExistence);
     if (text === null) fail("NOT_FOUND", "Nothing on this page is readable.");
     const title = /^# (.*)/.exec(text)?.[1] ?? "";
-    const observers = binding.observers();
-    await this.#binding.observe(this.#queue, {
+    await binding.observeWithheld(this.#queue, {
       title: `Read Wiki page ${plainInline(slugOrId, 80)} as text`,
       description: `Read page "${plainInline(title, 120)}" of the InferMind Wiki of ${binding.host} ` +
         "as text, as InferOps composes it for this connection: its content, and for a Master its " +
         "structure and documentation coverage, with embedded widgets as their live text.",
-      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
     });
     return text;
   }
@@ -3190,7 +3285,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       throw error;
     });
     if (actionId === null) return;
-    const description = buildDescription(
+    const description = binding.description(
       `Replace the body of one page of the InferMind Wiki of ${binding.host}. InferOps applies it ` +
       `only if the page is still at the version below when approved. Its sections are not changed.`)
       .inline("Page", head.title)
@@ -3242,7 +3337,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       throw error;
     });
     if (actionId === null) return;
-    const description = buildDescription(
+    const description = binding.description(
       `Replace the markdown of one section of the InferMind Wiki of ${binding.host}. It is applied ` +
       `only if the section is still at the version below when approved.`)
       .inline("Page", head.title)
@@ -3376,7 +3471,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       page = `New page "${proposal.title}" (${proposal.targetSlug}) under ` +
         `${parent ? `"${parent.title}"` : `page ${proposal.parentId}`}`;
     }
-    const builder = buildDescription(
+    const builder = binding.description(
       `Approve one drafted page of the InferMind Wiki of ${binding.host} for publication. Approving ` +
       `queues its publication and publishes nothing itself. InferOps publishes it later, as you, only ` +
       `if you still hold knowledge:publish, can see every cited section, every heading is grounded in ` +
@@ -3393,6 +3488,439 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     if (proposal.contradictions.length > 0) builder.list("Contradictions", proposal.contradictions);
     else builder.inline("Contradictions", "none");
     return builder.verbatim("Content", proposal.content).finish();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Account gatekeeper (a facet of the Overseer, one per account binding; inferos ADR 0015)
+
+/** Where an account facet indexes each action id to the scope whose store holds it. */
+const ACTION_SCOPE_PREFIX = "actionScope:";
+/** Where an account facet's observer tracker keeps the boards and Wikis read through it. */
+const OBSERVED_SET_PREFIX = "observedSet:";
+
+/** One message for every refused `openBoard`, whatever was wrong, so a reference cannot probe. */
+const NO_SUCH_BOARD = "No such InferOps board is available to this connection.";
+/** One message for every refused `openWiki`, as `NO_SUCH_BOARD`. */
+const NO_SUCH_WIKI = "No such InferMind Wiki is available to this connection.";
+
+/**
+ * The key of a resolved board or Wiki: its records' store, its action index entry and its observed
+ * data set. Built from the resolved workspace id, so a slug that later names another workspace is
+ * another key.
+ */
+function scopeKey(scope: ActionScope): string {
+  return scope.kind === "board"
+    ? `board:${scope.host}:${scope.workspaceId ?? ""}:${scope.projectKey}`
+    : `wiki:${scope.host}:${scope.workspaceId ?? ""}`;
+}
+
+/** The scope a `scopeKey` names; null for anything else. */
+function scopeOfKey(key: string): ActionScope | null {
+  const [kind, host, workspaceId, projectKey] = key.split(":");
+  if (!host) return null;
+  const workspace = workspaceId ? { workspaceId } : {};
+  if (kind === "board" && projectKey) return { kind, host, ...workspace, projectKey };
+  if (kind === "wiki" && projectKey === undefined) return { kind, host, ...workspace };
+  return null;
+}
+
+/** How an approval names a resolved board or Wiki. */
+function scopeLabel(scope: ActionScope): string {
+  return scope.kind === "board" ? `Board ${scope.projectKey} on ${scope.host}` : `Wiki of ${scope.host}`;
+}
+
+/**
+ * The records of one board or Wiki of an account binding, kept apart from every other target's so
+ * one board's pending moves never show on another, and each indexed by action id so the overseer's
+ * apply, reject and revert (which name the id only) reach the right one.
+ */
+class ScopedActionStore extends ActionStore {
+  constructor(kv: SyncKvStorage, readonly key: string) {
+    super(kv, `scope:${key}/${ACTION_PREFIX}`);
+  }
+
+  override put(record: ActionRecord): void {
+    super.put(record);
+    this.kv.put(ACTION_SCOPE_PREFIX + record.actionId, this.key);
+  }
+
+  override delete(actionId: number): void {
+    super.delete(actionId);
+    this.kv.delete(ACTION_SCOPE_PREFIX + actionId);
+  }
+}
+
+/**
+ * The recorded action an account facet's action id names, with its resolved scope and the key of
+ * the store it is in; or undefined.
+ */
+function indexedAction(kv: SyncKvStorage, actionId: number):
+    { record: ActionRecord & { scope: ActionScope }; key: string } | undefined {
+  const key = kv.get<string>(ACTION_SCOPE_PREFIX + actionId);
+  if (key === undefined) return undefined;
+  const record = new ScopedActionStore(kv, key).get(actionId);
+  return record?.scope ? { record: record as ActionRecord & { scope: ActionScope }, key } : undefined;
+}
+
+/** Whether a verifier's account can open one data set an account binding has read. */
+async function setAccess(verifier: InferOpsVerifierApi, key: string): Promise<boolean> {
+  const scope = scopeOfKey(key);
+  if (!scope) return false;
+  return scope.kind === "board"
+    ? verifier.hasProjectAccess(scope.host, scope.projectKey, scope.workspaceId)
+    : verifier.hasWikiAccess(scope.host, scope.workspaceId);
+}
+
+/**
+ * One account binding: `inferops://<tenant>/account`. Its props hold the account and the tenant
+ * label and nothing else; each board or Wiki is named when it is opened (`openBoard`, `openWiki`),
+ * checked then against the person's own workspaces, and fixed into the session it opens and into
+ * every action proposed through it. Applying an action resolves its workspace again and refuses
+ * one that changed. Observers are strategy C: one tracked set per board and per Wiki read.
+ */
+@validateRpc()
+export class InferOpsAccountGatekeeper
+    extends DurableObject<Cloudflare.Env, AccountGatekeeperProps>
+    implements Gatekeeper<InferOpsAccountSession> {
+  #observerTracker?: ObserverTracker<InferOpsVerifierApi>;
+
+  /** The binding's collaborators and the sets they were checked against (one tracker per facet). */
+  get #tracker(): ObserverTracker<InferOpsVerifierApi> {
+    this.#observerTracker ??= new ObserverTracker<InferOpsVerifierApi>({
+      kv: this.ctx.storage.kv,
+      collectionPrefix: OBSERVED_SET_PREFIX,
+      vendorId: VENDOR_ID,
+      hasCollectionAccess: (verifier, keys) => Promise.all(keys.map(key => setAccess(verifier, key))),
+      denyMessage: () =>
+        "This collaborator cannot open every InferOps board and Wiki the Gadget read through this " +
+        "connection, so they cannot observe it.",
+    });
+    return this.#observerTracker;
+  }
+
+  #account(): AccountRef {
+    const { accountId, connected } = this.ctx.props;
+    return { accountId, connected };
+  }
+
+  /**
+   * The person's own workspace of `product` a reference's host names, or null when the host is not
+   * of this binding's organization, the person holds no such workspace, or nobody connected backs
+   * a non-demo binding. Undefined for the demo data, which has no workspace.
+   */
+  async #workspaceOf(host: string, product: WorkspaceProduct): Promise<string | null | undefined> {
+    if (!hostInTenant(host, this.ctx.props.tenant)) return null;
+    if (host === DEMO_HOST) return undefined;
+    const labels = parseHost(host);
+    if (!labels || !this.ctx.props.connected) return null;
+    return credentialsOf(this.ctx.exports, this.ctx.props.accountId).resolveWorkspace(labels.workspace, product);
+  }
+
+  /** Authorize one observation of `key`'s data set: strategy C's forward check, then the queue. */
+  async #observeSet(queue: RpcStub<ApprovalQueue>, key: string, description: ObservationDescription) {
+    const check = await this.#tracker.prepareObservation([key]);
+    const excluded = [...new Set([...description.excludeObservers ?? [], ...check.excludeObservers ?? []])];
+    const { excludeObservers: _, ...rest } = description;
+    try {
+      await queue.authorizeObservation(excluded.length > 0 ? { ...rest, excludeObservers: excluded } : rest);
+    } catch (error) {
+      if (isObservationRefused(error)) check.discard?.();
+      else check.abandon?.();
+      throw error;
+    }
+    check.commit();
+  }
+
+  /**
+   * Authorize an observation no collaborator was admitted for (the workspace list, a board search,
+   * a page's composed text): every current collaborator is excluded, and once it is recorded the
+   * binding is owner-only for good (gatekeeper-kit's withhold latch), since a set-less read gives a
+   * later collaborator nothing to be verified against.
+   */
+  async #observeWithheld(queue: RpcStub<ApprovalQueue>, description: ObservationDescription) {
+    const check = this.#tracker.prepareWithheld();
+    const excluded = check.excludeObservers ?? [];
+    try {
+      await queue.authorizeObservation(excluded.length > 0 ? { ...description, excludeObservers: excluded } : description);
+    } catch (error) {
+      if (isObservationRefused(error)) check.discard?.();
+      else check.abandon?.();
+      throw error;
+    }
+    check.commit();
+  }
+
+  /**
+   * `key` is the store the records live in: the scope's own, except when routing an action id,
+   * which uses the store its index names, so a record whose stored target was changed is refused
+   * by its fingerprint rather than looked up elsewhere.
+   */
+  #parts(scope: ActionScope, key = scopeKey(scope)): BindingParts {
+    return {
+      store: new ScopedActionStore(this.ctx.storage.kv, key),
+      client: clientFor(this.env, this.ctx.exports, this.#account(), scope.host, scope.workspaceId),
+      observers: () => this.#tracker.observerIds(),
+      observe: (queue, description) => this.#observeSet(queue, key, description),
+      withhold: (queue, description) => this.#observeWithheld(queue, description),
+      account: { scope, label: scopeLabel(scope) },
+    };
+  }
+
+  #boardBinding(scope: Extract<ActionScope, { kind: "board" }>, key?: string): ProjectBinding {
+    const target: ProjectGatekeeperProps = {
+      ...this.#account(), host: scope.host, projectKey: scope.projectKey, workspaceId: scope.workspaceId,
+    };
+    return new ProjectBinding(target, this.#parts(scope, key),
+      () => otherWorkspacesOf(this.env, this.ctx.exports, target));
+  }
+
+  #wikiBinding(scope: Extract<ActionScope, { kind: "wiki" }>, key?: string): WikiBinding {
+    return new WikiBinding({ ...this.#account(), host: scope.host, workspaceId: scope.workspaceId },
+      this.#parts(scope, key));
+  }
+
+  /**
+   * Narrow to one board: the reference parses as a board (so a dispatch, workflow, table, members or
+   * page reference is refused), is of this organization, names one of the person's own InferOps
+   * workspaces, and the project exists there for their own token. Every refusal is NOT_FOUND with
+   * one message. Not an observation: the board session's reads are.
+   */
+  async #openBoard(boardRef: string): Promise<ProjectBinding> {
+    let ref: ProjectBoardRef;
+    try {
+      ref = parseProjectBoardUrl(boardRef);
+    } catch {
+      fail("NOT_FOUND", NO_SUCH_BOARD);
+    }
+    const workspaceId = await this.#workspaceOf(ref.host, "inferops");
+    if (workspaceId === null) fail("NOT_FOUND", NO_SUCH_BOARD);
+    const binding = this.#boardBinding({
+      kind: "board", host: ref.host, projectKey: ref.projectKey, ...(workspaceId ? { workspaceId } : {}),
+    });
+    try {
+      if (!(await binding.client.hasProject(ref.projectKey))) fail("NOT_FOUND", NO_SUCH_BOARD);
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      if (code === "NOT_FOUND" || code === "FORBIDDEN") fail("NOT_FOUND", NO_SUCH_BOARD);
+      throw error;
+    }
+    return binding;
+  }
+
+  /**
+   * Narrow to one Wiki, as `openBoard` narrows to a board: the reference parses as a Wiki, is of
+   * this organization, names one of the person's own InferMind workspaces (an InferOps one has no
+   * Wiki), and the Wiki answers their own token.
+   */
+  async #openWiki(wikiRef: string): Promise<WikiBinding> {
+    let ref: WikiRef;
+    try {
+      ref = parseWikiUrl(wikiRef);
+    } catch {
+      fail("NOT_FOUND", NO_SUCH_WIKI);
+    }
+    const workspaceId = await this.#workspaceOf(ref.host, "infermind");
+    if (workspaceId === null) fail("NOT_FOUND", NO_SUCH_WIKI);
+    const binding = this.#wikiBinding({ kind: "wiki", host: ref.host, ...(workspaceId ? { workspaceId } : {}) });
+    try {
+      await binding.client.listDocuments();
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      if (code === "NOT_FOUND" || code === "FORBIDDEN") fail("NOT_FOUND", NO_SUCH_WIKI);
+      throw error;
+    }
+    return binding;
+  }
+
+  /**
+   * The person's workspaces in this organization, each with its slug: the demo's one workspace for
+   * the demo data. Withheld from every collaborator, and the binding is owner-only from then on.
+   */
+  async #listWorkspaces(queue: RpcStub<ApprovalQueue>): Promise<AccountWorkspace[]> {
+    const { tenant } = this.ctx.props;
+    const workspaces: AccountWorkspace[] = tenant === DEMO_HOST
+      ? [{ slug: "local", name: "Demo data", product: "inferops" },
+         { slug: "local", name: "Demo data", product: "infermind" }]
+      : ((await credentialsOf(this.ctx.exports, this.ctx.props.accountId).identity())?.workspaces ?? [])
+        .flatMap(w => w.workspaceSlug && parseHost(`${tenant}.${w.workspaceSlug}`)
+          ? [{ slug: w.workspaceSlug, name: w.workspaceName, product: w.product ?? "inferops" }] : []);
+    await this.#observeWithheld(queue, {
+      title: `Listed your InferOps workspaces in ${tenant}`,
+      description: `Listed the ${workspaces.length} InferOps and InferMind workspaces you hold in ${tenant}.`,
+    });
+    return workspaces;
+  }
+
+  /**
+   * Rank the boards of every InferOps workspace the person holds in this organization (or the
+   * demo's), as a board binding's `findBoards` does; a workspace InferOps now refuses is left out.
+   * Withheld from every collaborator, and the binding is owner-only from then on, since none was
+   * admitted for boards not yet read.
+   */
+  async #findBoards(queue: RpcStub<ApprovalQueue>, query: string): Promise<BoardCandidate[]> {
+    const text = boardQuery(query);
+    const { tenant } = this.ctx.props;
+    const account = this.#account();
+    const sources: DiscoverySource[] = tenant === DEMO_HOST
+      ? [{ host: DEMO_HOST, client: clientFor(this.env, this.ctx.exports, account, DEMO_HOST) }]
+      : ((await credentialsOf(this.ctx.exports, account.accountId).identity())?.workspaces ?? [])
+        .flatMap(w => {
+          const host = `${tenant}.${w.workspaceSlug}`;
+          if (w.product === "infermind" || !w.workspaceSlug || !parseHost(host)) return [];
+          return [{ host, client: clientFor(this.env, this.ctx.exports, account, host, w.workspaceId) }];
+        });
+    const { candidates, workspaces, count } = await searchBoards(text, sources, () => true);
+    await this.#observeWithheld(queue, {
+      title: `Searched InferOps boards in ${tenant}`,
+      description: searchedText(count, workspaces, candidates),
+    });
+    return candidates;
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    const { tenant } = this.ctx.props;
+    return {
+      url: accountUrl({ tenant }),
+      title: `InferOps account ${tenant}`,
+      snippet: `Every InferOps board and InferMind Wiki your own account can open in ${tenant}: list ` +
+        `your workspaces, find boards, and open a board or a Wiki by its reference.`,
+      suggestedBindingName: "INFEROPS",
+      tsType: "InferOpsAccountSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
+  /** Every write waits for review; none is auto-approvable. */
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsAccountSession> {
+    return new AccountSessionImpl({
+      openBoard: ref => this.#openBoard(ref),
+      openWiki: ref => this.#openWiki(ref),
+      listWorkspaces: queue => this.#listWorkspaces(queue),
+      findBoards: (queue, query) => this.#findBoards(queue, query),
+    }, approvalQueue.dup());
+  }
+
+  /**
+   * Strategy C: admit a collaborator whose own account can open every board and Wiki read through
+   * this binding so far; each one read later is checked again for every collaborator then.
+   */
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    await this.#tracker.addObserver(id, asVerifier<InferOpsVerifierApi>(user));
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    this.#tracker.removeObserver(id);
+  }
+
+  /**
+   * The binding of the board or Wiki an action was proposed on, and a check that its workspace
+   * still resolves to the one recorded: the person may have lost it, or its slug may name another
+   * workspace now. Undefined for an id this facet never staged.
+   */
+  #routed(actionId: number) {
+    const indexed = indexedAction(this.ctx.storage.kv, actionId);
+    if (!indexed) return undefined;
+    const { record, key } = indexed;
+    const { scope } = record;
+    const check = async () => {
+      const now = await this.#workspaceOf(scope.host, scope.kind === "board" ? "inferops" : "infermind");
+      if (now !== scope.workspaceId) {
+        logger.warn("action refused: its workspace no longer resolves", {
+          event: "account.apply.workspace_changed", host: scope.host, action: actionId, code: "NOT_FOUND",
+        });
+        throw new CheckRefused("NOT_FOUND", `${actionLabel(record)} was not applied: ` +
+          `${scopeLabel(scope)} is no longer one of your workspaces.`);
+      }
+    };
+    return scope.kind === "board"
+      ? { kind: "board" as const, binding: this.#boardBinding(scope, key), check, record }
+      : { kind: "wiki" as const, binding: this.#wikiBinding(scope, key), check, record };
+  }
+
+  /**
+   * Apply as the board or Wiki facet would, after the fingerprint (which covers the resolved
+   * target) and the workspace check of `#routed`.
+   */
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>):
+      Promise<void | { failed: ActionApplyFailure }> {
+    const routed = this.#routed(actionId);
+    if (!routed) throw new Error(`Unknown InferOps action ${actionId}.`);
+    return routed.kind === "board"
+      ? applyBoardAction(routed.binding, actionId, routed.check)
+      : applyWikiAction(routed.binding, actionId, routed.check);
+  }
+
+  async rejectAction(actionId: number): Promise<void> {
+    const routed = this.#routed(actionId);
+    if (routed) rejectPending(routed.binding, actionId);
+  }
+
+  async revertAction(actionId: number):
+      Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
+    const routed = this.#routed(actionId);
+    if (!routed) return { message: "This change was never applied, so there is nothing to revert." };
+    // As at apply: a workspace the person no longer holds (or a slug now naming another) is not written.
+    try {
+      if (routed.record.status === "applied") await routed.check();
+    } catch (error) {
+      if (error instanceof CheckRefused) {
+        return { message: error.reason.replace(" was not applied: ", " was not reverted: ") };
+      }
+      throw error;
+    }
+    return routed.kind === "board"
+      ? revertBoardAction(routed.binding, actionId)
+      : revertWikiAction(routed.binding, actionId);
+  }
+}
+
+/** What an account session asks of its facet; private to both, so neither's RPC surface has it. */
+type AccountScopes = {
+  openBoard(boardRef: string): Promise<ProjectBinding>;
+  openWiki(wikiRef: string): Promise<WikiBinding>;
+  listWorkspaces(queue: RpcStub<ApprovalQueue>): Promise<AccountWorkspace[]>;
+  findBoards(queue: RpcStub<ApprovalQueue>, query: string): Promise<BoardCandidate[]>;
+};
+
+@validateRpc()
+class AccountSessionImpl extends RpcTarget implements InferOpsAccountSession {
+  #scopes: AccountScopes;
+  #queue: RpcStub<ApprovalQueue>;
+
+  constructor(scopes: AccountScopes, queue: RpcStub<ApprovalQueue>) {
+    super();
+    this.#scopes = scopes;
+    this.#queue = queue;
+  }
+
+  [Symbol.dispose]() {
+    this.#queue[Symbol.dispose]();
+  }
+
+  async listWorkspaces(): Promise<AccountWorkspace[]> {
+    return this.#scopes.listWorkspaces(this.#queue);
+  }
+
+  async findBoards(query: string): Promise<BoardCandidate[]> {
+    return this.#scopes.findBoards(this.#queue, query);
+  }
+
+  /** The board session holds its own queue, so it outlives this session. */
+  async openBoard(boardRef: string): Promise<InferOpsProjectSession> {
+    return new ProjectSessionImpl(await this.#scopes.openBoard(boardRef), this.#queue.dup());
+  }
+
+  /** The Wiki session holds its own queue, so it outlives this session. */
+  async openWiki(wikiRef: string): Promise<InferOpsWikiSession> {
+    return new WikiSessionImpl(await this.#scopes.openWiki(wikiRef), this.#queue.dup());
   }
 }
 

@@ -6,8 +6,9 @@
 //
 // - Records written before creates and updates existed have no `kind`; `readAction` reads them as
 //   transitions, and they carry no fingerprint, so none is checked for them.
-// - The fingerprint is a SHA-256 over the binding's scope (its project key, or `knowledge/wiki`)
-//   and the normalized request. Apply
+// - The fingerprint is a SHA-256 over the binding's scope (its project key, or `knowledge/wiki`;
+//   for an account binding the resolved board or Wiki the record names in `scope`) and the
+//   normalized request. Apply
 //   recomputes it from the request it is about to send and refuses a mismatch. InferOps does not
 //   fingerprint idempotency keys (a reused key with another body returns the first result), so
 //   this is the check that one action's key is only ever sent with the one request approved for it.
@@ -48,8 +49,26 @@ export type ApplyAttempts = {
   failure?: StoredFailure;
 };
 
+/**
+ * The board or Wiki an action of an account binding was proposed on, as it was resolved when the
+ * reference was opened: `host` is the reference's `<tenant>.<workspace>`, `workspaceId` the person's
+ * own workspace its slug resolved to (absent for the demo data), `projectKey` the board's key. A
+ * board, dispatch or Wiki facet serves one target, fixed in its props, so its records carry none.
+ */
+export type ActionScope =
+  | { kind: "board"; host: string; workspaceId?: string; projectKey: string }
+  | { kind: "wiki"; host: string; workspaceId?: string };
+
+/**
+ * What an action's fingerprint is computed within: a facet's fixed scope (its project key, or
+ * `knowledge/wiki`), or the resolved scope an account binding's action records.
+ */
+export type FingerprintScope = string | ActionScope;
+
 type ActionBase = {
   actionId: number;
+  /** The resolved board or Wiki of an account binding's action; absent on every facet's own. */
+  scope?: ActionScope;
   status: ActionStatus;
   /** Fingerprint of the request staged with the action; absent on records from before creates. */
   fingerprint?: string;
@@ -281,11 +300,16 @@ function canonical(value: unknown): string {
 
 /**
  * The fingerprint of an action's request within the binding's scope: the bound project's key, or
- * `knowledge/wiki` for a Wiki binding (whose facet is one workspace's).
+ * `knowledge/wiki` for a Wiki binding (whose facet is one workspace's), hashed exactly as before
+ * account bindings existed; or, for an account binding, the resolved board or Wiki, whole, so a
+ * record moved to another target no longer matches.
  */
-export async function fingerprintOf(scope: string, record: StagedAction | ActionRecord):
+export async function fingerprintOf(scope: FingerprintScope, record: StagedAction | ActionRecord):
     Promise<string> {
-  const bytes = new TextEncoder().encode(canonical({ projectKey: scope, request: requestOf(record) }));
+  const subject = typeof scope === "string"
+    ? { projectKey: scope, request: requestOf(record) }
+    : { scope, request: requestOf(record) };
+  const bytes = new TextEncoder().encode(canonical(subject));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
@@ -294,7 +318,7 @@ export async function fingerprintOf(scope: string, record: StagedAction | Action
  * Whether the request `record` would send now is the one staged with it. A legacy record has no
  * fingerprint and passes.
  */
-export async function matchesFingerprint(scope: string, record: ActionRecord):
+export async function matchesFingerprint(scope: FingerprintScope, record: ActionRecord):
     Promise<boolean> {
   if (record.fingerprint === undefined) return true;
   return record.fingerprint === await fingerprintOf(scope, record);
