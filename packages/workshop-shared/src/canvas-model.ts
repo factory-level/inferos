@@ -1,13 +1,13 @@
 /**
- * The versioned nested canvas model (ADR 0014, proposed). Nothing stores, renders or runs it yet:
- * saved canvases stay `CanvasDefinition` until the migration that wires this in.
+ * The versioned nested canvas model (ADR 0014, proposed). Saved canvases stay `CanvasDefinition`,
+ * and a page is read from one by conversion. Nothing renders or runs this model yet.
  *
  * Containment says only where a node sits and what is removed with it. Nothing passes along it:
  * no permission, setting or event reaches a parent or child unless an attachment names that target.
  * A reference identifies a target and an attachment grants nothing; both are checked at use, under
  * the acting person's or run's own authority.
  */
-import { CANVAS_ID, CANVAS_REVISION, parseCanvasWidget, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
+import { CANVAS_ID, CANVAS_REVISION, parseCanvasDefinition, parseCanvasWidget, type CanvasDefinition, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
 
 /** The schema version this module reads. `CanvasDefinition`, with sections, is version 1. */
 export const CANVAS_MODEL_SCHEMA_VERSION = 2;
@@ -390,6 +390,47 @@ export function parseCanvasWorkspacePages(value: unknown): CanvasPage[] {
     }
   }
   return pages;
+}
+
+/**
+ * The page a version 1 definition maps to. Pure and deterministic, so converting twice or
+ * concurrently gives the same IDs and one result. It keeps the revision, because conversion isn't
+ * an edit, and throws without changing anything if the definition isn't valid.
+ */
+export function canvasPageFromDefinition(definition: unknown): CanvasPage {
+  const { id, revision, title, sections } = parseCanvasDefinition(definition);
+  return parseCanvasPage({
+    schemaVersion: CANVAS_MODEL_SCHEMA_VERSION, id, revision, title, attachments: [],
+    children: sections.map(section => section.id),
+    nodes: sections.flatMap(section => [
+      { nodeType: "object", id: section.id, title: section.title, columns: section.columns, attachments: [],
+        children: section.widgets.map(widget => widget.id) },
+      ...section.widgets.map(widget => ({ ...widget, nodeType: "widget", attachments: [] })),
+    ]),
+  });
+}
+
+/**
+ * The version 1 definition that holds this page exactly, or null if version 1 can't: it has
+ * attachments, nesting, a widget directly under the page, or more sections than version 1 allows.
+ */
+export function canvasDefinitionFromPage(page: CanvasPage): CanvasDefinition | null {
+  if (page.attachments.length > 0 || page.children.length > 12) return null;
+  const byId = new Map(page.nodes.map(node => [node.id, node]));
+  const sections: CanvasDefinition["sections"] = [];
+  for (const sectionId of page.children) {
+    const section = byId.get(sectionId);
+    if (section?.nodeType !== "object" || section.attachments.length > 0) return null;
+    const widgets: CanvasWidget[] = [];
+    for (const widgetId of section.children) {
+      const node = byId.get(widgetId);
+      if (node?.nodeType !== "widget" || node.attachments.length > 0) return null;
+      const { nodeType: _nodeType, attachments: _attachments, ...widget } = node;
+      widgets.push(widget);
+    }
+    sections.push({ id: section.id, title: section.title, columns: section.columns, widgets });
+  }
+  return parseCanvasDefinition({ schemaVersion: 1, id: page.id, revision: page.revision, title: page.title, sections });
 }
 
 /** An explicit edit target. It identifies what is selected within one workspace and authorizes nothing. */

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
-  CANVAS_MODEL_LIMITS, CanvasModelError, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
+  CANVAS_MODEL_LIMITS, CanvasModelError, canvasDefinitionFromPage, canvasPageFromDefinition, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
   resolveCanvasTarget, type CanvasModelErrorCode, type CanvasNode, type CanvasPage, type CanvasTarget,
 } from "./canvas-model";
 import rejected from "./canvas-model-fixtures/rejected.json";
@@ -250,6 +250,27 @@ describe("section-based canvases", () => {
     expect(asSections(after)).toEqual(before);
     const references = (definition: CanvasDefinition) => definition.sections.flatMap(section => section.widgets.map(widget => [widget.id, widget.targetRef]));
     expect(after.nodes.flatMap(node => node.nodeType === "widget" ? [[node.id, node.targetRef]] : []).toSorted()).toEqual(references(before).toSorted());
+  });
+
+  test.each(sectionMapping)("$name converts both ways, and converting again changes nothing", ({ sections, page }) => {
+    expect(canvasPageFromDefinition(sections)).toEqual(page);
+    expect(canvasPageFromDefinition(sections)).toEqual(canvasPageFromDefinition(sections));
+    expect(canvasDefinitionFromPage(parseCanvasPage(page))).toEqual(parseCanvasDefinition(sections));
+  });
+
+  test("a page version 1 can't hold has no version 1 form", () => {
+    for (const entry of valid.slice(1)) expect(canvasDefinitionFromPage(parseCanvasPage(entry.page)), entry.name).toBeNull();
+    expect(canvasDefinitionFromPage(parseCanvasPage(valid[0].page))).not.toBeNull();
+  });
+
+  test("a page with more sections than version 1 allows has no version 1 form", () => {
+    const sections = Array.from({ length: 13 }, (_, index) => ({ nodeType: "object", id: `s${index}`, title: "S", columns: 1, children: [], attachments: [] }));
+    expect(canvasDefinitionFromPage(parseCanvasPage({ schemaVersion: 2, id: "p", revision: "0", title: "P", attachments: [],
+      children: sections.map(section => section.id), nodes: sections }))).toBeNull();
+  });
+
+  test("an invalid definition doesn't convert", () => {
+    expect(() => canvasPageFromDefinition({ schemaVersion: 1, id: "p", revision: "0", title: "P", sections: [{}] })).toThrow("Invalid canvas");
   });
 
   test("a version 1 reader refuses a nested page rather than guessing", () => {
