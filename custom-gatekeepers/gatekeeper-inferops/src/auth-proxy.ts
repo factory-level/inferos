@@ -11,7 +11,9 @@
 //   it exposes the persona picker, which anyone who reaches it can use.
 // - Only the three browser legs of central-auth are forwarded (`GET /authorize`,
 //   `POST /authorize/persona`, `GET /logout`). The InferLab origin also serves the whole API, so
-//   every other path is a 404 here.
+//   every other path is a 404 here. Every sign-in starts at `/logout` (inferlab-login.ts), which
+//   ends the session central-auth keeps for this host and then redirects to the relative
+//   `/authorize?…`, so the persona picker is shown each time instead of the last persona.
 // - Only a fixed set of request headers is forwarded, with Access's `CF_Authorization` cookie
 //   removed. `Origin` and `Referer` naming the authorize origin are rewritten to the InferLab origin,
 //   so central-auth's same-origin check on the persona form holds; anything else passes unchanged

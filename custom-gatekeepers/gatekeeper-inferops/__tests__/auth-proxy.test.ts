@@ -107,6 +107,15 @@ describe("handleInferLabAuthProxy", () => {
     expect(seen[0].headers.get("origin")).toBe("https://evil.example");
   });
 
+  it("keeps a relative redirect from /logout on the authorize host", async () => {
+    upstream(() => new Response(null, {
+      status: 302, headers: { location: "/authorize?client_id=inferos&state=s" },
+    }));
+    const response = await handleInferLabAuthProxy(
+      new Request(`${PROXY}/logout?return=${encodeURIComponent("/authorize?client_id=inferos&state=s")}`), ENV);
+    expect(response?.headers.get("location")).toBe(`${PROXY}/authorize?client_id=inferos&state=s`);
+  });
+
   it("keeps InferLab redirects and cookies on the authorize host", async () => {
     upstream(() => {
       const headers = new Headers({ location: `${AUTH}/authorize?client_id=inferos` });
