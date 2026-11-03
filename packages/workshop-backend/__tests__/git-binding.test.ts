@@ -382,6 +382,48 @@ describe("env.GIT presence", () => {
     });
   });
 
+  it("refuses to bind a spawner that exposes a connection outside this gadget's bindings",
+      () => withImpl(async impl => {
+    seedGadget(impl, 100);
+    seedGadget(impl, 200);
+    impl.storage.gatekeepers.put({
+      id: 1,
+      class: {},
+      creationSpec: { type: "gatekeeper", vendorId: "test", resourceUrl: "", typeUrlPattern: "" },
+    });
+    impl.storage.gatekeepers.put({
+      id: 2,
+      class: {},
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Scoped", modelId: null, env: { OTHER: 200 } },
+      },
+    });
+
+    expect(() => impl.bindWorkpiece(100, "SPAWNER", 2)).toThrow(
+        /exposes "OTHER" outside gadget 100's available bindings/);
+  }));
+
+  it("allows a spawner to expose only its gadget and bound connections",
+      () => withImpl(async impl => {
+    seedGadget(impl, 100, { DB: { target: 1 } });
+    impl.storage.gatekeepers.put({
+      id: 1,
+      class: {},
+      creationSpec: { type: "gatekeeper", vendorId: "test", resourceUrl: "", typeUrlPattern: "" },
+    });
+    impl.storage.gatekeepers.put({
+      id: 2,
+      class: {},
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Scoped", modelId: null, env: { SELF: 100, DB: 1 } },
+      },
+    });
+
+    expect(() => impl.bindWorkpiece(100, "SPAWNER", 2)).not.toThrow();
+  }));
+
   it("describeBinding serves the Git and Worktree API", () => withImpl(async impl => {
     let description = impl.describeGitBinding(1, "env.GIT");
     expect(description).toContain("Binding: env.GIT");

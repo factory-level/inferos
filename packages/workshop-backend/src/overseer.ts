@@ -2955,6 +2955,32 @@ class OverseerImpl implements AgentHooks {
       }
       throw new Error(`No such gatekeeper: ${target}`);
     }
+    // An agent spawner can hand every configured env binding to a new agent, so its env must
+    // stay within the gadget that exposes the spawner. The modal offers exactly this gadget and
+    // its current bindings, but this check is the authoritative boundary for direct RPC callers
+    // and nested spawners too.
+    let allowed = new Set<WorkpieceId>([
+      gadgetId,
+      ...this.visibleBindings(gadget, chatId).map(([, edge]) => edge.target),
+    ]);
+    let pendingSpawners = [target];
+    let checkedSpawners = new Set<WorkpieceId>();
+    while (pendingSpawners.length > 0) {
+      let spawnerId = pendingSpawners.pop()!;
+      if (checkedSpawners.has(spawnerId)) continue;
+      checkedSpawners.add(spawnerId);
+      let spec = this.storage.gatekeepers.get(spawnerId)?.creationSpec;
+      if (spec?.type !== "agentSpawner") continue;
+      for (let [envName, envTarget] of Object.entries(spec.config.env)) {
+        if (!allowed.has(envTarget)) {
+          throw new Error(`Agent spawner "${name}" exposes "${envName}" outside gadget ` +
+              `${gadgetId}'s available bindings.`);
+        }
+        if (this.storage.gatekeepers.get(envTarget)?.creationSpec?.type === "agentSpawner") {
+          pendingSpawners.push(envTarget);
+        }
+      }
+    }
     // An install in a workspace that is not test-only never depends on mock data or models, however
     // the binding arrives: at install (Overseer.installBlueprint) or added later.
     if (targetRecord.mock && gadget.installedFrom && !this.storage.testOnly.get()) {
