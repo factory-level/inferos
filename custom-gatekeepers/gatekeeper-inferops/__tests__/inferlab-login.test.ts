@@ -167,6 +167,8 @@ describe("sign-in flow", () => {
     expect(params.get("client_id")).toBe("inferos");
     expect(params.get("redirect_uri")).toBe(REDIRECT_URI);
     expect(params.get("code_challenge_method")).toBe("S256");
+    // Without a sign-in proxy the session is InferLab's own and is reused: no prompt is sent.
+    expect(params.get("prompt")).toBeNull();
     expect(params.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(params.get("state")).toMatch(/^[0-9a-f]{64}\.[0-9a-f]{64}$/);
   });
