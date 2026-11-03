@@ -159,6 +159,7 @@ function fakeOverseer(overrides: OverseerOverrides = {}): RpcStub<Overseer> {
 
 type AuthenticatedApiOverrides = {
   searchUsers?: (query: string, excludeIds: string[]) => Promise<UserDirectoryRecord[]>
+  holdsSharedConfiguration?: (action: 'build' | 'publish') => Promise<boolean>
 }
 
 function fakeAuthenticatedApi(overrides: AuthenticatedApiOverrides = {}): RpcStub<AuthenticatedApi> {
@@ -167,6 +168,7 @@ function fakeAuthenticatedApi(overrides: AuthenticatedApiOverrides = {}): RpcStu
       id: `${query}@example.com`,
       name: query === 'ada' ? 'Ada' : query,
     }] : [],
+    holdsSharedConfiguration: async () => true,
     ...overrides,
   } as unknown as RpcStub<AuthenticatedApi>
 }
@@ -329,6 +331,25 @@ describe('ShareModal', () => {
 
     expect(rendered.textContent).toContain('Added Ada')
     expect(rendered.textContent).toContain(WORKSPACE_URL)
+  })
+
+  it('offers no invite or share link to someone the deployment does not let share, and says why', async () => {
+    const asked: string[] = []
+    const rendered = await render(fakeOverseer(), fakeAuthenticatedApi({
+      holdsSharedConfiguration: async (action) => { asked.push(action); return false },
+    }))
+    expect(asked).toEqual(['publish'])
+    expect(rendered.querySelector('[data-testid="people-composer"]')).toBeNull()
+    expect([...rendered.querySelectorAll('button')].some(b => b.textContent?.includes('Create a share link'))).toBe(false)
+    expect(rendered.querySelector('[role="status"]')?.textContent)
+      .toContain('You don’t have permission to share configuration other people use')
+  })
+
+  it('treats a server that cannot answer the sharing question as not restricting it', async () => {
+    const rendered = await render(fakeOverseer(), fakeAuthenticatedApi({
+      holdsSharedConfiguration: async () => { throw new Error('no such method') },
+    }))
+    expect(rendered.querySelector('[data-testid="people-composer"]')).not.toBeNull()
   })
 
   it('keeps Invite disabled until a recipient can be submitted', async () => {

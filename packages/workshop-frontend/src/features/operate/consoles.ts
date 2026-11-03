@@ -1,4 +1,4 @@
-import type { GadgetMetadataWithTimestamps, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
+import { SHARED_CONFIGURATION_REFUSED, type GadgetMetadataWithTimestamps, type GadgetSummary, type WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleSource, type ConsoleView, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from '@gadgets/workshop-shared/operate-console'
 import type { OperateFlow } from '@gadgets/workshop-shared/operate-flow'
@@ -124,10 +124,10 @@ export const unshownSteps = (flow: OperateFlow, shown: readonly string[]): strin
 
 /**
  * The text to show for a console save or publish refused by the kernel: its own message when it is
- * about one of the console's flows (it names only the builder's own workspace data), otherwise
- * `fallback`.
+ * about one of the console's flows (it names only the builder's own workspace data) or is the
+ * deployment's shared-configuration refusal, otherwise `fallback`.
  */
 export const consoleRefusalMessage = (caught: unknown, fallback: string): string => {
   const message = caught instanceof Error ? caught.message : ''
-  return message.startsWith('Console flow ') ? message : fallback
+  return message.startsWith('Console flow ') || message === SHARED_CONFIGURATION_REFUSED ? message : fallback
 }

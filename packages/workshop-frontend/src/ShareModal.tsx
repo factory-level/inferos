@@ -318,6 +318,29 @@ function sameRequirements(
     left.every((requirement, index) => requirement.gatekeeperId === right[index].gatekeeperId)
 }
 
+/**
+ * Whether the deployment lets this person share configuration other people use, asked when the
+ * dialog opens. Only what to offer: the server asks again at every invite and link. Until the answer
+ * arrives nothing new is offered; a server that can't answer the question (one without it) doesn't
+ * restrict sharing, so it is treated as allowed.
+ */
+const useSharingAllowed = (authenticatedApi: RpcStub<AuthenticatedApi>, open: boolean) => {
+  const [allowed, setAllowed] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!open) return
+    let current = true
+    setAllowed(null)
+    Promise.resolve()
+      .then(() => authenticatedApi.holdsSharedConfiguration('publish'))
+      .then(
+        (holds) => { if (current) setAllowed(holds === true) },
+        () => { if (current) setAllowed(true) },
+      )
+    return () => { current = false }
+  }, [authenticatedApi, open])
+  return allowed
+}
+
 export default function ShareModal({ open, onClose, overseer, metadata, currentUser, authenticatedApi }: Props) {
   const toasts = useKumoToastManager()
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
@@ -343,8 +366,10 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const containsRestrictedData = metadata.containsRestrictedData === true
   // The server refuses share links and non-owner invites once this is set; hide those controls.
   const ownerInvitesOnly = metadata.ownerInvitesOnly === true
-  const canInvite = !ownerInvitesOnly || isOwner
-  const canUseShareLinks = !ownerInvitesOnly
+  // Sharing makes this workspace configuration other people use; the deployment may reserve that.
+  const sharingAllowed = useSharingAllowed(authenticatedApi, open)
+  const canInvite = (!ownerInvitesOnly || isOwner) && sharingAllowed === true
+  const canUseShareLinks = !ownerInvitesOnly && sharingAllowed === true
   const directoryQuery = addUsername.trim()
   // Everyone already on the workspace: the caller, the owner (absent from listCollaborators()
   // when the caller is a collaborator), and every collaborator -- plus everyone already staged.
@@ -1037,6 +1062,17 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
           className={`chat-panel min-h-0 flex-1 overscroll-contain px-4 pb-6 sm:px-6 ${directoryOpen ? 'overflow-hidden' : 'overflow-y-auto'}`}
           onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 0)}
         >
+          {sharingAllowed === false && (
+            <div className="mb-3 flex items-start gap-2.5 rounded-2xl bg-kumo-warning-tint px-3 py-2.5" role="status">
+              <div className="grid h-6 w-6 shrink-0 place-items-center text-kumo-warning">
+                <ShieldWarning size={18} weight="duotone" />
+              </div>
+              <p className="text-[12px] leading-[18px] tracking-[-0.1px] text-kumo-default">
+                You don’t have permission to share configuration other people use, so you can’t add
+                people or create share links here. Ask someone who can, such as an Admin.
+              </p>
+            </div>
+          )}
           {(containsRestrictedData || ownerInvitesOnly) && (
             <div className="mb-3 flex items-start gap-2.5 rounded-2xl bg-kumo-warning-tint px-3 py-2.5">
               <div className="grid h-6 w-6 shrink-0 place-items-center text-kumo-warning">

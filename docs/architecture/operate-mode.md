@@ -79,6 +79,7 @@ covers:
   - packages/integration-tests/__tests__/operate-execution-bound-loopbacks.test.ts
   - packages/workshop-backend/src/sharing.ts
   - packages/workshop-backend/__tests__/shared-configuration.test.ts
+  - packages/workshop-frontend/src/ShareModal.tsx
   - packages/workshop-backend/__tests__/sharing.test.ts
   - packages/workshop-backend/__tests__/authz-generation.test.ts
   - packages/workshop-backend/__tests__/authz-generation-guard.test.ts
@@ -632,6 +633,7 @@ A deployment may name the gatekeeper vendor that decides who edits and publishes
   - `publish`, while shared: `publishConsole`, `installBlueprint`, `upgradeInstall`, `updateBlueprint`, `deleteBlueprint` and `GadgetClient.createBlueprint`.
   - `build`, while shared: `mergeChanges`, `setKind`, and `GadgetClient.bind` (outside a chat), `unbind` and `renameBinding`.
 - **What reaches people before a publish.** Canvas, flow and console edits don't: a use collaborator reads only published consoles and the screens they show, and flows are build-only. Gadget code does, once merged (a use collaborator runs the gadget's current head), and so do a gadget's bindings; those are the `build` re-checks above. A chat's working copy and a console draft reach nobody until merged or published.
+- **Client.** `AuthenticatedApi.holdsSharedConfiguration(action)` answers the same question for display (true when no vendor is named, false when the check fails), granting nothing. The Share dialog (`ShareModal`) asks it for `publish` when it opens and, on a no, offers no invite or share link and says the person doesn't have permission to share configuration other people use, while still listing who has access; a server without the method is treated as not restricting. A workspace opened read-only already renders as the use view, because the session's metadata says `use`. Kernel refusals carry `SHARED_CONFIGURATION_REFUSED` (`workshop-shared/api.ts`), which the console save and publish dialogs show as is. The canvas home and console launcher still list a shared workspace a person owns as buildable until it is opened.
 - Console customization flags are not consulted: they are policy settings, never grants. The check only narrows; it never gives a session more than its sharing role.
 - For the InferOps gatekeeper the answer is InferOps' `configuration:build` / `configuration:publish`, which only an Admin's grant holds (see [InferOps gatekeeper](inferops-gatekeeper.md)).
 - `__tests__/shared-configuration.test.ts` covers `open()` with the setting off, an owner and a build collaborator refused or allowed, a failed check, and an unshared workspace; sharing refused before anything runs, a failed check, and an allowed share; a console published in an unshared workspace without asking; in a shared build session whose authority changed, the `publish` and `build` re-checks refused, and a failed check; `requireSharedConfiguration`'s scopes; and the account loop (no account, another vendor, expired credentials, first yes, failures, a non-boolean answer).
