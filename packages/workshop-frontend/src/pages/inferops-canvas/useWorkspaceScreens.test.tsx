@@ -140,6 +140,29 @@ it('a workspace whose reads never answer is listed as unreadable, and the rest s
   expect(state.workspaces.map(entry => [entry.workspace.id, entry.screens])).toEqual([['slow', null], ['quick', []]])
 })
 
+it('a use-role workspace whose reads never answer stays listed as unreadable, not dropped', async () => {
+  vi.useFakeTimers()
+  const { api } = fakeApi({}, [workspace('mine', undefined, '2026-02-01'), workspace('shared', 'use', '2026-01-01')])
+  const stub = api as unknown as { openGadget: (id: string) => Record<string, unknown> }
+  const open = stub.openGadget
+  stub.openGadget = (id: string) => id === 'shared'
+    ? { listCanvases: never, listFlows: never, listConsoles: never, [Symbol.dispose]: () => {} }
+    : open(id)
+  await act(async () => root.render(<Probe api={api} />))
+  await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_READ_TIMEOUT_MS) })
+  if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
+  expect(state.workspaces.map(entry => [entry.workspace.id, entry.screens])).toEqual([['mine', []], ['shared', null]])
+})
+
+it('a use-role workspace whose reads fail stays listed as unreadable too', async () => {
+  const { api } = fakeApi({}, [workspace('shared', 'use', '2026-01-01')])
+  const stub = api as unknown as { openGadget: (id: string) => Record<string, unknown> }
+  stub.openGadget = () => ({ listCanvases: denied, listFlows: denied, listConsoles: denied, [Symbol.dispose]: () => {} })
+  await act(async () => root.render(<Probe api={api} />))
+  if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
+  expect(state.workspaces.map(entry => [entry.workspace.id, entry.screens])).toEqual([['shared', null]])
+})
+
 it('Try again loads the list again after a failure', async () => {
   let calls = 0
   const api = { listGadgets: async () => { calls++; if (calls === 1) throw new Error('down'); return [] }, openGadget: () => ({}) } as unknown as RpcStub<AuthenticatedApi>

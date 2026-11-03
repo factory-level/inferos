@@ -117,7 +117,8 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
     const recent = all.toSorted((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
     const builds = recent.filter(workspace => workspace.role !== 'use').slice(0, MAX_SCREEN_WORKSPACES)
     // An operator without Build reaches their console through a workspace shared for use, which is
-    // not among the recent build workspaces; it is listed only when it holds a console.
+    // not among the recent build workspaces; it is listed when it holds a console, and as unreadable
+    // (`screens: null`) when its reads fail or time out, so a published console never just vanishes.
     const uses = durableViews ? recent.filter(workspace => workspace.role === 'use').slice(0, MAX_USE_CONSOLE_WORKSPACES) : []
     const operated = Promise.all(uses.map(async (workspace): Promise<WorkspaceScreens | null> => {
       const overseer = api.openGadget(workspace.id)
@@ -129,7 +130,7 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
             publishedScreens: await readPublishedScreens(overseer, consoles) }
         })(), `Workspace ${workspace.id}`, WORKSPACE_READ_TIMEOUT_MS)
       } catch {
-        return null
+        return { workspace, screens: null, flows: [], consoles: [], publishedScreens: {} }
       } finally {
         overseer[Symbol.dispose]()
       }
