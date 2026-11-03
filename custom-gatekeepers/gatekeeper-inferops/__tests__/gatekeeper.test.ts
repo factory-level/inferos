@@ -115,9 +115,15 @@ describe("scope", () => {
 
   it("refuses the activity of another project's issue exactly as an unknown one, observing nothing", async () => {
     const { hooks, session } = setup();
+    // openIssue refuses too; settle both promises so neither rejection goes unhandled.
+    const activityOf = async (id: string) => {
+      const issue = session.openIssue(id);
+      const [, read] = await Promise.allSettled([issue, issue.activity()]);
+      return read.status === "rejected" ? String(read.reason) : "";
+    };
 
-    const otherProject = await failure(session.openIssue(ENG_41).activity());
-    const unknown = await failure(session.openIssue(crypto.randomUUID()).activity());
+    const otherProject = await activityOf(ENG_41);
+    const unknown = await activityOf(crypto.randomUUID());
 
     expect(otherProject).toContain("NOT_FOUND: No such issue in this project.");
     expect(unknown.replace(/^.*NOT_FOUND/, "")).toBe(otherProject.replace(/^.*NOT_FOUND/, ""));

@@ -42,7 +42,7 @@
 //   deployment. Local development only; it never backs a connected person.
 
 import { createLogger } from "@gadgets/observability/logger";
-import { readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
+import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import {
   HOST_BOARD_LIMITS, type HostBoardColumn, type HostBoardIssue, type HostBoardScope,
   type HostBoardSnapshot, type HostBoardUnavailableReason,
@@ -207,12 +207,32 @@ function runNotFound(): InferOpsError {
 class Malformed extends Error {}
 
 /**
- * One activity read's bounds. A page is one `issue.history` request, its body already capped at
- * HOST_BOARD_LIMITS.bytes by `request`; HISTORY_PAGES of HISTORY_PAGE_SIZE bounds the records read,
- * and `ActivityWindow` bounds what is kept across pages to the newest ISSUE_ACTIVITY_LIMIT, shortened.
+ * One activity read's bounds. A page is one `issue.history` request whose body is read through the
+ * streaming cap of HISTORY_PAGE_BYTES (HOST_BOARD_LIMITS.bytes, 256 KiB) before it is parsed.
+ *
+ * Why the page size adapts rather than being fixed: InferOps allows a comment or a description of
+ * 20,000 characters, which JSON can make up to 6 bytes each (a `\u00XX` escape), so one entry is
+ * at most about 120 KB with its other fields, and always fits a page alone. Only 2 such entries
+ * are certain to fit, while a typical entry (a state change) is a few hundred bytes. So a read
+ * asks for up to HISTORY_PAGE_SIZE entries, sizes each next page from the bytes per entry of the
+ * last (aiming at 3/4 of the cap), and asks again for half as many at the same cursor when a page
+ * goes over the cap. A legitimate page therefore never fails the read; only a single entry larger
+ * than the cap, which InferOps' own limits rule out, does (UNAVAILABLE).
+ *
+ * HISTORY_REQUESTS bounds the requests, retries included: about 5,000 typical entries, and at
+ * least 50 of the largest. `ActivityWindow` bounds what is kept across pages to the newest
+ * ISSUE_ACTIVITY_LIMIT, shortened.
  */
 const HISTORY_PAGE_SIZE = 100;
-const HISTORY_PAGES = 50;
+const HISTORY_PAGE_BYTES = HOST_BOARD_LIMITS.bytes;
+const HISTORY_REQUESTS = 50;
+
+/** How many entries to ask for next, after a page of `entries` took `bytes`. */
+function nextHistoryPageSize(entries: number, bytes: number): number {
+  if (entries === 0 || bytes === 0) return HISTORY_PAGE_SIZE;
+  const fit = Math.floor((HISTORY_PAGE_BYTES * 3) / 4 / (bytes / entries));
+  return Math.min(HISTORY_PAGE_SIZE, Math.max(1, fit));
+}
 
 /** One `issue.history` page: its entries, and the cursor to the next page (null on the last). */
 function parseHistoryPage(raw: unknown): { entries: HistoryEntryRecord[]; nextCursor: string | null } {
@@ -1071,7 +1091,20 @@ type Send = {
   maybeEmpty?: boolean;
   /** Read a failed response before the shared mapping; undefined falls back to it. */
   failure?: (status: number, wire: string | null) => SendFailure | undefined;
+  /**
+   * Read the body through the streaming byte cap before any parsing: a successful one over it
+   * throws `BodyTooLarge` (cancelled, nothing parsed), a failed one is capped at
+   * `HOST_BOARD_LIMITS.errorBytes`. `received` is told how many bytes a successful body had.
+   */
+  capped?: { maxBytes: number; received: (bytes: number) => void };
 };
+
+/** A successful response over its request's byte cap: cancelled unread, so nothing was parsed. */
+class BodyTooLarge extends InferOpsError {
+  constructor() {
+    super("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
+  }
+}
 
 /**
  * The InferOps HTTP data source for one connection: a fixed credential, or an endpoint whose
@@ -1122,10 +1155,32 @@ export function openHttpInferOpsClient(
       throw unavailable(0, error);
     }
     let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      body = undefined;
+    if (send.capped) {
+      let raw = "";
+      try {
+        raw = await readTextCapped(response, response.ok ? send.capped.maxBytes : L.errorBytes);
+      } catch (error) {
+        if (response.ok && error instanceof ResponseTooLargeError) {
+          logger.warn("InferOps request failed", {
+            event: "http.request.failed", operation, status: response.status, code: "TOO_LARGE",
+          });
+          throw new BodyTooLarge();
+        }
+        // A failed response over its cap, or a stream that broke: nothing to parse, so the
+        // status alone decides below.
+      }
+      if (response.ok) send.capped.received(new TextEncoder().encode(raw).byteLength);
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = undefined;
+      }
+    } else {
+      try {
+        body = await response.json();
+      } catch {
+        body = undefined;
+      }
     }
     if (!response.ok) {
       const wire = wireCode(body);
@@ -1265,19 +1320,30 @@ export function openHttpInferOpsClient(
    * The issue's `issue.history`, after `readIssue` has placed it in `projectKey`'s project (so an
    * issue elsewhere is the same NOT_FOUND). InferOps pages it oldest first, so the newest entries
    * come last: each page goes straight into a rolling window of the newest ISSUE_ACTIVITY_LIMIT,
-   * and only one page is held at a time. A history longer than HISTORY_PAGES pages fails
+   * and only one page is held at a time. Each page is byte-capped before parsing, and sized to fit
+   * the cap (see HISTORY_PAGE_SIZE). A history needing more than HISTORY_REQUESTS requests fails
    * UNAVAILABLE rather than show older entries as the latest.
    */
   async function readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity> {
     await readIssue(projectKey, issueId);
     const window = new ActivityWindow();
     let after: string | null = null;
-    for (let page = 0; page < HISTORY_PAGES; page++) {
-      const query = `limit=${HISTORY_PAGE_SIZE}${after ? `&afterSeq=${after}` : ""}`;
+    let size = HISTORY_PAGE_SIZE;
+    for (let sent = 0; sent < HISTORY_REQUESTS; sent++) {
+      const query = `limit=${size}${after ? `&afterSeq=${after}` : ""}`;
       let body: unknown;
+      let bytes = 0;
       try {
-        body = await request("issue.history", { method: "GET", path: `/project/issues/${issueId}/history?${query}` });
+        body = await request("issue.history", {
+          method: "GET", path: `/project/issues/${issueId}/history?${query}`,
+          capped: { maxBytes: HISTORY_PAGE_BYTES, received: received => { bytes = received; } },
+        });
       } catch (error) {
+        // Over the cap: the same cursor again for half as many, down to a single entry.
+        if (error instanceof BodyTooLarge && size > 1) {
+          size = Math.max(1, Math.floor(size / 2));
+          continue;
+        }
         if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw issueNotFound();
         throw error;
       }
@@ -1285,6 +1351,7 @@ export function openHttpInferOpsClient(
       window.add(entries);
       if (!nextCursor) return window.result();
       after = nextCursor;
+      size = nextHistoryPageSize(entries.length, bytes);
     }
     throw new InferOpsError("UNAVAILABLE", "This issue's history is too long to show here.");
   }

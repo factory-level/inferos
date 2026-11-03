@@ -278,9 +278,65 @@ describe("activity", () => {
     expect(activity.entries[1]).toMatchObject({ kind: "change", value: "title 4999", shortened: false });
     // What is kept is bounded by the window, whatever the history's length.
     expect(JSON.stringify(activity).length).toBeLessThan(100 * 2200);
-    // Every page fits under the response cap the client already enforces.
+    // Pages of this size fit the cap, so none had to be asked for again.
     expect(largestPage).toBeLessThan(256 * 1024);
     expect(calls.filter(c => c.path.includes("/history"))).toHaveLength(50);
+  });
+
+  it("stops reading a page at the 256 KiB cap before parsing it, and fails UNAVAILABLE when even one entry is over", async () => {
+    // A body that never ends: without the cap it would be buffered whole before JSON.parse.
+    const streams: { pulled: number; cancelled: boolean }[] = [];
+    const chunk = new TextEncoder().encode(`{"entries":[${'"x",'.repeat(4096)}`);
+    const { client, calls } = fakeInferOps(call => {
+      if (!call.path.includes("/history")) return undefined;
+      const stream = { pulled: 0, cancelled: false };
+      streams.push(stream);
+      return new Response(new ReadableStream({
+        pull(controller) { stream.pulled += chunk.byteLength; controller.enqueue(chunk); },
+        cancel() { stream.cancelled = true; },
+      }), { headers: { "content-type": "application/json" } });
+    });
+
+    const refused = await failure(client.readIssueActivity("DEMO", DEMO_1));
+
+    expect(refused.code).toBe("UNAVAILABLE");
+    expect(refused.message).not.toContain("entries");
+    // The same cursor, for half as many each time, down to one entry.
+    expect(calls.filter(c => c.path.includes("/history")).map(c => new URLSearchParams(c.path.split("?")[1]).get("limit")))
+      .toEqual(["100", "50", "25", "12", "6", "3", "1"]);
+    for (const stream of streams) {
+      expect(stream.cancelled).toBe(true);
+      expect(stream.pulled).toBeLessThanOrEqual(256 * 1024 + 2 * chunk.byteLength);
+    }
+  });
+
+  it("reads a history of InferOps' largest comments, asking for smaller pages until each fits the cap", async () => {
+    // 20,000 characters is InferOps' comment limit; "€" is 3 bytes in UTF-8, and a control
+    // character 6 bytes as a JSON escape, so these are about 60 KB and 120 KB an entry.
+    const body = (n: number) => (n % 2 === 0 ? "€" : "\u0001").repeat(20_000);
+    const comment = (n: number) => ({ kind: "comment", id: String(n), at: "2026-11-03T08:00:00.000Z", actorId: PERSON,
+      actorType: "user", field: null, value: null, body: body(n), correlationId: null });
+    const served: number[] = [];
+    const { client, calls } = fakeInferOps(call => {
+      const match = /^\/project\/issues\/[^/]+\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const query = new URLSearchParams(match[1]);
+      const after = Number(query.get("afterSeq") ?? 0);
+      const page = Array.from({ length: Math.max(0, Math.min(Number(query.get("limit")), 30 - after)) }, (_, i) => comment(after + i + 1));
+      const text = JSON.stringify({ entries: page, nextCursor: after + page.length < 30 ? String(after + page.length) : null });
+      served.push(new TextEncoder().encode(text).byteLength);
+      return new Response(text, { headers: { "content-type": "application/json" } });
+    });
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity.omitted).toBe(0);
+    expect(activity.entries).toHaveLength(30);
+    expect(activity.entries[0]).toMatchObject({ kind: "comment", body: "€".repeat(2000), shortened: true });
+    expect(activity.entries[1]).toMatchObject({ kind: "comment", body: "\u0001".repeat(2000), shortened: true });
+    expect(served.some(bytes => bytes > 256 * 1024)).toBe(true);
+    expect(Math.max(...served.filter(bytes => bytes <= 256 * 1024))).toBeGreaterThan(100_000);
+    expect(calls.filter(c => c.path.includes("/history")).length).toBeLessThan(50);
   });
 
   it("refuses another project's issue as NOT_FOUND without asking for its history", async () => {
