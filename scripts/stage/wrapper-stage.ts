@@ -270,13 +270,44 @@ export function conflictingInputs(file: Readonly<Record<string, string | undefin
 }
 
 /**
- * The id of the namespace `wrangler kv namespace create` just made, from its own output (the config
- * snippet it prints after "Success!"), or null when the output isn't a successful create.
+ * The id of the namespace `wrangler kv namespace create` just made for `title`, read from the
+ * structure of its own output, or null. Wrangler prints `Creating namespace with title "<title>"`,
+ * then `Success!`, then a config snippet carrying the new id. So: exactly one "Creating" line, for
+ * exactly this title; a Success line after it; and exactly one id in what follows Success. An id
+ * printed anywhere before Success (a banner, a warning, another resource) is never taken.
  */
-export function parseKvCreateId(stdout: string): string | null {
-  if (!stdout.includes("Success!")) return null;
-  const match = /"id":\s*"([0-9a-f]{32})"/.exec(stdout) ?? /\bid\s*=\s*"([0-9a-f]{32})"/.exec(stdout);
-  return match ? match[1]! : null;
+export function parseKvCreateId(stdout: string, title: string): string | null {
+  const creating = [...stdout.matchAll(/Creating namespace with title "([^"\n]*)"/g)];
+  if (creating.length !== 1 || creating[0]![1] !== title) return null;
+  const success = stdout.indexOf("Success!", creating[0]!.index);
+  if (success < 0) return null;
+  const snippet = stdout.slice(success);
+  const ids = [...snippet.matchAll(/(?:"id":\s*"|\bid\s*=\s*")([0-9a-f]{32})"/g)].map((m) => m[1]!);
+  return ids.length === 1 ? ids[0]! : null;
+}
+
+/**
+ * What one `wrangler kv namespace create <title>` answered, as `ClaimOps.create` needs it: the new
+ * id, or `exists` when the title is taken. A create that succeeded without a readable id may have
+ * left the namespace behind, so its error names the title and how to clean it up.
+ */
+export function kvCreateOutcome(
+  title: string,
+  result: { status: number | null; stdout: string; stderr: string },
+): { id: string } | { exists: true } {
+  if (result.status !== 0) {
+    if (/already exists/.test(`${result.stdout}\n${result.stderr}`)) return { exists: true };
+    throw new Error(`wrangler kv namespace create ${title} failed:\n${result.stderr}`);
+  }
+  const id = parseKvCreateId(result.stdout, title);
+  if (!id) {
+    throw new Error(
+      `wrangler kv namespace create reported success, but its answer didn't name exactly one id for "${title}". ` +
+        `"${title}" may have been created: check \`wrangler kv namespace list\` and, if this deployment is abandoned, ` +
+        "remove it by hand with `wrangler kv namespace delete --namespace-id <its id>`.",
+    );
+  }
+  return { id };
 }
 
 /** What claiming needs from the account, so the flow can be run without one. */

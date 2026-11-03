@@ -46,7 +46,7 @@ import {
 } from "./stage-resources.ts";
 import { resolveStage, type StageDefinition } from "./stages.ts";
 import {
-  claimMarkers, conflictingInputs, inputSources, ownershipMarkers, ownershipProblem, parseKvCreateId, parseR2BucketList,
+  claimMarkers, conflictingInputs, inputSources, kvCreateOutcome, ownershipMarkers, ownershipProblem, parseR2BucketList,
   pinnedRevisionFromLsTree, readWrapperStage, workerProbe, WRAPPER_DEPLOY_VARS_FILE, type AccountResources,
 } from "./wrapper-stage.ts";
 
@@ -235,14 +235,7 @@ async function claim(stage: StageDefinition): Promise<void> {
       list: async () => [...(await listKvNamespaces()).keys()],
       create: async (title) => {
         // From an empty directory, so no Wrangler config can prefix the title.
-        const result = await runWrangler(scratch, ["kv", "namespace", "create", title]);
-        if (result.status !== 0) {
-          if (/already exists/.test(`${result.stdout}\n${result.stderr}`)) return { exists: true };
-          throw new Error(`wrangler kv namespace create ${title} failed:\n${result.stderr}`);
-        }
-        const id = parseKvCreateId(result.stdout);
-        if (!id) throw new Error(`wrangler kv namespace create ${title} reported no namespace id`);
-        return { id };
+        return kvCreateOutcome(title, await runWrangler(scratch, ["kv", "namespace", "create", title]));
       },
       remove: async (id) => {
         const result = await runWrangler(ROOT, ["kv", "namespace", "delete", "--namespace-id", id, "--skip-confirmation"]);

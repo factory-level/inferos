@@ -7,7 +7,7 @@ import { stageKvNamespaces, stagePackages, stageWorkerName } from "./stage-confi
 import { STAGES } from "./stages.ts";
 import {
   claimMarkers, claimProblem, companyPrefix, conflictingInputs, inputSources, ownershipMarkers, ownershipProblem,
-  parseKvCreateId, parseR2BucketList, type ClaimOps,
+  kvCreateOutcome, parseKvCreateId, parseR2BucketList, type ClaimOps,
   parseWrapperDeployment, pinnedRevisionFromLsTree, readWrapperStage, workerProbe, wrapperStage,
   type WrapperDeployment,
 } from "./wrapper-stage.ts";
@@ -163,11 +163,56 @@ test("Wrangler's answers are read strictly, and an unreadable one refuses", () =
   // A 10007 that isn't the error code (an id, a date) doesn't mean not found.
   assert.throws(() => workerProbe(1, "", "failed for script id 4410007a at 2026-10007"), /cannot tell/);
   assert.throws(() => workerProbe(1, JSON.stringify({ errors: [{ code: 10000, message: "see 10007" }] }), ""), /cannot tell/);
-  // A create's own answer carries the id of what it made.
+  // A create's own answer carries the id of what it made, for the title it was asked for.
   const id = "0123456789abcdef0123456789abcdef";
-  assert.equal(parseKvCreateId(`✨ Success!\nAdd it to your config:\n{\n  "kv_namespaces": [\n    {\n      "binding": "X",\n      "id": "${id}"\n    }\n  ]\n}\n`), id);
-  assert.equal(parseKvCreateId(`✨ Success!\n[[kv_namespaces]]\nbinding = "X"\nid = "${id}"\n`), id);
-  assert.equal(parseKvCreateId(`"id": "${id}"`), null);
+  const title = "inferos-acme-owner.os.acme.example";
+  const creating = `🌀 Creating namespace with title "${title}"\n`;
+  assert.equal(parseKvCreateId(`${creating}✨ Success!\nAdd it to your config:\n{\n  "kv_namespaces": [\n    {\n      "binding": "X",\n      "id": "${id}"\n    }\n  ]\n}\n`, title), id);
+  assert.equal(parseKvCreateId(`${creating}✨ Success!\n[[kv_namespaces]]\nbinding = "X"\nid = "${id}"\n`, title), id);
+  assert.equal(parseKvCreateId(`"id": "${id}"`, title), null);
+});
+
+test("the create-id parser takes only the id Wrangler gave for this title", () => {
+  const ours = "0123456789abcdef0123456789abcdef";
+  const other = "fedcba9876543210fedcba9876543210";
+  const title = "inferos-acme-owner.os.acme.example";
+  const snippet = (id: string) => `✨ Success!\n{\n  "kv_namespaces": [\n    {\n      "binding": "X",\n      "id": "${id}"\n    }\n  ]\n}\n`;
+  // An unrelated id printed before the config snippet (a banner, a warning) is never taken.
+  assert.equal(
+    parseKvCreateId(`warning: account "id": "${other}" is near its limit\n🌀 Creating namespace with title "${title}"\n${snippet(ours)}`, title),
+    ours,
+  );
+  assert.equal(
+    parseKvCreateId(`🌀 Creating namespace with title "${title}"\nresolved "id": "${other}"\n${snippet(ours)}`, title),
+    ours,
+  );
+  // A create for another title, two creates, no Success, or two ids after Success: no id at all.
+  assert.equal(parseKvCreateId(`🌀 Creating namespace with title "inferos-beta-owner.os.beta.example"\n${snippet(ours)}`, title), null);
+  assert.equal(parseKvCreateId(`🌀 Creating namespace with title "${title}"\n🌀 Creating namespace with title "${title}"\n${snippet(ours)}`, title), null);
+  assert.equal(parseKvCreateId(`🌀 Creating namespace with title "${title}"\n{ "id": "${ours}" }\n`, title), null);
+  assert.equal(parseKvCreateId(`🌀 Creating namespace with title "${title}"\n${snippet(ours)}${snippet(other)}`, title), null);
+});
+
+test("a create that succeeded without a readable id names the title and the cleanup", () => {
+  const title = "inferos-acme-owner.os.acme.example";
+  const ok = (stdout: string) => ({ status: 0, stdout, stderr: "" });
+  assert.deepEqual(
+    kvCreateOutcome(title, ok(`🌀 Creating namespace with title "${title}"\n✨ Success!\nid = "0123456789abcdef0123456789abcdef"\n`)),
+    { id: "0123456789abcdef0123456789abcdef" },
+  );
+  assert.throws(
+    () => kvCreateOutcome(title, ok(`🌀 Creating namespace with title "${title}"\n✨ Success!\n(no snippet)\n`)),
+    (error: Error) =>
+      error.message.includes(`"${title}" may have been created`) &&
+      error.message.includes("wrangler kv namespace list") &&
+      error.message.includes("wrangler kv namespace delete --namespace-id"),
+  );
+  // Taken already is another run's claim; any other failure says so.
+  assert.deepEqual(
+    kvCreateOutcome(title, { status: 1, stdout: "", stderr: `A KV namespace with the title "${title}" already exists.` }),
+    { exists: true },
+  );
+  assert.throws(() => kvCreateOutcome(title, { status: 1, stdout: "", stderr: "Authentication error" }), /failed:\nAuthentication error/);
 });
 
 /** A fake account: titles by id, with hooks to make things happen between steps. */
