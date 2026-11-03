@@ -108,8 +108,9 @@ export const STAGES = {
       // Dev InferLab's Cloud Armor admits only allowlisted addresses; external test agents sign in here.
       authorizeOrigin: "https://auth.dev-os.factorylevel.dev",
       // Workflow policy (`project/workflow`) reads InferOps `workflow.get`, which dev serves. Custom
-      // tables wait for dev InferOps to turn `objects.enabled` on (FAC-57, FAC-149).
-      resources: ["workflowPolicy"],
+      // tables (`object/table`) read InferOps `table.*`/`object.*`, which dev serves since its
+      // `objects.enabled` went on (inferops#2535, FAC-149); prod's InferOps keeps them off.
+      resources: ["tables", "workflowPolicy"],
     },
     gatekeepers: STAGE_GATEKEEPERS,
     requireCleanTree: false,
