@@ -3633,11 +3633,6 @@ export class InferOpsAccountGatekeeper
   }
 
   /**
-   * `key` is the store the records live in: the scope's own, except when routing an action id,
-   * which uses the store its index names, so a record whose stored target was changed is refused
-   * by its fingerprint rather than looked up elsewhere.
-   */
-  /**
    * Authorize an observation no collaborator was admitted for (the workspace list, a board search,
    * a page's composed text): every current collaborator is excluded, and once it is recorded the
    * binding is owner-only for good (gatekeeper-kit's withhold latch), since a set-less read gives a
@@ -3656,6 +3651,11 @@ export class InferOpsAccountGatekeeper
     check.commit();
   }
 
+  /**
+   * `key` is the store the records live in: the scope's own, except when routing an action id,
+   * which uses the store its index names, so a record whose stored target was changed is refused
+   * by its fingerprint rather than looked up elsewhere.
+   */
   #parts(scope: ActionScope, key = scopeKey(scope)): BindingParts {
     return {
       store: new ScopedActionStore(this.ctx.storage.kv, key),

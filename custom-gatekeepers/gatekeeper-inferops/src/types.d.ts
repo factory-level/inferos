@@ -147,7 +147,9 @@ export interface InferOpsProjectSession {
    * list means nothing matched. Several candidates mean the person must choose: never pick one for
    * them. A candidate names a board but grants nothing; open it only through a connection made for
    * its boardRef, or with openBoard(boardRef) of an account connection of its organization.
-   * Recorded as an observation, and refused in a workspace shared with others.
+   * Recorded as an observation, and refused in a workspace shared with others. On a board opened
+   * through an account connection, calling it makes that whole connection no longer shareable
+   * with anyone from then on.
    */
   findBoards(query: string): Promise<BoardCandidate[]>;
 }
@@ -555,7 +557,9 @@ export interface InferOpsWikiSession {
    * of the operations it measures, as your access allows, or a line saying coverage is unavailable
    * or could not be loaded. Embedded widgets read as their live text. A page with an edit of yours
    * not yet in effect reads with that edit, and then without coverage and with embeds as the links
-   * they are written as. Fails with NOT_FOUND for a page with nothing you can read.
+   * they are written as. Fails with NOT_FOUND for a page with nothing you can read. On a Wiki
+   * opened through an account connection, calling it makes that whole connection no longer
+   * shareable with anyone from then on.
    */
   readDocumentText(slugOrId: string): Promise<string>;
   /**
