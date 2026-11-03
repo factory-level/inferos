@@ -45,6 +45,15 @@ export interface StageDefinition {
      * persona picker, so it must be covered by the stage's Access application; the deploy checks.
      */
     authorizeOrigin?: string;
+    /**
+     * The optional InferOps resource kinds this stage's gatekeeper offers, each switched on by its
+     * own gatekeeper var (gatekeeper-inferops `connection.json`, `enabledBy`). A kind left out is not
+     * offered, so a blueprint that binds to it is refused at Configure. List a kind only once this
+     * stage's InferLab environment serves it: custom tables need InferOps `objects.enabled`.
+     * Turning a kind on never widens a grant: every call is still the person's own InferOps
+     * authority.
+     */
+    resources?: readonly InferOpsOptionalResource[];
   };
   /**
    * The gatekeepers this stage deploys. A gatekeeper left out is neither deployed nor bound, so it
@@ -66,6 +75,16 @@ const STAGE_GATEKEEPERS = [
   INFEROPS_GATEKEEPER, "gatekeeper-context", "gatekeeper-scheduler", "gatekeeper-mcp",
 ] as const;
 
+/** The InferOps gatekeeper's optional resource kinds, and the var that switches each on. */
+export const INFEROPS_OPTIONAL_RESOURCES = {
+  tables: "INFEROPS_TABLES_ENABLED",
+  members: "INFEROPS_MEMBERS_ENABLED",
+  workflowPolicy: "INFEROPS_WORKFLOW_POLICY_ENABLED",
+} as const;
+
+/** One optional InferOps resource kind a stage can offer. */
+export type InferOpsOptionalResource = keyof typeof INFEROPS_OPTIONAL_RESOURCES;
+
 /** Every stage `pnpm stage:*` accepts, by name. */
 export const STAGES = {
   dev: {
@@ -78,6 +97,9 @@ export const STAGES = {
       authOrigin: "https://auth.dev.inferlab.io",
       // Dev InferLab's Cloud Armor admits only allowlisted addresses; external test agents sign in here.
       authorizeOrigin: "https://auth.dev-os.factorylevel.dev",
+      // Workflow policy (`project/workflow`) reads InferOps `workflow.get`, which dev serves. Custom
+      // tables wait for dev InferOps to turn `objects.enabled` on (FAC-57, FAC-149).
+      resources: ["workflowPolicy"],
     },
     gatekeepers: STAGE_GATEKEEPERS,
     requireCleanTree: false,
