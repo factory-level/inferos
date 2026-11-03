@@ -1,4 +1,4 @@
-// The InferLab sign-in proxy: central-auth's persona sign-in pages, served from a hostname of this
+// The InferLab sign-in proxy: central-auth's sign-in pages (personas and Google), served from a hostname of this
 // deployment for browsers InferLab's edge does not admit.
 //
 // Dev InferLab's edge (Cloud Armor) admits only allowlisted addresses plus requests carrying the
@@ -9,9 +9,17 @@
 //
 // - The authorize origin must sit behind the same Cloudflare Access application as the deployment:
 //   it exposes the persona picker, which anyone who reaches it can use.
-// - Only the three browser legs of central-auth are forwarded (`GET /authorize`,
-//   `POST /authorize/persona`, `GET /logout`). The InferLab origin also serves the whole API, so
-//   every other path is a 404 here.
+// - Only the browser legs of central-auth are forwarded: `GET /authorize`,
+//   `POST /authorize/persona`, `GET /logout`, and the Google edge's `POST /auth/oauth/sign-in/social`
+//   and `GET /auth/oauth/callback/google`. The InferLab origin also serves the whole API, so every
+//   other path is a 404 here.
+// - Every forwarded request names this origin in `x-inferos-authorize-origin`. InferLab answers the
+//   Google legs on that origin only when it is listed in its `auth.sso.proxyOrigins`, so Google sends
+//   the browser back here (its callback, `<origin>/auth/oauth/callback/google`, is registered on
+//   InferLab's Google client). Anywhere else the header is ignored.
+// - Every sign-in asks for `/authorize?…&prompt=select_account` (inferlab-login.ts), so the sign-in
+//   page is shown each time instead of the last persona, without ending the session central-auth
+//   keeps for this host (opening `/logout` here would also end every connected account's session).
 // - Only a fixed set of request headers is forwarded, with Access's `CF_Authorization` cookie
 //   removed. `Origin` and `Referer` naming the authorize origin are rewritten to the InferLab origin,
 //   so central-auth's same-origin check on the persona form holds; anything else passes unchanged
@@ -30,7 +38,12 @@ const FORWARDED: ReadonlyMap<string, string> = new Map([
   ["/authorize", "GET"],
   ["/authorize/persona", "POST"],
   ["/logout", "GET"],
+  ["/auth/oauth/sign-in/social", "POST"],
+  ["/auth/oauth/callback/google", "GET"],
 ]);
+
+/** Names the origin this proxy serves central-auth from (InferLab's `PORTAL_AUTHORIZE_ORIGIN_HEADER`). */
+export const AUTHORIZE_ORIGIN_HEADER = "x-inferos-authorize-origin";
 
 /** Request headers a sign-in page needs; nothing else reaches InferLab. */
 const FORWARDED_REQUEST_HEADERS = [
@@ -76,6 +89,7 @@ export async function handleInferLabAuthProxy(request: Request, env: InferLabLog
     if (name === "origin" || name === "referer") value = rewriteOrigin(value, authorize, upstream);
     if (value) headers.set(name, value);
   }
+  headers.set(AUTHORIZE_ORIGIN_HEADER, authorize);
 
   const response = await inferLabFetch(env)(`${upstream}${url.pathname}${url.search}`, {
     method: request.method,

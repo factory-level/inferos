@@ -167,6 +167,8 @@ describe("sign-in flow", () => {
     expect(params.get("client_id")).toBe("inferos");
     expect(params.get("redirect_uri")).toBe(REDIRECT_URI);
     expect(params.get("code_challenge_method")).toBe("S256");
+    // Without a sign-in proxy the session is InferLab's own and is reused: no prompt is sent.
+    expect(params.get("prompt")).toBeNull();
     expect(params.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(params.get("state")).toMatch(/^[0-9a-f]{64}\.[0-9a-f]{64}$/);
   });
@@ -259,9 +261,14 @@ describe("sign-in flow", () => {
   it("sends the browser to the authorize origin but exchanges the code at the InferLab origin", async () => {
     const proxied = { ...LOGIN_ENV, INFERLAB_AUTHORIZE_ORIGIN: "http://127.0.0.1:8788" };
     const popup = await handleInferLabLogin(new Request(await start("proxied")), proxied, env.INFERLAB_LOGIN);
+    // Straight to /authorize on the proxy, asking for the sign-in page: no /logout, which would also
+    // end the InferLab session behind an account already connected through this host.
     const location = new URL(popup!.headers.get("Location")!);
     expect(`${location.origin}${location.pathname}`).toBe("http://127.0.0.1:8788/authorize");
+    expect(location.searchParams.get("prompt")).toBe("select_account");
+    expect(location.searchParams.get("client_id")).toBe("inferos");
     expect(location.searchParams.get("redirect_uri")).toBe(REDIRECT_URI);
+    expect(location.searchParams.get("code_challenge_method")).toBe("S256");
 
     const exchanges = tokenEndpoint(signedIn("ada@example.com"));
     const done = await handleInferLabLogin(new Request(
