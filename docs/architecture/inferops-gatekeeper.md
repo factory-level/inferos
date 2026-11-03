@@ -211,6 +211,9 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `authorizeObservation` before returning. `openIssue(id)` is not an observation (UUID existence) and
   fails with the same `NOT_FOUND: No such issue in this project.` for an unknown issue and for an
   issue of another project.
+  A state's or card's workflow is one of `content`, `software` and `service` (InferOps' Service
+  jobs ladder, at the pinned inferops `0bc12ccc`, `project-board.schema.json`); any other value
+  makes the whole board answer `UNAVAILABLE`. Coding dispatch stays `software`-only.
 - **Activity** (FAC-157). `InferOpsIssueSession.activity()` reads InferOps' `issue.history` (field
   changes and comments) with the connection's own InferOps access.
   - **Placement:** it reads the issue first, so an unknown issue or one of another project is the
@@ -259,7 +262,8 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 - **Creates.** `createIssue({title, description?, priority?, stateId?})` validates the fields the
   same way, resolves the state from the board (`INVALID_STATE` outside the project; default the
   first `software` state in board order, or the first state when there is none) and sends it
-  explicitly, with `workflow: "content"` only for a content state. Until decided, `readBoard()`
+  explicitly, naming the state's workflow (`content` or `service`) unless it is InferOps' default
+  `software`. Until decided, `readBoard()`
   shows a provisional card at the end of that column: id `pending-<action id>`, identifier
   `<KEY>-new`, revision `"0"`, `pending: "create"`; `openIssue` does not accept it. The approval
   shows project, title, state, workflow, priority and description; its title is

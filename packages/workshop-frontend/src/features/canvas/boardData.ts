@@ -1,8 +1,9 @@
 // The board data adapter every board-shaped card shares. One instance serves one scope: the
 // user's capability on one workspace (its Overseer stub), so nothing read in one scope is ever
 // shown in another. Within a scope, entries are keyed by the canonical widget request. A target
-// is resolved to a session only through the workspace's existing connection
-// (Overseer.getGatekeeperByResourceUrl), so a reference identifies a board and authorizes nothing.
+// is resolved to a session only through the workspace's existing connections: its exact board
+// connection, else its InferOps account connection for the board's organization
+// (inferopsConnection.ts), so a reference identifies a board and authorizes nothing.
 //
 // InferOps stays authoritative: the adapter keeps snapshots, never a second copy it edits. A move,
 // a new issue or an edit is proposed through the gatekeeper's approval path and shown as pending
@@ -13,6 +14,7 @@ import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
 import type { Board, InferOpsProjectSession, IssueActivity, IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardMetrics } from './boardMetrics'
+import { openInferOpsSession } from './inferopsConnection'
 
 /** What one board card asks for: registered kind and version, canonical target, normalized params. */
 export type BoardRequest = Pick<CanvasProjectBoardWidget, 'kind' | 'version' | 'targetRef' | 'params'>
@@ -409,15 +411,7 @@ export class BoardData {
     if (this.#disposed) return Promise.resolve(null)
     const data = this.#target(target)
     if (!data.session) {
-      const session = (async () => {
-        const client = await this.#overseer.getGatekeeperByResourceUrl(target)
-        if (!client) return null
-        try {
-          return await client.openSession() as RpcStub<InferOpsProjectSession>
-        } finally {
-          client[Symbol.dispose]()
-        }
-      })()
+      const session = openInferOpsSession(this.#overseer, target, 'board')
       data.session = session
       // An unbound target is not cached: the next read looks the connection up again.
       void session.then(stub => { if (stub === null && data.session === session) data.session = undefined }, () => {})

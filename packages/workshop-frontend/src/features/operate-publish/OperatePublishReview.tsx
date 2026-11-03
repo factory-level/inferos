@@ -90,9 +90,16 @@ export const OperatePublishReview = ({
   }
 
   if (!candidate) {
+    // Publishing here means a new version of the workspace's blueprint, so the first version has to
+    // be made in Build. Name the control that does it, since Build has none called "Publish".
     return <Section title="Nothing to review">
       <p className="m-0 text-sm text-kumo-subtle">
-        No version of this workspace has been published yet, so there is nothing to install. Publish it from Build first.
+        This workspace has no blueprint yet, so there is nothing to publish or install.
+      </p>
+      <p className="m-0 text-sm text-kumo-subtle">
+        To make one, go back to Build, select the app, open <strong>Blueprints</strong> (the blueprint
+        icon in the header, or Blueprints in the menu on a small screen) and choose <strong>Create
+        blueprint</strong>. Then come back to Publish to Operate.
       </p>
       <div><WorkshopButton tone="primary" onClick={onBackToBuild}>Back to Build</WorkshopButton></div>
     </Section>

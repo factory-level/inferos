@@ -2229,7 +2229,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
       ...(issue.description ? { description: issue.description } : {}),
       ...(issue.priority ? { priority: issue.priority } : {}),
       stateId: state.id,
-      ...(state.workflow === "content" ? { workflow: "content" as const } : {}),
+      ...(state.workflow !== "software" ? { workflow: state.workflow } : {}),
     };
     // One intent, one create: the same proposal again (another tab, a retried submit) while the
     // first is pending joins it rather than queueing a second issue. Edits and moves need no

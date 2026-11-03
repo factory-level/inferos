@@ -3,6 +3,7 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft } from '@phosphor-icons/react'
 import type { WorkpieceId } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
+import { useServerConfig } from '../../ServerConfigContext'
 import WorkspaceOpenErrorPage from '../../components/WorkspaceOpenErrorPage'
 import { OperatePublishReview } from '../../features/operate-publish/OperatePublishReview'
 import { candidateOf, installsOf, messageOf, type Candidate } from '../../features/operate-publish/operatePublish'
@@ -24,6 +25,11 @@ const Centered = ({ children }: { children: React.ReactNode }) =>
 export const OperatePublishPage = ({ workspaceId, spaceId }: { workspaceId: string; spaceId: string | null }) => {
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
+  // Build offers Publish to Operate only with composable views; a direct link says so rather than
+  // reviewing half a feature. While the config is still loading (null) the page goes on, and the
+  // kernel refuses whatever the deployment doesn't serve.
+  const serverConfig = useServerConfig()
+  const unavailable = serverConfig !== null && serverConfig.canvasFeatures?.composableViews !== true
   const source = useWorkspaceOpen({
     id: workspaceId, authenticatedApi, onMetadata: ignore, onShareKeyConsumed: ignore, onInvalidShareKey: ignore,
   })
@@ -65,6 +71,15 @@ export const OperatePublishPage = ({ workspaceId, spaceId }: { workspaceId: stri
     to: '/workspace/$id/publish', params: { id: workspaceId }, search: { space: id }, replace: true,
   })
 
+  if (unavailable) {
+    return <Centered>
+      <p className="max-w-lg text-sm text-kumo-subtle">
+        Publish to Operate isn&apos;t available on this deployment: it needs composable views, which
+        this deployment hasn&apos;t turned on.
+      </p>
+      <Link to="/workspace/$id" params={{ id: workspaceId }} className="text-sm text-kumo-brand">Back to workspace</Link>
+    </Centered>
+  }
   if (source.error?.kind === 'open') {
     return <WorkspaceOpenErrorPage kind={source.error.failure} onGoToWorkspaces={() => navigate({ to: '/workspaces' })} onRetry={source.retry} />
   }

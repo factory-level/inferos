@@ -1,7 +1,7 @@
 // One InferMind workspace's Wiki, read through the workspace's Wiki connection for it
-// (`inferops://<tenant>.<workspace>/knowledge/wiki`). Like a board, the reference is resolved only
-// through a connection the workspace already holds (Overseer.getGatekeeperByResourceUrl), so it
-// identifies a Wiki and authorizes nothing. InferMind stays authoritative: this keeps the latest
+// (`inferops://<tenant>.<workspace>/knowledge/wiki`), or its InferOps account connection for the
+// Wiki's organization. Like a board, the reference is resolved only through connections the
+// workspace already holds (inferopsConnection.ts), so it identifies a Wiki and authorizes nothing. InferMind stays authoritative: this keeps the latest
 // reads (the page list, the Wiki structure, the pages), and a section or page body edit is only
 // proposed through the gatekeeper's approval path. What became of an edit is read from the page,
 // never assumed: a proposal is not a save.
@@ -9,7 +9,8 @@ import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
 import { canonicalBoardRef, codeOf, messageOf, type ProposalResult } from './boardData'
-import { bodyEditActionTitle, isOpenEdit, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
+import { resolveInferOpsSession, type InferOpsConnectionKind } from './inferopsConnection'
+import { bodyEditActionTitle, isOpenEdit, pageText, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
 
 export type WikiListState =
   | { status: 'loading' }
@@ -54,8 +55,11 @@ export type WikiSnapshot = {
   bodyEdits: ReadonlyMap<string, BodyEdit>
 }
 
-/** The agent's text of one page, or why it could not be read. */
-export type AgentTextResult = { ok: true; text: string } | { ok: false; code: string; message: string }
+/**
+ * The agent's text of one page, or why it could not be read. `composed` when it was built here
+ * from the page read (an account connection), rather than read as InferOps composes it.
+ */
+export type AgentTextResult = { ok: true; text: string; composed?: true } | { ok: false; code: string; message: string }
 
 /** Nothing read yet; one object, so snapshots compare equal. */
 export const LOADING_WIKI: WikiSnapshot = { list: { status: 'loading' }, structure: { status: 'loading' }, pages: new Map(), edits: new Map(), bodyEdits: new Map() }
@@ -79,6 +83,8 @@ export class WikiData {
   readonly #edits = new Map<string, Edit>()
   readonly #bodyEdits = new Map<string, PageEdit>()
   #session?: Promise<RpcStub<InferOpsWikiSession> | null>
+  /** The connection the current session came through, once resolved. */
+  #via?: InferOpsConnectionKind
   // Orders reads: a result older than the newest read of the same thing never lands.
   #clock = 0
   #listRead = 0
@@ -214,15 +220,34 @@ export class WikiData {
     this.#publish({})
   }
 
-  /** The page as the agent reads it (`readDocumentText`), through the same connection. Each read is an observation. */
+  /**
+   * The page as the agent reads it. Through the Wiki's own connection that is `readDocumentText`,
+   * an observation. Through an InferOps account connection it is composed here instead, from the
+   * page and structure already read, by the gatekeeper's own page-text serializer (`pageText`):
+   * `readDocumentText` there would make the whole account connection owner-only for good, which a
+   * view toggle must not do (owner decision, 2026-11-03). That text leaves out what only InferOps
+   * adds: a Master's coverage block and embedded widgets' live text.
+   */
   async readAgentText(slug: string): Promise<AgentTextResult> {
     try {
       const session = await this.#sessionOf()
       if (!session) return NOT_CONNECTED
+      if (this.#via === 'account') return this.#composedText(slug)
       return { ok: true, text: await session.readDocumentText(slug) }
     } catch (error) {
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }
+  }
+
+  #composedText(slug: string): AgentTextResult {
+    const page = this.#snapshot.pages.get(slug)
+    if (page?.status !== 'ready') return { ok: false, code: 'NOT_LOADED', message: 'The page is not loaded.' }
+    const { structure } = this.#snapshot
+    const text = pageText(page.document, structure.status === 'ready' ? structure.structure : null)
+    if (text === null) {
+      return { ok: false, code: 'NOT_COMPOSED', message: 'This page lists the Wiki structure, which is not read here.' }
+    }
+    return { ok: true, text, composed: true }
   }
 
   /** Drop the session; late results are discarded. */
@@ -358,15 +383,10 @@ export class WikiData {
   #sessionOf(): Promise<RpcStub<InferOpsWikiSession> | null> {
     if (this.#disposed) return Promise.resolve(null)
     if (!this.#session) {
-      const session = (async () => {
-        const client = await this.#overseer.getGatekeeperByResourceUrl(this.target)
-        if (!client) return null
-        try {
-          return await client.openSession() as RpcStub<InferOpsWikiSession>
-        } finally {
-          client[Symbol.dispose]()
-        }
-      })()
+      const session = resolveInferOpsSession(this.#overseer, this.target, 'wiki').then(resolved => {
+        if (resolved) this.#via = resolved.via
+        return resolved?.session ?? null
+      })
       this.#session = session
       // No binding is not cached: the next read looks the connection up again.
       void session.then(stub => { if (stub === null && this.#session === session) this.#session = undefined }, () => {})

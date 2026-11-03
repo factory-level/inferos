@@ -97,8 +97,36 @@ describe('BoardData', () => {
     ws.connected[DEMO] = true
     data.refresh(request())
     await flush()
-    expect(ws.lookups).toEqual([DEMO, DEMO])
+    // Unbound means neither the board's own connection nor its organization's account connection.
+    expect(ws.lookups).toEqual([DEMO, 'inferops://demo.local/account', DEMO])
     expect(ws.reads).toHaveLength(1)
+  })
+
+  it('reads a board through the account connection, and shows its refusal as an error, not as unbound', async () => {
+    let refuse = true
+    const opened: string[] = []
+    const overseer = {
+      getGatekeeperByResourceUrl: async (url: string) => url !== 'inferops://demo.local/account' ? null : {
+        openSession: async () => ({
+          openBoard: async (ref: string) => {
+            opened.push(ref)
+            if (refuse) throw new Error('NOT_FOUND: No such InferOps board is available to this connection.')
+            return { readBoard: async () => board([issue('1', 'todo')]), [Symbol.dispose]: () => {} }
+          },
+          [Symbol.dispose]: () => {},
+        }),
+        [Symbol.dispose]: () => {},
+      },
+    } as unknown as RpcStub<Overseer>
+    const data = new BoardData(overseer)
+    listen(data, request())
+    await flush()
+    expect(data.get(request())).toEqual({ status: 'error', message: 'No such InferOps board is available to this connection.' })
+    refuse = false
+    data.refresh(request())
+    await flush()
+    expect(columns(data.get(request()))).toEqual([['1'], [], []])
+    expect(opened).toEqual([DEMO, DEMO])
   })
 
   it('keys the cache by canonical target, so a differently cased host is the same board', () => {

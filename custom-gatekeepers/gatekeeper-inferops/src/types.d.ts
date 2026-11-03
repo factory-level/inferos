@@ -2,7 +2,7 @@
 export type Revision = string;
 
 /** The work-item workflow that a state or issue belongs to. */
-export type Workflow = "content" | "software";
+export type Workflow = "content" | "software" | "service";
 
 /** An issue's priority; none means unset. */
 export type Priority = "urgent" | "high" | "medium" | "low" | "none";
