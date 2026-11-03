@@ -6222,6 +6222,7 @@ class OverseerImpl implements AgentHooks {
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
+          this.assertAgentBindingStillAvailable(caller.chatId, target.id);
           this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
         }
         let chatId = "chatId" in caller ? caller.chatId : undefined;
@@ -7154,16 +7155,11 @@ class OverseerImpl implements AgentHooks {
         ...this.visibleBindings(gadget, caller.chatId).map(([, edge]) => edge.target)]);
       scope = `gadget ${gadgetId}`;
     } else if (caller.from === "agent") {
-      context = this.storage.chatContext.get(caller.chatId);
-      gadgetId = context?.spawnerScope?.gadgetId!;
-      if (!context?.spawnerScope || !context.bindings || !Number.isSafeInteger(gadgetId)) {
-        throw new Error(`Agent chat ${caller.chatId} has no live gadget scope.`);
-      }
-      let gadget = this.getGadgetRecord(gadgetId);
-      let current = new Set<WorkpieceId>([
-        gadgetId, ...this.visibleBindings(gadget).map(([, edge]) => edge.target),
-      ]);
-      allowed = new Set(Object.values(context.bindings).filter(target => current.has(target)));
+      let live = this.agentAvailableBindings(caller.chatId);
+      context = live?.context;
+      if (!live) throw new Error(`Agent chat ${caller.chatId} has no live gadget scope.`);
+      gadgetId = context!.spawnerScope!.gadgetId;
+      allowed = live.bindings;
       scope = `agent chat ${caller.chatId} and gadget ${gadgetId}`;
     } else {
       throw new Error("Agent spawner has no calling gadget scope.");
@@ -7177,18 +7173,31 @@ class OverseerImpl implements AgentHooks {
   // snapshot as an upper bound, but intersect it with the originating gadget's live bindings
   // before every gatekeeper call so an unbind or rebind takes effect immediately.
   assertAgentBindingStillAvailable(chatId: number, target: WorkpieceId): void {
+    let live = this.agentAvailableBindings(chatId);
+    if (!live) return;
+    if (!live.bindings.has(target)) {
+      throw new Error(`Workpiece ${target} is no longer available to agent chat ${chatId}.`);
+    }
+  }
+
+  private agentAvailableBindings(chatId: number)
+      : {context: AiChatAgentContext, bindings: Set<WorkpieceId>} | undefined {
     let context = this.storage.chatContext.get(chatId);
-    if (!context?.spawnerScope) return; // Pre-lineage chats retain their existing access path.
+    if (!context?.spawnerScope) {
+      if (context?.spawnerConfig) {
+        throw new Error(
+            `Legacy spawned agent chat ${chatId} has no recorded gadget scope; ` +
+            `re-spawn it to restore gatekeeper access.`);
+      }
+      return undefined;
+    }
     if (!context.bindings) throw new Error(`Agent chat ${chatId} has no available bindings.`);
     let gadgetId = context.spawnerScope.gadgetId;
     let gadget = this.getGadgetRecord(gadgetId);
     let current = new Set<WorkpieceId>([
       gadgetId, ...this.visibleBindings(gadget).map(([, edge]) => edge.target),
     ]);
-    let available = new Set(Object.values(context.bindings).filter(id => current.has(id)));
-    if (!available.has(target)) {
-      throw new Error(`Workpiece ${target} is no longer available to agent chat ${chatId}.`);
-    }
+    return {context, bindings: new Set(Object.values(context.bindings).filter(id => current.has(id)))};
   }
 
   private assertSpawnerScope(id: WorkpieceId, allowed: Set<WorkpieceId>, scope: string,
