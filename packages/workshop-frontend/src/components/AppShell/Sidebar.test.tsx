@@ -230,4 +230,25 @@ describe('Sidebar modes', () => {
     expect(button('Overview')?.textContent).toBe('')
     expect(button('Overview')?.getAttribute('aria-current')).toBe('page')
   })
+
+  it('lists Gatekeepers in the primary nav, current only on the Gatekeepers page', () => {
+    testState.flags = { 'operate-mode': false }
+    goTo('/gatekeepers')
+    render()
+    const nav = container.querySelector('nav')!
+    const gatekeepers = [...nav.querySelectorAll('a')].find(anchor => anchor.textContent === 'Gatekeepers')
+    expect(gatekeepers?.getAttribute('href')).toBe('/gatekeepers')
+    expect(gatekeepers?.getAttribute('aria-current')).toBe('page')
+
+    goTo('/gatekeepers/context')
+    render()
+    expect(link('Gatekeepers')?.getAttribute('aria-current')).toBeNull()
+    expect(link('Context Library')?.getAttribute('aria-current')).toBe('page')
+  })
+
+  it('keeps Gatekeepers reachable by name in the collapsed rail', () => {
+    testState.flags = { 'operate-mode': false }
+    render(true)
+    expect(link('Gatekeepers')?.getAttribute('href')).toBe('/gatekeepers')
+  })
 })

@@ -181,3 +181,19 @@ it('opens a published console\'s registered widgets through that console revisio
   await act(async () => root.render(<CanvasView definition={definition([])} gadgets={summaries()} overseer={overseer} />))
   expect(disposed.toSorted()).toEqual([3, 'console 9'].toSorted())
 })
+
+it('keeps a section titled like the shown heading for assistive technology only', async () => {
+  const twoSections: CanvasDefinition = { ...definition([]), sections: [
+    { id: 'main', title: ' main ', columns: 1, widgets: [] },
+    { id: 'more', title: 'More', columns: 1, widgets: [] },
+  ] }
+  await act(async () => root.render(<CanvasView definition={twoSections} gadgets={summaries()} overseer={overseer} shownTitle="Main" />))
+  const heading = (id: string) => container.querySelector(`#canvas-section-${id}`)!
+  expect(heading('main').className).toBe('sr-only')
+  expect(container.querySelector('section[aria-labelledby="canvas-section-main"]')).not.toBeNull()
+  expect(heading('more').className).not.toContain('sr-only')
+
+  // Without a heading above it (a console screen or a flow step), every section shows its own.
+  await act(async () => root.render(<CanvasView definition={twoSections} gadgets={summaries()} overseer={overseer} />))
+  expect(heading('main').className).not.toContain('sr-only')
+})

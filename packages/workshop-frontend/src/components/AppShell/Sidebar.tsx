@@ -6,6 +6,7 @@ import {
   House,
   Kanban,
   MagnifyingGlass,
+  Plug,
   SidebarSimple,
   SquaresFour,
   Stack,
@@ -36,7 +37,7 @@ import { useAppMode, useOperateModeAvailable } from '../../features/operate/useA
  *   • primary nav (Home, Workspaces, …)    pinned
  *   • workspace tools (⌘K search)          pinned
  *   • Favorites / Recent workspaces        SCROLLS
- *   • utility strip (plug, avatar)         pinned
+ *   • utility strip (theme, avatar)        pinned
  *
  * Console workspaces own their navigation; this rail belongs to the configuration application.
  */
@@ -163,6 +164,12 @@ export default function Sidebar({
                 collapsed={collapsed}
               />
             )}
+            <SidebarItem
+              to="/gatekeepers"
+              label="Gatekeepers"
+              icon={<Plug size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
             {/* Gatekeeper management apps (e.g. the Context Library), listed dynamically. */}
             <SidebarGatekeeperApps apps={gatekeeperApps} collapsed={collapsed} />
             <SidebarItem

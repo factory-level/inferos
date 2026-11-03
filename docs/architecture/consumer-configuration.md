@@ -13,6 +13,7 @@ covers:
   - packages/workshop-frontend/src/ServerConfigContext.tsx
   - packages/workshop-frontend/src/BlueprintsPage.tsx
   - packages/workshop-frontend/src/components/GadgetList.tsx
+  - packages/workshop-frontend/src/routes/outputs.tsx
   - scripts/run-dev-server.ts
   - scripts/dev-server-config.ts
   - packages/router
@@ -23,7 +24,7 @@ covers:
   - .agents/skills/verify-inferos
   - .agents/skills/upgrade-inferos
   - .agents/skills/recover-inferos
-updated: 2026-10-13
+updated: 2026-11-03
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -173,6 +174,8 @@ Capability configuration ([#67](https://github.com/factory-level/inferos/issues/
 `displayDensity` is normalized to comfortable for missing/invalid persisted values and published in admin/public configuration. `AdminApi.setDisplayDensity` validates comfortable/compact and supports later administrator changes. Profile initialization treats an existing compact setting as customization, preserving all target settings together. Initialization already consumed by an older version is not reapplied when density support is added; use the explicit setter.
 
 The frontend reads deployment density from its existing server-config context. Compact spacing applies at the `sm` breakpoint and above to workspace rows, Explore rows, grid gaps and card content; mobile spacing is unchanged. Loading rows/grid gaps follow the same density. Font sizes, Kumo colors, keyboard interactions, menus and gadget-owned layouts remain unchanged. This is curated listing spacing, not a global CSS scale or a canvas density implementation. Configuration refresh requires a client reconnect/reload; an admin-panel control remains pending.
+
+Each Explore grid card is one link to its blueprint (`FeaturedBlueprintCard`), as each list row already was, so a click on its thumbnail, title, description or badges opens it; the card holds no control of its own. The Outputs page keeps its filters in the URL (`type`, a format id, and `owner`, `mine` or `shared`; absent means all), so a reload, Back or a shared link keeps them. A filter change replaces the history entry rather than adding one, and a format id the page does not offer reads as all. The text search stays page state.
 
 ## InferOps-backed sign-in
 

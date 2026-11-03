@@ -108,7 +108,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
         : <>
           <h1 className="text-lg font-semibold text-kumo-default">{active.title}</h1>
           <CanvasView scrollRoot={scrollRoot} definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} codingDispatch={codingDispatch}
-            wikiEditable={wikiEditable} />
+            wikiEditable={wikiEditable} shownTitle={active.title} />
         </>)}
       {active && editing && <div className="space-y-4">
         {createForm}
