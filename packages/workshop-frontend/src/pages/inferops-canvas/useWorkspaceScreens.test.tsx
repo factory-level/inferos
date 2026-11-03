@@ -7,7 +7,8 @@ import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
-import { canBuild, recheckWorkspaceScreens, RECHECK_FLOOR_MS, useWorkspaceScreens, type WorkspaceScreensState } from './useWorkspaceScreens'
+import { canBuild, recheckWorkspaceScreens, RECHECK_FLOOR_MS, retryWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreensState } from './useWorkspaceScreens'
+import { LOAD_TIMEOUT_MS, WORKSPACE_READ_TIMEOUT_MS } from '../../loadTimeout'
 
 const CONSOLE: OperateConsole = { id: 'c1', revision: '0', published: null, title: 'Operations lead', fullChat: 'off',
   views: [{ id: 'board', title: 'Board', type: 'screen', screen: 's1' }] }
@@ -104,4 +105,69 @@ it('coalesces rechecks: one reload in flight at a time, at least the floor apart
   await advance(1)
   expect(loads).toHaveLength(4)
   await finish(3)
+})
+
+// FAC-155: a failed or hung load ends in `error`, never a list that looks empty, and one workspace
+// that never answers doesn't hold up the others.
+const never = () => new Promise<never>(() => {})
+
+it('a failed workspace list is an error, not an empty list', async () => {
+  const api = { listGadgets: () => Promise.reject(new Error('down')) } as unknown as RpcStub<AuthenticatedApi>
+  await act(async () => root.render(<Probe api={api} />))
+  expect(state).toEqual({ status: 'error' })
+})
+
+it('a workspace list that never answers becomes an error after the load timeout', async () => {
+  vi.useFakeTimers()
+  const api = { listGadgets: never } as unknown as RpcStub<AuthenticatedApi>
+  await act(async () => root.render(<Probe api={api} />))
+  expect(state).toEqual({ status: 'loading' })
+  await act(async () => { await vi.advanceTimersByTimeAsync(LOAD_TIMEOUT_MS) })
+  expect(state).toEqual({ status: 'error' })
+})
+
+it('a workspace whose reads never answer is listed as unreadable, and the rest still load', async () => {
+  vi.useFakeTimers()
+  const { api } = fakeApi({}, [workspace('slow', undefined, '2026-02-01'), workspace('quick', undefined, '2026-01-01')])
+  const stub = api as unknown as { openGadget: (id: string) => Record<string, unknown> }
+  const open = stub.openGadget
+  stub.openGadget = (id: string) => id === 'slow'
+    ? { listCanvases: never, listFlows: never, listConsoles: never, [Symbol.dispose]: () => {} }
+    : open(id)
+  await act(async () => root.render(<Probe api={api} />))
+  await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_READ_TIMEOUT_MS) })
+  if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
+  expect(state.workspaces.map(entry => [entry.workspace.id, entry.screens])).toEqual([['slow', null], ['quick', []]])
+})
+
+it('a use-role workspace whose reads never answer stays listed as unreadable, not dropped', async () => {
+  vi.useFakeTimers()
+  const { api } = fakeApi({}, [workspace('mine', undefined, '2026-02-01'), workspace('shared', 'use', '2026-01-01')])
+  const stub = api as unknown as { openGadget: (id: string) => Record<string, unknown> }
+  const open = stub.openGadget
+  stub.openGadget = (id: string) => id === 'shared'
+    ? { listCanvases: never, listFlows: never, listConsoles: never, [Symbol.dispose]: () => {} }
+    : open(id)
+  await act(async () => root.render(<Probe api={api} />))
+  await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_READ_TIMEOUT_MS) })
+  if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
+  expect(state.workspaces.map(entry => [entry.workspace.id, entry.screens])).toEqual([['mine', []], ['shared', null]])
+})
+
+it('a use-role workspace whose reads fail stays listed as unreadable too', async () => {
+  const { api } = fakeApi({}, [workspace('shared', 'use', '2026-01-01')])
+  const stub = api as unknown as { openGadget: (id: string) => Record<string, unknown> }
+  stub.openGadget = () => ({ listCanvases: denied, listFlows: denied, listConsoles: denied, [Symbol.dispose]: () => {} })
+  await act(async () => root.render(<Probe api={api} />))
+  if (state.status !== 'ready') throw new Error(`not ready: ${state.status}`)
+  expect(state.workspaces.map(entry => [entry.workspace.id, entry.screens])).toEqual([['shared', null]])
+})
+
+it('Try again loads the list again after a failure', async () => {
+  let calls = 0
+  const api = { listGadgets: async () => { calls++; if (calls === 1) throw new Error('down'); return [] }, openGadget: () => ({}) } as unknown as RpcStub<AuthenticatedApi>
+  await act(async () => root.render(<Probe api={api} />))
+  expect(state).toEqual({ status: 'error' })
+  await act(async () => retryWorkspaceScreens())
+  expect(state).toEqual({ status: 'ready', workspaces: [] })
 })

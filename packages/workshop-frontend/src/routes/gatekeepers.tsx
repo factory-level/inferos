@@ -1,4 +1,6 @@
 import { logRpcFailure } from '../rpcErrors'
+import { LOAD_TIMEOUT_MS, withLoadTimeout } from '../loadTimeout'
+import { WorkshopButton } from '../components/WorkshopControls'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
@@ -463,6 +465,9 @@ function ConnectorsPage() {
   // only difference is that confirming adds the account directly (no OAuth redirect).
   const [addable, setAddable] = useState<GatekeeperVendorInfo[]>([])
   const [loadError, setLoadError] = useState(false)
+  // Bumped by Try again: the whole load (vendors, addable gatekeepers, the account subscription)
+  // starts over.
+  const [loadAttempt, setLoadAttempt] = useState(0)
 
   const [modalTarget, setModalTarget] = useState<ModalTarget>(null)
   const [connecting, setConnecting] = useState(false)
@@ -481,6 +486,16 @@ function ConnectorsPage() {
 
     setAccountsLoaded(false)
     setVendorsLoaded(false)
+    setLoadError(false)
+    let accountsReady = false
+    // The subscription answers with `ready()` once it has listed the accounts; one that never does
+    // would leave the page on its loading line, so it times out into the error state too.
+    const accountsTimer = setTimeout(() => {
+      if (!cancelled && !accountsReady) {
+        logRpcFailure('Connected accounts did not load in time:', new Error('timeout'))
+        setLoadError(true)
+      }
+    }, LOAD_TIMEOUT_MS)
 
     authenticatedApi.listAddableGatekeepers()
       .then((list) => {
@@ -490,7 +505,7 @@ function ConnectorsPage() {
         logRpcFailure('Failed to load addable gatekeepers:', err)
       })
 
-    authenticatedApi.listGatekeeperVendors()
+    withLoadTimeout(authenticatedApi.listGatekeeperVendors(), 'The gatekeeper list')
       .then((vendorList) => {
         if (cancelled) return
         const unavailable = vendorList.filter((v) => v.unavailable)
@@ -534,6 +549,7 @@ function ConnectorsPage() {
         if (!cancelled) setAccounts(Array.from(accountMap.values()))
       },
       ready() {
+        accountsReady = true
         if (!cancelled) setAccountsLoaded(true)
       },
     })
@@ -547,9 +563,10 @@ function ConnectorsPage() {
 
     return () => {
       cancelled = true
+      clearTimeout(accountsTimer)
       subscription[Symbol.dispose]()
     }
-  }, [authenticatedApi])
+  }, [authenticatedApi, loadAttempt])
 
   const handleOpenConnect = (vendorId: string) => {
     setModalTarget({ kind: 'connect', vendorId })
@@ -747,13 +764,16 @@ function ConnectorsPage() {
         </div>
 
         {loadError && (
-          <div className="rounded-xl bg-kumo-elevated px-4 py-6 text-center">
+          <div role="alert" className="rounded-xl bg-kumo-elevated px-4 py-6 text-center">
             <p className="m-0 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
               Something went wrong loading your gatekeepers.
             </p>
             <p className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-              Check your connection and try refreshing the page.
+              Your gatekeepers are still connected; this page couldn't read them.
             </p>
+            <WorkshopButton tone="secondary" className="mt-3" onClick={() => setLoadAttempt(attempt => attempt + 1)}>
+              Try again
+            </WorkshopButton>
           </div>
         )}
 

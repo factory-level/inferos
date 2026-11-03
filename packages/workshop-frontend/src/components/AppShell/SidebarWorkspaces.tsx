@@ -1,4 +1,6 @@
 import { logRpcFailure } from '../../rpcErrors'
+import { withLoadTimeout } from '../../loadTimeout'
+import { WorkshopButton } from '../WorkshopControls'
 import {
   createContext,
   useCallback,
@@ -44,6 +46,9 @@ type WorkspacesContextValue = {
 
   gadgets: GadgetMetadataWithTimestamps[]
   gadgetsLoading: boolean
+  /** The list failed or didn't answer in time: say so and offer a retry, never "No workspaces yet". */
+  gadgetsFailed: boolean
+  retryGadgets: () => void
   favorites: GadgetMetadataWithTimestamps[]
   recent: GadgetMetadataWithTimestamps[]
 
@@ -74,6 +79,9 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
 
   const [gadgets, setGadgets] = useState<GadgetMetadataWithTimestamps[]>([])
   const [gadgetsLoading, setGadgetsLoading] = useState(true)
+  const [gadgetsFailed, setGadgetsFailed] = useState(false)
+  const [gadgetsAttempt, setGadgetsAttempt] = useState(0)
+  const retryGadgets = useCallback(() => setGadgetsAttempt(attempt => attempt + 1), [])
 
   const [search, setSearch] = useState('')
 
@@ -92,7 +100,8 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
   useEffect(() => {
     let cancelled = false
     setGadgetsLoading(true)
-    authenticatedApi.listGadgets()
+    setGadgetsFailed(false)
+    withLoadTimeout(authenticatedApi.listGadgets(), 'The workspace list')
       .then((list) => {
         if (cancelled) return
         setGadgets(list)
@@ -100,10 +109,12 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
       })
       .catch((err) => {
         logRpcFailure('Failed to load workspaces for sidebar:', err)
-        if (!cancelled) setGadgetsLoading(false)
+        if (cancelled) return
+        setGadgetsFailed(true)
+        setGadgetsLoading(false)
       })
     return () => { cancelled = true }
-  }, [authenticatedApi])
+  }, [authenticatedApi, gadgetsAttempt])
 
   // Dispose share overseer on close / unmount.
   useEffect(() => {
@@ -216,6 +227,8 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     setSearch,
     gadgets,
     gadgetsLoading,
+    gadgetsFailed,
+    retryGadgets,
     favorites,
     recent,
     onTogglePin,
@@ -298,6 +311,8 @@ export function SidebarWorkspacesLists({ collapsed = false }: { collapsed?: bool
     favorites,
     recent,
     gadgetsLoading,
+    gadgetsFailed,
+    retryGadgets,
     onTogglePin,
     onRename,
     onShare,
@@ -370,6 +385,11 @@ export function SidebarWorkspacesLists({ collapsed = false }: { collapsed?: bool
             {[0, 1, 2, 3].map((i) => (
               <div key={i} className="h-7 rounded-md bg-kumo-elevated animate-pulse" />
             ))}
+          </div>
+        ) : gadgetsFailed ? (
+          <div role="alert" className="flex flex-col items-start gap-1.5 px-2.5 py-1.5">
+            <p className="m-0 text-[12px] leading-4 tracking-[-0.2px] text-kumo-danger">Couldn't load your workspaces.</p>
+            <WorkshopButton tone="secondary" onClick={retryGadgets}>Try again</WorkshopButton>
           </div>
         ) : recent.length === 0 ? (
           <p className="px-2.5 py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-inactive">

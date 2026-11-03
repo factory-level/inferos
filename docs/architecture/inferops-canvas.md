@@ -13,6 +13,9 @@ covers:
   - packages/workshop-frontend/src/routes/inferops-canvas.tsx
   - packages/workshop-frontend/src/components/AppShell/Sidebar.tsx
   - packages/workshop-frontend/src/components/AppShell/SidebarUtilityStrip.tsx
+  - packages/workshop-frontend/src/components/AppShell/SidebarWorkspaces.tsx
+  - packages/workshop-frontend/src/loadTimeout.ts
+  - packages/workshop-frontend/src/routes/gatekeepers.tsx
   - packages/workshop-frontend/src/hooks/useWorkspaceWorkpieces.ts
   - packages/workshop-frontend/src/hooks/useResizableSplit.ts
   - packages/workshop-frontend/src/components/GadgetPresence.tsx
@@ -428,6 +431,12 @@ With Operate available, `/inferops-canvas` renders `OperateSessionPage` (`featur
 - **Wiki read-only.** Neither `SessionScreen` nor `FlowScreen` passes `wikiEditable`, so a Wiki widget on a session screen or flow step shows pages and live embeds but offers no section edit: the Wiki is authored on the workspace's own canvas, not operated (see [InferMind Wiki widget](#infermind-wiki-widget)). Board embeds in it keep the board's own move and edit controls, as a board card on the same screen does.
 - **No coding.** Neither `SessionScreen` nor `FlowScreen` passes `codingDispatch`, so boards in the session and in flows offer no coding control and never look up a coding-dispatch connection, whatever the screen's workspace holds (see [Coding control surface](#coding-control-surface)).
 - `useWorkspaceScreens` loads each workspace's screens, flows and consoles in one batch and is invalidated when any changes. Besides the 24 most recently active build workspaces, it opens up to 24 workspaces shared with the viewer for use and lists each that holds consoles, with the screens those consoles show (all the use role can read, see [Operate mode](operate-mode.md)) and no flows. The console launcher shows those consoles without an edit action, and `canBuild` keeps them out of the canvas home and console setup. Only recently active use workspaces are inspected, so an operator's console in an older shared workspace is not listed. A workspace is in an operator's `listGadgets()` from the moment it is shared with them (`Overseer.addCollaborator` records it in their user DO), so its consoles are found before they first open it.
+- **A failed or hung load is an error with a retry, never an empty account** (FAC-155). `withLoadTimeout` (`loadTimeout.ts`) gives a list the page can't show anything without 15 s, and one workspace's own reads 10 s.
+  - **Screens:** in `useWorkspaceScreens`, the workspace list timing out or failing is `error`. A workspace whose reads don't answer is listed as unreadable (`screens: null`), and the rest still load. The Canvas home shows the error with Try again (`retryWorkspaceScreens`). Its New screen picker says *Loading workspaces…* or *Could not load workspaces* until the list is ready, and *No workspaces yet* only for an account that has none.
+  - **Sidebar:** the workspace list (`SidebarWorkspaces.tsx`) shows *Couldn't load your workspaces.* with Try again instead of *No workspaces yet.*
+  - **Gatekeepers** (`routes/gatekeepers.tsx`): the vendor list, and the connected-accounts subscription's first `ready()`, time out into the page's error with Try again, which starts the whole load over.
+  - Before this, any of these that never answered left the page on its loading line. The New screen picker read *No workspaces yet* meanwhile, which was the GrokBot report.
+  - **Tests:** `useWorkspaceScreens.test.tsx`, `InferOpsCanvasHome.test.tsx`, `SidebarWorkspaces.test.tsx` and `gatekeepersRoute.test.tsx` cover a failed and a hung request on each surface.
 - **Gallery styling.** The console uses semantic Kumo surfaces with restrained headers and navigation. Widget cards use rounded corners and drop shadows; console launcher cards remain flat and compact.
 
 ## Host-rendered board
