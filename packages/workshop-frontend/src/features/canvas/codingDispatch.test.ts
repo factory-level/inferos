@@ -35,6 +35,18 @@ it('stays unavailable, and reads nothing more, when the workspace holds no codin
   data.dispose()
 })
 
+it('never falls back to an InferOps account connection: dispatch needs its own', async () => {
+  // The workspace holds only the organization's account connection.
+  lookup.mockImplementation(async url => url === 'inferops://demo.local/account'
+    ? { openSession: async () => session, [Symbol.dispose]: () => {} } : null)
+  const data = new CodingDispatchData(overseer, DISPATCH)
+  await flush()
+  expect(data.state).toEqual({ status: 'unavailable' })
+  expect(lookup.mock.calls.map(([url]) => url)).toEqual([DISPATCH])
+  expect(listRuns).not.toHaveBeenCalled()
+  data.dispose()
+})
+
 it('stops following after the limit and says so; a refresh follows afresh', async () => {
   const data = new CodingDispatchData(overseer, DISPATCH)
   await flush()
