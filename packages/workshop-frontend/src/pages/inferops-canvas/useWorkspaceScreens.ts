@@ -5,6 +5,7 @@ import { parseCanvasDefinition, type CanvasDefinition } from '@gadgets/workshop-
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { consoleScreens, type OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import type { OperateFlow } from '@gadgets/workshop-shared/operate-flow'
+import { WORKSPACE_READ_TIMEOUT_MS, withLoadTimeout } from '../../loadTimeout'
 
 /** At most this many recently active workspaces are opened to list their screens. */
 export const MAX_SCREEN_WORKSPACES = 24
@@ -110,7 +111,9 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
   if (pending) return pending
   loadsInFlight++
   lastLoadStart = Date.now()
-  const load = api.listGadgets().then(async all => {
+  // The list itself times out into the error state; each workspace's reads time out on their own
+  // (it is then listed as unreadable), so one workspace that never answers can't hold up the page.
+  const load = withLoadTimeout(api.listGadgets(), 'The workspace list').then(async all => {
     const recent = all.toSorted((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
     const builds = recent.filter(workspace => workspace.role !== 'use').slice(0, MAX_SCREEN_WORKSPACES)
     // An operator without Build reaches their console through a workspace shared for use, which is
@@ -119,10 +122,12 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
     const operated = Promise.all(uses.map(async (workspace): Promise<WorkspaceScreens | null> => {
       const overseer = api.openGadget(workspace.id)
       try {
-        const [consoles, screens] = await Promise.all([overseer.listConsoles(), overseer.listCanvases()])
-        if (consoles.length === 0) return null
-        return { workspace, screens: screens.map(parseCanvasDefinition), flows: [], consoles,
-          publishedScreens: await readPublishedScreens(overseer, consoles) }
+        return await withLoadTimeout((async () => {
+          const [consoles, screens] = await Promise.all([overseer.listConsoles(), overseer.listCanvases()])
+          if (consoles.length === 0) return null
+          return { workspace, screens: screens.map(parseCanvasDefinition), flows: [], consoles,
+            publishedScreens: await readPublishedScreens(overseer, consoles) }
+        })(), `Workspace ${workspace.id}`, WORKSPACE_READ_TIMEOUT_MS)
       } catch {
         return null
       } finally {
@@ -136,10 +141,12 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
       const overseer = api.openGadget(workspace.id)
       try {
         // All three reads ride one batch on the pipelined stub.
-        const [screens, flows, consoles] =
-          await Promise.all([overseer.listCanvases(), overseer.listFlows(), overseer.listConsoles()])
-        return { workspace, screens: screens.map(parseCanvasDefinition), flows, consoles,
-          publishedScreens: await readPublishedScreens(overseer, consoles) }
+        return await withLoadTimeout((async () => {
+          const [screens, flows, consoles] =
+            await Promise.all([overseer.listCanvases(), overseer.listFlows(), overseer.listConsoles()])
+          return { workspace, screens: screens.map(parseCanvasDefinition), flows, consoles,
+            publishedScreens: await readPublishedScreens(overseer, consoles) }
+        })(), `Workspace ${workspace.id}`, WORKSPACE_READ_TIMEOUT_MS)
       } catch {
         return { workspace, screens: null, flows: [], consoles: [], publishedScreens: {} }
       } finally {
@@ -156,6 +163,9 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
   byMode.set(key, load)
   return load
 }
+
+/** Loads every screen list again, as a failed or hung load's Try again does. */
+export const retryWorkspaceScreens = () => invalidateWorkspaceScreens()
 
 /** Whether the user can author in a listed workspace: everything but a workspace shared for use. */
 export const canBuild = (entry: WorkspaceScreens): boolean => entry.workspace.role !== 'use'

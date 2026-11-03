@@ -6,7 +6,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { WorkshopButton, WorkshopInput } from '../../components/WorkshopControls'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useDocumentTitle } from '../../useDocumentTitle'
-import { MAX_SCREEN_WORKSPACES, canBuild, invalidateWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
+import { MAX_SCREEN_WORKSPACES, canBuild, invalidateWorkspaceScreens, retryWorkspaceScreens, useWorkspaceScreens, type WorkspaceScreens } from './useWorkspaceScreens'
 import { useOperateSession } from '../../features/operate/OperateSessionContext'
 import { WorkspaceFlows } from '../../features/operate/WorkspaceFlows'
 
@@ -125,7 +125,9 @@ export const InferOpsCanvasHome = () => {
       }}>
       <div className="basis-full"><Eyebrow>New screen</Eyebrow></div>
       <Select className={FILLED_SELECT} label="Workspace" value={workspaceId} disabled={creating || workspaces.length === 0}
-        placeholder={workspaces.length === 0 ? 'No workspaces yet' : 'Choose a workspace'}
+        placeholder={screens.status === 'loading' ? 'Loading workspaces…'
+          : screens.status === 'error' ? 'Could not load workspaces'
+            : workspaces.length === 0 ? 'No workspaces yet' : 'Choose a workspace'}
         renderValue={value => workspaces.find(entry => entry.workspace.id === value)?.workspace.title ?? 'Choose a workspace'}
         onValueChange={value => setWorkspaceId(String(value ?? ''))}>
         {workspaces.map(entry => <Select.Option key={entry.workspace.id} value={entry.workspace.id}>{entry.workspace.title}</Select.Option>)}
@@ -143,7 +145,10 @@ export const InferOpsCanvasHome = () => {
     {!durableViews && <p className="px-1 text-[13px] leading-[18px] text-kumo-subtle">Saved screens are not enabled for this deployment; open a workspace to compose a temporary one.</p>}
 
     {screens.status === 'loading' && <p role="status" className="px-1 text-[13px] leading-[18px] text-kumo-subtle">Loading screens…</p>}
-    {screens.status === 'error' && <p role="alert" className="px-1 text-[13px] leading-[18px] text-kumo-danger">Could not load your workspaces. Check your connection and reload.</p>}
+    {screens.status === 'error' && <div role="alert" className="flex flex-wrap items-center gap-3 px-1">
+      <p className="m-0 text-[13px] leading-[18px] text-kumo-danger">Could not load your workspaces. They are still there; this page couldn't read them.</p>
+      <WorkshopButton tone="secondary" onClick={retryWorkspaceScreens}>Try again</WorkshopButton>
+    </div>}
     {screens.status === 'ready' && workspaces.length === 0 && <p className="px-1 text-[13px] leading-[18px] text-kumo-subtle">
       You have no workspaces yet. <Link to="/" className="text-kumo-brand">Create one</Link>, then come back to add screens.
     </p>}
