@@ -98,6 +98,7 @@ import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/op
 // connection for a URL naming the stopgap's workspace slug.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { COMPANY_MISCONFIGURED, companyAdmits, deploymentCompany } from "./deployment-company";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
@@ -105,7 +106,7 @@ import { createLogger } from "@gadgets/observability/logger";
 import type {
   AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
-  ResourceDescription, SupportedResource, VendorDescription,
+  ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
@@ -1049,6 +1050,36 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   /** The InferLab-verified email of a sign-in or connected account; null without one. */
   async getAuthenticatedEmail(): Promise<string | null> {
     return this.ctx.props.email ?? null;
+  }
+
+  /**
+   * Whether the connected person may `build` or `publish` configuration other people use in this
+   * InferOS: InferOps' `configuration:<action>` (only an Admin's grant holds it, and a grant deny
+   * removes it), asked with their own token in each of their workspaces until one says yes. The
+   * answer is about one company only, the session's own (`scope`, its tenant id): a connection's
+   * workspaces are all in its session's company, and a session in a company other than the one
+   * `INFEROPS_COMPANY` names answers for nothing here. The Workshop refuses a person whose
+   * connections answer for more than one company. An account without a connected person (demo
+   * data, a sign-in) answers for nothing. A workspace InferOps refuses the question in is a no;
+   * any other failure, or a malformed `INFEROPS_COMPANY`, throws, so the Workshop refuses rather
+   * than guessing. Workspaces granted since the person connected count after they reconnect.
+   */
+  async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer> {
+    const nothing = { holds: false, scope: null };
+    if (action !== "build" && action !== "publish") return nothing;
+    const endpoint = inferOpsApiEndpoint(this.env);
+    if (!this.ctx.props.connected || !endpoint) return nothing;
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return nothing;
+    const scope = identity.tenantId.toLowerCase();
+    for (const { workspaceId } of identity.workspaces) {
+      const client = whileInferOpsEnabled(this.env, () =>
+        accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
+      if (await client.holdsPermission(`configuration:${action}`)) return { holds: true, scope };
+    }
+    return { holds: false, scope };
   }
 
   /** No grantable resource types, so nothing to authorize and no URL to return. */

@@ -1054,6 +1054,8 @@ export function openInferOpsClient(
     readTableRow: (host, recordId) => host === account.host
       ? stub.readTableRow(recordId) : Promise.reject(tableNotFound()),
     listWorkspaceMembers: () => stub.listWorkspaceMembers(),
+    // The demo data belongs to no company, so its account holds no company permission.
+    holdsPermission: async () => false,
     readWorkflowPolicy: async projectKey => {
       const { projectId, body } = await stub.readWorkflowPolicy(projectKey);
       return readWorkflowPolicyAnswer(body, projectId);

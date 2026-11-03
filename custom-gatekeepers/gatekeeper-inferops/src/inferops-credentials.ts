@@ -32,6 +32,7 @@ import { createLogger } from "@gadgets/observability/logger";
 import type { GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
 import type { InferOpsAuthority } from "./http-inferops";
 import { inferLabFetch } from "./edge-header";
+import { COMPANY_MISCONFIGURED, OTHER_COMPANY, companyAdmits, deploymentCompany } from "./deployment-company";
 
 const VENDOR_ID = "inferops";
 type LogFields = { vendorId: string; status: number };
@@ -268,6 +269,7 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
     // The connection first, so a disconnected account reads as such rather than as no membership.
     const { creds, identity, generation } =
       await this.#coordinator.snapshot(this.#refresh, { notify: this.#notify });
+    this.#ownCompany();
     const target = this.#membership(workspaceId).workspaceId;
     return { creds: { token: creds.accessToken, workspaceId: target }, identity, generation };
   }
@@ -291,6 +293,18 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
     const fetcher = inferLabFetch(this.env);
     if (current) await logoutInferLabSession(origin, current.refreshToken, fetcher);
     if (staged) await logoutInferLabSession(origin, staged.grant.refreshToken, fetcher);
+  }
+
+  /**
+   * Refuses a connection from another company than this deployment's (`INFEROPS_COMPANY`), such
+   * as one stored before the deployment named its company. Its session is left for the person to
+   * disconnect; nothing here sends it anywhere.
+   */
+  #ownCompany(): void {
+    const identity = this.ctx.storage.kv.get<InferOpsIdentity>(IDENTITY_KEY);
+    const company = deploymentCompany(this.env);
+    if (!company) throw new Error(COMPANY_MISCONFIGURED);
+    if (identity && !companyAdmits(company, identity.tenantId)) throw new Error(OTHER_COMPANY);
   }
 
   #membership(workspaceId: string): InferOpsWorkspace {

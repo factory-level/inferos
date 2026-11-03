@@ -86,6 +86,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 | --- | --- |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops.ts` | Vendor (connected accounts with an InferLab origin, auto-provisioned demo accounts without), account (`GatekeeperUser`: bind, configurator, revoke, reconnect), verifier, project-board gatekeeper facet, sessions, `clientFor` (which data source and whose authority), HTTP entry for the sign-in legs. |
 | `custom-gatekeepers/gatekeeper-inferops/src/auth-proxy.ts` | The sign-in proxy: on `INFERLAB_AUTHORIZE_ORIGIN`, forwards central-auth's `/authorize`, `/authorize/persona`, `/logout` and the Google edge's `/auth/oauth/sign-in/social` and `/auth/oauth/callback/google` to `INFERLAB_AUTH_ORIGIN` with the edge header and `x-inferos-authorize-origin`. See [sign-in proxy](#sign-in-proxy). |
+| `custom-gatekeepers/gatekeeper-inferops/src/deployment-company.ts` | `INFEROPS_COMPANY`: the one company the deployment belongs to (a tenant id, `internal`, unset or malformed), `companyAdmits`, and the refusal messages, which name no company. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferlab-login.ts` | InferLab PKCE flows: `INFERLAB_AUTH_ORIGIN` and `INFERLAB_AUTHORIZE_ORIGIN` validation, `inferOpsApiEndpoint` (the one place the API base URL comes from), `InferLabLogin` Durable Object per attempt (sign-in, connect or reconnect), `/authorize` redirect (to the authorize origin when set), `/oauth` callback, the sign-in proxy's dispatch, server-side code exchange, the workspace-slug read, and what each purpose does with the session. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-credentials.ts` | `InferOpsCredentials` Durable Object per connected account: the InferLab session (access and refresh token) under gatekeeper-kit's `CredentialCoordinator`, the identity and the InferOps and InferMind workspaces InferLab reported with each one's slug (an InferMind one marked `product: "infermind"`), slug resolution per product (`resolveWorkspace(slug, product)`, InferOps by default), refresh (`POST /auth/refresh`), logout (`POST /auth/logout`), staged reconnects, and the once-only expiry notice. |
 | `custom-gatekeepers/gatekeeper-inferops/src/inferops-client.ts` | `InferOpsClient` data-source contract (board, issues, the coding calls `listRepos`, `listRuns`, `readRun`, `dispatchIssue`, `cancelRun`, and the Wiki calls, among them `readDocument` with the page's body, version and Master role, `readStructure`, `updateDocument` and the proposal calls `listProposals`, `readProposal` and `approveProposal`, whose refusals read as `PROPOSAL_APPROVE_REFUSED` in both implementations) and `InferOpsError` codes (`NOT_FOUND`, `STALE_REVISION`, `WORKFLOW_MISMATCH`, `INVALID_STATE`, `IDEMPOTENCY_CONFLICT`, `INVALID_REQUEST`, `CONFLICT`, `RUN_ACTIVE`, `UNAUTHORIZED`, `FORBIDDEN`, `UNAVAILABLE`, `DISABLED`), with the facts a failure proves: its `WriteStage` (`unsent`, or `refused` by InferOps in answer to the write: a 401, or a 400, 403, 404 or 409 carrying InferOps' error envelope) and whether a `FORBIDDEN` is a workflow-policy refusal. They hold only in the isolate that raised the error; `atStage` restores a stage across the mock's RPC boundary. |
@@ -137,8 +138,19 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `tenantId`, the `product: "inferops"` entries of `user.workspaces`, `emailVerified`). A connect
   or reconnect then reads `GET <api>/workspaces` with the new token (no `X-Workspace-Id`) and
   stores each membership's `slug` beside it; a listed workspace that is not a membership is
-  ignored, and a failed or malformed list fails the attempt and signs the new session out. Then,
-  by purpose:
+  ignored, and a failed or malformed list fails the attempt and signs the new session out.
+  - **Company (FAC-160, inferops ADR 0009 T6).** A deployment belongs to one company:
+    `INFEROPS_COMPANY` is a tenant id or `internal` (InferLab's own, reserved tenants only), and
+    `deployment-company.ts` reads it. InferOps is the authority: its token exchange refuses a
+    session in any other company, or for an origin it has no company for, with
+    `company_not_this_deployment` (403), which the flow shows as "This InferOS belongs to another
+    company…", naming neither. With a tenant id set, the gatekeeper checks again: a session from
+    another company is signed out and refused before any purpose uses it, and
+    `InferOpsCredentials.getCredentials` refuses a stored connection from another company.
+    `internal` and unset (local) leave the decision to InferOps, which holds the reserved list.
+    Set but malformed, the code isn't exchanged and sign-in is off. It only refuses.
+
+  Then, by purpose:
   - **Sign-in** requires `emailVerified: true` (InferLab also issues sessions for emails nobody
     proved, such as invitations and impersonation), signs the session out again with
     `POST /auth/logout`, and hands `callback.complete` an account carrying only the normalized
@@ -163,6 +175,28 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   (401) is reported back through `reportCredentialsRejected`, which heals by refreshing and lets the
   request retry once. The refresh token never leaves the object. `revoke()` signs the session out
   and wipes the object.
+- **Shared configuration.** `InferOpsAccount.holdsSharedConfiguration(action)` answers the
+  Workshop's question when a deployment sets `SHARED_CONFIGURATION_GATEKEEPER=inferops` (see
+  [Operate mode](operate-mode.md#shared-configuration)). The answer is about one company, the
+  session's own: its `scope` is the identity's tenant id, since a connection's workspaces are all in
+  its session's company. A session in a company other than the one `INFEROPS_COMPANY` names answers
+  for nothing (`scope: null`) and sends no request; a malformed `INFEROPS_COMPANY` throws. Otherwise
+  it asks InferOps' `GET /auth/permissions?permissions=configuration:<build|publish>` with the
+  person's own token in each workspace stored at connect, in order, through
+  `InferOpsClient.holdsPermission`, and says yes at the first workspace whose decision allows it.
+  Only an Admin's grant (`owner`, `admin`) holds those permissions, and a grant deny removes either
+  from that grant (factory-level/inferops#2551); a deny on one grant doesn't remove the authority
+  while another grant in the company still holds it. The Workshop refuses a person whose
+  connections answer for more than one company. With `INFEROPS_COMPANY` `internal` or unset, the
+  company is whichever InferOps admitted at the exchange, which after factory-level/inferops#2547
+  is only one the deployment's origin is mapped to. A 403 or 404 for a workspace is a no there; an
+  outage, or an answer without a boolean decision for exactly the permission asked, throws
+  `UNAVAILABLE`, so the Workshop refuses rather than guessing. An account without a connected person
+  (demo data, a sign-in) answers for nothing; the mock client's `holdsPermission` is always false.
+  A workspace granted since the person connected counts after they reconnect.
+  `__tests__/account.test.ts` ("shared configuration authority") covers the request, an Operator,
+  an Admin in a second workspace, another company's deployment and its own, a malformed setting, a
+  refused workspace, an outage and malformed answers, and an account with no person.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there

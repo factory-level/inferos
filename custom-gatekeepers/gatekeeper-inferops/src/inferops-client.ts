@@ -450,6 +450,13 @@ export interface InferOpsClient {
   listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead>;
 
   /**
+   * Whether the account holds `permission` in the client's own workspace, as InferOps'
+   * `auth.permissions` decides it there (the grant's role, its denies, any assumption ceiling).
+   * A refusal of the question itself (no grant in the workspace, 403 or 404) is false.
+   */
+  holdsPermission(permission: string): Promise<boolean>;
+
+  /**
    * The published content-workflow policy head of the project with key `projectKey`, as InferOps'
    * `workflow.get` answers it under the account's `project:read`: the key is resolved through the
    * project list of the client's own workspace first, then that one project's head is read and

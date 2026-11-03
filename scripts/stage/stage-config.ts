@@ -115,6 +115,7 @@ export function inferOpsGatekeeperVars(stage: StageDefinition): Record<string, s
     INFERLAB_AUTH_ORIGIN: stage.inferops.authOrigin,
     ...(stage.inferops.authorizeOrigin ? { INFERLAB_AUTHORIZE_ORIGIN: stage.inferops.authorizeOrigin } : {}),
     INFEROPS_ENABLED: "true",
+    INFEROPS_COMPANY: stage.inferops.company,
     // Every optional switch is stated rather than left to the gatekeeper's "unset" default, so a
     // stage's behaviour never depends on a default changing. Coding dispatch stays off: it needs a
     // separate `project/dispatch` grant and a local runner a stage does not have.
@@ -153,6 +154,9 @@ export function backendVars(stage: StageDefinition, origin: string, canvasCatalo
     // is allowlisted, so the pair is checked together (inferLabLoginStartupError) before deploying.
     AUTH_GATEKEEPERS: INFERLAB_LOGIN_VENDOR,
     DISABLE_PASSWORD_AUTH: "true",
+    // Only an InferOps Admin edits and publishes shared configuration (FAC-44): InferOps'
+    // configuration:build / configuration:publish, asked through the person's own connection.
+    SHARED_CONFIGURATION_GATEKEEPER: INFERLAB_LOGIN_VENDOR,
     // Composition with saved views, as a wrapper with `composableViews` + `durableViews` gets it
     // from `pnpm dev-server`: the InferOps board is shown on a canvas.
     COMPOSABLE_VIEWS: "true",

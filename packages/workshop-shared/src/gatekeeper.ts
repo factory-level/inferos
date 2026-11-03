@@ -81,6 +81,22 @@ export type VendorDescription = {
 }
 
 /**
+ * What a person asks to do with configuration other people use (see
+ * `GatekeeperUser.holdsSharedConfiguration`): `build` edits a shared workspace, `publish` shares a
+ * workspace or makes its configuration live for the people it is shared with.
+ */
+export type SharedConfigurationAction = "build" | "publish";
+
+/**
+ * One account's answer to `GatekeeperUser.holdsSharedConfiguration`. `scope` names what the answer
+ * is about in the vendor's own terms (for InferOps, the company of the account's session); it is
+ * null when the account can speak for nothing this deployment belongs to, and `holds` is then false.
+ * The Workshop takes answers from one scope only: a person whose connected accounts span more than
+ * one scope is refused, since nothing says which of them this deployment belongs to.
+ */
+export type SharedConfigurationAnswer = { holds: boolean; scope: string | null };
+
+/**
  * Per-open context the Workshop passes to GatekeeperUser.startAppUi(). `isAdmin` is supplied fresh
  * each time rather than baked into the account, since a user's admin status can change over time.
  */
@@ -757,6 +773,17 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * fresh per open (not baked into the account) so admin-gated features reflect current status.
    */
   startAppUi?(context: AppUiContext): Promise<GatekeeperUiFrame>;
+
+  /**
+   * Whether the person behind this account may `build` (edit) or `publish` (share, make live)
+   * configuration other people use in this deployment, as the service this account signs in to
+   * decides it, freshly, with the person's own credentials, and only within the scope this
+   * deployment belongs to (see `SharedConfigurationAnswer`). Called only on accounts of the vendor a
+   * deployment names in `SHARED_CONFIGURATION_GATEKEEPER`; the Workshop gates on that setting
+   * rather than probing the stub. Answer `holds: false` when the person holds no such authority
+   * there; throw when it can't be told, and the Workshop refuses.
+   */
+  holdsSharedConfiguration?(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.

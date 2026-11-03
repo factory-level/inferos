@@ -37,6 +37,14 @@ declare namespace Cloudflare {
      */
     INFERLAB_AUTHORIZE_ORIGIN?: string;
     /**
+     * The one company this deployment belongs to (inferops ADR 0009 T6): an InferOps tenant id, or
+     * `internal` (InferLab's own, reserved tenants only). InferOps enforces it at the token
+     * exchange; with a tenant id the gatekeeper also refuses any sign-in, connect, reconnect or
+     * stored connection in another company. Unset (local), InferOps alone decides. Set but
+     * malformed, sign-in is off.
+     */
+    INFEROPS_COMPANY?: string;
+    /**
      * A secret, not a var: the shared value InferLab's edge (an IP-allowlisting WAF) lets through
      * in the `x-inferos-edge` header. Set, every request to `INFERLAB_AUTH_ORIGIN` and
      * `INFEROPS_BASE_URL` carries it, and no other request does (see edge-header.ts). Unset, no

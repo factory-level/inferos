@@ -44,6 +44,21 @@ export function isPublicationSelfApprovalAllowed(env: Cloudflare.Env): boolean {
 }
 
 /**
+ * The gatekeeper vendor id that decides who may edit and publish shared configuration, from
+ * SHARED_CONFIGURATION_GATEKEEPER (lowercased), or null when unset, which leaves Build to a
+ * workspace's owner and `build` collaborators as before. When set, a workspace with collaborators
+ * or share links is shared configuration: opening it with build access needs that vendor to say
+ * the person may `build`, and sharing or publishing needs `publish` (see
+ * `GatekeeperUser.holdsSharedConfiguration`). A person's own unshared workspaces and operate
+ * session are unaffected. Authorization config, so env-driven and never part of AdminConfig.
+ */
+export function getSharedConfigurationGatekeeper(env: Cloudflare.Env): string | null {
+  const raw = (env as { SHARED_CONFIGURATION_GATEKEEPER?: string }).SHARED_CONFIGURATION_GATEKEEPER;
+  const vendorId = raw?.trim().toLowerCase();
+  return vendorId ? vendorId : null;
+}
+
+/**
  * Checks that the sign-in allowlist can be honoured: every vendor in AUTH_GATEKEEPERS must be bound
  * (`GATEKEEPER_<NAME>`) and must advertise `providesAuth`. A listed vendor that is not configured
  * for sign-in (for example the InferOps gatekeeper without its InferLab origin) would otherwise
@@ -61,5 +76,11 @@ export async function assertAuthGatekeepersConfigured(env: Cloudflare.Env): Prom
       throw new Error(`AUTH_GATEKEEPERS lists "${vendorId}", but that gatekeeper is not configured ` +
         `to provide sign-in; configure it, or remove it from AUTH_GATEKEEPERS.`);
     }
+  }
+  // A named authority that isn't bound would refuse every shared workspace without saying why.
+  const sharedConfiguration = getSharedConfigurationGatekeeper(env);
+  if (sharedConfiguration && !getAuthVendorBinding(env, sharedConfiguration)) {
+    throw new Error(`SHARED_CONFIGURATION_GATEKEEPER names "${sharedConfiguration}", but no ` +
+      `gatekeeper is bound as GATEKEEPER_${sharedConfiguration.toUpperCase()}.`);
   }
 }

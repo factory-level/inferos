@@ -33,12 +33,12 @@ test("a malformed stage definition is refused before anything is generated", () 
     ...STAGES.dev,
     hostname: "Dev-OS.example",
     workerPrefix: "inferos-dev",
-    inferops: { baseUrl: "http://localhost:8080", authOrigin: "https://auth.example/path" },
+    inferops: { baseUrl: "http://localhost:8080", authOrigin: "https://auth.example/path", company: "acme" },
     gatekeepers: ["gatekeeper-context", "gatekeeper-context"],
   };
   const problems = stageDefinitionProblems(bad).join("\n");
   for (const fragment of ["hostname", "workerPrefix", "inferops.baseUrl", "inferops.authOrigin",
-    "must include gatekeeper-inferops", "twice"]) {
+    "inferops.company", "must include gatekeeper-inferops", "twice"]) {
     assert.match(problems, new RegExp(fragment));
   }
 });
@@ -153,6 +153,8 @@ test("gatekeepers live under the stage origin; InferOps points at the stage's In
     assert.equal(inferops.vars?.INFEROPS_BASE_URL, stage.inferops.baseUrl);
     assert.equal(inferops.vars?.INFERLAB_AUTH_ORIGIN, stage.inferops.authOrigin);
     assert.equal(inferops.vars?.INFEROPS_ENABLED, "true");
+    // FAC-160: each stage names its company; both are InferLab's own today.
+    assert.equal(inferops.vars?.INFEROPS_COMPANY, "internal");
     assert.equal(inferops.vars?.CODING_WORKBENCH_ENABLED, "false");
     for (const name of ["INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG", "MOCK_INFEROPS_SYNTHETIC_ISSUES"]) {
       assert.equal(inferops.vars?.[name], undefined, `${name} reached a stage`);
@@ -165,9 +167,9 @@ test("gatekeepers live under the stage origin; InferOps points at the stage's In
 test("each stage offers only the optional InferOps resource kinds it lists, and states every switch", () => {
   const vars = (stageName: "dev" | "prod") =>
     (build(stageName).get("gatekeeper-inferops") as StagingConfig).vars ?? {};
-  // FAC-149: dev offers workflow policy; custom tables wait for dev InferOps objects; prod offers none.
+  // FAC-149: dev offers workflow policy and custom tables; prod offers none.
   assert.equal(vars("dev").INFEROPS_WORKFLOW_POLICY_ENABLED, "true");
-  assert.equal(vars("dev").INFEROPS_TABLES_ENABLED, "false");
+  assert.equal(vars("dev").INFEROPS_TABLES_ENABLED, "true");
   assert.equal(vars("dev").INFEROPS_MEMBERS_ENABLED, "false");
   for (const name of ["INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED"]) {
     assert.equal(vars("prod")[name], "false", `${name} on prod`);
@@ -186,6 +188,10 @@ test("the backend signs in with InferLab only and carries no secret in its vars"
   assert.equal(backend.vars?.PUBLIC_BASE_URL, "https://dev-os.factorylevel.dev");
   assert.equal(backend.vars?.AUTH_GATEKEEPERS, "inferops");
   assert.equal(backend.vars?.DISABLE_PASSWORD_AUTH, "true");
+  assert.equal(backend.vars?.SHARED_CONFIGURATION_GATEKEEPER, "inferops");
+  // Production too: only an InferOps Admin edits or publishes shared configuration on any stage.
+  assert.equal((build("prod").get("workshop-backend") as StagingConfig).vars?.SHARED_CONFIGURATION_GATEKEEPER,
+    "inferops");
   assert.equal(backend.vars?.COMPOSABLE_VIEWS, "true");
   assert.equal(backend.vars?.DURABLE_VIEWS, "true");
   assert.equal(backend.vars?.CANVAS_CATALOG, JSON.stringify({ widgets: [] }));
