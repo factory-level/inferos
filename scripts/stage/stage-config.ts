@@ -22,12 +22,12 @@ import {
 import {
   INFEROPS_GATEKEEPER, INFERLAB_LOGIN_VENDOR, inferLabLoginStartupError,
 } from "../dev-server-config.ts";
-import { INFEROPS_OPTIONAL_RESOURCES, type StageDefinition, type StageName } from "./stages.ts";
+import { INFEROPS_OPTIONAL_RESOURCES, type StageDefinition } from "./stages.ts";
 
 type PackageConfig = Pick<DeployablePackage, "name" | "config">;
 
 /** The generated per-package config a stage deploys from (gitignored — it is build output). */
-export function stageConfigFileName(stageName: StageName): string {
+export function stageConfigFileName(stageName: string): string {
   return `wrangler.stage-${stageName}.jsonc`;
 }
 
@@ -181,7 +181,7 @@ const FORBIDDEN_GATEKEEPER_VARS = [
 export function buildStageConfigs({
   stageName, stage, packages, accountId, kvIds, canvasCatalog,
 }: {
-  stageName: StageName;
+  stageName: string;
   stage: StageDefinition;
   packages: readonly PackageConfig[];
   accountId: string;
@@ -344,7 +344,7 @@ export function stageTiers(configs: ReadonlyMap<string, StagingConfig>): StageTi
  * `gatekeeperSecretNames` the secrets a gatekeeper package is uploaded with, by package name.
  */
 export function formatStagePlan({ stageName, stage, configs, secretNames, gatekeeperSecretNames = {}, kv }: {
-  stageName: StageName;
+  stageName: string;
   stage: StageDefinition;
   configs: ReadonlyMap<string, StagingConfig>;
   secretNames: string[];

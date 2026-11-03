@@ -6,6 +6,9 @@
 //   node scripts/stage/stage.ts config <stage>     resolve KV ids (read-only) and write the configs
 //   node scripts/stage/stage.ts deploy <stage>     build, provision missing KV, deploy every tier
 //   node scripts/stage/stage.ts delete <stage> --confirm <hostname>
+//   ... --wrapper <dir> in place of <stage>         a company's own InferOS (wrapper-stage.ts): run from
+//                                                  the wrapper's pinned inferos checkout, by
+//                                                  `pnpm inferos:deploy` in the wrapper
 //   ... --dry-run                                  print the plan, touch no network
 //
 // Deployment runs in three tiers, as a preview's does (preview/preview.ts): the stage's gatekeepers
@@ -23,7 +26,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 import { resolveBinEntry } from "../bin-entry.ts";
@@ -41,7 +44,10 @@ import { INFEROPS_GATEKEEPER } from "../dev-server-config.ts";
 import {
   deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending,
 } from "./stage-resources.ts";
-import { resolveStage, type StageDefinition, type StageName } from "./stages.ts";
+import { resolveStage, type StageDefinition } from "./stages.ts";
+import {
+  ownershipMarker, ownershipProblem, pinnedRevisionFromLsTree, readWrapperStage, WRAPPER_DEPLOY_VARS_FILE,
+} from "./wrapper-stage.ts";
 
 /** The subcommands this script accepts. */
 type Command = "config" | "deploy" | "delete";
@@ -49,7 +55,10 @@ type Command = "config" | "deploy" | "delete";
 /** A parsed command line. */
 export interface StageArgs {
   command: Command;
+  /** A persistent stage's name; empty when `wrapper` names the deployment instead. */
   stage: string;
+  /** A wrapper repository's root, whose `inferos.deploy.json` defines the deployment. */
+  wrapper: string | undefined;
   dryRun: boolean;
   allowDirty: boolean;
   allowDestructiveMigrations: boolean;
@@ -57,18 +66,18 @@ export interface StageArgs {
   confirm: string | undefined;
 }
 
-const USAGE = "Usage: stage.ts <config|deploy|delete> <stage> [--dry-run] [--allow-dirty] " +
+const USAGE = "Usage: stage.ts <config|deploy|delete> <stage | --wrapper <dir>> [--dry-run] [--allow-dirty] " +
   "[--allow-destructive-migrations] [--skip-smoke] [--confirm <hostname>]";
 const GATEKEEPER_CONCURRENCY = 8;
 
 /** Parse argv (without the node and script paths). Throws the usage on anything unexpected. */
 export function parseStageArgs(argv: readonly string[]): StageArgs {
-  const [command, stage, ...rest] = argv;
-  if (!["config", "deploy", "delete"].includes(command ?? "") || !stage || stage.startsWith("--")) {
-    throw new Error(USAGE);
-  }
+  const [command, first, ...more] = argv;
+  if (!["config", "deploy", "delete"].includes(command ?? "")) throw new Error(USAGE);
+  const named = first !== undefined && !first.startsWith("--");
+  const rest = named ? more : argv.slice(1);
   const args: StageArgs = {
-    command: command as Command, stage, dryRun: false, allowDirty: false,
+    command: command as Command, stage: named ? first : "", wrapper: undefined, dryRun: false, allowDirty: false,
     allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
   };
   for (let i = 0; i < rest.length; i++) {
@@ -78,14 +87,55 @@ export function parseStageArgs(argv: readonly string[]): StageArgs {
     else if (arg === "--allow-destructive-migrations") args.allowDestructiveMigrations = true;
     else if (arg === "--skip-smoke") args.skipSmoke = true;
     else if (arg === "--confirm" && rest[i + 1]) args.confirm = rest[++i];
+    else if (arg === "--wrapper" && rest[i + 1]) args.wrapper = rest[++i];
     else throw new Error(`unknown argument: ${arg}\n${USAGE}`);
   }
+  if (Boolean(args.stage) === Boolean(args.wrapper)) throw new Error(`name a stage or --wrapper <dir>, not both or neither\n${USAGE}`);
+  if (args.wrapper && args.allowDirty) throw new Error("a wrapper deploys only from a clean tree; --allow-dirty is for the dev stage");
   return args;
 }
 
-/** Fill unset variables from `.stage-<stage>.vars`; the shell always wins. */
-function loadStageVars(stageName: StageName): void {
-  const path = join(ROOT, `.stage-${stageName}.vars`);
+/** What a run deploys: a persistent stage, or a wrapper's own. */
+interface Target {
+  stageName: string;
+  stage: StageDefinition;
+  /** Set for a wrapper deployment: its root. */
+  wrapperRoot?: string;
+}
+
+function resolveTarget(args: StageArgs): Target {
+  if (!args.wrapper) {
+    const { name, stage } = resolveStage(args.stage);
+    return { stageName: name, stage };
+  }
+  const wrapperRoot = resolve(args.wrapper);
+  const { name, stage } = readWrapperStage(wrapperRoot);
+  assertPinned(wrapperRoot);
+  return { stageName: name, stage, wrapperRoot };
+}
+
+/**
+ * A wrapper deploys exactly the InferOS it pins: this checkout's HEAD must be the wrapper's committed
+ * `inferos` gitlink. Checked before anything else, dry run included, so a plan is never of the
+ * wrong revision.
+ */
+function assertPinned(wrapperRoot: string): void {
+  const lsTree = execFileSync("git", ["-C", wrapperRoot, "ls-tree", "HEAD", "inferos"], { encoding: "utf8" });
+  const pinned = pinnedRevisionFromLsTree(lsTree);
+  if (!pinned) throw new Error("the wrapper's last commit pins no inferos submodule; commit the pin first");
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim();
+  if (head !== pinned) {
+    throw new Error(`this InferOS checkout is at ${head.slice(0, 12)}, but the wrapper pins ${pinned.slice(0, 12)}; ` +
+        "run the deploy from the wrapper (pnpm inferos:deploy), whose inferos checkout is the pinned one");
+  }
+  console.log(`InferOS ${pinned.slice(0, 12)}: the revision the wrapper pins`);
+}
+
+/** Fill unset variables from the stage's vars file; the shell always wins. */
+function loadStageVars(target: Target): void {
+  const path = target.wrapperRoot
+    ? join(target.wrapperRoot, WRAPPER_DEPLOY_VARS_FILE)
+    : join(ROOT, `.stage-${target.stageName}.vars`);
   if (!existsSync(path)) return;
   for (const [key, value] of Object.entries(parseEnv(readFileSync(path, "utf8")))) {
     if (process.env[key] === undefined) process.env[key] = value;
@@ -134,6 +184,13 @@ function runInherited(command: string, args: string[], env: NodeJS.ProcessEnv): 
   });
 }
 
+/** Refuse a wrapper deploy whose prefix the account already holds for another deployment. Read-only. */
+async function assertOwnership(stage: StageDefinition): Promise<void> {
+  const problem = ownershipProblem([...(await listKvNamespaces()).keys()], stage);
+  if (problem) throw new Error(problem);
+  console.log(`the prefix ${stage.resourcePrefix} is free or already this deployment's`);
+}
+
 /** The account's KV namespaces by title. Read-only. */
 async function listKvNamespaces(): Promise<Map<string, string>> {
   const result = await runWrangler(ROOT, ["kv", "namespace", "list"]);
@@ -165,16 +222,18 @@ async function ensureKvNamespaces(titles: readonly string[]): Promise<Map<string
   return after;
 }
 
-function workingTreeState(): { sha: string; dirty: boolean } {
+function workingTreeState(wrapperRoot?: string): { sha: string; dirty: boolean } {
   const sha = execFileSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim();
-  const dirty = execFileSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8" }).trim() !== "";
-  return { sha, dirty };
+  const isDirty = (cwd: string) => execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" }).trim() !== "";
+  // A wrapper's own tree counts too: its deploy file and blueprints are part of what's deployed.
+  return { sha, dirty: isDirty(ROOT) || (wrapperRoot !== undefined && isDirty(wrapperRoot)) };
 }
 
 /** Everything a run needs, resolved before anything touches the network. */
 interface Prepared {
-  stageName: StageName;
+  stageName: string;
   stage: StageDefinition;
+  wrapperRoot: string | undefined;
   accountId: string;
   packages: DeployablePackage[];
   secrets: Record<string, string>;
@@ -184,8 +243,9 @@ interface Prepared {
 }
 
 function prepare(args: StageArgs): Prepared {
-  const { name: stageName, stage } = resolveStage(args.stage);
-  loadStageVars(stageName);
+  const target = resolveTarget(args);
+  const { stageName, stage, wrapperRoot } = target;
+  loadStageVars(target);
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   if (!accountId) throw new Error("CLOUDFLARE_ACCOUNT_ID must be set to the account the stage deploys to");
   const packages = stagePackages(stage, readDeployablePackages(ROOT));
@@ -198,9 +258,10 @@ function prepare(args: StageArgs): Prepared {
   // list is reported by the dry run rather than by the deploy it was meant to rehearse.
   const secrets = stageBackendSecrets();
   const gatekeeperSecrets = { [INFEROPS_GATEKEEPER]: stageInferOpsGatekeeperSecrets() };
-  const catalog = readCanvasConfig(ROOT)?.catalog;
+  // A wrapper's composition is its own inferos.canvas.json, as `pnpm dev` serves it.
+  const catalog = readCanvasConfig(wrapperRoot ?? ROOT)?.catalog;
   return {
-    stageName, stage, accountId, packages, secrets, gatekeeperSecrets,
+    stageName, stage, wrapperRoot, accountId, packages, secrets, gatekeeperSecrets,
     canvasCatalog: catalog === undefined ? undefined : JSON.stringify(catalog),
   };
 }
@@ -286,18 +347,23 @@ async function deploy(args: StageArgs): Promise<void> {
       canvasCatalog: prepared.canvasCatalog });
     console.log(`dry-run plan (no network):\n${formatStagePlan({ stageName, stage, configs,
       secretNames: Object.keys(secrets), gatekeeperSecretNames: secretNamesOf(prepared), kv })}`);
+    if (prepared.wrapperRoot) {
+      console.log(`ownership: checked against the account before anything is created; ` +
+          `the prefix ${stage.resourcePrefix} is this deployment's by the KV namespace ${ownershipMarker(stage)}`);
+    }
     return;
   }
 
-  const tree = workingTreeState();
+  const tree = workingTreeState(prepared.wrapperRoot);
   if (tree.dirty && (stage.requireCleanTree || !args.allowDirty)) {
     throw new Error(stage.requireCleanTree
       ? `stage "${stageName}" deploys only from a clean working tree; commit or stash first`
       : "the working tree is dirty; commit first, or pass --allow-dirty to deploy it anyway");
   }
 
+  if (prepared.wrapperRoot) await assertOwnership(stage);
   const [kvIds] = await Promise.all([
-    ensureKvNamespaces(kv.map((ns) => ns.title)),
+    ensureKvNamespaces([...kv.map((ns) => ns.title), ...(prepared.wrapperRoot ? [ownershipMarker(stage)] : [])]),
     runInherited("pnpm", ["run", "build"], { VITE_CF_ACCESS_MODE: "false" }),
   ]);
   const configs = buildStageConfigs({ stageName, stage, packages, accountId, kvIds,
@@ -346,6 +412,11 @@ async function configure(args: StageArgs): Promise<void> {
   }
   console.log(`Wrangler login reaches account ${accountId}`);
   const existing = await listKvNamespaces();
+  if (prepared.wrapperRoot) {
+    const problem = ownershipProblem([...existing.keys()], stage);
+    console.log(problem ? `  ownership: ${problem}` : `  ownership: the prefix ${stage.resourcePrefix} is free or this deployment's`);
+    if (problem) return;
+  }
   for (const ns of kv) console.log(`  KV ${ns.title}: ${existing.has(ns.title) ? "present" : "missing (stage:deploy creates it)"}`);
   if (kv.some((ns) => !existing.has(ns.title))) return;
   writeConfigs(prepared, buildStageConfigs({ stageName, stage, packages, accountId, kvIds: existing,
@@ -353,12 +424,15 @@ async function configure(args: StageArgs): Promise<void> {
 }
 
 async function remove(args: StageArgs): Promise<void> {
-  const { name: stageName, stage } = resolveStage(args.stage);
-  loadStageVars(stageName);
+  const target = resolveTarget(args);
+  const { stageName, stage } = target;
+  loadStageVars(target);
   if (args.confirm !== stage.hostname) {
     throw new Error(`deleting stage "${stageName}" destroys every Durable Object it holds; ` +
         `confirm with --confirm ${stage.hostname}`);
   }
+  // A wrapper deletes only workers its own prefix holds on this account.
+  if (target.wrapperRoot && !args.dryRun) await assertOwnership(stage);
   const packages = stagePackages(stage, readDeployablePackages(ROOT));
   // Router first so the hostname stops answering before anything behind it disappears.
   const order = ["router", "workshop-backend", ...packages.map((pkg) => pkg.name).filter((n) => n.startsWith("gatekeeper-"))];

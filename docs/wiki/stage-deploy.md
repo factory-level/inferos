@@ -1,6 +1,6 @@
 ---
 title: Deploy a persistent stage
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 
 # Deploy a persistent stage
@@ -48,6 +48,44 @@ Dev InferLab's WAF lets the stage through only when the InferOps side and this s
 3. Deploy with `pnpm stage:deploy dev`, then sign in with InferLab.
 4. **Rotate.** Change both values and redeploy both sides. Requests are refused between the two deploys.
 5. **Remove.** Leaving the variable out does not delete the value, because a deploy without it keeps the previous version's secret. Delete it with `pnpm exec wrangler secret delete INFEROPS_EDGE_SECRET --name inferos-dev-gatekeeper-inferops`.
+
+## A company's own InferOS, from its wrapper
+
+A company's InferOS is deployed from its wrapper repository, at the InferOS revision the wrapper pins, with the same deploy as the persistent stages. Nothing below has been run against a real account yet; the dry run and the tests are the proof so far.
+
+1. **Describe the deployment** in `inferos.deploy.json` at the wrapper root, committed:
+
+   ```json
+   {
+     "schemaVersion": 1,
+     "company": "acme",
+     "hostname": "os.acme.example",
+     "inferops": { "baseUrl": "https://api.inferlab.io", "authOrigin": "https://auth.inferlab.io", "resources": ["tables"] }
+   }
+   ```
+
+   `company` is 2 to 31 lowercase letters and digits, no hyphen. Every worker and resource is named `inferos-<company>-…`, so the slug is the deployment's identity: never change it once deployed. `inferops.authorizeOrigin` (a sign-in proxy hostname) and `inferops.resources` (`tables`, `members`, `workflowPolicy`) are optional, as on the persistent stages.
+2. **Do the account steps above** for the company's hostname: the account on Workers Paid holding the hostname's zone, an Access application for the hostname (and the sign-in proxy's, if any), and InferLab's `inferos` sign-in client allowing the origin.
+3. **Put the inputs** in the shell or in a gitignored `.inferos-deploy.vars` at the wrapper root, with the same names as the table above (`CLOUDFLARE_ACCOUNT_ID`, `STAGE_ADMINS`, and the optional ones). Values are never printed.
+4. **Rehearse:** `pnpm inferos:deploy --dry-run` in the wrapper. It checks the pin, then prints the plan: every `inferos-<company>-…` worker, its vars, the secret names, the KV namespaces, the bucket and the ownership marker it will check.
+5. **Deploy:** `pnpm inferos:deploy`. It refuses a dirty wrapper or pinned checkout, checks the account (below), builds, deploys the three tiers, and checks the Access redirect. Rerunning it is the update: the marker, the namespaces, the bucket and every Durable Object are kept.
+
+**What stops two companies colliding.** The prefix comes from the slug, the slug can't contain a hyphen (so no prefix starts another), `dev`, `prod`, `staging`, `preview`, `test` and `local` are reserved, and a persistent stage's hostname is refused. On the account, before anything is created, the deploy lists the KV namespace titles. The prefix is this deployment's only if the namespace `inferos-<company>-owner.<hostname>` exists, or if nothing is under the prefix yet, in which case the deploy creates that marker. Another hostname's marker, or resources under the prefix with no marker, stop the deploy with the reason.
+
+**What it needs.**
+
+| Credential or input | Who provides it | Used for |
+| --- | --- | --- |
+| A Cloudflare account on Workers Paid, holding the hostname's DNS zone | The company or the operator | Every worker, KV namespace, the R2 bucket, the custom domain |
+| A Wrangler login with access to that account (`wrangler login`) and `CLOUDFLARE_ACCOUNT_ID` | The person deploying | Running the deploy |
+| An Access application covering the hostname | The account admin, in the dashboard | Gating the instance; the deploy only checks it |
+| `STAGE_ADMINS` | The company | The instance's `/admin` users |
+| InferLab registering the origin in `auth.sso.inferosOrigins` | InferLab (an InferOps configuration change) | "Sign in with InferLab" |
+| Optional: `CF_ACCESS_CLIENT_ID`/`_SECRET`, `CF_AI_GATEWAY*`, `INFEROPS_EDGE_SECRET` | As above | The smoke, server-managed models, an edge-restricted InferLab |
+
+**What it costs.** The account must be on Workers Paid (the deploy uses bundle sizes, Browser Rendering and the Worker Loader that need it): $5 a month per account at the time of writing, plus usage beyond the plan's included requests, Durable Objects, KV, R2 storage and Workers AI. Access is free up to its free plan's seat limit. The custom domain has no charge of its own, but the zone and domain are the company's. Check Cloudflare's current pricing before a deploy; this deploy adds nothing on the InferLab side but a configuration entry.
+
+**Limits.** The wrapper's own gatekeepers and Workers (`features.customCloudflareCode`) aren't deployed yet, so such a wrapper is refused. `pnpm inferos:deploy delete --confirm <hostname>` deletes the workers as `stage:delete` does, after the same ownership check.
 
 ## Rollback and deletion
 

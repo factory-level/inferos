@@ -1,6 +1,6 @@
 ---
 title: Bootstrap a consuming repository
-updated: 2026-10-03
+updated: 2026-11-03
 ---
 
 # Bootstrap a consuming repository
@@ -133,6 +133,10 @@ pnpm inferos recover ports|config|fixtures|state [--apply]   # dry run unless --
   - `state` deletes `inferos/.wrangler/state` through `pnpm local reset --yes`.
 
 **Rollback limit for stateful migrations:** local state is reset only, never migrated back. Durable Object and storage migrations that a newer pin applied on start cannot be undone. Going back to an older pin therefore means reverting the upgrade and running `pnpm inferos recover state --apply`, which loses every local account, workspace, seeded board and approval. Nothing here touches cloud resources.
+
+## Deploy the wrapper
+
+`pnpm inferos:deploy [config|deploy|delete] [--dry-run]` deploys this company's InferOS at the pinned revision, described by the committed `inferos.deploy.json`, through the pinned checkout's stage deploy. Rehearse with `--dry-run` first; nothing is created by it. The file, the account steps, the inputs, the collision checks, the costs and the limits are in [deploy a persistent stage](stage-deploy.md#a-companys-own-inferos-from-its-wrapper).
 
 ## Generated contract
 
