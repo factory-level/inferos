@@ -241,6 +241,34 @@ it('shows what an agent reads through the same connection, and does not compare 
   expect(wiki.session.readDocumentText).toHaveBeenCalledWith('handbook')
 })
 
+/** Serves the Wiki only through the organization's InferOps account connection, as `openWiki` does. */
+const throughAccount = () => {
+  bindings.delete(WIKI)
+  const openWiki = vi.fn<(ref: string) => Promise<object>>(async () => wiki.session)
+  bindings.set('inferops://acme/account', connection({ openWiki, openBoard: async () => ({}), [Symbol.dispose]: () => {} }))
+  return openWiki
+}
+
+it.each([
+  ['a page', 'handbook', 'handbook'],
+  ['a Master, from the structure read', 'engineering', 'engineering'],
+])('through an account connection, composes %s\'s agent text from what it read and never calls readDocumentText', async (_, shown, slug) => {
+  organize()
+  const openWiki = throughAccount()
+  await render(widget(shown))
+  await click(button(wikiArticle(), 'Agent view'))
+  const panel = wikiArticle().querySelector<HTMLElement>('[aria-label="Agent view"]')!
+  expect(openWiki).toHaveBeenCalledWith(WIKI)
+  // readDocumentText would make the whole account connection owner-only for good.
+  expect(wiki.session.readDocumentText).not.toHaveBeenCalled()
+  // The same bytes the gatekeeper's page-text contract gives for the same data (the double's
+  // readDocumentText is that contract; called directly here, so it records no call).
+  const contract = wiki.session.readDocumentText.getMockImplementation()!
+  expect(panel.querySelector('pre')?.textContent).toBe(await contract(slug))
+  expect(panel.textContent).toContain('Composed from this page as read here')
+  expect(panel.textContent).not.toContain('Same as this page')
+})
+
 it('disposes the Wiki and board sessions with the view', async () => {
   await render(widget())
   await act(async () => root.unmount())

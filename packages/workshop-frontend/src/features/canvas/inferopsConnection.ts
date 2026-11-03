@@ -25,22 +25,28 @@ export const accountUrlFor = (target: string): string | null => {
   return tenant && workspace && rest.length === 0 ? `inferops://${tenant}/account` : null
 }
 
+/** Which connection a session came through: the reference's own, or its organization's account. */
+export type InferOpsConnectionKind = 'exact' | 'account'
+
+/** A session and the connection it came through. */
+export type ResolvedSession<S> = { session: RpcStub<S>; via: InferOpsConnectionKind }
+
 /**
- * The session for `target`, or null when the workspace holds neither its exact connection nor an
- * account connection for its organization. The account connection's refusal of the reference
- * (`NOT_FOUND`) rejects: the widget shows it as an error, not as unbound. Every stub but the
- * returned session is disposed here.
+ * The session for `target` and the connection it came through, or null when the workspace holds
+ * neither its exact connection nor an account connection for its organization. The account
+ * connection's refusal of the reference (`NOT_FOUND`) rejects: the widget shows it as an error, not
+ * as unbound. Every stub but the returned session is disposed here.
  */
-export function openInferOpsSession(overseer: RpcStub<Overseer>, target: string, kind: 'board'):
-  Promise<RpcStub<InferOpsProjectSession> | null>
-export function openInferOpsSession(overseer: RpcStub<Overseer>, target: string, kind: 'wiki'):
-  Promise<RpcStub<InferOpsWikiSession> | null>
-export async function openInferOpsSession(overseer: RpcStub<Overseer>, target: string, kind: InferOpsSessionKind):
-    Promise<RpcStub<InferOpsProjectSession> | RpcStub<InferOpsWikiSession> | null> {
+export function resolveInferOpsSession(overseer: RpcStub<Overseer>, target: string, kind: 'board'):
+  Promise<ResolvedSession<InferOpsProjectSession> | null>
+export function resolveInferOpsSession(overseer: RpcStub<Overseer>, target: string, kind: 'wiki'):
+  Promise<ResolvedSession<InferOpsWikiSession> | null>
+export async function resolveInferOpsSession(overseer: RpcStub<Overseer>, target: string, kind: InferOpsSessionKind):
+    Promise<ResolvedSession<InferOpsProjectSession> | ResolvedSession<InferOpsWikiSession> | null> {
   const exact = await overseer.getGatekeeperByResourceUrl(target)
   if (exact) {
     try {
-      return await exact.openSession() as RpcStub<InferOpsProjectSession> | RpcStub<InferOpsWikiSession>
+      return { session: await exact.openSession() as RpcStub<InferOpsProjectSession>, via: 'exact' }
     } finally {
       exact[Symbol.dispose]()
     }
@@ -55,8 +61,8 @@ export async function openInferOpsSession(overseer: RpcStub<Overseer>, target: s
       // An awaited capability capnweb types as its plain stub shape; it is the same stub the
       // exact connection's openSession() returns, so it is typed as one.
       return kind === 'board'
-        ? await session.openBoard(target) as unknown as RpcStub<InferOpsProjectSession>
-        : await session.openWiki(target) as unknown as RpcStub<InferOpsWikiSession>
+        ? { session: await session.openBoard(target) as unknown as RpcStub<InferOpsProjectSession>, via: 'account' }
+        : { session: await session.openWiki(target) as unknown as RpcStub<InferOpsWikiSession>, via: 'account' }
     } finally {
       session[Symbol.dispose]()
     }
@@ -64,3 +70,8 @@ export async function openInferOpsSession(overseer: RpcStub<Overseer>, target: s
     account[Symbol.dispose]()
   }
 }
+
+/** The session for `target` alone; see `resolveInferOpsSession`. */
+export const openInferOpsSession = async (overseer: RpcStub<Overseer>, target: string, kind: 'board'):
+    Promise<RpcStub<InferOpsProjectSession> | null> =>
+  (await resolveInferOpsSession(overseer, target, kind))?.session ?? null

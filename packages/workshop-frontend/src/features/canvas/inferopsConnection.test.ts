@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import { accountUrlFor, openInferOpsSession } from './inferopsConnection'
+import { accountUrlFor, openInferOpsSession, resolveInferOpsSession } from './inferopsConnection'
 
 const BOARD = 'inferops://acme.operations/project/board/ENG'
 const WIKI = 'inferops://acme.mind/knowledge/wiki'
@@ -51,7 +51,7 @@ describe('accountUrlFor', () => {
 describe('openInferOpsSession', () => {
   it('uses the exact connection when the workspace holds one, even beside an account connection', async () => {
     const ws = workspace({ [BOARD]: 'board', [ACCOUNT]: 'account' })
-    expect(await openInferOpsSession(ws.overseer, BOARD, 'board')).toMatchObject({ kind: 'board', url: BOARD })
+    expect(await resolveInferOpsSession(ws.overseer, BOARD, 'board')).toMatchObject({ session: { kind: 'board', url: BOARD }, via: 'exact' })
     expect(ws.lookups).toEqual([BOARD])
     expect(ws.opened).toEqual([])
     expect(ws.disposed).toEqual([`client:${BOARD}`])
@@ -60,7 +60,8 @@ describe('openInferOpsSession', () => {
   it('falls back to the organization\'s account connection, opening the reference as its kind', async () => {
     const ws = workspace({ [ACCOUNT]: 'account' })
     expect(await openInferOpsSession(ws.overseer, BOARD, 'board')).toEqual({ kind: 'board', url: BOARD, via: ACCOUNT })
-    expect(await openInferOpsSession(ws.overseer, WIKI, 'wiki')).toEqual({ kind: 'wiki', url: WIKI, via: ACCOUNT })
+    expect(await resolveInferOpsSession(ws.overseer, WIKI, 'wiki'))
+      .toEqual({ session: { kind: 'wiki', url: WIKI, via: ACCOUNT }, via: 'account' })
     expect(ws.lookups).toEqual([BOARD, ACCOUNT, WIKI, ACCOUNT])
     expect(ws.opened).toEqual([`board:${BOARD}`, `wiki:${WIKI}`])
     // The account session and client are disposed; only the opened session is handed back.
