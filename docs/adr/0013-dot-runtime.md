@@ -1,10 +1,10 @@
 ---
-title: The Dot runs on pinned OpenDots in a per-company Node container, with Intelligence self-hosted once it's licensed
+title: The Dot runs on pinned OpenDots in a per-person Node container, with Intelligence self-hosted once it's licensed
 status: proposed
 date: 2026-11-02
 ---
 
-# 0013. The Dot runs on pinned OpenDots in a per-company Node container, with Intelligence self-hosted once it's licensed
+# 0013. The Dot runs on pinned OpenDots in a per-person Node container, with Intelligence self-hosted once it's licensed
 
 ## Context
 
@@ -26,14 +26,18 @@ What bears on the choice:
 | # | Decision | Status |
 | --- | --- | --- |
 | 1 | **Pin OpenDots at `8091324942b86789ed0da7facbee855145d933b0`,** moved only by a reviewed change. No upstream code is vendored here | Proposed |
-| 2 | **Run it as a Node 24 container outside Cloudflare Workers:** upstream's `app` image target, one instance per company, as ADR 0009's proposed default 4 in InferOps requires until FAC-128 proves a partition. InferOS reaches it over an authenticated server-side link | Proposed. Tested as a local Node process, not as a container |
-| 3 | **Give each instance one persistent volume for its SQLite file, with one writer.** The file is subsystem state, and the instance owns it. It's no shared store and no copy of InferOps records | Proposed. Where the volume lives is **undecided** (below) |
+| 2 | **Run it as a Node 24 container outside Cloudflare Workers, one instance per person,** until FAC-127 and FAC-128 prove a partition. One instance per company, ADR 0009's proposed default 4 in InferOps, separates companies but not people: there's one all-or-nothing owner token, and `tasks` and `memories` have no owner (`src/server/store.ts:33,36`). So this is narrower than default 4. The image starts from upstream's `app` target but is modified, because that build runs install scripts, and it needs its base tag pinned, because `node:24-bookworm-slim` floats. InferOS reaches the server over an authenticated server-side link. **The browser also has to reach the Intelligence gateway** (`docs/SETUP.md:64`), so the link isn't server-side only | Proposed. Tested as a local Node process, not as a container |
+| 3 | **Give each instance one persistent volume for its SQLite file, with one writer.** The file is subsystem state, and the instance owns it. It's no shared store and no copy of InferOps records. Connection tokens sit in a plain column there (`src/server/connection-store.ts:14`), so the volume has to be treated as holding credentials | Proposed. Where the volume lives is **undecided** (below) |
 | 4 | **Self-host Intelligence with the pinned Helm chart, in the company environment.** One deployment per company until FAC-128 says otherwise | **Blocked: needs a license.** No version is pinned, because none could be run |
-| 5 | **The instance refuses to start without both Intelligence URLs.** Given a key and no URLs, OpenDots connects to the hosted gateway (`docs/SETUP.md`), which the owner ruled out. An adapter has to enforce this | Proposed |
-| 6 | **Close upstream's other ways out:** `DO_NOT_TRACK=1` and `COPILOTKIT_TELEMETRY_DISABLED=true`, `WEB_SEARCH_PROVIDER=disabled` until a provider is chosen, and installs with `--ignore-scripts` | Proposed. The local run shows no remote connection with these set |
-| 7 | **Excluded at first:** voice, computers, Automatic Learning, Slack and Composio. Leave their settings unset, keep `skillDeliveryEnabled` off, and keep Dots' learning container empty | Proposed. Unset settings are shown off in the run below; learning delivery isn't tested |
+| 5 | **The instance refuses to start unless both Intelligence URLs are set and are the company's own.** Given a key and no URLs, OpenDots connects to the hosted gateway (`docs/SETUP.md`), which the owner ruled out. An adapter has to enforce this | Proposed |
+| 6 | **Close upstream's other ways out:** `DO_NOT_TRACK=1` and `COPILOTKIT_TELEMETRY_DISABLED=true`, `WEB_SEARCH_PROVIDER=disabled` until a provider is chosen, and installs with `--ignore-scripts`. An unset search provider sends queries to Parallel anonymously, with no key needed, so the start check in rule 5 refuses that too | Proposed. Not shown by the run: its two connection snapshots were of an idle server (below) |
+| 7 | **Excluded at first:** voice, computers, Automatic Learning, Slack and Composio. Leave their settings unset, keep `skillDeliveryEnabled` off, and keep Dots' learning container empty. The start check in rule 5 refuses these settings when they're set | Proposed. Unset settings are shown off in the run below; learning delivery isn't tested |
 
-**Proposed default for the owner:** obtain the 30-day evaluation license to finish the proof on a machine with room, and ask CopilotKit about a self-hosted license before any deployment is planned. The price isn't known to us.
+| 8 | **The model is a required dependency, and its provider is open.** OpenDots needs `OPENAI_API_KEY` and `OPENAI_MODEL`. `OPENAI_BASE_URL` defaults to `api.openai.com`, and the model receives conversation content, including page content and tool results. Local Intelligence doesn't make the model local (`README.md:196`). The start check in rule 5 refuses an unset base URL | **Open: a separate decision for the owner** |
+
+**Proposed default for the owner:** obtain the 30-day evaluation license to test the conversation path on a machine with room, and ask CopilotKit about a self-hosted license before any deployment is planned. The evaluation isn't rule 4's environment, so it doesn't finish the proof: **the first criterion stays open until the chart runs.**
+
+**Questions for CopilotKit:** the price; whether one license covers one deployment per company or per person; and whether the license check or the chart calls home.
 
 **Undecided, and this record depends on them:** ADR 0009 default 4 and its company environment, ADR 0011's authority contexts, and where a persistent volume and a Kubernetes cluster live. InferOps has no Dot host today, its `infra/foundation` names no Kubernetes cluster, and nothing here chooses one.
 
@@ -46,7 +50,7 @@ Evidence is **local only**, on one Linux machine: Node 24.14.0, a clean environm
 | Starts | **Yes**, the built server, without Intelligence |
 | Authenticates | **Yes** for OpenDots' one owner token. That's not per-person sign-in, which is FAC-127 |
 | Completes a tool call | **Partly.** A `DotAgent` turn ran `create_space_page` through a local fake model, in process. Intelligence and the runtime route weren't involved |
-| Reads persisted job state after restart | **Yes** for the SQLite side |
+| Reads persisted job state after restart | **Partly.** A task written to the SQLite file read back after a clean server start. It never went through the crash |
 | Reads persisted thread state after restart | **Not proven.** The thread binding survived, but messages live in Intelligence, which didn't run |
 
 The first criterion of FAC-126 is **not met**: it needs a running Intelligence.
@@ -73,19 +77,26 @@ thread bindings after restart: [ 'proof-thread Proof' ]
 remote connections from the server: 0
 ```
 
-The task was written directly to the store, because the API refuses one without Intelligence. It reads `failed` after the restart because the server's runner picked it up, and a task needs an Intelligence conversation to run. So its state persisted, and its work didn't run.
+What this does and doesn't show:
+
+- **Only the page made through the API crossed `kill -9`.** The task and the tool-call page were written afterwards, by another process, to the same file, because the API refuses a task without Intelligence. So they show only that the next server start reads the file.
+- **The task reads `failed`** because the server's runner picked it up, and a task needs an Intelligence conversation to run. Its work didn't run.
+- **"Remote connections: 0" is weak.** It's two `ss` snapshots of an idle server with no key, no model and no conversation. It says nothing about egress during a real turn.
+
+**Second criterion, partly met:** the dependencies, persistence ownership and path are written here, with Intelligence's stack unrun, the model provider open, and the hosting of the volume and any cluster undecided.
 
 Also at the pin, in the same environment: `npm ci --ignore-scripts` and `npm run build` succeeded. Upstream's tests passed 345 of 346. `tests/telemetry.test.ts` timed out once at 5 s under load, and passed 8 of 8 when run alone.
 
 ## Consequences
 
+- **Licenses, not a full review:** OpenDots is MIT. Its lockfile has 1,137 packages, 938 of them not dev-only. One has no license field (`khroma`), and `lightningcss` is MPL-2.0. Three have install scripts: `@scarf/scarf` (install analytics), `esbuild` and `fsevents`. The build passed with scripts off.
 - FAC-127, FAC-128, FAC-132, FAC-133, FAC-135, FAC-136 and FAC-137 can use this shape, and none can finish a real conversation until Intelligence runs. FAC-139 depends on this choice.
-- A Kubernetes cluster, Postgres, Redis and an OIDC provider become new infrastructure for each company's environment, or a shared one if FAC-128 allows it. That cost hasn't been sized.
+- A Kubernetes cluster, Postgres, Redis and an OIDC provider become new infrastructure for each company's environment, or a shared one if FAC-128 allows it, and one OpenDots instance per person multiplies the running cost. That cost hasn't been sized.
 - Conversation history has to be backed up in Intelligence and application state in SQLite, separately (`docs/SETUP.md`). A company's export and deletion have to reach both.
 - `node:sqlite` prints an `ExperimentalWarning` on Node 24.14.0, so a Node upgrade is a thing to test.
 - AG-UI differs: OpenDots locks `@ag-ui/core` 0.0.59 and InferOps uses 1.0.2. Adapter conformance has to cover that, and this record doesn't.
 - OpenDots has `@copilotkit/*` at 1.75.0 with caret ranges in `package.json`, so builds must use its lockfile.
-- Upstream's `Dockerfile` runs `npm ci` with install scripts on. The image needs `--ignore-scripts`, and the container path is still to be tested.
+- The container path is still to be tested.
 
 ## Alternatives Considered
 
