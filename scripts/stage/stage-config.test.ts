@@ -186,6 +186,10 @@ test("the backend signs in with InferLab only and carries no secret in its vars"
   assert.equal(backend.vars?.PUBLIC_BASE_URL, "https://dev-os.factorylevel.dev");
   assert.equal(backend.vars?.AUTH_GATEKEEPERS, "inferops");
   assert.equal(backend.vars?.DISABLE_PASSWORD_AUTH, "true");
+  assert.equal(backend.vars?.SHARED_CONFIGURATION_GATEKEEPER, "inferops");
+  // Production too: only an InferOps Admin edits or publishes shared configuration on any stage.
+  assert.equal((build("prod").get("workshop-backend") as StagingConfig).vars?.SHARED_CONFIGURATION_GATEKEEPER,
+    "inferops");
   assert.equal(backend.vars?.COMPOSABLE_VIEWS, "true");
   assert.equal(backend.vars?.DURABLE_VIEWS, "true");
   assert.equal(backend.vars?.CANVAS_CATALOG, JSON.stringify({ widgets: [] }));

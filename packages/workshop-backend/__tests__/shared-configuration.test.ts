@@ -4,6 +4,7 @@
 // and their operate session are unaffected, and a deployment that names no vendor is unchanged.
 import { describe, expect, it, vi } from "vitest";
 import { getSharedConfigurationGatekeeper } from "../src/auth/config.js";
+import { requireSharedConfiguration } from "../src/overseer.js";
 import { holdsSharedConfiguration } from "../src/user.js";
 import { openFakeOverseer } from "./fixtures.js";
 
@@ -11,17 +12,20 @@ const REFUSED = "You don't have permission to share or publish configuration oth
 const GATED = { SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
 
 type Answer = boolean | Error;
+/** What the caller's account answers: one answer, or one per action and moment. */
+type Answers = Answer | ((action: string) => Answer);
 /** A connected-account record as the user DO keeps one, for the account loop. */
 type AccountRecord = Parameters<typeof holdsSharedConfiguration>[0] extends Iterable<infer R> ? R : never;
 
 /** Opens a workspace through the real open(), with the caller's account answering `answer`. */
 async function open(opts: {
-  env?: object; shared?: boolean; answer?: Answer; collaborator?: boolean;
+  env?: object; shared?: boolean; answer?: Answers; collaborator?: boolean;
 }) {
   let asked: string[] = [];
   let answerFor = vi.fn(async (action: string) => {
     asked.push(action);
-    let answer = opts.answer ?? false;
+    let given = opts.answer ?? false;
+    let answer = typeof given === "function" ? given(action) : given;
     if (answer instanceof Error) throw answer;
     return answer;
   });
@@ -122,10 +126,12 @@ describe("sharing and publishing", () => {
     expect(sharing.addCollaborator).not.toHaveBeenCalled();
   });
 
-  it("refuses to publish a console before reading it when the vendor says no", async () => {
+  it("leaves publishing a console in a person's own unshared workspace to them", async () => {
     let { overseer, asked } = await personal(false);
-    await expect(overseer.publishConsole("console", "1")).rejects.toThrow(REFUSED);
-    expect(asked).toEqual(["publish"]);
+    // Past the check, the forged workspace has no console store to publish from.
+    let error = await overseer.publishConsole("console", "1").catch((e: unknown) => e);
+    expect(String(error)).not.toContain(REFUSED);
+    expect(asked).toEqual([]);
   });
 
   it("refuses when the vendor can't answer, with its own message", async () => {
@@ -146,6 +152,95 @@ describe("sharing and publishing", () => {
     await expect(overseer.createShareLink("use")).resolves.toEqual({ key: "key", linkId: "link" });
     expect(sharing.createShareLink).toHaveBeenCalledOnce();
     expect(asked).toEqual([]);
+  });
+});
+
+// Opened with build, then the authority changes: what reaches other people asks again.
+async function shared(answers: { build: Answer; publish: Answer }) {
+  let opened = false;
+  let session = await open({
+    env: GATED, shared: true,
+    answer: action => {
+      if (!opened && action === "build") return true;
+      return action === "build" ? answers.build : answers.publish;
+    },
+  });
+  opened = true;
+  expect(kind(session.overseer)).toBe("OverseerClientInterface");
+  return session;
+}
+
+describe("a build session in a shared workspace", () => {
+
+  it("refuses publishing, installs and blueprint changes without publish, before anything runs", async () => {
+    let { overseer, asked } = await shared({ build: true, publish: false });
+    asked.length = 0;
+    await expect(overseer.publishConsole("console", "1")).rejects.toThrow(REFUSED);
+    await expect(overseer.installBlueprint("blueprint", {})).rejects.toThrow(REFUSED);
+    await expect(overseer.upgradeInstall(2)).rejects.toThrow(REFUSED);
+    await expect(overseer.updateBlueprint("blueprint", { title: "t" })).rejects.toThrow(REFUSED);
+    await expect(overseer.deleteBlueprint("blueprint")).rejects.toThrow(REFUSED);
+    expect(asked).toEqual(["publish", "publish", "publish", "publish", "publish"]);
+  });
+
+  it("refuses a merge or a kind change once build is gone, though the session opened with it", async () => {
+    let { overseer, asked } = await shared({ build: false, publish: false });
+    asked.length = 0;
+    await expect(overseer.mergeChanges(1)).rejects.toThrow(REFUSED);
+    await expect(overseer.setKind("app")).rejects.toThrow(REFUSED);
+    expect(asked).toEqual(["build", "build"]);
+  });
+
+  it("refuses when InferOps can't answer", async () => {
+    let { overseer } = await shared({ build: new Error("down"), publish: new Error("down") });
+    await expect(overseer.mergeChanges(1)).rejects.toThrow("down");
+    await expect(overseer.publishConsole("console", "1")).rejects.toThrow("down");
+  });
+});
+
+/** A workspace for the check alone, recording what its user's account is asked. */
+function workspace(opts: { env?: object; shared: boolean; answer: Answer }) {
+  let asked: string[] = [];
+  return {
+    asked,
+    workspace: {
+      env: (opts.env ?? GATED) as Cloudflare.Env,
+      isSharedConfiguration: async () => opts.shared,
+      users: {
+        idFromString: (id: string) => id,
+        get: () => ({
+          holdsSharedConfiguration: async (action: string) => {
+            asked.push(action);
+            if (opts.answer instanceof Error) throw opts.answer;
+            return opts.answer;
+          },
+        }),
+      },
+    } as never,
+  };
+}
+
+describe("requireSharedConfiguration", () => {
+
+  it("asks nobody when off, or for a shared-only check in an unshared workspace", async () => {
+    let off = workspace({ env: {}, shared: true, answer: false });
+    await requireSharedConfiguration(off.workspace, "user", "publish", "always");
+    let unshared = workspace({ shared: false, answer: false });
+    await requireSharedConfiguration(unshared.workspace, "user", "build", "shared");
+    expect([...off.asked, ...unshared.asked]).toEqual([]);
+  });
+
+  it("asks for sharing even in an unshared workspace, and refuses a no", async () => {
+    let { workspace: ws, asked } = workspace({ shared: false, answer: false });
+    await expect(requireSharedConfiguration(ws, "user", "publish", "always")).rejects.toThrow(REFUSED);
+    expect(asked).toEqual(["publish"]);
+  });
+
+  it("passes a yes, and refuses a failed check with its own message", async () => {
+    await requireSharedConfiguration(workspace({ shared: true, answer: true }).workspace, "user", "build", "shared");
+    await expect(requireSharedConfiguration(
+      workspace({ shared: true, answer: new Error("down") }).workspace, "user", "build", "shared"))
+      .rejects.toThrow("down");
   });
 });
 

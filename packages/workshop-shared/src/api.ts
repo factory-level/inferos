@@ -33,7 +33,7 @@ import type {
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -1226,6 +1226,14 @@ export interface AuthenticatedApi extends RpcTarget {
    * in a sandboxed iframe and exposes `ui` to it over a MessagePort RPC session.
    */
   getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null>;
+
+  /**
+   * Whether the current user may `build` or `publish` configuration other people use, as the
+   * deployment's SHARED_CONFIGURATION_GATEKEEPER decides it now through their own connected
+   * account; true when the deployment names none. For the client to decide whether to offer
+   * sharing and publishing. It grants nothing: the kernel asks again at every such call.
+   */
+  holdsSharedConfiguration(action: SharedConfigurationAction): Promise<boolean>;
 
   // --- Deployment admin ---
 

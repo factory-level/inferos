@@ -6,7 +6,7 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import type { Collection, Singleton } from "@gadgets/typed-storage";
 import type { Overseer } from "@gadgets/workshop-shared/api";
-import { OverseerDurableObject, makeOverseerStorage } from "../src/overseer.js";
+import { OverseerDurableObject, makeOverseerStorage, requireSharedConfiguration } from "../src/overseer.js";
 import type { ActionRecord } from "../src/overseer.js";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -83,6 +83,11 @@ export async function openFakeOverseer(
       ownerId,
       // A deployment with no optional authorization settings (e.g. SHARED_CONFIGURATION_GATEKEEPER).
       env: {},
+      // The real check, over this forged impl's env, sharing state and users.
+      requireSharedConfiguration(...args: [string, "build" | "publish", "always" | "shared"]) {
+        return requireSharedConfiguration(this as never, ...args);
+      },
+      isSharedConfiguration: async () => false,
       assertGatekeeperUsable: () => {},
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
