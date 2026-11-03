@@ -3,6 +3,7 @@
 
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { fingerprintOf } from "../src/actions";
 import type { Board } from "../src/types";
 import type { BindingProps } from "./worker";
 
@@ -486,6 +487,27 @@ describe("stored actions", () => {
     });
 
     expect(await hooks.apply(props, 5)).toBeNull();
+
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: STATE.working, revision: "2" });
+  });
+
+  // The fingerprints below were computed by the code that staged records before bindings took their
+  // scope as an argument; pending records on deployed stages carry them, so they must still verify.
+  it("still verifies and applies a fingerprinted record staged before bindings took their scope", async () => {
+    const { props, hooks, mock } = setup();
+    const record = {
+      kind: "transition", actionId: 6, issueId: DEMO_1, identifier: "DEMO-1", fromStateId: STATE.ready,
+      toStateId: STATE.working, toStateName: "Working", expectedRevision: "1", status: "pending",
+      fingerprint: "7706d15188984cc9b414dd05fa057b51e0f1b3fd1e6a2e0686951e63bca8c943", attempts: {},
+    };
+    expect(await fingerprintOf("DEMO", record as never)).toBe(record.fingerprint);
+    expect(await fingerprintOf("knowledge/wiki", {
+      kind: "section-update", sectionId: "00000000-0000-4000-8000-000000000000", documentTitle: "x", tag: "t",
+      body: "B", expectedVersion: 1, previousBody: "A",
+    } as never)).toBe("39a4eb7ea8950305425e7b27a77cd383dc7d3b8b8cff41e2cee3d03545f5ce9e");
+    await hooks.putRaw(props, "action:6", record);
+
+    expect(await hooks.apply(props, 6)).toBeNull();
 
     expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: STATE.working, revision: "2" });
   });
