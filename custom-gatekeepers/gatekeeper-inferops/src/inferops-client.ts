@@ -120,7 +120,7 @@ export type NewIssueRequest = {
   description?: string;
   priority?: Priority;
   stateId: string;
-  workflow?: "content";
+  workflow?: "content" | "service";
 };
 
 /** Changed fields of an issue as the gatekeeper sends them (trimmed, unchanged ones dropped). */

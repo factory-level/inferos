@@ -179,6 +179,33 @@ describe("reads", () => {
     }
   });
 
+  it("reads a service board's seven states in board order, and still refuses an unknown workflow", async () => {
+    // InferOps' `service` ladder (FAC-166, inferops 0bc12ccc), positions after the other two.
+    const ladder = [
+      ["Enquiry", "backlog"], ["Quoted", "backlog"], ["Booked", "unstarted"], ["Scheduled", "started"],
+      ["On site", "started"], ["Completed", "completed"], ["Cancelled", "cancelled"],
+    ] as const;
+    const states = ladder.map(([name, group], i) => ({
+      id: `20000000-0000-4000-8000-0000000001${String(i).padStart(2, "0")}`, name, group, position: 10 + i,
+      workflow: "service",
+    }));
+    const job = { ...card(DEMO_1, "DEMO-1", states[1]!.id, "1041"), workflow: "service" };
+    const board = (columns: unknown[]) => Response.json({ projectId: DEMO.id, projects: [DEMO, ENG], columns });
+    const serving = (columns: unknown[]) => fakeInferOps(call =>
+      call.path === `/project/board?projectId=${DEMO.id}` ? board(columns) : undefined).client;
+
+    const snapshot = await serving(states.map(s => ({ state: s, issues: s.id === job.stateId ? [job] : [] })))
+      .readProject("DEMO");
+    expect(snapshot.states.map(s => [s.name, s.group, s.workflow]))
+      .toEqual(ladder.map(([name, group]) => [name, group, "service"]));
+    expect(snapshot.issues.map(i => [i.identifier, i.workflow, i.stateId])).toEqual([["DEMO-1", "service", states[1]!.id]]);
+
+    const unknown = serving([{ state: { ...states[0], workflow: "maintenance" }, issues: [] }]);
+    expect((await failure(unknown.readProject("DEMO"))).code).toBe("UNAVAILABLE");
+    const unknownCard = serving([{ state: states[0], issues: [{ ...job, stateId: states[0]!.id, workflow: "maintenance" }] }]);
+    expect((await failure(unknownCard.readProject("DEMO"))).code).toBe("UNAVAILABLE");
+  });
+
   it("lists projects by key and name, and answers an unknown project with NOT_FOUND", async () => {
     const { client } = fakeInferOps();
 
@@ -318,6 +345,20 @@ describe("creates", () => {
     expect(calls.find(c => c.method === "POST")!.body).toEqual({
       projectId: DEMO.id, title: "Post", description: "Body", stateId: DRAFTING, workflow: "content",
     });
+  });
+
+  it("names a service workflow, so a job in a service state is not created as software", async () => {
+    const ENQUIRY = "20000000-0000-4000-8000-000000000100";
+    const { client, calls } = fakeInferOps(call => call.method === "POST" && call.path === "/project/issues"
+      ? Response.json({ issue: { ...card(DEMO_1, "DEMO-1", ENQUIRY, "5"), workflow: "service" } }, { status: 201 })
+      : undefined);
+
+    const created = await client.createIssue("DEMO", { title: "Rewire", stateId: ENQUIRY, workflow: "service" }, "k");
+
+    expect(calls.find(c => c.method === "POST")!.body).toEqual({
+      projectId: DEMO.id, title: "Rewire", stateId: ENQUIRY, workflow: "service",
+    });
+    expect(created.workflow).toBe("service");
   });
 
   it("retries a create whose response was lost under the same key, creating one issue", async () => {

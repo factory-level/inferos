@@ -125,7 +125,7 @@ const PRINCIPAL_KINDS = ["user", "service_account", "system"] as const;
 const REQUIRED_FIELDS = ["title", "description", "acceptanceCriteria", "assigneeId", "targetDate", "refs"] as const;
 const GUARD_KINDS = ["required-field", "lease-holder", "actor-kind", "not-blocked", "approval-ref"] as const;
 const LANE_GROUPS = ["backlog", "unstarted", "started", "completed", "cancelled"] as const;
-const WORKFLOWS = ["content", "software"] as const;
+const WORKFLOWS = ["content", "software", "service"] as const;
 
 type Value = Record<string, unknown>;
 

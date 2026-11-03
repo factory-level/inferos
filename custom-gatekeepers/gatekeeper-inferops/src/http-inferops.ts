@@ -154,7 +154,7 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const WIRE_CODE = /^[A-Z_]{1,40}$/;
 
 const STATE_GROUPS: readonly StateGroup[] = ["backlog", "unstarted", "started", "completed", "cancelled"];
-const WORKFLOWS: readonly Workflow[] = ["content", "software"];
+const WORKFLOWS: readonly Workflow[] = ["content", "software", "service"];
 const PRIORITIES: readonly Issue["priority"][] = ["urgent", "high", "medium", "low", "none"];
 const RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "succeeded", "failed", "cancelled", "unknown"];
 const RUN_REASON_CODES: readonly RunReasonCode[] = ["AUTH_BLOCKED", "QUOTA_BLOCKED", "TESTS_FAILED"];
