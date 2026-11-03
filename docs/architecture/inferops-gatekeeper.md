@@ -175,6 +175,28 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   (401) is reported back through `reportCredentialsRejected`, which heals by refreshing and lets the
   request retry once. The refresh token never leaves the object. `revoke()` signs the session out
   and wipes the object.
+- **Shared configuration.** `InferOpsAccount.holdsSharedConfiguration(action)` answers the
+  Workshop's question when a deployment sets `SHARED_CONFIGURATION_GATEKEEPER=inferops` (see
+  [Operate mode](operate-mode.md#shared-configuration)). The answer is about one company, the
+  session's own: its `scope` is the identity's tenant id, since a connection's workspaces are all in
+  its session's company. A session in a company other than the one `INFEROPS_COMPANY` names answers
+  for nothing (`scope: null`) and sends no request; a malformed `INFEROPS_COMPANY` throws. Otherwise
+  it asks InferOps' `GET /auth/permissions?permissions=configuration:<build|publish>` with the
+  person's own token in each workspace stored at connect, in order, through
+  `InferOpsClient.holdsPermission`, and says yes at the first workspace whose decision allows it.
+  Only an Admin's grant (`owner`, `admin`) holds those permissions, and a grant deny removes either
+  from that grant (factory-level/inferops#2551); a deny on one grant doesn't remove the authority
+  while another grant in the company still holds it. The Workshop refuses a person whose
+  connections answer for more than one company. With `INFEROPS_COMPANY` `internal` or unset, the
+  company is whichever InferOps admitted at the exchange, which after factory-level/inferops#2547
+  is only one the deployment's origin is mapped to. A 403 or 404 for a workspace is a no there; an
+  outage, or an answer without a boolean decision for exactly the permission asked, throws
+  `UNAVAILABLE`, so the Workshop refuses rather than guessing. An account without a connected person
+  (demo data, a sign-in) answers for nothing; the mock client's `holdsPermission` is always false.
+  A workspace granted since the person connected counts after they reconnect.
+  `__tests__/account.test.ts` ("shared configuration authority") covers the request, an Operator,
+  an Admin in a second workspace, another company's deployment and its own, a malformed setting, a
+  refused workspace, an outage and malformed answers, and an account with no person.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there

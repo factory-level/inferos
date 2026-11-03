@@ -24,7 +24,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperUiFrame, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { ArtifactPublisherGatekeeper } from "./artifact-publisher";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -613,6 +613,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     if (!app) return null;
     // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
     return user.startAccountAppUi(app.accountId, { isAdmin: this.#isAdmin() });
+  }
+
+  // A display hint; the overseer re-asks at every share and publish (requireSharedConfiguration).
+  async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<boolean> {
+    if (action !== "build" && action !== "publish") throw new Error("Unknown action.");
+    try {
+      return await this.#user.holdsSharedConfiguration(action);
+    } catch {
+      return false;
+    }
   }
 
   // --- Deployment admin ---

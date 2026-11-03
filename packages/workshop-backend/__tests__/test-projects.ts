@@ -81,6 +81,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "gatekeeper-lookup.test.ts",
   "overseer-hooks.test.ts",
   "sharing.test.ts",
+  "shared-configuration.test.ts",
   "user-directory.test.ts",
 ];
 

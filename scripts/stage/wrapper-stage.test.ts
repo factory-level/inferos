@@ -329,6 +329,8 @@ test("the company's tenant id becomes the stage's company and the gatekeeper's I
     stageName: result.stage.name, stage: result.stage.stage, packages, accountId: "0".repeat(32), kvIds,
   });
   assert.equal(configs.get("gatekeeper-inferops")?.vars?.INFEROPS_COMPANY, ACME.inferops.tenantId);
+  // FAC-44: a company's deployment gates shared configuration on InferOps too.
+  assert.equal(configs.get("workshop-backend")?.vars?.SHARED_CONFIGURATION_GATEKEEPER, "inferops");
 });
 
 test("a wrapper's plan never prints its tenant id; InferLab's own stages say internal", () => {
