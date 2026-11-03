@@ -177,6 +177,24 @@ test("the backend signs in with InferLab only and carries no secret in its vars"
   assert.equal(build("dev").get("workshop-backend")?.vars?.CANVAS_CATALOG, undefined);
 });
 
+test("dev offers one cheap model with a daily turn cap; prod has no model bounds", () => {
+  const dev = build("dev").get("workshop-backend") as StagingConfig;
+  assert.equal(dev.vars?.MODEL_ALLOWLIST, "claude-haiku-5-5");
+  assert.equal(dev.vars?.DAILY_AGENT_TURN_LIMIT, "40");
+  const prod = build("prod").get("workshop-backend") as StagingConfig;
+  assert.equal(prod.vars?.MODEL_ALLOWLIST, undefined);
+  assert.equal(prod.vars?.DAILY_AGENT_TURN_LIMIT, undefined);
+});
+
+test("model bounds must name models and a positive daily cap", () => {
+  const problems = (agents: StageDefinition["agents"]) => stageDefinitionProblems({ ...STAGES.dev, agents }).join("\n");
+  assert.match(problems({ models: [], dailyTurnLimit: 1 }), /at least one model/);
+  assert.match(problems({ models: ["a,b"], dailyTurnLimit: 1 }), /not a model id/);
+  assert.match(problems({ models: ["claude-haiku-5-5"], dailyTurnLimit: 0 }), /positive integer/);
+  assert.match(problems({ models: ["claude-haiku-5-5"], dailyTurnLimit: 1.5 }), /positive integer/);
+  assert.equal(problems({ models: ["claude-haiku-5-5"], dailyTurnLimit: 1 }), "");
+});
+
 test("secrets: admins are required, and the plan names secrets without their values", () => {
   assert.throws(() => resolveStageAdmins({ list: " , " }), /STAGE_ADMINS/);
   const sentinel = "sentinel-secret-value-9f2c";

@@ -1958,6 +1958,8 @@ const SUGGESTED_MODEL_CATALOG = {
     "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000, hidden: true},
     "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000, hidden: true},
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
+    // Not in pi's bundled catalog yet, so both limits are stated here, conservatively.
+    "claude-haiku-5-5": {name: "Claude Haiku 5.5", contextWindow: 200000, outputLimit: 16000},
   },
   "openai": {
     // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the

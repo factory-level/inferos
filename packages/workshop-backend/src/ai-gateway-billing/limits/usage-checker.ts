@@ -19,6 +19,11 @@ export interface UsageCheckResult {
   allowed: boolean;
   /** Guidance/reason when blocked. */
   reason?: string;
+  /**
+   * The chat error code when blocked. Unset means `usage_limit`, which offers adding credits; the
+   * plain daily cap uses `daily_turn_limit`, because there's nothing to top up.
+   */
+  errorCode?: "daily_turn_limit";
   /** Whether to serve the request using the user's own gateway/keys rather than the platform's. */
   shouldUseByok: boolean;
   /** Whether the user is within their free-tier limit. */
@@ -66,7 +71,7 @@ export async function checkUsageAndBalance(
   userStub: DurableObjectStub<UserDurableObject>,
 ): Promise<UsageCheckResult> {
   if (!isCloudflareLimitsEnabled(env)) {
-    return unlimitedResult();
+    return checkDailyTurnCap(env, userStub);
   }
 
   const limit = getDailyLlmCallLimit(env);
@@ -122,6 +127,57 @@ export async function checkUsageAndBalance(
     balance,
     hasUserToken,
     byokRouting: decision.shouldUseByok ? byokRouting : undefined,
+  };
+}
+
+/**
+ * Whether a turn on this model draws on the platform's allowance, so it's checked and counted: a
+ * gateway model always; the local developer key (a managed model) only under the plain daily cap,
+ * so a stage's bound can be tried locally. A person's own key or plan never does.
+ */
+export function drawsOnPlatformAllowance(env: Cloudflare.Env,
+    model: { config: { billing?: string }, profile: { managed?: boolean } }): boolean {
+  if (model.config.billing === undefined) return true;
+  return model.profile.managed === true && !isCloudflareLimitsEnabled(env);
+}
+
+/**
+ * The cap from DAILY_AGENT_TURN_LIMIT, or null when unset or not a positive integer. It applies
+ * only while the Cloudflare limits flow is off, which has its own allowance and top-up.
+ */
+export function getDailyAgentTurnCap(env: Pick<Cloudflare.Env, "DAILY_AGENT_TURN_LIMIT">): number | null {
+  const raw = env.DAILY_AGENT_TURN_LIMIT?.trim();
+  if (!raw || !/^[1-9][0-9]*$/.test(raw)) return null;
+  return Number.parseInt(raw, 10);
+}
+
+/**
+ * A plain daily cap on agent turns, for deployments such as a test stage where nobody can connect
+ * a Cloudflare account to continue. It shares the user object's daily counter, and a blocked turn
+ * isn't counted. Without a cap it allows everything, as before.
+ */
+async function checkDailyTurnCap(
+  env: Cloudflare.Env,
+  userStub: DurableObjectStub<UserDurableObject>,
+): Promise<UsageCheckResult> {
+  const cap = getDailyAgentTurnCap(env);
+  if (cap === null) return unlimitedResult();
+  const quota = await userStub.consumeDailyLlmCall(cap);
+  return {
+    allowed: quota.withinLimits,
+    ...(quota.withinLimits ? {} : {
+      reason: `This environment allows ${cap} agent turns a day, and they're used up. ` +
+          "They reset at midnight UTC.",
+      errorCode: "daily_turn_limit" as const,
+    }),
+    shouldUseByok: false,
+    withinLimits: quota.withinLimits,
+    remaining: quota.remaining,
+    limit: quota.limit,
+    windowKind: "daily",
+    resetAt: quota.resetAt,
+    balance: null,
+    hasUserToken: false,
   };
 }
 

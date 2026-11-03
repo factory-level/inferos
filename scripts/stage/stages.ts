@@ -54,6 +54,13 @@ export interface StageDefinition {
   gatekeepers: readonly string[];
   /** Refuse to deploy from a dirty or detached working tree. */
   requireCleanTree: boolean;
+  /**
+   * Optional bounds on the platform's own models (`MODEL_ALLOWLIST`, `DAILY_AGENT_TURN_LIMIT`): the
+   * models offered, in order, the first being the default, and the agent turns each workspace owner
+   * may start per UTC day. Unset offers every model with no cap. Neither is a dollar bound: that's
+   * the provider's spend limit on the key the gateway stores.
+   */
+  agents?: { models: readonly string[]; dailyTurnLimit: number };
 }
 
 /**
@@ -81,6 +88,8 @@ export const STAGES = {
     },
     gatekeepers: STAGE_GATEKEEPERS,
     requireCleanTree: false,
+    // Testers on a 60 USD a month key: the cheapest current model only, and a daily cap per owner.
+    agents: { models: ["claude-haiku-5-5"], dailyTurnLimit: 40 },
   },
   prod: {
     hostname: "os.factorylevel.dev",
@@ -128,6 +137,17 @@ export function stageDefinitionProblems(stage: StageDefinition): string[] {
     problems.push(`gatekeepers must include ${INFEROPS_GATEKEEPER}: it serves InferLab sign-in`);
   }
   if (new Set(stage.gatekeepers).size !== stage.gatekeepers.length) problems.push("gatekeepers lists a package twice");
+  if (stage.agents) {
+    // Whether each id is a suggested model is checked beside the catalog (workshop-backend's
+    // model-allowlist test); here, only that the list can be a comma-separated var.
+    if (stage.agents.models.length === 0) problems.push("agents.models must name at least one model");
+    for (const model of stage.agents.models) {
+      if (!/^[A-Za-z0-9@][A-Za-z0-9@./_-]*$/.test(model)) problems.push(`agents.models "${model}" is not a model id`);
+    }
+    if (!Number.isInteger(stage.agents.dailyTurnLimit) || stage.agents.dailyTurnLimit < 1) {
+      problems.push("agents.dailyTurnLimit must be a positive integer");
+    }
+  }
   return problems;
 }
 

@@ -84,7 +84,7 @@ import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from ".
 import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/observability/error-reporting";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
-import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
+import { checkUsageAndBalance, drawsOnPlatformAllowance } from "./ai-gateway-billing/limits/usage-checker";
 import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
@@ -7963,13 +7963,13 @@ class OverseerImpl implements AgentHooks {
         // (This runs inside the try so the `finally` below still clears the active-agent state and
         // emits a stream "clear" — otherwise the UI would spin forever on a block.)
         let byokRouting: UserGatewayRouting | undefined;
-        if (this.ownerId && aiModel.config.billing === undefined) {
+        if (this.ownerId && drawsOnPlatformAllowance(this.env, aiModel)) {
           let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
           let usage = await checkUsageAndBalance(this.env, ownerStub);
           if (!usage.allowed) {
             turn.setErrorType("usage_limit");
             this.postAgentErrorMessage(chatId, aiModel.profile,
-                usage.reason ?? "Usage limit reached.", "usage_limit");
+                usage.reason ?? "Usage limit reached.", usage.errorCode ?? "usage_limit");
             turnLogger.debug("agent run finished", {
               event: "agent.run.finished", outcome: "usage_limit",
               durationMs: Date.now() - startedAt,

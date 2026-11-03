@@ -163,6 +163,10 @@ export function backendVars(stage: StageDefinition, origin: string, canvasCatalo
     INFEROPS_BOUND_VIEWS: "false",
     PUBLISH_CLOUDFLAREOS_WIDGET: "false",
     PUBLISH_CLOUDFLAREOS_APP: "false",
+    ...(stage.agents ? {
+      MODEL_ALLOWLIST: stage.agents.models.join(","),
+      DAILY_AGENT_TURN_LIMIT: String(stage.agents.dailyTurnLimit),
+    } : {}),
   };
 }
 

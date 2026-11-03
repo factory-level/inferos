@@ -4,7 +4,10 @@ design: https://github.com/factory-level/inferops/blob/develop/docs/human/journe
 covers:
   - scripts/stage
   - scripts/preview/staging-config.ts
-updated: 2026-10-30
+  - packages/workshop-backend/src/model-allowlist.ts
+  - packages/workshop-backend/src/ai-gateway.ts
+  - packages/workshop-backend/src/ai-gateway-billing/limits/usage-checker.ts
+updated: 2026-11-03
 ---
 
 # Persistent stage deploys
@@ -29,6 +32,23 @@ updated: 2026-10-30
 - **Checks.** `--dry-run` prints the plan with no network. `prod` deploys only from a clean tree; `dev` needs `--allow-dirty` for one. After the router deploys, an unauthenticated request to every stage hostname (`stageHostnames`: the stage's, and the sign-in proxy's) must be an Access login redirect, or the run fails saying the stage is exposed; on a first deploy the probe retries name-resolution failures (`ENOTFOUND`/`EAI_AGAIN`) for up to five minutes while the new custom-domain record appears (`retryWhileDnsPending`, `scripts/stage/stage-resources.ts`); with `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` set it then runs `runSmoke` against the stage's gatekeepers. `pnpm stage:delete <stage> --confirm <hostname>` deletes the workers, router first, and keeps the KV namespaces and bucket.
 - `scripts/stage/stage-config.test.ts` and `stage-resources.test.ts` cover the configs built from the real packages, the stage definitions (including the authorize origin's rules and which workers get a custom domain), secret redaction in the plan (the backend's and the edge secret), edge-secret validation and the Wrangler output parsers. The runbook is [deploy a persistent stage](../wiki/stage-deploy.md); the decision is [ADR 0009](../adr/0009-persistent-stage-deploys.md) (proposed).
 
+## Agent models and bounds
+
+A stage offers no agent model until it has a model source. On a stage that's the platform AI Gateway: `CF_AI_GATEWAY`, `CF_AI_GATEWAY_ACCOUNT_ID` and `CF_AI_GATEWAY_PROVIDERS`, uploaded as backend secrets by `resolveAiGateway`, with the provider's key stored in that gateway, never in InferOS. Without them, the only models are ones a person adds with their own key, so the picker shows "No agent". The local developer key (`localApiModels`) never reaches a stage, because a stage never sets `DEV`.
+
+A stage's optional `agents` (`stages.ts`) bounds the platform's own models, as two plain backend vars (`backendVars`):
+
+- **`MODEL_ALLOWLIST`** (`model-allowlist.ts`): the model ids offered, in order. `AiGatewayConfig.getModelList` and `localApiModels` offer only those, so the first is the default for anyone with no stored choice. `resolveModel` refuses the rest, so a stored choice can't reach a costlier model. Models a person adds with their own key aren't affected.
+- **`DAILY_AGENT_TURN_LIMIT`** (`usage-checker.ts`): agent turns each workspace owner may start per UTC day, while the Cloudflare limits flow is off. It counts gateway turns and the local developer key (`drawsOnPlatformAllowance`), never a person's own key or plan, and a refused turn isn't counted. The chat shows "This environment allows N agent turns a day, and they're used up. They reset at midnight UTC." with the code `daily_turn_limit`, so no top-up dialog opens.
+
+`dev` sets `models: ["claude-haiku-5-5"]` and `dailyTurnLimit: 40`; `prod` sets neither. `stageDefinitionProblems` refuses an empty model list, an id that couldn't be a comma-separated var, and a cap that isn't a positive integer.
+
+**Neither is a dollar bound.** That's the spend limit on the key the gateway stores, set with the provider. The cap counts turns, and a turn can make many model calls; there's no per-turn step cap.
+
+Claude Haiku 5.5 isn't in pi's bundled catalog, so `SUGGESTED_MODELS` states its window (200,000) and output limit (16,000) conservatively.
+
+**Evidence, local only:** `workshop-backend/__tests__/model-bounds.test.ts`, the stage-config tests, and a local `pnpm dev-server` with `MODEL_ALLOWLIST=claude-haiku-5-5` and `DAILY_AGENT_TURN_LIMIT=2`. There the picker offered only "Claude Haiku 5.5 (local API key)", two turns were answered, and the third was refused with the message above. Not shown on a deployed stage.
+
 ## Divergences from Design
 
 - There is no design document for stages; the owner's stated intent (two Zero-Trust instances wired to InferLab dev and prod, deployed from a workstation) is recorded in [ADR 0009](../adr/0009-persistent-stage-deploys.md), which is proposed. The cloud-parity requirements in [local development](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md) remain the nearest design.
@@ -39,4 +59,5 @@ updated: 2026-10-30
 ## Open Questions
 
 - Whether stages should move to CI (dev on merge, prod on approved dispatch) once the first deploys are accepted.
-- Whether a stage should configure an AI Gateway or stay bring-your-own-key.
+- Whether `prod` should configure an AI Gateway or stay bring-your-own-key. `dev` is meant to use one, bounded as above.
+- Whether a turn needs its own step or token cap, beyond each call's output limit.
