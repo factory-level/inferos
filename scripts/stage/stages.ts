@@ -79,7 +79,7 @@ export interface StageDefinition {
  * release/manifest-lib.ts). `gatekeeper-mcp-portal` is left out because it needs an
  * admin-configured portal URL, and `gatekeeper-homeassistant` because nothing here uses it.
  */
-const STAGE_GATEKEEPERS = [
+export const STAGE_GATEKEEPERS = [
   INFEROPS_GATEKEEPER, "gatekeeper-context", "gatekeeper-scheduler", "gatekeeper-mcp",
 ] as const;
 
