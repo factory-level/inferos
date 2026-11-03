@@ -4,7 +4,7 @@
   "id": "inferops",
   "package": "@inferos/gatekeeper-inferops",
   "status": "reference",
-  "summary": "InferOps project boards, coding dispatch, the InferMind Wiki (its structure, page bodies and sections, and approval of drafted page proposals for publication) and read-only custom tables, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
+  "summary": "InferOps project boards, coding dispatch, the InferMind Wiki (its structure, page bodies and sections, and approval of drafted page proposals for publication) read-only custom tables, and one account connection per organization that opens the person's own boards and Wikis by reference, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
   "entrypoints": {
     "main": "src/inferops.ts",
     "vendor": "GatekeeperVendor",
@@ -18,6 +18,7 @@
       "InferOpsTableGatekeeper",
       "InferOpsMembersGatekeeper",
       "InferOpsWorkflowPolicyGatekeeper",
+      "InferOpsAccountGatekeeper",
       "InferLabLogin",
       "InferOpsCredentials"
     ]
@@ -121,13 +122,29 @@
         { "method": "readWorkflowPolicy", "notes": "The project's policy head as InferOps answered it, parsed strictly and fresh on every call, without rule reasons, agents or publishedBy; compiledHash is InferOps' hash of its compiled source policy, not of this projection." }
       ],
       "writes": []
+    },
+    {
+      "kind": "account",
+      "urlPattern": "inferops://*/account",
+      "gatekeeper": "InferOpsAccountGatekeeper",
+      "session": "InferOpsAccountSession",
+      "scope": "Every InferOps board and InferMind Wiki the signed-in person's own account can open in one organization (inferos ADR 0015). The props hold the account and the tenant label only. Each openBoard/openWiki parses the reference with its own kind's grammar (so dispatch, workflow, table, members and page references are refused), requires the binding's tenant label, resolves the workspace slug among the person's own workspaces of the right product, and confirms the project or Wiki with their own token; every refusal is one NOT_FOUND. The sessions it opens are the board and Wiki sessions, fixed to what was opened. The demo account (inferops://demo.local/account) serves the mock; the stopgap connection is refused. Coding dispatch, workflow policy, custom tables and members keep their own bindings, and Operate keeps exact board bindings.",
+      "enabledBy": ["INFEROPS_ENABLED"],
+      "observers": "exclusion",
+      "reads": [
+        { "method": "listWorkspaces", "notes": "The person's workspaces in the organization; every collaborator is excluded." },
+        { "method": "findBoards", "notes": "As the board session's search, across the person's InferOps workspaces in the organization; every collaborator is excluded." },
+        { "method": "openBoard", "notes": "Not an observation: narrows to one board. Its session's reads are observations of that board's data set (strategy C)." },
+        { "method": "openWiki", "notes": "Not an observation: narrows to one Wiki. Its session's reads are observations of that Wiki's data set (strategy C)." }
+      ],
+      "writes": []
     }
   ],
   "approval": {
     "autoApprovable": [],
     "fingerprint": true,
     "rejection": "Deletes the pending record, which ends its simulation; a later apply of that id is refused as unknown.",
-    "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op."
+    "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op. An account binding's actions are proposed through the board and Wiki sessions it opens: each record carries its resolved target (kind, host, workspace id, project key), the fingerprint covers it, records are kept per target and indexed by the binding-wide action id, and apply resolves the workspace again and refuses one that changed."
   },
   "providerErrors": [
     { "code": "NOT_FOUND", "meaning": "The project, issue, run, page or section does not exist or is outside the binding's scope; the two are indistinguishable.", "retryable": false },
@@ -228,6 +245,17 @@
         "kind": "object/table",
         "cases": ["approval", "apply-once", "stale-revision", "lost-response-retry"],
         "reason": "Not applicable: the kind proposes no writes, so there is nothing to approve, apply or retry. Its tests assert the mock and the HTTP client see no non-GET request."
+      },
+      {
+        "kind": "account",
+        "cases": ["resource-scope", "observation", "sharing", "approval", "apply-once"],
+        "reason": "No shared-suite adapter yet: the shared cases assume a session that writes directly, and this kind's writes go through the board and Wiki sessions it opens. Its own suites cover opening and every refusal, per-target pending actions, routing of apply, reject and revert, the fingerprinted target, the workspace check at apply, and strategy C admission and exclusion.",
+        "coveredBy": ["__tests__/account-binding.test.ts", "__tests__/account.test.ts"]
+      },
+      {
+        "kind": "account",
+        "cases": ["stale-revision", "server-error-retry", "lost-response-retry", "revocation"],
+        "reason": "Not tested for this kind. Apply, revert and retry run the same board and Wiki functions over the same data source and account credentials as project/board and knowledge/wiki, whose cases are covered there."
       }
     ]
   }

@@ -5,9 +5,10 @@ import projectUi from "../src/configurator/project-ui";
 import tableUi from "../src/configurator/table-ui";
 import membersUi from "../src/configurator/members-ui";
 import workflowUi from "../src/configurator/workflow-ui";
+import accountUi from "../src/configurator/account-ui";
 import type { InferOpsProjectConfiguratorRpc } from "../src/configurator/project-configurator-types";
 import {
-  parseMembersUrl, parseProjectBoardUrl, parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl,
+  parseAccountUrl, parseMembersUrl, parseProjectBoardUrl, parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl,
   parseWikiUrl, projectBoardUrl,
 } from "../src/resources";
 
@@ -209,5 +210,38 @@ describe("custom table URLs", () => {
     await expect(tableUi.resourceUrl({ values: demo, ui: uiWith(null) })).rejects.toThrow("choose a workspace and a table");
     await expect(tableUi.resourceUrl({ values: tableUi.initial, ui: uiWith("demo.local") }))
       .rejects.toThrow("choose a workspace and a table");
+  });
+});
+
+describe("account URLs", () => {
+  const ACCOUNT = "inferops://acme/account";
+  const DEMO_ACCOUNT = "inferops://demo.local/account";
+  const PATTERN = "inferops://*/account";
+
+  // The account picker duplicates the grammar too; keep it in step.
+  it.each([ACCOUNT, DEMO_ACCOUNT])("round-trips %s through the account picker, organization pre-filled", async url => {
+    const values = await accountUi.initialValuesFromResourceUrl({
+      resourceUrl: url, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    });
+    expect(values).toEqual(parseAccountUrl(url));
+    const built = await accountUi.resourceUrl({ values: { ...accountUi.initial, ...values }, ui: uiWith(null) });
+    expect(parseAccountUrl(built)).toEqual(parseAccountUrl(url));
+    // A board URL does not prefill the account picker.
+    expect(await accountUi.initialValuesFromResourceUrl({
+      resourceUrl: URL, resourceUrlPattern: PATTERN, ui: uiWith(null),
+    })).toEqual({});
+  });
+
+  it("names the demo account with no organization only when the account offers it", async () => {
+    expect(await accountUi.resourceUrl({ values: accountUi.initial, ui: uiWith("demo.local") })).toBe(DEMO_ACCOUNT);
+    await expect(accountUi.resourceUrl({ values: accountUi.initial, ui: uiWith(null) }))
+      .rejects.toThrow("Enter your organization.");
+    expect(await accountUi.resourceUrl({ values: { tenant: " Acme " }, ui: uiWith(null) })).toBe(ACCOUNT);
+  });
+
+  it("is a grammar of its own: no other kind's parser takes it", () => {
+    expect(() => parseProjectBoardUrl(ACCOUNT)).toThrow(EXPECTED);
+    expect(() => parseWikiUrl(ACCOUNT)).toThrow();
+    expect(() => parseAccountUrl(URL)).toThrow(/inferops:\/\/<tenant>\/account/);
   });
 });

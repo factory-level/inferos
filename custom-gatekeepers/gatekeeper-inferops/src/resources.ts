@@ -10,7 +10,9 @@
 // private read of one project's published content-workflow policy, on the same terms. It is an
 // InferOS-minted binding URL, as `object/table` and `portal/members` are: InferOps defines no
 // `project/workflow` widget (its `project/workflow-chart` is an issue-count chart, another thing),
-// and the URL never reaches InferOps. A URL names a target; it never grants
+// and the URL never reaches InferOps. `inferops://<tenant>/account` is InferOS-minted too: one
+// binding that opens each of the person's boards and Wikis in that organization by reference, checked
+// when it is opened (inferos ADR 0015). A URL names a target; it never grants
 // anything by itself, and it never names a deployment: the API base URL and the credentials come
 // from the account and the deployment's configuration. The gatekeeper resolves the workspace slug
 // against the person's own workspaces, binds the result into its props when the Workshop mints the
@@ -94,6 +96,54 @@ export const PROJECT_WORKFLOW_RESOURCE: SupportedResource = {
   excludeFromOperateChat: true,
 };
 
+/**
+ * Every InferOps board and InferMind Wiki the person's own account can open in one organization,
+ * through one binding (inferos ADR 0015): `inferops://<tenant>/account`, or
+ * `inferops://demo.local/account` for the demo data. Each board or Wiki is named when it is opened
+ * and checked then; coding dispatch, workflow policy, custom tables and members are not included.
+ * Kept out of Operate chat, which keeps exact board bindings.
+ */
+export const INFEROPS_ACCOUNT_RESOURCE: SupportedResource = {
+  urlPattern: "inferops://*/account",
+  title: "InferOps account",
+  description:
+    "Open every InferOps board and InferMind Wiki your own account can open in one organization, " +
+    "through one connection. Coding dispatch and the other kinds need their own connections.",
+  excludeFromOperateChat: true,
+};
+
+/** A parsed account URL: the organization's tenant label, or `demo.local` for the demo data. */
+export type AccountUrlRef = { tenant: string };
+
+/**
+ * Parse an account URL, `inferops://<tenant>/account`, or throw a message naming the expected form.
+ * The authority is one tenant slug, or exactly `demo.local`. Syntax only: the label authorizes
+ * nothing, and every board or Wiki opened through the binding must carry the same label.
+ */
+export function parseAccountUrl(url: string): AccountUrlRef {
+  const tenant = /^inferops:\/\/([^/?#]+)\/account\/?$/.exec(url.trim())?.[1];
+  if (!tenant || (tenant !== DEMO_HOST && !isSlug(tenant))) {
+    throw new Error(
+      "Not an InferOps account URL: expected inferops://<tenant>/account, for example " +
+      `inferops://acme/account, or inferops://${DEMO_HOST}/account for demo data.`);
+  }
+  return { tenant };
+}
+
+/** The canonical URL of an account binding. Inverse of `parseAccountUrl`. */
+export function accountUrl({ tenant }: AccountUrlRef): string {
+  return `inferops://${tenant}/account`;
+}
+
+/**
+ * Whether a board or Wiki reference's host belongs to the account binding of `tenant`: the demo
+ * host to the demo account only, any other `<tenant>.<workspace>` to the binding of that tenant.
+ */
+export function hostInTenant(host: string, tenant: string): boolean {
+  if (tenant === DEMO_HOST || host === DEMO_HOST) return host === tenant;
+  return parseHost(host)?.tenant === tenant;
+}
+
 /** The project-scoped resource kinds, by the path segment that names them. */
 export type ProjectResourceKind = "board" | "dispatch" | "workflow";
 
@@ -170,10 +220,11 @@ export function projectResourceKind(url: string): ProjectResourceKind | null {
 }
 
 /** Every resource kind, by what its URL's path names. */
-export type ResourceKind = ProjectResourceKind | "wiki" | "table" | "members";
+export type ResourceKind = ProjectResourceKind | "wiki" | "table" | "members" | "account";
 
 /** The kind a resource URL names, or null when it names none (the parsers explain why). */
 export function resourceKind(url: string): ResourceKind | null {
+  if (/^inferops:\/\/[^/?#]+\/account\/?$/.test(url.trim())) return "account";
   if (/^inferops:\/\/[^/?#]+\/knowledge\/wiki\/?$/.test(url.trim())) return "wiki";
   if (/^inferops:\/\/[^/?#]+\/object\/table\//.test(url.trim())) return "table";
   if (/^inferops:\/\/[^/?#]+\/portal\/members\/?$/.test(url.trim())) return "members";
