@@ -46,7 +46,8 @@ import {
 } from "./stage-resources.ts";
 import { resolveStage, type StageDefinition } from "./stages.ts";
 import {
-  ownershipMarker, ownershipProblem, pinnedRevisionFromLsTree, readWrapperStage, WRAPPER_DEPLOY_VARS_FILE,
+  claimProblem, conflictingInputs, ownershipMarkers, ownershipProblem, parseR2BucketList, pinnedRevisionFromLsTree, readWrapperStage,
+  workerProbe, WRAPPER_DEPLOY_VARS_FILE, type AccountResources,
 } from "./wrapper-stage.ts";
 
 /** The subcommands this script accepts. */
@@ -137,7 +138,17 @@ function loadStageVars(target: Target): void {
     ? join(target.wrapperRoot, WRAPPER_DEPLOY_VARS_FILE)
     : join(ROOT, `.stage-${target.stageName}.vars`);
   if (!existsSync(path)) return;
-  for (const [key, value] of Object.entries(parseEnv(readFileSync(path, "utf8")))) {
+  const values = parseEnv(readFileSync(path, "utf8"));
+  if (target.wrapperRoot) {
+    // A company's inputs are its file's: another stage's value left in the shell (an account id, an
+    // admin list, an edge secret) must not deploy into this company silently. Names only, never values.
+    const conflicting = conflictingInputs(values, process.env);
+    if (conflicting.length > 0) {
+      throw new Error(`the shell and ${WRAPPER_DEPLOY_VARS_FILE} disagree on ${conflicting.join(", ")}; ` +
+          "run the deploy from a clean shell, or unset them");
+    }
+  }
+  for (const [key, value] of Object.entries(values)) {
     if (process.env[key] === undefined) process.env[key] = value;
   }
 }
@@ -185,10 +196,55 @@ function runInherited(command: string, args: string[], env: NodeJS.ProcessEnv): 
 }
 
 /** Refuse a wrapper deploy whose prefix the account already holds for another deployment. Read-only. */
-async function assertOwnership(stage: StageDefinition): Promise<void> {
-  const problem = ownershipProblem([...(await listKvNamespaces()).keys()], stage);
+async function assertOwnership(stage: StageDefinition, packages: readonly DeployablePackage[]): Promise<void> {
+  const problem = ownershipProblem(await listAccountResources(stage, packages), stage);
   if (problem) throw new Error(problem);
-  console.log(`the prefix ${stage.resourcePrefix} is free or already this deployment's`);
+  console.log(`the prefix ${stage.resourcePrefix} and this deployment's hostnames are free or already its own`);
+}
+
+/**
+ * What the account holds of every kind a deploy creates (see `AccountResources`): KV titles and R2
+ * bucket names by listing, and this deployment's own worker names by probing each one, since Wrangler
+ * can't list workers account-wide. Read-only; an answer it can't read refuses rather than passes.
+ */
+async function listAccountResources(stage: StageDefinition, packages: readonly DeployablePackage[]): Promise<AccountResources> {
+  const kv = [...(await listKvNamespaces()).keys()];
+  const r2Result = await runWrangler(ROOT, ["r2", "bucket", "list"]);
+  if (r2Result.status !== 0) throw new Error(`wrangler r2 bucket list failed:\n${r2Result.stderr}`);
+  const r2 = parseR2BucketList(r2Result.stdout);
+  if (r2 === null) throw new Error("cannot read the account's R2 buckets from wrangler r2 bucket list; refusing to deploy");
+  const names = packages.map((pkg) => stageWorkerName(stage, pkg.name));
+  const workers: string[] = [];
+  for (const name of names) {
+    const probe = await runWrangler(ROOT, ["deployments", "list", "--name", name, "--json"]);
+    if (workerProbe(probe.status, `${probe.stdout}\n${probe.stderr}`)) workers.push(name);
+  }
+  return { kv, r2, workers };
+}
+
+/**
+ * Claim the prefix and hostnames by creating this deployment's markers, then re-list: the claim holds
+ * only if no rival claim appeared meanwhile (`claimProblem`). On a conflict, only the markers this
+ * run created are removed, and nothing else has been created yet.
+ */
+async function claim(stage: StageDefinition): Promise<void> {
+  const markers = ownershipMarkers(stage);
+  const before = await listKvNamespaces();
+  const created = markers.filter((marker) => !before.has(marker));
+  if (created.length === 0) return;
+  const after = await ensureKvNamespaces(markers);
+  const problem = claimProblem([...after.keys()], stage);
+  if (!problem) {
+    console.log(`claimed ${created.join(", ")}`);
+    return;
+  }
+  for (const marker of created) {
+    const id = after.get(marker);
+    if (!id) continue;
+    const result = await runWrangler(ROOT, ["kv", "namespace", "delete", "--namespace-id", id]);
+    if (result.status !== 0) console.error(`could not remove this run's claim ${marker}; remove it by hand:\n${result.stderr}`);
+  }
+  throw new Error(problem);
 }
 
 /** The account's KV namespaces by title. Read-only. */
@@ -349,7 +405,8 @@ async function deploy(args: StageArgs): Promise<void> {
       secretNames: Object.keys(secrets), gatekeeperSecretNames: secretNamesOf(prepared), kv })}`);
     if (prepared.wrapperRoot) {
       console.log(`ownership: checked against the account before anything is created; ` +
-          `the prefix ${stage.resourcePrefix} is this deployment's by the KV namespace ${ownershipMarker(stage)}`);
+          `the prefix ${stage.resourcePrefix} and its hostnames are this deployment's by the KV namespace(s) ` +
+          `${ownershipMarkers(stage).join(", ")}; existing Workers, KV namespaces and R2 buckets under the prefix are checked too`);
     }
     return;
   }
@@ -361,9 +418,12 @@ async function deploy(args: StageArgs): Promise<void> {
       : "the working tree is dirty; commit first, or pass --allow-dirty to deploy it anyway");
   }
 
-  if (prepared.wrapperRoot) await assertOwnership(stage);
+  if (prepared.wrapperRoot) {
+    await assertOwnership(stage, packages);
+    await claim(stage);
+  }
   const [kvIds] = await Promise.all([
-    ensureKvNamespaces([...kv.map((ns) => ns.title), ...(prepared.wrapperRoot ? [ownershipMarker(stage)] : [])]),
+    ensureKvNamespaces(kv.map((ns) => ns.title)),
     runInherited("pnpm", ["run", "build"], { VITE_CF_ACCESS_MODE: "false" }),
   ]);
   const configs = buildStageConfigs({ stageName, stage, packages, accountId, kvIds,
@@ -413,7 +473,7 @@ async function configure(args: StageArgs): Promise<void> {
   console.log(`Wrangler login reaches account ${accountId}`);
   const existing = await listKvNamespaces();
   if (prepared.wrapperRoot) {
-    const problem = ownershipProblem([...existing.keys()], stage);
+    const problem = ownershipProblem(await listAccountResources(stage, packages), stage);
     console.log(problem ? `  ownership: ${problem}` : `  ownership: the prefix ${stage.resourcePrefix} is free or this deployment's`);
     if (problem) return;
   }
@@ -432,8 +492,8 @@ async function remove(args: StageArgs): Promise<void> {
         `confirm with --confirm ${stage.hostname}`);
   }
   // A wrapper deletes only workers its own prefix holds on this account.
-  if (target.wrapperRoot && !args.dryRun) await assertOwnership(stage);
   const packages = stagePackages(stage, readDeployablePackages(ROOT));
+  if (target.wrapperRoot && !args.dryRun) await assertOwnership(stage, packages);
   // Router first so the hostname stops answering before anything behind it disappears.
   const order = ["router", "workshop-backend", ...packages.map((pkg) => pkg.name).filter((n) => n.startsWith("gatekeeper-"))];
   for (const pkgName of order) {

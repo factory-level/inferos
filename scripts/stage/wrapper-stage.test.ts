@@ -6,8 +6,9 @@ import { test } from "node:test";
 import { stageKvNamespaces, stagePackages, stageWorkerName } from "./stage-config.ts";
 import { STAGES } from "./stages.ts";
 import {
-  companyPrefix, ownershipMarker, ownershipProblem, parseWrapperDeployment, pinnedRevisionFromLsTree,
-  readWrapperStage, wrapperStage, type WrapperDeployment,
+  claimProblem, companyPrefix, conflictingInputs, ownershipMarkers, ownershipProblem, parseR2BucketList,
+  parseWrapperDeployment, pinnedRevisionFromLsTree, readWrapperStage, workerProbe, wrapperStage,
+  type WrapperDeployment,
 } from "./wrapper-stage.ts";
 import { readDeployablePackages } from "../release/manifest-lib.ts";
 import { ROOT } from "../preview/staging-config.ts";
@@ -61,7 +62,7 @@ test("two companies' prefixes never overlap, and none overlaps a persistent stag
     assert.ok(!companyPrefix(b).startsWith(companyPrefix(a)) && !companyPrefix(a).startsWith(companyPrefix(b)), `${a}/${b}`);
   }
   assert.ok(problemsOf({ ...ACME, company: "acme-eu" }).some((p) => /no hyphens/.test(p)));
-  for (const reserved of ["dev", "prod", "staging", "preview"]) {
+  for (const reserved of ["dev", "prod", "staging", "preview", "disposable"]) {
     assert.ok(problemsOf({ ...ACME, company: reserved }).some((p) => p.includes("is reserved")), reserved);
   }
 });
@@ -69,6 +70,11 @@ test("two companies' prefixes never overlap, and none overlaps a persistent stag
 test("a persistent stage's hostname is refused", () => {
   assert.ok(problemsOf({ ...ACME, hostname: STAGES.prod.hostname }).some((p) => p.includes('the "prod" stage')));
   assert.ok(problemsOf({ ...ACME, hostname: "auth.dev-os.factorylevel.dev" }).some((p) => p.includes('the "dev" stage')));
+  // The sign-in proxy's hostname is a custom domain too, and is checked the same way.
+  const proxied = { ...ACME, inferops: { ...ACME.inferops, authorizeOrigin: "https://auth.dev-os.factorylevel.dev" } };
+  assert.ok(problemsOf(proxied).some((p) => p.includes("hostname auth.dev-os.factorylevel.dev is the \"dev\" stage's")));
+  const ownProxy = { ...ACME, inferops: { ...ACME.inferops, authorizeOrigin: "https://auth.os.acme.example" } };
+  assert.deepEqual(problemsOf(ownProxy), []);
 });
 
 test("the file is read strictly and every problem is named", () => {
@@ -98,19 +104,64 @@ test("readWrapperStage reads the wrapper root's file and refuses an invalid one"
   }
 });
 
-test("the account check refuses another deployment's prefix and unowned resources", () => {
+const none = { kv: [] as string[], r2: [] as string[], workers: [] as string[] };
+
+test("a deployment claims its prefix with one marker per hostname it serves", () => {
+  assert.deepEqual(ownershipMarkers(built(ACME).stage), ["inferos-acme-owner.os.acme.example"]);
+  const proxied = built({ ...ACME, inferops: { ...ACME.inferops, authorizeOrigin: "https://auth.os.acme.example" } }).stage;
+  assert.deepEqual(ownershipMarkers(proxied), ["inferos-acme-owner.os.acme.example", "inferos-acme-owner.auth.os.acme.example"]);
+});
+
+test("the account check refuses rival claims, even beside this deployment's own", () => {
   const { stage } = built(ACME);
-  const mine = ownershipMarker(stage);
-  assert.equal(mine, "inferos-acme-owner.os.acme.example");
-  // A fresh account, or one with other companies only: free.
-  assert.equal(ownershipProblem([], stage), null);
-  assert.equal(ownershipProblem(["inferos-dev-kv", "inferos-acmeeu-owner.eu.example", "inferos-acmeeu-kv"], stage), null);
+  const [mine] = ownershipMarkers(stage);
+  // A fresh account, or one holding other companies only: free.
+  assert.equal(ownershipProblem(none, stage), null);
+  assert.equal(ownershipProblem({ ...none, kv: ["inferos-dev-kv", "inferos-acmeeu-owner.eu.example", "inferos-acmeeu-kv"] }, stage), null);
   // Already this deployment's: a redeploy.
-  assert.equal(ownershipProblem([mine, "inferos-acme-something"], stage), null);
-  // The same slug claimed for another hostname: refused, naming it.
-  assert.match(ownershipProblem(["inferos-acme-owner.os.other.example", "inferos-acme-kv"], stage) ?? "", /another deployment \(os\.other\.example\)/);
-  // Resources under the prefix with no marker: not adopted.
-  assert.match(ownershipProblem(["inferos-acme-kv"], stage) ?? "", /no owner record/);
+  assert.equal(ownershipProblem({ kv: [mine!, "inferos-acme-x"], r2: ["inferos-acme-blueprint-content"], workers: ["inferos-acme-router"] }, stage), null);
+  // The same slug claimed for another hostname: refused, and still refused beside our own marker.
+  assert.match(ownershipProblem({ ...none, kv: ["inferos-acme-owner.os.other.example"] }, stage) ?? "", /claimed by another one \(inferos-acme-owner\.os\.other\.example\)/);
+  assert.match(ownershipProblem({ ...none, kv: [mine!, "inferos-acme-owner.os.other.example"] }, stage) ?? "", /claimed by another one/);
+  // This hostname claimed under another slug: refused.
+  assert.match(ownershipProblem({ ...none, kv: ["inferos-beta-owner.os.acme.example"] }, stage) ?? "", /inferos-beta-owner\.os\.acme\.example/);
+});
+
+test("with no claim, any Worker, KV namespace or R2 bucket under the prefix refuses", () => {
+  const { stage } = built(ACME);
+  for (const [kind, resources] of [
+    ["KV namespace", { ...none, kv: ["inferos-acme-workshop-backend-blueprints"] }],
+    ["R2 bucket", { ...none, r2: ["inferos-acme-blueprint-content"] }],
+    ["Worker", { ...none, workers: ["inferos-acme-router"] }],
+  ] as const) {
+    assert.match(ownershipProblem(resources, stage) ?? "", new RegExp(`no owner record \\(${kind} inferos-acme-`), kind);
+  }
+  // Other prefixes don't count.
+  assert.equal(ownershipProblem({ kv: ["inferos-acmeeu-kv"], r2: ["inferos-dev-blueprint-content"], workers: [] }, stage), null);
+});
+
+test("after claiming, a rival claim that appeared meanwhile withdraws this one", () => {
+  const { stage } = built(ACME);
+  const [mine] = ownershipMarkers(stage);
+  assert.equal(claimProblem([mine!, "inferos-acme-kv"], stage), null);
+  assert.match(claimProblem(["inferos-acme-x"], stage) ?? "", /isn't listed/);
+  assert.match(claimProblem([mine!, "inferos-acme-owner.os.other.example"], stage) ?? "", /at the same time/);
+  assert.match(claimProblem([mine!, "inferos-beta-owner.os.acme.example"], stage) ?? "", /at the same time/);
+});
+
+test("Wrangler's answers are read strictly, and an unreadable one refuses", () => {
+  assert.deepEqual(parseR2BucketList("Listing buckets...\nname:           inferos-acme-blueprint-content\ncreation_date:  2026-11-03T00:00:00Z\n\nname:           other\ncreation_date:  x\n"),
+    ["inferos-acme-blueprint-content", "other"]);
+  assert.deepEqual(parseR2BucketList("Listing buckets...\n"), []);
+  assert.equal(parseR2BucketList("something else"), null);
+  assert.equal(workerProbe(0, "[]"), true);
+  assert.equal(workerProbe(1, "✘ [ERROR] A request to the Cloudflare API failed. This Worker does not exist on your account. [code: 10007]"), false);
+  assert.throws(() => workerProbe(1, "Authentication error [code: 10000]"), /cannot tell whether the worker exists/);
+});
+
+test("a vars file and the shell disagreeing on a name is reported, by name only", () => {
+  assert.deepEqual(conflictingInputs({ STAGE_ADMINS: "a@acme.example", CLOUDFLARE_ACCOUNT_ID: "1" }, { STAGE_ADMINS: "a@acme.example", CLOUDFLARE_ACCOUNT_ID: "2" }), ["CLOUDFLARE_ACCOUNT_ID"]);
+  assert.deepEqual(conflictingInputs({ INFEROPS_EDGE_SECRET: "x" }, {}), []);
 });
 
 test("the pinned revision is read from the wrapper's gitlink only", () => {

@@ -17,6 +17,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stageHostnames } from "./stage-config.ts";
 import {
   INFEROPS_OPTIONAL_RESOURCES, STAGE_GATEKEEPERS, STAGES, stageDefinitionProblems,
   type InferOpsOptionalResource, type StageDefinition,
@@ -32,7 +33,11 @@ export const WRAPPER_DEPLOY_VARS_FILE = ".inferos-deploy.vars";
 const COMPANY = /^[a-z][a-z0-9]{1,30}$/;
 
 /** Slugs that would shadow a persistent stage or read as one. */
-const RESERVED_COMPANIES: ReadonlySet<string> = new Set([...Object.keys(STAGES), "staging", "preview", "test", "local"]);
+const RESERVED_COMPANIES: ReadonlySet<string> = new Set([
+  ...Object.keys(STAGES), "staging", "preview", "test", "local",
+  // `inferos-disposable-<slug>-<date>` names the deploy recipe's ephemeral instances.
+  "disposable",
+]);
 
 /** The parsed deploy file. */
 export interface WrapperDeployment {
@@ -142,8 +147,11 @@ export function wrapperStage(deployment: WrapperDeployment): { stage: WrapperSta
   };
   const problems = stageDefinitionProblems(stage);
   for (const [name, persistent] of Object.entries(STAGES) as [string, StageDefinition][]) {
-    const theirs = [persistent.hostname, persistent.inferops.authorizeOrigin && new URL(persistent.inferops.authorizeOrigin).hostname];
-    if (theirs.includes(stage.hostname)) problems.push(`hostname ${stage.hostname} is the "${name}" stage's`);
+    // Every hostname either side serves: the router's and a sign-in proxy's custom domain.
+    const theirs = new Set(stageHostnames(persistent));
+    for (const host of stageHostnames(stage)) {
+      if (theirs.has(host)) problems.push(`hostname ${host} is the "${name}" stage's`);
+    }
     for (const other of [persistent.workerPrefix, persistent.resourcePrefix]) {
       if (other.startsWith(prefix) || prefix.startsWith(other)) {
         problems.push(`prefix ${prefix} overlaps the "${name}" stage's ${other}`);
@@ -171,31 +179,110 @@ export function readWrapperStage(wrapperRoot: string): WrapperStage {
 }
 
 /**
- * The KV namespace whose existence marks `stage`'s prefix as its own on the account. Its title
- * names the hostname, so a second wrapper that took the same company slug for another hostname
- * finds the first one's marker and is refused before anything is created.
+ * The KV namespaces whose existence marks `stage`'s prefix and hostnames as its own on the account:
+ * one per hostname it serves (`<prefix>owner.<hostname>`). A second wrapper that took the same slug
+ * for another hostname, or another slug for one of these hostnames, finds them and is refused
+ * before anything is created.
  */
-export const ownershipMarker = (stage: StageDefinition) => `${stage.resourcePrefix}owner.${stage.hostname}`;
+export const ownershipMarkers = (stage: StageDefinition) =>
+  stageHostnames(stage).map((host) => `${stage.resourcePrefix}owner.${host}`);
+
+/** Any wrapper deployment's marker: `inferos-<company>-owner.<hostname>`. */
+const MARKER = /^(inferos-[a-z][a-z0-9]{1,30}-)owner\.(.+)$/;
 
 /**
- * Whether the account's existing KV titles let `stage` deploy, or why not. Read-only: the deploy
- * creates the marker with the stage's other namespaces when this says the prefix is free.
+ * What the account already holds, of every kind a wrapper deploy creates: KV namespace titles, R2
+ * bucket names, and which of the deployment's own worker names exist (Durable Objects live in those
+ * workers, so they count through them). Workers can't be listed account-wide here, so the deploy
+ * probes each name it would deploy.
  */
-export function ownershipProblem(titles: readonly string[], stage: StageDefinition): string | null {
-  const mine = ownershipMarker(stage);
-  const underPrefix = titles.filter((title) => title.startsWith(stage.resourcePrefix));
-  const markers = underPrefix.filter((title) => title.startsWith(`${stage.resourcePrefix}owner.`));
-  if (markers.includes(mine)) return null;
-  if (markers.length > 0) {
-    return `the prefix ${stage.resourcePrefix} already belongs to another deployment ` +
-        `(${markers.map((m) => m.slice(`${stage.resourcePrefix}owner.`.length)).join(", ")}); ` +
-        "choose another company slug";
+export interface AccountResources {
+  kv: readonly string[];
+  r2: readonly string[];
+  workers: readonly string[];
+}
+
+/**
+ * The claims that conflict with `stage`'s: a marker under its prefix for another hostname, or a
+ * marker under another prefix for one of its hostnames.
+ */
+function rivalClaims(kvTitles: readonly string[], stage: StageDefinition): string[] {
+  const mine = new Set(ownershipMarkers(stage));
+  const hosts = new Set(stageHostnames(stage));
+  return kvTitles.filter((title) => {
+    if (mine.has(title)) return false;
+    const match = MARKER.exec(title);
+    if (!match) return false;
+    return match[1] === stage.resourcePrefix || hosts.has(match[2]!);
+  });
+}
+
+/**
+ * Whether the account lets `stage` deploy, or why not. Read-only. A rival claim refuses, even beside
+ * this one's own: two claims on one prefix or one hostname mean neither is trusted. With no claim of
+ * its own, any Worker, KV namespace or R2 bucket under the prefix refuses too: it isn't known to be
+ * this deployment's, so it is never adopted.
+ */
+export function ownershipProblem(resources: AccountResources, stage: StageDefinition): string | null {
+  const rivals = rivalClaims(resources.kv, stage);
+  if (rivals.length > 0) {
+    return `the prefix ${stage.resourcePrefix} or a hostname of this deployment is claimed by another one ` +
+        `(${rivals.join(", ")}); choose another company slug or hostname, or remove the other claim if it is stale`;
   }
+  const mine = new Set(ownershipMarkers(stage));
+  if (resources.kv.some((title) => mine.has(title))) return null;
+  const underPrefix = [
+    ...resources.kv.map((name) => `KV namespace ${name}`),
+    ...resources.r2.map((name) => `R2 bucket ${name}`),
+    ...resources.workers.map((name) => `Worker ${name}`),
+  ].filter((label) => label.split(" ").at(-1)!.startsWith(stage.resourcePrefix));
   if (underPrefix.length > 0) {
-    return `the account already has ${underPrefix.length} resource(s) under ${stage.resourcePrefix} ` +
-        "with no owner record, so they aren't known to be this deployment's; refusing to adopt them";
+    return `the account already has ${underPrefix.length} resource(s) under ${stage.resourcePrefix} with no owner ` +
+        `record (${underPrefix.slice(0, 5).join(", ")}${underPrefix.length > 5 ? ", …" : ""}), so they aren't known ` +
+        "to be this deployment's; refusing to adopt them";
   }
   return null;
+}
+
+/**
+ * After creating this deployment's markers, the claim holds only if all of them are listed and no
+ * rival claim is. Two first deploys that raced past `ownershipProblem` each find the other's marker
+ * here, so both refuse (each removing only its own) rather than both deploying.
+ */
+export function claimProblem(kvTitles: readonly string[], stage: StageDefinition): string | null {
+  const missing = ownershipMarkers(stage).filter((marker) => !kvTitles.includes(marker));
+  if (missing.length > 0) return `the claim ${missing.join(", ")} was created but isn't listed; refusing to deploy`;
+  const rivals = rivalClaims(kvTitles, stage);
+  if (rivals.length === 0) return null;
+  return `another deployment claimed this prefix or hostname at the same time (${rivals.join(", ")}); ` +
+      "this deployment's claim is withdrawn and nothing else was created";
+}
+
+/**
+ * The names a wrapper's vars file and the shell both set, to different values. A company's inputs
+ * are its file's, so another stage's value left exported (an account id, an admin list, an edge
+ * secret) must refuse rather than deploy into this company. Names only, never values.
+ */
+export function conflictingInputs(file: Readonly<Record<string, string | undefined>>, env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(file)
+    .filter(([key, value]) => env[key] !== undefined && env[key] !== value)
+    .map(([key]) => key);
+}
+
+/** R2 bucket names from `wrangler r2 bucket list`, or null when the output isn't that listing. */
+export function parseR2BucketList(stdout: string): string[] | null {
+  if (!stdout.includes("Listing buckets...")) return null;
+  return [...stdout.matchAll(/^name:\s+(\S+)\s*$/gm)].map((match) => match[1]!);
+}
+
+/**
+ * Whether a worker exists, from `wrangler deployments list --name <worker>`: listed (exit 0), not
+ * found (Cloudflare's code 10007), or neither, which is an error so the guard fails closed.
+ */
+export function workerProbe(status: number | null, output: string): boolean {
+  if (status === 0) return true;
+  if (/\b10007\b/.test(output)) return false;
+  throw new Error(`cannot tell whether the worker exists (wrangler exited ${status}); refusing to deploy`);
 }
 
 /**

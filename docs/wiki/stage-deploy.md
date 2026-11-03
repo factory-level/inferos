@@ -66,11 +66,20 @@ A company's InferOS is deployed from its wrapper repository, at the InferOS revi
 
    `company` is 2 to 31 lowercase letters and digits, no hyphen. Every worker and resource is named `inferos-<company>-…`, so the slug is the deployment's identity: never change it once deployed. `inferops.authorizeOrigin` (a sign-in proxy hostname) and `inferops.resources` (`tables`, `members`, `workflowPolicy`) are optional, as on the persistent stages.
 2. **Do the account steps above** for the company's hostname: the account on Workers Paid holding the hostname's zone, an Access application for the hostname (and the sign-in proxy's, if any), and InferLab's `inferos` sign-in client allowing the origin.
-3. **Put the inputs** in the shell or in a gitignored `.inferos-deploy.vars` at the wrapper root, with the same names as the table above (`CLOUDFLARE_ACCOUNT_ID`, `STAGE_ADMINS`, and the optional ones). Values are never printed.
+3. **Put the inputs** in a gitignored `.inferos-deploy.vars` at the wrapper root, with the same names as the table above (`CLOUDFLARE_ACCOUNT_ID`, `STAGE_ADMINS`, and the optional ones), and **run from a clean shell**. A name the shell also sets to a different value stops the deploy, naming it, so another stage's exported account id, admin list or edge secret never deploys into this company. Values are never printed.
 4. **Rehearse:** `pnpm inferos:deploy --dry-run` in the wrapper. It checks the pin, then prints the plan: every `inferos-<company>-…` worker, its vars, the secret names, the KV namespaces, the bucket and the ownership marker it will check.
 5. **Deploy:** `pnpm inferos:deploy`. It refuses a dirty wrapper or pinned checkout, checks the account (below), builds, deploys the three tiers, and checks the Access redirect. Rerunning it is the update: the marker, the namespaces, the bucket and every Durable Object are kept.
 
-**What stops two companies colliding.** The prefix comes from the slug, the slug can't contain a hyphen (so no prefix starts another), `dev`, `prod`, `staging`, `preview`, `test` and `local` are reserved, and a persistent stage's hostname is refused. On the account, before anything is created, the deploy lists the KV namespace titles. The prefix is this deployment's only if the namespace `inferos-<company>-owner.<hostname>` exists, or if nothing is under the prefix yet, in which case the deploy creates that marker. Another hostname's marker, or resources under the prefix with no marker, stop the deploy with the reason.
+**What stops two companies colliding.**
+
+- **Names:** the prefix comes from the slug, and the slug can't contain a hyphen, so no prefix starts another.
+- **Reserved:** `dev`, `prod`, `staging`, `preview`, `test`, `local` and `disposable`.
+- **Hostnames:** every hostname the deployment serves, its own and its sign-in proxy's, is compared with the persistent stages'.
+- **On the account, before anything is created:** the deploy reads the KV namespaces and R2 buckets, and checks each worker name it would use. A deployment's claim is one KV namespace per hostname, `inferos-<company>-owner.<hostname>`.
+  - A claim for another hostname under this prefix, or for one of these hostnames under another prefix, stops the deploy, even if this deployment's own claim is there too.
+  - With no claim of its own, any worker, KV namespace or R2 bucket already under the prefix stops it, as not known to be this deployment's.
+  - A first deploy creates its claim and checks again, and withdraws it if a rival appeared at the same moment.
+- **What's left open:** two runs racing within any delay in Cloudflare's namespace listing, and resources other tools make after the check. See [stage deploy architecture](../architecture/stage-deploy.md).
 
 **What it needs.**
 
