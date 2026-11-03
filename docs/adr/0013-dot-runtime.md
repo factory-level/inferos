@@ -1,113 +1,159 @@
 ---
-title: The Dot runs on pinned OpenDots in a per-person Node container, with Intelligence self-hosted once it's licensed
+title: The Dot runs on InferOps' conversation runtime, with OpenDots as a reference only
 status: proposed
-date: 2026-11-02
+date: 2026-11-03
 ---
 
-# 0013. The Dot runs on pinned OpenDots in a per-person Node container, with Intelligence self-hosted once it's licensed
+# 0013. The Dot runs on InferOps' conversation runtime, with OpenDots as a reference only
+
+**Amended 2026-11-03.** The first version of this record (2026-11-02, [#302](https://github.com/factory-level/inferos/pull/302)) proposed pinned OpenDots in a per-person Node container, with self-hosted CopilotKit Intelligence once it was licensed. The owner then decided on 2026-11-03: "we're not using copilotkit intelligence", hosted or self-hosted. Without Intelligence, OpenDots has no conversation store and no runtime route. This version replaces the whole decision. The first version stays readable in the history of this file.
 
 ## Context
 
-Each person gets a personal Dot based on CopilotKit/OpenDots ([agent operations](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/agent-operations.md)). The design leaves the runtime and the Intelligence deployment to implementation, and says Cloudflare hosting alone doesn't establish compatibility.
+Each person gets a personal Dot based on CopilotKit/OpenDots ([agent operations](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/agent-operations.md)). The design's minimum integration: "InferOS chat invokes an authenticated personal Dot, which uses scoped InferLab gatekeeper capabilities." It also says runtime conversations and personal working state can stay subsystem state.
 
-The owner decided on 2026-11-02: "Yes we're installing opendots but running our own intelligence." So OpenDots is installed at a pinned commit, Intelligence is self-hosted, and hosted Intelligence isn't used.
+The owner's constraints:
 
-Read at OpenDots `8091324942b86789ed0da7facbee855145d933b0` (MIT), inferos `314ef907eddf846a8c40d78a92b13f22126d59b3`, inferops `e2b12995b4c2b76c7b4fea5e644c3cd13a07318c`, and CopilotKit's self-hosting pages on 2026-11-02. Nothing here is built, and this record adds no code.
+- No CopilotKit Intelligence.
+- The model provider is Anthropic, on a key with a spend limit of 60 USD a month across all agents.
+- InferOps stays authoritative. InferOS reaches it only through the gatekeeper.
 
-What bears on the choice:
+Testers report the owner describing Dot as a background adaptation for our own models, with no in-app entry point. This record relies on that only where it says so.
 
-- **OpenDots has two stores.** Its Node server keeps pages, Dots, thread bindings, tasks, runs and connections in one SQLite file through `node:sqlite` (`src/server/store.ts`, `workspace.ts`). Conversation messages, tool calls and run events live only in Intelligence (`README.md:194`). There's no standalone conversation store: without Intelligence, `/api/copilotkit/*` answers 503 and a conversation can't be created (`src/server/platform.ts`).
-- **It knows one owner.** `thread_bindings` has an `ownerId`, set once per process from `OWNER_ID`, and `tasks` has no owner at all. Access is one shared `OWNER_TOKEN`, or none on loopback (`src/server/app.ts`).
-- **Self-hosted Intelligence is licensed.** CopilotKit's page requires "a valid CopilotKit Intelligence license key", on the Team self-hosted or Enterprise plan through their account team. It needs Kubernetes 1.28 or later, Helm, an ingress controller, PostgreSQL 14 or later, Redis 7 or later and an OIDC identity provider. The chart is at `oci://ghcr.io/copilotkit/charts/intelligence`, with anonymous pulls allowed for the released chart.
-- **The local evaluation isn't a production path.** It's a preview: a CopilotKit account, a renewable 30-day license, at least 4 CPUs, 12 GiB RAM and 40 GiB of disk. CopilotKit supports Docker Desktop on macOS, and calls Linux unverified.
+Read at OpenDots `8091324942b86789ed0da7facbee855145d933b0` (MIT), inferos `03d65fac1f47016d65eda1d38316494629a53a90` and inferops `b56fa96960d978967f4c3898feb926c2915b9528`.
+
+**What OpenDots needs Intelligence for.** It isn't one adapter:
+
+- `Platform` constructs `CopilotKitIntelligence` and injects it into `CopilotRuntime` on `/api/copilotkit`. Readiness, conversation creation (`createThread`) and history (`getThreadMessages`) all depend on it (`src/server/platform.ts:49-190`).
+- Headless voice and scheduled turns require `mode=intelligence` (`src/server/headless.ts:18-42`).
+- Creating a task refuses without an Intelligence thread (`src/server/app.ts:127-148`).
+- Page conversations and save-to-page read thread history from it (`src/server/page-service.ts:46-145`).
+- `DotAgent` passes the Intelligence key and URL as its learned-skill backend (`src/server/dot-agent.ts:104-131`).
+
+**What would survive.** These keep the SQLite store's tables: spaces, Dots, thread bindings, task mappings, captures, pages and connections (`src/server/workspace.ts`). The runner's task leases would survive too (`src/server/runner.ts`). But the store holds IDs and metadata, not messages. It knows one owner, and `tasks` and `memories` have no owner column. So keeping OpenDots means writing a conversation store, a runtime route and a per-person partition: most of what makes it a runtime.
+
+**What was compared:**
+
+| Candidate | Threads and job state | Agent loop | Per-person scope | Model key path | Proven here |
+| --- | --- | --- | --- | --- | --- |
+| **InferOps chatbot domain + `shared-agentic` (chosen)** | Postgres `chatbot_conversation`, `chatbot_message` and `chatbot_run`, under RLS by tenant, workspace and principal (`domain/ts/chatbot/backend/conversations.ts`) | Mastra `Agent` streaming AG-UI, tools run through a signed run-token broker (`domain/ts/chatbot/backend/agent.ts`, `live-routes.ts`) | Every read and write filters on the principal. Another person gets "not found" | `agentic.chatApiKey` from the SOPS secret layer | **Yes**, through a real `kill -9` (below) |
+| InferOS's own agent sessions (`workshop-backend`) | Durable Object storage | The workshop agent, with a Haiku 5.5 allowlist and a daily turn cap proposed in [#305](https://github.com/factory-level/inferos/pull/305) | Per workspace owner | Cloudflare AI Gateway provider keys (#305) | No. Agent deployments are unwired (`docs/architecture/agent-deployments.md`), and Dot would reach InferOps data only through gatekeeper actions |
+| OpenDots, Intelligence replaced behind `CopilotKitIntelligence` | Its SQLite file, plus a store we'd write | TanStack loop in `DotAgent`, with CopilotKit's `BuiltInAgent` | One owner per process | `OPENAI_*` variables | No. It's a fork of the layer listed above |
+| `@inferlab/agui` alone | None. It's a wire protocol only (`lib/ts/agui/CLAUDE.md`) | None | — | — | — |
 
 ## Decision
 
 | # | Decision | Status |
 | --- | --- | --- |
-| 1 | **Pin OpenDots at `8091324942b86789ed0da7facbee855145d933b0`,** moved only by a reviewed change. No upstream code is vendored here | Proposed |
-| 2 | **Run it as a Node 24 container outside Cloudflare Workers, one instance per person,** until FAC-127 and FAC-128 prove a partition. One instance per company, ADR 0009's proposed default 4 in InferOps, separates companies but not people: there's one all-or-nothing owner token, and `tasks` and `memories` have no owner (`src/server/store.ts:33,36`). So this is narrower than default 4. Each instance has its own stable `OWNER_ID`, derived from the person, because that value owns conversations in Intelligence and defaults to one shared name (`src/server/index.ts:32`, `platform.ts:157,173`). Whether Intelligence keeps those owners apart under one key isn't proven and can't be known until it runs: FAC-127 proves it, or each person gets their own key or project. The image starts from upstream's `app` target but is modified, because that build runs install scripts, and it needs its base tag pinned, because `node:24-bookworm-slim` floats. InferOS reaches the server over an authenticated server-side link. **The browser also has to reach the Intelligence gateway** (`docs/SETUP.md:64`), so the link isn't server-side only | Proposed. Tested as a local Node process, not as a container |
-| 3 | **Give each instance one persistent volume for its SQLite file, with one writer.** The file is subsystem state, and the instance owns it. It's no shared store and no copy of InferOps records. Connection tokens sit in a plain column there (`src/server/connection-store.ts:14`), so the volume has to be treated as holding credentials | Proposed. Where the volume lives is **undecided** (below) |
-| 4 | **Self-host Intelligence with the pinned Helm chart, in the company environment.** One deployment per company until FAC-128 says otherwise | **Blocked: needs a license.** No version is pinned, because none could be run |
-| 5 | **The instance refuses to start unless both Intelligence URLs are set and are the company's own.** Given a key and no URLs, OpenDots connects to the hosted gateway (`docs/SETUP.md`), which the owner ruled out. An adapter has to enforce this | Proposed |
-| 6 | **Close upstream's other ways out:** `DO_NOT_TRACK=1` and `COPILOTKIT_TELEMETRY_DISABLED=true`, `WEB_SEARCH_PROVIDER=disabled` until a provider is chosen, and installs with `--ignore-scripts`. An unset search provider sends queries to Parallel anonymously, with no key needed, so the start check in rule 5 refuses that too | Proposed. Not shown by the run: its two connection snapshots were of an idle server (below) |
-| 7 | **Excluded at first:** voice, computers, Automatic Learning, Slack and Composio. Leave their settings unset, keep `skillDeliveryEnabled` off, and keep Dots' learning container empty. The start check in rule 5 refuses these settings when they're set | Proposed. Unset settings are shown off in the run below; learning delivery isn't tested |
-| 8 | **The model is a required dependency, and its provider is open.** OpenDots needs `OPENAI_API_KEY` and `OPENAI_MODEL`. `OPENAI_BASE_URL` defaults to `api.openai.com`, and the model receives conversation content, including page content and tool results. Local Intelligence doesn't make the model local (`README.md:196`). The start check in rule 5 refuses an unset base URL | **Open: a separate decision for the owner** |
+| 1 | **Dot's threads and run state live in InferOps' chatbot tables, in Postgres under RLS.** A conversation belongs to one person in one workspace. InferOS stores a conversation reference at most, never messages | Proposed. Proven locally (below) |
+| 2 | **InferOps' `shared-agentic` runs the loop:** Mastra, with tools only through the run-token broker, so every call is the person's own grant at the server. Write tools land live or as proposals according to the server, never the agent | Proposed. The loop and broker are proven. Write tools aren't built (the current set is read-only) |
+| 3 | **InferOS reaches Dot through the gatekeeper,** with new InferOps capabilities for creating, reading and running a Dot conversation (`defineCapability`). That's an inferops pull request first, then the gatekeeper. The browser never talks to the model or to `shared-agentic` | Proposed. Not built |
+| 4 | **OpenDots is a reference only.** Nothing is vendored, copied or installed. The pin stays recorded as the revision read. Its ideas are design input: spaces and pages, leased background tasks, approval handoff for connection tools. Without a copy, there's no notice to keep | Proposed |
+| 5 | **No CopilotKit package.** None is installed in InferOps: `@ag-ui/mastra` 1.1.6 lists `@copilotkit/runtime` only as an optional peer, and `bun.lock` doesn't resolve it. So there's no hosted gateway to reach and no CopilotKit telemetry. If one is ever added, it needs its own record, with telemetry off and no key without local URLs | Proposed. Checked in the lockfile and `node_modules` |
+| 6 | **The model is Claude Haiku 5.5 by default,** matching FAC-152 (#305). `agentic.chatModel` moves from `anthropic/claude-haiku-4-5` to it in an inferops pull request | Proposed. Not changed yet. Whether Mastra's model router knows the id is untested |
+| 7 | **Bounds on cost (below)** are part of the runtime, not settings. They're an inferops change | Proposed. Not built |
+| 8 | **Excluded at first:** voice, computers, learning and channels. None exist in this runtime | Proposed |
 
-**Proposed default for the owner:** obtain the 30-day evaluation license to test the conversation path on a machine with room, and ask CopilotKit about a self-hosted license before any deployment is planned. The evaluation isn't rule 4's environment, so it doesn't finish the proof: **the first criterion stays open until the chart runs.**
+### The model key
 
-**Questions for CopilotKit:** the price; whether one license covers one deployment per company or per person; and whether the license check or the chart calls home.
+- **Where InferOps reads it:** `agentic.chatApiKey`. Deployed, that's the SOPS layer `config/<env>.sops.json`, KMS-encrypted and decrypted in memory at boot. Locally, it's the `ANTHROPIC_API_KEY` mapping. Nobody issues or copies a key for this record.
+- **InferOS never holds Dot's key.** It calls Dot through the gatekeeper. InferOS's own agents keep their key in AI Gateway provider keys (#305).
+- **One limit for both:** the proposed way is two keys, one per runtime, in one Anthropic workspace whose monthly spend limit is 60 USD. Each runtime can then be revoked on its own. Putting one key in both stores works too, but it doubles where that key can leak. **This is the owner's choice, and setting the limit is the owner's step.**
+- **What a key changes:** the local fake model is replaced by Anthropic through Mastra's model router. Conversation content, selected context and tool results then go to Anthropic. Without a key, the run route answers 503.
 
-**Undecided, and this record depends on them:** ADR 0009 default 4 and its company environment, ADR 0011's authority contexts, and where a persistent volume and a Kubernetes cluster live. InferOps has no Dot host today, its `infra/foundation` names no Kubernetes cluster, and nothing here chooses one.
+### Cost and bounds
+
+Prices are Claude Haiku 5.5's: 0.10 USD per million input tokens and 0.50 USD per million output, for prompts up to 100K tokens. Beyond that, it's 0.50 and 2.50. Token counts are estimated at four characters a token. None of this was measured against Anthropic.
+
+- **A typical run:** two model steps, one tool call and one answer. About 40K input tokens and 1K output in total, so about 0.005 USD. If Dot had all 60 USD, that's about 12,000 runs a month.
+- **The worst case with today's limits:**
+  - Every step re-sends 40 history messages of up to 12,000 characters each, plus 170,000 characters of context.
+  - That's about 165K tokens a step, priced at the long-prompt rate.
+  - Eight steps comes to about 0.70 USD a run. About 85 such runs spend the month.
+- **Proposed bounds:**
+  - **Per run:**
+    - at most 4 steps;
+    - at most 1,024 output tokens a step;
+    - history trimmed to 20 messages of 4,000 characters each, and context to 60,000 characters, so each prompt stays under 100K tokens.
+    - That makes the worst run about 0.025 USD. The existing 120-second timeout stays.
+  - **Per day:** 40 runs per person per UTC day, the same as #305's turn cap. The worst day is about 1 USD a person, and a typical day about 0.20 USD.
+  - **Per month:** a ledger in InferOps, written from each run's usage. The run already emits `chat.usage`. Dot stops at 30 USD, half the budget, leaving the rest for InferOS's agents. The Anthropic workspace limit stays the only hard dollar bound.
 
 ## Proof
 
-Evidence is **local only**, on one Linux machine: Node 24.14.0, a clean environment, a scratch `HOME`, no credentials, and bound to `127.0.0.1`. **No CI evidence and no deployed evidence.** The model was a local fake, and no real model was called.
+Evidence is **local only**, on one Linux machine. **No CI evidence and no deployed evidence.**
+
+- **What ran:**
+  - inferops `b56fa96960d978967f4c3898feb926c2915b9528` in a worktree, on a fresh, migrated and seeded database `inferlab_47`;
+  - the real API (`app/ts/shared-api/src/main.ts`, stub sign-in) on port 12780;
+  - a stand-in for `shared-agentic` on port 12700. It serves the real `handleConversationRun` with a local fake model in process: on its first call the model asks for `find_resources`, and once it sees the tool result it answers.
+- **What didn't:** no key, no network beyond localhost, and the stand-in harness isn't committed.
+- **Who signed in:** `member@acme.dev`, in the Knowledge workspace.
 
 | Acceptance | Result |
 | --- | --- |
-| Starts | **Yes**, the built server, without Intelligence |
-| Authenticates | **Yes** for OpenDots' one owner token. That's not per-person sign-in, which is FAC-127 |
-| Completes a tool call | **Partly.** A `DotAgent` turn ran `create_space_page` through a local fake model, in process. Intelligence and the runtime route weren't involved |
-| Reads persisted job state after restart | **Partly.** A task written to the SQLite file read back after a clean server start. It never went through the crash |
-| Reads persisted thread state after restart | **Not proven.** The thread binding survived, but messages live in Intelligence, which didn't run |
+| Starts | **Yes.** The API was serving in 9 s, and the stand-in at once |
+| Authenticates | **Yes.** No token: 401. Another person's token on this conversation: "Conversation not found", and their list doesn't include it. A workspace that isn't Knowledge: 403. A forged run token at the tool broker: 403. A wrong dispatch key at the agent: 401 |
+| Completes a tool call | **Yes.** `find_resources` ran through the broker under the person's scope, and the second model step saw its result. It returned an empty list, because the local seed has no indexed knowledge |
+| Reads persisted thread state after `kill -9` | **Yes.** Both processes killed with `kill -9` and restarted. The conversation read back identical, except its `updatedAt` |
+| Reads persisted run state after `kill -9` | **Yes, with gaps (below).** A run killed mid-answer read back as `running`, with its partial text up to the last checkpoint |
 
-The first criterion of FAC-126 is **not met**: it needs a running Intelligence.
-
-Output, with the token left out and the random ids shortened:
+Output, with tokens left out:
 
 ```text
-listening: 127.0.0.1:4790
-GET /api/state, no token: 401
-GET /api/state, wrong token: 401
-GET /api/state, owner token: 200
-GET /api/copilotkit/info: 503 {"error":"Setup required: INTELLIGENCE_API_KEY (or CPK_INTELLIGENCE_API_KEY)."}
-POST page: 201
-POST task, no Intelligence: 503 {"error":"Setup required: INTELLIGENCE_API_KEY (or CPK_INTELLIGENCE_API_KEY), OPENAI_API_KEY, OPENAI_MODEL."}
-remote connections from the server: 0
---- kill -9
---- one Dot turn against the local fake model, same database
-events: RUN_STARTED TOOL_CALL_START TOOL_CALL_ARGS TOOL_CALL_END TOOL_CALL_RESULT TEXT_MESSAGE_CHUNK RUN_FINISHED
-task created: 52fd… queued
---- second start, same database
-tasks after restart: [ 'A job that must survive a restart [failed]' ]
-pages after restart: [ 'Made through the API', 'Made by a tool call' ]
-thread bindings after restart: [ 'proof-thread Proof' ]
-remote connections from the server: 0
+conversation=75a656a7-6d0d-42d5-ba4b-6c995672a7dc  run=653489d7…  http=200
+events: RUN_STARTED TOOL_CALL_START TOOL_CALL_ARGS TOOL_CALL_END TOOL_CALL_RESULT TEXT_MESSAGE_START TEXT_MESSAGE_CONTENT x2 CUSTOM x3 RUN_FINISHED
+fake-model call=1 sawToolResult=false
+fake-model call=2 sawToolResult=true
+db: run 653489d7… complete; messages: user complete, assistant complete
+--- kill -9 API and agent, restart
+conversation identical after kill -9 and restart
+--- second turn, slow model; kill -9 both after 8 s, restart
+db before kill: run e9b52fb1… running; assistant running "word0 word1 word2 word3 word4"
+db after restart: run e9b52fb1… running; assistant running "word0 … word5"
+new turn while it reads running: refused, "A response is already running"
+read after 3 minutes: run interrupted; assistant interrupted "word0 … word5"
+third turn: http=200, tool call and answer completed
 ```
 
-What this does and doesn't show:
+What crossed the `kill -9`, and what didn't:
 
-- **Only the page made through the API crossed `kill -9`.** The task and the tool-call page were written afterwards, by another process, to the same file, because the API refuses a task without Intelligence. So they show only that the next server start reads the file.
-- **The task reads `failed`** because the server's runner picked it up, and a task needs an Intelligence conversation to run. Its work didn't run.
-- **"Remote connections: 0" is weak.** It's two `ss` snapshots of an idle server with no key, no model and no conversation. It says nothing about egress during a real turn.
+- **Crossed:** the whole completed conversation and its run row, and the killed turn's user message plus its partial answer up to the last one-second checkpoint.
+- **Not crossed:**
+  - The killed turn isn't resumed or retried.
+  - Its tool call is kept only in the stream, not as a stored message.
+  - The `shared-agentic` process holds no state, so nothing was lost there.
+- **The conversation stays busy for 3 minutes.** A run left `running` refuses new turns until a read finds it older than 3 minutes and marks it `interrupted` (`conversations.ts:53`).
+- **"Job state" here means run rows.** Dot's background jobs aren't built. They would be `defineJob` runs, which weren't exercised.
 
-**Second criterion, partly met:** the dependencies, persistence ownership and path are written here, with Intelligence's stack unrun, the model provider open, and the hosting of the volume and any cluster undecided.
-
-Also at the pin, in the same environment: `npm ci --ignore-scripts` and `npm run build` succeeded. Upstream's tests passed 345 of 346. `tests/telemetry.test.ts` timed out once at 5 s under load, and passed 8 of 8 when run alone.
+**Second criterion:** runtime dependencies, persistence ownership and the deployment path are written above. Voice, computers and learning stay excluded. InferOps' existing `shared-agentic` and API services are the deployment, with no new infrastructure.
 
 ## Consequences
 
-- **Licenses, not a full review:** OpenDots is MIT. Its lockfile has 1,137 packages, 938 of them not dev-only. One has no license field (`khroma`), and `lightningcss` is MPL-2.0. Three have install scripts: `@scarf/scarf` (install analytics), `esbuild` and `fsevents`. The build passed with scripts off.
-- FAC-127, FAC-128, FAC-132, FAC-133, FAC-135, FAC-136 and FAC-137 can use this shape, and none can finish a real conversation until Intelligence runs. FAC-139 depends on this choice.
-- A Kubernetes cluster, Postgres, Redis and an OIDC provider become new infrastructure for each company's environment, or a shared one if FAC-128 allows it, and one OpenDots instance per person multiplies the running cost. That cost hasn't been sized.
-- Conversation history has to be backed up in Intelligence and application state in SQLite, separately (`docs/SETUP.md`). A company's export and deletion have to reach both.
-- `node:sqlite` prints an `ExperimentalWarning` on Node 24.14.0, so a Node upgrade is a thing to test.
-- AG-UI differs: OpenDots locks `@ag-ui/core` 0.0.59 and InferOps uses 1.0.2. Adapter conformance has to cover that, and this record doesn't.
-- OpenDots has `@copilotkit/*` at 1.75.0 with caret ranges in `package.json`, so builds must use its lockfile.
-- The container path is still to be tested.
+- No license, no Kubernetes cluster, no Redis, no OIDC provider and no per-person container. The first version's cost and infrastructure questions go away. Dot runs on services InferOps already deploys, so it adds no GCP cost beyond the extra load.
+- One store for Dot's conversations: they're backed up, exported and deleted with the company's other InferOps data, and the anonymizer covers them.
+- **To build, in inferops first, each its own pull request:**
+  1. a Dot lane for the run route, which today requires a Knowledge workspace (`live-routes.ts:79`);
+  2. the gatekeeper capabilities in rule 3;
+  3. write tools through the server's live-or-proposed decision, using the existing `requiresApproval` interrupt;
+  4. the bounds and ledger, with the Haiku 5.5 default;
+  5. background runs as `defineJob`, which needs a decision on whose authority a run uses when the person isn't present.
+- **Found in the proof, for inferops:**
+  - "Conversation not found" and "A response is already running" come back as 500, not 404 and 409. The chatbot's own error handler doesn't take effect.
+  - The usage event names the configured model, not the one that ran.
+- OpenDots' AG-UI version gap (`@ag-ui/core` 0.0.59 against InferOps' 1.0.2) no longer matters, because OpenDots doesn't run.
+- FAC-127, FAC-128, FAC-132, FAC-133, FAC-135 and FAC-139 were written around OpenDots and Intelligence, and need rewording against this record.
 
 ## Alternatives Considered
 
-- **Hosted Intelligence:** ruled out by the owner.
-- **Host OpenDots in Cloudflare Workers unchanged:** it's a long-running Node server using `node:sqlite` and `@hono/node-server`, with a background runner and a local file. It wasn't tried. The design already says the shell doesn't establish compatibility.
-- **Replace Intelligence behind `CopilotKitIntelligence` and `IntelligenceAgent`:** no license needed, but it's a fork of the conversation layer OpenDots is built on, and it isn't what the owner decided. Not sized.
-- **Treat the local evaluation as the runtime:** it's a preview, and CopilotKit says it isn't a production installation.
-- **One shared OpenDots across companies now:** denied by ADR 0009 default 4 until a second-company test passes.
+- **Self-hosted or hosted Intelligence:** ruled out by the owner on 2026-11-03.
+- **OpenDots with our own conversation store behind `CopilotKitIntelligence`:** a fork of OpenDots' conversation layer and its headless and page paths, plus a per-person partition it doesn't have. It keeps a second store to back up and export. Not chosen, because InferOps already has the store, loop and scope.
+- **InferOS's own agent sessions:** closest to the key path in #305, and native to the shell. But agent deployments are unwired, InferOps data would cross the gatekeeper on every tool call anyway, and nothing here proved its state across a crash. It stays the right home for InferOS's configured agents, which aren't Dot.
+- **A new Dot service:** more infrastructure for the same three tables and loop.
 
 ## Related
 
 - Design: [`agent-operations.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/agent-operations.md), [`ask-dot.md`](https://github.com/factory-level/inferops/blob/develop/docs/human/journeys/operator/dot/ask-dot.md)
-- InferOps [ADR 0009](https://github.com/factory-level/inferops/blob/develop/docs/agent/adr/0009-company-environment-and-isolation-topology.md), [ADR 0011](https://github.com/factory-level/inferops/blob/develop/docs/agent/adr/0011-workflow-authority-envelopes.md), both proposed
+- inferos [#305](https://github.com/factory-level/inferos/pull/305): Haiku 5.5 and the daily turn cap for InferOS's agents
+- InferOps [ADR 0009](https://github.com/factory-level/inferops/blob/develop/docs/agent/adr/0009-company-environment-and-isolation-topology.md) and [ADR 0011](https://github.com/factory-level/inferops/blob/develop/docs/agent/adr/0011-workflow-authority-envelopes.md), both proposed
 - [ADR 0011](0011-system-workflow-authority.md), [ADR 0012](0012-run-correlation-and-outcomes.md)
-- [CopilotKit self-hosting](https://docs.copilotkit.ai/intelligence/self-hosting), [local evaluation](https://docs.copilotkit.ai/intelligence/self-hosting-local)

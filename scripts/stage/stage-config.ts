@@ -22,7 +22,7 @@ import {
 import {
   INFEROPS_GATEKEEPER, INFERLAB_LOGIN_VENDOR, inferLabLoginStartupError,
 } from "../dev-server-config.ts";
-import type { StageDefinition, StageName } from "./stages.ts";
+import { INFEROPS_OPTIONAL_RESOURCES, type StageDefinition, type StageName } from "./stages.ts";
 
 type PackageConfig = Pick<DeployablePackage, "name" | "config">;
 
@@ -119,9 +119,9 @@ export function inferOpsGatekeeperVars(stage: StageDefinition): Record<string, s
     // stage's behaviour never depends on a default changing. Coding dispatch stays off: it needs a
     // separate `project/dispatch` grant and a local runner a stage does not have.
     CODING_WORKBENCH_ENABLED: "false",
-    INFEROPS_TABLES_ENABLED: "false",
-    INFEROPS_MEMBERS_ENABLED: "false",
-    INFEROPS_WORKFLOW_POLICY_ENABLED: "false",
+    // Each optional resource kind is on only where the stage lists it (`inferops.resources`).
+    ...Object.fromEntries(Object.entries(INFEROPS_OPTIONAL_RESOURCES).map(([kind, name]) =>
+      [name, String((stage.inferops.resources ?? [] as readonly string[]).includes(kind))])),
     INFEROPS_HOST_BOARDS: "false",
   };
 }
