@@ -6,7 +6,8 @@ import { test } from "node:test";
 import { stageKvNamespaces, stagePackages, stageWorkerName } from "./stage-config.ts";
 import { STAGES } from "./stages.ts";
 import {
-  claimProblem, companyPrefix, conflictingInputs, ownershipMarkers, ownershipProblem, parseR2BucketList,
+  claimMarkers, claimProblem, companyPrefix, conflictingInputs, inputSources, ownershipMarkers, ownershipProblem,
+  parseKvCreateId, parseR2BucketList, type ClaimOps,
   parseWrapperDeployment, pinnedRevisionFromLsTree, readWrapperStage, workerProbe, wrapperStage,
   type WrapperDeployment,
 } from "./wrapper-stage.ts";
@@ -154,9 +155,91 @@ test("Wrangler's answers are read strictly, and an unreadable one refuses", () =
     ["inferos-acme-blueprint-content", "other"]);
   assert.deepEqual(parseR2BucketList("Listing buckets...\n"), []);
   assert.equal(parseR2BucketList("something else"), null);
-  assert.equal(workerProbe(0, "[]"), true);
-  assert.equal(workerProbe(1, "✘ [ERROR] A request to the Cloudflare API failed. This Worker does not exist on your account. [code: 10007]"), false);
-  assert.throws(() => workerProbe(1, "Authentication error [code: 10000]"), /cannot tell whether the worker exists/);
+  assert.equal(workerProbe(0, "[]", ""), true);
+  assert.equal(workerProbe(1, "", "✘ [ERROR] A request to the Cloudflare API failed. This Worker does not exist on your account. [code: 10007]"), false);
+  assert.equal(workerProbe(1, JSON.stringify({ errors: [{ code: 10007, message: "not found" }] }), ""), false);
+  assert.equal(workerProbe(1, JSON.stringify({ code: 10007 }), ""), false);
+  assert.throws(() => workerProbe(1, "", "Authentication error [code: 10000]"), /cannot tell whether the worker exists/);
+  // A 10007 that isn't the error code (an id, a date) doesn't mean not found.
+  assert.throws(() => workerProbe(1, "", "failed for script id 4410007a at 2026-10007"), /cannot tell/);
+  assert.throws(() => workerProbe(1, JSON.stringify({ errors: [{ code: 10000, message: "see 10007" }] }), ""), /cannot tell/);
+  // A create's own answer carries the id of what it made.
+  const id = "0123456789abcdef0123456789abcdef";
+  assert.equal(parseKvCreateId(`✨ Success!\nAdd it to your config:\n{\n  "kv_namespaces": [\n    {\n      "binding": "X",\n      "id": "${id}"\n    }\n  ]\n}\n`), id);
+  assert.equal(parseKvCreateId(`✨ Success!\n[[kv_namespaces]]\nbinding = "X"\nid = "${id}"\n`), id);
+  assert.equal(parseKvCreateId(`"id": "${id}"`), null);
+});
+
+/** A fake account: titles by id, with hooks to make things happen between steps. */
+function fakeAccount(initial: Record<string, string>, hooks: { beforeCreate?: (title: string) => void; afterCreate?: () => void } = {}) {
+  const namespaces = new Map(Object.entries(initial));
+  const removed: string[] = [];
+  let next = 0;
+  const ops: ClaimOps = {
+    list: async () => [...namespaces.values()],
+    create: async (title) => {
+      hooks.beforeCreate?.(title);
+      if ([...namespaces.values()].includes(title)) return { exists: true };
+      const id = `mine-${next++}`;
+      namespaces.set(id, title);
+      hooks.afterCreate?.();
+      return { id };
+    },
+    remove: async (id) => { removed.push(id); namespaces.delete(id); },
+  };
+  return { ops, namespaces, removed, other: (id: string, title: string) => namespaces.set(id, title) };
+}
+
+test("claiming creates the missing markers and keeps them when no rival appears", async () => {
+  const { stage } = built(ACME);
+  const account = fakeAccount({});
+  assert.deepEqual(await claimMarkers(stage, account.ops), ["inferos-acme-owner.os.acme.example"]);
+  assert.deepEqual(account.removed, []);
+  // A redeploy holds its claim already and creates nothing.
+  assert.deepEqual(await claimMarkers(stage, account.ops), []);
+});
+
+test("a marker another run creates between the listings is never removed", async () => {
+  const { stage } = built(ACME);
+  const [marker] = ownershipMarkers(stage);
+  // The other run's create lands after this run's first listing and before its own create.
+  const account = fakeAccount({}, { beforeCreate: (title) => { if (title === marker) account.other("theirs", title); } });
+  await assert.rejects(claimMarkers(stage, account.ops), /another run holds it/);
+  assert.deepEqual(account.removed, []);
+  assert.equal(account.namespaces.get("theirs"), marker);
+});
+
+test("on a rival claim, only the ids this run created are removed", async () => {
+  const proxied = built({ ...ACME, inferops: { ...ACME.inferops, authorizeOrigin: "https://auth.os.acme.example" } }).stage;
+  const [first, second] = ownershipMarkers(proxied);
+  // A rival for another hostname appears after this run's creates: both of ours go, theirs stays.
+  const rival = fakeAccount({}, { afterCreate: () => rival.other("theirs", "inferos-acme-owner.os.other.example") });
+  await assert.rejects(claimMarkers(proxied, rival.ops), /at the same time/);
+  assert.deepEqual(rival.removed.toSorted(), ["mine-0", "mine-1"]);
+  assert.equal(rival.namespaces.get("theirs"), "inferos-acme-owner.os.other.example");
+  // The second marker taken meanwhile: the first (ours) is withdrawn, the second (theirs) kept.
+  const taken = fakeAccount({}, { beforeCreate: (title) => { if (title === second) taken.other("theirs", title); } });
+  await assert.rejects(claimMarkers(proxied, taken.ops), /another run holds it/);
+  assert.deepEqual(taken.removed, ["mine-0"]);
+  assert.equal(taken.namespaces.get("theirs"), second);
+  assert.equal([...taken.namespaces.values()].includes(first!), false);
+});
+
+test("a failed create withdraws what this run made and says so", async () => {
+  const proxied = built({ ...ACME, inferops: { ...ACME.inferops, authorizeOrigin: "https://auth.os.acme.example" } }).stage;
+  let calls = 0;
+  const account = fakeAccount({});
+  const failing: ClaimOps = { ...account.ops, create: async (title) => {
+    if (calls++ === 1) throw new Error("network");
+    return account.ops.create(title);
+  } };
+  await assert.rejects(claimMarkers(proxied, failing), /claiming failed: network/);
+  assert.deepEqual(account.removed, ["mine-0"]);
+});
+
+test("the log names where each input came from, never its value", () => {
+  assert.deepEqual(inputSources({ STAGE_ADMINS: "a@acme.example", OTHER: "x" }, { CLOUDFLARE_ACCOUNT_ID: "1", PATH: "/bin", INFEROPS_EDGE_SECRET: "s" }),
+    ["CLOUDFLARE_ACCOUNT_ID (shell)", "INFEROPS_EDGE_SECRET (shell)", "STAGE_ADMINS (file)"]);
 });
 
 test("a vars file and the shell disagreeing on a name is reported, by name only", () => {

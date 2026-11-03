@@ -46,8 +46,8 @@ import {
 } from "./stage-resources.ts";
 import { resolveStage, type StageDefinition } from "./stages.ts";
 import {
-  claimProblem, conflictingInputs, ownershipMarkers, ownershipProblem, parseR2BucketList, pinnedRevisionFromLsTree, readWrapperStage,
-  workerProbe, WRAPPER_DEPLOY_VARS_FILE, type AccountResources,
+  claimMarkers, conflictingInputs, inputSources, ownershipMarkers, ownershipProblem, parseKvCreateId, parseR2BucketList,
+  pinnedRevisionFromLsTree, readWrapperStage, workerProbe, WRAPPER_DEPLOY_VARS_FILE, type AccountResources,
 } from "./wrapper-stage.ts";
 
 /** The subcommands this script accepts. */
@@ -147,6 +147,8 @@ function loadStageVars(target: Target): void {
       throw new Error(`the shell and ${WRAPPER_DEPLOY_VARS_FILE} disagree on ${conflicting.join(", ")}; ` +
           "run the deploy from a clean shell, or unset them");
     }
+    const sources = inputSources(values, process.env);
+    console.log(`inputs: ${sources.length ? sources.join(", ") : "none"}`);
   }
   for (const [key, value] of Object.entries(values)) {
     if (process.env[key] === undefined) process.env[key] = value;
@@ -217,34 +219,40 @@ async function listAccountResources(stage: StageDefinition, packages: readonly D
   const workers: string[] = [];
   for (const name of names) {
     const probe = await runWrangler(ROOT, ["deployments", "list", "--name", name, "--json"]);
-    if (workerProbe(probe.status, `${probe.stdout}\n${probe.stderr}`)) workers.push(name);
+    if (workerProbe(probe.status, probe.stdout, probe.stderr)) workers.push(name);
   }
   return { kv, r2, workers };
 }
 
 /**
- * Claim the prefix and hostnames by creating this deployment's markers, then re-list: the claim holds
- * only if no rival claim appeared meanwhile (`claimProblem`). On a conflict, only the markers this
- * run created are removed, and nothing else has been created yet.
+ * Claim the prefix and hostnames (`claimMarkers`): this run creates its missing markers one by one,
+ * keeping the id each create returned, then lists again. On a rival claim it removes only those ids.
  */
 async function claim(stage: StageDefinition): Promise<void> {
-  const markers = ownershipMarkers(stage);
-  const before = await listKvNamespaces();
-  const created = markers.filter((marker) => !before.has(marker));
-  if (created.length === 0) return;
-  const after = await ensureKvNamespaces(markers);
-  const problem = claimProblem([...after.keys()], stage);
-  if (!problem) {
-    console.log(`claimed ${created.join(", ")}`);
-    return;
+  const scratch = mkdtempSync(join(tmpdir(), "stage-claim-"));
+  try {
+    const created = await claimMarkers(stage, {
+      list: async () => [...(await listKvNamespaces()).keys()],
+      create: async (title) => {
+        // From an empty directory, so no Wrangler config can prefix the title.
+        const result = await runWrangler(scratch, ["kv", "namespace", "create", title]);
+        if (result.status !== 0) {
+          if (/already exists/.test(`${result.stdout}\n${result.stderr}`)) return { exists: true };
+          throw new Error(`wrangler kv namespace create ${title} failed:\n${result.stderr}`);
+        }
+        const id = parseKvCreateId(result.stdout);
+        if (!id) throw new Error(`wrangler kv namespace create ${title} reported no namespace id`);
+        return { id };
+      },
+      remove: async (id) => {
+        const result = await runWrangler(ROOT, ["kv", "namespace", "delete", "--namespace-id", id, "--skip-confirmation"]);
+        if (result.status !== 0) throw new Error(`wrangler kv namespace delete failed:\n${result.stderr}`);
+      },
+    });
+    if (created.length) console.log(`claimed ${created.join(", ")}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
-  for (const marker of created) {
-    const id = after.get(marker);
-    if (!id) continue;
-    const result = await runWrangler(ROOT, ["kv", "namespace", "delete", "--namespace-id", id]);
-    if (result.status !== 0) console.error(`could not remove this run's claim ${marker}; remove it by hand:\n${result.stderr}`);
-  }
-  throw new Error(problem);
 }
 
 /** The account's KV namespaces by title. Read-only. */

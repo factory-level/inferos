@@ -269,19 +269,117 @@ export function conflictingInputs(file: Readonly<Record<string, string | undefin
     .map(([key]) => key);
 }
 
+/**
+ * The id of the namespace `wrangler kv namespace create` just made, from its own output (the config
+ * snippet it prints after "Success!"), or null when the output isn't a successful create.
+ */
+export function parseKvCreateId(stdout: string): string | null {
+  if (!stdout.includes("Success!")) return null;
+  const match = /"id":\s*"([0-9a-f]{32})"/.exec(stdout) ?? /\bid\s*=\s*"([0-9a-f]{32})"/.exec(stdout);
+  return match ? match[1]! : null;
+}
+
+/** What claiming needs from the account, so the flow can be run without one. */
+export interface ClaimOps {
+  /** Every KV namespace title on the account. */
+  list(): Promise<readonly string[]>;
+  /** Create a namespace: its id, from this create's own answer, or `exists` when the title is taken. */
+  create(title: string): Promise<{ id: string } | { exists: true }>;
+  /** Delete the namespace with this exact id. */
+  remove(id: string): Promise<void>;
+}
+
+/**
+ * Claim `stage`'s prefix and hostnames: create each missing marker, then list again and check the
+ * claim (`claimProblem`). Only ids this run's own creates returned are ever removed, so a marker
+ * that appeared between two listings, made by another run, is never touched: a title this run found
+ * taken counts as someone else's claim. On any conflict or failure, this run's markers are withdrawn
+ * and the error says why. Returns the titles this run created.
+ */
+export async function claimMarkers(stage: StageDefinition, ops: ClaimOps): Promise<string[]> {
+  const before = new Set(await ops.list());
+  const created = new Map<string, string>();
+  const withdraw = async () => {
+    const failed: string[] = [];
+    for (const [title, id] of created) {
+      try { await ops.remove(id); } catch { failed.push(title); }
+    }
+    return failed;
+  };
+  let problem: string | null = null;
+  try {
+    for (const marker of ownershipMarkers(stage)) {
+      if (before.has(marker)) continue;
+      const result = await ops.create(marker);
+      if ("exists" in result) {
+        problem = `the claim ${marker} appeared while this run was claiming, so another run holds it; ` +
+            "nothing of it is removed; retry once that run has finished";
+        break;
+      }
+      created.set(marker, result.id);
+    }
+    problem ??= claimProblem(await ops.list(), stage);
+  } catch (error) {
+    const failed = await withdraw();
+    throw new Error(`claiming failed: ${error instanceof Error ? error.message : String(error)}` +
+        (failed.length ? `; remove this run's ${failed.join(", ")} by hand` : ""), { cause: error });
+  }
+  if (problem) {
+    const failed = await withdraw();
+    throw new Error(problem + (failed.length ? `; remove this run's ${failed.join(", ")} by hand` : ""));
+  }
+  return [...created.keys()];
+}
+
+/** The deploy inputs whose source is worth showing: account, admins and the optional secrets. */
+const DEPLOY_INPUTS = /^(CLOUDFLARE_ACCOUNT_ID|STAGE_ADMINS|CF_ACCESS_CLIENT_(ID|SECRET)|CF_AI_GATEWAY\w*|INFEROPS_EDGE_SECRET)$/;
+
+/**
+ * Where each deploy input came from, `NAME (shell)` or `NAME (file)`, for the log: names and
+ * sources only, never values, so an input exported in the shell and absent from the file is
+ * visible before anything is deployed.
+ */
+export function inputSources(file: Readonly<Record<string, string | undefined>>, shell: NodeJS.ProcessEnv): string[] {
+  const names = new Set([...Object.keys(shell), ...Object.keys(file)].filter((name) => DEPLOY_INPUTS.test(name)));
+  return [...names].toSorted().map((name) => `${name} (${shell[name] !== undefined ? "shell" : "file"})`);
+}
+
 /** R2 bucket names from `wrangler r2 bucket list`, or null when the output isn't that listing. */
 export function parseR2BucketList(stdout: string): string[] | null {
   if (!stdout.includes("Listing buckets...")) return null;
   return [...stdout.matchAll(/^name:\s+(\S+)\s*$/gm)].map((match) => match[1]!);
 }
 
+/** Cloudflare error codes in a JSON answer: `{code}` or `{errors: [{code}]}`. */
+function jsonErrorCodes(text: string): number[] | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(text.trim()); } catch { return null; }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as { code?: unknown; errors?: unknown };
+  const codes = typeof record.code === "number" ? [record.code] : [];
+  if (Array.isArray(record.errors)) {
+    for (const error of record.errors) {
+      if (typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "number") {
+        codes.push((error as { code: number }).code);
+      }
+    }
+  }
+  return codes;
+}
+
 /**
- * Whether a worker exists, from `wrangler deployments list --name <worker>`: listed (exit 0), not
- * found (Cloudflare's code 10007), or neither, which is an error so the guard fails closed.
+ * Whether a worker exists, from `wrangler deployments list --name <worker> --json`: listed (exit 0),
+ * not found, or neither, which is an error so the guard fails closed. Not found is Cloudflare's code
+ * 10007 read from a JSON error answer, or else from Wrangler's own `[code: 10007]` error line; a
+ * 10007 anywhere else in the output (an id, a date) doesn't count.
  */
-export function workerProbe(status: number | null, output: string): boolean {
+export function workerProbe(status: number | null, stdout: string, stderr: string): boolean {
   if (status === 0) return true;
-  if (/\b10007\b/.test(output)) return false;
+  for (const text of [stdout, stderr]) {
+    const codes = jsonErrorCodes(text);
+    if (codes?.includes(10007)) return false;
+  }
+  if (/\[code: 10007\]/.test(`${stdout}\n${stderr}`)) return false;
   throw new Error(`cannot tell whether the worker exists (wrangler exited ${status}); refusing to deploy`);
 }
 
