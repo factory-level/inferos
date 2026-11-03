@@ -12445,6 +12445,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return store.replace(id, expectedRevision, content, commits);
   }
   async deleteConsole(id: string, expectedRevision: string): Promise<void> {
+    await this.#requireSharedConfiguration("publish", "shared");
     this.#consoleStore().delete(id, expectedRevision);
     this.impl.announceConsoleRevision(id, null);
   }
@@ -12517,6 +12518,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async publishArtifactRevision(gadgetId: WorkpieceId, kind: ArtifactKind, name: string, number: number,
       pins: ArtifactPin[], model: ArtifactModelRequirement | null,
       qualification: ArtifactQualification): Promise<ArtifactPublishResult> {
+    await this.#requireSharedConfiguration("publish", "shared");
     // The publisher is the person this session belongs to; no agent holds this capability.
     let profile = await this.#getClientProfile();
     return this.impl.publishArtifact(gadgetId, kind, name, number, pins, model, qualification,
@@ -12534,6 +12536,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async bindArtifactRevision(ref: ArtifactRef, bindings: Record<string, BlueprintBindingAssignment>)
       : Promise<WorkpieceId> {
+    await this.#requireSharedConfiguration("publish", "shared");
     let record = this.#artifactRevision(ref);
     if (!record) throw new Error(`No such revision: ${ref}`);
     let assignments = new Map(Object.entries(bindings));
@@ -12613,6 +12616,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> {
+    await this.#requireSharedConfiguration("build", "shared");
     let props: ArtifactPublisherProps = {overseerId: this.impl.ctx.id.toString()};
     return this.impl.addGatekeeper(this.impl.ctx.exports.ArtifactPublisherGatekeeper({props}),
         {type: "artifactPublisher"}, this.clientUserId, this.#mintedCapabilityKind());
@@ -12837,6 +12841,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async setTitle(title: string): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     this.impl.storage.title.put(title);
     await this.#owner.updateTitle(this.impl.ctx.id.toString(), title);
   }
@@ -13021,6 +13026,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async setTestOnly(testOnly: boolean): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     if (!testOnly) {
       let mocked = [...this.impl.storage.gadgets.list()].flatMap(workpiece =>
           workpiece.type === "gadget" && workpiece.installedFrom &&
@@ -13250,6 +13256,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
+    await this.#requireSharedConfiguration("build", "shared");
     return this.#addConnection(await this.#resolveConnection(accountId, resourceUrl), resourceUrl);
   }
 
@@ -13275,6 +13282,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
+    await this.#requireSharedConfiguration("build", "shared");
     let chatMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(modelId), this.impl.logger);
     let props: LanguageModelGatekeeperProps = {
@@ -13299,6 +13307,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
+    await this.#requireSharedConfiguration("build", "shared");
     // Validate the configured env: names must be valid binding names and targets must exist --
     // and must not be gadgets still provisional to some chat, which belong to that chat's
     // unaccepted proposal, not (yet) to the workspace. (Spawn-time snapshotting tolerates targets
@@ -13512,6 +13521,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (action.type === "observation") {
       throw new Error("Observations can't have 'pending' state.");
     }
+    // Applying an action acts for the workspace; approving an artifact publisher's publishes as
+    // the approver (see publishApprovedArtifact), so that takes publish.
+    let publishes = this.impl.storage.gatekeepers.get(action.gatekeeperId)?.creationSpec?.type ===
+        "artifactPublisher";
+    await this.#requireSharedConfiguration(publishes ? "publish" : "build", "shared");
 
     // Resolve the approver's identity before applying, so a failed profile fetch can't leave the
     // action applied in the world but still "pending" in storage.
@@ -13588,6 +13602,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async enableHook(id: number): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     let record = this.impl.storage.boundHooks.get(id);
     if (!record) throw new Error("Invalid hook ID.");
 
@@ -13616,6 +13631,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async disableHook(id: number): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     let record = this.impl.storage.boundHooks.get(id);
     if (!record) throw new Error("Invalid hook ID.");
 
@@ -13634,6 +13650,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async deleteHook(id: number): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     return this.impl.deleteHook(id);
   }
 
@@ -13721,6 +13738,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // actions that this newly unblocks. Auto-approval rules are workspace-wide per gatekeeper.
   async setAutoApprovedActionKind(gatekeeperId: WorkpieceId, actionKind: ActionKind)
       : Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     let gatekeeper = this.impl.storage.gatekeepers.get(gatekeeperId);
     if (!gatekeeper) {
       throw new Error(`No such gatekeeper: ${gatekeeperId}`);
@@ -13739,6 +13757,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Remove the auto-approval rule for `tag` on the given gatekeeper, so future matching actions
   // require manual approval again.
   async removeAutoApprovedActionKind(gatekeeperId: WorkpieceId, tag: string): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     this.impl.storage.autoApproveTags.delete(`${gatekeeperId}:${tag}`);
   }
 
@@ -13869,6 +13888,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async acceptConnectionRequest(
       requestId: string, result: {gatekeeperId: number}): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
     let msg = this.#findConnectionRequest(requestId);
     if (msg.state !== "pending") {
       throw new Error(`Connection request is not pending: ${requestId}`);
@@ -14490,6 +14510,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async retryBlueprintPublish(blueprintId: string): Promise<void> {
+    await this.#requireSharedConfiguration("publish", "shared");
     let record = this.impl.storage.blueprints.get(blueprintId);
     if (!record) throw new Error("No such blueprint.");
     if (!record.dirty) return;  // nothing to retry

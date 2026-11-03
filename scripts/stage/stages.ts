@@ -39,6 +39,14 @@ export interface StageDefinition {
     /** InferLab central-auth (`/authorize`, `/auth/token`), a bare HTTPS origin. */
     authOrigin: string;
     /**
+     * The one company this deployment belongs to (inferops ADR 0009 T6): its InferOps tenant id,
+     * or `"internal"`, InferLab's own, which admits reserved tenants only (the GrokBot seats).
+     * InferOps decides it, from its own `auth.sso.inferosCompanies` entry for this origin, and
+     * refuses a session in any other company; the gatekeeper checks a tenant id again
+     * (`INFEROPS_COMPANY`). It only refuses: it never grants anything.
+     */
+    company: "internal" | string;
+    /**
      * Optional: a second hostname of this stage, served by the InferOps gatekeeper, that forwards
      * InferLab's sign-in pages (gatekeeper-inferops `auth-proxy.ts`). Set it when InferLab's edge
      * admits only allowlisted addresses, so a browser elsewhere can still sign in. It exposes the
@@ -95,6 +103,8 @@ export const STAGES = {
     inferops: {
       baseUrl: "https://api.dev.inferlab.io",
       authOrigin: "https://auth.dev.inferlab.io",
+      // InferLab's own QA stage: the GrokBot seats only.
+      company: "internal",
       // Dev InferLab's Cloud Armor admits only allowlisted addresses; external test agents sign in here.
       authorizeOrigin: "https://auth.dev-os.factorylevel.dev",
       // Workflow policy (`project/workflow`) reads InferOps `workflow.get`, which dev serves. Custom
@@ -109,7 +119,8 @@ export const STAGES = {
     workerPrefix: "inferos-prod-",
     resourcePrefix: "inferos-prod-",
     auth: { mode: "inferlab" },
-    inferops: { baseUrl: "https://api.inferlab.io", authOrigin: "https://auth.inferlab.io" },
+    // InferLab's own until a person names the company it serves (inferops `config/production.js`).
+    inferops: { baseUrl: "https://api.inferlab.io", authOrigin: "https://auth.inferlab.io", company: "internal" },
     gatekeepers: STAGE_GATEKEEPERS,
     requireCleanTree: true,
   },
@@ -117,6 +128,13 @@ export const STAGES = {
 
 /** A stage name `pnpm stage:*` accepts. */
 export type StageName = keyof typeof STAGES;
+
+const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Whether `value` names a deployment's company: `"internal"`, or a lowercase tenant id. */
+export function isDeploymentCompany(value: string): boolean {
+  return value === "internal" || TENANT_ID.test(value);
+}
 
 const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const PREFIX = /^[a-z][a-z0-9-]*-$/;
@@ -137,6 +155,9 @@ export function stageDefinitionProblems(stage: StageDefinition): string[] {
     if (!isInferLabAuthOrigin(value) || !value.startsWith("https://")) {
       problems.push(`${field} "${value}" must be a bare https:// origin`);
     }
+  }
+  if (!isDeploymentCompany(stage.inferops.company)) {
+    problems.push(`inferops.company "${stage.inferops.company}" must be "internal" or an InferOps tenant id`);
   }
   const authorize = stage.inferops.authorizeOrigin;
   if (authorize !== undefined) {

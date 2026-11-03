@@ -33,12 +33,12 @@ test("a malformed stage definition is refused before anything is generated", () 
     ...STAGES.dev,
     hostname: "Dev-OS.example",
     workerPrefix: "inferos-dev",
-    inferops: { baseUrl: "http://localhost:8080", authOrigin: "https://auth.example/path" },
+    inferops: { baseUrl: "http://localhost:8080", authOrigin: "https://auth.example/path", company: "acme" },
     gatekeepers: ["gatekeeper-context", "gatekeeper-context"],
   };
   const problems = stageDefinitionProblems(bad).join("\n");
   for (const fragment of ["hostname", "workerPrefix", "inferops.baseUrl", "inferops.authOrigin",
-    "must include gatekeeper-inferops", "twice"]) {
+    "inferops.company", "must include gatekeeper-inferops", "twice"]) {
     assert.match(problems, new RegExp(fragment));
   }
 });
@@ -153,6 +153,8 @@ test("gatekeepers live under the stage origin; InferOps points at the stage's In
     assert.equal(inferops.vars?.INFEROPS_BASE_URL, stage.inferops.baseUrl);
     assert.equal(inferops.vars?.INFERLAB_AUTH_ORIGIN, stage.inferops.authOrigin);
     assert.equal(inferops.vars?.INFEROPS_ENABLED, "true");
+    // FAC-160: each stage names its company; both are InferLab's own today.
+    assert.equal(inferops.vars?.INFEROPS_COMPANY, "internal");
     assert.equal(inferops.vars?.CODING_WORKBENCH_ENABLED, "false");
     for (const name of ["INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG", "MOCK_INFEROPS_SYNTHETIC_ISSUES"]) {
       assert.equal(inferops.vars?.[name], undefined, `${name} reached a stage`);
