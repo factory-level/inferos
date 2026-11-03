@@ -13,8 +13,8 @@ import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-sto
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
 
-const ADA = { id: "ada-profile", name: "Ada" };
-const BEN = { id: "ben-profile", name: "Ben" };
+const ADA = { type: "user" as const, id: "ada-profile", name: "Ada" };
+const BEN = { type: "user" as const, id: "ben-profile", name: "Ben" };
 const GADGET = 3;
 const OTHER_GADGET = 4;
 const commit = (n: number) => n.toString(16).padStart(40, "0");
