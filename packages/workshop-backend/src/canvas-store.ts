@@ -1,11 +1,28 @@
 import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
+import { canvasDefinitionFromPage, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import { readCanvasCatalog } from "./canvas-catalog";
 import type { OverseerStorage } from "./overseer";
 
-/** Workspace-local composition persistence, reachable only through a build-capable Overseer session. */
+/**
+ * A page version 1 can't hold, beside its untouched `canvases` row. `basedOnRevision` is that row's
+ * revision when this was saved: if the row has moved, code without pages edited it, and the row wins.
+ */
+export interface StoredCanvasPage {
+  /** The nested page. */
+  page: CanvasPage;
+  /** The revision of the `canvases` row this page replaces while the two agree. */
+  basedOnRevision: string;
+}
+
+/**
+ * Workspace-local composition persistence, reachable only through a build-capable Overseer session.
+ *
+ * `canvases` only ever holds version 1, because code before pages parses every row to list any of
+ * them: one nested row there would blank the whole workspace after a rollback (ADR 0014).
+ */
 export class WorkspaceCanvasStore {
   constructor(private durableStorage: DurableObjectStorage,
-      private storage: Pick<OverseerStorage, "canvases">,
+      private storage: Pick<OverseerStorage, "canvases" | "canvasPages">,
       private env: Pick<Cloudflare.Env, "COMPOSABLE_VIEWS" | "DURABLE_VIEWS" | "CANVAS_CATALOG">) {}
 
   #requireEnabled(): void {
@@ -45,6 +62,7 @@ export class WorkspaceCanvasStore {
     return this.durableStorage.transactionSync(() => {
       const current = this.get(id);
       if (!current) throw new Error("Canvas not found");
+      if (this.#nestedPage(current)) throw new Error("This page has nested objects, which this editor can't change");
       const updated = applyCanvasOperations(current, expectedRevision, operations, readCanvasCatalog(this.env).widgetKinds);
       this.storage.canvases.put(updated);
       return updated;
@@ -56,8 +74,67 @@ export class WorkspaceCanvasStore {
     this.durableStorage.transactionSync(() => {
       const current = this.get(id);
       if (!current) throw new Error("Canvas not found");
-      if (current.revision !== expectedRevision) throw new CanvasConflictError(current.revision);
+      const nested = this.#nestedPage(current);
+      const revision = nested?.revision ?? current.revision;
+      if (revision !== expectedRevision) throw new CanvasConflictError(revision);
       this.storage.canvases.delete(id);
+      this.storage.canvasPages.delete(id);
+    });
+  }
+
+  /** The nested page that currently replaces this row, if any. */
+  #nestedPage(row: CanvasDefinition): CanvasPage | null {
+    const stored = this.storage.canvasPages.get(row.id);
+    return stored?.basedOnRevision === row.revision ? parseCanvasPage(stored.page) : null;
+  }
+
+  /** One page by ID: its nested page, or its version 1 row by conversion. Reads never write. */
+  getPage(id: string): CanvasPage | null {
+    const row = this.get(id);
+    if (!row) return null;
+    return this.#nestedPage(row) ?? canvasPageFromDefinition(row);
+  }
+
+  /** Every page of this workspace. Reads never write. */
+  listPages(): CanvasPage[] {
+    this.#requireEnabled();
+    return Array.from(this.storage.canvases.list(), row => {
+      const parsed = parseCanvasDefinition(row);
+      return this.#nestedPage(parsed) ?? canvasPageFromDefinition(parsed);
+    });
+  }
+
+  /**
+   * Save a page at a new revision. A page version 1 can hold goes in its `canvases` row, and any
+   * other goes beside that row, leaving it as it was. The page must already exist. Nothing calls
+   * this outside tests until readers understand nested pages (FAC-83).
+   */
+  savePage(value: unknown, expectedRevision: string): CanvasPage {
+    this.#requireEnabled();
+    const page = parseCanvasPage(value);
+    return this.durableStorage.transactionSync(() => {
+      const row = this.get(page.id);
+      if (!row) throw new Error("Canvas not found");
+      const stored = this.storage.canvasPages.get(page.id);
+      if (stored && stored.basedOnRevision !== row.revision) {
+        throw new Error("This page was edited on an earlier version, and its nested copy is kept. Choose which to keep first");
+      }
+      const current = this.#nestedPage(row) ?? canvasPageFromDefinition(row);
+      if (current.revision !== expectedRevision) throw new CanvasConflictError(current.revision);
+      const existing = new Set(current.nodes.map(node => node.id));
+      const { widgetKinds } = readCanvasCatalog(this.env);
+      const disallowed = page.nodes.find(node => node.nodeType === "widget" && !existing.has(node.id) && !widgetKinds.includes(node.kind));
+      if (disallowed?.nodeType === "widget") throw new Error(`Widget kind ${disallowed.kind} is not enabled for this installation`);
+      const updated: CanvasPage = { ...page, revision: (BigInt(current.revision) + 1n).toString() };
+      parseCanvasWorkspacePages([updated, ...this.listPages().filter(other => other.id !== page.id)]);
+      const definition = canvasDefinitionFromPage(updated);
+      if (definition) {
+        this.storage.canvases.put(definition);
+        this.storage.canvasPages.delete(page.id);
+      } else {
+        this.storage.canvasPages.put({ page: updated, basedOnRevision: row.revision });
+      }
+      return updated;
     });
   }
 }

@@ -3,7 +3,7 @@ import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
-import { WorkspaceCanvasStore } from "./canvas-store";
+import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
 import {
@@ -1368,6 +1368,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
     collections: {
       canvases: collection<CanvasDefinition>()({ primaryKey: "id" }),
+      // Nested pages version 1 can't hold, beside their untouched `canvases` rows (see canvas-store.ts).
+      canvasPages: collection<StoredCanvasPage>()({ primaryKey: record => record.page.id }),
       // Authored flows: ordered lists of this workspace's canvases (see flow-store.ts).
       flows: collection<OperateFlow>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).

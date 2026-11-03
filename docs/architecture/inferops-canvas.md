@@ -77,7 +77,7 @@ Bound views ([Bound view](#bound-view)) diverge from the bound-view contract (r8
 
 Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/architecture/workspaces-and-canvases.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/workspaces-and-canvases.md).
 
-- The guarded canvas definition is a flat layout of sections and widget instances; there are no nested objects, no attached hooks, events or effects, no explicit target selector and no dedicated Canvas Builder (I06). A [nested model contract](#nested-canvas-model-contract) exists, and nothing stores, renders or runs it.
+- The guarded canvas definition is a flat layout of sections and widget instances; there are no nested objects, no attached hooks, events or effects, no explicit target selector and no dedicated Canvas Builder (I06). A [nested model contract](#nested-canvas-model-contract) exists with store methods nothing calls yet, and nothing renders or runs it.
 - Canvases themselves have no draft and published states, and there is no widget-progression or canvas-progression contract with completion callbacks (I07).
 - The board adapter resolves one board reference; no company-wide record pages are reached from here, and InferOps' record-list contract (default 100, maximum 500, no cursor) bounds what paging could show (I03).
 
@@ -110,11 +110,22 @@ Bootstrap writes `views/operations.json` with the configured target reference. `
 
 ## Nested canvas model contract
 
-`@gadgets/workshop-shared/canvas-model` is schema version 2, proposed in [ADR 0014](../adr/0014-nested-canvas-model.md). **Nothing imports it yet.** Saved canvases, the operation engine, the renderer, consoles and the agent's tools all still use version 1, so no behavior has changed. `canvas.ts` only gained three exports for it (`CANVAS_ID`, `CANVAS_REVISION`, `parseCanvasWidget`).
+`@gadgets/workshop-shared/canvas-model` is schema version 2, proposed in [ADR 0014](../adr/0014-nested-canvas-model.md). **Only the canvas store uses it, and nothing calls those store methods outside tests.** Saved canvases, the operation engine, the renderer, consoles and the agent's tools all still use version 1, so no behavior has changed. `canvas.ts` only gained three exports for it (`CANVAS_ID`, `CANVAS_REVISION`, `parseCanvasWidget`).
 
 `parseCanvasPage` validates one page and `parseCanvasWorkspacePages` validates a page collection, including navigation targets. Both are pure, take no viewer and throw `CanvasModelError` with a stable `code` and a location `at` that holds only validated IDs and known field names. Accepting a page says its shape is sound and nothing about who may see what it references: a reference to another company's board parses, and is refused later, when it's resolved through a connection. `parseCanvasTarget`, `formatCanvasTarget` and `resolveCanvasTarget` handle explicit edit targets, which also authorize nothing.
 
-The fixtures in `src/canvas-model-fixtures/` are the executable statement of the rules: `valid.json`, `rejected.json` with each case's expected code and location, and `section-mapping.json` pairing version 1 definitions with their version 2 pages. `canvas-model.test.ts` runs them all, reads each mapped page back into the same version 1 definition, and checks malformed input only ever produces a `CanvasModelError`. That is local unit evidence for the contract, not evidence of a migration: conversion, storage and repeat-migration identity are FAC-81's.
+The fixtures in `src/canvas-model-fixtures/` are the executable statement of the rules: `valid.json`, `rejected.json` with each case's expected code and location, and `section-mapping.json` pairing version 1 definitions with their version 2 pages. `canvas-model.test.ts` runs them all, reads each mapped page back into the same version 1 definition, and checks malformed input only ever produces a `CanvasModelError`.
+
+### Pages in storage and rollback
+
+`canvases` only ever holds version 1. That isn't a preference: the store before pages parses every row to list any of them, and `console-store.ts` reads rows unparsed, so one nested row there would make a whole workspace's list throw after a rollback.
+
+- **Reading a page** (`getPage`, `listPages`) converts the row with `canvasPageFromDefinition`. It's pure and deterministic and writes nothing, so converting twice or concurrently gives the same IDs, and a row that can't convert throws and stays as it was. Conversion keeps the revision.
+- **Saving a page** (`savePage`) checks the expected revision, the contract, navigation targets and the catalog in one transaction. A page version 1 can hold goes in its row (`canvasDefinitionFromPage`). Any other goes in the `canvasPages` collection as `{page, basedOnRevision}`, and its row isn't touched.
+- **While a nested page is current,** `edit` refuses and `delete` removes both records. `list`, `get` and everything that reads `sections` see the row's last version 1 content, so a nested page shows its earlier layout until readers learn pages (FAC-83).
+- **After a rollback,** the previous store lists, reads and edits every row, and ignores `canvasPages`. If someone edits a row there, its revision moves past `basedOnRevision`. On rolling forward the row wins, the nested copy is kept, and `savePage` refuses until someone chooses. No code offers that choice yet (FAC-83). A row deleted there stays deleted, and its nested copy stays unread in storage.
+
+**Evidence, local only:** `workshop-backend/__tests__/canvas-store-pages.test.ts`, over mock storage. `previous-canvas-store.ts` there is the store at `03d65fac`, so the rollback tests run the previous code against data the new code wrote. It's no proof on real Durable Object storage or of a deployed rollback.
 
 The action events and declared actions in `CANVAS_WIDGET_ACTIONS` describe what the gatekeeper offers today. No widget emits those events and nothing runs an attachment yet.
 
