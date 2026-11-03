@@ -1,5 +1,4 @@
-import { Link, useRouterState } from '@tanstack/react-router'
-import { Desktop, Moon, Plug, Sun } from '@phosphor-icons/react'
+import { Desktop, Moon, Sun } from '@phosphor-icons/react'
 import { Tooltip } from '@cloudflare/kumo'
 import UserMenu from '../UserMenu'
 import { useTheme } from '../../ThemeContext'
@@ -41,38 +40,12 @@ function ThemeModeButton() {
   )
 }
 
-// Bottom strip on the sidebar: tiny iconography for connections, theme, and the user menu. Mirrors
-// the very low-chrome bottom row in the reference design and surfaces Profile / Providers / Admin
-// from the user-menu dropdown rather than duplicating them as separate icons.
-function StripLink({
-  to,
-  label,
-  children,
-}: {
-  to: '/gatekeepers'
-  label: string
-  children: React.ReactNode
-}) {
-  const pathname = useRouterState({ select: (s) => s.location.pathname })
-  const active = pathname === to
-  return (
-    <Tooltip content={label}>
-      <Link
-        to={to}
-        aria-label={label}
-        className={[
-          'flex h-8 w-8 items-center justify-center rounded-md transition-colors',
-          active
-            ? 'bg-kumo-fill text-kumo-brand'
-            : 'text-kumo-inactive hover:bg-kumo-tint hover:text-kumo-default',
-        ].join(' ')}
-      >
-        {children}
-      </Link>
-    </Tooltip>
-  )
-}
-
+/**
+ * Bottom strip on the sidebar: tiny iconography for theme and the user menu. Mirrors the very
+ * low-chrome bottom row in the reference design and surfaces Profile / Providers / Admin from the
+ * user-menu dropdown rather than duplicating them as separate icons. Gatekeepers is a primary nav
+ * entry in the rail above, so it is not repeated here.
+ */
 export default function SidebarUtilityStrip({ collapsed = false }: { collapsed?: boolean }) {
   return (
     <div
@@ -83,9 +56,6 @@ export default function SidebarUtilityStrip({ collapsed = false }: { collapsed?:
         collapsed ? 'flex-col justify-center gap-2 px-1.5' : '',
       ].join(' ')}
     >
-      <StripLink to="/gatekeepers" label="Gatekeepers">
-        <Plug size={15} />
-      </StripLink>
       <div className={collapsed ? 'flex flex-col items-center gap-2' : 'ml-auto flex items-center gap-1'}>
         <ThemeModeButton />
         <UserMenu />

@@ -12,6 +12,7 @@ covers:
   - packages/workshop-frontend/src/routes/workspace_.$id.inferops-canvas.tsx
   - packages/workshop-frontend/src/routes/inferops-canvas.tsx
   - packages/workshop-frontend/src/components/AppShell/Sidebar.tsx
+  - packages/workshop-frontend/src/components/AppShell/SidebarUtilityStrip.tsx
   - packages/workshop-frontend/src/hooks/useWorkspaceWorkpieces.ts
   - packages/workshop-frontend/src/hooks/useResizableSplit.ts
   - packages/workshop-frontend/src/components/GadgetPresence.tsx
@@ -30,7 +31,7 @@ covers:
   - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 
 # InferOps canvas and transactional widgets
@@ -155,6 +156,8 @@ The release slice of #34 (one private Kanban/Operate view with a live reference)
 
 Outside edit mode the active view renders read-only. Sections are size containers, so column counts follow the canvas pane's width rather than the viewport: two- and three-column sections collapse to one column below 48rem, and three-column sections show two columns until 64rem. Gadget widgets resolve their reference against the live workpiece list and open a `GadgetClient` through the workspace's `Overseer` (`getGadget`), disposing it when the widget goes away. They then render through the existing sandboxed `GadgetUI` host, keyed by the gadget's head commit so an accepted change reloads it. A widget does not load its bundle until it has been within 200px of the screen. Missing gadgets and drafts that are still pending in a conversation are never opened; each shows an explanatory state instead. Board widgets render the Kanban board the board data adapter holds for them, or its loading, not connected or error state (see [Kanban board](#kanban-board)). A board card's **Open** button opens its full view: the `widget` search parameter names the widget, the pane shows only that board with a **Back** button, and the widget is cleared from the URL when the view changes or no longer holds it. In edit mode a board card shows only its reference.
 
+The page prints the active view's title as its heading, so a section titled the same (compared trimmed and case-insensitively) keeps its heading for assistive technology only (`CanvasView`'s `shownTitle`) and the title is not shown twice. Console screens and flow steps print no view heading above the canvas and pass none, so every section there shows its own title. A Wiki widget fills the height of its grid cell, as a board card does, rather than ending at its content.
+
 Edit mode uses Kumo controls and the shared guarded operation engine. Sections can be renamed. Each section adds a board by reference or an accepted gadget from a picker. A separate move form selects a widget and destination section, appends it there, and returns focus to the source selector. This avoids removing the focused control along with a moved card. Existing upward ordering and undo can refine or reverse the move. It supports temporary in-memory views or saved definitions through the existing Overseer capability. Temporary views are labelled unsaved and last only while the page stays open. Saved changes compare revisions; rejected writes retain the displayed snapshot and offer an explicit reload. Undo restores prior content with a new revision and retains up to 20 session-local snapshots per view. Import validates bounded JSON and sends only content, so stored identities and workspace authority are never imported.
 
 Async responses from an earlier workspace are ignored. A slow file read cannot initiate a create against a workspace that has since been left. Layout controls do not load or mutate domain records or gadget code. Gadget console logs in chat, individual sharing and performance benchmarks remain follow-up work.
@@ -187,7 +190,7 @@ A blueprint widget such as the InferOps Kanban board is placed in three steps th
 
 ## First-class InferOps Canvas page
 
-When composable views are enabled the sidebar shows **InferOps Canvas**, linking to `/inferops-canvas`. That page lists saved screens across the user's most recently active build workspaces (at most 24): screens are stored per workspace, so it opens each workspace once with a pipelined `openGadget(id).listCanvases()` and disposes the stub right away. A workspace that needs observer setup before it can be opened is listed without its screens. The page also creates a screen in a chosen workspace, blank or from a catalog template, and opens it.
+The configuration sidebar's primary nav lists **Gatekeepers** (`/gatekeepers`, current only on that page) above the gatekeeper management apps; the bottom strip holds only the theme switch and the user menu. When composable views are enabled the sidebar shows **InferOps Canvas**, linking to `/inferops-canvas`. That page lists saved screens across the user's most recently active build workspaces (at most 24): screens are stored per workspace, so it opens each workspace once with a pipelined `openGadget(id).listCanvases()` and disposes the stub right away. A workspace that needs observer setup before it can be opened is listed without its screens. The page also creates a screen in a chosen workspace, blank or from a catalog template, and opens it.
 
 On a workspace's page the pane offers only the catalog's widget kinds. Catalog blueprint widgets appear as buttons that start a new chat (with the user's last-chosen model) asking the agent to build and place that widget, since doing so means creating a gadget and wiring a connection. Saved views are re-read every five seconds while the page is visible and no operation is in flight, and again as soon as a hidden page is shown, so the agent's edits show up without a reload. A board reference card shows the board through the board data adapter when the workspace has a connection for it, and says it is not connected otherwise; in edit mode it shows only the reference.
 

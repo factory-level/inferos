@@ -189,14 +189,15 @@ function FeaturedBlueprintCard({
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 2);
 
   return (
-    <div className="themed-card-hover-shadow press group relative flex cursor-pointer flex-col overflow-hidden rounded-xl bg-kumo-elevated text-left transition-[background-color,box-shadow] duration-150 ease-out hover:bg-kumo-overlay">
-      <Link
-        to="/blueprint/$id"
-        params={{ id: blueprint.id }}
-        aria-label={`Open featured blueprint ${blueprint.metadata.title}`}
-        className="absolute inset-0 z-10 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-kumo-ring"
-      />
-
+    // The whole card is the link, so a click anywhere on it, text and badges included, opens the
+    // blueprint. The card holds no control of its own; one added later needs its own hit area
+    // outside this link rather than a button nested inside it.
+    <Link
+      to="/blueprint/$id"
+      params={{ id: blueprint.id }}
+      aria-label={`Open featured blueprint ${blueprint.metadata.title}`}
+      className="themed-card-hover-shadow press group relative flex cursor-pointer flex-col overflow-hidden rounded-xl bg-kumo-elevated text-left transition-[background-color,box-shadow] duration-150 ease-out hover:bg-kumo-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-kumo-ring"
+    >
       <BlueprintThumbnail blueprint={blueprint} />
 
       <div className={`flex flex-1 items-start gap-2.5 px-3 py-2.5 ${compact ? "sm:py-1.5" : ""}`}>
@@ -215,7 +216,7 @@ function FeaturedBlueprintCard({
             {blueprint.metadata.description || "No description"}
           </p>
           {badges.length > 0 && (
-            <div className="relative z-20 mt-2 flex flex-wrap gap-1">
+            <div className="mt-2 flex flex-wrap gap-1">
               {badges.map((badge) => (
                 <BindingBadge
                   key={badge.vendorKey ?? badge.type}
@@ -227,7 +228,7 @@ function FeaturedBlueprintCard({
           )}
         </div>
       </div>
-    </div>
+    </Link>
   );
 }
 
