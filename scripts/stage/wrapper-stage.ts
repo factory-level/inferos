@@ -18,6 +18,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stageHostnames } from "./stage-config.ts";
+import { parseKvNamespaceList } from "./stage-resources.ts";
 import {
   INFEROPS_OPTIONAL_RESOURCES, STAGE_GATEKEEPERS, STAGES, stageDefinitionProblems,
   type InferOpsOptionalResource, type StageDefinition,
@@ -269,45 +270,51 @@ export function conflictingInputs(file: Readonly<Record<string, string | undefin
     .map(([key]) => key);
 }
 
-/**
- * The id of the namespace `wrangler kv namespace create` just made for `title`, read from the
- * structure of its own output, or null. Wrangler prints `Creating namespace with title "<title>"`,
- * then `Success!`, then a config snippet carrying the new id. So: exactly one "Creating" line, for
- * exactly this title; a Success line after it; and exactly one id in what follows Success. An id
- * printed anywhere before Success (a banner, a warning, another resource) is never taken.
- */
-export function parseKvCreateId(stdout: string, title: string): string | null {
-  const creating = [...stdout.matchAll(/Creating namespace with title "([^"\n]*)"/g)];
-  if (creating.length !== 1 || creating[0]![1] !== title) return null;
-  const success = stdout.indexOf("Success!", creating[0]!.index);
-  if (success < 0) return null;
-  const snippet = stdout.slice(success);
-  const ids = [...snippet.matchAll(/(?:"id":\s*"|\bid\s*=\s*")([0-9a-f]{32})"/g)].map((m) => m[1]!);
-  return ids.length === 1 ? ids[0]! : null;
+/** The error for a create that succeeded but left no id to withdraw: name the title and the cleanup. */
+function orphanedMarker(title: string, why: string): Error {
+  return new Error(
+    `wrangler kv namespace create reported success, but ${why}. ` +
+      `"${title}" may have been created: check \`wrangler kv namespace list\` and, if this deployment is abandoned, ` +
+      "remove it by hand with `wrangler kv namespace delete --namespace-id <its id>`.",
+  );
 }
 
 /**
- * What one `wrangler kv namespace create <title>` answered, as `ClaimOps.create` needs it: the new
- * id, or `exists` when the title is taken. A create that succeeded without a readable id may have
- * left the namespace behind, so its error names the title and how to clean it up.
+ * What one `wrangler kv namespace create <title>` answered: `created`, or `exists` when the title is
+ * taken. Its output carries no id this run relies on: the id comes from the account's list
+ * (`createdNamespaceId`), never from parsing what the create printed.
  */
 export function kvCreateOutcome(
   title: string,
   result: { status: number | null; stdout: string; stderr: string },
-): { id: string } | { exists: true } {
+): { created: true } | { exists: true } {
   if (result.status !== 0) {
     if (/already exists/.test(`${result.stdout}\n${result.stderr}`)) return { exists: true };
     throw new Error(`wrangler kv namespace create ${title} failed:\n${result.stderr}`);
   }
-  const id = parseKvCreateId(result.stdout, title);
-  if (!id) {
-    throw new Error(
-      `wrangler kv namespace create reported success, but its answer didn't name exactly one id for "${title}". ` +
-        `"${title}" may have been created: check \`wrangler kv namespace list\` and, if this deployment is abandoned, ` +
-        "remove it by hand with `wrangler kv namespace delete --namespace-id <its id>`.",
-    );
+  return { created: true };
+}
+
+/**
+ * The id of the namespace a create just made, from the account's own list (`wrangler kv namespace
+ * list`, parsed strictly by `parseKvNamespaceList`): the one namespace whose title is exactly
+ * `title`. No match, two namespaces with that title, or a list that can't be read: the create may
+ * have left the namespace behind, so the error names it and how to remove it.
+ */
+export function createdNamespaceId(
+  title: string,
+  list: { status: number | null; stdout: string; stderr: string },
+): string {
+  if (list.status !== 0) throw orphanedMarker(title, "the namespace list couldn't be read to find its id");
+  let byTitle: Map<string, string>;
+  try {
+    byTitle = parseKvNamespaceList(list.stdout);
+  } catch (error) {
+    throw orphanedMarker(title, `the namespace list couldn't be used to find its id (${(error as Error).message})`);
   }
-  return { id };
+  const id = byTitle.get(title);
+  if (!id) throw orphanedMarker(title, "no namespace with exactly that title is listed");
+  return id;
 }
 
 /** What claiming needs from the account, so the flow can be run without one. */
