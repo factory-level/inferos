@@ -1,6 +1,6 @@
 ---
 title: One InferOps account connection serves every board and Wiki the person can open
-status: proposed
+status: accepted
 date: 2026-11-03
 ---
 
@@ -51,6 +51,7 @@ Constraints that still hold: each person acts with their own authority and the g
 
 - Partly supersedes [ADR 0005](0005-inferops-uri-authority.md): for this kind only, the workspace id is not fixed into the binding's props. It is resolved per reference and fixed into each opened session and each action.
 - Refines [ADR 0004](0004-inferops-gatekeeper-user-authority.md): authority remains the person's own and the gatekeeper still narrows, only later.
+- Accepted by the owner on 2026-11-03 and implemented in #310 (refactor), #311 (the account kind, including an owner-only latch once `listWorkspaces`/`findBoards` or an opened session's `findBoards`/`readDocumentText` runs), #313 (canvas lookup; the Wiki Agent view composes its text locally through an account connection, so it never latches) and #312 (agent guidance).
 - Design: factory-level/inferops `docs/human/architecture/inferos/inferops-gatekeeper.md` ("InferOps account") and `inferops-canvas.md`, proposed in factory-level/inferops#2531.
 
 ## Alternatives considered
