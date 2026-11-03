@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildStageConfigs, stageKvNamespaces, stagePackages, stageWorkerName } from "./stage-config.ts";
+import { buildStageConfigs, formatStagePlan, stageKvNamespaces, stagePackages, stageWorkerName } from "./stage-config.ts";
 import { STAGES } from "./stages.ts";
 import {
   claimMarkers, claimProblem, companyPrefix, conflictingInputs, inputSources, ownershipMarkers, ownershipProblem,
@@ -329,4 +329,29 @@ test("the company's tenant id becomes the stage's company and the gatekeeper's I
     stageName: result.stage.name, stage: result.stage.stage, packages, accountId: "0".repeat(32), kvIds,
   });
   assert.equal(configs.get("gatekeeper-inferops")?.vars?.INFEROPS_COMPANY, ACME.inferops.tenantId);
+});
+
+test("a wrapper's plan never prints its tenant id; InferLab's own stages say internal", () => {
+  const result = wrapperStage(parsed(ACME));
+  if ("problems" in result) throw new Error(result.problems.join("; "));
+  const { name, stage } = result.stage;
+  const packages = stagePackages(stage, readDeployablePackages(ROOT));
+  const kv = stageKvNamespaces(stage, packages);
+  const configs = buildStageConfigs({
+    stageName: name, stage, packages, accountId: "0".repeat(32), kvIds: new Map(kv.map((ns, i) => [ns.title, `kv-${i}`])),
+  });
+  const plan = formatStagePlan({ stageName: name, stage, configs, secretNames: ["ADMINS"], kv });
+  assert.ok(!plan.includes(ACME.inferops.tenantId), "the tenant id reached the plan");
+  assert.match(plan, /company tenant id set\)/);
+  const dev = STAGES.dev;
+  const devPackages = stagePackages(dev, readDeployablePackages(ROOT));
+  const devKv = stageKvNamespaces(dev, devPackages);
+  const devPlan = formatStagePlan({
+    stageName: "dev", stage: dev, secretNames: [], kv: devKv,
+    configs: buildStageConfigs({
+      stageName: "dev", stage: dev, packages: devPackages, accountId: "0".repeat(32),
+      kvIds: new Map(devKv.map((ns, i) => [ns.title, `kv-${i}`])),
+    }),
+  });
+  assert.match(devPlan, /company internal\)/);
 });

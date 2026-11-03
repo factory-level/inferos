@@ -352,8 +352,11 @@ export function formatStagePlan({ stageName, stage, configs, secretNames, gateke
   gatekeeperSecretNames?: Readonly<Record<string, readonly string[]>>;
   kv: readonly StageKvNamespace[];
 }): string {
+  // The company is named only when it's `internal`: a company's tenant id goes to
+  // `INFEROPS_COMPANY` alone, never into a plan meant to be pasted into a PR or a log.
+  const company = stage.inferops.company === "internal" ? "internal" : "tenant id set";
   const lines = [
-    `stage "${stageName}" -> https://${stage.hostname} (InferLab ${stage.inferops.baseUrl}, company ${stage.inferops.company})`,
+    `stage "${stageName}" -> https://${stage.hostname} (InferLab ${stage.inferops.baseUrl}, company ${company})`,
   ];
   for (const tier of stageTiers(configs)) {
     lines.push(`  ${tier.label}:`);
