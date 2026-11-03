@@ -22,6 +22,9 @@
 //   Before either stores a session, the slugs of the person's workspaces are read from InferOps
 //   (`GET /workspaces`) and kept beside the memberships InferLab reported, since a resource URL
 //   names its workspace by slug. A failure there ends the attempt and signs the session out.
+// - The deployment belongs to one company (`INFEROPS_COMPANY`, deployment-company.ts). InferOps
+//   refuses the exchange for a session in another company; with a tenant id named here, a session
+//   in another company is also refused and signed out before any purpose uses it.
 
 import { DurableObject } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
@@ -44,6 +47,9 @@ import {
 import { endpointFromEnv, listWorkspaceSlugs, type InferOpsEndpoint } from "./http-inferops";
 import { inferLabFetch } from "./edge-header";
 import { handleInferLabAuthProxy } from "./auth-proxy";
+import {
+  COMPANY_MISCONFIGURED, OTHER_COMPANY, companyAdmits, deploymentCompany,
+} from "./deployment-company";
 
 const logger = createLogger<{ vendorId: string }>({
   component: "gatekeeper.inferops.login", vendorId: "inferops",
@@ -69,7 +75,7 @@ const CALLBACK_KEY = "callback";
 /** The deployment settings this flow reads. */
 export type InferLabLoginEnv = {
   INFERLAB_AUTH_ORIGIN?: string; BASE_URL?: string; INFEROPS_BASE_URL?: string;
-  INFEROPS_EDGE_SECRET?: string; INFERLAB_AUTHORIZE_ORIGIN?: string;
+  INFEROPS_EDGE_SECRET?: string; INFERLAB_AUTHORIZE_ORIGIN?: string; INFEROPS_COMPANY?: string;
 };
 
 /**
@@ -283,9 +289,9 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
   /**
    * Exchanges the authorization code and finishes the attempt for its purpose. Returns null when the
    * state is unknown, used or expired, and `{ error }` with a message safe to show the user when the
-   * flow fails.
+   * flow fails. `companySetting` is the worker's `INFEROPS_COMPANY` (deployment-company.ts).
    */
-  async complete(code: string, oauthNonce: string)
+  async complete(code: string, oauthNonce: string, companySetting?: string)
       : Promise<{ handoff: ConnectHandoff } | { error: string } | null> {
     const flow = this.#claim("oauth", oauthNonce);
     if (flow?.stage !== "oauth") return null;
@@ -295,8 +301,18 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
       if (!purpose) return null;
       const origin = inferLabAuthOrigin(this.env);
       if (!origin) return { error: NOT_CONFIGURED };
+      const company = deploymentCompany({ INFEROPS_COMPANY: companySetting });
+      if (!company) return { error: COMPANY_MISCONFIGURED };
       const exchange = await exchangeCode(origin, code, flow.codeVerifier, flow.redirectUri,
                                           inferLabFetch(this.env));
+      if (!companyAdmits(company, exchange.identity.tenantId)) {
+        // InferOps should have refused this already; nothing here keeps a session it issued.
+        logger.warn("InferLab session from another company refused", {
+          event: "inferlab.login.other_company",
+        });
+        await logoutInferLabSession(origin, exchange.grant.refreshToken, inferLabFetch(this.env));
+        throw new SignInFailure(OTHER_COMPANY);
+      }
       return { handoff: await this.#finish(origin, purpose, exchange, callback) };
     } catch (error) {
       if (error instanceof SignInFailure) return { error: error.message };
@@ -393,10 +409,28 @@ async function exchangeCode(origin: string, code: string, codeVerifier: string,
   });
   const body = await readTextCapped(response, MAX_TOKEN_RESPONSE_BYTES);
   if (!response.ok) {
+    // InferOps' one answer for a session in another company than this deployment's (ADR 0009 T6).
+    if (response.status === 403 && tokenErrorCode(body) === COMPANY_NOT_THIS_DEPLOYMENT) {
+      throw new SignInFailure(OTHER_COMPANY);
+    }
     // The body may echo request details; never surface it.
     throw new SignInFailure(`InferLab rejected the sign-in (HTTP ${response.status}).`);
   }
   return exchangeFromTokenResponse(body);
+}
+
+/** InferOps' `POST /auth/token` error for a session this deployment's company doesn't admit. */
+const COMPANY_NOT_THIS_DEPLOYMENT = "company_not_this_deployment";
+
+/** The `error` field of a failed token response, compared and never shown; null when there is none. */
+function tokenErrorCode(body: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const error = parsed && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+    return typeof error === "string" ? error : null;
+  } catch {
+    return null;
+  }
 }
 
 type LoginNamespace = DurableObjectNamespace<InferLabLogin>;
@@ -489,7 +523,7 @@ export async function handleInferLabLogin(request: Request, env: InferLabLoginEn
     const code = url.searchParams.get("code");
     if (!code) return invalidLink();
 
-    const result = await stub.complete(code, oauthNonce);
+    const result = await stub.complete(code, oauthNonce, env.INFEROPS_COMPANY);
     if (!result) return invalidLink();
     if ("error" in result) return htmlResponse(errorPageHtml("Sign-in failed", result.error), 502);
     return htmlResponse(connectHandoffPageHtml(result.handoff));

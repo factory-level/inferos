@@ -176,6 +176,7 @@
     { "name": "INFEROPS_API_TOKEN", "kind": "secret", "purpose": "Local-development stopgap connection shared by accounts with no identity. Never backs a connected person." },
     { "name": "INFEROPS_WORKSPACE_ID", "kind": "var", "purpose": "The stopgap connection's workspace id." },
     { "name": "INFEROPS_WORKSPACE_SLUG", "kind": "var", "purpose": "The workspace slug a URL must name to use the stopgap connection." },
+    { "name": "INFEROPS_COMPANY", "kind": "var", "purpose": "The one company this deployment belongs to: an InferOps tenant id, or internal (reserved tenants only). InferOps refuses a session in any other company at the token exchange (auth.sso.inferosCompanies); with a tenant id the gatekeeper also refuses a sign-in, connect, reconnect or stored connection in another one. Grants nothing.", "default": "Unset: InferOps alone decides (local development). Set but malformed: sign-in is off." },
     { "name": "INFEROPS_ENABLED", "kind": "var", "purpose": "Capability switch for the whole integration, checked on every call.", "default": "Unset counts as on." },
     { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
     { "name": "INFEROPS_TABLES_ENABLED", "kind": "var", "purpose": "Capability switch for object/table, checked on every call.", "default": "Unset counts as off." },
