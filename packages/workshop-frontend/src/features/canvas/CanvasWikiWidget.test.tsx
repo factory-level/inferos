@@ -172,7 +172,7 @@ it('renders the other embeds when one fails, and the last page with a failed ref
 it('says the Wiki is not connected without a connection, and has no access once it is refused', async () => {
   bindings.delete(WIKI)
   await render(widget())
-  expect(wikiArticle().textContent).toContain('Not connected. This workspace has no connection to this Wiki.')
+  expect(wikiArticle().textContent).toContain("Not connected. This workspace has no connection to this Wiki or to its organization's InferOps account.")
   expect(wikiArticle().querySelector('section')).toBeNull()
   bindings.set(WIKI, connection(wiki.session))
   await click(button(wikiArticle(), 'Refresh Wiki'))

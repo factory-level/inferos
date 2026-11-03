@@ -1,7 +1,7 @@
 // One InferMind workspace's Wiki, read through the workspace's Wiki connection for it
-// (`inferops://<tenant>.<workspace>/knowledge/wiki`). Like a board, the reference is resolved only
-// through a connection the workspace already holds (Overseer.getGatekeeperByResourceUrl), so it
-// identifies a Wiki and authorizes nothing. InferMind stays authoritative: this keeps the latest
+// (`inferops://<tenant>.<workspace>/knowledge/wiki`), or its InferOps account connection for the
+// Wiki's organization. Like a board, the reference is resolved only through connections the
+// workspace already holds (inferopsConnection.ts), so it identifies a Wiki and authorizes nothing. InferMind stays authoritative: this keeps the latest
 // reads (the page list, the Wiki structure, the pages), and a section or page body edit is only
 // proposed through the gatekeeper's approval path. What became of an edit is read from the page,
 // never assumed: a proposal is not a save.
@@ -9,6 +9,7 @@ import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
 import { canonicalBoardRef, codeOf, messageOf, type ProposalResult } from './boardData'
+import { openInferOpsSession } from './inferopsConnection'
 import { bodyEditActionTitle, isOpenEdit, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
 
 export type WikiListState =
@@ -358,15 +359,7 @@ export class WikiData {
   #sessionOf(): Promise<RpcStub<InferOpsWikiSession> | null> {
     if (this.#disposed) return Promise.resolve(null)
     if (!this.#session) {
-      const session = (async () => {
-        const client = await this.#overseer.getGatekeeperByResourceUrl(this.target)
-        if (!client) return null
-        try {
-          return await client.openSession() as RpcStub<InferOpsWikiSession>
-        } finally {
-          client[Symbol.dispose]()
-        }
-      })()
+      const session = openInferOpsSession(this.#overseer, this.target, 'wiki')
       this.#session = session
       // No binding is not cached: the next read looks the connection up again.
       void session.then(stub => { if (stub === null && this.#session === session) this.#session = undefined }, () => {})

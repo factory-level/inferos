@@ -103,7 +103,7 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
     <div className="min-h-0 flex-1 p-3">
       {list.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the Wiki…</p>}
       {list.status === 'unbound' && <p className="text-sm text-kumo-subtle">
-        Not connected. This workspace has no connection to this Wiki. Connect it, for example by asking in the chat, to read it here.
+        Not connected. This workspace has no connection to this Wiki or to its organization's InferOps account. Connect one, for example by asking in the chat, to read it here.
       </p>}
       {list.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
         {list.message} The connection to this Wiki is kept; it shows the Wiki again once InferOps is turned back on.

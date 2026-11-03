@@ -97,7 +97,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
     <div className={`min-h-0 flex-1 p-3 ${full ? 'flex flex-col' : ''} ${!full && state.status === 'loading' ? 'min-h-[32rem]' : ''}`}>
       {state.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the board…</p>}
       {state.status === 'unbound' && (props.unboundAction ? props.unboundAction(refresh) : <p className="text-sm text-kumo-subtle">
-        Not connected. This workspace has no connection to this board. Connect it, for example by asking in the chat, to see it live.
+        Not connected. This workspace has no connection to this board or to its organization's InferOps account. Connect one, for example by asking in the chat, to see it live.
       </p>)}
       {state.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
         {state.message} The connection to this board is kept; it shows the board again once InferOps is turned back on.

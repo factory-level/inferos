@@ -122,11 +122,12 @@ it('preloads board cards against the canvas scroll pane with a 200px margin and 
     expect(lookup).not.toHaveBeenCalled()
     // The browser reports an intersection with the expanded root before the widget enters the
     // pane itself. Once loaded it stays subscribed when a later observation is outside the root.
+    // One load: the board's own connection, then its organization's account connection.
     await act(async () => observer.report([{ isIntersecting: true }]))
-    expect(lookup).toHaveBeenCalledOnce()
+    expect(lookup).toHaveBeenCalledTimes(2)
     expect(container.textContent).toContain('Not connected')
     await act(async () => observer.report([{ isIntersecting: false }]))
-    expect(lookup).toHaveBeenCalledOnce()
+    expect(lookup).toHaveBeenCalledTimes(2)
     expect(container.textContent).toContain('Not connected')
   } finally { lookup.mockRestore() }
 })
