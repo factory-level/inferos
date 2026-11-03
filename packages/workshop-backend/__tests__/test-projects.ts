@@ -82,6 +82,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "overseer-hooks.test.ts",
   "sharing.test.ts",
   "shared-configuration.test.ts",
+  "workflow-definitions.test.ts",
   "user-directory.test.ts",
 ];
 
