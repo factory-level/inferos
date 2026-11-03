@@ -418,8 +418,114 @@ describe("env.GIT presence", () => {
       },
     });
 
-    expect(() => impl.openGatekeeperSession(2, {} as any, {from: "gadget", gadgetId: 100}))
-        .toThrow(/exposes "OTHER" outside gadget 100's available bindings/);
+    await expect(impl.openGatekeeperSession(2, {} as any, {from: "gadget", gadgetId: 100}))
+        .rejects.toThrow(/outside gadget 100's available bindings/);
+  }));
+
+  it("refuses an agent caller whose legacy spawner escapes its chat bindings",
+      () => withImpl(async impl => {
+    seedGadget(impl, 100);
+    seedGadget(impl, 200);
+    impl.storage.gatekeepers.put({
+      id: 2,
+      class: {},
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Legacy", modelId: null, env: { OTHER: 200 } },
+      },
+    });
+    impl.storage.chatContext.put({chatId: 1, spawnerScope: {gadgetId: 100},
+      bindings: {SPAWNER: 2, SAFE: 100}});
+
+    await expect(impl.openGatekeeperSession(2, {} as any, {from: "agent", chatId: 1}))
+        .rejects.toThrow(/outside agent chat 1 and gadget 100's available bindings/);
+  }));
+
+  it("rechecks a nested legacy spawner reached through an agent caller",
+      () => withImpl(async impl => {
+    seedGadget(impl, 100);
+    seedGadget(impl, 200);
+    impl.storage.gatekeepers.put({
+      id: 2,
+      class: {},
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Parent", modelId: null, env: { NESTED: 3 } },
+      },
+    });
+    impl.storage.gatekeepers.put({
+      id: 3,
+      class: {},
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Legacy nested", modelId: null, env: { OTHER: 200 } },
+      },
+    });
+    impl.storage.chatContext.put({chatId: 1, spawnerScope: {gadgetId: 100},
+      bindings: {PARENT: 2, NESTED: 3, SAFE: 100}});
+
+    await expect(impl.openGatekeeperSession(2, {} as any, {from: "agent", chatId: 1}))
+        .rejects.toThrow(/outside agent chat 1 and gadget 100's available bindings/);
+  }));
+
+  it("fails closed when a spawner caller has no gadget or chat scope", () => withImpl(async impl => {
+    impl.storage.gatekeepers.put({
+      id: 2,
+      class: {},
+      creationSpec: {
+        type: "agentSpawner",
+        config: { displayName: "Legacy", modelId: null, env: {} },
+      },
+    });
+
+    await expect(impl.openGatekeeperSession(2, {} as any, {from: "gadget"}))
+        .rejects.toThrow(/no calling gadget scope/);
+    await expect(impl.openGatekeeperSession(2, {} as any, {from: "agent", chatId: 1}))
+        .rejects.toThrow(/Agent chat 1 has no live gadget scope/);
+  }));
+
+  it("revokes a spawned child's resource access after unbind and rebind", () => withImpl(async impl => {
+    impl.ownerId = "owner-user-do";
+    impl.users = {
+      idFromString: (id: string) => id,
+      get: () => ({getChatContext: async () => ({
+        profile: {type: "user", id: OWNER, name: "Owner"},
+      })}),
+    };
+    seedGadget(impl, 100, {
+      RESOURCE: {target: 1}, SPAWNER: {target: 2},
+    });
+    impl.storage.gatekeepers.put({
+      id: 1, class: {},
+      creationSpec: {type: "gatekeeper", vendorId: "test", resourceUrl: "", typeUrlPattern: ""},
+    });
+    impl.storage.gatekeepers.put({
+      id: 2, class: {},
+      creationSpec: {type: "agentSpawner", config: {
+        displayName: "Scoped", modelId: null, env: {RESOURCE: 1},
+      }},
+    });
+    impl.getGatekeeperFacet = () => ({startSession: async () => ({})});
+
+    let spawner = await impl.openGatekeeperSession(2, {} as any,
+        {from: "gadget", gadgetId: 100}) as any;
+    await spawner.spawn("Child", "Use the resource");
+    let child = [...impl.storage.chatContext.list()].find((context: any) => context.chatId !== undefined);
+    let childChatId = child.chatId;
+    let caller = {from: "agent", chatId: childChatId};
+
+    await expect(impl.startGatekeeperSession({type: "gatekeeper", id: 1}, caller)).resolves.toBeDefined();
+    impl.unbindWorkpiece(100, "RESOURCE");
+    expect(() => impl.startGatekeeperSession({type: "gatekeeper", id: 1}, caller))
+        .toThrow(/no longer available to agent chat/);
+
+    impl.storage.gatekeepers.put({
+      id: 3, class: {},
+      creationSpec: {type: "gatekeeper", vendorId: "test", resourceUrl: "", typeUrlPattern: ""},
+    });
+    impl.bindWorkpiece(100, "OTHER", 3);
+    expect(() => impl.startGatekeeperSession({type: "gatekeeper", id: 1}, caller))
+        .toThrow(/no longer available to agent chat/);
   }));
 
   it("allows a spawner to expose only its gadget and bound connections",
