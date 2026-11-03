@@ -126,6 +126,15 @@ class FakeInferLab {
   pageWrites: Array<{ body: string; idempotencyKey: string | null }> = [];
   /** The issue updates InferOps took, with the workspace each was sent in. */
   issueWrites: Array<{ workspaceId: string | null; title: string | undefined }> = [];
+  /**
+   * `auth.permissions`: the workspaces whose grant allows `configuration:*` (an Admin's), the ones
+   * InferOps refuses the question in, and how it answers otherwise.
+   */
+  configurationAdmin = new Set<string>();
+  /** The company InferLab reports the session in. */
+  tenantId = "t1";
+  permissionsRefused = new Set<string>();
+  permissionsAnswer: ((permission: string) => Response) | null = null;
   /** Workspaces InferLab reports at sign-in. */
   workspaces: Array<{ workspaceId: string; workspaceName: string; product: string }> = [
     { workspaceId: OPS, workspaceName: "Ops", product: "inferops" },
@@ -255,7 +264,7 @@ class FakeInferLab {
         ...this.#issue(),
         user: {
           id: "u1", email: "ada@example.com", emailVerified: this.emailVerified, name: "Ada",
-          tenantId: "t1",
+          tenantId: this.tenantId,
           workspaces: this.workspaces.map(w => ({ ...w, role: "member", deniedPermissions: [] })),
         },
       });
@@ -348,6 +357,20 @@ class FakeInferLab {
         return Response.json({ widget: "record-card", type: TABLE_TYPE, record: TABLE_RECORD });
       }
       return Response.json({ success: false, error: { code: "NOT_FOUND", message: "no such widget target" } }, { status: 404 });
+    }
+    if (url.pathname === "/auth/permissions") {
+      // InferOps' auth.permissions: the X-Workspace-Id workspace's grant decides each name asked.
+      const permission = url.searchParams.get("permissions") ?? "";
+      if (this.permissionsAnswer) return this.permissionsAnswer(permission);
+      if (!workspaceId || !this.memberships.has(workspaceId) || this.permissionsRefused.has(workspaceId)) {
+        return Response.json({ error: { code: "FORBIDDEN", message: "No grant in this workspace" } }, { status: 403 });
+      }
+      const allowed = permission.startsWith("configuration:") && this.configurationAdmin.has(workspaceId);
+      return Response.json({
+        workspaceId, role: allowed ? "admin" : "member", assumed: false,
+        primaryRole: allowed ? "admin" : "operator", roleAllows: [], roleDenies: [], deniedPermissions: [],
+        decisions: [{ permission, allowed, reason: allowed ? "role-allow" : "no-allow" }],
+      });
     }
     if (url.pathname === "/workspace/members") {
       // InferOps' member.list: the X-Workspace-Id workspace only, under member:read.
@@ -1822,5 +1845,79 @@ describe("an InferOps account binding of a connected person", () => {
       .toBe("The update of DEMO-1 was not reverted: Board DEMO on acme.sales is no longer one of your workspaces.");
     expect(inferlab.apiCalls.slice(before)).toEqual([]);
     expect(inferlab.issueWrites).toHaveLength(1);
+  });
+});
+
+describe("shared configuration authority", () => {
+  const COMPANY_A = "a0000000-0000-4000-8000-00000000000a";
+  const COMPANY_B = "b0000000-0000-4000-8000-00000000000b";
+  const vars = env as unknown as { INFEROPS_COMPANY?: string };
+  afterEach(() => { delete vars.INFEROPS_COMPANY; });
+  const asked = () => inferlab.apiCalls.filter(c => c.path.startsWith("/auth/permissions"));
+  const answer = (holds: boolean, scope: string | null) => ({ holds, scope });
+
+  it("asks auth.permissions with the person's own token, and an Operator holds neither", async () => {
+    const account = await connect("operator");
+    expect(await hooks().holdsSharedConfiguration(account, "build")).toEqual(answer(false, "t1"));
+    expect(await hooks().holdsSharedConfiguration(account, "publish")).toEqual(answer(false, "t1"));
+    expect(asked().map(c => [c.method, c.path, c.workspaceId])).toEqual([
+      ["GET", "/auth/permissions?permissions=configuration%3Abuild", OPS],
+      ["GET", "/auth/permissions?permissions=configuration%3Apublish", OPS],
+    ]);
+    expect(asked().every(c => c.issuer === inferlab.test)).toBe(true);
+  });
+
+  it("is a yes, about the session's company, where any of its workspaces' grants holds it", async () => {
+    inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
+    inferlab.memberships.add(SALES);
+    inferlab.configurationAdmin.add(SALES);
+    const account = await connect("admin elsewhere");
+    expect(await hooks().holdsSharedConfiguration(account, "publish")).toEqual(answer(true, "t1"));
+    expect(asked().map(c => c.workspaceId)).toEqual([OPS, SALES]);
+  });
+
+  it("answers for nothing in a deployment that names another company, without asking", async () => {
+    inferlab.tenantId = COMPANY_A;
+    inferlab.configurationAdmin.add(OPS);
+    const admin = await connect("admin of A");
+    vars.INFEROPS_COMPANY = COMPANY_B;
+    expect(await hooks().holdsSharedConfiguration(admin, "publish")).toEqual(answer(false, null));
+    expect(asked()).toEqual([]);
+    vars.INFEROPS_COMPANY = COMPANY_A;
+    expect(await hooks().holdsSharedConfiguration(admin, "publish")).toEqual(answer(true, COMPANY_A));
+  });
+
+  it("fails on a malformed INFEROPS_COMPANY instead of answering", async () => {
+    const account = await connect("misconfigured");
+    vars.INFEROPS_COMPANY = "acme";
+    expect(typeof await hooks().holdsSharedConfiguration(account, "build")).toBe("string");
+  });
+
+  it("treats a workspace InferOps refuses the question in as a no", async () => {
+    inferlab.configurationAdmin.add(OPS);
+    inferlab.permissionsRefused.add(OPS);
+    const account = await connect("refused");
+    expect(await hooks().holdsSharedConfiguration(account, "build")).toEqual(answer(false, "t1"));
+  });
+
+  it("fails rather than guessing on an outage or an answer about something else", async () => {
+    const account = await connect("unsure");
+    inferlab.permissionsAnswer = () => new Response("down", { status: 502 });
+    expect(typeof await hooks().holdsSharedConfiguration(account, "build")).toBe("string");
+    inferlab.permissionsAnswer = () => Response.json({
+      decisions: [{ permission: "configuration:publish", allowed: true, reason: "role-allow" }],
+    });
+    expect(typeof await hooks().holdsSharedConfiguration(account, "build")).toBe("string");
+    inferlab.permissionsAnswer = () => Response.json({
+      decisions: [{ permission: "configuration:build", allowed: "yes", reason: "role-allow" }],
+    });
+    expect(typeof await hooks().holdsSharedConfiguration(account, "build")).toBe("string");
+  });
+
+  it("answers for nothing without a connected person, and asks nobody", async () => {
+    const before = asked().length;
+    expect(await hooks().holdsSharedConfiguration(
+      { accountId: "00000000-0000-4000-8000-0000000000ff", connected: false }, "build")).toEqual(answer(false, null));
+    expect(asked().length).toBe(before);
   });
 });

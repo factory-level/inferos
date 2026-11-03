@@ -5,7 +5,7 @@ import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assis
 import { localApiModels } from './local-api-models.js';
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -19,9 +19,15 @@ import { blueprintVersionKeys, isReservedBlueprintKey, readBlueprintContent, rea
 import { assertPublicationFlagOn, byRequestedDesc, PUBLICATION_AUDIENCES, readPublicationSnapshot, withPublicationStatus, type StoredPublicationRecord } from "./publication.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 
 const logger = createWorkshopLogger("workshop.user");
+
+// When a person's connected accounts answer for more than one scope (for InferOps, a company).
+const SHARED_CONFIGURATION_AMBIGUOUS =
+  "Your connected accounts belong to more than one organization, so it isn't clear which one " +
+  "decides who may change shared configuration here. Disconnect the others, then try again.";
 
 // How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
 // listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
@@ -121,11 +127,47 @@ export type ProvidedAccountInfo = {
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names; see the note above.
+type SharedConfigurationAccountStub = Required<Pick<GatekeeperUser, "holdsSharedConfiguration">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
   if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
   return true;
+}
+
+/**
+ * Whether `vendorId` says the person may `action` shared configuration here, asking each of their
+ * connected accounts of that vendor with live credentials. Every answer must be about one scope
+ * (`SharedConfigurationAnswer.scope`, for InferOps the company): accounts answering for different
+ * scopes are refused as ambiguous, since nothing says which one this deployment belongs to, and an
+ * account answering for none counts as no. Within the one scope, a yes from any account is a yes.
+ * Only a literal `holds: true` with a scope counts. An account that can't answer fails the whole
+ * check, since its scope is unknown too.
+ */
+export async function holdsSharedConfiguration(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string, action: SharedConfigurationAction,
+): Promise<boolean> {
+  let scopes = new Set<string>();
+  let holds = false;
+  for (let record of records) {
+    if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
+    let answer: SharedConfigurationAnswer;
+    try {
+      answer = await (record.account as unknown as SharedConfigurationAccountStub)
+        .holdsSharedConfiguration(action);
+    } catch (err) {
+      logger.warn("shared configuration authority could not be read", {
+        event: "shared.configuration.check.failed", vendorId, accountId: record.id, error: err,
+      });
+      throw new Error("Couldn't check whether you may change shared configuration. Try again.", { cause: err });
+    }
+    if (typeof answer?.scope !== "string" || answer.scope === "") continue;
+    scopes.add(answer.scope);
+    if (answer.holds === true) holds = true;
+  }
+  if (scopes.size > 1) throw new Error(SHARED_CONFIGURATION_AMBIGUOUS);
+  return holds;
 }
 
 /**
@@ -2015,6 +2057,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record?.description.providesUi) throw new Error("No such app.");
     return (record.account as unknown as SingletonAccountStub).startAppUi(context);
+  }
+
+  /**
+   * Whether this person may `build` or `publish` shared configuration, as the deployment's
+   * SHARED_CONFIGURATION_GATEKEEPER vendor decides it through their own connected accounts (the
+   * module-level `holdsSharedConfiguration`). True when the deployment names no vendor.
+   */
+  async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<boolean> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return true;
+    return holdsSharedConfiguration(this.#connectedAccountRecords(), vendorId, action);
   }
 
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[])

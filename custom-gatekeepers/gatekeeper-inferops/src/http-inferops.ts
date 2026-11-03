@@ -1783,6 +1783,27 @@ export function openHttpInferOpsClient(
         read => read.table.id === tableId.toLowerCase() && read.rows.length <= options.limit);
     },
 
+    async holdsPermission(permission: string): Promise<boolean> {
+      let body: unknown;
+      try {
+        body = await request("auth.permissions", {
+          method: "GET", path: `/auth/permissions?permissions=${encodeURIComponent(permission)}`,
+        });
+      } catch (error) {
+        const code = inferOpsCode(error);
+        if (code === "NOT_FOUND" || code === "FORBIDDEN") return false;
+        throw error;
+      }
+      // Only InferOps' decision for exactly the permission asked about counts.
+      return parsed("auth.permissions", body, raw => {
+        const decision = list(record(raw, "response").decisions, "decisions")
+          .map((value, i) => record(value, `decisions[${i}]`))
+          .find(d => d.permission === permission);
+        if (!decision) throw new Malformed(`decisions has no entry for the permission asked about`);
+        return bool(decision.allowed, "decisions.allowed");
+      });
+    },
+
     async listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead> {
       // A plain GET, not the embed lane: `member.list` reads the X-Workspace-Id workspace only. Its
       // refusals (no grant, no member:read, an explicit deny, missing) read as one NOT_FOUND, as

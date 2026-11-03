@@ -154,6 +154,9 @@ export function backendVars(stage: StageDefinition, origin: string, canvasCatalo
     // is allowlisted, so the pair is checked together (inferLabLoginStartupError) before deploying.
     AUTH_GATEKEEPERS: INFERLAB_LOGIN_VENDOR,
     DISABLE_PASSWORD_AUTH: "true",
+    // Only an InferOps Admin edits and publishes shared configuration (FAC-44): InferOps'
+    // configuration:build / configuration:publish, asked through the person's own connection.
+    SHARED_CONFIGURATION_GATEKEEPER: INFERLAB_LOGIN_VENDOR,
     // Composition with saved views, as a wrapper with `composableViews` + `durableViews` gets it
     // from `pnpm dev-server`: the InferOps board is shown on a canvas.
     COMPOSABLE_VIEWS: "true",
