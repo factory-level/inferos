@@ -76,8 +76,9 @@ import {
   type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiProposalApproval,
   type WikiProposalRead, type WikiProposalRecord, type WikiProposalState, type WikiSectionRecord,
   type WikiStructureRecord, type WorkspaceMembersRead, PROPOSAL_APPROVE_REFUSED,
+  type HistoryEntryRecord, toIssueActivity,
 } from "./inferops-client";
-import type { Issue, Revision, RunResult, RunStatus, WikiProposalSource } from "./types";
+import type { Issue, IssueActivity, Revision, RunResult, RunStatus, WikiProposalSource } from "./types";
 import { composeDocumentText, masterStructureText } from "./wiki";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound } from "./workflow-policy";
 
@@ -86,6 +87,8 @@ export const MOCK_HOST = "demo.local";
 
 const DATA_KEY = "data:v1";
 const RUNS_KEY = "runs:v1";
+/** Each issue's recorded field changes, as InferOps' `issue.history` would list them. */
+const HISTORY_KEY = "history:v1";
 const IDEMPOTENCY_PREFIX = "idem:";
 // v2 added page bodies, versions, Master roles and pillars; a v1 copy is left unread.
 const WIKI_KEY = "wiki:v2";
@@ -333,6 +336,12 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return issue;
   }
 
+  async readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity> {
+    await this.readIssue(projectKey, issueId);
+    const history = this.ctx.storage.kv.get<Record<string, HistoryEntryRecord[]>>(HISTORY_KEY) ?? {};
+    return toIssueActivity(history[issueId] ?? []);
+  }
+
   async transition(
     projectKey: string, issueId: string, toStateId: string, expectedRevision: Revision,
     idempotencyKey: string,
@@ -367,7 +376,7 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     }
 
     issue.stateId = toStateId;
-    return this.#commit(data, issue, idempotencyKey, operation, projectKey);
+    return this.#commit(data, issue, idempotencyKey, operation, projectKey, { stateId: toStateId });
   }
 
   async createIssue(projectKey: string, request: NewIssueRequest, idempotencyKey: string):
@@ -402,7 +411,8 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     };
     project.issues.push(issue);
     (data.descriptions ??= {})[issue.id] = request.description ?? null;
-    return this.#commit(data, issue, idempotencyKey, operation, projectKey);
+    return this.#commit(data, issue, idempotencyKey, operation, projectKey,
+      { title, stateId: state.id, priority: issue.priority });
   }
 
   async updateIssue(
@@ -432,7 +442,10 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     if (title !== undefined) issue.title = title;
     if (priority !== undefined) issue.priority = priority;
     if (description !== undefined) (data.descriptions ??= {})[issue.id] = description;
-    return this.#commit(data, issue, idempotencyKey, operation, projectKey);
+    return this.#commit(data, issue, idempotencyKey, operation, projectKey, {
+      ...title !== undefined ? { title } : {}, ...priority !== undefined ? { priority } : {},
+      ...description !== undefined ? { description } : {},
+    });
   }
 
   #runs(): RunRecord[] {
@@ -890,9 +903,15 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
 
   /** Advance the issue's revision, store the data and the key's result, and return the issue. */
   #commit(data: MockData, issue: Issue, idempotencyKey: string, operation: string,
-          projectKey: string): Issue {
+          projectKey: string, changed: Record<string, unknown>): Issue {
     issue.revision = (BigInt(issue.revision) + 1n).toString();
     this.ctx.storage.kv.put(DATA_KEY, data);
+    // Every change is a person's: the mock has no agents of its own.
+    const history = this.ctx.storage.kv.get<Record<string, HistoryEntryRecord[]>>(HISTORY_KEY) ?? {};
+    const at = new Date().toISOString();
+    (history[issue.id] ??= []).push(...Object.entries(changed).map(([field, value]): HistoryEntryRecord =>
+      ({ kind: "claim", at, actorType: "user", field, value, body: null })));
+    this.ctx.storage.kv.put(HISTORY_KEY, history);
     this.#remember(idempotencyKey, operation, issue);
     logger.info("write applied", { event: "mock.write.applied", projectKey, replayed: false });
     return issue;
@@ -1000,6 +1019,7 @@ export function openInferOpsClient(
     listProjects: () => stub.listProjects(),
     readProject: projectKey => stub.readProject(projectKey),
     readIssue: (projectKey, issueId) => stub.readIssue(projectKey, issueId),
+    readIssueActivity: (projectKey, issueId) => stub.readIssueActivity(projectKey, issueId),
     transition: (projectKey, issueId, toStateId, expectedRevision, idempotencyKey) =>
       refused(stub.transition(projectKey, issueId, toStateId, expectedRevision, idempotencyKey)),
     createIssue: (projectKey, issue, idempotencyKey) =>

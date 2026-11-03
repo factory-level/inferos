@@ -229,6 +229,172 @@ describe("reads", () => {
   });
 });
 
+describe("activity", () => {
+  const AGENT = "40000000-0000-4000-8000-000000000001";
+  const PERSON = "40000000-0000-4000-8000-000000000002";
+  const entry = (n: number, over: Record<string, unknown> = {}) => ({
+    kind: "claim", id: String(n), at: `2026-11-03T08:${String(n % 60).padStart(2, "0")}:00.000Z`,
+    actorId: PERSON, actorType: "user", field: "title", value: `title ${n}`, body: null,
+    correlationId: null, ...over,
+  });
+  const historyOf = (pages: Record<string, { entries: unknown[]; nextCursor: string | null }>) =>
+    (call: Call) => {
+      const match = /^\/project\/issues\/([^/]+)\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const after = new URLSearchParams(match[2]).get("afterSeq") ?? "start";
+      return Response.json(pages[after] ?? { entries: [], nextCursor: null });
+    };
+
+  it("reads the issue's history newest first, as person, agent or system, with no principal id", async () => {
+    const { client, calls } = fakeInferOps(historyOf({
+      start: {
+        entries: [
+          entry(1),
+          entry(2, { actorId: AGENT, actorType: "service_account", field: "stateId", value: WORKING }),
+          { kind: "comment", id: "3", at: "2026-11-03T08:03:00.000Z", actorId: AGENT, actorType: "service_account",
+            field: null, value: null, body: "Started on this.", correlationId: null },
+          entry(4, { actorId: null, actorType: "system", field: "priority", value: { level: 2 } }),
+        ],
+        nextCursor: null,
+      },
+    }));
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity).toEqual({
+      omitted: 0,
+      entries: [
+        { kind: "change", at: "2026-11-03T08:04:00.000Z", actor: "system", field: "priority", value: '{"level":2}', body: null, shortened: false },
+        { kind: "comment", at: "2026-11-03T08:03:00.000Z", actor: "agent", field: null, value: null, body: "Started on this.", shortened: false },
+        { kind: "change", at: "2026-11-03T08:02:00.000Z", actor: "agent", field: "stateId", value: WORKING, body: null, shortened: false },
+        { kind: "change", at: "2026-11-03T08:01:00.000Z", actor: "person", field: "title", value: "title 1", body: null, shortened: false },
+      ],
+    });
+    expect(JSON.stringify(activity)).not.toContain(AGENT);
+    expect(JSON.stringify(activity)).not.toContain(PERSON);
+    expect(calls.map(c => c.path)).toContain(`/project/issues/${DEMO_1}/history?limit=100`);
+  });
+
+  it("keeps only the newest 100 of a 5,000-record history with long comments, shortened, holding one page at a time", async () => {
+    // InferOps' own bounds: 100 per page here, comments up to 20,000 characters (2,000 shown).
+    const long = (n: number) => `comment ${n} ` + "x".repeat(2400);
+    const record = (n: number) => n % 2 === 0
+      ? { kind: "comment", id: String(n), at: "2026-11-03T08:00:00.000Z", actorId: PERSON, actorType: "user",
+        field: null, value: null, body: long(n), correlationId: null }
+      : entry(n);
+    let largestPage = 0;
+    const { client, calls } = fakeInferOps(call => {
+      const match = /^\/project\/issues\/[^/]+\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const query = new URLSearchParams(match[1]);
+      const after = Number(query.get("afterSeq") ?? 0);
+      const limit = Number(query.get("limit"));
+      const page = Array.from({ length: Math.max(0, Math.min(limit, 5000 - after)) }, (_, i) => record(after + i + 1));
+      const body = JSON.stringify({ entries: page, nextCursor: after + page.length < 5000 ? String(after + page.length) : null });
+      largestPage = Math.max(largestPage, body.length);
+      return new Response(body, { headers: { "content-type": "application/json" } });
+    });
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity.entries).toHaveLength(100);
+    expect(activity.omitted).toBe(4900);
+    expect(activity.entries[0]).toMatchObject({ kind: "comment", shortened: true });
+    expect(activity.entries[0]!.body).toHaveLength(2000);
+    expect(activity.entries[0]!.body!.startsWith("comment 5000 ")).toBe(true);
+    expect(activity.entries[1]).toMatchObject({ kind: "change", value: "title 4999", shortened: false });
+    // What is kept is bounded by the window, whatever the history's length.
+    expect(JSON.stringify(activity).length).toBeLessThan(100 * 2200);
+    // Pages of this size fit the cap, so none had to be asked for again.
+    expect(largestPage).toBeLessThan(256 * 1024);
+    expect(calls.filter(c => c.path.includes("/history"))).toHaveLength(50);
+  });
+
+  it("stops reading a page at the 256 KiB cap before parsing it, and fails UNAVAILABLE when even one entry is over", async () => {
+    // A body that never ends: without the cap it would be buffered whole before JSON.parse.
+    const streams: { pulled: number; cancelled: boolean }[] = [];
+    const chunk = new TextEncoder().encode(`{"entries":[${'"x",'.repeat(4096)}`);
+    const { client, calls } = fakeInferOps(call => {
+      if (!call.path.includes("/history")) return undefined;
+      const stream = { pulled: 0, cancelled: false };
+      streams.push(stream);
+      return new Response(new ReadableStream({
+        pull(controller) { stream.pulled += chunk.byteLength; controller.enqueue(chunk); },
+        cancel() { stream.cancelled = true; },
+      }), { headers: { "content-type": "application/json" } });
+    });
+
+    const refused = await failure(client.readIssueActivity("DEMO", DEMO_1));
+
+    expect(refused.code).toBe("UNAVAILABLE");
+    expect(refused.message).not.toContain("entries");
+    // The same cursor, for half as many each time, down to one entry.
+    expect(calls.filter(c => c.path.includes("/history")).map(c => new URLSearchParams(c.path.split("?")[1]).get("limit")))
+      .toEqual(["100", "50", "25", "12", "6", "3", "1"]);
+    for (const stream of streams) {
+      expect(stream.cancelled).toBe(true);
+      expect(stream.pulled).toBeLessThanOrEqual(256 * 1024 + 2 * chunk.byteLength);
+    }
+  });
+
+  it("reads a history of InferOps' largest comments, asking for smaller pages until each fits the cap", async () => {
+    // 20,000 characters is InferOps' comment limit; "€" is 3 bytes in UTF-8, and a control
+    // character 6 bytes as a JSON escape, so these are about 60 KB and 120 KB an entry.
+    const body = (n: number) => (n % 2 === 0 ? "€" : "\u0001").repeat(20_000);
+    const comment = (n: number) => ({ kind: "comment", id: String(n), at: "2026-11-03T08:00:00.000Z", actorId: PERSON,
+      actorType: "user", field: null, value: null, body: body(n), correlationId: null });
+    const served: number[] = [];
+    const { client, calls } = fakeInferOps(call => {
+      const match = /^\/project\/issues\/[^/]+\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const query = new URLSearchParams(match[1]);
+      const after = Number(query.get("afterSeq") ?? 0);
+      const page = Array.from({ length: Math.max(0, Math.min(Number(query.get("limit")), 30 - after)) }, (_, i) => comment(after + i + 1));
+      const text = JSON.stringify({ entries: page, nextCursor: after + page.length < 30 ? String(after + page.length) : null });
+      served.push(new TextEncoder().encode(text).byteLength);
+      return new Response(text, { headers: { "content-type": "application/json" } });
+    });
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity.omitted).toBe(0);
+    expect(activity.entries).toHaveLength(30);
+    expect(activity.entries[0]).toMatchObject({ kind: "comment", body: "€".repeat(2000), shortened: true });
+    expect(activity.entries[1]).toMatchObject({ kind: "comment", body: "\u0001".repeat(2000), shortened: true });
+    expect(served.some(bytes => bytes > 256 * 1024)).toBe(true);
+    expect(Math.max(...served.filter(bytes => bytes <= 256 * 1024))).toBeGreaterThan(100_000);
+    expect(calls.filter(c => c.path.includes("/history")).length).toBeLessThan(50);
+  });
+
+  it("refuses another project's issue as NOT_FOUND without asking for its history", async () => {
+    const { client, calls } = fakeInferOps(historyOf({}));
+
+    const refused = await failure(client.readIssueActivity("DEMO", ENG_41));
+
+    expect(refused).toEqual({ code: "NOT_FOUND", message: "InferOpsError: NOT_FOUND: No such issue in this project." });
+    expect(calls.some(c => c.path.includes("/history"))).toBe(false);
+  });
+
+  it("passes InferOps' refusal of the history on as FORBIDDEN, without the server's detail", async () => {
+    const { client } = fakeInferOps(call => call.path.includes("/history")
+      ? Response.json({ success: false, error: { code: "FORBIDDEN", message: "server detail for FORBIDDEN" } }, { status: 403 })
+      : undefined);
+
+    const refused = await failure(client.readIssueActivity("DEMO", DEMO_1));
+
+    expect(refused.code).toBe("FORBIDDEN");
+    expect(refused.message).not.toContain("server detail");
+  });
+
+  it("fails UNAVAILABLE rather than show older entries as the latest when the history is too long", async () => {
+    const { client } = fakeInferOps(call => call.path.includes("/history")
+      ? Response.json({ entries: [entry(1)], nextCursor: "1" })
+      : undefined);
+
+    expect((await failure(client.readIssueActivity("DEMO", DEMO_1))).code).toBe("UNAVAILABLE");
+  });
+});
+
 describe("project scope", () => {
   it("refuses an issue of another project exactly as an unknown one", async () => {
     const { client } = fakeInferOps();

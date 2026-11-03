@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent } from 'react'
 import type { Board, Issue, IssueChanges, NewIssue, Run, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
-import type { PendingChange, PendingMove, ProposalResult } from './boardData'
+import type { ActivityResult, PendingChange, PendingMove, ProposalResult } from './boardData'
 import { describeRun, finishedRuns, latestRunOf } from './codingRuns'
 import { KanbanCard } from './KanbanCard'
 import type { CodingControl } from './KanbanCodingForm'
@@ -35,6 +35,8 @@ export type KanbanBoardProps = {
   onCreate: (issue: NewIssue) => Promise<ProposalResult>
   /** Proposes an edit of the issue at its revision through the approval path. */
   onUpdate: (issue: Issue, changes: IssueChanges) => Promise<ProposalResult>
+  /** Reads what people and agents did on an issue, with the person's own access (a read; nothing is proposed). */
+  onActivity: (issue: Issue) => Promise<ActivityResult>
   /** Coding dispatch for the board's project; absent, no card offers it. */
   coding?: CodingControl
   /** Which issue's edit form is open, held by the caller; absent, each card holds its own. */
@@ -90,7 +92,7 @@ const decisionText = (board: Board, { change, outcome }: ChangeDecision): string
  *
  * With `coding`, each card shows its issue's latest coding run, and a run that finishes is announced.
  */
-export const KanbanBoard = ({ board, columns, pending, changes, awaiting, decided: decidedActions, layout, onMove, onCreate, onUpdate, coding, openIssue }: KanbanBoardProps) => {
+export const KanbanBoard = ({ board, columns, pending, changes, awaiting, decided: decidedActions, layout, onMove, onCreate, onUpdate, onActivity, coding, openIssue }: KanbanBoardProps) => {
   const instructionsId = useId()
   const root = useRef<HTMLDivElement>(null)
   // The issue whose card has focus; restored when its card re-mounts in another column.
@@ -234,6 +236,9 @@ export const KanbanBoard = ({ board, columns, pending, changes, awaiting, decide
             edit={edit}
             editDecision={editDecision && editDecision.revision === issue.revision ? editDecision.outcome : undefined}
             onUpdate={locked ? undefined : update(issue)}
+            // A provisional card has no issue in InferOps yet, so nothing to show the activity of.
+            onActivity={issue.pending === 'create' ? undefined : () => onActivity(issue)}
+            states={board.columns.map(column => column.state)}
             editControl={openIssue && {
               open: openIssue.issueId === issue.id,
               onOpenChange: open => openIssue.onChange(open ? issue.id : null),

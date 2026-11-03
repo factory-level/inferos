@@ -4,7 +4,7 @@
 // place that chooses between them.
 
 import type {
-  Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
+  Board, Issue, IssueActivity, IssueActivityEntry, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
   WikiDocumentNode, WikiProposal, WikiProposalFreshness, WikiProposalSource, WikiProposalState,
   WikiStructure,
 } from "./types";
@@ -289,6 +289,13 @@ export interface InferOpsClient {
   readIssue(projectKey: string, issueId: string): Promise<Issue>;
 
   /**
+   * One issue's recorded activity (`issue.history`: field changes and comments), newest first, at
+   * most ISSUE_ACTIVITY_LIMIT entries. The issue must belong to the project, with readIssue's one
+   * NOT_FOUND otherwise. Read with the connection's own InferOps access.
+   */
+  readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity>;
+
+  /**
    * Move an issue to another state of its project, after checking scope, state membership,
    * workflow and the expected revision. The returned issue carries its new revision, which is
    * opaque: nothing may assume how far a move advances it. A repeated `idempotencyKey` for the same
@@ -456,4 +463,74 @@ export interface InferOpsClient {
 
   /** Delete everything held for this account (the mock's data; nothing for a remote service). */
   forget(): Promise<void>;
+}
+
+/** The most recent activity entries an issue's `activity()` returns. */
+export const ISSUE_ACTIVITY_LIMIT = 100;
+
+/** The longest comment or value an activity entry keeps; a longer one is shortened and marked. */
+export const ACTIVITY_TEXT_MAX = 2000;
+
+/** One `issue.history` entry as InferOps returns it (only the fields the gatekeeper reads). */
+export interface HistoryEntryRecord {
+  kind: "claim" | "comment";
+  at: string;
+  actorType: "user" | "service_account" | "system" | null;
+  field: string | null;
+  value: unknown;
+  body: string | null;
+}
+
+const ACTORS = { user: "person", service_account: "agent", system: "system" } as const;
+
+const shorten = (text: string | null): { text: string | null; shortened: boolean } =>
+  text !== null && text.length > ACTIVITY_TEXT_MAX
+    ? { text: text.slice(0, ACTIVITY_TEXT_MAX), shortened: true }
+    : { text, shortened: false };
+
+/** One history record as an activity entry, its long text already shortened. */
+export function toActivityEntry(entry: HistoryEntryRecord): IssueActivityEntry {
+  const value = entry.kind === "claim"
+    ? shorten(typeof entry.value === "string" ? entry.value : entry.value == null ? null : JSON.stringify(entry.value))
+    : { text: null, shortened: false };
+  const body = entry.kind === "comment" ? shorten(entry.body) : { text: null, shortened: false };
+  return {
+    kind: entry.kind === "claim" ? "change" : "comment",
+    at: entry.at,
+    actor: entry.actorType ? ACTORS[entry.actorType] : null,
+    field: entry.kind === "claim" ? entry.field : null,
+    value: value.text,
+    body: body.text,
+    shortened: value.shortened || body.shortened,
+  };
+}
+
+/**
+ * The newest ISSUE_ACTIVITY_LIMIT of a history read oldest first, as it streams in: `add` keeps a
+ * rolling window of already-shortened entries, so however long the history, what is held stays
+ * within ISSUE_ACTIVITY_LIMIT entries of ACTIVITY_TEXT_MAX characters each. `result` is newest first.
+ * Who acted is reduced to person, agent or system; no principal id is kept.
+ */
+export class ActivityWindow {
+  #kept: IssueActivityEntry[] = [];
+  #seen = 0;
+
+  add(records: readonly HistoryEntryRecord[]): void {
+    for (const record of records) {
+      this.#seen++;
+      this.#kept.push(toActivityEntry(record));
+      if (this.#kept.length > ISSUE_ACTIVITY_LIMIT) this.#kept.shift();
+    }
+  }
+
+  result(): IssueActivity {
+    return { entries: this.#kept.toReversed(), omitted: this.#seen - this.#kept.length };
+  }
+}
+
+/** A whole history at once, oldest first (the mock's), as `activity()` returns it. */
+export function toIssueActivity(oldestFirst: readonly HistoryEntryRecord[]): IssueActivity {
+  const window = new ActivityWindow();
+  window.add(oldestFirst);
+  return window.result();
 }

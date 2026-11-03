@@ -120,6 +120,39 @@ export interface InferOpsIssueSession {
    * taken effect, another fails with CONFLICT.
    */
   update(changes: IssueChanges, expectedRevision: Revision): Promise<void>;
+  /**
+   * Read what people and agents did on this issue: each field change and comment InferOps
+   * recorded, newest first, at most 100 entries, read with the person's own
+   * InferOps access. Changes waiting for approval are not activity yet. Fails like read() when the
+   * issue was removed or access was revoked, and with FORBIDDEN when InferOps refuses the reader.
+   * Recorded as an observation.
+   */
+  activity(): Promise<IssueActivity>;
+}
+
+/** One thing that happened to an issue, as InferOps recorded it. */
+export interface IssueActivityEntry {
+  /** A field change, or a comment. */
+  kind: "change" | "comment";
+  /** When it happened, an ISO timestamp. */
+  at: string;
+  /** Who did it: a person, an agent (an InferOps service account), InferOps itself, or unrecorded. */
+  actor: "person" | "agent" | "system" | null;
+  /** The field a change set, such as "stateId" or "title". Null on a comment. */
+  field: string | null;
+  /** The value a change set, as text (JSON for anything that is not a string). Null on a comment. */
+  value: string | null;
+  /** The comment's text. Null on a change. */
+  body: string | null;
+  /** Whether `value` or `body` was cut to its first 2000 characters; the issue keeps the whole. */
+  shortened: boolean;
+}
+
+/** An issue's recent activity, newest first. */
+export interface IssueActivity {
+  entries: IssueActivityEntry[];
+  /** How many earlier entries were left out to stay within the limit. */
+  omitted: number;
 }
 
 /** Access to one project, fixed when this capability is created. */
