@@ -148,6 +148,31 @@ describe("nested pages", () => {
     expect(() => narrow.savePage(added, current.revision)).toThrow("not enabled");
   });
 
+  /** A store over one canvas holding the board widget, with the catalog narrowed to `widgetKinds`. */
+  const narrowedTo = (widgetKinds: string[]) => {
+    const durable = makeMockStorage();
+    const storage = makeOverseerStorage(durable);
+    const created = new WorkspaceCanvasStore(durable, storage, ENV).create(CONTENT);
+    return { created, store: new WorkspaceCanvasStore(durable, storage, { ...ENV, CANVAS_CATALOG: JSON.stringify({ widgetKinds, blueprints: [], screens: [] }) }) };
+  };
+
+  it("replacing a widget's kind under the same ID is held to the catalog", () => {
+    const { store, created } = narrowedTo(["inferops.project-board"]);
+    const page = store.getPage(created.id)!;
+    const replaced = { ...page, nodes: page.nodes.map(node => node.id === "eng"
+      ? { nodeType: "widget", id: "eng", kind: "inferos.gadget", version: 1, targetRef: "gadget:1", size: "normal", params: {}, attachments: [] } : node) };
+    expect(() => store.savePage(replaced, page.revision)).toThrow("Widget kind inferos.gadget is not enabled");
+    expect(store.getPage(created.id)?.revision).toBe(page.revision);
+  });
+
+  it("an unchanged widget stays after the catalog narrows past its kind", () => {
+    const { store, created } = narrowedTo(["inferos.gadget"]);
+    const page = store.getPage(created.id)!;
+    expect(store.savePage({ ...page, title: "Renamed" }, page.revision).title).toBe("Renamed");
+    const renamed = store.getPage(created.id)!;
+    expect(store.savePage(nested(renamed), renamed.revision).revision).toBe("2");
+  });
+
   it.each(rejected)("refuses $group: $name, with its code and location, and writes nothing", ({ page, expected }) => {
     const { store, storage } = setUp();
     store.create(CONTENT);

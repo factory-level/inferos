@@ -121,9 +121,10 @@ export class WorkspaceCanvasStore {
       }
       const current = this.#nestedPage(row) ?? canvasPageFromDefinition(row);
       if (current.revision !== expectedRevision) throw new CanvasConflictError(current.revision);
-      const existing = new Set(current.nodes.map(node => node.id));
+      // An unchanged widget stays when the catalog narrows; a new one, or a new kind under its ID, is held to it.
+      const existing = new Map(current.nodes.flatMap(node => node.nodeType === "widget" ? [[node.id, node.kind] as const] : []));
       const { widgetKinds } = readCanvasCatalog(this.env);
-      const disallowed = page.nodes.find(node => node.nodeType === "widget" && !existing.has(node.id) && !widgetKinds.includes(node.kind));
+      const disallowed = page.nodes.find(node => node.nodeType === "widget" && existing.get(node.id) !== node.kind && !widgetKinds.includes(node.kind));
       if (disallowed?.nodeType === "widget") throw new Error(`Widget kind ${disallowed.kind} is not enabled for this installation`);
       const updated: CanvasPage = { ...page, revision: (BigInt(current.revision) + 1n).toString() };
       parseCanvasWorkspacePages([updated, ...this.listPages().filter(other => other.id !== page.id)]);
