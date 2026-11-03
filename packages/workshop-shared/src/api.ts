@@ -5293,6 +5293,14 @@ export type BlueprintScreenshotUpload = {
   content: Uint8Array;
 };
 
+/**
+ * The message the Workshop refuses with when the deployment's shared-configuration authority
+ * (`AuthenticatedApi.holdsSharedConfiguration`) doesn't let the caller share, publish or change a
+ * shared workspace, so a client can show it as is. It names no role.
+ */
+export const SHARED_CONFIGURATION_REFUSED =
+    "You don't have permission to share or publish configuration other people use.";
+
 export const BLUEPRINT_SCREENSHOT_R2_PREFIX = 'screenshots/';
 export const BLUEPRINT_SCREENSHOT_PATH_PREFIX = '/blueprint-screenshot/';
 
