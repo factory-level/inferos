@@ -27,6 +27,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { OperateConsoleRead, ConsoleRef, ConsoleSource, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
+import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "./workflow-definition.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
@@ -2629,6 +2630,37 @@ export interface Overseer extends RpcTarget {
   replaceFlow(id: string, expectedRevision: string, content: OperateFlowContent): Promise<OperateFlow>;
   /** Delete a flow at its expected revision. */
   deleteFlow(id: string, expectedRevision: string): Promise<void>;
+
+  /**
+   * This workspace's workflow definitions as the caller may see them: their own with every saved
+   * revision, and everyone else's only once published, with only the published revision. A use
+   * session sees published ones only.
+   */
+  listWorkflowDefinitions(): Promise<WorkflowDefinition[]>;
+  /**
+   * Save the workflow gadget's current code as a new revision of the caller's own definition, or of
+   * a new one. Publishes nothing. Build only; in a shared workspace it also takes the deployment's
+   * `build` authority. At most `MAX_WORKSPACE_WORKFLOW_DEFINITIONS` per workspace and
+   * `MAX_WORKFLOW_DEFINITION_REVISIONS` revisions each.
+   */
+  saveWorkflowDefinition(input: WorkflowDefinitionSave): Promise<WorkflowDefinition>;
+  /**
+   * Make saved `revision` of the caller's own definition the published one. Build only; in a shared
+   * workspace it also takes the deployment's `publish` authority. Triggers stay on the revision
+   * they pinned.
+   */
+  publishWorkflowDefinition(id: string, revision: number): Promise<WorkflowDefinition>;
+  /**
+   * Pin bound hook `hookId` to one revision the caller may see (published, or their own saved one)
+   * of a definition for the gadget the hook wakes, or clear its pin with null. A pinned hook fires
+   * only while that gadget's code is exactly the revision's commit, and records each firing. Build
+   * only; in a shared workspace it also takes the deployment's `build` authority.
+   */
+  pinTriggerDefinition(hookId: number, ref: WorkflowDefinitionRef | null): Promise<void>;
+  /** The pin of bound hook `hookId`, or null. Build only. */
+  getTriggerDefinition(hookId: number): Promise<WorkflowDefinitionRef | null>;
+  /** The recorded firings of a definition the caller may see, oldest first. Build only. */
+  listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]>;
 
   /**
    * List this workspace's consoles: one operator role's menu of views over this workspace's
