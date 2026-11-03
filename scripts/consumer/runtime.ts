@@ -360,7 +360,7 @@ export async function diagnoseSettings(root: string, upstream: string, config: C
 async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const command = process.argv[2];
-  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "scaffold", "skills", "skills-upload", "skills-install", "setup", "dev", "intake", "config", "verify", "recover", "upgrade"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|scaffold|skills|skills-upload|skills-install|setup|dev|intake|config|verify|recover|upgrade");
+  if (!["check", "doctor", "blueprints", "extensions", "fixtures", "views", "canvas", "profile", "local", "gatekeepers", "scaffold", "skills", "skills-upload", "skills-install", "setup", "dev", "intake", "config", "verify", "recover", "upgrade", "deploy"].includes(command ?? "")) throw new Error("Usage: node .inferos/runtime.ts check|doctor|blueprints|extensions|fixtures|views|canvas|profile|local|gatekeepers|scaffold|skills|skills-upload|skills-install|setup|dev|intake|config|verify|recover|upgrade|deploy");
   if (command === "verify" || command === "recover" || command === "upgrade") {
     // Before the configuration check: these commands must answer for a broken wrapper too.
     const { runMaintenance } = await import("./maintenance.ts");
@@ -428,6 +428,10 @@ async function main() {
     const script = join(upstream, "packages/workshop-backend/scripts/initialize-consumer-profile.ts");
     if (!existsSync(script)) throw new Error("Pinned InferOS revision does not support profile initialization; use a reviewed newer pin");
     execFileSync(process.execPath, [script, root], { cwd: upstream, stdio: "inherit" });
+    return;
+  }
+  if (command === "deploy") {
+    await relayPinned(upstream, deployArgs(root, upstream, process.argv.slice(3), { config, blocked, modifiedUpstream }), deployEnv(root));
     return;
   }
   if (command === "local") {
@@ -500,6 +504,42 @@ async function assertStartable(root: string, { config, upstream, blocked, modifi
   await validateConsumerFixture(root, upstream);
   if (modifiedUpstream) console.error("The pinned InferOS checkout has local modifications; this run is not an exact-revision proof.");
   console.error("Starting the native Workshop baseline. InferOps board data is mocked by the InferOps gatekeeper; profile:init is a separate administrator operation.");
+}
+
+/**
+ * The pinned stage deploy's argv for this wrapper (`pnpm inferos:deploy [config|deploy|delete] [flags]`,
+ * `deploy` by default), after refusing what it can't deploy faithfully: a pin without wrapper
+ * deploys, enabled capabilities the pin doesn't support, the wrapper's own Cloudflare code (its
+ * gatekeepers and Workers aren't deployed yet), and, outside a dry run, a modified pinned checkout.
+ * The pinned script then re-checks the pin against the wrapper's gitlink and the account.
+ */
+export function deployArgs(root: string, upstream: string, args: readonly string[],
+  consumer: { config: ConsumerConfig; blocked: readonly string[]; modifiedUpstream: boolean }): string[] {
+  const script = join(upstream, "scripts/stage/stage.ts");
+  if (!existsSync(join(upstream, "scripts/stage/wrapper-stage.ts"))) {
+    throw new Error("Pinned InferOS revision cannot deploy a wrapper; select a reviewed newer pin");
+  }
+  const [first] = args;
+  const action = first && !first.startsWith("--") ? first : "deploy";
+  const rest = first && !first.startsWith("--") ? args.slice(1) : args;
+  if (!["config", "deploy", "delete"].includes(action)) throw new Error("Usage: pnpm inferos:deploy [config|deploy|delete] [--dry-run] [--confirm <hostname>]");
+  if (consumer.blocked.length) throw new Error(`Enabled capabilities are not supported by this installation: ${consumer.blocked.join(", ")}`);
+  if (consumer.config.features.customCloudflareCode) {
+    throw new Error("features.customCloudflareCode is on, but a deploy doesn't include the wrapper's own gatekeepers and Workers yet; turn it off to deploy, or wait for a pin that deploys them");
+  }
+  if (consumer.modifiedUpstream && !rest.includes("--dry-run")) {
+    throw new Error("The pinned InferOS checkout has local modifications; a deploy must be the exact pinned revision");
+  }
+  return [script, action, "--wrapper", root, ...rest];
+}
+
+/** The deploy's environment: the shell's, with the wrapper's blueprint directory taking precedence. */
+function deployEnv(root: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const blueprints = consumerBlueprintDirectory(root);
+  if (blueprints) env.BUNDLED_BLUEPRINTS_DIR = blueprints;
+  else delete env.BUNDLED_BLUEPRINTS_DIR;
+  return env;
 }
 
 /** The wrapper's port and blueprint directory, which take precedence over the shell's. */

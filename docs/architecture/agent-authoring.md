@@ -5,6 +5,7 @@ covers:
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/agent-artifact.ts
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
+  - packages/workshop-backend/src/overseer.ts
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
@@ -74,6 +75,10 @@ Read-only reference: `/libs/backend/registry` and `apps/cli/src/user.ts` in fact
 ## Data and Control Flow
 
 InferOS already provides native Gadgets, Blueprint import/export, bindings and callable agents. `spawnCallable` persists an enqueue, and completion uses callbacks rather than synchronous task completion. Scheduler callbacks are persistent but not exactly-once. Blueprint export does not contain live SQLite state, history or credentials. Blueprint code versions are retained in R2 under `<blueprintId>/<version>`, so earlier versions stay readable. `.gadget` v1 is a 24-byte prefix (magic, format version `1`, metadata length, content length), then JSON `BlueprintMetadata`, then the content bytes. It carries no digest, and the reader refuses any other format version.
+
+### Agent spawner scope
+
+`Overseer.bindWorkpiece()` validates an agent spawner's complete nested `config.env` against the gadget and its currently visible bindings. `Overseer.openGatekeeperSession()` returns a caller-bound spawner session; every `spawn()` and `spawnCallable()` rechecks the current bindings. Spawner sessions require a gadget caller or a spawned agent with recorded gadget lineage; direct user and ordinary chat sessions have no such scope and are refused. Spawned chats retain the originating gadget ID. Before each gadget or gatekeeper call, their frozen seed bindings are intersected with that gadget's live bindings, so unbinding or rebinding a resource revokes an existing child's access. Recursive spawner envs use the same scope check. Legacy spawned chats have no recorded parent gadget ID, so they fail closed at their next gadget or gatekeeper call and must be re-spawned to restore access. `packages/workshop-backend/__tests__/git-binding.test.ts` covers bind-time refusal, legacy callers, missing scope, nested spawners, and revocation after unbind/rebind.
 
 ### Artifact revisions
 

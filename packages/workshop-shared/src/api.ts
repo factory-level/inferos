@@ -2579,8 +2579,9 @@ export type AgentSpawnerConfig = {
    * targets no longer exist are dropped); the spawned agent sees only these bindings, never the
    * workspace's default binding list.
    *
-   * The entries are deliberately not limited to bindings held by the gadget that owns the
-   * spawner: a spawner may define bindings of its own, with its own names and targets.
+   * Every target must be available to the gadget that owns the spawner. Nested spawners are
+   * checked against the same scope, and spawned agents lose access when the gadget unbinds a
+   * target.
    *
    * Once a gadget binds the spawner, every env target joins each "use" collaborator's
    * verification scope transitively: spawning is reachable from the gadget UI, and the spawned

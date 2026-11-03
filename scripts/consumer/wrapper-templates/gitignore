@@ -5,3 +5,4 @@ node_modules/
 .inferos/state/
 wrangler.consumer.jsonc
 wrangler.dev.jsonc
+.inferos-deploy.vars

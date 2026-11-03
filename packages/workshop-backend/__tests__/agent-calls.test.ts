@@ -123,7 +123,18 @@ async function spawnerBinding(impl: any, config = SPAWNER_CONFIG): Promise<Agent
   let cls = impl.ctx.exports.AgentSpawnerGatekeeper({ props: {
     overseerId: impl.ctx.id.toString(), config, creatorUserId: OWNER_USER_ID,
   } });
-  return impl.getGatekeeperFacet(900, cls).startSession(undefined);
+  impl.storage.gatekeepers.put({
+    id: 900, resourceTitle: "Spawner", class: cls,
+    creationSpec: { type: "agentSpawner", config },
+  });
+  impl.storage.gadgets.put({
+    type: "gadget", id: 100, title: "G", created: new Date(0), bindingName: "G",
+    bindings: { SPAWNER: { target: 900 } },
+  });
+
+  return impl.startGatekeeperSession(
+    { type: "gatekeeper", id: 900 }, { from: "gadget", gadgetId: 100 }
+  );
 }
 
 describe("durable agent calls", () => {
@@ -579,7 +590,8 @@ describe("durable agent calls", () => {
     expect(meta).toMatchObject({ title: "Drafts", spawnerName: "Spawner" });
     expect(meta.activeAgent).toBeUndefined();
     expect(impl.storage.chatContext.get(meta.id)).toEqual({
-      chatId: meta.id, spawnerConfig: SPAWNER_CONFIG, spawnerTypes: SPAWNER_TYPES, bindings: {},
+      chatId: meta.id, spawnerConfig: SPAWNER_CONFIG,
+      spawnerScope: { gadgetId: 100 }, spawnerTypes: SPAWNER_TYPES, bindings: {},
     });
     expect([...impl.storage.chats.list()]).toEqual([]);
     expect(started).toEqual([]);
