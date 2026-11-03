@@ -4,7 +4,7 @@
 
 /** A work item's version, as a decimal string. Opaque: pass it back, never increment it. */
 export type Revision = string;
-export type Workflow = "content" | "software";
+export type Workflow = "content" | "software" | "service";
 export type StateGroup = "backlog" | "unstarted" | "started" | "completed" | "cancelled";
 export type Priority = "urgent" | "high" | "medium" | "low" | "none";
 

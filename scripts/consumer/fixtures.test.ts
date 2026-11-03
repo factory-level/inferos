@@ -13,7 +13,7 @@ test("canonical fixture validates without returning record contents or losing bi
   const input = fixture();
   input.columns[0].issues[0].revision = "900719925474099300001";
   const result = validateBoardFixture(input, ref);
-  assert.deepEqual(result, { projects: 1, columns: 3, issues: 1, schemaRevision: "3dae0f50d5b4fa467d734cbb2adf857f39942b31" });
+  assert.deepEqual(result, { projects: 1, columns: 3, issues: 1, schemaRevision: "0bc12ccc8f9758c4556ff5eb3502a6b7c9fa8262" });
   assert.equal(input.columns[0].issues[0].revision, "900719925474099300001");
 });
 
