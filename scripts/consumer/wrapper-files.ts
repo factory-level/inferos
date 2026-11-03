@@ -70,7 +70,7 @@ export const WRAPPER_SCRIPTS: Record<string, string> = {
   "gatekeepers:generate": "node .inferos/runtime.ts gatekeepers --write", "gatekeepers:scaffold": "node .inferos/runtime.ts scaffold", "views:check": "node .inferos/runtime.ts views", canvas: "node .inferos/runtime.ts canvas",
   "fixtures:check": "node .inferos/runtime.ts fixtures", "blueprints:check": "node .inferos/runtime.ts blueprints", "skills:check": "node .inferos/runtime.ts skills",
   "skills:install": "node .inferos/runtime.ts skills-install", "skills:upload": "node .inferos/runtime.ts skills-upload", doctor: "node .inferos/runtime.ts doctor",
-  setup: "node .inferos/runtime.ts setup", dev: "node .inferos/runtime.ts dev",
+  setup: "node .inferos/runtime.ts setup", dev: "node .inferos/runtime.ts dev", "inferos:deploy": "node .inferos/runtime.ts deploy",
 };
 
 /** Templates without another upstream home: the wrapper README and `.gitignore`. */
