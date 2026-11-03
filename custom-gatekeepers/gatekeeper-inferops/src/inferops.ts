@@ -177,7 +177,7 @@ import type { InferOpsProjectConfiguratorRpc } from "./configurator/project-conf
 import type {
   AccountWorkspace, Board, BoardCandidate, DispatchTarget, InferOpsAccountSession, InferOpsDispatchSession, InferOpsIssueSession,
   InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession, InferOpsWikiSession,
-  InferOpsWorkflowPolicySession, Issue, IssueChanges, ListRecordsOptions, NewIssue, Repo,
+  InferOpsWorkflowPolicySession, Issue, IssueActivity, IssueChanges, ListRecordsOptions, NewIssue, Repo,
   WorkflowPolicyHead, WorkspaceMembers,
   Revision, Run, TableDescription, TableRecord, WikiDocument,
   WikiDocumentNode, WikiProposal, WikiProposalDetail, WikiProposalState, WikiSection, WikiStructure,
@@ -2276,6 +2276,26 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       description: `Read issue ${issue.identifier} of project ${this.#binding.projectKey}.`,
     });
     return issue;
+  }
+
+  /**
+   * The issue's recorded activity, through the connection's own InferOps access (`issue.history`):
+   * an issue it cannot read fails exactly as `read()` does, and InferOps' own refusal (FORBIDDEN)
+   * is passed on. One observation names the issue and how much was read.
+   */
+  async activity(): Promise<IssueActivity> {
+    const binding = this.#binding;
+    const issue = await binding.issue(this.#issueId).catch(hideIssueExistence);
+    const activity = await binding.client.readIssueActivity(binding.projectKey, this.#issueId)
+      .catch(hideIssueExistence);
+    const shown = activity.entries.length;
+    await binding.observe(this.#queue, {
+      title: `Read activity of InferOps issue ${issue.identifier}`,
+      description: `Read ${shown} activity ${shown === 1 ? "entry" : "entries"} of issue ` +
+        `${issue.identifier} in project ${binding.projectKey}` +
+        (activity.omitted > 0 ? `, the most recent of ${shown + activity.omitted}.` : "."),
+    });
+    return activity;
   }
 
   /**

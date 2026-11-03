@@ -12,7 +12,7 @@
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
-import type { Board, InferOpsProjectSession, IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
+import type { Board, InferOpsProjectSession, IssueActivity, IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardMetrics } from './boardMetrics'
 import { openInferOpsSession } from './inferopsConnection'
 
@@ -58,6 +58,9 @@ export type BoardState =
 
 /** How a proposal (move, create or edit) went: queued for approval, or refused with the gatekeeper's code and message. */
 export type ProposalResult = { ok: true } | { ok: false; code: string; message: string }
+
+/** An issue's activity as the gatekeeper read it with the person's own access, or why it could not. */
+export type ActivityResult = { ok: true; activity: IssueActivity } | { ok: false; code: string; message: string }
 
 /** The state of a request nobody has subscribed to yet; one object, so snapshots compare equal. */
 export const LOADING_BOARD: BoardState = { status: 'loading' }
@@ -253,6 +256,24 @@ export class BoardData {
 
   // Submit through the target's session. `settle(true)` once the gatekeeper queued it,
   // `settle(false)` when it was refused or could not be sent. The board is re-read either way.
+  /**
+   * Read one issue's activity through the board's own connection: a read, so nothing is proposed,
+   * nothing pending changes, and the board is not re-read. The issue must be on the loaded board;
+   * the gatekeeper refuses one it cannot read in the same words as `read()`.
+   */
+  async activity(request: BoardRequest, issueId: string): Promise<ActivityResult> {
+    const entry = this.#entries.get(boardRequestKey(request))
+    if (!entry || !('board' in entry.state)) return NOT_LOADED
+    try {
+      const session = await this.#session(entry.target)
+      if (!session) return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
+      using issue = session.openIssue(issueId)
+      return { ok: true, activity: await issue.activity() }
+    } catch (error) {
+      return { ok: false, code: codeOf(error), message: messageOf(error) }
+    }
+  }
+
   async #propose(target: string, call: (session: RpcStub<InferOpsProjectSession>) => Promise<void>,
     settle: (queued: boolean) => void): Promise<ProposalResult> {
     try {

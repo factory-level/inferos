@@ -33,7 +33,7 @@ updated: 2026-11-03
 `inferops`) implements the reviewed agent-facing API from the
 [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
 `inferops-gatekeeper-api.d.ts` verbatim, plus `findBoards` (below): `InferOpsProjectSession` (`readBoard`, `openIssue`,
-`createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`), with `Issue.pending`
+`createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`, `activity`), with `Issue.pending`
 marking simulated changes. The gatekeeper code is written against a data-source
 contract (`src/inferops-client.ts`) with two implementations: `src/mock-inferops.ts` (**demo data**,
 the default, and what the tests and the demo use) and `src/http-inferops.ts` (the InferOps HTTP
@@ -214,6 +214,31 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   A state's or card's workflow is one of `content`, `software` and `service` (InferOps' Service
   jobs ladder, at the pinned inferops `0bc12ccc`, `project-board.schema.json`); any other value
   makes the whole board answer `UNAVAILABLE`. Coding dispatch stays `software`-only.
+- **Activity** (FAC-157). `InferOpsIssueSession.activity()` reads InferOps' `issue.history` (field
+  changes and comments) with the connection's own InferOps access.
+  - **Placement:** it reads the issue first, so an unknown issue or one of another project is the
+    same `NOT_FOUND`, and nothing is observed.
+  - **Shape:** it returns the most recent 100 entries, newest first (`toIssueActivity` in
+    `inferops-client.ts`), with how many earlier ones were left out. Who acted is reduced to person,
+    agent (a service account) or system, and no principal id leaves the gatekeeper.
+  - **Paging and bounds:** InferOps pages history oldest first, so the HTTP client reads it page by
+    page, at most 50 requests.
+    - Each page's body is streamed through `readTextCapped` and abandoned at 256 KiB before it's
+      parsed (`Send.capped`); a failed page's body is capped at 4 KiB.
+    - Page size adapts. InferOps allows comments and descriptions of 20,000 characters, up to about
+      120 KB an entry as JSON, so only one is sure to fit, while most entries are a few hundred
+      bytes. A read asks for 100, sizes each next page from the last page's bytes per entry, and
+      asks again for half as many when a page goes over the cap. Only a single entry over 256 KiB,
+      which InferOps' limits rule out, fails the read (`UNAVAILABLE`).
+    - Each page goes straight into `ActivityWindow`, a rolling window of the newest 100 entries.
+    - Comments and values are cut to 2,000 characters as they're kept (`shortened: true`).
+    - So one read holds one page plus the window, however long the history.
+    - A history needing more than 50 requests (about 5,000 typical entries, at least 50 of the
+      largest) fails `UNAVAILABLE` rather than show older entries as the latest.
+    - A newest-first `issue.history` in InferOps would make this one request; that's an InferOps change.
+  - **Refusal and logging:** InferOps' refusal of the history is passed on as `FORBIDDEN`. One
+    observation names the issue and the count. Pending changes aren't activity until applied.
+  - **The mock** records each applied write's fields as a person's change.
 - **Writes.** Every write is staged in the facet's KV as an `ActionRecord` (actions.ts) with the
   request it will send and its fingerprint, then submitted with `submitAction`; if submission
   throws, the record is deleted. None is auto-approvable.
