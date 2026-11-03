@@ -321,8 +321,8 @@ function sameRequirements(
 /**
  * Whether the deployment lets this person share configuration other people use, asked when the
  * dialog opens. Only what to offer: the server asks again at every invite and link. Until the answer
- * arrives nothing new is offered; a server that can't answer the question (one without it) doesn't
- * restrict sharing, so it is treated as allowed.
+ * arrives nothing new is offered, and a failed question offers nothing either, as the kernel refuses
+ * when it can't tell.
  */
 const useSharingAllowed = (authenticatedApi: RpcStub<AuthenticatedApi>, open: boolean) => {
   const [allowed, setAllowed] = useState<boolean | null>(null)
@@ -334,7 +334,7 @@ const useSharingAllowed = (authenticatedApi: RpcStub<AuthenticatedApi>, open: bo
       .then(() => authenticatedApi.holdsSharedConfiguration('publish'))
       .then(
         (holds) => { if (current) setAllowed(holds === true) },
-        () => { if (current) setAllowed(true) },
+        () => { if (current) setAllowed(false) },
       )
     return () => { current = false }
   }, [authenticatedApi, open])

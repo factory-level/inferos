@@ -345,11 +345,12 @@ describe('ShareModal', () => {
       .toContain('You don’t have permission to share configuration other people use')
   })
 
-  it('treats a server that cannot answer the sharing question as not restricting it', async () => {
+  it('offers no sharing when the sharing question fails, as the server refuses then', async () => {
     const rendered = await render(fakeOverseer(), fakeAuthenticatedApi({
-      holdsSharedConfiguration: async () => { throw new Error('no such method') },
+      holdsSharedConfiguration: async () => { throw new Error('unavailable') },
     }))
-    expect(rendered.querySelector('[data-testid="people-composer"]')).not.toBeNull()
+    expect(rendered.querySelector('[data-testid="people-composer"]')).toBeNull()
+    expect(rendered.querySelector('[role="status"]')).not.toBeNull()
   })
 
   it('keeps Invite disabled until a recipient can be submitted', async () => {
