@@ -103,7 +103,7 @@ import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeepe
 import { createLogger } from "@gadgets/observability/logger";
 import type {
   AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
-  GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceConfiguratorFrame,
+  GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
@@ -1140,18 +1140,80 @@ const NEXT_ACTION_KEY = "nextActionId";
 const INSTANCE_KEY = "instanceId";
 
 /**
- * A facet's action store and data source: the parts every kind of binding shares. `scope` keys the
- * fingerprints: the bound project's key, or `knowledge/wiki`.
+ * Where one binding's action records live: its facet's storage, each record under `prefix` plus its
+ * action id. A board, dispatch or Wiki facet serves one binding and keeps its records under
+ * `action:`, as it always has. The id counter and the instance id stay facet-wide, so ids and
+ * idempotency keys never repeat within a facet whatever its stores.
  */
-class ActionBinding<P> {
-  constructor(
-    readonly ctx: DurableObjectState<P>,
-    readonly client: InferOpsClient,
-    readonly scope: string,
-  ) {}
+class ActionStore {
+  constructor(readonly kv: SyncKvStorage, readonly prefix: string = ACTION_PREFIX) {}
+
+  /** A recorded action; a record from before creates and updates reads as a transition. */
+  get(actionId: number): ActionRecord | undefined {
+    return readAction(this.kv.get(this.prefix + actionId));
+  }
+
+  put(record: ActionRecord): void {
+    this.kv.put(this.prefix + record.actionId, record);
+  }
+
+  delete(actionId: number): void {
+    this.kv.delete(this.prefix + actionId);
+  }
+
+  /** Every record of this store, in key order. */
+  *records(): Generator<ActionRecord> {
+    for (const [, raw] of this.kv.list({ prefix: this.prefix })) {
+      const record = readAction(raw);
+      if (record) yield record;
+    }
+  }
+}
+
+/** The collaborators a facet admitted, by id, from its own storage. */
+function admittedObservers(kv: SyncKvStorage): string[] {
+  return Array.from(kv.list({ prefix: OBSERVER_PREFIX }), ([key]) => key.slice(OBSERVER_PREFIX.length));
+}
+
+/** What a binding is made of, besides its target. */
+type BindingParts = {
+  /** Where its action records live. */
+  store: ActionStore;
+  /** Its data source, as the person (or the demo) in its workspace. */
+  client: InferOpsClient;
+  /**
+   * The collaborators it currently serves, by id: excluded from reads that reveal more than their
+   * admission covered (a board search, a page's composed text) and blocking owner-only decisions.
+   */
+  observers: () => string[];
+  /** Authorizes one observation; the approval queue's own, unchanged, unless given. */
+  observe?: (queue: RpcStub<ApprovalQueue>, description: ObservationDescription) => Promise<void>;
+};
+
+/**
+ * A binding's action store and data source: the parts every kind of binding shares. `scope` keys
+ * the fingerprints: the bound project's key, or `knowledge/wiki`.
+ */
+class ActionBinding {
+  readonly store: ActionStore;
+  readonly client: InferOpsClient;
+  readonly observers: () => string[];
+  readonly #observe: BindingParts["observe"];
+
+  constructor(parts: BindingParts, readonly scope: string) {
+    this.store = parts.store;
+    this.client = parts.client;
+    this.observers = parts.observers;
+    this.#observe = parts.observe;
+  }
 
   get kv(): SyncKvStorage {
-    return this.ctx.storage.kv;
+    return this.store.kv;
+  }
+
+  /** Authorize an observation of this binding's data before it is returned. */
+  observe(queue: RpcStub<ApprovalQueue>, description: ObservationDescription): Promise<void> {
+    return this.#observe ? this.#observe(queue, description) : queue.authorizeObservation(description);
   }
 
   /** A random id for this facet, so two bindings of one account never share idempotency keys. */
@@ -1170,15 +1232,15 @@ class ActionBinding<P> {
 
   /** A recorded action; a record from before creates and updates reads as a transition. */
   action(actionId: number): ActionRecord | undefined {
-    return readAction(this.kv.get(ACTION_PREFIX + actionId));
+    return this.store.get(actionId);
   }
 
   putAction(record: ActionRecord): void {
-    this.kv.put(ACTION_PREFIX + record.actionId, record);
+    this.store.put(record);
   }
 
   deleteAction(actionId: number): void {
-    this.kv.delete(ACTION_PREFIX + actionId);
+    this.store.delete(actionId);
   }
 
   /**
@@ -1202,9 +1264,8 @@ class ActionBinding<P> {
     const fingerprint = await fingerprintOf(this.scope, staged);
     guard?.();
     if (join) {
-      for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
-        const record = readAction(raw);
-        if (record?.status === "pending" && record.fingerprint === fingerprint) {
+      for (const record of this.store.records()) {
+        if (record.status === "pending" && record.fingerprint === fingerprint) {
           return { actionId: record.actionId, joined: true };
         }
       }
@@ -1314,30 +1375,33 @@ class ActionBinding<P> {
   }
 }
 
-/** A project binding (board or coding dispatch): the bound project and its simulated board. */
 /** One InferOps workspace `findBoards` searches: its host and a data source in it. */
 type DiscoverySource = { host: string; client: InferOpsClient };
 
-class ProjectBinding extends ActionBinding<ProjectGatekeeperProps> {
+/**
+ * A project binding (board or coding dispatch): the bound project and its simulated board. `target`
+ * is its scope, which no session method takes as an argument: for a facet, the props the Workshop
+ * minted it with.
+ */
+class ProjectBinding extends ActionBinding {
   /**
    * `otherWorkspaces` lists the person's other InferOps workspaces for `findBoards`, each with a
    * data source as the same person; omitted where there is no person to list them for.
    */
-  constructor(ctx: DurableObjectState<ProjectGatekeeperProps>, client: InferOpsClient,
+  constructor(readonly target: ProjectGatekeeperProps, parts: BindingParts,
               readonly otherWorkspaces: () => Promise<DiscoverySource[]> = async () => []) {
-    super(ctx, client, ctx.props.projectKey);
+    super(parts, target.projectKey);
   }
 
   get projectKey(): string {
-    return this.ctx.props.projectKey;
+    return this.target.projectKey;
   }
 
   pending(): Pending {
     const changes: Pending["changes"][number][] = [];
     const creates: CreateAction[] = [];
-    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
-      const record = readAction(raw);
-      if (record?.status !== "pending") continue;
+    for (const record of this.store.records()) {
+      if (record.status !== "pending") continue;
       if (isIssueChange(record)) changes.push(record);
       else if (record.kind === "create") creates.push(record);
     }
@@ -1348,9 +1412,8 @@ class ProjectBinding extends ActionBinding<ProjectGatekeeperProps> {
   codingPending(): { dispatches: DispatchAction[]; cancels: CancelRunAction[] } {
     const dispatches: DispatchAction[] = [];
     const cancels: CancelRunAction[] = [];
-    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
-      const record = readAction(raw);
-      if (record?.status !== "pending") continue;
+    for (const record of this.store.records()) {
+      if (record.status !== "pending") continue;
       if (record.kind === "dispatch") dispatches.push(record);
       else if (record.kind === "cancel") cancels.push(record);
     }
@@ -1372,36 +1435,12 @@ export class InferOpsProjectGatekeeper
     implements Gatekeeper<InferOpsProjectSession>, HostBoardReader, HostBoardConnectionFence {
   #binding(): ProjectBinding {
     const { accountId, connected, host, workspaceId } = this.ctx.props;
-    const account = { accountId, connected };
-    return new ProjectBinding(
-      this.ctx, clientFor(this.env, this.ctx.exports, account, host, workspaceId),
-      () => this.#otherWorkspaces());
-  }
-
-  /**
-   * A connected person's other InferOps workspaces, for `findBoards`: those InferLab reported at
-   * connect time with a slug, each read with the person's own token in that workspace (the
-   * credentials object refuses any workspace that is not theirs). The tenant label is the binding's,
-   * since a person's workspaces share one tenant. The stopgap connection and the demo serve one
-   * workspace, so they search only the binding's.
-   */
-  async #otherWorkspaces(): Promise<DiscoverySource[]> {
-    const { accountId, connected, host, workspaceId } = this.ctx.props;
-    const tenant = parseHost(host)?.tenant;
-    if (!connected || host === DEMO_HOST || !tenant) return [];
-    const identity = await credentialsOf(this.ctx.exports, accountId).identity();
-    return (identity?.workspaces ?? []).flatMap(workspace => {
-      if (workspace.product === "infermind" || !workspace.workspaceSlug ||
-          workspace.workspaceId === workspaceId) {
-        return [];
-      }
-      const other = `${tenant}.${workspace.workspaceSlug}`;
-      if (!parseHost(other)) return [];
-      return [{
-        host: other,
-        client: clientFor(this.env, this.ctx.exports, { accountId, connected }, other, workspace.workspaceId),
-      }];
-    });
+    const kv = this.ctx.storage.kv;
+    return new ProjectBinding(this.ctx.props, {
+      store: new ActionStore(kv),
+      client: clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId),
+      observers: () => admittedObservers(kv),
+    }, () => otherWorkspacesOf(this.env, this.ctx.exports, this.ctx.props));
   }
 
   async describe(): Promise<ResourceDescription> {
@@ -1521,100 +1560,152 @@ export class InferOpsProjectGatekeeper
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
       Promise<void | { failed: ActionApplyFailure }> {
-    const binding = this.#binding();
-    const record = binding.action(actionId);
-    if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-    if (record.status === "applied") return;
-    if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
-    if (isCodingAction(record) || isWikiAction(record)) {
-      throw new Error(`InferOps action ${actionId} is not a board action.`);
-    }
-    const fields = { projectKey: binding.projectKey, action: actionId };
-    const key = binding.idempotencyKey(actionId);
-    return binding.applyOnce(record, {
-      policy: BOARD_WRITES, fields,
-      check: () => assertFingerprint(binding.projectKey, record, fields),
-      async send(marked) {
-        switch (record.kind) {
-          case "transition":
-            await binding.client.transition(
-              binding.projectKey, record.issueId, record.toStateId, record.expectedRevision, key);
-            return { ...marked, status: "applied" };
-          case "create": {
-            const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
-            return { ...marked, status: "applied", createdIdentifier: created.identifier } as ActionRecord;
-          }
-          case "update": {
-            const updated = await binding.client.updateIssue(
-              binding.projectKey, record.issueId, record.changes, record.expectedRevision, key);
-            return { ...marked, status: "applied", appliedRevision: updated.revision } as ActionRecord;
-          }
-        }
-      },
-    });
+    return applyBoardAction(this.#binding(), actionId);
   }
 
   /** Forget the pending action; reads stop simulating it at once, so no restart is needed. */
   async rejectAction(actionId: number): Promise<void> {
-    const binding = this.#binding();
-    if (binding.action(actionId)?.status === "pending") binding.deleteAction(actionId);
+    rejectPending(this.#binding(), actionId);
   }
 
-  /**
-   * Undo an applied move or title/priority update, provided nothing has changed the issue since.
-   * The data source checks the current revision again, so a concurrent change makes this fail
-   * rather than clobber. Creates, and updates that changed the description, are submitted as not
-   * revertible.
-   */
+  /** See `revertBoardAction`. */
   async revertAction(actionId: number):
       Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
-    const binding = this.#binding();
-    const record = binding.action(actionId);
-    if (!record || record.status !== "applied") {
-      return { message: "This change was never applied, so there is nothing to revert." };
-    }
-    if (isCodingAction(record) || isWikiAction(record)) return { message: "This is not a board action." };
-    if (record.kind === "create") {
-      return {
-        message: `Creating ${record.createdIdentifier ?? "an issue"} cannot be undone here. ` +
-          `Cancel it in InferOps if needed.`,
-      };
-    }
-    if (record.kind === "update" && record.changes.description !== undefined) {
-      return {
-        message: `This change to ${record.identifier} replaced its description, which cannot be ` +
-          `restored here. Edit it in InferOps if needed.`,
-      };
-    }
-    let current: Issue;
-    try {
-      current = await binding.client.readIssue(binding.projectKey, record.issueId);
-    } catch (error) {
-      if (inferOpsErrorCode(error) !== "NOT_FOUND") throw error;
-      return { message: `${record.identifier} is no longer in project ${binding.projectKey}.` };
-    }
-    const revertKey = binding.idempotencyKey(actionId, ":revert");
-    if (record.kind === "transition") {
-      if (current.stateId !== record.toStateId) {
-        return {
-          message: `${record.identifier} has moved again since this change, so it was not moved ` +
-            `back. Move it in InferOps if needed.`,
-        };
-      }
-      await binding.client.transition(
-        binding.projectKey, record.issueId, record.fromStateId, current.revision, revertKey);
-    } else {
-      if (!stillShowsUpdate(record, current)) {
-        return {
-          message: `${record.identifier} has changed again since this update, so its previous ` +
-            `values were not restored. Edit it in InferOps if needed.`,
-        };
-      }
-      await binding.client.updateIssue(
-        binding.projectKey, record.issueId, record.previous, current.revision, revertKey);
-    }
-    binding.putAction({ ...record, status: "reverted" });
+    return revertBoardAction(this.#binding(), actionId);
   }
+}
+
+/**
+ * A connected person's other InferOps workspaces, for `findBoards` on a binding of `target`: those
+ * InferLab reported at connect time with a slug, each read with the person's own token in that
+ * workspace (the credentials object refuses any workspace that is not theirs). The tenant label is
+ * the binding's, since a person's workspaces share one tenant. The stopgap connection and the demo
+ * serve one workspace, so they search only the binding's.
+ */
+async function otherWorkspacesOf(env: Cloudflare.Env, exports: ExportsWithStores,
+                                 target: ProjectGatekeeperProps): Promise<DiscoverySource[]> {
+  const { accountId, connected, host, workspaceId } = target;
+  const tenant = parseHost(host)?.tenant;
+  if (!connected || host === DEMO_HOST || !tenant) return [];
+  const identity = await credentialsOf(exports, accountId).identity();
+  return (identity?.workspaces ?? []).flatMap(workspace => {
+    if (workspace.product === "infermind" || !workspace.workspaceSlug ||
+        workspace.workspaceId === workspaceId) {
+      return [];
+    }
+    const other = `${tenant}.${workspace.workspaceSlug}`;
+    if (!parseHost(other)) return [];
+    return [{
+      host: other,
+      client: clientFor(env, exports, { accountId, connected }, other, workspace.workspaceId),
+    }];
+  });
+}
+
+/** Forget a pending action of `binding`; reads stop simulating it at once. */
+function rejectPending(binding: ActionBinding, actionId: number): void {
+  if (binding.action(actionId)?.status === "pending") binding.deleteAction(actionId);
+}
+
+/**
+ * Send a board action's recorded request under the action's idempotency key, so a repeated apply
+ * (or one whose response was lost) is answered by InferOps without writing twice. The fingerprint
+ * staged with the action must still match the request, and `check`, when given, must pass, or
+ * nothing is sent. A failure is returned with what it proves (apply-attempts.ts): a first attempt
+ * InferOps refused, or one that failed before sending, is known not applied, and a refusal that will
+ * stand ends the action `failed` and no longer simulated; anything after an attempt that may have
+ * reached InferOps is unknown.
+ */
+async function applyBoardAction(binding: ProjectBinding, actionId: number,
+                                check?: () => Promise<void>): Promise<void | { failed: ActionApplyFailure }> {
+  const record = binding.action(actionId);
+  if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
+  if (record.status === "applied") return;
+  if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
+  if (isCodingAction(record) || isWikiAction(record)) {
+    throw new Error(`InferOps action ${actionId} is not a board action.`);
+  }
+  const fields = { projectKey: binding.projectKey, action: actionId };
+  const key = binding.idempotencyKey(actionId);
+  return binding.applyOnce(record, {
+    policy: BOARD_WRITES, fields,
+    check: async () => {
+      await assertFingerprint(binding.scope, record, fields);
+      await check?.();
+    },
+    async send(marked) {
+      switch (record.kind) {
+        case "transition":
+          await binding.client.transition(
+            binding.projectKey, record.issueId, record.toStateId, record.expectedRevision, key);
+          return { ...marked, status: "applied" };
+        case "create": {
+          const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
+          return { ...marked, status: "applied", createdIdentifier: created.identifier } as ActionRecord;
+        }
+        case "update": {
+          const updated = await binding.client.updateIssue(
+            binding.projectKey, record.issueId, record.changes, record.expectedRevision, key);
+          return { ...marked, status: "applied", appliedRevision: updated.revision } as ActionRecord;
+        }
+      }
+    },
+  });
+}
+
+/**
+ * Undo an applied move or title/priority update, provided nothing has changed the issue since.
+ * The data source checks the current revision again, so a concurrent change makes this fail
+ * rather than clobber. Creates, and updates that changed the description, are submitted as not
+ * revertible.
+ */
+async function revertBoardAction(binding: ProjectBinding, actionId: number):
+    Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
+  const record = binding.action(actionId);
+  if (!record || record.status !== "applied") {
+    return { message: "This change was never applied, so there is nothing to revert." };
+  }
+  if (isCodingAction(record) || isWikiAction(record)) return { message: "This is not a board action." };
+  if (record.kind === "create") {
+    return {
+      message: `Creating ${record.createdIdentifier ?? "an issue"} cannot be undone here. ` +
+        `Cancel it in InferOps if needed.`,
+    };
+  }
+  if (record.kind === "update" && record.changes.description !== undefined) {
+    return {
+      message: `This change to ${record.identifier} replaced its description, which cannot be ` +
+        `restored here. Edit it in InferOps if needed.`,
+    };
+  }
+  let current: Issue;
+  try {
+    current = await binding.client.readIssue(binding.projectKey, record.issueId);
+  } catch (error) {
+    if (inferOpsErrorCode(error) !== "NOT_FOUND") throw error;
+    return { message: `${record.identifier} is no longer in project ${binding.projectKey}.` };
+  }
+  const revertKey = binding.idempotencyKey(actionId, ":revert");
+  if (record.kind === "transition") {
+    if (current.stateId !== record.toStateId) {
+      return {
+        message: `${record.identifier} has moved again since this change, so it was not moved ` +
+          `back. Move it in InferOps if needed.`,
+      };
+    }
+    await binding.client.transition(
+      binding.projectKey, record.issueId, record.fromStateId, current.revision, revertKey);
+  } else {
+    if (!stillShowsUpdate(record, current)) {
+      return {
+        message: `${record.identifier} has changed again since this update, so its previous ` +
+          `values were not restored. Edit it in InferOps if needed.`,
+      };
+    }
+    await binding.client.updateIssue(
+      binding.projectKey, record.issueId, record.previous, current.revision, revertKey);
+  }
+  binding.putAction({ ...record, status: "reverted" });
 }
 
 /**
@@ -1928,7 +2019,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   async readBoard(): Promise<Board> {
     const board = await this.#binding.board();
     const issues = board.columns.reduce((sum, column) => sum + column.issues.length, 0);
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: `Read InferOps board ${board.project.identifier}`,
       description:
         `Read the board of project ${board.project.identifier}: ${issues} issues in ` +
@@ -1952,7 +2043,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
       fail("INVALID_REQUEST", `A board search must be 1-${MAX_DISCOVERY_QUERY_LENGTH} characters.`);
     }
     const binding = this.#binding;
-    const { host } = binding.ctx.props;
+    const { host } = binding.target;
     if (host !== DEMO_HOST && !parseHost(host)) {
       fail("INVALID_REQUEST", "This connection's workspace cannot be searched.");
     }
@@ -1995,9 +2086,8 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     const others = workspaces.length - 1;
     const where = others > 0
       ? `${host} and ${others} other workspace${others === 1 ? "" : "s"}` : host;
-    const observers = Array.from(binding.kv.list({ prefix: OBSERVER_PREFIX }),
-      ([key]) => key.slice(OBSERVER_PREFIX.length));
-    await this.#queue.authorizeObservation({
+    const observers = binding.observers();
+    await this.#binding.observe(this.#queue, {
       title: `Searched InferOps boards on ${where}`,
       description:
         `Matched a search against the ${count} projects listed on ` +
@@ -2084,7 +2174,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
 
   async read(): Promise<Issue> {
     const issue = await this.#binding.issue(this.#issueId).catch(hideIssueExistence);
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: `Read InferOps issue ${issue.identifier}`,
       description: `Read issue ${issue.identifier} of project ${this.#binding.projectKey}.`,
     });
@@ -2230,8 +2320,12 @@ export class InferOpsDispatchGatekeeper
     implements Gatekeeper<InferOpsDispatchSession> {
   #binding(): ProjectBinding {
     const { accountId, connected, host, workspaceId } = this.ctx.props;
-    return new ProjectBinding(this.ctx,
-      codingClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId));
+    const kv = this.ctx.storage.kv;
+    return new ProjectBinding(this.ctx.props, {
+      store: new ActionStore(kv),
+      client: codingClientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId),
+      observers: () => admittedObservers(kv),
+    });
   }
 
   async describe(): Promise<ResourceDescription> {
@@ -2389,7 +2483,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
     const allowed = codingRepoAllowlist(this.#env);
     const repos = (await this.#binding.client.listRepos())
       .map(repo => ({ ...repo, allowed: allowed.has(repo.id.toLowerCase()) }));
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: "List InferOps repositories",
       description: `Listed the ${repos.length} repositories of the workspace of project ` +
         `${this.#binding.projectKey}; ${repos.filter(r => r.allowed).length} are allowed for coding.`,
@@ -2401,7 +2495,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
     if (runId.startsWith(PROVISIONAL_RUN)) fail("NOT_FOUND", "No such run in this project.");
     const binding = this.#binding;
     const run = await binding.client.readRun(binding.projectKey, runId).catch(hideRunExistence);
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: `Read InferOps coding run of ${run.issueIdentifier}`,
       description: `Read the ${run.status} coding run of issue ${run.issueIdentifier} of project ` +
         `${binding.projectKey}.`,
@@ -2417,7 +2511,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
       ...dispatches.toSorted((a, b) => b.actionId - a.actionId).map(provisionalRun),
       ...runs.map(run => shownRun(run, cancels)),
     ];
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: `Read InferOps coding runs of ${binding.projectKey}`,
       description: `Read the ${runs.length} recent coding runs of project ${binding.projectKey}.`,
     });
@@ -2540,22 +2634,24 @@ const MAX_SECTION_BODY = 100_000;
 /** InferOps' bound on a page body (`EditPageRequestSchema`). */
 const MAX_PAGE_BODY = 200_000;
 
-/** A Wiki binding: its action store, data source and the edits still waiting for a decision. */
-class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
-  constructor(ctx: DurableObjectState<WikiGatekeeperProps>, client: InferOpsClient) {
-    super(ctx, client, WIKI_SCOPE);
+/**
+ * A Wiki binding: its action store, data source and the edits still waiting for a decision.
+ * `target` is its scope, as for a project binding.
+ */
+class WikiBinding extends ActionBinding {
+  constructor(readonly target: WikiGatekeeperProps, parts: BindingParts) {
+    super(parts, WIKI_SCOPE);
   }
 
   get host(): string {
-    return this.ctx.props.host;
+    return this.target.host;
   }
 
   /** Pending section and page body edits, oldest first. */
   pendingEdits(): WikiEditAction[] {
     const edits: WikiEditAction[] = [];
-    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
-      const record = readAction(raw);
-      if (record?.status === "pending" && isWikiEdit(record)) edits.push(record);
+    for (const record of this.store.records()) {
+      if (record.status === "pending" && isWikiEdit(record)) edits.push(record);
     }
     return edits.toSorted((a, b) => a.actionId - b.actionId);
   }
@@ -2563,16 +2659,10 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
   /** Pending proposal approvals, oldest first. */
   pendingApprovals(): ProposalApproveAction[] {
     const approvals: ProposalApproveAction[] = [];
-    for (const [, raw] of this.kv.list({ prefix: ACTION_PREFIX })) {
-      const record = readAction(raw);
-      if (record?.status === "pending" && record.kind === "proposal-approve") approvals.push(record);
+    for (const record of this.store.records()) {
+      if (record.status === "pending" && record.kind === "proposal-approve") approvals.push(record);
     }
     return approvals.toSorted((a, b) => a.actionId - b.actionId);
-  }
-
-  /** The collaborators admitted to this binding (strategy B), by id. */
-  observers(): string[] {
-    return Array.from(this.kv.list({ prefix: OBSERVER_PREFIX }), ([key]) => key.slice(OBSERVER_PREFIX.length));
   }
 
   /**
@@ -2583,7 +2673,7 @@ class WikiBinding extends ActionBinding<WikiGatekeeperProps> {
    * person approving here must be that sender.
    */
   approvalRefusal(): string | null {
-    if (!this.ctx.props.connected && this.host !== DEMO_HOST) return APPROVE_NEEDS_OWN_SIGN_IN;
+    if (!this.target.connected && this.host !== DEMO_HOST) return APPROVE_NEEDS_OWN_SIGN_IN;
     if (this.observers().length > 0) return APPROVE_NOT_SHARED;
     return null;
   }
@@ -2671,8 +2761,12 @@ export class InferOpsWikiGatekeeper
     implements Gatekeeper<InferOpsWikiSession> {
   #binding(): WikiBinding {
     const { accountId, connected, host, workspaceId } = this.ctx.props;
-    return new WikiBinding(
-      this.ctx, clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId));
+    const kv = this.ctx.storage.kv;
+    return new WikiBinding(this.ctx.props, {
+      store: new ActionStore(kv),
+      client: clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId),
+      observers: () => admittedObservers(kv),
+    });
   }
 
   async describe(): Promise<ResourceDescription> {
@@ -2724,186 +2818,200 @@ export class InferOpsWikiGatekeeper
     this.ctx.storage.kv.delete(OBSERVER_PREFIX + id);
   }
 
-  /**
-   * Apply a section edit or a page body edit; see `#sendSectionEdit` and `#sendBodyEdit`. The
-   * fingerprint is required: every Wiki record has one. Both are reconcile-only
-   * (apply-attempts.ts): a failure before sending is known not applied, any other failure leaves
-   * the outcome unknown, and once an attempt may have reached InferOps no later apply sends it
-   * again, even when the page now shows the edit. A proposal approval is replayable instead; see
-   * `#applyApproval`.
-   */
+  /** See `applyWikiAction`. */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
       Promise<void | { failed: ActionApplyFailure }> {
-    const binding = this.#binding();
-    const record = binding.action(actionId);
-    if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-    if (record.status === "applied") return;
-    if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
-    if (!isWikiAction(record)) throw new Error(`InferOps action ${actionId} is not a Wiki action.`);
-    const fields = { host: binding.host, action: actionId };
-    if (record.kind === "proposal-approve") return this.#applyApproval(binding, record, fields);
-    return binding.applyOnce(record, {
-      policy: RECONCILE_ONLY, fields,
-      check: () => assertFingerprint(WIKI_SCOPE, record, fields, { required: true }),
-      send: marked => record.kind === "document-update"
-        ? this.#sendBodyEdit(binding, marked as DocumentUpdateAction)
-        : this.#sendSectionEdit(binding, marked as SectionUpdateAction),
-    });
-  }
-
-  /**
-   * Apply an approval of a proposal: replayable (`PROPOSAL_APPROVE`), since InferOps' refusals roll
-   * back and a same-principal, same-hash resend answers the decided proposal. Checked first, inside
-   * `applyOnce` so nothing is marked dispatched before it passes: that only the binding's own
-   * account holder could have decided it (a collaborator may have been admitted since it was
-   * staged), refused unsent and left pending as a FORBIDDEN a later apply can pass; then the
-   * fingerprint. Sent under `<instance>:<action>`. Applied means approved and queued, with the
-   * state InferOps answered; publication is InferOps' later job, read through `readProposal`.
-   */
-  async #applyApproval(binding: WikiBinding, record: ProposalApproveAction, fields: Partial<LogFields>):
-      Promise<void | { failed: ActionApplyFailure }> {
-    return binding.applyOnce(record, {
-      policy: PROPOSAL_APPROVE, fields,
-      check: async () => {
-        const refusal = binding.approvalRefusal();
-        if (refusal !== null) {
-          logger.warn("proposal approval refused before sending", {
-            event: "proposal-approve.apply.not_owner_only", ...fields, code: "FORBIDDEN",
-          });
-          throw new CheckRefused("FORBIDDEN", refusal);
-        }
-        await assertFingerprint(WIKI_SCOPE, record, fields, { required: true });
-      },
-      send: async marked => {
-        const approved = await binding.client.approveProposal(
-          record.proposalId, { proposalHash: record.proposalHash, sources: record.sources },
-          binding.idempotencyKey(record.actionId));
-        return { ...(marked as ProposalApproveAction), status: "applied", approvedState: approved.state };
-      },
-    });
-  }
-
-  /**
-   * A page body edit is sent as it was approved: the body, the version it was proposed at, and a
-   * key fixed per action (`<instance>:<action>`). InferOps compares the version itself, so the page
-   * is not read first, and its text decides nothing: a page already holding this body at a later
-   * version fails STALE_REVISION like any other change, since matching text does not show this
-   * action wrote it. Returns the record with the version reported.
-   */
-  async #sendBodyEdit(binding: WikiBinding, record: DocumentUpdateAction): Promise<ActionRecord> {
-    const written = await binding.client.updateDocument(
-      record.documentId, { body: record.body }, record.expectedVersion,
-      binding.idempotencyKey(record.actionId));
-    return { ...record, status: "applied", appliedVersion: written.version };
-  }
-
-  /**
-   * Send a section edit. InferOps' section PATCH takes no expected version and ignores the
-   * idempotency key, so the check is made here, by reading the section first:
-   *
-   * - at the version the edit was proposed at: send the body (under the action's key, for when
-   *   InferOps honors it), and record the version InferOps reports;
-   * - already showing exactly this body at a later version, on a first attempt: the same text was
-   *   written elsewhere, so it counts as applied and nothing is sent;
-   * - anything else: refused as stale, nothing sent.
-   *
-   * The read and the write are two requests, so an edit made in between is overwritten (see the
-   * design's Open Questions).
-   */
-  async #sendSectionEdit(binding: WikiBinding, record: SectionUpdateAction): Promise<ActionRecord> {
-    let current: WikiSectionRecord;
-    try {
-      current = await binding.client.readSection(record.sectionId);
-    } catch (error) {
-      throw atStage(error, "unsent");
-    }
-    if (current.version === record.expectedVersion) {
-      const updated = await binding.client.updateSection(
-        record.sectionId, record.body, binding.idempotencyKey(record.actionId));
-      return { ...record, status: "applied", appliedVersion: updated.version };
-    }
-    if (current.body === record.body) {
-      logger.info("section edit already in effect", {
-        event: "section-update.apply.in_effect", host: binding.host, action: record.actionId,
-      });
-      return { ...record, status: "applied", appliedVersion: current.version };
-    }
-    throw new InferOpsError("STALE_REVISION", "The section changed since the edit was proposed.",
-                            { stage: "unsent" });
+    return applyWikiAction(this.#binding(), actionId);
   }
 
   /** Forget the pending edit; reads stop showing it at once. */
   async rejectAction(actionId: number): Promise<void> {
-    const binding = this.#binding();
-    if (binding.action(actionId)?.status === "pending") binding.deleteAction(actionId);
+    rejectPending(this.#binding(), actionId);
   }
 
-  /**
-   * Restore the body an applied edit replaced, provided the section or page is still exactly what
-   * the edit left; otherwise explain instead of clobbering a later edit. A section is checked by
-   * reading it (its version and body); a page by InferOps' compare-and-swap, sent expecting the
-   * version the edit produced under `<instance>:<action>:revert`, so a page changed since in any way
-   * fails STALE_REVISION and keeps its content, and a retried revert whose response was lost is
-   * replayed under its key.
-   */
+  /** See `revertWikiAction`. */
   async revertAction(actionId: number):
       Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
-    const binding = this.#binding();
-    const record = binding.action(actionId);
-    if (record?.kind === "proposal-approve") {
-      return { message: "An approval cannot be undone here. If the page was published, edit it in InferMind." };
-    }
-    if (!record || record.status !== "applied") {
-      return { message: "This change was never applied, so there is nothing to revert." };
-    }
-    if (!isWikiEdit(record)) return { message: "This is not a Wiki action." };
-    if (record.kind === "document-update") return this.#revertBodyEdit(binding, record);
-    let current: WikiSectionRecord;
-    try {
-      current = await binding.client.readSection(record.sectionId);
-    } catch (error) {
-      if (inferOpsErrorCode(error) !== "NOT_FOUND") throw error;
-      return { message: `Section ${plainInline(record.tag, 60)} is no longer in this Wiki.` };
-    }
-    if (current.version !== record.appliedVersion || current.body !== record.body) {
-      return {
-        message: `Section ${plainInline(record.tag, 60)} has changed again since this edit, so its previous text ` +
-          `was not restored. Edit it in InferMind if needed.`,
-      };
-    }
-    await binding.client.updateSection(
-      record.sectionId, record.previousBody, binding.idempotencyKey(actionId, ":revert"));
-    binding.putAction({ ...record, status: "reverted" });
+    return revertWikiAction(this.#binding(), actionId);
   }
+}
 
-  async #revertBodyEdit(binding: WikiBinding, record: DocumentUpdateAction):
-      Promise<void | { message?: string }> {
-    const page = `Page "${plainInline(record.documentTitle, 60)}"`;
-    if (record.appliedVersion === undefined) {
-      return { message: `${page} has no recorded version for this edit, so its previous text was not restored.` };
-    }
-    try {
-      await binding.client.updateDocument(
-        record.documentId, { body: record.previousBody }, record.appliedVersion,
-        binding.idempotencyKey(record.actionId, ":revert"));
-    } catch (error) {
-      switch (inferOpsErrorCode(error)) {
-        case "STALE_REVISION":
-          return {
-            message: `${page} has changed again since this edit, so its previous text was not ` +
-              `restored. Edit it in InferMind if needed.`,
-          };
-        case "NOT_FOUND":
-          return { message: `${page} is no longer in this Wiki.` };
-        default:
-          throw error;
+/**
+ * Apply a section edit or a page body edit; see `sendSectionEdit` and `sendBodyEdit`. The
+ * fingerprint is required: every Wiki record has one. Both are reconcile-only
+ * (apply-attempts.ts): a failure before sending is known not applied, any other failure leaves
+ * the outcome unknown, and once an attempt may have reached InferOps no later apply sends it
+ * again, even when the page now shows the edit. A proposal approval is replayable instead; see
+ * `applyApproval`.
+ */
+async function applyWikiAction(binding: WikiBinding, actionId: number, check?: () => Promise<void>):
+    Promise<void | { failed: ActionApplyFailure }> {
+  const record = binding.action(actionId);
+  if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
+  if (record.status === "applied") return;
+  if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
+  if (!isWikiAction(record)) throw new Error(`InferOps action ${actionId} is not a Wiki action.`);
+  const fields = { host: binding.host, action: actionId };
+  if (record.kind === "proposal-approve") return applyApproval(binding, record, fields, check);
+  return binding.applyOnce(record, {
+    policy: RECONCILE_ONLY, fields,
+    check: async () => {
+      await assertFingerprint(binding.scope, record, fields, { required: true });
+      await check?.();
+    },
+    send: marked => record.kind === "document-update"
+      ? sendBodyEdit(binding, marked as DocumentUpdateAction)
+      : sendSectionEdit(binding, marked as SectionUpdateAction),
+  });
+}
+
+/**
+ * Apply an approval of a proposal: replayable (`PROPOSAL_APPROVE`), since InferOps' refusals roll
+ * back and a same-principal, same-hash resend answers the decided proposal. Checked first, inside
+ * `applyOnce` so nothing is marked dispatched before it passes: that only the binding's own
+ * account holder could have decided it (a collaborator may have been admitted since it was
+ * staged), refused unsent and left pending as a FORBIDDEN a later apply can pass; then the
+ * fingerprint. Sent under `<instance>:<action>`. Applied means approved and queued, with the
+ * state InferOps answered; publication is InferOps' later job, read through `readProposal`.
+ */
+async function applyApproval(binding: WikiBinding, record: ProposalApproveAction, fields: Partial<LogFields>,
+                             check?: () => Promise<void>):
+    Promise<void | { failed: ActionApplyFailure }> {
+  return binding.applyOnce(record, {
+    policy: PROPOSAL_APPROVE, fields,
+    check: async () => {
+      const refusal = binding.approvalRefusal();
+      if (refusal !== null) {
+        logger.warn("proposal approval refused before sending", {
+          event: "proposal-approve.apply.not_owner_only", ...fields, code: "FORBIDDEN",
+        });
+        throw new CheckRefused("FORBIDDEN", refusal);
       }
-    }
-    binding.putAction({ ...record, status: "reverted" });
-    logger.info("document-update reverted", {
-      event: "document-update.reverted", host: binding.host, action: record.actionId,
-    });
+      await assertFingerprint(binding.scope, record, fields, { required: true });
+      await check?.();
+    },
+    send: async marked => {
+      const approved = await binding.client.approveProposal(
+        record.proposalId, { proposalHash: record.proposalHash, sources: record.sources },
+        binding.idempotencyKey(record.actionId));
+      return { ...(marked as ProposalApproveAction), status: "applied", approvedState: approved.state };
+    },
+  });
+}
+
+/**
+ * A page body edit is sent as it was approved: the body, the version it was proposed at, and a
+ * key fixed per action (`<instance>:<action>`). InferOps compares the version itself, so the page
+ * is not read first, and its text decides nothing: a page already holding this body at a later
+ * version fails STALE_REVISION like any other change, since matching text does not show this
+ * action wrote it. Returns the record with the version reported.
+ */
+async function sendBodyEdit(binding: WikiBinding, record: DocumentUpdateAction): Promise<ActionRecord> {
+  const written = await binding.client.updateDocument(
+    record.documentId, { body: record.body }, record.expectedVersion,
+    binding.idempotencyKey(record.actionId));
+  return { ...record, status: "applied", appliedVersion: written.version };
+}
+
+/**
+ * Send a section edit. InferOps' section PATCH takes no expected version and ignores the
+ * idempotency key, so the check is made here, by reading the section first:
+ *
+ * - at the version the edit was proposed at: send the body (under the action's key, for when
+ *   InferOps honors it), and record the version InferOps reports;
+ * - already showing exactly this body at a later version, on a first attempt: the same text was
+ *   written elsewhere, so it counts as applied and nothing is sent;
+ * - anything else: refused as stale, nothing sent.
+ *
+ * The read and the write are two requests, so an edit made in between is overwritten (see the
+ * design's Open Questions).
+ */
+async function sendSectionEdit(binding: WikiBinding, record: SectionUpdateAction): Promise<ActionRecord> {
+  let current: WikiSectionRecord;
+  try {
+    current = await binding.client.readSection(record.sectionId);
+  } catch (error) {
+    throw atStage(error, "unsent");
   }
+  if (current.version === record.expectedVersion) {
+    const updated = await binding.client.updateSection(
+      record.sectionId, record.body, binding.idempotencyKey(record.actionId));
+    return { ...record, status: "applied", appliedVersion: updated.version };
+  }
+  if (current.body === record.body) {
+    logger.info("section edit already in effect", {
+      event: "section-update.apply.in_effect", host: binding.host, action: record.actionId,
+    });
+    return { ...record, status: "applied", appliedVersion: current.version };
+  }
+  throw new InferOpsError("STALE_REVISION", "The section changed since the edit was proposed.",
+                          { stage: "unsent" });
+}
+
+/**
+ * Restore the body an applied edit replaced, provided the section or page is still exactly what
+ * the edit left; otherwise explain instead of clobbering a later edit. A section is checked by
+ * reading it (its version and body); a page by InferOps' compare-and-swap, sent expecting the
+ * version the edit produced under `<instance>:<action>:revert`, so a page changed since in any way
+ * fails STALE_REVISION and keeps its content, and a retried revert whose response was lost is
+ * replayed under its key.
+ */
+async function revertWikiAction(binding: WikiBinding, actionId: number):
+    Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
+  const record = binding.action(actionId);
+  if (record?.kind === "proposal-approve") {
+    return { message: "An approval cannot be undone here. If the page was published, edit it in InferMind." };
+  }
+  if (!record || record.status !== "applied") {
+    return { message: "This change was never applied, so there is nothing to revert." };
+  }
+  if (!isWikiEdit(record)) return { message: "This is not a Wiki action." };
+  if (record.kind === "document-update") return revertBodyEdit(binding, record);
+  let current: WikiSectionRecord;
+  try {
+    current = await binding.client.readSection(record.sectionId);
+  } catch (error) {
+    if (inferOpsErrorCode(error) !== "NOT_FOUND") throw error;
+    return { message: `Section ${plainInline(record.tag, 60)} is no longer in this Wiki.` };
+  }
+  if (current.version !== record.appliedVersion || current.body !== record.body) {
+    return {
+      message: `Section ${plainInline(record.tag, 60)} has changed again since this edit, so its previous text ` +
+        `was not restored. Edit it in InferMind if needed.`,
+    };
+  }
+  await binding.client.updateSection(
+    record.sectionId, record.previousBody, binding.idempotencyKey(actionId, ":revert"));
+  binding.putAction({ ...record, status: "reverted" });
+}
+
+async function revertBodyEdit(binding: WikiBinding, record: DocumentUpdateAction):
+    Promise<void | { message?: string }> {
+  const page = `Page "${plainInline(record.documentTitle, 60)}"`;
+  if (record.appliedVersion === undefined) {
+    return { message: `${page} has no recorded version for this edit, so its previous text was not restored.` };
+  }
+  try {
+    await binding.client.updateDocument(
+      record.documentId, { body: record.previousBody }, record.appliedVersion,
+      binding.idempotencyKey(record.actionId, ":revert"));
+  } catch (error) {
+    switch (inferOpsErrorCode(error)) {
+      case "STALE_REVISION":
+        return {
+          message: `${page} has changed again since this edit, so its previous text was not ` +
+            `restored. Edit it in InferMind if needed.`,
+        };
+      case "NOT_FOUND":
+        return { message: `${page} is no longer in this Wiki.` };
+      default:
+        throw error;
+    }
+  }
+  binding.putAction({ ...record, status: "reverted" });
+  logger.info("document-update reverted", {
+    event: "document-update.reverted", host: binding.host, action: record.actionId,
+  });
 }
 
 /** A page as the session shows it: its pending edits overlaid, and a Master's structure if read. */
@@ -2929,7 +3037,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
 
   async listDocuments(): Promise<WikiDocumentNode[]> {
     const documents = await this.#binding.client.listDocuments();
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: "List InferMind Wiki pages",
       description: `Listed the ${documents.length} pages of the InferMind Wiki of ${this.#binding.host}.`,
     });
@@ -2951,7 +3059,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
   async readStructure(): Promise<WikiStructure> {
     const structure = await this.#binding.client.readStructure();
     const filed = new Set(structure.pillars.flatMap(p => p.members.map(m => m.id)));
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: "Read InferMind Wiki structure",
       description: `Read how the InferMind Wiki of ${this.#binding.host} is organized: ` +
         `${structure.root ? "a company root page" : "no company root page"}, ` +
@@ -2986,7 +3094,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       masterRole: head.masterRole, ...(pendingBody ? { pendingBody: true as const } : {}), sections,
       references: embeddedReferences(authoredContent(head.title, { body, visibleSections: sections.map(s => s.body) })),
     };
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: `Read Wiki page ${plainInline(head.slug, 80)}`,
       description: `Read page "${plainInline(head.title, 120)}" of the InferMind Wiki of ` +
         `${this.#binding.host}: ${body.trim() ? "its body, " : ""}${sections.length} sections, ` +
@@ -3018,9 +3126,8 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     const text = await binding.client.readDocumentText(documentId).catch(hideDocumentExistence);
     if (text === null) fail("NOT_FOUND", "Nothing on this page is readable.");
     const title = /^# (.*)/.exec(text)?.[1] ?? "";
-    const observers = Array.from(binding.kv.list({ prefix: OBSERVER_PREFIX }),
-      ([key]) => key.slice(OBSERVER_PREFIX.length));
-    await this.#queue.authorizeObservation({
+    const observers = binding.observers();
+    await this.#binding.observe(this.#queue, {
       title: `Read Wiki page ${plainInline(slugOrId, 80)} as text`,
       description: `Read page "${plainInline(title, 120)}" of the InferMind Wiki of ${binding.host} ` +
         "as text, as InferOps composes it for this connection: its content, and for a Master its " +
@@ -3038,7 +3145,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       generated: structure ? masterStructureText(head, structure) : null,
     });
     if (text === null) fail("NOT_FOUND", "Nothing on this page is readable.");
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: `Read Wiki page ${plainInline(head.slug, 80)} as text`,
       description: `Read page "${plainInline(head.title, 120)}" of the InferMind Wiki of ` +
         `${this.#binding.host} as text, with its pending edits: ` +
@@ -3164,7 +3271,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     const binding = this.#binding;
     const records = await binding.client.listProposals(state).catch(hideProposalExistence);
     const approvals = binding.pendingApprovals();
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: "List InferMind Wiki proposals",
       description: `Listed the ${records.length} ${state === undefined ? "" : `${state} `}page proposals ` +
         `of the InferMind Wiki of ${binding.host}, with their content.`,
@@ -3176,7 +3283,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     if (!UUID.test(proposalId)) fail("NOT_FOUND", PROPOSAL_NOT_FOUND);
     const binding = this.#binding;
     const { proposal, freshness } = await this.#readProposal(proposalId);
-    await this.#queue.authorizeObservation({
+    await this.#binding.observe(this.#queue, {
       title: `Read Wiki proposal ${plainInline(proposal.targetSlug, 80)}`,
       description: `Read proposal "${plainInline(proposal.title, 120)}" (revision ${proposal.revision}) of the ` +
         `InferMind Wiki of ${binding.host}: ${proposal.state}, ` +
