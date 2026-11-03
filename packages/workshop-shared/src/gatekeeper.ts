@@ -81,6 +81,13 @@ export type VendorDescription = {
 }
 
 /**
+ * What a person asks to do with configuration other people use (see
+ * `GatekeeperUser.holdsSharedConfiguration`): `build` edits a shared workspace, `publish` shares a
+ * workspace or makes its configuration live for the people it is shared with.
+ */
+export type SharedConfigurationAction = "build" | "publish";
+
+/**
  * Per-open context the Workshop passes to GatekeeperUser.startAppUi(). `isAdmin` is supplied fresh
  * each time rather than baked into the account, since a user's admin status can change over time.
  */
@@ -757,6 +764,16 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * fresh per open (not baked into the account) so admin-gated features reflect current status.
    */
   startAppUi?(context: AppUiContext): Promise<GatekeeperUiFrame>;
+
+  /**
+   * Whether the person behind this account may `build` (edit) or `publish` (share, make live)
+   * configuration other people use, as the service this account signs in to decides it, freshly,
+   * with the person's own credentials. Called only on accounts of the vendor a deployment names in
+   * `SHARED_CONFIGURATION_GATEKEEPER`; the Workshop gates on that setting rather than probing the
+   * stub. Return false when the person holds no such authority; throw when it can't be told, and
+   * the Workshop refuses.
+   */
+  holdsSharedConfiguration?(action: SharedConfigurationAction): Promise<boolean>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.

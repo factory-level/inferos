@@ -5,7 +5,7 @@ import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assis
 import { localApiModels } from './local-api-models.js';
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -19,6 +19,7 @@ import { blueprintVersionKeys, isReservedBlueprintKey, readBlueprintContent, rea
 import { assertPublicationFlagOn, byRequestedDesc, PUBLICATION_AUDIENCES, readPublicationSnapshot, withPublicationStatus, type StoredPublicationRecord } from "./publication.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 
 const logger = createWorkshopLogger("workshop.user");
@@ -121,11 +122,44 @@ export type ProvidedAccountInfo = {
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names; see the note above.
+type SharedConfigurationAccountStub = Required<Pick<GatekeeperUser, "holdsSharedConfiguration">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
   if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
   return true;
+}
+
+/**
+ * Whether `vendorId` says the person may `action` shared configuration, asking each of their
+ * connected accounts of that vendor with live credentials in turn; the first yes wins. False when
+ * none says yes, including when they have none. An account that can't answer is logged and counts
+ * as no, but when none answered and one failed it throws, so an outage never reads as a refusal.
+ */
+export async function holdsSharedConfiguration(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string, action: SharedConfigurationAction,
+): Promise<boolean> {
+  let failed = false;
+  let answered = false;
+  for (let record of records) {
+    if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
+    try {
+      let holds = await (record.account as unknown as SharedConfigurationAccountStub)
+        .holdsSharedConfiguration(action);
+      answered = true;
+      if (holds === true) return true;
+    } catch (err) {
+      failed = true;
+      logger.warn("shared configuration authority could not be read", {
+        event: "shared.configuration.check.failed", vendorId, accountId: record.id, error: err,
+      });
+    }
+  }
+  if (failed && !answered) {
+    throw new Error("Couldn't check whether you may change shared configuration. Try again.");
+  }
+  return false;
 }
 
 /**
@@ -2015,6 +2049,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record?.description.providesUi) throw new Error("No such app.");
     return (record.account as unknown as SingletonAccountStub).startAppUi(context);
+  }
+
+  /**
+   * Whether this person may `build` or `publish` shared configuration, as the deployment's
+   * SHARED_CONFIGURATION_GATEKEEPER vendor decides it through their own connected accounts (the
+   * module-level `holdsSharedConfiguration`). True when the deployment names no vendor.
+   */
+  async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<boolean> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return true;
+    return holdsSharedConfiguration(this.#connectedAccountRecords(), vendorId, action);
   }
 
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[])

@@ -81,6 +81,8 @@ export async function openFakeOverseer(
     open: OverseerDurableObject.prototype.open,
     impl: {
       ownerId,
+      // A deployment with no optional authorization settings (e.g. SHARED_CONFIGURATION_GATEKEEPER).
+      env: {},
       assertGatekeeperUsable: () => {},
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},

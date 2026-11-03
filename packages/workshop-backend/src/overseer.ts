@@ -3,6 +3,12 @@ import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
+import { getSharedConfigurationGatekeeper } from "./auth/config.js";
+
+// The refusal when the deployment's shared-configuration authority doesn't let the caller share or
+// publish (see getSharedConfigurationGatekeeper). It names no role: who may is that service's call.
+const SHARED_CONFIGURATION_REFUSED =
+    "You don't have permission to share or publish configuration other people use.";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
@@ -39,7 +45,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplyFailure } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -10818,6 +10824,15 @@ class OverseerImpl implements AgentHooks {
     return this.#sharingManager;
   }
 
+  /**
+   * Whether this workspace is shared configuration: it has a collaborator or a live share link, so
+   * what is built here reaches other people. Read when SHARED_CONFIGURATION_GATEKEEPER is set.
+   */
+  async isSharedConfiguration(): Promise<boolean> {
+    let sharing = await this.getSharingManager();
+    return sharing.listCollaborators().length > 0 || sharing.listShareLinkRecords().length > 0;
+  }
+
   // The live role lookup auto-approval checks a rule's enabler against (see autoApprovalRule).
   // Synchronous, so the submit-time check stays in the submit's one step. Until the sharing manager
   // is resolved it knows no roles, so no rule fires: callers about to check resolve it first.
@@ -11598,6 +11613,21 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       user_id: userId,
       source: shareKey ? "share_key" : "direct",
     });
+
+    // Shared configuration: where the deployment names who decides it, building in a workspace
+    // other people use takes that authority, freshly, from the caller's own connected account; the
+    // owner is no exception. Without it the session is the read-only "use" one. A person's own
+    // unshared workspaces, and their operate session, are theirs to build in.
+    if (role === "build" && !operateSession && getSharedConfigurationGatekeeper(this.impl.env)
+        && await this.impl.isSharedConfiguration()) {
+      let holds = await clientUser.holdsSharedConfiguration("build").catch((err: unknown) => {
+        this.impl.logger.warn("shared configuration check failed; opening read-only", {
+          event: "shared.configuration.open.failed", error: err,
+        });
+        return false;
+      });
+      if (!holds) role = "use";
+    }
 
     if (role === "use") {
       // "use" collaborators get a restricted capability exposing only the gadget UI.
@@ -12399,6 +12429,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // in one transaction only if the capture still holds (see ConsoleCapture), each widget entry
   // freezing its commit's surfaces and each bound view its spec.
   async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
+    await this.#requireSharedConfiguration("publish");
     let store = this.#consoleStore();
     let capture = store.capture(id, expectedRevision);
     let commits = await this.impl.readSourceCommits(capture.commitIds);
@@ -12609,6 +12640,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Per-session caller identity for the SharingManager.
   #sharingCaller(): SharingCaller {
     return { profileId: this.clientProfileId, isOwner: this.isOwner };
+  }
+
+  // Sharing a workspace or publishing from it makes configuration reach other people. Where the
+  // deployment names who decides that, the caller's own connected account must say they may
+  // `publish`, asked at each call so a revoked authority stops the next one.
+  async #requireSharedConfiguration(action: SharedConfigurationAction): Promise<void> {
+    if (!getSharedConfigurationGatekeeper(this.impl.env)) return;
+    let user = this.impl.users.get(this.impl.users.idFromString(this.clientUserId));
+    if (!(await user.holdsSharedConfiguration(action))) {
+      throw new Error(SHARED_CONFIGURATION_REFUSED);
+    }
   }
 
   // What a capability minted into this session counts as toward #hasCollaboratorSession -- the
@@ -14452,6 +14494,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
+    await this.#requireSharedConfiguration("publish");
     // Look up the user DO to check if the account exists.
     let userDoId = this.impl.users.idFromName(username);
     let userDo = this.impl.users.get(userDoId);
@@ -14542,11 +14585,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async createShareLink(role: CollaboratorRole, note?: string)
       : Promise<{ key: string; linkId: string }> {
+    await this.#requireSharedConfiguration("publish");
     return (await this.impl.getSharingManager())
         .createShareLink({ caller: this.#sharingCaller(), role, note });
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
+    await this.#requireSharedConfiguration("publish");
     return (await this.impl.getSharingManager())
         .newShareLinkKey({ caller: this.#sharingCaller(), linkId });
   }
