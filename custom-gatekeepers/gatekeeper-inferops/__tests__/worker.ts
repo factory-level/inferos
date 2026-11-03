@@ -415,11 +415,12 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   /** The account's answer to the Workshop's shared-configuration question, or its failure message. */
-  async holdsSharedConfiguration(props: AccountProps, action: "build" | "publish"): Promise<boolean | string> {
+  async holdsSharedConfiguration(props: AccountProps, action: "build" | "publish")
+      : Promise<{ holds: boolean; scope: string | null } | string> {
     const account = this.#account(props) as unknown as
       Required<Pick<GatekeeperUser, "holdsSharedConfiguration">>;
     try {
-      return await account.holdsSharedConfiguration(action);
+      return { ...await account.holdsSharedConfiguration(action) };
     } catch (error) {
       return String(error instanceof Error ? error.message : error);
     }
