@@ -615,18 +615,22 @@ export interface AccountWorkspace {
  * Coding dispatch is not included: it needs its own connection.
  */
 export interface InferOpsAccountSession {
-  /** Your workspaces in this organization. Refused in a workspace shared with others. */
+  /**
+   * Your workspaces in this organization. Refused in a workspace shared with others, and once
+   * called, this connection is no longer shared with anyone.
+   */
   listWorkspaces(): Promise<AccountWorkspace[]>;
   /**
    * Boards that match what the person described, across your InferOps workspaces in this
    * organization, as InferOpsProjectSession.findBoards matches them (1-200 characters, at most 8,
    * best first). Several candidates mean the person must choose. Open one with openBoard(boardRef).
-   * Refused in a workspace shared with others.
+   * Refused in a workspace shared with others, and once called, this connection is no longer
+   * shared with anyone.
    */
   findBoards(query: string): Promise<BoardCandidate[]>;
   /**
    * One project board, e.g. openBoard("inferops://acme.operations/project/board/ENG"), as a board
-   * connection would give it. Changes proposed through it are approved as for that board.
+   * connection would give it.
    */
   openBoard(boardRef: string): Promise<InferOpsProjectSession>;
   /**

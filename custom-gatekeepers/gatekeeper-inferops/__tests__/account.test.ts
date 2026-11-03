@@ -124,6 +124,8 @@ class FakeInferLab {
   /** The handbook page's body and version, and the page body writes InferOps took. */
   page = { body: "The handbook.", version: 3 };
   pageWrites: Array<{ body: string; idempotencyKey: string | null }> = [];
+  /** The issue updates InferOps took, with the workspace each was sent in. */
+  issueWrites: Array<{ workspaceId: string | null; title: string | undefined }> = [];
   /** Workspaces InferLab reports at sign-in. */
   workspaces: Array<{ workspaceId: string; workspaceName: string; product: string }> = [
     { workspaceId: OPS, workspaceName: "Ops", product: "inferops" },
@@ -386,6 +388,16 @@ class FakeInferLab {
             blockedReason: null,
           }],
         }],
+      });
+    }
+    if (url.pathname === `/project/issues/${DEMO_1}` && init.method === "PATCH") {
+      this.issueWrites.push({ workspaceId, title: body.title });
+      return Response.json({
+        issue: {
+          id: DEMO_1, identifier: "DEMO-1", title: body.title ?? "First", priority: "high", stateId: READY,
+          targetDate: null, workflow: "software", revision: "1042", assigneeId: null,
+          blockedReason: null, projectId: DEMO.id,
+        },
       });
     }
     if (url.pathname === `/project/issues/${DEMO_1}` && (init.method ?? "GET") === "GET") {
@@ -1790,5 +1802,25 @@ describe("an InferOps account binding of a connected person", () => {
     const refused = await hooks().applyBound("account-lost", action!.id);
     expect(refused).toBe("The update of DEMO-1 was not applied: Board DEMO on acme.sales is no longer one of your workspaces.");
     expect(inferlab.apiCalls.slice(before).filter(c => c.method !== "GET")).toEqual([]);
+  });
+
+  it("does not revert an applied action once the person no longer holds its workspace", async () => {
+    const { account, session } = await person("account-revert");
+    await session.openBoard(SALES_URL).openIssue(DEMO_1).update({ title: "Renamed in Sales" }, "1041");
+    const [action] = (await hooks().log()).actions.slice(-1);
+    expect(await hooks().applyBound("account-revert", action!.id)).toBeNull();
+    expect(inferlab.issueWrites).toEqual([{ workspaceId: SALES, title: "Renamed in Sales" }]);
+
+    inferlab.workspaces = inferlab.workspaces.filter(w => w.workspaceId !== SALES);
+    const response = await finish(await hooks().reconnectAccount(account));
+    expect(response.status, await response.text()).toBe(200);
+    const stageId = reconnects.find(r => r.label === "account-revert")!.stageId;
+    expect(await hooks().commitReconnect(account, stageId)).toBeNull();
+
+    const before = inferlab.apiCalls.length;
+    expect(await hooks().revertBound("account-revert", action!.id))
+      .toBe("The update of DEMO-1 was not reverted: Board DEMO on acme.sales is no longer one of your workspaces.");
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+    expect(inferlab.issueWrites).toHaveLength(1);
   });
 });

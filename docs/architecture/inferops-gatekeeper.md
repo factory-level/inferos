@@ -625,15 +625,19 @@ so Operate and host boards keep exact board bindings.
   the board and Wiki facets' fingerprints are unchanged). Apply runs the board or Wiki facet's own
   apply (`applyBoardAction`, `applyWikiAction`) after the fingerprint and then resolves the workspace
   again: a person who no longer holds it, or a slug that now names another workspace, refuses the
-  action unsent and for good. Every approval names its target first ("Target: Board GROK on
+  action unsent and for good. Reverting an applied action makes the same check first and writes
+  nothing when it fails. Every approval names its target first ("Target: Board GROK on
   grokbot.operations", or "Wiki of …").
 - **Collaborators (strategy C).** gatekeeper-kit's `ObserverTracker` keeps the binding's
   collaborators (with their verifiers) and one data set per board and per Wiki read, keyed as the
   stores are. A collaborator is admitted against every set read so far (`hasProjectAccess`,
   `hasWikiAccess` on their own verifier); the first read of a new set checks every stored
   collaborator again and excludes those who fail. `listWorkspaces`, `findBoards` (on the account and
-  on a board it opened) and `readDocumentText` exclude every collaborator, and a Wiki proposal
-  approval is refused while the binding has any, as on the facets.
+  on a board it opened) and `readDocumentText` on a Wiki it opened reveal more than any set, so they
+  go through the tracker's withhold fence (`prepareWithheld`): every current collaborator is
+  excluded, and once such a read is recorded the binding is owner-only for good, refusing every
+  later collaborator whatever they can open. Until then admission follows the per-set rule above.
+  A Wiki proposal approval is refused while the binding has any collaborator, as on the facets.
 - **Administration.** Disabling the board or Wiki kind in the admin settings does not reach an
   account binding already made, since that policy is checked when a binding is minted; disabling
   the account kind is the switch for it.

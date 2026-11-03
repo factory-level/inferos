@@ -743,6 +743,11 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /** Revert an action of a bound binding; the message it reports, or null once reverted. */
+  async revertBound(name: string, actionId: number): Promise<string | null> {
+    return (await this.#bound(name).revertAction(actionId))?.message ?? null;
+  }
+
   /** Admission of a collaborator by their own account's verifier, over a bound binding. */
   async addObserverFrom(name: string, observer: AccountProps): Promise<string | null> {
     try {

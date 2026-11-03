@@ -132,8 +132,8 @@
       "enabledBy": ["INFEROPS_ENABLED"],
       "observers": "exclusion",
       "reads": [
-        { "method": "listWorkspaces", "notes": "The person's workspaces in the organization; every collaborator is excluded." },
-        { "method": "findBoards", "notes": "As the board session's search, across the person's InferOps workspaces in the organization; every collaborator is excluded." },
+        { "method": "listWorkspaces", "notes": "The person's workspaces in the organization. Withheld: every current collaborator is excluded, and once it is recorded the binding is owner-only for good (no collaborator is admitted after it)." },
+        { "method": "findBoards", "notes": "As the board session's search, across the person's InferOps workspaces in the organization. Withheld as listWorkspaces is: the binding is owner-only from then on. So are findBoards on a board it opened and readDocumentText on a Wiki it opened." },
         { "method": "openBoard", "notes": "Not an observation: narrows to one board. Its session's reads are observations of that board's data set (strategy C)." },
         { "method": "openWiki", "notes": "Not an observation: narrows to one Wiki. Its session's reads are observations of that Wiki's data set (strategy C)." }
       ],
@@ -144,7 +144,7 @@
     "autoApprovable": [],
     "fingerprint": true,
     "rejection": "Deletes the pending record, which ends its simulation; a later apply of that id is refused as unknown.",
-    "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op. An account binding's actions are proposed through the board and Wiki sessions it opens: each record carries its resolved target (kind, host, workspace id, project key), the fingerprint covers it, records are kept per target and indexed by the binding-wide action id, and apply resolves the workspace again and refuses one that changed."
+    "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op. An account binding's actions are proposed through the board and Wiki sessions it opens: each record carries its resolved target (kind, host, workspace id, project key), the fingerprint covers it, records are kept per target and indexed by the binding-wide action id, and apply and revert resolve the workspace again and refuse one that changed."
   },
   "providerErrors": [
     { "code": "NOT_FOUND", "meaning": "The project, issue, run, page or section does not exist or is outside the binding's scope; the two are indistinguishable.", "retryable": false },

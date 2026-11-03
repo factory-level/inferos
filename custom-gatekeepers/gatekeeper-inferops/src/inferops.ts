@@ -1233,6 +1233,11 @@ type BindingParts = {
   observers: () => string[];
   /** Authorizes one observation; the approval queue's own, unchanged, unless given. */
   observe?: (queue: RpcStub<ApprovalQueue>, description: ObservationDescription) => Promise<void>;
+  /**
+   * Authorizes an observation no collaborator's admission covers (a board search, a page's
+   * composed text). Unless given: excluding every current collaborator, through `observe`.
+   */
+  withhold?: (queue: RpcStub<ApprovalQueue>, description: ObservationDescription) => Promise<void>;
 };
 
 /**
@@ -1248,6 +1253,7 @@ class ActionBinding {
   /** How an approval names the target, for an account binding's board or Wiki; else undefined. */
   readonly targetLabel: string | undefined;
   readonly #observe: BindingParts["observe"];
+  readonly #withhold: BindingParts["withhold"];
 
   constructor(parts: BindingParts, facetScope: string) {
     this.store = parts.store;
@@ -1256,6 +1262,7 @@ class ActionBinding {
     this.scope = parts.account?.scope ?? facetScope;
     this.targetLabel = parts.account?.label;
     this.#observe = parts.observe;
+    this.#withhold = parts.withhold;
   }
 
   /**
@@ -1274,6 +1281,16 @@ class ActionBinding {
   /** Authorize an observation of this binding's data before it is returned. */
   observe(queue: RpcStub<ApprovalQueue>, description: ObservationDescription): Promise<void> {
     return this.#observe ? this.#observe(queue, description) : queue.authorizeObservation(description);
+  }
+
+  /**
+   * Authorize an observation that reveals more than any collaborator was admitted for: by default
+   * excluding every current one, or as the binding's `withhold` part decides.
+   */
+  observeWithheld(queue: RpcStub<ApprovalQueue>, description: ObservationDescription): Promise<void> {
+    if (this.#withhold) return this.#withhold(queue, description);
+    const observers = this.observers();
+    return this.observe(queue, observers.length > 0 ? { ...description, excludeObservers: observers } : description);
   }
 
   /** A random id for this facet, so two bindings of one account never share idempotency keys. */
@@ -2171,11 +2188,9 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     const others = workspaces.length - 1;
     const where = others > 0
       ? `${host} and ${others} other workspace${others === 1 ? "" : "s"}` : host;
-    const observers = binding.observers();
-    await this.#binding.observe(this.#queue, {
+    await binding.observeWithheld(this.#queue, {
       title: `Searched InferOps boards on ${where}`,
       description: searchedText(count, workspaces, candidates),
-      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
     });
     return candidates;
   }
@@ -3208,13 +3223,11 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     const text = await binding.client.readDocumentText(documentId).catch(hideDocumentExistence);
     if (text === null) fail("NOT_FOUND", "Nothing on this page is readable.");
     const title = /^# (.*)/.exec(text)?.[1] ?? "";
-    const observers = binding.observers();
-    await this.#binding.observe(this.#queue, {
+    await binding.observeWithheld(this.#queue, {
       title: `Read Wiki page ${plainInline(slugOrId, 80)} as text`,
       description: `Read page "${plainInline(title, 120)}" of the InferMind Wiki of ${binding.host} ` +
         "as text, as InferOps composes it for this connection: its content, and for a Master its " +
         "structure and documentation coverage, with embedded widgets as their live text.",
-      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
     });
     return text;
   }
@@ -3624,12 +3637,32 @@ export class InferOpsAccountGatekeeper
    * which uses the store its index names, so a record whose stored target was changed is refused
    * by its fingerprint rather than looked up elsewhere.
    */
+  /**
+   * Authorize an observation no collaborator was admitted for (the workspace list, a board search,
+   * a page's composed text): every current collaborator is excluded, and once it is recorded the
+   * binding is owner-only for good (gatekeeper-kit's withhold latch), since a set-less read gives a
+   * later collaborator nothing to be verified against.
+   */
+  async #observeWithheld(queue: RpcStub<ApprovalQueue>, description: ObservationDescription) {
+    const check = this.#tracker.prepareWithheld();
+    const excluded = check.excludeObservers ?? [];
+    try {
+      await queue.authorizeObservation(excluded.length > 0 ? { ...description, excludeObservers: excluded } : description);
+    } catch (error) {
+      if (isObservationRefused(error)) check.discard?.();
+      else check.abandon?.();
+      throw error;
+    }
+    check.commit();
+  }
+
   #parts(scope: ActionScope, key = scopeKey(scope)): BindingParts {
     return {
       store: new ScopedActionStore(this.ctx.storage.kv, key),
       client: clientFor(this.env, this.ctx.exports, this.#account(), scope.host, scope.workspaceId),
       observers: () => this.#tracker.observerIds(),
       observe: (queue, description) => this.#observeSet(queue, key, description),
+      withhold: (queue, description) => this.#observeWithheld(queue, description),
       account: { scope, label: scopeLabel(scope) },
     };
   }
@@ -3702,7 +3735,7 @@ export class InferOpsAccountGatekeeper
 
   /**
    * The person's workspaces in this organization, each with its slug: the demo's one workspace for
-   * the demo data. Observed as the account's own, so every collaborator is excluded from it.
+   * the demo data. Withheld from every collaborator, and the binding is owner-only from then on.
    */
   async #listWorkspaces(queue: RpcStub<ApprovalQueue>): Promise<AccountWorkspace[]> {
     const { tenant } = this.ctx.props;
@@ -3712,11 +3745,9 @@ export class InferOpsAccountGatekeeper
       : ((await credentialsOf(this.ctx.exports, this.ctx.props.accountId).identity())?.workspaces ?? [])
         .flatMap(w => w.workspaceSlug && parseHost(`${tenant}.${w.workspaceSlug}`)
           ? [{ slug: w.workspaceSlug, name: w.workspaceName, product: w.product ?? "inferops" }] : []);
-    const observers = this.#tracker.observerIds();
-    await queue.authorizeObservation({
+    await this.#observeWithheld(queue, {
       title: `Listed your InferOps workspaces in ${tenant}`,
       description: `Listed the ${workspaces.length} InferOps and InferMind workspaces you hold in ${tenant}.`,
-      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
     });
     return workspaces;
   }
@@ -3724,7 +3755,8 @@ export class InferOpsAccountGatekeeper
   /**
    * Rank the boards of every InferOps workspace the person holds in this organization (or the
    * demo's), as a board binding's `findBoards` does; a workspace InferOps now refuses is left out.
-   * Every collaborator is excluded, since none was admitted for boards not yet read.
+   * Withheld from every collaborator, and the binding is owner-only from then on, since none was
+   * admitted for boards not yet read.
    */
   async #findBoards(queue: RpcStub<ApprovalQueue>, query: string): Promise<BoardCandidate[]> {
     const text = boardQuery(query);
@@ -3739,11 +3771,9 @@ export class InferOpsAccountGatekeeper
           return [{ host, client: clientFor(this.env, this.ctx.exports, account, host, w.workspaceId) }];
         });
     const { candidates, workspaces, count } = await searchBoards(text, sources, () => true);
-    const observers = this.#tracker.observerIds();
-    await queue.authorizeObservation({
+    await this.#observeWithheld(queue, {
       title: `Searched InferOps boards in ${tenant}`,
       description: searchedText(count, workspaces, candidates),
-      ...(observers.length > 0 ? { excludeObservers: observers } : {}),
     });
     return candidates;
   }
@@ -3811,8 +3841,8 @@ export class InferOpsAccountGatekeeper
       }
     };
     return scope.kind === "board"
-      ? { kind: "board" as const, binding: this.#boardBinding(scope, key), check }
-      : { kind: "wiki" as const, binding: this.#wikiBinding(scope, key), check };
+      ? { kind: "board" as const, binding: this.#boardBinding(scope, key), check, record }
+      : { kind: "wiki" as const, binding: this.#wikiBinding(scope, key), check, record };
   }
 
   /**
@@ -3837,6 +3867,15 @@ export class InferOpsAccountGatekeeper
       Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
     const routed = this.#routed(actionId);
     if (!routed) return { message: "This change was never applied, so there is nothing to revert." };
+    // As at apply: a workspace the person no longer holds (or a slug now naming another) is not written.
+    try {
+      if (routed.record.status === "applied") await routed.check();
+    } catch (error) {
+      if (error instanceof CheckRefused) {
+        return { message: error.reason.replace(" was not applied: ", " was not reverted: ") };
+      }
+      throw error;
+    }
     return routed.kind === "board"
       ? revertBoardAction(routed.binding, actionId)
       : revertWikiAction(routed.binding, actionId);

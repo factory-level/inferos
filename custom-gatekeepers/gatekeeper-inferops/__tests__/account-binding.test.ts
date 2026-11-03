@@ -269,6 +269,36 @@ describe("collaborators (strategy C)", () => {
     expect((await hooks.log()).excluded).toEqual([["everything"], ["everything"], ["everything"], []]);
   });
 
+  const WITHHELD = "can no longer be observed by anyone but its owner";
+
+  it.each([
+    ["listWorkspaces", (session: ReturnType<typeof setup>["session"]) => session.listWorkspaces()],
+    ["findBoards", (session: ReturnType<typeof setup>["session"]) => session.findBoards("platform")],
+    ["findBoards on a board it opened",
+      (session: ReturnType<typeof setup>["session"]) => session.openBoard(DEMO_BOARD).findBoards("platform")],
+    ["readDocumentText on a Wiki it opened",
+      (session: ReturnType<typeof setup>["session"]) => session.openWiki(DEMO_WIKI).readDocumentText("handbook")],
+  ])("is owner-only for good once %s has run: a later collaborator is refused, whoever they are", async (_, read) => {
+    const { props, hooks, session } = setup();
+    await read(session);
+    expect((await hooks.log()).excluded).toEqual([[]]);
+    // Not even a collaborator who can open everything, nor one with no InferOps access at all.
+    expect(await hooks.addAccountObserver(props, "everything", ALL)).toContain(WITHHELD);
+    expect(await hooks.addAccountObserver(props, "nobody", { projects: [], wikis: [] })).toContain(WITHHELD);
+  });
+
+  it("follows the per-board and per-Wiki rules until such a read, and latches once one runs", async () => {
+    const { props, hooks, session } = setup();
+    await session.openBoard(DEMO_BOARD).readBoard();
+    expect(await hooks.addAccountObserver(props, "none", { projects: [], wikis: [] }))
+      .toContain("cannot open every InferOps board and Wiki");
+    expect(await hooks.addAccountObserver(props, "demo", { projects: ["DEMO"], wikis: [] })).toBeNull();
+
+    await session.listWorkspaces();
+    expect((await hooks.log()).excluded.at(-1)).toEqual(["demo"]);
+    expect(await hooks.addAccountObserver(props, "late", ALL)).toContain(WITHHELD);
+  });
+
   it("refuses a Wiki proposal approval while the binding has a collaborator", async () => {
     const { props, hooks, session } = setup();
     expect(await hooks.addAccountObserver(props, "everything", ALL)).toBeNull();
