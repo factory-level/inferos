@@ -7,7 +7,6 @@ import type {
   AgentSpawnerConfig,
   AiChatAuthorInfo,
   AuthenticatedApi,
-  GadgetClient,
   Overseer,
   WorkpieceId,
 } from '@gadgets/workshop-shared/api'
@@ -33,7 +32,6 @@ export interface AgentBindingRef {
 export interface AgentSettingsModalProps {
   /** The agent being edited, or null when the modal is closed. */
   target: AgentBindingRef | null
-  gadget: RpcStub<GadgetClient>
   overseer: RpcStub<Overseer>
   authenticatedApi: RpcStub<AuthenticatedApi> | null
   /** What the gadget can offer an agent's bindings: itself and its own bindings. */
@@ -44,18 +42,40 @@ export interface AgentSettingsModalProps {
   onSaved: () => void
 }
 
-/** The agent's saved configuration, read through the gadget's binding to it. */
-async function loadAgentConfig(gadget: RpcStub<GadgetClient>, name: string): Promise<AgentSpawnerConfig> {
-  const gk = await gadget.getBinding(name)
-  try {
-    if (!gk) throw new Error('This agent is no longer bound to the gadget.')
-    const spec = await gk.getCreationSpec()
-    if (spec.type !== 'agentSpawner') throw new Error('This connection is not an agent.')
-    return spec.config
-  } finally {
-    gk?.[Symbol.dispose]()
+/**
+ * Which of `targets` are agent `selfId` or reach it through agents' env, so offering them would let
+ * the agent spawn itself (the server refuses that too). `readEnv` gives an agent's env, or null for
+ * anything that isn't an agent; each workpiece is read at most once.
+ */
+export async function agentsReaching(
+  selfId: WorkpieceId,
+  targets: WorkpieceId[],
+  readEnv: (id: WorkpieceId) => Promise<Record<string, WorkpieceId> | null>,
+): Promise<Set<WorkpieceId>> {
+  const envs = new Map<WorkpieceId, Promise<Record<string, WorkpieceId> | null>>()
+  const envOf = (id: WorkpieceId) => {
+    if (!envs.has(id)) envs.set(id, readEnv(id).catch(() => null))
+    return envs.get(id)!
   }
+  const reaches = async (start: WorkpieceId) => {
+    const seen = new Set<WorkpieceId>()
+    const queue = [start]
+    while (queue.length) {
+      const id = queue.pop()!
+      if (id === selfId) return true
+      if (seen.has(id)) continue
+      seen.add(id)
+      queue.push(...Object.values((await envOf(id)) ?? {}))
+    }
+    return false
+  }
+  const reaching = new Set<WorkpieceId>()
+  for (const target of targets) if (await reaches(target)) reaching.add(target)
+  return reaching
 }
+
+const CREATOR_ONLY = "Only the person who created this agent can change its model, instructions and " +
+  "capabilities: its agents run with that person's account and authority. You can change its name."
 
 /**
  * Another agent's selection laid over this one's rows: what it reaches here is switched on under its
@@ -78,7 +98,6 @@ const errorText = (err: unknown, fallback: string) =>
  */
 export const AgentSettingsModal = ({
   target,
-  gadget,
   overseer,
   authenticatedApi,
   envCandidates,
@@ -88,6 +107,7 @@ export const AgentSettingsModal = ({
 }: AgentSettingsModalProps) => {
   // The configuration as last read or saved: the server refuses an edit made against a stale one.
   const [saved, setSaved] = useState<AgentSpawnerConfig | null>(null)
+  const [createdByYou, setCreatedByYou] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
   const [displayName, setDisplayName] = useState('')
@@ -105,13 +125,20 @@ export const AgentSettingsModal = ({
     setNotice(null)
     if (!target) return
     let cancelled = false
-    loadAgentConfig(gadget, target.name).then((config) => {
+    const selfId = target.gatekeeperId
+    Promise.all([
+      overseer.getAgentSpawner(selfId),
+      // Never offer an agent that would let this one spawn itself.
+      agentsReaching(selfId, envCandidates.map((c) => c.target),
+        async (id) => (await overseer.getAgentSpawner(id)).config.env),
+    ]).then(([{ config, createdByYou: mine }, reaching]) => {
       if (cancelled) return
       setSaved(config)
+      setCreatedByYou(mine)
       setDisplayName(config.displayName)
       setModelId(config.modelId)
       setInstructions(config.instructions ?? '')
-      setRows(rowsForAgentEnv(config.env, envCandidates))
+      setRows(rowsForAgentEnv(config.env, envCandidates.filter((c) => !reaching.has(c.target))))
     }).catch((err) => {
       if (cancelled) return
       reportIssue('connections.agent-load', err)
@@ -125,7 +152,7 @@ export const AgentSettingsModal = ({
     }
     // Reload only when another agent is opened; candidates changing underneath keep the edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, gadget, authenticatedApi])
+  }, [target, overseer, authenticatedApi])
 
   const behaviour: AgentSpawnerBehaviour = {}
   if (saved) {
@@ -178,7 +205,9 @@ export const AgentSettingsModal = ({
   const startFrom = async (name: string) => {
     setError(null)
     try {
-      const other = await loadAgentConfig(gadget, name)
+      const agent = otherAgents.find((a) => a.name === name)
+      if (!agent) return
+      const { config: other } = await overseer.getAgentSpawner(agent.gatekeeperId)
       setRows(rowsFromOtherAgent(rows, other.env))
     } catch (err) {
       setError(errorText(err, "Could not read that agent's capabilities."))
@@ -222,6 +251,7 @@ export const AgentSettingsModal = ({
                   onDisplayNameChange={setDisplayName}
                   onModelIdChange={setModelId}
                   onInstructionsChange={setInstructions}
+                  lockedReason={createdByYou ? undefined : CREATOR_ONLY}
                 />
                 <div className="flex justify-end">
                   <WorkshopButton
@@ -242,7 +272,7 @@ export const AgentSettingsModal = ({
                   Changed only here, never by the settings above. Agents already running keep what
                   they started with. Only the person who created this agent can change this.
                 </p>
-                {otherAgents.length > 0 && (
+                {createdByYou && otherAgents.length > 0 && (
                   <ConnectionConfigField
                     label="Start from another agent"
                     description="Copy another agent's selection, then review it before saving."
@@ -266,16 +296,17 @@ export const AgentSettingsModal = ({
                   env={rows}
                   envError={envError}
                   onEnvChange={setRows}
+                  disabled={!createdByYou}
                   description="What this agent's spawned agents can reach, and the names they see it under."
                 />
-                <div className="flex justify-end">
+                {createdByYou && <div className="flex justify-end">
                   <WorkshopButton
                     onClick={saveCapabilities}
                     disabled={busy !== null || !envChanged || envError !== null}
                   >
                     {busy === 'capabilities' ? 'Saving...' : 'Save capabilities'}
                   </WorkshopButton>
-                </div>
+                </div>}
               </div>
             </>
           )}

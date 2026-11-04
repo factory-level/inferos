@@ -9,6 +9,8 @@ export interface AgentBindingsFieldProps {
   onEnvChange: (env: SpawnerEnvRow[]) => void
   /** Overrides the field's description, e.g. to say when a change takes effect. */
   description?: string
+  /** Shows the rows without letting them change. */
+  disabled?: boolean
 }
 
 /**
@@ -20,6 +22,7 @@ export const AgentBindingsField = ({
   envError,
   onEnvChange,
   description = 'What spawned agents may use, and the names they see it under.',
+  disabled = false,
 }: AgentBindingsFieldProps) => {
   const updateRow = (index: number, updates: Partial<SpawnerEnvRow>) => {
     onEnvChange(env.map((row, i) => (i === index ? { ...row, ...updates } : row)))
@@ -39,12 +42,13 @@ export const AgentBindingsField = ({
               <Checkbox
                 aria-label={`Give spawned agents access to ${row.targetTitle}`}
                 checked={row.enabled}
+                disabled={disabled}
                 onCheckedChange={(checked) => updateRow(index, { enabled: checked === true })}
               />
               <WorkshopInput
                 aria-label={`Binding name for ${row.targetTitle}`}
                 value={row.name}
-                disabled={!row.enabled}
+                disabled={disabled || !row.enabled}
                 onChange={(e) => updateRow(index, { name: e.target.value })}
                 className="!h-8 w-[180px] min-w-0 font-mono"
               />

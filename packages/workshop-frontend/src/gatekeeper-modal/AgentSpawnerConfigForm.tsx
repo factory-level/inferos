@@ -90,6 +90,8 @@ export type AgentSpawnerConfigFormProps = {
   onInstructionsChange: (value: string) => void
   /** Present when the form also edits the agent's bindings (creating one); absent when they are edited apart. */
   bindings?: AgentSpawnerEnvProps
+  /** Why the model and instructions can't be changed here, which shows them read-only; absent when they can. */
+  lockedReason?: string
 }
 
 export function AgentSpawnerConfigForm({
@@ -101,6 +103,7 @@ export function AgentSpawnerConfigForm({
   onModelIdChange,
   onInstructionsChange,
   bindings,
+  lockedReason,
 }: AgentSpawnerConfigFormProps) {
   return (
     <section className="grid gap-4">
@@ -126,6 +129,7 @@ export function AgentSpawnerConfigForm({
           className="w-full text-sm [&_button]:!h-9"
           placeholder="Select a model"
           value={modelId}
+          disabled={lockedReason !== undefined}
           onValueChange={(v) => onModelIdChange(v as string | null)}
           renderValue={(id) => {
             if (id === null) return 'None (no agent)'
@@ -155,11 +159,18 @@ export function AgentSpawnerConfigForm({
           placeholder="e.g. Triage new service enquiries and draft a reply for review."
           value={instructions}
           maxLength={MAX_INSTANCE_INSTRUCTIONS_LENGTH}
+          readOnly={lockedReason !== undefined}
           onChange={(e) => onInstructionsChange(e.target.value)}
           rows={4}
           className="w-full"
         />
       </ConnectionConfigField>
+
+      {lockedReason && (
+        <p className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+          {lockedReason}
+        </p>
+      )}
 
       {bindings && <AgentBindingsField {...bindings} />}
     </section>

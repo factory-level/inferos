@@ -7,11 +7,11 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { AgentSpawnerConfig, AuthenticatedApi, GadgetClient, Overseer } from '@gadgets/workshop-shared/api'
+import type { AgentSpawnerConfig, AuthenticatedApi, Overseer } from '@gadgets/workshop-shared/api'
 
 vi.mock('../errorReporting', () => ({ reportIssue: vi.fn<() => void>() }))
 
-import { AgentSettingsModal, rowsFromOtherAgent, type AgentBindingRef } from './AgentSettingsModal'
+import { AgentSettingsModal, agentsReaching, rowsFromOtherAgent, type AgentBindingRef } from './AgentSettingsModal'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 // jsdom has no PointerEvent, which Kumo's checkbox dispatches on click.
@@ -32,25 +32,28 @@ const PLANNER: AgentBindingRef = { name: 'PLANNER', gatekeeperId: 8, title: 'Pla
 const CANDIDATES = [
   { target: 100, targetTitle: 'Jobs', name: 'JOBS' },
   { target: 200, targetTitle: 'Board', name: 'BOARD' },
+  { target: 9, targetTitle: 'Cycler', name: 'CYCLER' },
 ]
 
-function fakes(configs: Record<string, AgentSpawnerConfig> = { SERVICE_DESK: SAVED, PLANNER: OTHER }) {
-  const gadget = {
-    getBinding: vi.fn<(name: string) => Promise<unknown>>(async (name) => configs[name]
-      ? {
-        getCreationSpec: async () => ({ type: 'agentSpawner', config: configs[name] }),
-        [Symbol.dispose]: () => {},
-      }
-      : null),
-  } as unknown as RpcStub<GadgetClient>
+// Agents by workpiece id: 7 is the one edited, 8 another agent of the gadget, 9 an agent bound
+// to the gadget whose env reaches 7.
+const CYCLER: AgentSpawnerConfig = { displayName: 'Cycler', modelId: null, env: { DESK: 7 } }
+
+function fakes({ createdByYou = true }: { createdByYou?: boolean } = {}) {
+  const configs: Record<number, AgentSpawnerConfig> = { 7: SAVED, 8: OTHER, 9: CYCLER }
   const overseer = {
-    updateAgentSpawner: vi.fn<(id: number, expected: AgentSpawnerConfig, behaviour: object) => Promise<AgentSpawnerConfig>>(async (_id, expected, behaviour) =>
-      ({ ...expected, ...behaviour })),
-    setAgentSpawnerEnv: vi.fn<(id: number, expected: AgentSpawnerConfig, env: Record<string, number>) => Promise<AgentSpawnerConfig>>(async (_id, expected, env) =>
-      ({ ...expected, env })),
+    getAgentSpawner: vi.fn<(id: number) => Promise<{ config: AgentSpawnerConfig, createdByYou: boolean }>>(
+      async (id) => {
+        if (!configs[id]) throw new Error(`Workpiece ${id} is not an agent.`)
+        return { config: configs[id], createdByYou: id === 7 ? createdByYou : true }
+      }),
+    updateAgentSpawner: vi.fn<(id: number, expected: AgentSpawnerConfig, behaviour: object) => Promise<AgentSpawnerConfig>>(
+      async (_id, expected, behaviour) => ({ ...expected, ...behaviour })),
+    setAgentSpawnerEnv: vi.fn<(id: number, expected: AgentSpawnerConfig, env: Record<string, number>) => Promise<AgentSpawnerConfig>>(
+      async (_id, expected, env) => ({ ...expected, env })),
   }
   const authenticatedApi = { listModels: async () => [] } as unknown as RpcStub<AuthenticatedApi>
-  return { gadget, overseer, authenticatedApi }
+  return { overseer, authenticatedApi }
 }
 
 const byLabel = <T extends HTMLElement>(label: string) => {
@@ -92,7 +95,6 @@ describe('AgentSettingsModal', () => {
     act(() => root!.render(
       <AgentSettingsModal
         target={AGENT}
-        gadget={f.gadget}
         overseer={f.overseer as unknown as RpcStub<Overseer>}
         authenticatedApi={f.authenticatedApi}
         envCandidates={CANDIDATES}
@@ -111,6 +113,25 @@ describe('AgentSettingsModal', () => {
     expect(byLabel<HTMLTextAreaElement>('Agent instructions').value).toBe('Triage new service enquiries.')
     expect(byLabel<HTMLInputElement>('Binding name for Jobs').disabled).toBe(false)
     expect(byLabel<HTMLInputElement>('Binding name for Board').disabled).toBe(true)
+  })
+
+  it('never offers an agent that would let this one spawn itself', async () => {
+    await open()
+    expect(document.body.querySelector('[aria-label="Binding name for Cycler"]')).toBeNull()
+    expect(byLabel('Binding name for Board')).toBeTruthy()
+  })
+
+  it("shows a non-creator the model, instructions and capabilities read-only, and saves their name", async () => {
+    const f = await open(fakes({ createdByYou: false }))
+    expect(document.body.textContent).toContain('Only the person who created this agent can change its model')
+    expect(byLabel<HTMLTextAreaElement>('Agent instructions').readOnly).toBe(true)
+    expect(byLabel<HTMLInputElement>('Binding name for Jobs').disabled).toBe(true)
+    expect(Array.from(document.body.querySelectorAll('button')).some((b) => b.textContent === 'Save capabilities'))
+      .toBe(false)
+    await type(byLabel<HTMLInputElement>('Agent display name'), 'Service desk (EU)')
+    await click(button('Save'))
+    await settle()
+    expect(f.overseer.updateAgentSpawner).toHaveBeenCalledWith(7, SAVED, { displayName: 'Service desk (EU)' })
   })
 
   it('saves name and instructions without sending any capability', async () => {
@@ -132,6 +153,16 @@ describe('AgentSettingsModal', () => {
     await settle()
     expect(f.overseer.setAgentSpawnerEnv).toHaveBeenCalledWith(7, SAVED, { JOBS: 100, BOARD: 200 })
     expect(f.overseer.updateAgentSpawner).not.toHaveBeenCalled()
+  })
+
+  it('finds every agent that reaches this one, however far along', async () => {
+    const envs: Record<number, Record<string, number>> = { 1: { B: 2 }, 2: { C: 3 }, 3: { SELF: 7 }, 4: { JOBS: 100 } }
+    const read = vi.fn<(id: number) => Promise<Record<string, number> | null>>(async (id) => envs[id] ?? null)
+    expect(await agentsReaching(7, [1, 4, 7, 100], read)).toEqual(new Set([1, 7]))
+    expect(read).toHaveBeenCalledTimes(5)
+    // Each workpiece is read once, and a cycle that doesn't include this agent ends.
+    expect(await agentsReaching(7, [5], async (id): Promise<Record<string, number> | null> => (id === 5 ? { X: 6 } : id === 6 ? { Y: 5 } : null)))
+      .toEqual(new Set())
   })
 
   it("starts from another agent's capabilities by copying only what this gadget can offer", () => {

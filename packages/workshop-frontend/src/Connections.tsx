@@ -518,7 +518,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
 
       <AgentSettingsModal
         target={agentTarget}
-        gadget={gadget}
         overseer={overseer}
         authenticatedApi={authenticatedApi}
         // An agent is never offered to itself.

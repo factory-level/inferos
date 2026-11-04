@@ -98,8 +98,9 @@ An agent spawner is the workspace's configured agent. Its `AgentSpawnerConfig` i
   - A widened `env` restarts the "use" sessions it reaches through a binding gadget, as binding does. Whether `env` stays within each calling gadget's bindings is still checked on every call (above).
 - **In the prompt:** a spawned agent's instructions are added to its system prompt as configured behaviour that grants nothing (`formatAgentInstructions`), with any `</agent_instructions>` in the text escaped so it can't end the frame early. The bindings listed after them are all it can reach.
 - **In the UI:** a gadget's Connections tab shows an "Agent settings" button on each permanent binding to an agent. It finds them by asking each vendorless binding for its creation spec.
-  - `AgentSettingsModal` reopens the saved configuration. Name, model and instructions save together through `updateAgentSpawner`, and only the fields that changed are sent.
-  - Capabilities sit in their own section with their own save (`setAgentSpawnerEnv`). It is offered the gadget and its bindings, never the agent itself.
+  - `AgentSettingsModal` reopens the saved configuration through `getAgentSpawner`. Name, model and instructions save together through `updateAgentSpawner`, and only the fields that changed are sent.
+  - Capabilities sit in their own section with their own save (`setAgentSpawnerEnv`). It is offered the gadget and its bindings, never the agent itself or an agent that reaches it (`agentsReaching`).
+  - Someone who didn't create the agent sees its model, instructions and capabilities read-only, with the reason, and can change only its name.
   - "Start from another agent" copies another of the gadget's agents' selection into the rows (`rowsFromOtherAgent`) for review. It saves nothing by itself. Named, shared capability bundles are not built.
   - Server refusals, such as a stale edit or a creator-only change, are shown in the server's words.
   - Creating an agent (`GatekeeperModal`) also takes instructions.
