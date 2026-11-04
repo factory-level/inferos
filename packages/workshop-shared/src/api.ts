@@ -2638,8 +2638,8 @@ export interface Overseer extends RpcTarget {
   deleteCanvas(id: string, expectedRevision: string): Promise<void>;
   /**
    * Read one canvas as its nested page (ADR 0014): objects, widgets and attachments by stable ID.
-   * Requires build access and both flags; the use role is refused, since its screens are published
-   * version 1 copies. A missing canvas reads as null.
+   * Requires build access and both flags. It is the live draft, so the use role and an operate session
+   * are refused: they read only what a console published. A missing canvas reads as null.
    */
   getCanvasPage(id: string): Promise<CanvasPage | null>;
   /**

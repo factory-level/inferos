@@ -15688,7 +15688,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[])
       : Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
-  async getCanvasPage(id: string): Promise<CanvasPage | null> { return this.owner.getCanvasPage(id); }
+  // The nested page is the builder's live draft: an operate session reads only what a console published.
+  async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
   async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[])
       : Promise<CanvasPage> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
