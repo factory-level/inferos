@@ -30,6 +30,13 @@ vi.mock('@cloudflare/kumo', () => ({
       onClick={() => onCheckedChange(!checked)} />
   ),
   Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
+  Checkbox: ({ checked, onCheckedChange, 'aria-label': label }: {
+    checked: boolean
+    onCheckedChange: (checked: boolean) => void
+    'aria-label': string
+  }) => (
+    <input type="checkbox" aria-label={label} checked={checked} onChange={e => onCheckedChange(e.target.checked)} />
+  ),
   Button: ({ children, onClick, disabled }: { children: ReactNode; onClick?: () => void; disabled?: boolean }) => (
     <button type="button" onClick={onClick} disabled={disabled}>{children}</button>
   ),
@@ -90,6 +97,8 @@ async function render(overseer: Partial<Overseer>, gadgets: GadgetSummary[] = []
   const withDefaults: Partial<Overseer> = {
     listWorkflowDefinitions: async () => [],
     getTriggerDefinition: async () => null,
+    listTriggerControls: async () => [],
+    listCollaborators: async () => [],
     ...overseer,
   }
   await act(async () => {
@@ -205,5 +214,53 @@ describe('WorkflowTriggersPanel', () => {
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({
       title: "You don't have permission to share or publish configuration other people use.",
     }))
+  })
+})
+
+// FAC-102 part 2: who may run a pinned trigger on request.
+describe('a pinned trigger\'s run-on-request control', () => {
+  const PIN = { definitionId: 'def-1', revision: 1 }
+  const BEN_COLLABORATOR = { profile: BEN, addedBy: [], role: 'use' as const }
+  const setInput = (input: HTMLInputElement, value: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  it('lets a builder name a button and who may press it', async () => {
+    const setTriggerControl = vi.fn<Overseer['setTriggerControl']>(async () => null)
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      listCollaborators: async () => [BEN_COLLABORATOR], setTriggerControl,
+    })
+    expect(button('Add button')?.disabled).toBe(true)
+    await act(async () => { setInput(container.querySelector('[aria-label="Button label"]')!, 'Issue refunds now') })
+    await act(async () => { container.querySelector<HTMLInputElement>('[aria-label="Let Ben run it"]')!.click() })
+    await act(async () => { button('Add button')!.click() })
+    expect(setTriggerControl).toHaveBeenCalledWith(7, { label: 'Issue refunds now', invokers: ['ben'] })
+  })
+
+  it('shows an unpinned trigger no control', async () => {
+    await render({ listHooks: async () => [hook({ id: 7 })], listCollaborators: async () => [BEN_COLLABORATOR] })
+    expect(container.querySelector('[aria-label="Run on request"]')).toBeNull()
+  })
+
+  it('lists recent runs on request with who asked, and shows a refusal in the server\'s words', async () => {
+    const control = { hookId: 7, label: 'Issue refunds now', invokers: ['ben'], definition: PIN, configuredBy: ADA, configuredAt: new Date(0) }
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      listCollaborators: async () => [BEN_COLLABORATOR], listTriggerControls: async () => [control],
+      listWorkflowDeliveries: async () => [
+        { hookId: 7, definitionId: 'def-1', revision: 1, commitId: 'a'.repeat(40), at: new Date(0) },
+        { hookId: 7, definitionId: 'def-1', revision: 1, commitId: 'a'.repeat(40), at: new Date(1), invocation: { id: 'i1', requestedBy: 'ben' } },
+      ],
+      setTriggerControl: async () => { throw new Error("You don't have permission to share or publish configuration other people use.") },
+    })
+    await act(async () => {})
+    const runs = container.querySelector('[aria-label="Recent runs on request"]')!
+    expect(runs.querySelectorAll('li')).toHaveLength(1)
+    expect(runs.textContent).toContain('Requested by Ben')
+    await act(async () => { button('Remove')!.click() })
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toBe("You don't have permission to share or publish configuration other people use.")
   })
 })

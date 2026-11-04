@@ -11,6 +11,7 @@ import {
   GadgetSummary,
 } from '@gadgets/workshop-shared/api'
 import GadgetUI from './GadgetUI'
+import { WorkflowRunControls } from './features/workspace-kind/WorkflowRunControls'
 import UserMenu from './components/UserMenu'
 import { GadgetPresence } from './components/GadgetPresence'
 import TopBarNotice from './TopBarNotice'
@@ -146,6 +147,9 @@ export default function GadgetUseView({
           ))}
         </div>
       )}
+
+      {/* Workflow runs this person may ask for (FAC-102); nothing when they're listed on none. */}
+      <WorkflowRunControls overseer={overseer} />
 
       {/* ═══ GADGET UI ══════════════════════════════════════════════════════════ */}
       <div className="flex-1 min-h-0 overflow-hidden">
