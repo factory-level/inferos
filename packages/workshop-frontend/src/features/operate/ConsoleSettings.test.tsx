@@ -14,15 +14,17 @@ const state = vi.hoisted(() => ({
   boundViews: false,
   // One overseer for every render, as the real hook keeps it in state.
   overseer: null as unknown,
+  workpieces: new Map() as Map<number, object>,
+  getPage: vi.fn<(consoleId: string, screenId: string, source: string) => Promise<object | null>>(),
 }))
-state.overseer = { stub: { replaceConsole: state.replace, listConsoleWidgetCandidates: () => Promise.resolve([]) } }
+state.overseer = { stub: { replaceConsole: state.replace, listConsoleWidgetCandidates: () => Promise.resolve([]), getConsolePage: state.getPage } }
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ hostBoards: state.hostBoards, boundViews: state.boundViews }) }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({
   overseer: state.overseer, metadata: { role: state.denied ? 'use' : 'build' },
 }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWorkspaceScreens: state.invalidate }))
-vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ workpieces: new Map(), ready: true }) }))
+vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ workpieces: state.workpieces, ready: true }) }))
 import { ConsoleSettings } from './ConsoleSettings'
 
 const entry: ConsoleEntry = { workspace: { id: 'w1', title: 'Operations', created: new Date(), lastActive: new Date() }, screens: [], publishedScreens: [], console: {
@@ -37,7 +39,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('PointerEvent', MouseEvent)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  state.denied = false; state.hostBoards = false; state.boundViews = false; state.replace.mockReset().mockResolvedValue(); state.invalidate.mockClear(); close.mockClear(); edit.mockClear()
+  state.denied = false; state.hostBoards = false; state.boundViews = false; state.workpieces = new Map(); state.getPage.mockReset().mockResolvedValue(null); state.replace.mockReset().mockResolvedValue(); state.invalidate.mockClear(); close.mockClear(); edit.mockClear()
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 const render = () => act(() => root.render(<ConsoleSettings entry={entry} onClose={close} onEdit={edit} />))
@@ -161,4 +163,24 @@ it('keeps saved views untouched when not edited, and sends an edited list in ful
   act(() => container.querySelector<HTMLButtonElement>('[aria-label="Remove Triage view"]')!.click())
   await act(async () => save().click())
   expect(lastContent().boundViews).toEqual([])
+})
+
+it('tells the builder to publish again when a console published before apps were fenced places one only inside a nested page', async () => {
+  state.workpieces = new Map([[3, { id: 3, type: 'gadget', title: 'Counter', commitId: 'c1' }]])
+  // The published page holds the app one object deep; the version 1 copy shows none of it.
+  state.getPage.mockImplementation(async (_consoleId, screenId) => screenId !== 's1' ? null : {
+    schemaVersion: 2, id: 's1', revision: '5', title: 'Board', children: ['work'], attachments: [],
+    nodes: [
+      { nodeType: 'object', id: 'work', title: 'Work', columns: 1, children: ['inner'], attachments: [] },
+      { nodeType: 'object', id: 'inner', title: 'Inner', columns: 1, children: ['w3'], attachments: [] },
+      { nodeType: 'widget', id: 'w3', kind: 'inferos.gadget', version: 1, targetRef: 'gadget:3', size: 'normal', params: {}, attachments: [] },
+    ],
+  })
+  const legacy: ConsoleEntry = { ...entry, publishedScreens: [{ schemaVersion: 1, id: 's1', revision: '5', title: 'Board', sections: [] }],
+    console: { ...entry.console, published: { revision: '3', publishedAt: '2026-11-01T00:00:00.000Z', content: {
+      title: 'Operations', fullChat: 'default', views: entry.console.views } } } }
+  await act(async () => root.render(<ConsoleSettings entry={legacy} onClose={close} onEdit={edit} />))
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(state.getPage).toHaveBeenCalledWith('c1', 's1', 'published')
+  expect(container.textContent).toContain("Operators can't open Counter until you publish Operations again")
 })

@@ -25,8 +25,14 @@ export {
   type RetainedActionPage,
 } from "./action-journal";
 
-/** The queue surface staging needs; a session's own approval-queue stub satisfies it. */
-export type ActionSubmitter = Pick<RpcStub<ApprovalQueue>, "submitAction">;
+/**
+ * The queue surface staging needs; a session's own approval-queue stub satisfies it. Staging ignores
+ * what `submitAction` resolves to (the kernel's receipt, FAC-97), so a gatekeeper that doesn't hand
+ * receipts on, and a test queue that resolves to nothing, satisfy it too.
+ */
+export type ActionSubmitter = {
+  submitAction(...args: Parameters<RpcStub<ApprovalQueue>["submitAction"]>): Promise<unknown>;
+};
 
 type ActionLogFields =
   { outcome: ResolveOutcome; vendorId: string; action: number; stranded: number };

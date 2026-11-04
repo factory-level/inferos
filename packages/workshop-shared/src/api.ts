@@ -1,5 +1,5 @@
 import type { ActionResult } from "./action-outcome.js";
-import type { CanvasPage } from "./canvas-model.js";
+import type { CanvasPage, CanvasPageOperation } from "./canvas-model.js";
 import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-approval";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
@@ -2674,6 +2674,18 @@ export interface Overseer extends RpcTarget {
   editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition>;
   /** Delete a definition at its expected revision with build access and both flags. Reimport creates a new identity. */
   deleteCanvas(id: string, expectedRevision: string): Promise<void>;
+  /**
+   * Read one canvas as its nested page (ADR 0014): objects, widgets and attachments by stable ID.
+   * Requires build access and both flags. It is the live draft, so the use role and an operate session
+   * are refused: they read only what a console published. A missing canvas reads as null.
+   */
+  getCanvasPage(id: string): Promise<CanvasPage | null>;
+  /**
+   * Compare the page revision and apply typed page operations atomically, with build access and both
+   * flags. A stale revision throws the canvas conflict error and writes nothing. Removing a node
+   * removes only its reference on the page, never a record it names.
+   */
+  editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage>;
 
   /**
    * List this workspace's flows: ordered lists of its canvases that an operate session runs one
@@ -2798,6 +2810,20 @@ export interface Overseer extends RpcTarget {
    * Denied to the operate session.
    */
   getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
+   * `gadgetId` is the live app, with its own storage and bindings, never a copy (see
+   * `ConsolePublishedApp`). This is how the use role reaches an app a published console places,
+   * which `getGadget()` refuses it. It opens only while the app's current commit is the one
+   * published: once a builder changes the app, this refuses, saying a builder must publish the
+   * console again, and never offers the changed code instead. Every call on the returned capability
+   * checks that again, with the console still published at `revision` and open in the caller's
+   * operate session, so a capability kept from before the change, or from an older revision, stops
+   * working. Refused if the console is not published at `revision` or does not place the app there.
+   * Build access opens the app's mainline as `getGadget()` does, after the same placement check.
+   * Denied to the operate session.
+   */
+  getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
   /**
    * The local states (FAC-86) a widget a console offers declares, as published revision
    * `revision` froze them, or null when it declares none. Checked as `getConsoleWidget` checks

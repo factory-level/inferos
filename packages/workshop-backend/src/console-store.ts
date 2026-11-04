@@ -1,9 +1,9 @@
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
-import { nestedPage } from "./canvas-store";
-import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { canvasDefinitionProjection, canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { nestedPage, readCanvasDefinition } from "./canvas-store";
+import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -230,6 +230,49 @@ function placedGadgets(storage: Pick<ConsoleStorage, "canvasPages">, row: Canvas
   });
 }
 
+// Whether `record` is an app a screen places: a permanent gadget of this workspace that is not a
+// widget install, registered or frozen (those are the widget registry's; see `checkConsoleWidgets`).
+function isApp(record: ReturnType<ConsoleStorage["gadgets"]["get"]>): record is GadgetRecord {
+  return record?.type === "gadget" && !record.pending && !record.frozenFor && record.installedFrom?.kind !== "widget";
+}
+
+/**
+ * Each app the screens `content` shows place (FAC-89 part 2), once, in the order the screens show
+ * them, at any depth of a nested page, with its current commit (null when it has none).
+ */
+function placedApps(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent)
+    : { gadgetId: WorkpieceId; commitId: string | null }[] {
+  let seen = new Set<WorkpieceId>();
+  let apps: { gadgetId: WorkpieceId; commitId: string | null }[] = [];
+  for (let screenId of consoleScreens(content)) {
+    let row = storage.canvases.get(screenId);
+    for (let gadgetId of row ? placedGadgets(storage, row) : []) {
+      let record = storage.gadgets.get(gadgetId);
+      if (seen.has(gadgetId) || !isApp(record)) continue;
+      seen.add(gadgetId);
+      apps.push({ gadgetId, commitId: record.commitId ?? null });
+    }
+  }
+  return apps;
+}
+
+// The gadget ids a published screen copy places: its frozen page's, at any depth, when it has one,
+// otherwise its version 1 copy's. Apps keep their own ids there; only widgets were replaced.
+function snapshotGadgets(snapshot: ConsoleScreenSnapshot): WorkpieceId[] {
+  let widgets = snapshot.page ? snapshot.page.nodes.flatMap(node => node.nodeType === "widget" ? [node] : [])
+    : snapshot.screen.sections.flatMap(section => section.widgets);
+  return widgets.flatMap(widget => {
+    let match = widget.kind === "inferos.gadget" ? CANVAS_GADGET_REF.exec(widget.targetRef) : null;
+    return match ? [Number(match[1])] : [];
+  });
+}
+
+/** What an operator is told about an app whose commit moved since the console was published. */
+function appChanged(record: GadgetRecord | undefined, gadgetId: WorkpieceId, consoleTitle: string): string {
+  return `App ${record?.title ?? gadgetId} has changed since console ${consoleTitle} was published; ` +
+      "a builder must publish the console again before operators can open it.";
+}
+
 /** `page` with each placed gadget the map names replaced by its frozen install, at any depth. */
 function withFrozenNodes(page: CanvasPage, frozen: Map<WorkpieceId, WorkpieceId>): CanvasPage {
   return { ...page, nodes: page.nodes.map(node => {
@@ -349,6 +392,8 @@ export type ConsoleCapture = {
   commitIds: string[];
   /** Each screen the console shows, with the revision of the page it stands for (null if missing). */
   screens: { id: string; revision: string | null }[];
+  /** Each app those screens place, with its commit as read (see `placedApps`): what the publication fences. */
+  apps: { gadgetId: WorkpieceId; commitId: string | null }[];
 };
 
 function captureConsole(storage: Pick<ConsoleStorage, "gadgets" | "canvases" | "canvasPages">, stored: OperateConsole): ConsoleCapture {
@@ -367,7 +412,7 @@ function captureConsole(storage: Pick<ConsoleStorage, "gadgets" | "canvases" | "
   // A page saved beside an unchanged row (a nested page) moves only the page's revision.
   let screens = consoleScreens(stored).map(id => ({ id, revision: screenRevision(storage, id) }));
   return { revision: stored.revision, boundViews,
-    commitIds: [...new Set(registered.filter(commitId => commitId !== null))], screens };
+    commitIds: [...new Set(registered.filter(commitId => commitId !== null))], screens, apps: placedApps(storage, stored) };
 }
 
 // The surfaces a published widget entry freezes from its source commit: whether it has a UI, and
@@ -397,6 +442,9 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   checkConsoleWidgets(storage, content, commits);
   let screens = publishedPages(storage, content);
   let flows = publishedFlows(storage, content);
+  // Apps are fenced, not copied: they keep their storage and bindings (see `ConsolePublishedApp`).
+  let apps = placedApps(storage, content).flatMap(({ gadgetId, commitId }): ConsolePublishedApp[] =>
+    commitId === null ? [] : [{ gadgetId, commitId }]);
   let entries = content.widgets ?? [];
   if (entries.length > 0 && (!frozen || !commits)) throw new Error("This console's widgets cannot be published here.");
   let boundViews = (content.boundViews ?? []).map((entry): BoundViewEntry => {
@@ -421,14 +469,17 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   });
   dropPublishedScreens(storage, id);
   for (let { screenId, row, page } of screens) {
-    storage.consoleScreens.put({ consoleId: id, screenId, screen: withFrozenGadgets(row, frozenIds),
+    // The publication keeps the real nested page (FAC-89); `screen`, what a version 1 reader of the
+    // published console sees, is that page's projection (FAC-83), never the layout it replaced.
+    storage.consoleScreens.put({ consoleId: id, screenId,
+      screen: withFrozenGadgets(page ? canvasDefinitionProjection(page) : row, frozenIds),
       ...(page ? { page: withFrozenNodes(page, frozenIds) } : {}) });
   }
   let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
     ...(content.boundViews === undefined ? {} : { boundViews }) };
   let result: OperateConsole = { ...stored,
     published: { revision, publishedAt, content: publishedContent, ...(flows.length === 0 ? {} : { flows }),
-      screens: screens.map(({ screenId, row, page }) => ({ id: screenId, revision: (page ?? row).revision })) } };
+      screens: screens.map(({ screenId, row, page }) => ({ id: screenId, revision: (page ?? row).revision })), apps } };
   if (jsonBytes(result) > CONSOLE_SIZE_LIMITS.console) {
     throw new Error(`This console would be over ${CONSOLE_SIZE_LIMITS.console} bytes published.`);
   }
@@ -702,7 +753,7 @@ export class WorkspaceConsoleStore {
   screen(consoleId: string, screenId: string, source: ConsoleSource): CanvasDefinition | null {
     let shown = this.get(consoleId, source);
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
-    if (source === "draft") return this.storage.canvases.get(screenId) ?? null;
+    if (source === "draft") return readCanvasDefinition(this.storage, screenId);
     return this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
   }
 
@@ -751,6 +802,39 @@ export class WorkspaceConsoleStore {
       throw new Error(`Console ${consoleId} does not offer widget ${gadgetId}.`);
     }
     return entry;
+  }
+
+  /**
+   * The app `gadgetId` as console `consoleId`'s published revision `revision` fenced it (FAC-89
+   * part 2): its entry in `ConsolePublication.apps`. Throws if the console is no longer published at
+   * `revision`, like a stale console move; if that revision does not place the app (or placed it
+   * before apps were fenced, or when it had no commit); and, in words for the operator, once the
+   * app's current commit is no longer the one published, until a builder publishes the console
+   * again. Never offers the app's mainline in its place, nor any older commit.
+   */
+  offeredApp(consoleId: string, revision: string, gadgetId: WorkpieceId): ConsolePublishedApp {
+    let shown = this.get(consoleId, "published");
+    if (!shown) throw new Error(`Console ${consoleId} is not published.`);
+    if (shown.revision !== revision) throw new Error(`Console ${consoleId} has changed since it was opened.`);
+    let app = shown.published?.apps?.find(candidate => candidate.gadgetId === gadgetId);
+    if (!app) throw new Error(`Console ${consoleId} does not offer app ${gadgetId}.`);
+    let record = this.storage.gadgets.get(gadgetId);
+    if (!isApp(record) || record.commitId !== app.commitId) {
+      throw new Error(appChanged(isApp(record) ? record : undefined, gadgetId, shown.title));
+    }
+    return app;
+  }
+
+  /**
+   * Whether a published console of this workspace places the app `gadgetId` on a screen it shows
+   * (any publication, including one made before apps were fenced): such an app is opened only
+   * through that console (`offeredApp`), never directly by an operator.
+   */
+  placedByPublishedConsole(gadgetId: WorkpieceId): boolean {
+    for (let snapshot of this.storage.consoleScreens.list()) {
+      if (snapshotGadgets(snapshot).includes(gadgetId)) return isApp(this.storage.gadgets.get(gadgetId));
+    }
+    return false;
   }
 
   // The draft's bound view `entryId` at `revision`, whose source must still pass the install checks.

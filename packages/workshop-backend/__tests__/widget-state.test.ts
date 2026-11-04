@@ -114,3 +114,30 @@ describe("concurrent transitions", () => {
     });
   }
 });
+
+// FAC-86 part 2 (QA on #343): a malformed widget reference is refused before any console workspace
+// is asked for the widget's states, and extra fields are never read.
+describe("a malformed widget reference", () => {
+  it("is refused before anything is read, whatever is wrong with it", async () => {
+    let { OperateSessionImpl } = await import("../src/server.js");
+    let asked = 0;
+    let workspace = { getConsoleWidgetStates: async () => { asked++; return MACHINE; }, [Symbol.dispose]: () => {} };
+    let impl = new OperateSessionImpl(() => env.TEST_USER.getByName(crypto.randomUUID()) as never, async () => ({}) as never,
+      async () => workspace as never, () => ({}) as never, () => ({}) as never, {} as never);
+    const bad: unknown[] = [
+      null, "console-ws/intake/3/41", { ...REF, workspaceId: "" }, { ...REF, consoleId: 7 },
+      { ...REF, revision: "r".repeat(129) }, { ...REF, gadgetId: -1 }, { ...REF, gadgetId: 1.5 },
+      { ...REF, gadgetId: "41" }, { workspaceId: "console-ws", consoleId: "intake", revision: "3" },
+    ];
+    for (let ref of bad) {
+      await expect(Promise.resolve().then(() => impl.getWidgetState(ref as never)), JSON.stringify(ref)).rejects.toThrow();
+      await expect(Promise.resolve().then(() => impl.transitionWidget(ref as never, "edit", 0)), JSON.stringify(ref)).rejects.toThrow();
+    }
+    expect(asked).toBe(0);
+    // Extra fields aren't read: the workspace is asked with the four checked ones only.
+    let seen: unknown[] = [];
+    workspace.getConsoleWidgetStates = async (...args: unknown[]) => { seen = args; asked++; return MACHINE; };
+    await impl.getWidgetState({ ...REF, tenant: "other-company", gadgetId: REF.gadgetId } as never);
+    expect(seen).toEqual([REF.consoleId, REF.revision, REF.gadgetId]);
+  });
+});

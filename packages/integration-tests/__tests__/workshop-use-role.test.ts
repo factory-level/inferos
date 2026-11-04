@@ -83,6 +83,8 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
     "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
     "getConsoleScreen" | "getConsolePage" | "getConsoleWidget" |
+    // An app a published console places, at the commit it published (FAC-89 part 2, operate-console-apps.test.ts).
+    "getConsoleApp" |
     // A published widget's frozen local states, checked as getConsoleWidget is (FAC-86, widget-state.test.ts).
     "getConsoleWidgetStates" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
@@ -96,6 +98,9 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
+  // The nested page is the builder's (FAC-83): a non-builder can neither read nor edit it.
+  getCanvasPage: ws => ws.getCanvasPage("view"),
+  editCanvasPage: ws => ws.editCanvasPage("view", "0", [{ type: "renamePage", title: "New" }]),
   listFlows: ws => ws.listFlows(),
   createFlow: ws => ws.createFlow({ title: "Flow", steps: ["view"] }),
   replaceFlow: ws => ws.replaceFlow("flow", "0", { title: "Flow", steps: ["view"] }),

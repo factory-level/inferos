@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG, type CanvasCatalog, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
+import { canvasPageFromDefinition, type CanvasPage, type CanvasPageOperation } from '@gadgets/workshop-shared/canvas-model'
 import { CanvasWorkspacePane } from './CanvasWorkspacePane'
 import type { CanvasStorage } from './useCanvasWorkspace'
 
@@ -28,10 +29,19 @@ const render = async (storage: CanvasStorage, catalog: CanvasCatalog = DEFAULT_C
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
 const BOARD = 'inferops://demo.local/project/board/DEMO'
+/** The page read and page edit of a fake whose saved views are what `listCanvases` returns. */
+const withPages = <T extends { listCanvases: () => Promise<CanvasDefinition[]> }>(api: T) => ({
+  ...api,
+  getCanvasPage: vi.fn<Overseer['getCanvasPage']>(async (id: string) => {
+    const view = (await api.listCanvases()).find(item => item.id === id)
+    return view ? canvasPageFromDefinition(view) : null
+  }),
+  editCanvasPage: vi.fn<Overseer['editCanvasPage']>(),
+})
 const saved: CanvasDefinition = { schemaVersion: 1, id: 'ops', revision: '0', title: 'Ops', sections: [{ id: 'main', title: 'Main', columns: 2,
   widgets: [{ id: 'b', kind: 'inferops.project-board', version: 1, targetRef: BOARD, size: 'wide', params: { workflow: 'software', showCompleted: false } }] }] }
-const durable = (): CanvasStorage => ({ kind: 'durable', api: { listCanvases: async () => [saved], createCanvas: vi.fn<Overseer['createCanvas']>(),
-  editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() } })
+const durable = (): CanvasStorage => ({ kind: 'durable', api: withPages({ listCanvases: async () => [saved], createCanvas: vi.fn<Overseer['createCanvas']>(),
+  editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() }) })
 const button = (name: string) => [...container.querySelectorAll('button')].find(item => item.textContent === name)
 
 beforeEach(() => {
@@ -54,7 +64,7 @@ it('labels temporary views as unsaved and opens a newly created view for editing
 })
 
 it('labels durable views as saved', async () => {
-  await render({ kind: 'durable', api: { listCanvases: async () => [], createCanvas: vi.fn<Overseer['createCanvas']>(), editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() } })
+  await render({ kind: 'durable', api: withPages({ listCanvases: async () => [], createCanvas: vi.fn<Overseer['createCanvas']>(), editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() }) })
   expect(container.querySelector('[role="status"]')?.textContent).toBe('Saved views')
 })
 
@@ -135,8 +145,8 @@ it('preloads board cards against the canvas scroll pane with a 200px margin and 
 // FAC-82: edit mode is a tree of the view and an inspector for the one selected target.
 const twoSections: CanvasDefinition = { ...saved, sections: [...saved.sections, { id: 'side', title: 'Side', columns: 1, widgets: [] }] }
 const editable = (views: CanvasDefinition[] = [twoSections]) => {
-  const api = { listCanvases: vi.fn<Overseer['listCanvases']>(async () => views), createCanvas: vi.fn<Overseer['createCanvas']>(),
-    editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() }
+  const api = withPages({ listCanvases: vi.fn<Overseer['listCanvases']>(async () => views), createCanvas: vi.fn<Overseer['createCanvas']>(),
+    editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() })
   return { api, storage: { kind: 'durable', api } as CanvasStorage }
 }
 const tree = () => container.querySelector('[aria-label="Edit targets"]')!
@@ -215,4 +225,112 @@ it('names the exact target in a request handed to the agent', async () => {
   await pick('Side')
   await act(async () => { button('InferOps Kanban')!.click() })
   expect(onAskAgent.mock.calls[0]![0]).toContain('(target page:ops/node:side)')
+})
+
+// FAC-83: nested creation, movement and configuration through typed page operations.
+const nestedPage = (revision: string, extra: Partial<CanvasPage> = {}): CanvasPage => {
+  const base = canvasPageFromDefinition(twoSections)
+  return { ...base, revision, nodes: [
+    ...base.nodes.map(node => node.id === 'main' && node.nodeType === 'object' ? { ...node, children: ['inner'] } : node),
+    { nodeType: 'object', id: 'inner', title: 'Inner', columns: 1, children: ['b'], attachments: [] },
+  ], ...extra }
+}
+const settle = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) }) }
+const choose = async (label: string, option: string) => {
+  const field = [...inspector().querySelectorAll<HTMLElement>('[role="combobox"]')]
+    .find(item => item.closest('label, div')?.textContent?.includes(label))
+  if (!field) throw new Error(`No select ${label}`)
+  await act(async () => field.click()); await settle()
+  const item = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(entry => entry.textContent === option)
+  if (!item) throw new Error(`No option ${option}`)
+  // Base UI selects on the press sequence, not a bare click; jsdom has no PointerEvent.
+  if (!('PointerEvent' in window)) Object.defineProperty(window, 'PointerEvent', { value: class extends MouseEvent {} })
+  await act(async () => {
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      item.dispatchEvent(new (type.startsWith('pointer') ? window.PointerEvent : MouseEvent)(type, { bubbles: true, cancelable: true }))
+    }
+  })
+  await settle()
+}
+const submitIn = async (field: string, value: string) => {
+  const input = [...inspector().querySelectorAll<HTMLInputElement>('input')].find(item => item.name === field)!
+  input.value = value
+  await act(async () => { input.form!.requestSubmit() })
+}
+
+it('nests an object in the selected section and moves a widget into it, each as one page operation for that target', async () => {
+  const { api, storage } = editable()
+  api.editCanvasPage.mockImplementation(async (_id, revision, operations) => {
+    const added = operations[0]
+    if (added?.type === 'addObject') {
+      const base = canvasPageFromDefinition(twoSections)
+      return { ...base, revision: '1', nodes: [
+        ...base.nodes.map(node => node.id === 'main' && node.nodeType === 'object' ? { ...node, children: ['b', added.object.id] } : node),
+        { nodeType: 'object', id: added.object.id, title: 'Inner', columns: 1, children: [], attachments: [] },
+      ] }
+    }
+    expect(revision).toBe('1')
+    return nestedPage('2')
+  })
+  await render(storage)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick('Main')
+  await submitIn('child', 'Inner')
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '0', [
+    { type: 'addObject', parent: 'main', index: 1, object: { id: expect.any(String), title: 'Inner', columns: 1 } }])
+  expect(api.editCanvas).not.toHaveBeenCalled()
+  // The tree shows what the store saved: the new object, in its section.
+  await pick('Inner')
+  expect(breadcrumb()).toContain('Main')
+  await pick(`Project board ${BOARD}`)
+  await choose('Move into', 'Inner')
+  await act(async () => { button('Move')!.click() })
+  const inner = (api.editCanvasPage.mock.calls[0]![2][0] as Extract<CanvasPageOperation, { type: 'addObject' }>).object.id
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '1', [{ type: 'moveNode', nodeId: 'b', parent: inner, index: 0 }])
+  expect(container.textContent).toContain('This view has nested objects')
+})
+
+it('reports a conflicting nested edit in the server\'s words, and keeps the view it had', async () => {
+  const { api, storage } = editable()
+  api.editCanvasPage.mockRejectedValue(new Error('Canvas changed; reload before applying this edit'))
+  await render(storage)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick('Main')
+  await submitIn('child', 'Inner')
+  const alert = container.querySelector('[role="alert"]')?.textContent ?? ''
+  expect(alert).toContain('Canvas changed; reload before applying this edit')
+  expect(alert).toContain('Nothing was overwritten')
+  expect([...tree().querySelectorAll('button')].some(item => item.textContent === 'Inner')).toBe(false)
+})
+
+it('removes a nested object from the view only, saying records stay, and edits its attachments one target at a time', async () => {
+  const { api, storage } = editable()
+  api.getCanvasPage.mockResolvedValue(nestedPage('0'))
+  api.editCanvasPage.mockImplementation(async (_id, _revision, operations) => operations[0]?.type === 'removeNode'
+    ? { ...canvasPageFromDefinition(twoSections), revision: '1', nodes: canvasPageFromDefinition(twoSections).nodes
+      .filter(node => node.id !== 'b').map(node => node.id === 'main' && node.nodeType === 'object' ? { ...node, children: [] } : node) }
+    : nestedPage('1'))
+  await render(storage)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick(`Project board ${BOARD}`)
+  await choose('When', 'action-completed')
+  await choose('Open', 'Ops')
+  await act(async () => { button('Add attachment')!.click() })
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '0', [{ type: 'setAttachments', target: 'b',
+    attachments: [{ id: expect.any(String), version: 1, on: 'action-completed', effect: { kind: 'navigate', page: 'ops' } }] }])
+  await pick('Inner')
+  expect(inspector().textContent).toContain('Gadgets and InferOps records are unchanged.')
+  await act(async () => { button('Remove from view')!.click() })
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '1', [{ type: 'removeNode', nodeId: 'inner' }])
+  // What held it is selected.
+  expect(breadcrumb()).toContain('page:ops/node:main')
+})
+
+it('reads the nested page only in edit mode, so viewing (as the use role does) never asks for it', async () => {
+  const { api, storage } = editable()
+  await render(storage)
+  expect(api.getCanvasPage).not.toHaveBeenCalled()
+  await act(async () => { button('Edit layout')!.click() })
+  await settle()
+  expect(api.getCanvasPage).toHaveBeenCalledWith('ops')
 })

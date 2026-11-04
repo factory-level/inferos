@@ -1,7 +1,7 @@
 import type { ActionApprovalCorrelation, OperateApprovalRequest, OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
 import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
-import type { CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import type { CanvasPage, CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
@@ -50,8 +50,8 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
-import { actionOutcome, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -6848,10 +6848,11 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Synchronous journal write for callers already inside a storage transaction. A caller resolves
-  // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here.
+  // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here. Returns
+  // the journal id it minted, which only an `ActionReceiptImpl` hands out (as a capability).
   submitActionNow(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
-      : void {
+      : number {
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
@@ -6929,6 +6930,7 @@ class OverseerImpl implements AgentHooks {
     if (willAutoApprove) {
       this.ctx.waitUntil(this.drainAutoApprovals(gatekeeperId));
     }
+    return actionId;
   }
 
   async bindHook<Hook extends RpcTarget>(
@@ -12857,6 +12859,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.#canvasStore().edit(id, expectedRevision, operations);
   }
   async deleteCanvas(id: string, expectedRevision: string): Promise<void> { this.#canvasStore().delete(id, expectedRevision); }
+  async getCanvasPage(id: string): Promise<CanvasPage | null> { return this.#canvasStore().getPage(id); }
+  async editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
+    return this.#canvasStore().editPage(id, expectedRevision, operations);
+  }
 
   #flowStore(): WorkspaceFlowStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -12968,6 +12974,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
     // Build access may already open any gadget, so its capability is the ordinary one.
+    return this.getGadget(gadgetId);
+  }
+  // Build access opens the app's mainline, as getGadget does; only the placement is checked, so a
+  // builder previewing a published console after changing the app still sees what they built.
+  async getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let shown = this.#consoleStore().get(consoleId, "published");
+    if (!shown || shown.revision !== revision || !shown.published?.apps?.some(app => app.gadgetId === gadgetId)) {
+      throw new Error(`Console ${consoleId} does not offer app ${gadgetId} at revision ${revision}.`);
+    }
     return this.getGadget(gadgetId);
   }
   // A pinned commit must be the source's current commit or one of its ancestors within
@@ -15351,6 +15366,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // The nested page is the builder's: a use session reads only published version 1 screens.
+  async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[]): Promise<CanvasPage> { this.#deny(); }
   async listFlows(): Promise<OperateFlow[]> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
@@ -15568,7 +15586,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
 
   // A widget install, registered or frozen, is offered only by a published console (see
-  // getConsoleWidget), never by membership in the workspace. Apps shared for use are unchanged.
+  // getConsoleWidget), never by membership in the workspace. So is an app a published console
+  // places (see getConsoleApp), which would otherwise run its mainline rather than the commit the
+  // console published. Other apps shared for use are unchanged.
   async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     let record = this.impl.getGadgetRecord(id);  // also validates it exists
     if (record.pending) {
@@ -15580,9 +15600,40 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     if (record.frozenFor || installed?.kind === "widget") {
       throw new Error(`Gadget ${id} is a widget; open it through the console that offers it.`);
     }
+    // Checked when the capability is minted and again on every call through it and through any
+    // capability it returns, so one minted while the app was only shared for use stops reaching its
+    // mainline as soon as a published console places it (the console is then the only way in).
+    let check = async () => {
+      if (this.#placedApp(id)) {
+        throw new Error(`Gadget ${id} is an app a published console places; open it through that console.`);
+      }
+    };
+    await check();
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new UseGadgetClientInterface(this.impl, id, this.clientUserId);
+    return new UseGadgetClientInterface(this.impl, id, this.clientUserId, check);
+  }
+
+  // Whether a published console places app `id` (see WorkspaceConsoleStore.placedByPublishedConsole).
+  // Consoles exist only while durable views are on; with them off there is no console to open it by.
+  #placedApp(id: WorkpieceId): boolean {
+    if (this.impl.env.COMPOSABLE_VIEWS !== "true" || this.impl.env.DURABLE_VIEWS !== "true") return false;
+    return this.#consoleStore().placedByPublishedConsole(id);
+  }
+
+  // The app as the console's published revision fenced it: the live gadget, opened only while its
+  // current commit is the published one. The capability checks again on every call, with the
+  // caller's operate session, so once a builder changes the app (or the console moves on, or the
+  // person leaves it) a kept capability stops working and says why. Never the app's mainline.
+  async getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let check = async () => {
+      this.#consoleStore().offeredApp(consoleId, revision, gadgetId);
+      await this.impl.consoleSessionCheck(this.#clientUser, consoleId, revision);
+    };
+    await check();
+    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
+    //     type system doesn't know this.
+    return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
   }
 
   // The capability checks the console context again on every call: the console must still offer
@@ -15937,6 +15988,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[])
       : Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // The nested page is the builder's live draft: an operate session reads only what a console published.
+  async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[])
+      : Promise<CanvasPage> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent)
       : Promise<OperateFlow> { this.#deny(); }
@@ -15976,6 +16031,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getConsoleWidgetStates(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<WidgetStateMachine | null> { this.#deny(); }
   async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> { this.#deny(); }
@@ -16610,6 +16667,36 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
   }));
 }
 
+// The receipt `ApprovalQueueImpl.submitAction` returns (FAC-97): the one way to read a submitted
+// action's status. Its `status` closes over that action's journal id and the connection it came
+// through, and reads only that record from this workspace's own journal; nothing takes an id from a
+// caller. So a receipt can't be forged or pointed at another gadget's, connection's or workspace's
+// action: reading one takes holding its `status` function, which RPC passes as a stub. What it says
+// about a refusal is a fixed code and the kernel's own fixed sentence for it, never the attempt's
+// message: provider text can name other people or carry secrets, and it stays in the action log for
+// the people deciding actions.
+function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): ActionReceipt {
+  return {
+    actionId: `action-${id}`,
+    status: async (): Promise<ActionReceiptStatus> => {
+      let record = impl.storage.actions.get(id);
+      if (record?.type !== "action" || record.gatekeeperId !== gatekeeperId) {
+        throw new Error("This action is no longer recorded in this workspace.");
+      }
+      let entry = actionRecordToLog(record) as Extract<ActionLogEntry, { type: "action" }>;
+      let outcome = actionOutcome(entry);
+      let attempt = entry.lastAttempt;
+      let refused = outcome === "failed" || outcome === "unknown" || outcome === "waiting";
+      let code = attempt && refused ? actionReceiptCode(attempt.code) : undefined;
+      return {
+        outcome,
+        ...(outcome === "succeeded" && entry.result ? { result: entry.result } : {}),
+        ...(code ? { code, reason: outcome === "unknown" ? ACTION_RECEIPT_UNKNOWN_REASON : ACTION_RECEIPT_REASON[code] } : {}),
+      };
+    },
+  };
+}
+
 @validateRpc()
 class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   // `hookId` is set only on the queue startHook returns with each firing: that queue is held by
@@ -16632,10 +16719,11 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
     return new GitCacheImpl(this.impl.gitCache, this.gatekeeperId);
   }
 
-  async submitAction(action: number, description: ActionDescription): Promise<void> {
+  async submitAction(action: number, description: ActionDescription): Promise<ActionReceipt> {
     await this.impl.resolveEnablerRoles();
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    let id = this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    return actionReceipt(this.impl, this.gatekeeperId, id);
   }
 
   bindHook<Hook extends RpcTarget>(

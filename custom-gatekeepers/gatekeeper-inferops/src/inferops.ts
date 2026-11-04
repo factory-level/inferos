@@ -1479,11 +1479,14 @@ class ActionBinding {
     return { ...failure, retryable };
   }
 
-  /** Submit a staged action; if it was not submitted, forget it so it is no longer simulated. */
+  /**
+   * Submit a staged action and return its receipt (FAC-97), which the write hands to its caller;
+   * if it was not submitted, forget it so it is no longer simulated.
+   */
   async submit(queue: RpcStub<ApprovalQueue>, actionId: number,
-               description: Parameters<ApprovalQueue["submitAction"]>[1]): Promise<void> {
+               description: Parameters<ApprovalQueue["submitAction"]>[1]): Promise<Receipt> {
     try {
-      await queue.submitAction(actionId, description);
+      return await queue.submitAction(actionId, description);
     } catch (error) {
       // Not submitted (unless an auto-approval already applied it), so stop simulating it.
       if (this.action(actionId)?.status === "pending") this.deleteAction(actionId);
@@ -1491,6 +1494,9 @@ class ActionBinding {
     }
   }
 }
+
+/** A write's receipt as the approval queue returns it over RPC, handed on to the caller. */
+type Receipt = Awaited<ReturnType<RpcStub<ApprovalQueue>["submitAction"]>>;
 
 /** One InferOps workspace `findBoards` searches: its host and a data source in it. */
 type DiscoverySource = { host: string; client: InferOpsClient };
@@ -2251,7 +2257,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
    * column the approver saw. The workflow is the state's, named only when it is `content`
    * (InferOps' default is `software`).
    */
-  async createIssue(issue: NewIssue): Promise<void> {
+  async createIssue(issue: NewIssue): Promise<Receipt | null> {
     const title = validTitle(issue.title);
     checkDescription(issue.description);
     const binding = this.#binding;
@@ -2276,7 +2282,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     // first is pending joins it rather than queueing a second issue. Edits and moves need no
     // such step, since a pending change to an issue already refuses another (`refuseIfPending`).
     const { actionId, joined } = await binding.stageOnce({ kind: "create", issue: request, stateName: state.name });
-    if (joined) return;
+    if (joined) return null;
     const description = binding.description(
       `Create an issue in InferOps project ${binding.projectKey}.`)
       .inline("Project", binding.projectKey)
@@ -2285,7 +2291,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
       .inline("Workflow", state.workflow)
       .inline("Priority", request.priority ?? "none");
     if (request.description) description.verbatim("Description", request.description);
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Create issue: ${title}`),
       ...description.finish(),
       implementsRevert: false,
@@ -2368,7 +2374,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
     return { snapshot, stored, issue, refuseIfPending };
   }
 
-  async transition(toStateId: string, expectedRevision: Revision): Promise<void> {
+  async transition(toStateId: string, expectedRevision: Revision): Promise<Receipt | null> {
     const binding = this.#binding;
     const { snapshot, issue, refuseIfPending } = await this.#current(expectedRevision);
     const target = snapshot.states.find(s => s.id === toStateId);
@@ -2377,7 +2383,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       fail("WORKFLOW_MISMATCH",
         `${issue.identifier} is a ${issue.workflow} issue; "${target.name}" is a ${target.workflow} state.`);
     }
-    if (issue.stateId === toStateId) return;
+    if (issue.stateId === toStateId) return null;
     refuseIfPending();
 
     const from = snapshot.states.find(s => s.id === issue.stateId);
@@ -2399,7 +2405,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       .inline("To", target.name)
       .inline("Expected revision", expectedRevision)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Move ${issue.identifier} to ${target.name}`),
       ...rendered,
       implementsRevert: true,
@@ -2411,7 +2417,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
    * part of `Issue`, so a supplied one is always sent. The previous title and priority are
    * recorded for revert; a description change makes the action not revertible.
    */
-  async update(changes: IssueChanges, expectedRevision: Revision): Promise<void> {
+  async update(changes: IssueChanges, expectedRevision: Revision): Promise<Receipt | null> {
     const title = changes.title === undefined ? undefined : validTitle(changes.title);
     checkDescription(changes.description);
     const binding = this.#binding;
@@ -2424,7 +2430,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
         ? { priority: changes.priority } : {}),
     };
     const named = (["title", "description", "priority"] as const).filter(f => sent[f] !== undefined);
-    if (named.length === 0) return;
+    if (named.length === 0) return null;
     refuseIfPending();
 
     const previous = {
@@ -2454,7 +2460,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
     if (sent.description === null) description.prose("The description is cleared.");
     else if (sent.description !== undefined) description.verbatim("New description", sent.description);
     description.inline("Expected revision", expectedRevision);
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Update ${issue.identifier}: ${named.join(", ")}`),
       ...description.finish(),
       implementsRevert: sent.description === undefined,
@@ -2683,7 +2689,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
    * checked, so a dispatch InferOps would refuse is not proposed. None of it is an observation: the
    * approval shows what was read.
    */
-  async dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<void> {
+  async dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<Receipt | null> {
     const binding = this.#binding;
     assertCodingWorkbenchEnabled(this.#env);
     if (!REVISION.test(expectedRevision)) {
@@ -2743,7 +2749,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
       .inline("Base ref", target.baseRef ?? `${repo.defaultBaseRef} (default)`)
       .inline("Expected revision", expectedRevision)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Dispatch ${issue.identifier} to ${repo.slug}`),
       ...description,
       implementsRevert: false,
@@ -2752,12 +2758,12 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
   }
 
   /** A cancel already pending for the run makes this a no-op. */
-  async cancel(runId: string): Promise<void> {
+  async cancel(runId: string): Promise<Receipt | null> {
     if (runId.startsWith(PROVISIONAL_RUN)) fail("NOT_FOUND", "No such run in this project.");
     const binding = this.#binding;
     const run = await binding.client.readRun(binding.projectKey, runId).catch(hideRunExistence);
     if (!ACTIVE_RUN.has(run.status)) fail("CONFLICT", `The run of ${run.issueIdentifier} is already ${run.status}.`);
-    if (binding.codingPending().cancels.some(c => c.runId === run.id)) return;
+    if (binding.codingPending().cancels.some(c => c.runId === run.id)) return null;
 
     const actionId = await binding.stage({ kind: "cancel", runId: run.id, identifier: run.issueIdentifier });
     const description = buildDescription(
@@ -2768,7 +2774,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
       .inline("Run", run.id)
       .inline("Status", run.status)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Cancel the ${run.status} run of ${run.issueIdentifier}`),
       ...description,
       implementsRevert: false,
@@ -3377,7 +3383,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
    * the one shown (nothing to do) and a live pending body edit (CONFLICT). Not an observation: the
    * approval shows what was read.
    */
-  async updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<void> {
+  async updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<Receipt | null> {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
       fail("INVALID_REQUEST", "expectedVersion must be the version readDocument() returned.");
     }
@@ -3392,7 +3398,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
         `Page ${head.slug} is at version ${head.version}, not ${expectedVersion}. Read it again.`);
     }
     const live = binding.liveBodyEdit(head);
-    if ((live?.body ?? head.body) === body) return;
+    if ((live?.body ?? head.body) === body) return null;
     if (live) failBodyConflict(head.slug);
     const actionId = await binding.stage({
       kind: "document-update", documentId: head.id, documentTitle: head.title, body, expectedVersion,
@@ -3406,7 +3412,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       if (error instanceof AlreadyProposed) return null;
       throw error;
     });
-    if (actionId === null) return;
+    if (actionId === null) return null;
     const description = binding.description(
       `Replace the body of one page of the InferMind Wiki of ${binding.host}. InferOps applies it ` +
       `only if the page is still at the version below when approved. Its sections are not changed.`)
@@ -3415,7 +3421,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       .verbatim("Current text", head.body)
       .verbatim("New text", body)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Edit Wiki page ${head.title}`),
       ...description,
       implementsRevert: true,
@@ -3428,7 +3434,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
    * pending edit (CONFLICT), and a body equal to the one shown (nothing to do). The section's page
    * is read for the approval's title. Not an observation: the approval shows what was read.
    */
-  async updateSection(sectionId: string, body: string, expectedVersion: number): Promise<void> {
+  async updateSection(sectionId: string, body: string, expectedVersion: number): Promise<Receipt | null> {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
       fail("INVALID_REQUEST", "expectedVersion must be the version readDocument() returned.");
     }
@@ -3443,7 +3449,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
         `Section ${stored.tag} is at version ${stored.version}, not ${expectedVersion}. Read it again.`);
     }
     const live = binding.liveEdit(stored);
-    if ((live?.body ?? stored.body) === body) return;
+    if ((live?.body ?? stored.body) === body) return null;
     if (live) failSectionConflict(stored.tag);
     const head = await binding.client.readDocument(stored.documentId).catch(hideDocumentExistence);
     const actionId = await binding.stage({
@@ -3458,7 +3464,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       if (error instanceof AlreadyProposed) return null;
       throw error;
     });
-    if (actionId === null) return;
+    if (actionId === null) return null;
     const description = binding.description(
       `Replace the markdown of one section of the InferMind Wiki of ${binding.host}. It is applied ` +
       `only if the section is still at the version below when approved.`)
@@ -3468,7 +3474,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       .verbatim("Current text", stored.body)
       .verbatim("New text", body)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Edit Wiki section ${stored.tag} of ${head.title}`),
       ...description,
       implementsRevert: true,
@@ -3522,7 +3528,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
    * an observation: the approval shows what was read. Self-approval is InferOps' to refuse, at
    * apply, against the account holder who sends it.
    */
-  async approveProposal(proposalId: string, proposalHash: string): Promise<void> {
+  async approveProposal(proposalId: string, proposalHash: string): Promise<Receipt | null> {
     if (!UUID.test(proposalId)) fail("NOT_FOUND", PROPOSAL_NOT_FOUND);
     if (!SHA256_HEX.test(proposalHash)) {
       fail("INVALID_REQUEST", "proposalHash must be the proposalHash readProposal() returned.");
@@ -3567,8 +3573,8 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       if (error instanceof AlreadyProposed) return null;
       throw error;
     });
-    if (actionId === null) return;
-    await binding.submit(this.#queue, actionId, {
+    if (actionId === null) return null;
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Approve Wiki proposal: ${proposal.title}`),
       ...description,
       implementsRevert: false,

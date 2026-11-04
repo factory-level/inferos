@@ -108,6 +108,9 @@ it("denies authoring on the session workspace, however it is opened, and to anyo
   await expect(workspace.createGadget("Gadget")).rejects.toThrow(denied);
   await expect(workspace.createCanvas({ title: "Board", sections: [] })).rejects.toThrow(denied);
   await expect(workspace.editCanvas("canvas", "1", [])).rejects.toThrow(denied);
+  // The nested page is the builder's live draft (FAC-83): an operate session reads neither it nor edits it.
+  await expect(workspace.getCanvasPage("canvas")).rejects.toThrow(denied);
+  await expect(workspace.editCanvasPage("canvas", "1", [{ type: "renamePage", title: "X" }])).rejects.toThrow(denied);
   await expect(workspace.submitCodeChange(1, {
     generation: 0, revision: 0, clientId: "operate", seq: 1, pins: [],
     change: diffFiles(new Map(), new Map()),

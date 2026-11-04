@@ -352,6 +352,26 @@ export type ConsolePublication = {
    * widget versions operators get. Absent on publications made before it was recorded.
    */
   screens?: { id: string; revision: string }[];
+  /**
+   * Each app the publication's screens place (FAC-89 part 2), once, in the order the screens show
+   * them, with the commit it ran when published. An app is a placed gadget that isn't a widget
+   * install, and keeps its own storage and bindings, so it is never copied: operators open it only
+   * while its current commit is this one (see `ConsolePublishedApp`). An app with no commit then is
+   * not listed. Absent on publications made before it was recorded.
+   */
+  apps?: ConsolePublishedApp[];
+};
+
+/**
+ * An app as one console publication fenced it: the gadget and the commit it ran then. The console
+ * offers the app to operators only while the gadget's current commit is still `commitId`; once a
+ * builder moves it, operators are refused until the console is published again.
+ */
+export type ConsolePublishedApp = {
+  /** The placed gadget: the live app, not a copy. */
+  gadgetId: WorkpieceId;
+  /** The commit the gadget ran when the console was published. */
+  commitId: string;
 };
 
 /**
