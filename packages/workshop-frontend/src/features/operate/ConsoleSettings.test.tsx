@@ -12,11 +12,14 @@ const state = vi.hoisted(() => ({
   invalidate: vi.fn<() => void>(),
   hostBoards: false,
   boundViews: false,
+  // One overseer for every render, as the real hook keeps it in state.
+  overseer: null as unknown,
 }))
+state.overseer = { stub: { replaceConsole: state.replace, listConsoleWidgetCandidates: () => Promise.resolve([]) } }
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ hostBoards: state.hostBoards, boundViews: state.boundViews }) }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({
-  overseer: { stub: { replaceConsole: state.replace } }, metadata: { role: state.denied ? 'use' : 'build' },
+  overseer: state.overseer, metadata: { role: state.denied ? 'use' : 'build' },
 }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWorkspaceScreens: state.invalidate }))
 vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ workpieces: new Map(), ready: true }) }))

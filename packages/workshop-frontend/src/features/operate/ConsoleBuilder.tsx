@@ -15,6 +15,7 @@ import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleFlowRegistry } from './ConsoleFlowRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
+import { useConsoleWidgetCandidates } from './useConsoleWidgetCandidates'
 import { consoleScreens } from '@gadgets/workshop-shared/operate-console'
 import { consoleContentForSave, consoleRefusalMessage, unshownSteps, viewScreens, type ConsoleEntry } from './consoles'
 
@@ -62,6 +63,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
   const gadgets = new Map<WorkpieceId, GadgetSummary>()
   for (const workpiece of workpieces.values()) if (workpiece.type === 'gadget') gadgets.set(workpiece.id, workpiece)
   const widgetInstalls = [...gadgets.values()].filter(gadget => gadget.chatId === undefined && !gadget.frozenFor && gadget.installedFrom?.kind === 'widget')
+  const widgetCandidates = useConsoleWidgetCandidates(overseer, widgetInstalls)
   const screens = [...new Map([...(entry?.screens ?? []), ...addedScreens].map(screen => [screen.id, screen])).values()]
   const available = !!overseer && ready && metadata?.id === workspaceId && metadata.role !== 'use' && !openError && !observerConfig
   const limitReached = !initial && (entry?.consoles.length ?? 0) >= MAX_WORKSPACE_CONSOLES
@@ -140,7 +142,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
             <Button disabled={!available || views.length >= MAX_CONSOLE_VIEWS} onClick={() => setCreatingScreen(true)}>Create a new screen</Button>
             {/* An installed widget a screen shows must be registered before the console can be saved. */}
             {widgetInstalls.length > 0 && <ConsoleWidgetRegistry widgets={widgets} published={initial?.console.published?.content.widgets}
-              candidates={widgetInstalls} hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!available} onChange={setWidgets} />}
+              candidates={widgetCandidates} hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!available} onChange={setWidgets} />}
             {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={initial?.console.published?.content.hostBoards}
               widgetCount={widgets.length + shownBoundViews.length} assistantOnly={fullChat === 'only'} disabled={!available} onChange={setHostBoards} />}
             {boundViewsOn && <ConsoleBoundViewRegistry boundViews={shownBoundViews} published={initial?.console.published?.content.boundViews}
