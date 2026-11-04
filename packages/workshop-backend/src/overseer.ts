@@ -15429,12 +15429,18 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     if (record.frozenFor || installed?.kind === "widget") {
       throw new Error(`Gadget ${id} is a widget; open it through the console that offers it.`);
     }
-    if (this.#placedApp(id)) {
-      throw new Error(`Gadget ${id} is an app a published console places; open it through that console.`);
-    }
+    // Checked when the capability is minted and again on every call through it and through any
+    // capability it returns, so one minted while the app was only shared for use stops reaching its
+    // mainline as soon as a published console places it (the console is then the only way in).
+    let check = async () => {
+      if (this.#placedApp(id)) {
+        throw new Error(`Gadget ${id} is an app a published console places; open it through that console.`);
+      }
+    };
+    await check();
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new UseGadgetClientInterface(this.impl, id, this.clientUserId);
+    return new UseGadgetClientInterface(this.impl, id, this.clientUserId, check);
   }
 
   // Whether a published console places app `id` (see WorkspaceConsoleStore.placedByPublishedConsole).

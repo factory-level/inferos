@@ -198,4 +198,30 @@ describe("a console's placed apps", () => {
     using handle = await used.getGadget(app);
     expect(await handle.getUiBundle()).toEqual({ jsCode: appFiles("v1")["client.js"] });
   });
+
+  it("refuses a capability opened before the app was placed, once a console publishing it is published", async () => {
+    const s = await operationsSpace("appsearly");
+    const gadget = s.space.createGadget("Board", undefined, "BOARD");
+    const app = await gadget.getId();
+    await commit(s, app, {}, appFiles("v1"));
+
+    // Opened while the app is only shared for use: no console places it yet.
+    using used = await s.operator.openGadget(s.spaceId);
+    using early = await used.getGadget(app);
+    const server = await early.connectToGadget() as unknown as RpcStub<Counter>;
+    const tally = await server.tally();
+    expect(await server.bump()).toBe(1);
+
+    const screen = await screenWith(s.space, [app]);
+    const created = await s.space.createConsole(consoleOf(screen.id));
+    await s.space.publishConsole(created.id, created.revision);
+
+    // From then on the console is the only way in: nothing kept from before reaches the mainline.
+    const THROUGH_CONSOLE = /an app a published console places; open it through that console/;
+    await expect(early.getUiBundle()).rejects.toThrow(THROUGH_CONSOLE);
+    await expect(early.getTitle()).rejects.toThrow(THROUGH_CONSOLE);
+    await expect(server.bump()).rejects.toThrow(THROUGH_CONSOLE);
+    await expect(tally.bump()).rejects.toThrow(THROUGH_CONSOLE);
+    for (const kept of [tally, server]) kept[Symbol.dispose]();
+  });
 });
