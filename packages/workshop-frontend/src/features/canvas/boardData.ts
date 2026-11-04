@@ -271,6 +271,7 @@ export class BoardData {
       using issue = session.openIssue(issueId)
       return { ok: true, activity: await issue.activity() }
     } catch (error) {
+      if (revoked(error)) this.#revoke(entry.target, error)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }
   }

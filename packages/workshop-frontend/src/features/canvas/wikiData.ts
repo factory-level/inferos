@@ -253,6 +253,7 @@ export class WikiData {
       if (!session) return NOT_CONNECTED
       return { ok: true, hits: await session.searchWiki(query) }
     } catch (error) {
+      this.#failed(error)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }
   }
@@ -264,6 +265,7 @@ export class WikiData {
       if (this.#via === 'account') return this.#composedText(slug)
       return { ok: true, text: await session.readDocumentText(slug) }
     } catch (error) {
+      this.#failed(error)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }
   }
