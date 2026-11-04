@@ -57,6 +57,6 @@ it('explains a refused cancel of a run that already stopped', () => {
 it('keeps the server\'s words for a stale revision, an active run and a switched-off deployment', () => {
   for (const code of ['STALE_REVISION', 'RUN_ACTIVE', 'DISABLED'] as const) {
     const text = codingErrorText({ ok: false, code, message: `Server says ${code}.` }, 'ENG-1', 'dispatch')
-    expect(text, code).toContain(`Server says ${code}.`)
+    expect(text).toContain(`Server says ${code}.`)
   }
 })

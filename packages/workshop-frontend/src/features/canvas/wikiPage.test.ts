@@ -168,6 +168,6 @@ it('leaves a Master\'s documentation coverage block out of the agent text it com
 it('keeps the server\'s words for a stale, missing or switched-off edit', () => {
   for (const code of ['STALE_REVISION', 'NOT_FOUND', 'DISABLED'] as const) {
     const text = editErrorText({ phase: 'refused', code, message: `Server says ${code}.` } as Parameters<typeof editErrorText>[0])
-    expect(text, code).toContain(`Server says ${code}.`)
+    expect(text).toContain(`Server says ${code}.`)
   }
 })
