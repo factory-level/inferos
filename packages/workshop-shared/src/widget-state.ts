@@ -99,9 +99,13 @@ export const WIDGET_STATE_ERROR_CODES = Object.freeze({
 
 /** A refused transition. The state it was asked of is unchanged. */
 export class WidgetStateError extends Error {
-  constructor(readonly code: string, message: string) {
+  /** One of `WIDGET_STATE_ERROR_CODES`. */
+  readonly code: string;
+
+  constructor(code: string, message: string) {
     super(`${code}: ${message}`);
     this.name = "WidgetStateError";
+    this.code = code;
   }
 }
 

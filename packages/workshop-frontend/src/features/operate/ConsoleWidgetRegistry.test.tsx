@@ -11,7 +11,7 @@ let root: Root
 const change = vi.fn<(widgets: ConsoleWidgetEntry[]) => void>()
 const install = (id: number, title: string, version: number, more: { refusal?: string; tools?: string[] } = {}) => ({
   gadgetId: id, title, blueprintId: `bp${id}`, version, versionId: `bp${id}@${version}`, commitId: `c${id}0000000000`,
-  surfaces: more.refusal ? null : { ui: true, tools: more.tools ?? [] }, refusal: more.refusal ?? null })
+  surfaces: more.refusal ? null : { ui: true, tools: more.tools ?? [], states: null }, refusal: more.refusal ?? null })
 const ready = (...list: ReturnType<typeof install>[]): WidgetCandidates => ({ state: 'ready', list })
 const registered: ConsoleWidgetEntry = { gadgetId: 3, blueprintId: 'bp3', version: 2, label: 'Status', state: 'resettable' }
 
