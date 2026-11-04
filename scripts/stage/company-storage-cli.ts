@@ -1,7 +1,10 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { unstable_getMiniflareWorkerOptions } from "wrangler";
+import { waitForMiniflareReady } from "./miniflare-readiness.ts";
 import {
   exportCompanyStorage, httpStatusReader, purgeLocalCompany, type CompanyStorageBindings,
   type KeyValueStore, type ObjectStore, type StorageResourceNames,
@@ -22,6 +25,8 @@ interface LocalManifest {
     credentialR2?: string[];
   };
 }
+
+const MINIFLARE_READY_TIMEOUT_MS = 30_000;
 
 const usage = `
 Usage:
@@ -70,9 +75,23 @@ function readManifest(path: string): LocalManifest {
   return manifest;
 }
 
-async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Miniflare; bindings: CompanyStorageBindings }> {
-  const { workerOptions, externalWorkers, main } = unstable_getMiniflareWorkerOptions(manifest.workerConfig);
-  if (!main) throw new Error("The wrapper config does not identify a local worker entrypoint");
+async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Miniflare; bindings: CompanyStorageBindings; cleanup: () => void }> {
+  const bundleDirectory = mkdtempSync(join(tmpdir(), "inferos-company-storage-"));
+  try {
+    execFileSync("pnpm", ["exec", "wrangler", "deploy", "--dry-run", "--outdir", bundleDirectory,
+      "-c", manifest.workerConfig], { cwd: manifest.wrapperRoot, stdio: "inherit" });
+  } catch (error) {
+    rmSync(bundleDirectory, { recursive: true, force: true });
+    throw new Error(`Wrangler could not bundle the local wrapper without deploying: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const { workerOptions, externalWorkers } = unstable_getMiniflareWorkerOptions(manifest.workerConfig);
+  const main = join(bundleDirectory, "index.js");
+  try {
+    readFileSync(main);
+  } catch {
+    rmSync(bundleDirectory, { recursive: true, force: true });
+    throw new Error(`Wrangler dry-run did not emit the expected bundled worker at ${main}`);
+  }
   const { modulesRules, ...workerConfig } = workerOptions;
   const defaultRules = [
     { type: "Text", include: ["**/*.txt", "**/*.html", "**/*.sql"] },
@@ -80,14 +99,21 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
     { type: "CompiledWasm", include: ["**/*.wasm", "**/*.wasm?module"] },
   ];
   if (JSON.stringify(modulesRules ?? []) !== JSON.stringify(defaultRules)) {
+    rmSync(bundleDirectory, { recursive: true, force: true });
     throw new Error("Custom Wrangler modulesRules need an explicit Miniflare v5 manifest mapping");
   }
   const mf = new Miniflare(convertV4MiniflareOptions({
-    workers: [{ ...workerConfig, scriptPath: main, modules: true }, ...externalWorkers],
+    workers: [{ ...workerConfig, rootPath: bundleDirectory, scriptPath: main, modules: true }, ...externalWorkers],
     resourcePersistencePath: manifest.stateDirectory,
     remoteBindings: false,
   }));
-  await mf.ready;
+  try {
+    await waitForMiniflareReady(mf.ready, MINIFLARE_READY_TIMEOUT_MS);
+  } catch (error) {
+    try { await mf.dispose(); } catch { /* retain the startup failure as the actionable error */ }
+    rmSync(bundleDirectory, { recursive: true, force: true });
+    throw error;
+  }
   try {
     const kv = new Map<string, KeyValueStore>();
     for (const { binding, name } of manifest.resources.kv) kv.set(name, await mf.getKVNamespace(binding) as unknown as KeyValueStore);
@@ -115,9 +141,11 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
         } else if (ids.length) gadgetDurableObjects.push({ namespace: className, ids });
       }
     }
-    return { mf, bindings: { kv, r2, workspaces, gadgetDurableObjects } };
+    return { mf, bindings: { kv, r2, workspaces, gadgetDurableObjects },
+      cleanup: () => rmSync(bundleDirectory, { recursive: true, force: true }) };
   } catch (error) {
     await mf.dispose();
+    rmSync(bundleDirectory, { recursive: true, force: true });
     throw error;
   }
 }
@@ -142,7 +170,7 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   if (parsed.command === "export-local") {
-    const { mf, bindings } = await openLocalBindings(manifest);
+    const { mf, bindings, cleanup } = await openLocalBindings(manifest);
     try {
       const result = await exportCompanyStorage({ tenantId: manifest.tenantId, prefix: manifest.resourcePrefix,
         resources, bindings, outputDirectory: manifest.outputDirectory });
@@ -151,7 +179,10 @@ async function main(argv: string[]): Promise<void> {
         keyValues: (result.kv as unknown[]).length, objects: (result.r2 as unknown[]).length,
         workspaces: (result.workspaces as unknown[]).length,
         gadgetNamespaces: (result.gadgetDurableObjects as unknown[]).length }, null, 2));
-    } finally { await mf.dispose(); }
+    } finally {
+      try { await mf.dispose(); }
+      finally { cleanup(); }
+    }
     return;
   }
   if (parsed.apply) {
