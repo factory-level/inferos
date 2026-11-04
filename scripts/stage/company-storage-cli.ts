@@ -103,7 +103,14 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
     throw new Error("Custom Wrangler modulesRules need an explicit Miniflare v5 manifest mapping");
   }
   const mf = new Miniflare(convertV4MiniflareOptions({
-    workers: [{ ...workerConfig, rootPath: bundleDirectory, scriptPath: main, modules: true }, ...externalWorkers],
+    workers: [{ ...workerConfig, rootPath: bundleDirectory, scriptPath: main, modules: true }, ...externalWorkers, {
+      // The router config contains a production service binding, but storage export never routes
+      // requests through it. Give Miniflare an inert local target instead of resolving a remote
+      // service or requiring the full application stack.
+      name: "workshop-backend",
+      modules: true,
+      script: "export default { fetch: () => new Response('Local storage export does not serve requests', { status: 503 }) }",
+    }],
     resourcePersistencePath: manifest.stateDirectory,
     remoteBindings: false,
   }));
