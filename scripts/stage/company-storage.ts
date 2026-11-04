@@ -38,8 +38,10 @@ export interface CompanyStorageBindings {
 export interface StorageResourceNames {
   kv: readonly string[];
   r2: readonly string[];
-  credentialKv?: readonly string[];
-  credentialR2?: readonly string[];
+  /** Explicitly approved for export. Omitted means none; every other resource is name-only. */
+  exportKv?: readonly string[];
+  /** Explicitly approved for export. Omitted means none; every other resource is name-only. */
+  exportR2?: readonly string[];
 }
 
 export type StatusReader = (tenantId: string) => Promise<OffboardingStatus>;
@@ -89,12 +91,21 @@ export async function exportCompanyStorage({
   bindings: CompanyStorageBindings;
   outputDirectory: string;
 }): Promise<Record<string, unknown>> {
+  if (!/[\/:_-]$/.test(prefix)) throw new Error("Company resource prefix must end with a namespace delimiter (:, /, _, or -)");
+  const exportKv = new Set(resources.exportKv ?? []);
+  const exportR2 = new Set(resources.exportR2 ?? []);
+  for (const name of exportKv) if (!resources.kv.includes(name)) throw new Error(`Export KV ${name} is not a listed local resource`);
+  for (const name of exportR2) if (!resources.r2.includes(name)) throw new Error(`Export R2 ${name} is not a listed local resource`);
+
   const kvExports: Record<string, unknown>[] = [];
-  const withheldKv = new Set(resources.credentialKv ?? []);
+  const withheld: { kind: "kv" | "r2"; name: string; reason: string }[] = [];
   for (const name of resources.kv) {
     const store = bindings.kv.get(name);
     if (!store) throw new Error(`Missing local KV binding ${name}`);
-    if (withheldKv.has(name) || credentialResource(name)) continue;
+    if (!exportKv.has(name) || credentialResource(name)) {
+      withheld.push({ kind: "kv", name, reason: credentialResource(name) ? "credential store" : "not on export allow-list" });
+      continue;
+    }
     for (const key of await listKv(store)) {
       if (!key.startsWith(prefix)) continue;
       const value = await store.get(key, "arrayBuffer");
@@ -103,11 +114,13 @@ export async function exportCompanyStorage({
   }
 
   const r2Exports: Record<string, unknown>[] = [];
-  const withheldR2 = new Set(resources.credentialR2 ?? []);
   for (const name of resources.r2) {
     const store = bindings.r2.get(name);
     if (!store) throw new Error(`Missing local R2 binding ${name}`);
-    if (withheldR2.has(name) || credentialResource(name)) continue;
+    if (!exportR2.has(name) || credentialResource(name)) {
+      withheld.push({ kind: "r2", name, reason: credentialResource(name) ? "credential store" : "not on export allow-list" });
+      continue;
+    }
     for (const object of await listR2(store)) {
       if (!object.key.startsWith(prefix)) continue;
       const body = await store.get(object.key);
@@ -130,12 +143,7 @@ export async function exportCompanyStorage({
     createdAt: new Date().toISOString(),
     kv: kvExports,
     r2: r2Exports,
-    withheld: [
-      ...(resources.credentialKv ?? []).map((name) => ({ kind: "kv", name, reason: "credential store" })),
-      ...(resources.credentialR2 ?? []).map((name) => ({ kind: "r2", name, reason: "credential store" })),
-      ...resources.kv.filter(credentialResource).map((name) => ({ kind: "kv", name, reason: "credential store" })),
-      ...resources.r2.filter(credentialResource).map((name) => ({ kind: "r2", name, reason: "credential store" })),
-    ],
+    withheld,
     workspaces,
     gadgetDurableObjects,
   };
@@ -197,13 +205,21 @@ export async function purgeLocalCompany({
   const root = realpathSync(wrapperRoot);
   const state = resolve(stateDirectory);
   if (!isAbsolute(stateDirectory)) throw new Error("Local state directory must be an absolute path");
-  const rel = relative(root, state);
+  let checkedState = state;
+  if (apply) {
+    checkedState = realpathSync(state);
+    const realRel = relative(root, checkedState);
+    if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) {
+      throw new Error("Refusing purge: real path must stay inside this wrapper's .wrangler/state tree");
+    }
+  }
+  const rel = relative(root, checkedState);
   if (!rel || rel.startsWith("..") || isAbsolute(rel) || !rel.split(/[\\/]/).includes(".wrangler") || !rel.split(/[\\/]/).includes("state")) {
     throw new Error("Refusing purge: state directory must be inside this wrapper's .wrangler/state tree");
   }
   if (!apply) return { tenantId, stateDirectory: state, applied: false };
   const status = await assertPurgeAllowed(tenantId, readStatus, now);
   await beforeDelete?.();
-  rmSync(state, { recursive: true, force: false });
-  return { tenantId, stateDirectory: state, applied: true, status };
+  rmSync(checkedState, { recursive: true, force: false });
+  return { tenantId, stateDirectory: checkedState, applied: true, status };
 }

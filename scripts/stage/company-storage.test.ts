@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -38,49 +38,68 @@ async function r2Snapshot(mf: Miniflare): Promise<string> {
   return JSON.stringify(values.sort(([a], [b]) => a.localeCompare(b)));
 }
 
-test("Miniflare export withholds credential stores; purge gate refuses early and isolates company B", async () => {
+test("Miniflare export is allow-listed and delimiter-bounded; purge is gated and isolates company B", async () => {
   const dirA = join(scratch, "a", ".wrangler", "state");
   const dirB = join(scratch, "b", ".wrangler", "state");
   const config = (name: string, persist: string) => new Miniflare({
     workers: [{ config: { name, compatibilityDate: "2026-09-04", env: {
-        DATA: { type: "kv", id: `${name}-data` }, CREDENTIALS: { type: "kv", id: `${name}-credentials` },
+        DATA: { type: "kv", id: `${name}-data` }, ARCHIVE: { type: "kv", id: `${name}-archive` },
         OBJECTS: { type: "r2", name: `${name}-objects` },
       }, manifest: { mainModule: "worker.js", modules: { "worker.js": { type: "esm", contents: "export default { fetch(){ return new Response('ok') } }" } } } } }],
     resourcePersistencePath: persist,
   });
   const a = config("company-a", dirA);
   const b = config("company-b", dirB);
+  let aDisposed = false;
   try {
     const aData = await a.getKVNamespace("DATA");
-    const aCredentials = await a.getKVNamespace("CREDENTIALS");
+    const aArchive = await a.getKVNamespace("ARCHIVE");
     const aObjects = await a.getR2Bucket("OBJECTS");
-    await aData.put("company-a:record", "safe value");
-    await aCredentials.put("company-a:token", "Bearer abcdefghijklmnopqrstuvwxyz");
-    await aObjects.put("company-a:blob", "blob content");
+    await aData.put("inferos-acme-record", "safe value");
+    await aData.put("inferos-acme2-record", "neighbor company");
+    await aArchive.put("inferos-acme-credential", "opaque credential value");
+    await aObjects.put("inferos-acme-blob", "blob content");
+    await aObjects.put("inferos-acme2-blob", "neighbor company object");
     const bData = await b.getKVNamespace("DATA");
-    const bCredentials = await b.getKVNamespace("CREDENTIALS");
+    const bArchive = await b.getKVNamespace("ARCHIVE");
     const bObjects = await b.getR2Bucket("OBJECTS");
-    await bData.put("company-b:record", "other company");
-    await bCredentials.put("company-b:token", "Bearer zyxwvutsrqponmlkjihgfedcba");
-    await bObjects.put("company-b:blob", "other blob");
-    const beforeB = JSON.stringify([await snapshot(b, "DATA"), await snapshot(b, "CREDENTIALS"), await r2Snapshot(b)]);
+    await bData.put("inferos-acme2-record", "other company");
+    await bArchive.put("inferos-acme2-credential", "other opaque credential");
+    await bObjects.put("inferos-acme2-blob", "other blob");
+    const beforeB = JSON.stringify([await snapshot(b, "DATA"), await snapshot(b, "ARCHIVE"), await r2Snapshot(b)]);
 
-    const resources: StorageResourceNames = { kv: ["DATA", "CREDENTIALS"], r2: ["OBJECTS"] };
+    const resources: StorageResourceNames = { kv: ["DATA", "ARCHIVE"], r2: ["OBJECTS"],
+      exportKv: ["DATA"], exportR2: ["OBJECTS"] };
     const bindings: CompanyStorageBindings = {
-      kv: new Map<string, KeyValueStore>([["DATA", aData as unknown as KeyValueStore], ["CREDENTIALS", aCredentials as unknown as KeyValueStore]]),
+      kv: new Map<string, KeyValueStore>([["DATA", aData as unknown as KeyValueStore], ["ARCHIVE", aArchive as unknown as KeyValueStore]]),
       r2: new Map<string, ObjectStore>([["OBJECTS", aObjects as unknown as ObjectStore]]),
       workspaces: new Map([["workspace-a", { exportWorkspaceRecords: async () => ({ canvases: [{ id: "canvas-a" }] }) }]]),
       gadgetDurableObjects: [{ namespace: "GadgetState", ids: ["opaque-do-id"] }],
     };
     const output = join(scratch, "export");
-    const document = await exportCompanyStorage({ tenantId: "tenant-a", prefix: "company-a:", resources, bindings, outputDirectory: output });
+    const document = await exportCompanyStorage({ tenantId: "tenant-a", prefix: "inferos-acme-", resources, bindings, outputDirectory: output });
     const text = readFileSync(join(output, "company-tenant-a-export.json"), "utf8");
     assert.equal((document.kv as unknown[]).length, 1);
     assert.equal((document.r2 as unknown[]).length, 1);
-    assert.match(text, /credential store/);
+    assert.match(text, /not on export allow-list/);
+    assert.match(text, /ARCHIVE/);
     assert.match(text, /not exported: arbitrary gadget state/);
-    assert.doesNotMatch(text, /Bearer abcdefghijklmnopqrstuvwxyz/);
+    assert.doesNotMatch(text, /opaque credential value/);
+    assert.doesNotMatch(text, /acme2/);
     assert.match(text, /workspace-a/);
+
+    const noAllowList = await exportCompanyStorage({ tenantId: "tenant-a-no-allow-list", prefix: "inferos-acme-",
+      resources: { kv: ["DATA", "ARCHIVE"], r2: ["OBJECTS"] }, bindings,
+      outputDirectory: join(scratch, "no-allow-list") });
+    assert.deepEqual(noAllowList.kv, []);
+    assert.deepEqual(noAllowList.r2, []);
+    assert.deepEqual(noAllowList.withheld, [
+      { kind: "kv", name: "DATA", reason: "not on export allow-list" },
+      { kind: "kv", name: "ARCHIVE", reason: "not on export allow-list" },
+      { kind: "r2", name: "OBJECTS", reason: "not on export allow-list" },
+    ]);
+    await assert.rejects(exportCompanyStorage({ tenantId: "tenant-invalid-prefix", prefix: "inferos-acme",
+      resources, bindings, outputDirectory: join(scratch, "invalid-prefix") }), /must end with a namespace delimiter/);
 
     const now = new Date("2026-01-20T00:00:00.000Z");
     await assert.rejects(assertPurgeAllowed("tenant-a", async id => status(id), now), /inside its restore window/);
@@ -89,17 +108,31 @@ test("Miniflare export withholds credential stores; purge gate refuses early and
 
     const rootA = join(scratch, "a");
     await a.dispose();
+    aDisposed = true;
     await assert.rejects(purgeLocalCompany({ tenantId: "tenant-a", stateDirectory: dirA, wrapperRoot: rootA,
       apply: true, readStatus: async id => status(id), now }), /inside its restore window/);
     const purged = await purgeLocalCompany({ tenantId: "tenant-a", stateDirectory: dirA, wrapperRoot: rootA,
       apply: true, readStatus: async id => status(id), now: new Date("2026-03-01T00:00:00.000Z") });
     assert.equal(purged.applied, true);
     assert.equal(existsSync(dirA), false);
-    const afterB = JSON.stringify([await snapshot(b, "DATA"), await snapshot(b, "CREDENTIALS"), await r2Snapshot(b)]);
+    const afterB = JSON.stringify([await snapshot(b, "DATA"), await snapshot(b, "ARCHIVE"), await r2Snapshot(b)]);
     assert.equal(afterB, beforeB, "company B's local state is byte-for-byte unchanged");
   } finally {
+    if (!aDisposed) await a.dispose();
     await b.dispose();
   }
+});
+
+test("purge refuses a .wrangler/state symlink that resolves outside its wrapper", async () => {
+  const wrapper = join(scratch, "symlink-wrapper");
+  const outside = join(scratch, "outside", ".wrangler", "state");
+  const link = join(wrapper, ".wrangler", "state");
+  mkdirSync(join(wrapper, ".wrangler"), { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  symlinkSync(outside, link, "dir");
+  await assert.rejects(purgeLocalCompany({ tenantId: "tenant-a", stateDirectory: link, wrapperRoot: wrapper,
+    apply: true, readStatus: async id => status(id), now: new Date("2026-03-01T00:00:00.000Z") }), /real path must stay inside this wrapper/);
+  assert.equal(existsSync(outside), true);
 });
 
 test("offboarding status must belong to the selected company", async () => {

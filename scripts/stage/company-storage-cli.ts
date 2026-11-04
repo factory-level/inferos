@@ -6,7 +6,7 @@ import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { unstable_getMiniflareWorkerOptions } from "wrangler";
 import { waitForMiniflareReady } from "./miniflare-readiness.ts";
 import {
-  exportCompanyStorage, httpStatusReader, purgeLocalCompany, type CompanyStorageBindings,
+  credentialResource, exportCompanyStorage, httpStatusReader, purgeLocalCompany, type CompanyStorageBindings,
   type KeyValueStore, type ObjectStore, type StorageResourceNames,
 } from "./company-storage.ts";
 
@@ -21,8 +21,10 @@ interface LocalManifest {
   resources: {
     kv: { binding: string; name: string }[];
     r2: { binding: string; name: string }[];
-    credentialKv?: string[];
-    credentialR2?: string[];
+    /** Missing means no KV resources are exported. */
+    exportKv?: string[];
+    /** Missing means no R2 resources are exported. */
+    exportR2?: string[];
   };
 }
 
@@ -34,6 +36,8 @@ Usage:
   pnpm stage:company-storage export-local --manifest FILE
   pnpm stage:company-storage purge-local --manifest FILE [--apply]
 
+Each wrapper must contain exactly one company's data; never point purge at a shared state directory.
+Only resources named in resources.exportKv/exportR2 are exported; omitted lists export nothing.
 Manifest contains only local wrapper paths and resource names. A real stage has no apply command.
 Set INFEROPS_OFFBOARDING_TOKEN to an internal InferOps bearer only for purge-local --apply.
 `;
@@ -56,6 +60,7 @@ function args(argv: string[]): { command: string; manifest?: string; apply: bool
 function readManifest(path: string): LocalManifest {
   const manifest = JSON.parse(readFileSync(path, "utf8")) as LocalManifest;
   if (!/^[0-9a-f-]{36}$/i.test(manifest.tenantId) || !manifest.resourcePrefix ||
+      !/[\/:_-]$/.test(manifest.resourcePrefix) ||
       !manifest.inferopsBaseUrl || !manifest.wrapperRoot || !manifest.stateDirectory ||
       !manifest.workerConfig || !manifest.outputDirectory || !manifest.resources ||
       !Array.isArray(manifest.resources.kv) || !Array.isArray(manifest.resources.r2)) {
@@ -71,6 +76,17 @@ function readManifest(path: string): LocalManifest {
   }
   if ([...manifest.resources.kv, ...manifest.resources.r2].some(resource => !resource.binding || !resource.name)) {
     throw new Error("Every local resource needs a binding and a resource name");
+  }
+  for (const [kind, allowed, listed] of [
+    ["KV", manifest.resources.exportKv, manifest.resources.kv.map(({ name }) => name)],
+    ["R2", manifest.resources.exportR2, manifest.resources.r2.map(({ name }) => name)],
+  ] as const) {
+    if (allowed !== undefined && (!Array.isArray(allowed) || allowed.some(name => typeof name !== "string"))) {
+      throw new Error(`resources.export${kind} must be an array of resource names`);
+    }
+    if (allowed && (new Set(allowed).size !== allowed.length || allowed.some(name => !listed.includes(name)))) {
+      throw new Error(`resources.export${kind} may contain only unique names listed in resources.${kind.toLowerCase()}`);
+    }
   }
   return manifest;
 }
@@ -163,14 +179,19 @@ async function main(argv: string[]): Promise<void> {
   const resources: StorageResourceNames = {
     kv: manifest.resources.kv.map(x => x.name),
     r2: manifest.resources.r2.map(x => x.name),
-    credentialKv: manifest.resources.credentialKv,
-    credentialR2: manifest.resources.credentialR2,
+    exportKv: manifest.resources.exportKv,
+    exportR2: manifest.resources.exportR2,
   };
   if (parsed.command === "plan") {
     console.log(JSON.stringify({ mode: "plan-only", tenantId: manifest.tenantId,
       kv: resources.kv, r2: resources.r2,
-      withheld: [...(resources.credentialKv ?? []).map(name => ({ kind: "kv", name, reason: "credential store" })),
-        ...(resources.credentialR2 ?? []).map(name => ({ kind: "r2", name, reason: "credential store" }))],
+      exportAllowList: { kv: resources.exportKv ?? [], r2: resources.exportR2 ?? [] },
+      withheld: [
+        ...resources.kv.filter(name => credentialResource(name) || !(resources.exportKv ?? []).includes(name))
+          .map(name => ({ kind: "kv", name, reason: credentialResource(name) ? "credential store" : "not on export allow-list" })),
+        ...resources.r2.filter(name => credentialResource(name) || !(resources.exportR2 ?? []).includes(name))
+          .map(name => ({ kind: "r2", name, reason: credentialResource(name) ? "credential store" : "not on export allow-list" })),
+      ],
       durableObjects: "workspace allow-list export; gadget state listed, not exported",
       remoteDeletion: "not performed; real Cloudflare deletion is a person-run step",
     }, null, 2));

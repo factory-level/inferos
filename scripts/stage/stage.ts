@@ -42,7 +42,7 @@ import {
 } from "./stage-config.ts";
 import { INFEROPS_GATEKEEPER } from "../dev-server-config.ts";
 import {
-  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending,
+  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending, STAGE_DELETE_DISCLOSURE,
 } from "./stage-resources.ts";
 import { resolveStage, type StageDefinition } from "./stages.ts";
 import {
@@ -509,7 +509,7 @@ async function remove(args: StageArgs): Promise<void> {
   }
   const retainedKv = stageKvNamespaces(stage, packages).map(({ title }) => title);
   const retainedR2 = stageR2Buckets(stage, packages);
-  console.log("WORKER DELETION DOES NOT DELETE COMPANY STORAGE.");
+  console.log(STAGE_DELETE_DISCLOSURE);
   console.log(`Retained KV namespaces (${retainedKv.length}): ${retainedKv.join(", ") || "none"}`);
   console.log(`Retained R2 buckets (${retainedR2.length}): ${retainedR2.join(", ") || "none"}`);
   console.log("No KV or R2 deletion was attempted. For this real stage, a person must export and delete only the retained resource names above in the matching Cloudflare account; this command cannot perform Cloudflare storage deletion.");
