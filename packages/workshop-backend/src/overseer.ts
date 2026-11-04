@@ -10,7 +10,7 @@ import type {
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
-  type StoredWorkflowDelivery, type StoredWorkflowInvocation,
+  type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
 } from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
@@ -1397,6 +1397,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The next workflow-definition delivery number (see workflow-definition-store.ts).
       nextWorkflowDeliveryId: 0,
+      // The next on-request run record number (see workflow-definition-store.ts).
+      nextWorkflowInvocationLogId: 0,
       nextChatId: 0,
       nextHookId: 0,
       nextAgentCallId: 0,
@@ -1440,6 +1442,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // (FAC-102; see workflow-definition-store.ts).
       workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),
       workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
+      // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
+      workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
       consoles: collection<OperateConsole>()({ primaryKey: "id" }),
       // Each published console's screens as they were when it was published, keyed

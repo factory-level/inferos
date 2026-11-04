@@ -42,9 +42,9 @@ describe("a trigger's control", () => {
     });
     expect(() => store.setControl(ADA, HOOK, { label: "", invokers: [OPERATOR] })).toThrow(TypeError);
     expect(() => store.setControl(ADA, HOOK, { label: "Run", invokers: [] })).toThrow(TypeError);
-    // A builder sees every control; a person sees only the controls listing them, as the only invoker.
+    // A builder sees every control; a person sees only the controls listing them, and only their label.
     expect(store.controls(null)).toHaveLength(1);
-    expect(store.controls(OPERATOR).map(c => c.invokers)).toEqual([[OPERATOR]]);
+    expect(store.controls(OPERATOR)).toEqual([{ hookId: HOOK, label: "Issue refund" }]);
     expect(store.controls("someone-else")).toEqual([]);
     store.pinTrigger(ADA.id, HOOK, GADGET, null);
     expect(store.controls(null)).toEqual([]);
@@ -198,5 +198,121 @@ describe("a second workspace", () => {
     expect(() => second.store.beginInvocation(OPERATOR, HOOK)).toThrow("You can't run this trigger.");
     expect(() => second.store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocation.id))
       .toThrow("That run request is unknown or already ran.");
+  });
+});
+
+// FAC-102 round 2 (review on #340).
+describe("an invocation stays on the revision it was admitted for", () => {
+  /** `pinned()` with a second saved revision of the same definition, for repinning. */
+  function twoRevisions() {
+    let base = pinned();
+    let heads = new Map([[GADGET, commit(1)]]);
+    let at = (id: number) => heads.get(id);
+    heads.set(GADGET, commit(2));
+    base.store.save(ADA, { id: base.definitionId, title: "Refund", gadgetId: GADGET }, at);
+    base.store.publish(ADA, base.definitionId, 2);
+    base.store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+    return { ...base, at };
+  }
+
+  it("is dropped when the trigger is repinned, so the request never runs the other revision", () => {
+    let { store, definitionId, at } = twoRevisions();
+    let invocation = store.beginInvocation(OPERATOR, HOOK);
+    expect(invocation.revision).toBe(1);
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId, revision: 2 });
+    expect(() => store.fire(HOOK, GADGET, at, everyoneBuilds, invocation.id))
+      .toThrow("That run request is unknown or already ran.");
+  });
+
+  it("is refused at delivery when the pin moved by any other path", () => {
+    let { store, storage, definitionId, at } = twoRevisions();
+    let invocation = store.beginInvocation(OPERATOR, HOOK);
+    // A pin moved without going through pinTrigger still can't take the request to revision 2.
+    storage.workflowTriggerPins.put({ hookId: HOOK, definitionId, revision: 2 });
+    expect(() => store.fire(HOOK, GADGET, at, everyoneBuilds, invocation.id))
+      .toThrow("That run request was for another revision of this workflow. Ask again.");
+    expect(store.deliveries(ADA.id, definitionId)).toEqual([]);
+  });
+
+  it("is dropped when the control changes or is cleared", () => {
+    let { store } = twoRevisions();
+    let first = store.beginInvocation(OPERATOR, HOOK);
+    store.setControl(ADA, HOOK, { label: "Refund now", invokers: [OPERATOR] });
+    expect(() => store.fire(HOOK, GADGET, headOf, everyoneBuilds, first.id)).toThrow("unknown or already ran");
+    let second = store.beginInvocation(OPERATOR, HOOK);
+    store.setControl(ADA, HOOK, null);
+    expect(() => store.fire(HOOK, GADGET, headOf, everyoneBuilds, second.id)).toThrow("unknown or already ran");
+  });
+
+  it("expires if it isn't delivered within a few minutes", () => {
+    vi.useFakeTimers();
+    try {
+      let { store } = pinned();
+      store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+      let invocation = store.beginInvocation(OPERATOR, HOOK);
+      vi.advanceTimersByTime(6 * 60_000);
+      expect(() => store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocation.id))
+        .toThrow("That run request expired. Ask again.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("how often a trigger runs on request", () => {
+  it("refuses a person past their rate, saying when to try again, and others keep theirs", () => {
+    vi.useFakeTimers();
+    try {
+      let { store } = pinned();
+      store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR, BUILDER] });
+      for (let i = 0; i < 3; i++) store.beginInvocation(OPERATOR, HOOK);
+      expect(() => store.beginInvocation(OPERATOR, HOOK))
+        .toThrow(/^You've run this trigger 3 times in the last 10 minutes\. Try again in \d+ minutes?\.$/);
+      expect(() => store.beginInvocation(BUILDER, HOOK)).not.toThrow();
+      vi.advanceTimersByTime(10 * 60_000 + 1);
+      expect(() => store.beginInvocation(OPERATOR, HOOK)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses everyone past the trigger's own hourly rate", () => {
+    vi.useFakeTimers();
+    try {
+      let { store } = pinned();
+      let invokers = Array.from({ length: 10 }, (_, i) => `person-${i}`);
+      store.setControl(ADA, HOOK, { label: "Issue refund", invokers });
+      // Each run is delivered (its waiting request cleared), so only the rate can refuse the next.
+      for (let i = 0; i < 20; i++) {
+        store.cancelInvocation(store.beginInvocation(invokers[i % 10]!, HOOK).id);
+        vi.advanceTimersByTime(60_000);
+      }
+      expect(() => store.beginInvocation("person-0", HOOK))
+        .toThrow(/^This trigger has run on request 20 times in the last hour\. Try again in \d+ minutes?\.$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("what an invoker sees, and what reaches the gatekeeper", () => {
+  it("shows an invoker only the control's label, never who configured it or what it runs", () => {
+    let { store } = pinned();
+    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR, BUILDER] });
+    expect(store.controls(OPERATOR)).toEqual([{ hookId: HOOK, label: "Issue refund" }]);
+  });
+
+  it("passes the gatekeeper only the invocation id, even when called directly with more", async () => {
+    let { store } = pinned();
+    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+    let invoke = vi.fn(async (_request: unknown) => {});
+    let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
+    let impl = {
+      storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
+      workflowDefinitionStore: () => store,
+    };
+    let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
+    await direct(impl, OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
+    expect(invoke.mock.calls).toEqual([[{ invocationId: expect.any(String) }]]);
   });
 });

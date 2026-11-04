@@ -94,8 +94,19 @@ export const MAX_TRIGGER_CONTROL_INVOKERS = 50;
 /** Longest trigger control label, in characters. */
 export const MAX_TRIGGER_CONTROL_LABEL_LENGTH = 80;
 
-/** Most invocations one workspace keeps; the oldest is dropped past it. */
+/** Most on-request runs one workspace remembers for its run rates; the oldest is dropped past it. */
 export const MAX_WORKFLOW_INVOCATIONS = 1000;
+
+/**
+ * Run rates on request. Each run spends the builders' connections and model budget, and a person
+ * asks for one by hand, so a few in ten minutes per person and twenty an hour per trigger leave
+ * room for real use while a stuck button or a loop stops quickly.
+ */
+export const TRIGGER_RUNS_PER_INVOKER = { runs: 3, windowMs: 10 * 60_000 } as const;
+export const TRIGGER_RUNS_PER_TRIGGER = { runs: 20, windowMs: 60 * 60_000 } as const;
+
+/** How long an admitted request may wait for its trigger's gatekeeper to deliver it. */
+export const WORKFLOW_INVOCATION_TTL_MS = 5 * 60_000;
 
 /**
  * What a builder sets on a pinned trigger so named people can ask it to run now: a label, and the
@@ -110,16 +121,19 @@ export type TriggerControlSettings = {
   invokers: string[];
 };
 
-/** A trigger's control, as a builder sees it, or as one of its invokers sees it. */
+/**
+ * A trigger's control. A builder sees all of it; one of its invokers sees only `hookId` and
+ * `label`, enough to run it, and nothing of who configured it, who else may, or what it runs.
+ */
 export type TriggerControl = {
   hookId: number;
   label: string;
-  /** The revision the trigger runs. */
-  definition: WorkflowDefinitionRef;
-  /** Who may run it. Shown to builders; an invoker sees only themselves. */
-  invokers: string[];
-  configuredBy: AiChatAuthorInfo;
-  configuredAt: Date;
+  /** The revision the trigger runs. Builders only. */
+  definition?: WorkflowDefinitionRef;
+  /** Who may run it. Builders only. */
+  invokers?: string[];
+  configuredBy?: AiChatAuthorInfo;
+  configuredAt?: Date;
 };
 
 /**
