@@ -2,6 +2,7 @@ import type { WorkpieceId } from "./api.js";
 import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
 import type { WidgetToolDeclaration } from "./widget-tools.js";
+import type { WidgetStateMachine } from "./widget-state.js";
 import type { CanvasProjectBoardWidget } from "./canvas.js";
 
 /** Authorized presentation of a published console for the version-1 AG-UI read adapter. */
@@ -137,6 +138,12 @@ export type ConsoleWidgetFreeze = {
    * while console tools are on (`CONSOLE_TOOLS`).
    */
   tools?: WidgetToolDeclaration[];
+  /**
+   * The local states that commit's `states.json` declares (FAC-86), snapshotted at publication
+   * like `tools`: what each operator's running state of the widget follows. Absent when the commit
+   * declares none, or on entries published before publication recorded it.
+   */
+  states?: WidgetStateMachine;
 };
 
 /**
@@ -188,11 +195,12 @@ export type ConsoleWidgetCandidate = {
   /** The install's current commit, or null if it has none yet. */
   commitId: string | null;
   /**
-   * What that commit offers a console: a UI (`client.js`) and the names of the tools its
-   * `tools.json` declares. Operators reach declared tools only while console tools are on
-   * (`CONSOLE_TOOLS`). Null when the commit is not a widget a console runs, or there is none.
+   * What that commit offers a console: a UI (`client.js`), the names of the tools its
+   * `tools.json` declares, and the local states its `states.json` declares (null when it declares
+   * none). Operators reach declared tools only while console tools are on (`CONSOLE_TOOLS`). Null
+   * when the commit is not a widget a console runs, or there is none.
    */
-  surfaces: { ui: boolean; tools: string[] } | null;
+  surfaces: { ui: boolean; tools: string[]; states: string[] | null } | null;
   /**
    * Why a console cannot offer it now, as saving a console that registers it would refuse it; null
    * when one can. Registering offers the widget only, and publishing still needs the deployment's

@@ -97,6 +97,7 @@ export const BACKEND: readonly string[] = [
   "agent-spawner-config.test.ts",
   "operate-agui.test.ts",
   "operate-flow-start.test.ts",
+  "widget-state.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
   "authorize-observation-flags.test.ts",

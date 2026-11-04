@@ -16,6 +16,7 @@ import {
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
+import { WIDGET_STATES_FILE, parseWidgetStates, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
   isGadgetModule,
@@ -3268,9 +3269,23 @@ class OverseerImpl implements AgentHooks {
       let files = await this.#classifiedFiles("widget", commitId);
       let classification = classifyGadgetFiles("widget", files);
       let callable = classification.class === "callableTools" || classification.class === "callableCombined";
+      // A widget's local states (FAC-86), read only when its commit declares them; a states.json
+      // that doesn't parse refuses the widget rather than this read (consoleWidgetRefusal).
+      let states: WidgetStateMachine | null = null;
+      let statesProblem: string | null = null;
+      if (files.has(WIDGET_STATES_FILE)) {
+        try {
+          let text = await this.gitStore.readCommitBlob(commitId, WIDGET_STATES_FILE, "text");
+          if (text === null) statesProblem = "states.json is missing.";
+          else states = parseWidgetStates(text);
+        } catch (error) {
+          statesProblem = error instanceof BlobTextError ? "states.json is not UTF-8 text."
+              : error instanceof Error ? error.message : String(error);
+        }
+      }
       commits.set(commitId, { classification,
         viewText: classification.class === "viewOnly" ? files.get(GADGET_VIEW_FILE) ?? null : null,
-        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null });
+        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null, states, statesProblem });
     }
     return commits;
   }
@@ -12785,6 +12800,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
     return this.#consoleStore().page(consoleId, screenId, source);
   }
+  async getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> {
+    return this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.states ?? null;
+  }
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
     // Build access may already open any gadget, so its capability is the ordinary one.
@@ -15408,6 +15427,13 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // the widget at that published revision, and the caller's own operate session must still have
   // that console and revision open. So one kept from an older publication, from a console since
   // unpublished or deleted, or from a console the person has since left stops working.
+  // A published entry never changes, so its frozen states are what every check would read.
+  async getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> {
+    let states = this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.states ?? null;
+    await this.impl.consoleSessionCheck(this.#clientUser, consoleId, revision);
+    return states;
+  }
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     let ui = true;
     let check = async () => {
@@ -15784,6 +15810,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getConsoleWidgetStates(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> { this.#deny(); }
   async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)

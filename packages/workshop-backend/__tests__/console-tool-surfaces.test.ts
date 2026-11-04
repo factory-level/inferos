@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import type { BoundViewEntry, ConsoleWidgetEntry, HostBoardEntry, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { parseWidgetTools, WIDGET_TOOL_LIMITS } from "@gadgets/workshop-shared/widget-tools";
+import { parseWidgetStates } from "@gadgets/workshop-shared/widget-state";
 import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
 import { CONSOLE_SIZE_LIMITS, consoleToolsEnabled, WorkspaceConsoleStore, type FrozenInstalls, type SourceCommit, type SourceCommits } from "../src/console-store";
 import { makeOverseerStorage, type GadgetRecord } from "../src/overseer";
@@ -31,9 +32,23 @@ function sourceCommit(files: Record<string, string>): SourceCommit {
   let map = new Map(Object.entries(files));
   let classification = classifyGadgetFiles("widget", map);
   let callable = classification.class === "callableTools" || classification.class === "callableCombined";
+  let states = null, statesProblem = null;
+  if (files["states.json"] !== undefined) {
+    try {
+      states = parseWidgetStates(files["states.json"]);
+    } catch (error) {
+      statesProblem = (error as Error).message;
+    }
+  }
   return { classification, viewText: classification.class === "viewOnly" ? files["view.json"]! : null,
-    tools: callable ? parseWidgetTools(files["tools.json"]!) : null };
+    tools: callable ? parseWidgetTools(files["tools.json"]!) : null, states, statesProblem };
 }
+
+/** A small request widget's local states (FAC-86). */
+const STATES = {
+  version: 1, initial: "viewing", persistence: "person", states: ["viewing", "editing"],
+  transitions: [{ event: "edit", from: "viewing", to: "editing" }, { event: "cancel", from: "editing", to: "viewing" }],
+};
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
 
@@ -77,6 +92,10 @@ const COMMITS = {
   toolsOnly: sourceCommit({ "server.js": SERVER, "tools.json": JSON.stringify([tool("openCount"), tool("closedCount")]) }),
   edited: sourceCommit({ "server.js": SERVER, "tools.json": JSON.stringify([tool("renamed")]) }),
   broken: sourceCommit({ "server.js": SERVER, "tools.json": "[]" }),
+  stateful: sourceCommit({ "client.js": CLIENT, "server.js": SERVER, "states.json": JSON.stringify(STATES) }),
+  restated: sourceCommit({ "client.js": CLIENT, "server.js": SERVER,
+    "states.json": JSON.stringify({ ...STATES, persistence: "session" }) }),
+  badStates: sourceCommit({ "client.js": CLIENT, "server.js": SERVER, "states.json": JSON.stringify({ ...STATES, states: ["viewing", "editing", "orphan"] }) }),
 };
 type CommitName = keyof typeof COMMITS;
 
@@ -363,5 +382,43 @@ describe("the whole-console size cap with frozen tools", () => {
     expect(attempt(padding, description)).toEqual({ size: CONSOLE_SIZE_LIMITS.console });
     let over = attempt(padding, `${description}d`);
     expect(over.refused?.message).toBe(`This console would be over ${CONSOLE_SIZE_LIMITS.console} bytes published.`);
+  });
+});
+
+describe("a widget's declared local states (FAC-86)", () => {
+  it("are frozen at publication, unchanged by later edits, and offered as a candidate surface", () => {
+    let t = setup();
+    t.install(5, "stateful");
+    t.screen("floor", [5]);
+    let saved = t.save(ON, t.content("floor", [t.entry(5)]));
+    let published = t.publish(ON, saved.id, saved.revision);
+    expect(published.published!.content.widgets![0]!.frozen).toEqual(
+      { sourceGadgetId: 5, commitId: "stateful", ui: true, states: COMMITS.stateful.states });
+    t.install(5, "restated");
+    let stored = t.store(ON).get(saved.id, "published")!;
+    expect(stored.widgets![0]!.frozen!.states!.persistence).toBe("person");
+    // A candidate lists the states its current commit declares, or none.
+    t.install(7, "visual");
+    let store = t.store(ON);
+    let candidates = store.widgetCandidates(t.read(store.widgetCandidateCommitIds()));
+    expect(candidates.map(c => [c.gadgetId, c.surfaces?.states])).toEqual(
+      expect.arrayContaining([[5, ["viewing", "editing"]], [7, null]]));
+  });
+
+  it("refuse a widget whose states.json doesn't parse, naming why", () => {
+    let t = setup();
+    t.install(6, "badStates");
+    t.screen("floor", []);
+    expect(() => t.save(ON, t.content("floor", [t.entry(6)])))
+      .toThrow('states.json isn\'t valid: State "orphan" can\'t be reached from "viewing".');
+  });
+
+  it("are kept while console tools are off, which only drops tools", () => {
+    let t = setup();
+    t.install(5, "stateful");
+    t.screen("floor", [5]);
+    let saved = t.save(OFF, t.content("floor", [t.entry(5)]));
+    expect(t.publish(OFF, saved.id, saved.revision).published!.content.widgets![0]!.frozen!.states)
+      .toEqual(COMMITS.stateful.states);
   });
 });

@@ -6,6 +6,7 @@ import { nestedPage } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
+import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
@@ -36,6 +37,10 @@ export type SourceCommit = {
   viewText: string | null;
   /** The parsed `tools.json`, for a `callableTools` or `callableCombined` commit; otherwise null. */
   tools: WidgetToolDeclaration[] | null;
+  /** The parsed `states.json` of a widget that declares one; otherwise null. */
+  states: WidgetStateMachine | null;
+  /** Why a present `states.json` doesn't parse, which refuses the widget; otherwise null. */
+  statesProblem: string | null;
 };
 
 /**
@@ -166,8 +171,12 @@ export function consoleWidgetRefusal(storage: Pick<ConsoleStorage, "gadgets">, e
     commits?: SourceCommits): string | null {
   let refusal = installRefusal(storage, entry);
   if (refusal || !commits) return refusal;
-  let { class: fileClass, violations } = currentCommit(storage, commits, entry.gadgetId).classification;
-  if (fileClass === "visualWidget" || fileClass === "callableTools" || fileClass === "callableCombined") return null;
+  let commit = currentCommit(storage, commits, entry.gadgetId);
+  let { class: fileClass, violations } = commit.classification;
+  if (fileClass === "visualWidget" || fileClass === "callableTools" || fileClass === "callableCombined") {
+    return commit.statesProblem === null ? null
+      : `Gadget ${entry.gadgetId}'s states.json isn't valid: ${commit.statesProblem}`;
+  }
   if (fileClass === "viewOnly") return `Gadget ${entry.gadgetId} is a view with no code; offer it as a bound view instead.`;
   let reasons = violations.map(violation => violation.message).join(" ");
   return `Gadget ${entry.gadgetId}'s files are not a widget a console runs.${reasons ? ` ${reasons}` : ""}`;
@@ -363,8 +372,9 @@ function captureConsole(storage: Pick<ConsoleStorage, "gadgets" | "canvases" | "
 
 // The surfaces a published widget entry freezes from its source commit: whether it has a UI, and
 // its declared tools when it has some (`commits` holds none while console tools are off).
-function frozenSurfaces(commit: SourceCommit): Pick<ConsoleWidgetFreeze, "ui" | "tools"> {
-  return { ui: !hasNoUi(commit), ...(commit.tools === null ? {} : { tools: commit.tools }) };
+function frozenSurfaces(commit: SourceCommit): Pick<ConsoleWidgetFreeze, "ui" | "tools" | "states"> {
+  return { ui: !hasNoUi(commit), ...(commit.tools === null ? {} : { tools: commit.tools }),
+    ...(commit.states === null ? {} : { states: commit.states }) };
 }
 
 /**
@@ -661,7 +671,8 @@ export class WorkspaceConsoleStore {
       let runs = fileClass === "visualWidget" || fileClass === "callableTools" || fileClass === "callableCombined";
       return { gadgetId: record.id, blueprintId: entry.blueprintId, version: entry.version,
         versionId: consoleWidgetVersionId(entry), commitId: record.commitId ?? null,
-        surfaces: runs ? { ui: fileClass !== "callableTools", tools: commit!.tools?.map(tool => tool.name) ?? [] } : null,
+        surfaces: runs ? { ui: fileClass !== "callableTools", tools: commit!.tools?.map(tool => tool.name) ?? [],
+          states: commit!.states?.states ?? null } : null,
         refusal };
     });
   }
