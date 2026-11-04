@@ -25,7 +25,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "./workflow-definition.js";
 import type {
@@ -2672,6 +2672,13 @@ export interface Overseer extends RpcTarget {
    * (see `publishedConsole()`). Creating, replacing, publishing and deleting need build access.
    */
   listConsoles(): Promise<OperateConsole[]>;
+  /**
+   * Every widget install of this workspace a console could register, each with its stable
+   * version, what its current commit offers and, when a console can't offer it now, the reason a
+   * save would refuse it (see `ConsoleWidgetCandidate`): the same checks `createConsole()` and
+   * `replaceConsole()` make. Build only, and needs both view flags, like `listConsoles()`.
+   */
+  listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]>;
   /** Create an unpublished console draft under a server-minted ID and revision zero. Its views must reference canvases of this workspace; limit 16 per workspace. */
   createConsole(content: OperateConsoleContent): Promise<OperateConsole>;
   /** Replace a console's draft at its expected revision. Operators keep the published revision until `publishConsole()`. */

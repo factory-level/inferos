@@ -34,7 +34,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, type ConsoleSource, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, type ConsoleSource, type ConsoleWidgetCandidate, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -12632,6 +12632,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
+  // Read first, then checked, as a save is (see createConsole).
+  async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> {
+    let store = this.#consoleStore();
+    return store.widgetCandidates(await this.impl.readSourceCommits(store.widgetCandidateCommitIds()));
+  }
   // Saving checks each registered gadget's current commit, read first; one that moves meanwhile
   // refuses the save.
   async createConsole(content: OperateConsoleContent): Promise<OperateConsole> {
@@ -14949,6 +14954,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().listPublished(); }
+  async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
@@ -15493,6 +15499,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
       : Promise<OperateConsole> { this.#deny(); }

@@ -101,6 +101,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
+  listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
   publishConsole: ws => ws.publishConsole("console", "0"),
