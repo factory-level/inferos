@@ -4006,8 +4006,8 @@ export type WorkspaceRecordExport = {
   triggerControls: {hookId: number; definition?: WorkflowDefinitionRef; configuredAt?: Date}[];
   /** Widget install references; refusal text and declared names are withheld. */
   widgetRegistry: {gadgetId: WorkpieceId; blueprintId: string; version: number; versionId: string; commitId: string | null; surfaces: {ui: boolean; toolCount: number; stateCount: number} | null}[];
-  /** Allow-listed action audit entries; no provider payloads, messages, errors, or descriptions. */
-  actionLog: {id: number; gatekeeperId?: WorkpieceId; gatekeeper: string | null; method: string | null; outcome: import("./action-outcome.js").ActionOutcome; requestedBy?: ActionRequester; requestedAt: Date; decidedBy?: {type: AiChatAuthorInfo["type"]; id: string; name: string}; decidedAt?: Date; appliedRevision?: string; createdIdentifier?: string; runId?: string}[];
+  /** Allow-listed action audit entries; actor identities use opaque IDs without names or emails. */
+  actionLog: {id: number; gatekeeperId?: WorkpieceId; gatekeeper: string | null; method: string | null; outcome: import("./action-outcome.js").ActionOutcome; requestedBy?: {type: "user" | "agent" | "gadget" | "system"; id: string}; requestedAt: Date; decidedBy?: {type: AiChatAuthorInfo["type"]; id: string}; decidedAt?: Date; appliedRevision?: string; createdIdentifier?: string; runId?: string}[];
   /** Maximum number of newest action entries included in `actionLog`. */
   actionLogLimit: number;
   /** True only when more history exists than `actionLogLimit`; consumers must report this. */

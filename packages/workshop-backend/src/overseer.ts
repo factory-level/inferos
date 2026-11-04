@@ -852,6 +852,32 @@ const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 // How many audited host-board reads an operate session workspace keeps (see host-boards.ts).
 const HOST_BOARD_READS_KEPT = 1000;
 
+async function opaqueExportActorId(id: string, exportSalt: string, alwaysHash = false): Promise<string> {
+  // Email-like account identifiers are reversible personal data. Hash them deterministically so
+  // repeated actors remain linkable within the export without exposing the address. The random
+  // export salt prevents the same email from being correlated across separate exports.
+  if (!alwaysHash && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return id;
+  let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${exportSalt}:${id}`)));
+  return `sha256:${digest.toHex()}`;
+}
+
+async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt: string)
+    : Promise<{type: "user" | "agent" | "gadget" | "system"; id: string} | undefined> {
+  if (!caller) return undefined;
+  switch (caller.from) {
+    case "agent":
+    case "user":
+      return caller.chatId === undefined ? undefined : {
+        type: caller.from,
+        id: await opaqueExportActorId(`chat:${caller.chatId}`, exportSalt, true),
+      };
+    case "gadget":
+      return caller.gadgetId === undefined ? undefined : {type: "gadget", id: String(caller.gadgetId)};
+    case "hook":
+      return {type: "system", id: "hook"};
+  }
+}
+
 export type ActionRecord = {
   id: number,
   gatekeeperId: WorkpieceId;
@@ -12728,12 +12754,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let actionLog: WorkspaceRecordExport["actionLog"] = [];
     let beforeId: number | undefined;
+    let actionLogTruncated = false;
+    let actorIdSalt = crypto.getRandomValues(new Uint8Array(16)).toHex();
     while (actionLog.length < ACTION_LOG_EXPORT_LIMIT) {
       let page = await this.listActions({beforeId});
-      for (let entry of page.entries.slice(0, ACTION_LOG_EXPORT_LIMIT - actionLog.length)) {
+      let room = ACTION_LOG_EXPORT_LIMIT - actionLog.length;
+      actionLogTruncated ||= page.entries.length > room;
+      for (let entry of page.entries.slice(0, room)) {
         let action = entry.type === "action" ? entry : undefined;
         let decidedBy = action?.resolvedBy;
         let result = action?.result;
+        let storedRecord = this.impl.storage.actions.get(entry.id);
         let gatekeeper = entry.gatekeeperId === undefined ? undefined : this.impl.storage.gatekeepers.get(entry.gatekeeperId);
         actionLog.push({
           id: entry.id,
@@ -12741,9 +12772,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           gatekeeper: gatekeeperVendorId(gatekeeper) ?? null,
           method: action?.description.actionKind?.tag ?? null,
           outcome: action ? actionOutcome(action) : "unknown",
-          requestedBy: entry.requestedBy,
+          requestedBy: await exportRequester(storedRecord?.caller, actorIdSalt),
           requestedAt: entry.createdAt,
-          decidedBy: decidedBy ? {type: decidedBy.type, id: decidedBy.id, name: decidedBy.name} : undefined,
+          decidedBy: decidedBy ? {type: decidedBy.type, id: await opaqueExportActorId(decidedBy.id, actorIdSalt)} : undefined,
           decidedAt: action?.appliedAt ?? action?.lastAttempt?.at,
           appliedRevision: typeof result?.appliedRevision === "string" ? result.appliedRevision : undefined,
           createdIdentifier: typeof result?.createdIdentifier === "string" ? result.createdIdentifier : undefined,
@@ -12751,7 +12782,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         });
       }
       beforeId = page.nextBeforeId;
-      if (beforeId === undefined) break;
+      if (actionLog.length >= ACTION_LOG_EXPORT_LIMIT) {
+        actionLogTruncated ||= beforeId !== undefined;
+        break;
+      }
+      if (actionLogTruncated || beforeId === undefined) break;
     }
 
     let workflowDefinitions = (await this.listWorkflowDefinitions()).map(definition => ({
@@ -12792,7 +12827,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       widgetRegistry,
       actionLog,
       actionLogLimit: ACTION_LOG_EXPORT_LIMIT,
-      actionLogTruncated: beforeId !== undefined,
+      actionLogTruncated,
       withheld: {
         canvases: "Authored titles, target references, and widget parameters may contain user text or secrets.",
         pages: "Node titles, attachment text and effects, targets, and widget parameters may contain user text or secrets.",
@@ -12800,7 +12835,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         triggers: "Hook descriptions, resource titles, and URLs are provider-controlled text and routing metadata.",
         triggerControls: "Labels and invoker/profile identity are user-authored or personal data.",
         widgetRegistry: "Refusal text and tool/state names are arbitrary gadget-authored strings.",
-        actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets.",
+        actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets; identities kept as opaque ids, names and emails withheld.",
       },
     };
   }

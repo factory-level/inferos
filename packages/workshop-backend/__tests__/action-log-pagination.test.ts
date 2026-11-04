@@ -213,6 +213,78 @@ describe("listActions", () => {
 });
 
 describe("exportWorkspaceRecords", () => {
+  it("keeps actor attribution opaque and stable without exporting names or emails", async () => {
+    let storage = makeActionStorage();
+    let email = "private.person@example.test";
+    let displayName = "Private Display Name";
+    for (let id = 0; id < 2; id++) {
+      putAction(storage, id, {state: "approved", appliedAt: new Date(FIXTURE_EPOCH + id + 1)});
+      let entry = storage.actions.get(id)!;
+      if (entry.type !== "action") throw new Error("fixture action missing");
+      storage.actions.put({...entry, resolvedBy: {type: "user", id: email, name: displayName}});
+    }
+    let client = await openFakeOverseer(storage, {impl: {
+      env: {COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true"},
+      frozenInstalls: () => ({create: () => { throw new Error("unused"); }, remove: () => {}}),
+      readSourceCommits: async () => new Map(),
+      workflowDefinitionStore: () => ({list: () => [], controls: () => [], pinOf: () => null}),
+    }});
+
+    let exported = await client.exportWorkspaceRecords();
+    let serialized = JSON.stringify(exported);
+    expect(serialized).not.toContain(email);
+    expect(serialized).not.toContain(displayName);
+    expect(exported.actionLog[0].decidedBy).toMatchObject({type: "user"});
+    expect(exported.actionLog[0].decidedBy?.id).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(exported.actionLog[1].decidedBy?.id).toBe(exported.actionLog[0].decidedBy?.id);
+    expect(exported.actionLog[0].requestedBy).toMatchObject({type: "agent"});
+    expect(exported.actionLog[1].requestedBy?.id).toBe(exported.actionLog[0].requestedBy?.id);
+    expect(exported.withheld.actionLog).toContain("identities kept as opaque ids, names and emails withheld");
+  });
+
+  it("reports truncation when the final page straddles the export limit", async () => {
+    let storage = makeActionStorage();
+    for (let id = 0; id < 505; id++) putAction(storage, id, {state: "approved"});
+    let client = await openFakeOverseer(storage, {impl: {
+      env: {COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true"},
+      frozenInstalls: () => ({create: () => { throw new Error("unused"); }, remove: () => {}}),
+      readSourceCommits: async () => new Map(),
+      workflowDefinitionStore: () => ({list: () => [], controls: () => [], pinOf: () => null}),
+    }});
+    let ids = Array.from({length: 505}, (_, index) => 504 - index);
+    let makeEntries = (entryIds: number[]) => entryIds.map(id => ({
+      id,
+      gatekeeperId: 1,
+      resourceTitle: `Resource ${id}`,
+      createdAt: new Date(FIXTURE_EPOCH + id),
+      state: "approved" as const,
+      type: "observation" as const,
+      description: {title: `Observation ${id}`, description: "fixture"},
+    } satisfies ActionLogEntry));
+    let pages = [
+      ids.slice(0, 100), ids.slice(100, 200), ids.slice(200, 300), ids.slice(300, 400),
+      ids.slice(400, 495), ids.slice(495),
+    ];
+    let calls = 0;
+    let listActionsSpy = vi.spyOn(Object.getPrototypeOf(client), "listActions").mockImplementation(async () => {
+      let pageIds = pages[calls++]!;
+      return {
+        entries: makeEntries(pageIds),
+        nextBeforeId: pageIds.length === 0 || calls === pages.length ? undefined : pageIds.at(-1),
+      };
+    });
+
+    let exported = await (async () => {
+      try {
+        return await client.exportWorkspaceRecords();
+      } finally {
+        listActionsSpy.mockRestore();
+      }
+    })();
+    expect(exported.actionLog).toHaveLength(500);
+    expect(exported.actionLogTruncated).toBe(true);
+  });
+
   it("projects provider payloads away and reports when the bounded history is truncated", async () => {
     let storage = makeActionStorage();
     const secret = "fake-provider-token-should-never-export";
