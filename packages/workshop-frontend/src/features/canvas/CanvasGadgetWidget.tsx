@@ -40,6 +40,8 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
   const isWidget = !!gadget?.frozenFor
   // The widget a published revision offers (a frozen install); apps there have no local states.
   const offeredWidget = offeredBy && isWidget ? offeredBy : undefined
+  // The state its bar shows, which the widget's own frame is told so it can draw it.
+  const [widgetState, setWidgetState] = useState<string | null>(null)
   useEffect(() => {
     if (gadgetId === undefined) return
     const stub = consoleId === undefined || revision === undefined ? overseer.getGadget(gadgetId)
@@ -73,11 +75,12 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
     {/* The widget's own state (FAC-86), only for a published console's frozen widget in Operate. */}
     {offeredWidget?.workspaceId !== undefined && operate?.session && gadgetId !== undefined &&
       <WidgetStateBar session={operate.session.stub}
-        widgetRef={{ workspaceId: offeredWidget.workspaceId, consoleId: offeredWidget.consoleId, revision: offeredWidget.revision, gadgetId }} />}
+        widgetRef={{ workspaceId: offeredWidget.workspaceId, consoleId: offeredWidget.consoleId, revision: offeredWidget.revision, gadgetId }}
+        onStateChange={setWidgetState} />}
     {gadget === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is no longer in the workspace. Remove it from the layout or choose another gadget.</p>
       : gadgetId === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is still a draft in a conversation. Accept the conversation's changes to show it here.</p>
       : refused ? <p role="status" className="p-4 text-sm text-kumo-subtle">{refused}</p>
       : stub && shown && <GadgetUI key={gadget.commitId} gadget={stub} isVisible={visible}
-        height={widget.size === 'full' ? '560px' : '420px'} />}
+        height={widget.size === 'full' ? '560px' : '420px'} widgetState={widgetState} />}
   </article>
 }
