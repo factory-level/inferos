@@ -18,6 +18,7 @@ type BlockPoint = "start" | "authorization" | "callback";
 let mode: TestMode = "success";
 let events: string[] = [];
 let callbackScheduleIds: string[] = [];
+let firings: object[] = [];
 let activeCallbacks = 0;
 let maxActiveCallbacks = 0;
 // When set, callbacks hold until this many have overlapped once, so reaching the driver's
@@ -122,8 +123,9 @@ class TestCallback extends RpcTarget {
     this.#markDisposed = resolve;
   });
 
-  async onSchedule(firing: { runId: string; scheduleId: string }): Promise<void> {
+  async onSchedule(firing: { runId: string; scheduleId: string; requested?: true }): Promise<void> {
     events.push(`callback:${firing.runId}`);
+    firings.push(firing);
     callbackScheduleIds.push(firing.scheduleId);
     activeCallbacks++;
     maxActiveCallbacks = Math.max(maxActiveCallbacks, activeCallbacks);
@@ -149,8 +151,9 @@ class TestCallback extends RpcTarget {
 
 /** Test-only persistent hook initiator. */
 export class TestHooks extends WorkerEntrypoint {
-  async startHook(): Promise<{ callback: TestCallback; approvalQueue: TestApprovalQueue }> {
+  async startHook(request?: { invocationId: string }): Promise<{ callback: TestCallback; approvalQueue: TestApprovalQueue }> {
     events.push("start");
+    if (request) events.push(`request:${request.invocationId}`);
     mark("start");
     await pauseIfBlocked("start");
     if (mode === "start-reject") throw new Error("opaque admission rejection");
@@ -207,6 +210,7 @@ export class TestHooks extends WorkerEntrypoint {
     return {
       events: [...events],
       callbackScheduleIds: [...callbackScheduleIds],
+      firings: [...firings],
       maxActiveCallbacks,
       disposedApprovalQueues,
       disposedCallbacks,
@@ -221,6 +225,7 @@ export class TestHooks extends WorkerEntrypoint {
     mode = "success";
     events = [];
     callbackScheduleIds = [];
+    firings = [];
     activeCallbacks = 0;
     maxActiveCallbacks = 0;
     callbackConcurrencyTarget = 0;

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { applyCanvasOperations, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation } from '@gadgets/workshop-shared/canvas'
 import { applyCanvasPageOperations, canvasDefinitionProjection, canvasPageFromDefinition, parseCanvasPage, type CanvasPage, type CanvasPageOperation } from '@gadgets/workshop-shared/canvas-model'
+import { withServerWords } from './serverWords'
 
 export type CanvasStorage = { kind: 'temporary' } | {
   kind: 'durable'
@@ -110,10 +111,12 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
       return true
     } catch (thrown) {
       if (generation.current === current) {
-        const message = thrown instanceof Error ? thrown.message : ''
-        setError(CONFLICT.test(message)
-          ? `${message}. Nothing was overwritten: reload to see the newer version, then make your change again.`
-          : 'Could not change the view. Check the fields, or reload to get the latest saved revision.')
+        // A conflict says plainly that newer work exists and nothing was overwritten (FAC-83); every
+        // refusal keeps the server's own words (FAC-97).
+        const message = thrown instanceof Error ? thrown.message : undefined
+        setError(withServerWords(message && CONFLICT.test(message)
+          ? 'Nothing was overwritten: reload to see the newer version, then make your change again.'
+          : 'Could not change the view. Check the fields, or reload to get the latest saved revision.', message))
       }
       return false
     } finally {

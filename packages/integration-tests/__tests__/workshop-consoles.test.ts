@@ -1,6 +1,7 @@
 import type { RpcStub } from "capnweb";
 import { expect, it } from "vitest";
 import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES, type OperateSession, type OperateSessionUpdate } from "@gadgets/workshop-shared/api";
+import { canvasPageFromDefinition } from "@gadgets/workshop-shared/canvas-model";
 import { startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { callbackStubFor, connect, logIn, signUp, waitFor } from "../src/rpc-client.js";
@@ -126,6 +127,9 @@ it("lets a use-role operator use only the published revision, while a builder pr
       .toEqual([board.id, activity.id].toSorted());
     expect(await useWorkspace.getCanvas(board.id)).toEqual(board);
     expect(await useWorkspace.getConsoleScreen(created.id, board.id, "published")).toEqual(board);
+    // FAC-89: the published page is the one the publication froze, at the same revision.
+    expect(await useWorkspace.getConsolePage(created.id, board.id, "published")).toEqual(canvasPageFromDefinition(board));
+    expect(await useWorkspace.getConsolePage(created.id, elsewhere.id, "published")).toBeNull();
     expect(await useWorkspace.getCanvas(elsewhere.id)).toBeNull();
     await expect(useWorkspace.editCanvas(board.id, board.revision, [{ type: "rename", title: "Denied" }]))
       .rejects.toThrow(denied);
@@ -161,6 +165,10 @@ it("lets a use-role operator use only the published revision, while a builder pr
     // The operator can't preview the draft; the builder can, and sees the edits.
     await expect(useWorkspace.getConsole(created.id, "draft")).rejects.toThrow(denied);
     await expect(useWorkspace.getConsoleScreen(created.id, board.id, "draft")).rejects.toThrow(denied);
+    await expect(useWorkspace.getConsolePage(created.id, board.id, "draft")).rejects.toThrow(denied);
+    // The renamed screen is the draft's; the operator's page is still the published one.
+    expect(await useWorkspace.getConsolePage(created.id, board.id, "published")).toEqual(canvasPageFromDefinition(board));
+    expect(await workspace.getConsolePage(created.id, board.id, "draft")).toEqual(canvasPageFromDefinition(renamed));
     await expect(session.dispatch({ ...open, source: "draft", revision: "2", viewId: "board" }, page.seq))
       .rejects.toSatisfy(consoleChanged);
     expect(await workspace.getConsole(created.id, "draft")).toEqual(draft);

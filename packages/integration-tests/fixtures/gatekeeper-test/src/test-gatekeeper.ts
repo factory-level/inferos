@@ -25,8 +25,9 @@ import {
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { ActionApplyError, ActionOutcomeUnknownError, applyActionOutcome } from "@gadgets/gatekeeper-kit/actions";
+import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import type {
-  AccountDescription, ActionApplyFailure, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
   HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, SupportedResource,
   VendorDescription,
@@ -218,6 +219,19 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 
   recordApplyAttempt(label: string): void {
     this.ctx.storage.kv.put(`apply-attempts:${label}`, this.getApplyAttempts(label) + 1);
+  }
+
+  /** The next successful applyAction() for `label` reports `result` as what the provider produced. */
+  resultNextApply(label: string, result: unknown): void {
+    this.ctx.storage.kv.put(`result-next-apply:${label}`, result);
+  }
+
+  /** One-shot, like takeApplyFailure(). */
+  takeApplyResult(label: string): unknown {
+    const key = `result-next-apply:${label}`;
+    const result = this.ctx.storage.kv.get<unknown>(key);
+    this.ctx.storage.kv.delete(key);
+    return result;
   }
 
   /** Every applyAction() call, including ones that then fail: a double dispatch shows up here. */
@@ -835,7 +849,7 @@ export class TestGatekeeper
   }
 
   /** The kit's terminal failures reach the overseer as its structured result (applyActionOutcome). */
-  async applyAction(action: number): Promise<void | { failed: ActionApplyFailure }> {
+  async applyAction(action: number): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     let structured: { outcome: "unknown" | "notApplied"; retryable?: boolean; message: string } | undefined;
     const outcome = await applyActionOutcome(async () => {
       const state = control(this.ctx.exports);
@@ -853,6 +867,8 @@ export class TestGatekeeper
       }
       if (failure !== null) throw new Error(failure.reason);
       await state.applyAction(label, action);
+      // Passed on unchecked, so a test can show the overseer bounding what a gatekeeper reports.
+      return (await state.takeApplyResult(label) ?? undefined) as ActionResult | undefined;
     });
     // Returned as is, so a missing flag reaches the overseer missing, as from an older gatekeeper.
     if (structured !== undefined) return { failed: structured as ActionApplyFailure };
@@ -1069,6 +1085,15 @@ export default {
       const { label } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       await control(ctx.exports).releaseCode(label);
+      return new Response(null, { status: 204 });
+    }
+
+    // One-shot: the next successful applyAction() for `label` reports `result` as what it produced.
+    // Body: {"label": "...", "result": any JSON (passed on unchecked)}
+    if (url.pathname === "/control/result-next-apply" && req.method === "POST") {
+      const { label, result } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      await control(ctx.exports).resultNextApply(label, result);
       return new Response(null, { status: 204 });
     }
 

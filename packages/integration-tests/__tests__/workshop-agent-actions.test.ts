@@ -1,3 +1,4 @@
+import { actionOutcome } from "@gadgets/workshop-shared/action-outcome";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
 import {
@@ -871,4 +872,59 @@ it.concurrent("a turn interrupted by a workspace restart resumes and completes",
     await expectIdle(ws);
     expect(await streamGeneration(ws)).not.toBe(before);
   });
+});
+
+// FAC-97: an action reads as done only once the provider applied it, and then carries the result
+// the provider reported. Queued is waiting, an apply in flight is running, and neither is success.
+it.concurrent("a queued action waits, a dispatched one runs, and only an applied one succeeds, with its result", async () => {
+  await using session = await openSession(models.script([writeValues(5), { text: "Not reached." }]), "agentoutcome");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 5.");
+  const [action] = await waitForPendingActions(session, 1);
+  const entryOf = async () => (await session.listActions({ filter: "action" })).entries.find(entry => entry.id === action!.id)!;
+  const outcome = async () => { const entry = await entryOf(); return entry.type === "action" ? actionOutcome(entry) : null };
+  expect(await outcome()).toBe("waiting");
+  await control("result-next-apply", { label, result: { appliedValue: 5, revision: "r7" } });
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await control("hold-next-apply", { label });
+    const approval = ws.approveAction(action!.id);
+    try {
+      await waitFor("the apply to be dispatched", async () => await applyAttempts(label) === 1 || null);
+      expect(await outcome()).toBe("running");
+      expect((await entryOf())).not.toHaveProperty("result");
+    } finally {
+      await control("release-apply", { label });
+    }
+    await approval;
+  });
+  expect(await outcome()).toBe("succeeded");
+  expect(await entryOf()).toMatchObject({ state: "approved", result: { appliedValue: 5, revision: "r7" } });
+  expect(await entryOf()).not.toHaveProperty("applying");
+});
+
+it.concurrent("a result out of bounds is dropped, and the applied action still succeeds", async () => {
+  await using session = await openSession(models.script([writeValues(6), { text: "Not reached." }]), "agentoutcomebounds");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 6.");
+  const [action] = await waitForPendingActions(session, 1);
+  await control("result-next-apply", { label, result: { nested: { not: "flat" } } });
+  await withOwnerWorkspace(harness.url, session.username, async ws => { await ws.approveAction(action!.id) });
+  const entry = (await session.listActions({ filter: "action" })).entries.find(candidate => candidate.id === action!.id)!;
+  expect(entry).toMatchObject({ state: "approved" });
+  expect(entry).not.toHaveProperty("result");
+});
+
+it.concurrent("a refused apply fails with the provider's own words, and never reads as applied", async () => {
+  await using session = await openSession(models.script([writeValues(7), { text: "Not reached." }]), "agentoutcomerefused");
+  const label = labelOf(session);
+  await session.runTurn("Set the test value to 7.");
+  const [action] = await waitForPendingActions(session, 1);
+  await failNextApply(label, "STALE_REVISION: the issue changed since it was read.", "refused");
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await expect(ws.approveAction(action!.id)).rejects.toThrow("STALE_REVISION: the issue changed since it was read.");
+  });
+  const entry = (await session.listActions({ filter: "action" })).entries.find(candidate => candidate.id === action!.id)!;
+  expect(entry.type === "action" && actionOutcome(entry)).toBe("failed");
+  expect(entry).toMatchObject({ lastAttempt: { message: "STALE_REVISION: the issue changed since it was read." } });
+  expect(entry).not.toHaveProperty("result");
 });

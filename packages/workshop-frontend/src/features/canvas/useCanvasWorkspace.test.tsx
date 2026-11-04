@@ -54,6 +54,8 @@ it('retains the displayed snapshot on a rejected write and reloads authoritative
   await act(async () => { await canvas.edit([{ type: 'rename', title: 'Stale edit' }]) })
   expect(container.textContent).toContain('Saved')
   expect(container.querySelector('[role="alert"]')).not.toBeNull()
+  // FAC-97: the server's own reason is kept beside the hint.
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('The server said: Canvas changed')
   expect(canvas.canUndo).toBe(false)
   remote.listCanvases.mockResolvedValueOnce([{ ...initial(), revision: '4', title: 'Other editor' }])
   await act(async () => { await canvas.reload() })
