@@ -57,9 +57,10 @@ it('shows only the label, runs the trigger on press and says it was requested, n
     invokeTrigger,
   })
   expect(container.textContent).toBe('Issue refunds now')
+  // (Only the label before the press; afterwards, the requested line with its time.)
   await act(async () => { button('Issue refunds now')!.click() })
   expect(invokeTrigger).toHaveBeenCalledWith(7)
-  expect(container.querySelector('[role="status"]')?.textContent).toBe(RUN_REQUESTED_TEXT)
+  expect(container.querySelector('[role="status"]')?.textContent).toMatch(new RegExp(`^${RUN_REQUESTED_TEXT} \\(requested at .+\\)$`))
   expect(container.textContent).not.toMatch(/done\b(?!.*yet)|applied|succeeded/i)
 })
 

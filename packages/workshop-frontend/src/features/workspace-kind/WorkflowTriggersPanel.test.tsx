@@ -263,4 +263,25 @@ describe('a pinned trigger\'s run-on-request control', () => {
     expect(container.querySelector('[role="alert"]')?.textContent)
       .toBe("You don't have permission to share or publish configuration other people use.")
   })
+
+  it('shows a listed person who has left, lets the builder untick them, and needs a current one ticked to save', async () => {
+    const setTriggerControl = vi.fn<Overseer['setTriggerControl']>(async () => null)
+    const control = { hookId: 7, label: 'Issue refunds now', invokers: ['ben', 'gone'], definition: PIN, configuredBy: ADA, configuredAt: new Date(0) }
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      listCollaborators: async () => [BEN_COLLABORATOR], listTriggerControls: async () => [control],
+      listWorkflowDeliveries: async () => [], setTriggerControl,
+    })
+    const former = container.querySelector<HTMLInputElement>('[aria-label="Let a former collaborator (1) run it"]')!
+    expect(former.checked).toBe(true)
+    expect(container.textContent).toContain('No longer a collaborator')
+    // Untick Ben, the only current collaborator: the departed entry alone can't be saved.
+    await act(async () => { container.querySelector<HTMLInputElement>('[aria-label="Let Ben run it"]')!.click() })
+    expect(button('Save')?.disabled).toBe(true)
+    // Tick Ben again and remove the departed one: only Ben is saved.
+    await act(async () => { container.querySelector<HTMLInputElement>('[aria-label="Let Ben run it"]')!.click() })
+    await act(async () => { former.click() })
+    await act(async () => { button('Save')!.click() })
+    expect(setTriggerControl).toHaveBeenCalledWith(7, { label: 'Issue refunds now', invokers: ['ben'] })
+  })
 })

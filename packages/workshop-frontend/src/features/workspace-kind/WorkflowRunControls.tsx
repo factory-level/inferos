@@ -12,7 +12,7 @@ import { WorkshopButton } from '../../components/WorkshopControls'
  */
 type Pressed =
   | { status: 'sending' }
-  | { status: 'requested'; outcome: Extract<ActionOutcome, 'running'> }
+  | { status: 'requested'; outcome: Extract<ActionOutcome, 'running'>; at: Date }
   | { status: 'refused'; message: string }
 
 /** The words for a run that was requested and not finished. */
@@ -45,7 +45,7 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
     let next: Pressed
     try {
       await overseer.invokeTrigger(hookId)
-      next = { status: 'requested', outcome: 'running' }
+      next = { status: 'requested', outcome: 'running', at: new Date() }
     } catch (err) {
       next = { status: 'refused', message: errorText(err) }
     }
@@ -63,7 +63,9 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
               {control.label}
             </WorkshopButton>
             {state?.status === 'requested' && (
-              <span role="status" className="text-[12px] leading-4 text-kumo-subtle">{RUN_REQUESTED_TEXT}</span>
+              <span role="status" className="text-[12px] leading-4 text-kumo-subtle">
+                {RUN_REQUESTED_TEXT} (requested at {state.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})
+              </span>
             )}
             {state?.status === 'refused' && (
               <span role="alert" className="text-[12px] leading-4 text-kumo-danger">{state.message}</span>

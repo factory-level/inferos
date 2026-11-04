@@ -46,6 +46,11 @@ export const TriggerControlEditor = ({ overseer, hookId, pin, control, collabora
 
   const nameOf = (profileId: string) =>
     collaborators.find(c => c.profile.id === profileId)?.profile.name ?? 'Someone no longer here'
+  // Everyone the control lists is shown, a person who has left the workspace included, so the
+  // builder sees and can untick them; Save needs a current collaborator ticked.
+  const current = new Set(collaborators.map(c => c.profile.id))
+  const departed = (control?.invokers ?? []).filter(id => !current.has(id))
+  const tickedCurrent = [...invokers].some(id => current.has(id))
 
   const save = async (settings: { label: string; invokers: string[] } | null) => {
     setBusy(true)
@@ -84,7 +89,7 @@ export const TriggerControlEditor = ({ overseer, hookId, pin, control, collabora
         onChange={e => setLabel(e.target.value)}
         className="w-full"
       />
-      {collaborators.length === 0 ? (
+      {collaborators.length === 0 && departed.length === 0 ? (
         <p className="m-0 text-[12px] leading-4 text-kumo-subtle">Share this workspace to list who may run it.</p>
       ) : (
         <ul aria-label="Who may run it" className="m-0 grid list-none gap-1 p-0">
@@ -98,6 +103,16 @@ export const TriggerControlEditor = ({ overseer, hookId, pin, control, collabora
               <span className="truncate">{c.profile.name}</span>
             </li>
           ))}
+          {departed.map((id, index) => (
+            <li key={id} className="flex items-center gap-2 text-[12px] text-kumo-subtle">
+              <Checkbox
+                aria-label={`Let a former collaborator (${index + 1}) run it`}
+                checked={invokers.has(id)}
+                onCheckedChange={checked => toggle(id, checked === true)}
+              />
+              <span className="truncate">No longer a collaborator: they can't run it unless re-added, untick to remove them</span>
+            </li>
+          ))}
         </ul>
       )}
       <div className="flex justify-end gap-2">
@@ -106,7 +121,7 @@ export const TriggerControlEditor = ({ overseer, hookId, pin, control, collabora
         )}
         <WorkshopButton
           tone="primary"
-          disabled={busy || !label.trim() || invokers.size === 0}
+          disabled={busy || !label.trim() || !tickedCurrent}
           onClick={() => save({ label: label.trim(), invokers: [...invokers] })}
         >
           {busy ? 'Saving…' : control ? 'Save' : 'Add button'}
