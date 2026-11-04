@@ -247,7 +247,7 @@ export class BoardData {
     return { ok: true, entry, column }
   }
 
-  #proposeChange(target: string, change: PendingChange, call: (session: RpcStub<InferOpsProjectSession>) => Promise<void>): Promise<ProposalResult> {
+  #proposeChange(target: string, change: PendingChange, call: (session: RpcStub<InferOpsProjectSession>) => Promise<unknown>): Promise<ProposalResult> {
     const others = () => this.#target(target).changes.filter(c => c !== change)
     this.#publish(target, { changes: [...this.#target(target).changes, change] })
     return this.#propose(target, call,
@@ -274,7 +274,7 @@ export class BoardData {
     }
   }
 
-  async #propose(target: string, call: (session: RpcStub<InferOpsProjectSession>) => Promise<void>,
+  async #propose(target: string, call: (session: RpcStub<InferOpsProjectSession>) => Promise<unknown>,
     settle: (queued: boolean) => void): Promise<ProposalResult> {
     try {
       const session = await this.#session(target)

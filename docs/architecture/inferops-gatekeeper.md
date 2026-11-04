@@ -310,6 +310,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   same proposal is a new intent. Edits and moves need no such step: a pending change already
   refuses another of the same issue (`CONFLICT`), and the same edit again sends nothing because the
   overlaid issue already shows it.
+- **Receipts (FAC-97 part 2).** `createIssue`, `transition`, `update`, `dispatch`, `cancel`, `updateDocumentBody`, `updateSection` and `approveProposal` return the kernel's receipt (`WriteReceipt` in `types.d.ts`: `actionId` and `status()`, whose outcome, bounded result and InferOps' own words come from the action log), through `ProjectBinding.submit`. A write with nothing to do returns `null`: a create that joins one already pending, a move to the issue's current state, an update that changes nothing, a cancel already pending, and a Wiki edit that changes nothing or is already pending. Simulation is unchanged: reads still show a pending write as applied, and the receipt is how a caller tells whether it has been. This reverses the earlier rule that callers never see approvals (see [Operate mode](operate-mode.md), Write receipts).
 - **Applying.** `applyAction` reads the record (a record without `kind` is a transition and has no
   fingerprint to check), recomputes the fingerprint of the request it is about to send and refuses
   a mismatch without sending anything, marks the record dispatched (`attempts.dispatchedAt`), then

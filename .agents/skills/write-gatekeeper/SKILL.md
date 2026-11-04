@@ -60,6 +60,8 @@ This JSDoc is the agent's sole documentation for the API, so keep it **narrowly 
 
 Do NOT leak details the caller doesn't need to use the API — the approval queue (never mention `submitAction`/`applyAction`/approvals; correct simulation keeps this invisible), or gatekeeper internals (caching, DO storage, OAuth, syncing). Document those in the `.ts` implementation or PR, never in the agent-facing `.d.ts`.
 
+**Exception: write receipts (FAC-97 part 2; proposed guidance, by Calvin's decision of 2026-11-04).** `submitAction()` resolves to an `ActionReceipt` (`{actionId, status()}`). A gatekeeper may return it from a write so its caller can tell a queued write from a done one; the InferOps gatekeeper does. If you do, copy the receipt and status types into your self-contained `.d.ts`, and describe the outcomes in terms of whether the write has taken effect ("waiting: not applied yet; it may still be applied or refused"). Don't describe the approval queue itself, the action log or how the receipt is minted. Returning nothing remains correct: it's how every other gatekeeper behaves.
+
 The agent receives the `.d.ts` text **verbatim** (via the `types.txt` symlink), and nothing resolves its imports — so it must be **self-contained**. Don't import types from other packages or files (e.g. `Cursor` from `@gadgets/workshop-shared/gatekeeper`); copy the definition into the `.d.ts` instead. TypeScript's structural typing means the implementation can still return the shared type. The only exception is `cloudflare:workers` (e.g. `import type { RpcTarget } from "cloudflare:workers"`), which the agent's environment provides. `pnpm lint` enforces this with the `gadgets/self-contained-agent-types` rule on every `packages/gatekeeper-*/src/*types.d.ts`. Also keep the file free of comments aimed at maintainers (such as "keep in sync with X"), since the agent reads those too.
 
 ### Step 3: STOP — Present API for review
@@ -188,7 +190,7 @@ The full Durable Objects storage API (including synchronous KV and SQLite) is do
 
 ### Simulation
 
-When `submitAction()` has been called but `applyAction()` hasn't, reads should reflect the pending action. This allows the calling agent or gadget to be unaware of the approvals mechanism, and proceed with follow-on work immediately. The end user is able to approve a whole batch of changes at once, later on.
+When `submitAction()` has been called but `applyAction()` hasn't, reads should reflect the pending action. This holds for a write that returns a receipt too: reads still show it as applied, and the receipt is how a caller that wants to know learns whether it actually has been. This allows the calling agent or gadget to be unaware of the approvals mechanism, and proceed with follow-on work immediately. The end user is able to approve a whole batch of changes at once, later on.
 
 Two possible implementation approaches include:
 

@@ -27,7 +27,7 @@ import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/co
 import { ActionApplyError, ActionOutcomeUnknownError, applyActionOutcome } from "@gadgets/gatekeeper-kit/actions";
 import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import type {
-  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ActionReceipt, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
   HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, SupportedResource,
   VendorDescription,
@@ -658,6 +658,8 @@ export interface TestSession {
   search(query: string): Promise<number>;
   /** `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would. */
   writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number>;
+  /** `writeValue`, handing on the kernel's receipt (FAC-97) instead of the fixture's own id. */
+  writeValueWithReceipt(value: number): Promise<ActionReceipt>;
   writeValues(values: number[]): Promise<number[]>;
   /**
    * Parks the calling code until `/control/release-code` for this account, so a test can act while
@@ -722,6 +724,22 @@ class TestSessionTarget extends RpcTarget implements TestSession {
         ...(opts?.autoApprovable ? { autoApprovable: true } : {}),
       });
       return id;
+    } catch (error) {
+      await this.state.discardAction(this.label, id);
+      throw error;
+    }
+  }
+
+  async writeValueWithReceipt(value: number): Promise<ActionReceipt> {
+    const id = await this.state.stageAction(this.label, value);
+    try {
+      return await this.approvalQueue.submitAction(id, {
+        title: `Set the test value to ${value}`,
+        description: `Set the deterministic integration-test value to **${value}**.`,
+        descriptionIsComplete: true,
+        implementsRevert: false,
+        actionKind: SET_VALUE_ACTION_KIND,
+      });
     } catch (error) {
       await this.state.discardAction(this.label, id);
       throw error;

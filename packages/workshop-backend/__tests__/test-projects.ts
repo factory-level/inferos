@@ -25,6 +25,7 @@ export const UNIT_NODE: readonly string[] = [
   "blueprint-version-bindings.test.ts",
   "browser-export.test.ts",
   "canvas-catalog.test.ts",
+  "action-receipt-scope.test.ts",
   "canvas-store-pages.test.ts",
   "console-publication-pages.test.ts",
   "chat-attachment-pdf.test.ts",

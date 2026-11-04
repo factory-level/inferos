@@ -1,8 +1,7 @@
 import { RpcStub, RpcTarget } from "cloudflare:workers";
 import type {
   ActionDescription, ApprovalQueue, GitCache, HookController, HookDescription,
-  ObservationDescription,
-} from "@gadgets/workshop-shared/gatekeeper";
+  ObservationDescription, ActionReceipt } from "@gadgets/workshop-shared/gatekeeper";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GoogleDocsApi } from "../../src/docs-api";
 import { DriveApi } from "../../src/drive-api";
@@ -35,7 +34,7 @@ class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
     throw new Error("Unexpected git cache access");
   }
 
-  async submitAction(_action: number, _description: ActionDescription): Promise<void> {
+  async submitAction(_action: number, _description: ActionDescription): Promise<ActionReceipt> {
     throw new Error("Unexpected action submission");
   }
 
