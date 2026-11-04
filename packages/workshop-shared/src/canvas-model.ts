@@ -483,3 +483,44 @@ export function resolveCanvasTarget(page: CanvasPage, target: CanvasTarget): Can
   }
   return null;
 }
+
+/** One step of a target's path from the workspace down: what it is, and the target that selects it alone. */
+export type CanvasTargetStep =
+  | { kind: "workspace"; target: CanvasTarget }
+  | { kind: "page"; target: CanvasTarget; page: CanvasPage }
+  | { kind: "object"; target: CanvasTarget; node: CanvasObjectNode }
+  | { kind: "widget"; target: CanvasTarget; node: CanvasWidgetNode }
+  | { kind: "attachment"; target: CanvasTarget; attachment: CanvasAttachment };
+
+/**
+ * Where `target` sits on this page, for a breadcrumb: the workspace, the page, every object that
+ * contains it, outermost first, then the target itself; an attachment follows the page or node that
+ * holds it. Null when this page doesn't hold the target. Each step's target selects that step only.
+ * Authorizes nothing.
+ */
+export function canvasTargetPath(page: CanvasPage, target: CanvasTarget): CanvasTargetStep[] | null {
+  const workspace: CanvasTargetStep = { kind: "workspace", target: { kind: "workspace" } };
+  if (target.kind === "workspace") return [workspace];
+  const resolved = resolveCanvasTarget(page, target);
+  if (!resolved) return null;
+  const pageStep: CanvasTargetStep = { kind: "page", target: { kind: "page", pageId: page.id }, page };
+  const byId = new Map(page.nodes.map(node => [node.id, node]));
+  const parentOf = new Map<string, string>();
+  for (const node of page.nodes) if (node.nodeType === "object") for (const child of node.children) parentOf.set(child, node.id);
+  // Containment is acyclic and every node is reached once (parseCanvasPage checks both), so this ends.
+  const nodeSteps = (id: string): CanvasTargetStep[] => {
+    const steps: CanvasTargetStep[] = [];
+    for (let at: string | undefined = id; at !== undefined; at = parentOf.get(at)) {
+      const node = byId.get(at)!;
+      const nodeTarget: CanvasTarget = { kind: "node", pageId: page.id, nodeId: node.id };
+      steps.unshift(node.nodeType === "object" ? { kind: "object", target: nodeTarget, node } : { kind: "widget", target: nodeTarget, node });
+    }
+    return steps;
+  };
+  switch (resolved.kind) {
+    case "page": return [workspace, pageStep];
+    case "object": case "widget": return [workspace, pageStep, ...nodeSteps(resolved.node.id)];
+    case "attachment": return [workspace, pageStep, ...(resolved.ownerId === page.id ? [] : nodeSteps(resolved.ownerId)),
+      { kind: "attachment", target, attachment: resolved.attachment }];
+  }
+}
