@@ -6,10 +6,12 @@ import type { CanvasCatalogBlueprint } from '@gadgets/workshop-shared/canvas'
  * The catalog's blueprint widgets for one section. Building one takes the agent (it creates the
  * gadget, wires its connection and places it), so each button hands a request to a new chat.
  */
-export const CanvasBlueprintWidgets = ({ blueprints, viewTitle, sectionTitle, busy, onAskAgent }: {
+export const CanvasBlueprintWidgets = ({ blueprints, viewTitle, sectionTitle, target, busy, onAskAgent }: {
   blueprints: CanvasCatalogBlueprint[]
   viewTitle: string
   sectionTitle: string
+  /** The section's written target (`formatCanvasTarget`), named in the request when known. */
+  target?: string
   busy: boolean
   onAskAgent: (request: string) => Promise<void>
 }) => {
@@ -20,7 +22,8 @@ export const CanvasBlueprintWidgets = ({ blueprints, viewTitle, sectionTitle, bu
     setAsking(true); setFailed(false)
     try {
       await onAskAgent(`Add a ${blueprint.label} widget (blueprint ${blueprint.blueprintId}) to the "${sectionTitle}" ` +
-        `section of the "${viewTitle}" canvas. Ask me which board or resource it should show if it needs one.`)
+        `section of the "${viewTitle}" canvas${target ? ` (target ${target})` : ''}. ` +
+        'Change nothing else. Ask me which board or resource it should show if it needs one.')
     } catch {
       setFailed(true)
     } finally {

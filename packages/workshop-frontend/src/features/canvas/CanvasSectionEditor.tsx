@@ -4,6 +4,7 @@ import { Button, Input } from '@cloudflare/kumo'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasCatalog, CanvasOperation, CanvasSection } from '@gadgets/workshop-shared/canvas'
 import { CanvasBlueprintWidgets } from './CanvasBlueprintWidgets'
+import { formatCanvasTarget } from '@gadgets/workshop-shared/canvas-model'
 import { sectionGridClass } from './canvasLayout'
 
 type Props = {
@@ -18,9 +19,13 @@ type Props = {
   onMoveUp: () => void
   onEdit: (operations: CanvasOperation[]) => Promise<boolean>
   onAskAgent?: (request: string) => Promise<void>
+  /** The view's page id; when given, a request handed to the agent names this section's exact target. */
+  pageId?: string
+  /** Show the section's widgets with their controls (the default). The builder's inspector edits a widget on its own instead. */
+  showWidgets?: boolean
 }
 
-export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGadgets, catalog, viewTitle, onMoveUp, onEdit, onAskAgent }: Props) => (
+export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGadgets, catalog, viewTitle, onMoveUp, onEdit, onAskAgent, pageId, showWidgets = true }: Props) => (
   <section className="@container space-y-3 rounded-lg border border-kumo-line p-4" aria-label={section.title}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="font-medium text-kumo-default">{section.title}</h3>
@@ -43,13 +48,14 @@ export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGad
       <Input label="Section title" name="title" defaultValue={section.title} required maxLength={120} disabled={busy} />
       <Button type="submit" disabled={busy}>Rename section</Button>
     </form>
-    <div className={sectionGridClass(section.columns)}>
+    {showWidgets && <div className={sectionGridClass(section.columns)}>
       {section.widgets.map((widget, index) => <CanvasWidgetCard key={widget.id} widget={widget} section={section}
         index={index} busy={busy} gadgets={gadgets} onEdit={onEdit} />)}
-    </div>
+    </div>}
     {catalog.widgetKinds.includes('inferos.gadget') && <>
       <CanvasAddGadgetForm section={section} gadgets={acceptedGadgets} busy={busy} onEdit={onEdit} />
       {onAskAgent && <CanvasBlueprintWidgets blueprints={catalog.blueprints} viewTitle={viewTitle} sectionTitle={section.title}
+        target={pageId === undefined ? undefined : formatCanvasTarget({ kind: 'node', pageId, nodeId: section.id })}
         busy={busy} onAskAgent={onAskAgent} />}
     </>}
     {catalog.widgetKinds.includes('inferops.project-board') && <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {

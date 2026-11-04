@@ -138,3 +138,37 @@ it('catches up on edits made while the page was hidden as soon as it is shown ag
   expect(canvas.active?.title).toBe('Edited while away')
   vi.restoreAllMocks()
 })
+
+it('refuses to undo once anyone else has changed the view, so undo never reverts their edit', async () => {
+  vi.useFakeTimers()
+  try {
+    const storage = api()
+    await render({ kind: 'durable', api: storage })
+    await act(async () => { await canvas.edit([{ type: 'rename', title: 'Mine' }]) })
+    expect(canvas.canUndo).toBe(true)
+    // The chat agent edits the same view; the quiet re-read brings its revision in.
+    storage.listCanvases.mockResolvedValue([{ ...initial(), revision: '2', title: 'Agent edited' }])
+    await act(async () => { await vi.advanceTimersByTimeAsync(CANVAS_REFRESH_MS) })
+    expect(canvas.active?.revision).toBe('2')
+    expect(canvas.canUndo).toBe(false)
+    expect(canvas.undoBlocked).toBe(true)
+    storage.editCanvas.mockClear()
+    await act(async () => { expect(await canvas.undo()).toBe(false) })
+    expect(storage.editCanvas).not.toHaveBeenCalled()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('undoes several of its own edits in turn while nothing else changed the view', async () => {
+  await render({ kind: 'temporary' })
+  await act(async () => { await canvas.create({ title: 'Start', sections: [] }) })
+  await act(async () => { await canvas.edit([{ type: 'rename', title: 'One' }]) })
+  await act(async () => { await canvas.edit([{ type: 'rename', title: 'Two' }]) })
+  await act(async () => { await canvas.undo() })
+  expect(canvas.active?.title).toBe('One')
+  expect(canvas.canUndo).toBe(true)
+  await act(async () => { await canvas.undo() })
+  expect(canvas.active?.title).toBe('Start')
+  expect(canvas.canUndo).toBe(false)
+})
