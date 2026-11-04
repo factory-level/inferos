@@ -572,3 +572,12 @@ it('marks a result whose section has an edit of this connection waiting', async 
   await search('pair')
   expect(results()!.textContent).toContain('Edit pending')
 })
+
+it('shows a lone closing marker in a snippet as the text it is', async () => {
+  await render(widget())
+  wiki.writeElsewhere('s3', 'Pair on one small issue.</b> Ask first.')
+  await search('pair')
+  const hit = results()!.querySelector('button')!
+  expect([...hit.querySelectorAll('mark')].map(m => m.textContent)).toEqual(['Pair'])
+  expect(hit.textContent).toContain('on one small issue.</b> Ask first.')
+})
