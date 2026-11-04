@@ -46,7 +46,7 @@ export type BoardState =
   /** The workspace holds no connection covering the reference. The cue to offer connecting, never to connect. */
   | { status: 'unbound' }
   /** Nothing usable was loaded (or the connection was revoked, which drops what was). */
-  | { status: 'error'; message: string }
+  | { status: 'error'; code: string; message: string }
   /**
    * The deployment has InferOps turned off: the gatekeeper refuses every read and move (`DISABLED`).
    * The connection is kept, so the board returns as it was once InferOps is turned back on; what was
@@ -378,7 +378,7 @@ export class BoardData {
         this.#set(entry, codeOf(error) === 'DISABLED'
           ? { status: 'disabled', message: messageOf(error) }
           : revoked(error) || !('board' in entry.state)
-            ? { status: 'error', message: messageOf(error) }
+            ? { status: 'error', code: codeOf(error), message: messageOf(error) }
             : { ...entry.state, status: 'stale', error: messageOf(error) })
       }
     } finally {

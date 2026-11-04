@@ -181,6 +181,10 @@ it('says the Wiki is not connected without a connection, and has no access once 
   await click(button(wikiArticle(), 'Refresh Wiki'))
   expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('No access to this Wiki: No InferMind access.')
   expect(wikiArticle().querySelector('section')).toBeNull()
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  await click(button(wikiArticle(), 'Refresh Wiki'))
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('Sign in to InferOps again to read this Wiki.')
+  expect(wikiArticle().querySelector('section')).toBeNull()
 })
 
 it('proposes a section edit, shows it waiting for approval and not saved, and saved only once the decided action re-reads the page', async () => {

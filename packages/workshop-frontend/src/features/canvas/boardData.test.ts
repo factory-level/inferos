@@ -121,7 +121,7 @@ describe('BoardData', () => {
     const data = new BoardData(overseer)
     listen(data, request())
     await flush()
-    expect(data.get(request())).toEqual({ status: 'error', message: 'No such InferOps board is available to this connection.' })
+    expect(data.get(request())).toEqual({ status: 'error', code: 'NOT_FOUND', message: 'No such InferOps board is available to this connection.' })
     refuse = false
     data.refresh(request())
     await flush()
@@ -155,7 +155,7 @@ describe('BoardData', () => {
     expect(ws.lookups).toEqual([DEMO, DEMO])
     ws.reads[2]!.reject(new Error('UNAUTHORIZED: InferOps rejected the connection.'))
     await flush()
-    expect(data.get(request())).toEqual({ status: 'error', message: 'InferOps rejected the connection.' })
+    expect(data.get(request())).toEqual({ status: 'error', code: 'UNAUTHORIZED', message: 'InferOps rejected the connection.' })
     // The connection removed from the workspace: the reference is unbound and nothing stale is shown.
     ws.connected[DEMO] = false
     data.refresh(request())
@@ -453,7 +453,7 @@ describe('BoardData read metrics', () => {
     ws.reads[1]!.reject(new Error('UNAVAILABLE: down'))
     await flush()
     expect(data.get(request())).toMatchObject({ status: 'stale', error: 'down' })
-    expect(data.get(late)).toMatchObject({ status: 'error', message: 'down' })
+    expect(data.get(late)).toMatchObject({ status: 'error', code: 'UNAVAILABLE', message: 'down' })
     // The board on screen is not current, so a third card does not take it: it reads.
     const third = request(DEMO, { workflow: 'content', showCompleted: false })
     listen(data, third)
