@@ -37,8 +37,9 @@ export class SharedApprovalQueue {
     return this.#stub.authorizeObservation(description);
   }
 
-  submitAction(actionId: number, description: ActionDescription): Promise<void> {
-    return this.#stub.submitAction(actionId, description);
+  /** Submit an action. Google's sessions don't hand on the kernel's write receipt (FAC-97), so it's dropped here. */
+  async submitAction(actionId: number, description: ActionDescription): Promise<void> {
+    using _receipt = await this.#stub.submitAction(actionId, description);
   }
 }
 

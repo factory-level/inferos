@@ -70,3 +70,45 @@ export const ACTION_OUTCOME_TEXT: Record<ActionOutcome, string> = {
   rejected: "Rejected, not applied",
   unknown: "Outcome unknown: it may or may not have applied",
 };
+
+/**
+ * Why a write didn't simply succeed, as a write receipt tells its caller (FAC-97): one of a fixed
+ * set, never a gatekeeper's or provider's own text. `PROVIDER_ERROR` is everything unmapped.
+ */
+export const ACTION_RECEIPT_CODES = [
+  "STALE_REVISION", "CONFLICT", "NOT_FOUND", "FORBIDDEN", "INVALID", "RATE_LIMITED", "UNAVAILABLE", "PROVIDER_ERROR",
+] as const;
+
+/** One of `ACTION_RECEIPT_CODES`. */
+export type ActionReceiptCode = typeof ACTION_RECEIPT_CODES[number];
+
+/** The provider error codes gatekeepers report (`ActionAttempt.code`) that a receipt names, by its own code. */
+const RECEIPT_CODE_OF: Readonly<Record<string, ActionReceiptCode>> = {
+  STALE_REVISION: "STALE_REVISION",
+  CONFLICT: "CONFLICT", RUN_ACTIVE: "CONFLICT",
+  NOT_FOUND: "NOT_FOUND",
+  FORBIDDEN: "FORBIDDEN", UNAUTHORIZED: "FORBIDDEN", DISABLED: "FORBIDDEN",
+  INVALID_REQUEST: "INVALID", INVALID_STATE: "INVALID", WORKFLOW_MISMATCH: "INVALID", IDEMPOTENCY_CONFLICT: "INVALID",
+  RATE_LIMITED: "RATE_LIMITED",
+  UNAVAILABLE: "UNAVAILABLE", TIMEOUT: "UNAVAILABLE",
+};
+
+/** The receipt code for a gatekeeper's error code, or `PROVIDER_ERROR` when it gave none or one not listed. */
+export function actionReceiptCode(code: string | undefined): ActionReceiptCode {
+  return (code !== undefined && Object.hasOwn(RECEIPT_CODE_OF, code) ? RECEIPT_CODE_OF[code] : undefined) ?? "PROVIDER_ERROR";
+}
+
+/** The one fixed sentence a receipt gives for each code. */
+export const ACTION_RECEIPT_REASON: Record<ActionReceiptCode, string> = {
+  STALE_REVISION: "It changed since it was read. Read it again before changing it.",
+  CONFLICT: "Another change to it hasn't taken effect yet. Try again once that one has.",
+  NOT_FOUND: "It no longer exists, or can't be reached.",
+  FORBIDDEN: "This change isn't permitted.",
+  INVALID: "The service didn't accept this change as made.",
+  RATE_LIMITED: "The service is limiting requests. Try again later.",
+  UNAVAILABLE: "The service couldn't be reached. Try again later.",
+  PROVIDER_ERROR: "The service refused this change.",
+};
+
+/** The fixed sentence for an attempt whose effect isn't known, whatever its code. */
+export const ACTION_RECEIPT_UNKNOWN_REASON = "It may or may not have been applied. Check before making it again.";
