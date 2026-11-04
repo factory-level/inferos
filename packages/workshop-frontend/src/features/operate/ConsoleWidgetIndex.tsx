@@ -70,7 +70,7 @@ export const ConsoleWidgetIndex = ({ overseer, consoleId, hasWidgets, editable }
     </ul>}
     {report === null && hasWidgets && <p className="text-sm text-kumo-subtle">Not listed yet. Publishing lists this console&apos;s widgets.</p>}
     {report && report.pendingWithdraws.length > 0 && <div className="space-y-1 text-sm">
-      <p className="text-kumo-default">Still to remove from the company listing (tried again when you next publish):</p>
+      <p className="text-kumo-default">Still to remove from the company listing, for this workspace's consoles (tried again automatically, and whenever a console here is published or deleted):</p>
       <ul>{report.pendingWithdraws.map(item => <li key={item.versionId} className="text-kumo-subtle">{item.versionId}: {item.reason}</li>)}</ul>
     </div>}
   </section>
