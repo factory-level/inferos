@@ -265,12 +265,19 @@ export class BoardData {
   async activity(request: BoardRequest, issueId: string): Promise<ActivityResult> {
     const entry = this.#entries.get(boardRequestKey(request))
     if (!entry || !('board' in entry.state)) return NOT_LOADED
+    const generation = this.#target(entry.target).accessGeneration
+    const current = (): boolean => !this.#disposed && this.#targets.get(entry.target)?.accessGeneration === generation
     try {
       const session = await this.#session(entry.target)
+      if (!current()) return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
       if (!session) return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
       using issue = session.openIssue(issueId)
-      return { ok: true, activity: await issue.activity() }
+      const activity = await issue.activity()
+      return current()
+        ? { ok: true, activity }
+        : { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
     } catch (error) {
+      if (!current()) return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
       if (revoked(error)) this.#revoke(entry.target, error)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }

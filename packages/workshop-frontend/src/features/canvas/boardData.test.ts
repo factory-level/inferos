@@ -185,6 +185,26 @@ describe('BoardData', () => {
     primary.unsubscribe()
   })
 
+  it('drops a successful activity result that finishes after another read revokes access', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+
+    const activity = data.activity(request(), '1')
+    await flush()
+    data.refresh(request())
+    await flush()
+    ws.reads[1]!.reject(new Error('UNAUTHORIZED: Sign in to InferOps again.'))
+    await flush()
+    ws.activities[0]!.resolve({ entries: [], omitted: 0 })
+
+    await expect(activity).resolves.toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+    expect(data.get(request())).toEqual({ status: 'error', code: 'UNAUTHORIZED', message: 'Sign in to InferOps again.' })
+  })
+
   it('drops every cached board when a board write is refused', async () => {
     const ws = workspace()
     const data = new BoardData(ws.overseer)

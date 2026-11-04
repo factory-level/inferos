@@ -248,23 +248,33 @@ export class WikiData {
    * this search only, never in the snapshot: a hit is a pointer, and opening its page reads it again.
    */
   async search(query: string): Promise<WikiSearchResult> {
+    const accessGeneration = this.#accessGeneration
+    const current = (): boolean => !this.#disposed && accessGeneration === this.#accessGeneration
     try {
       const session = await this.#sessionOf()
+      if (!current()) return NOT_CONNECTED
       if (!session) return NOT_CONNECTED
-      return { ok: true, hits: await session.searchWiki(query) }
+      const hits = await session.searchWiki(query)
+      return current() ? { ok: true, hits } : NOT_CONNECTED
     } catch (error) {
+      if (!current()) return NOT_CONNECTED
       this.#failed(error)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }
   }
 
   async readAgentText(slug: string): Promise<AgentTextResult> {
+    const accessGeneration = this.#accessGeneration
+    const current = (): boolean => !this.#disposed && accessGeneration === this.#accessGeneration
     try {
       const session = await this.#sessionOf()
+      if (!current()) return NOT_CONNECTED
       if (!session) return NOT_CONNECTED
       if (this.#via === 'account') return this.#composedText(slug)
-      return { ok: true, text: await session.readDocumentText(slug) }
+      const text = await session.readDocumentText(slug)
+      return current() ? { ok: true, text } : NOT_CONNECTED
     } catch (error) {
+      if (!current()) return NOT_CONNECTED
       this.#failed(error)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }

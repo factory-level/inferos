@@ -237,6 +237,52 @@ it('drops cached Wiki data when search loses access', async () => {
   data.dispose()
 })
 
+it('drops a successful search result that finishes after another read revokes access', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  await flush()
+  const hits = await wiki.session.searchWiki('team')
+  let resolveSearch!: (result: typeof hits) => void
+  const searchResult = new Promise<typeof hits>(resolve => { resolveSearch = resolve })
+  wiki.session.searchWiki.mockImplementationOnce(() => searchResult)
+
+  const search = data.search('team')
+  await flush()
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  data.refresh()
+  await flush()
+  resolveSearch(hits)
+
+  await expect(search).resolves.toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'UNAUTHORIZED' })
+  expect(data.snapshot.pages.size).toBe(0)
+  data.dispose()
+})
+
+it('drops a successful agent-text result that finishes after another read revokes access', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  await flush()
+  const text = await wiki.session.readDocumentText('handbook')
+  let resolveText!: (result: typeof text) => void
+  const textResult = new Promise<typeof text>(resolve => { resolveText = resolve })
+  wiki.session.readDocumentText.mockImplementationOnce(() => textResult)
+
+  const read = data.readAgentText('handbook')
+  await flush()
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  data.refresh()
+  await flush()
+  resolveText(text)
+
+  await expect(read).resolves.toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'UNAUTHORIZED' })
+  expect(data.snapshot.pages.size).toBe(0)
+  data.dispose()
+})
+
 it('reads the structure beside the page list, states its failure apart from the list, and re-reads it on refresh', async () => {
   const organized = organizedWiki()
   wiki = fakeWiki(organized)
