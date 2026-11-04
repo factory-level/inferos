@@ -46,7 +46,7 @@ import { consoleScreens, type ConsoleSource, type ConsoleWidgetCandidate, type H
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -12689,6 +12689,49 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return new WorkspaceCanvasStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
   }
 
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> {
+    let canvases = await this.listCanvases();
+    let consoles = await this.listConsoles();
+    let pages: WorkspaceRecordExport["pages"] = [];
+    for (let console of consoles) {
+      let screens: {source: ConsoleSource; ids: string[]}[] = [
+        {source: "draft", ids: console.views.flatMap(view => view.type === "screen" ? [view.screen] : view.screens)},
+      ];
+      if (console.published) {
+        let publishedScreens = console.published.screens?.map(screen => screen.id)
+            ?? console.published.content.views.flatMap(view => view.type === "screen" ? [view.screen] : view.screens);
+        screens.push({source: "published", ids: publishedScreens});
+      }
+      for (let {source, ids} of screens) {
+        for (let screenId of new Set(ids)) {
+          let page = await this.getConsolePage(console.id, screenId, source);
+          if (page) pages.push({consoleId: console.id, screenId, source, page});
+        }
+      }
+    }
+
+    let actionLog: ActionLogEntry[] = [];
+    let beforeId: number | undefined;
+    do {
+      let page = await this.listActions({beforeId});
+      actionLog.push(...page.entries);
+      beforeId = page.nextBeforeId;
+    } while (beforeId !== undefined);
+
+    return {
+      canvases,
+      pages,
+      workflowDefinitions: await this.listWorkflowDefinitions(),
+      triggers: await Promise.all((await this.listHooks()).map(async hook => ({
+        hook,
+        definition: await this.getTriggerDefinition(hook.id),
+      }))),
+      triggerControls: await this.listTriggerControls(),
+      widgetRegistry: await this.listConsoleWidgetCandidates(),
+      actionLog,
+    };
+  }
+
   async listCanvases(): Promise<CanvasDefinition[]> { return this.#canvasStore().list(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.#canvasStore().get(id); }
   async createCanvas(content: CanvasContent): Promise<CanvasDefinition> { return this.#canvasStore().create(content); }
@@ -15178,6 +15221,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // sight. A screen is layout and references only: every board on it resolves through the
   // viewer's own connection, never this workspace's. A screen no published console shows reads as
   // missing.
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> {
     let store = this.#consoleStore();
     let shown = new Set(store.listPublished().flatMap(consoleScreens));
@@ -15649,6 +15693,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
     return this.owner.subscribeToConsoleLogs(subscriber);
   }
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> { return this.owner.listCanvases(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.owner.getCanvas(id); }
   async listFlows(): Promise<OperateFlow[]> { return this.owner.listFlows(); }

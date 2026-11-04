@@ -2653,6 +2653,8 @@ export type AgentSpawnerBehaviour = Partial<Pick<AgentSpawnerConfig, "displayNam
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
+  /** Export only the declared business collections; available to build/owner sessions only. */
+  exportWorkspaceRecords(): Promise<WorkspaceRecordExport>;
   /**
    * List stored composition definitions in this workspace. Requires both view flags. Build access
    * lists every one; the use role lists only the screens this workspace's published consoles show,
@@ -3984,6 +3986,21 @@ export type ActionHistoryPage = {
    * page reached the start of the history.
    */
   nextBeforeId?: number;
+};
+
+/**
+ * Portable allow-list of a workspace's declared business records. It intentionally contains no
+ * credentials, arbitrary Durable Object storage, or gadget-owned state. Pages are captured as
+ * console/screen snapshots because the page API is scoped to those references.
+ */
+export type WorkspaceRecordExport = {
+  canvases: CanvasDefinition[];
+  pages: {consoleId: string; screenId: string; source: ConsoleSource; page: CanvasPage}[];
+  workflowDefinitions: WorkflowDefinition[];
+  triggers: {hook: BoundHookInfo; definition: WorkflowDefinitionRef | null}[];
+  triggerControls: TriggerControl[];
+  widgetRegistry: ConsoleWidgetCandidate[];
+  actionLog: ActionLogEntry[];
 };
 
 /** Lightweight attribution for a chat participant or configured model. */
