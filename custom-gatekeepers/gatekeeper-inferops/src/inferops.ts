@@ -104,7 +104,7 @@ import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeepe
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -162,7 +162,7 @@ import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
 } from "./simulation";
 import {
-  fingerprintOf, isCodingAction, isIssueChange, isWikiAction, isWikiEdit, matchesFingerprint, readAction,
+  appliedResult, fingerprintOf, isCodingAction, isIssueChange, isWikiAction, isWikiEdit, matchesFingerprint, readAction,
   sortedSources, type ActionRecord, type ActionScope, type CancelRunAction, type FingerprintScope, type CreateAction, type DispatchAction,
   type DocumentUpdateAction, type ProposalApproveAction, type SectionUpdateAction, type StagedAction,
   type StoredFailure, type UpdateAction, type WikiEditAction,
@@ -1403,7 +1403,7 @@ class ActionBinding {
     fields: Partial<LogFields>;
     check?: () => Promise<void> | void;
     send: (marked: ActionRecord) => Promise<ActionRecord>;
-  }): Promise<void | { failed: ActionApplyFailure }> {
+  }): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     const { policy, fields } = options;
     if (record.status === "failed") {
       const stored = record.attempts?.failure;
@@ -1435,6 +1435,7 @@ class ActionBinding {
     }
     this.putAction(applied);
     logger.info(`${record.kind} applied`, { event: `${record.kind}.applied`, ...fields });
+    return { applied: { result: appliedResult(applied) } };
   }
 
   /** Store that `record`'s write is about to be sent, before it is (see `ApplyAttempts`). */
@@ -1668,7 +1669,7 @@ export class InferOpsProjectGatekeeper
    * `cache` is unused: no git objects are involved.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     return applyBoardAction(this.#binding(), actionId);
   }
 
@@ -1726,10 +1727,10 @@ function rejectPending(binding: ActionBinding, actionId: number): void {
  * reached InferOps is unknown.
  */
 async function applyBoardAction(binding: ProjectBinding, actionId: number,
-                                check?: () => Promise<void>): Promise<void | { failed: ActionApplyFailure }> {
+                                check?: () => Promise<void>): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   const record = binding.action(actionId);
   if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-  if (record.status === "applied") return;
+  if (record.status === "applied") return { applied: { result: appliedResult(record) } };
   if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
   if (isCodingAction(record) || isWikiAction(record)) {
     throw new Error(`InferOps action ${actionId} is not a board action.`);
@@ -1745,9 +1746,11 @@ async function applyBoardAction(binding: ProjectBinding, actionId: number,
     async send(marked) {
       switch (record.kind) {
         case "transition":
-          await binding.client.transition(
+        {
+          const moved = await binding.client.transition(
             binding.projectKey, record.issueId, record.toStateId, record.expectedRevision, key);
-          return { ...marked, status: "applied" };
+          return { ...marked, status: "applied", appliedRevision: moved.revision } as ActionRecord;
+        }
         case "create": {
           const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
           return { ...marked, status: "applied", createdIdentifier: created.identifier } as ActionRecord;
@@ -2521,11 +2524,11 @@ export class InferOpsDispatchGatekeeper
    * may have reached InferOps no later apply sends it again.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     const binding = this.#binding();
     const record = binding.action(actionId);
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-    if (record.status === "applied") return;
+    if (record.status === "applied") return { applied: { result: appliedResult(record) } };
     if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
     if (!isCodingAction(record)) throw new Error(`InferOps action ${actionId} is not a coding action.`);
     const fields = { projectKey: binding.projectKey, action: actionId };
@@ -2968,7 +2971,7 @@ export class InferOpsWikiGatekeeper
 
   /** See `applyWikiAction`. */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     return applyWikiAction(this.#binding(), actionId);
   }
 
@@ -2993,10 +2996,10 @@ export class InferOpsWikiGatekeeper
  * `applyApproval`.
  */
 async function applyWikiAction(binding: WikiBinding, actionId: number, check?: () => Promise<void>):
-    Promise<void | { failed: ActionApplyFailure }> {
+    Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   const record = binding.action(actionId);
   if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-  if (record.status === "applied") return;
+  if (record.status === "applied") return { applied: { result: appliedResult(record) } };
   if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
   if (!isWikiAction(record)) throw new Error(`InferOps action ${actionId} is not a Wiki action.`);
   const fields = { host: binding.host, action: actionId };
@@ -3024,7 +3027,7 @@ async function applyWikiAction(binding: WikiBinding, actionId: number, check?: (
  */
 async function applyApproval(binding: WikiBinding, record: ProposalApproveAction, fields: Partial<LogFields>,
                              check?: () => Promise<void>):
-    Promise<void | { failed: ActionApplyFailure }> {
+    Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   return binding.applyOnce(record, {
     policy: PROPOSAL_APPROVE, fields,
     check: async () => {
@@ -3901,7 +3904,7 @@ export class InferOpsAccountGatekeeper
    * target) and the workspace check of `#routed`.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     const routed = this.#routed(actionId);
     if (!routed) throw new Error(`Unknown InferOps action ${actionId}.`);
     return routed.kind === "board"
