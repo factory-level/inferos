@@ -66,7 +66,7 @@ async function listKv(store: KeyValueStore): Promise<string[]> {
     cursor = page.list_complete ? undefined : page.cursor;
     if (!page.list_complete && !cursor) throw new Error("KV listing returned an incomplete page without a cursor");
   } while (cursor);
-  return names.sort();
+  return names.toSorted();
 }
 
 async function listR2(store: ObjectStore): Promise<{ key: string; size: number; uploaded: Date }[]> {
@@ -78,7 +78,7 @@ async function listR2(store: ObjectStore): Promise<{ key: string; size: number; 
     cursor = page.truncated ? page.cursor : undefined;
     if (page.truncated && !cursor) throw new Error("R2 listing returned a truncated page without a cursor");
   } while (cursor);
-  return objects.sort((a, b) => a.key.localeCompare(b.key));
+  return objects.toSorted((a, b) => a.key.localeCompare(b.key));
 }
 
 /** Read all company-prefixed KV/R2 objects, then invoke the allow-listed kernel export per workspace. */
@@ -91,7 +91,7 @@ export async function exportCompanyStorage({
   bindings: CompanyStorageBindings;
   outputDirectory: string;
 }): Promise<Record<string, unknown>> {
-  if (!/[\/:_-]$/.test(prefix)) throw new Error("Company resource prefix must end with a namespace delimiter (:, /, _, or -)");
+  if (!/[/:_-]$/.test(prefix)) throw new Error("Company resource prefix must end with a namespace delimiter (:, /, _, or -)");
   const exportKv = new Set(resources.exportKv ?? []);
   const exportR2 = new Set(resources.exportR2 ?? []);
   for (const name of exportKv) if (!resources.kv.includes(name)) throw new Error(`Export KV ${name} is not a listed local resource`);
@@ -130,11 +130,11 @@ export async function exportCompanyStorage({
   }
 
   const workspaces: Record<string, unknown>[] = [];
-  for (const [id, workspace] of [...bindings.workspaces].sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [id, workspace] of [...bindings.workspaces].toSorted(([a], [b]) => a.localeCompare(b))) {
     workspaces.push({ id, records: await workspace.exportWorkspaceRecords() });
   }
   const gadgetDurableObjects = bindings.gadgetDurableObjects.map(({ namespace, ids }) => ({
-    namespace, ids: [...ids].sort(), note: "not exported: arbitrary gadget state",
+    namespace, ids: ids.toSorted(), note: "not exported: arbitrary gadget state",
   }));
 
   const document = {

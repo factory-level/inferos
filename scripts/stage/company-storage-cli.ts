@@ -60,7 +60,7 @@ function args(argv: string[]): { command: string; manifest?: string; apply: bool
 function readManifest(path: string): LocalManifest {
   const manifest = JSON.parse(readFileSync(path, "utf8")) as LocalManifest;
   if (!/^[0-9a-f-]{36}$/i.test(manifest.tenantId) || !manifest.resourcePrefix ||
-      !/[\/:_-]$/.test(manifest.resourcePrefix) ||
+      !/[/:_-]$/.test(manifest.resourcePrefix) ||
       !manifest.inferopsBaseUrl || !manifest.wrapperRoot || !manifest.stateDirectory ||
       !manifest.workerConfig || !manifest.outputDirectory || !manifest.resources ||
       !Array.isArray(manifest.resources.kv) || !Array.isArray(manifest.resources.r2)) {
@@ -98,7 +98,7 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
       "-c", manifest.workerConfig], { cwd: manifest.wrapperRoot, stdio: "inherit" });
   } catch (error) {
     rmSync(bundleDirectory, { recursive: true, force: true });
-    throw new Error(`Wrangler could not bundle the local wrapper without deploying: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Wrangler could not bundle the local wrapper without deploying: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
   const { workerOptions, externalWorkers } = unstable_getMiniflareWorkerOptions(manifest.workerConfig);
   const main = join(bundleDirectory, "index.js");

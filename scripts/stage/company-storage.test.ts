@@ -25,7 +25,7 @@ async function snapshot(mf: Miniflare, binding: string): Promise<string> {
     const value = await kv.get(name, "arrayBuffer");
     values.push([name, value ? Buffer.from(value).toString("base64") : null]);
   }
-  return JSON.stringify(values.sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify(values.toSorted(([a], [b]) => a.localeCompare(b)));
 }
 
 async function r2Snapshot(mf: Miniflare): Promise<string> {
@@ -35,7 +35,7 @@ async function r2Snapshot(mf: Miniflare): Promise<string> {
     const stored = await bucket.get(object.key);
     return [object.key, stored ? Buffer.from(await stored.arrayBuffer()).toString("base64") : null] as const;
   }));
-  return JSON.stringify(values.sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify(values.toSorted(([a], [b]) => a.localeCompare(b)));
 }
 
 test("Miniflare export is allow-listed and delimiter-bounded; purge is gated and isolates company B", async () => {
