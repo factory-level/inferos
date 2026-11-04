@@ -12,6 +12,7 @@ import { CanvasMoveWidgetForm } from './CanvasMoveWidgetForm'
 import { CanvasSectionEditor } from './CanvasSectionEditor'
 import { CanvasTargetBreadcrumb } from './CanvasTargetBreadcrumb'
 import { CanvasTargetTree } from './CanvasTargetTree'
+import { CanvasTargetPrompt } from './CanvasTargetPrompt'
 import { CanvasWidgetCard } from './CanvasWidgetCard'
 import { CanvasView } from './CanvasView'
 import { exportCanvas } from './exportCanvas'
@@ -238,6 +239,9 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
               <p className="text-sm text-kumo-default">On <code>{selected.attachment.on}</code>, {selected.attachment.effect.kind}.</p>
               <p className="text-sm text-kumo-subtle">Edit or remove it from the page, object or widget it belongs to.</p>
             </>}
+            {selected.kind !== 'workspace' && <CanvasTargetPrompt key={formatCanvasTarget(selected.target)}
+              viewTitle={active.title} canvasId={page.id} revision={page.revision} target={formatCanvasTarget(selected.target)}
+              busy={canvas.busy} onAskAgent={onAskAgent} />}
           </section>
         </div>}
       </div>}
