@@ -3,15 +3,16 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { GadgetSummary } from '@gadgets/workshop-shared/api'
 import type { ConsoleWidgetEntry } from '@gadgets/workshop-shared/operate-console'
-import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
+import { ConsoleWidgetRegistry, type WidgetCandidates } from './ConsoleWidgetRegistry'
 
 let container: HTMLDivElement
 let root: Root
 const change = vi.fn<(widgets: ConsoleWidgetEntry[]) => void>()
-const install = (id: number, title: string, version: number): GadgetSummary =>
-  ({ id, type: 'gadget', title, commitId: `c${id}`, installedFrom: { blueprintId: `bp${id}`, version, kind: 'widget' } })
+const install = (id: number, title: string, version: number, more: { refusal?: string; tools?: string[] } = {}) => ({
+  gadgetId: id, title, blueprintId: `bp${id}`, version, versionId: `bp${id}@${version}`, commitId: `c${id}0000000000`,
+  surfaces: more.refusal ? null : { ui: true, tools: more.tools ?? [] }, refusal: more.refusal ?? null })
+const ready = (...list: ReturnType<typeof install>[]): WidgetCandidates => ({ state: 'ready', list })
 const registered: ConsoleWidgetEntry = { gadgetId: 3, blueprintId: 'bp3', version: 2, label: 'Status', state: 'resettable' }
 
 beforeEach(() => {
@@ -22,8 +23,9 @@ beforeEach(() => {
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 
-const render = (widgets: ConsoleWidgetEntry[], published?: ConsoleWidgetEntry[], disabled = false) => act(() => root.render(
-  <ConsoleWidgetRegistry widgets={widgets} published={published} candidates={[install(3, 'Status', 2), install(5, 'Queue', 1)]}
+const render = (widgets: ConsoleWidgetEntry[], published?: ConsoleWidgetEntry[], disabled = false,
+    candidates: WidgetCandidates = ready(install(3, 'Status', 2), install(5, 'Queue', 1))) => act(() => root.render(
+  <ConsoleWidgetRegistry widgets={widgets} published={published} candidates={candidates}
     disabled={disabled} onChange={change} />))
 const button = (text: string) => [...container.querySelectorAll('button')].find(item => item.textContent === text)
 
@@ -72,4 +74,44 @@ it('offers nothing to edit when the viewer cannot write the console', () => {
   render([registered], undefined, true)
   expect(button('Register widget')).toBeUndefined()
   expect(container.querySelector<HTMLButtonElement>('[aria-label="Remove Status"]')?.disabled).toBe(true)
+})
+
+it('offers only the installs a console can offer, and says why the others are not', () => {
+  render([], undefined, false, ready(install(5, 'Queue', 1),
+    install(7, 'Durable', 1, { refusal: 'Gadget 7 declares a data contract, so its state is not resettable.' })))
+  const select = container.querySelector('[role="combobox"]')!
+  act(() => (select as HTMLElement).click())
+  const options = [...document.querySelectorAll('[role="option"]')].map(option => option.textContent)
+  expect(options).toEqual([expect.stringContaining('Queue')])
+  const unusable = container.querySelector('[aria-label="Widget installs a console cannot offer"]')!
+  expect(unusable.textContent).toContain('Durable')
+  expect(unusable.textContent).toContain('declares a data contract')
+})
+
+it('shows each registered widget\'s stable version, the commit it runs and what it offers', () => {
+  render([registered], [{ ...registered, gadgetId: 40, frozen: { sourceGadgetId: 3, commitId: 'f00dfeed99', ui: true } }], false,
+    ready(install(3, 'Status', 2, { tools: ['count'] })))
+  const shown = container.querySelector('[aria-label="Registered widgets"]')!.textContent
+  expect(shown).toContain('bp3@2')
+  expect(shown).toContain('at c300000')
+  expect(shown).toContain('UI')
+  expect(shown).toContain('Tools: count')
+  expect(shown).toContain('Operators run f00dfee')
+})
+
+it('warns when a registered install can no longer be offered', () => {
+  render([registered], undefined, false,
+    ready(install(3, 'Status', 2, { refusal: 'Gadget 3 has bindings; a console offers only widgets with none.' })))
+  const row = container.querySelector('[aria-label="Registered widgets"] li')!
+  expect(row.textContent).toContain('Can\'t be offered')
+  expect(row.textContent).toContain('has bindings')
+})
+
+it('offers nothing to register while installs are being checked, or when the check failed', () => {
+  render([], undefined, false, { state: 'loading' })
+  expect(container.textContent).toContain('Checking widget installs')
+  expect(button('Register widget')?.disabled).toBe(true)
+  render([], undefined, false, { state: 'error' })
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not check')
+  expect(button('Register widget')?.disabled).toBe(true)
 })

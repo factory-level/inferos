@@ -11,6 +11,7 @@ import { consoleContentForSave, type ConsoleEntry } from './consoles'
 import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
+import { useConsoleWidgetCandidates } from './useConsoleWidgetCandidates'
 
 const ignore = () => {}
 const options = [
@@ -43,6 +44,7 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
   const { workpieces } = useWorkspaceWorkpieces(overseer, entry.workspace.id)
   const candidates = [...workpieces.values()].flatMap(piece => piece.type === 'gadget' && piece.chatId === undefined &&
     !piece.frozenFor && piece.installedFrom?.kind === 'widget' ? [piece] : [])
+  const widgetCandidates = useConsoleWidgetCandidates(overseer, candidates)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const editable = !!overseer && !!metadata && metadata.role !== 'use' && !accessError
@@ -74,7 +76,7 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       </div>)}
       {!editable && <p role="status" className="text-sm text-kumo-subtle">Console owners and editors manage these settings.</p>}
     </div>
-    <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={candidates}
+    <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={widgetCandidates}
       hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!editable || saving} onChange={setWidgets} />
     {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={entry.console.published?.content.hostBoards}
       widgetCount={widgets.length + shownBoundViews.length} assistantOnly={entry.console.fullChat === 'only'} disabled={!editable || saving} onChange={setHostBoards} />}

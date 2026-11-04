@@ -16,12 +16,23 @@ const testState = vi.hoisted(() => ({
   invalidate: vi.fn<() => void>(),
   denied: false,
   workpieces: new Map<number, object>(),
+  // The kernel's answer: every widget install of the workpiece list, each one a console can offer.
+  candidates: () => Promise.resolve([...testState.workpieces.values()].flatMap(piece => {
+    const install = piece as { id: number; commitId?: string; installedFrom?: { blueprintId: string; version: number; kind?: string } }
+    return install.installedFrom?.kind === 'widget' ? [{ gadgetId: install.id, blueprintId: install.installedFrom.blueprintId,
+      version: install.installedFrom.version, versionId: `${install.installedFrom.blueprintId}@${install.installedFrom.version}`,
+      commitId: install.commitId ?? null, surfaces: { ui: true, tools: [] }, refusal: null }] : []
+  })),
+  overseer: null as unknown,
 }))
 vi.mock('@cloudflare/kumo', async importOriginal => withKumoPopupDoubles(await importOriginal<typeof import('@cloudflare/kumo')>()))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { catalog: { widgetKinds: [], blueprints: [], screens: [] } } }) }))
+// One overseer for every render, as the real hook keeps it in state.
+testState.overseer = { stub: { createConsole: testState.createConsole, replaceConsole: testState.replaceConsole,
+  createCanvas: testState.createCanvas, listConsoleWidgetCandidates: () => testState.candidates() } }
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: ({ id }: { id?: string }) => ({
-  overseer: { stub: { createConsole: testState.createConsole, replaceConsole: testState.replaceConsole, createCanvas: testState.createCanvas } },
+  overseer: testState.overseer,
   metadata: { id: id ?? 'w1', role: testState.denied ? 'use' : 'build' }, error: null,
 }) }))
 vi.mock('../../hooks/useWorkspaceWorkpieces', () => ({ useWorkspaceWorkpieces: () => ({ ready: true, workpieces: testState.workpieces }) }))
