@@ -478,7 +478,7 @@ it('keeps a pending body deletion visible after a reload, read-only too', async 
   expect(pageBody().textContent).toContain("The proposed body is empty: approving it removes this page's body.")
 })
 
-it('says why a body edit was not sent, stale, conflicting or denied, keeping the draft', async () => {
+it('says why a body edit was not sent or stale, keeps retryable drafts, and clears them when access is revoked', async () => {
   organize()
   await render(widget('operations'))
   await click(button(pageBody(), 'Edit page body'))
@@ -497,8 +497,8 @@ it('says why a body edit was not sent, stale, conflicting or denied, keeping the
   await click(button(pageBody(), 'Cancel'))
   wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: FORBIDDEN: Your InferOps access cannot edit this Wiki.'))
   await proposeBody('Third try')
-  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: Your InferOps access cannot edit this Wiki.')
-  expect(pageBody().querySelector('textarea')?.value).toBe('Third try')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('No access to this Wiki: Your InferOps access cannot edit this Wiki.')
+  expect(wikiArticle().querySelector('textarea')).toBeNull()
 })
 
 it('offers to add a body to a page that reads as its sections, keeping section edits, and no body edit read-only', async () => {

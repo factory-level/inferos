@@ -60,6 +60,31 @@ it('reads a page once, reports a missing one, and drops everything read when acc
   data.dispose()
 })
 
+it.each(['UNAUTHORIZED', 'FORBIDDEN'])('clears all cached Wiki content and edit state after %s', async code => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  data.openPage('ops/incident-response')
+  await flush()
+  const section = sectionOf(data, 'handbook', 's1')
+  await data.proposeEdit('handbook', section, 'Private section draft text')
+  await data.proposeBodyEdit(pageOf(data, 'ops/incident-response'), 'Private body draft text')
+  expect(data.snapshot.edits.size).toBeGreaterThan(0)
+  expect(data.snapshot.bodyEdits.size).toBeGreaterThan(0)
+
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error(`Error: ${code}: access was revoked`))
+  data.refresh()
+  await flush()
+
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code })
+  expect(data.snapshot.pages.size).toBe(0)
+  expect(data.snapshot.edits.size).toBe(0)
+  expect(data.snapshot.bodyEdits.size).toBe(0)
+  expect(JSON.stringify(data.snapshot)).not.toContain('Private section draft text')
+  expect(JSON.stringify(data.snapshot)).not.toContain('Private body draft text')
+  data.dispose()
+})
+
 it('keeps InferOps being turned off apart from lost access, and a removed connection as unbound', async () => {
   const data = new WikiData(overseer, WIKI)
   await flush()

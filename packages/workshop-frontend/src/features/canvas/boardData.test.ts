@@ -316,6 +316,29 @@ describe('BoardData', () => {
     expect(await data.move(request(), 'missing', 'done', '1')).toMatchObject({ ok: false, code: 'NOT_FOUND' })
   })
 
+  it('clears proposal text when access is revoked and does not restore it after access returns', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo', '7')]))
+    await flush()
+    const result = data.update(request(), '1', { title: 'Private proposed title' }, '7')
+    await flush()
+    expect(data.get(request())).toMatchObject({ changes: [{ changes: { title: 'Private proposed title' } }] })
+
+    ws.updates[0]!.settle.reject(new Error('FORBIDDEN: Access to this board was revoked.'))
+    expect(await result).toEqual({ ok: false, code: 'FORBIDDEN', message: 'Access to this board was revoked.' })
+    expect(data.get(request())).toEqual({ status: 'error', code: 'FORBIDDEN', message: 'Access to this board was revoked.' })
+
+    data.refresh(request())
+    await flush()
+    ws.reads[1]!.resolve(board([issue('1', 'todo', '7')]))
+    await flush()
+    expect(data.get(request())).toMatchObject({ status: 'ready', pending: [], changes: [] })
+    expect(JSON.stringify(data.get(request()))).not.toContain('Private proposed title')
+  })
+
   it('queues a new issue through the session with its state, lists it until the board shows the provisional card, and reports refusals', async () => {
     const ws = workspace()
     const data = new BoardData(ws.overseer)

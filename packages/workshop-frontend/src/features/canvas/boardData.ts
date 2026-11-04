@@ -98,6 +98,7 @@ type Entry = { target: string; request: BoardRequest; listeners: Set<() => void>
 type TargetData = {
   wanted: number
   applied: number
+  accessGeneration: number
   pending: PendingMove[]
   changes: PendingChange[]
   session?: Promise<RpcStub<InferOpsProjectSession> | null>
@@ -276,27 +277,38 @@ export class BoardData {
 
   async #propose(target: string, call: (session: RpcStub<InferOpsProjectSession>) => Promise<unknown>,
     settle: (queued: boolean) => void): Promise<ProposalResult> {
+    const generation = this.#target(target).accessGeneration
+    const current = (): boolean => !this.#disposed && this.#targets.get(target)?.accessGeneration === generation
+    let accessRevoked = false
     try {
       const session = await this.#session(target)
+      if (!current()) return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
       if (!session) {
         settle(false)
         return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
       }
       await call(session)
+      if (!current()) return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
       settle(true)
       return { ok: true }
     } catch (error) {
+      if (revoked(error)) {
+        accessRevoked = true
+        if (!this.#disposed) this.#revoke(target, error)
+        return { ok: false, code: codeOf(error), message: messageOf(error) }
+      }
+      if (!current()) return { ok: false, code: 'NOT_CONNECTED', message: 'No connection covers this board any more.' }
       settle(false)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     } finally {
-      this.invalidate(target)
+      if (!accessRevoked && current()) this.invalidate(target)
     }
   }
 
   #target(target: string): TargetData {
     let data = this.#targets.get(target)
     if (!data) {
-      data = { wanted: 0, applied: 0, pending: [], changes: [] }
+      data = { wanted: 0, applied: 0, accessGeneration: 0, pending: [], changes: [] }
       this.#targets.set(target, data)
     }
     return data
@@ -374,6 +386,7 @@ export class BoardData {
       this.#forgetSession(read.target)
       const target = this.#targets.get(read.target)
       if (!target || read.clock < target.wanted || read.clock <= target.applied) return
+      if (revoked(error)) this.#revoke(read.target, error)
       for (const entry of this.#entriesOf(read.target)) {
         this.#set(entry, codeOf(error) === 'DISABLED'
           ? { status: 'disabled', message: messageOf(error) }
@@ -424,5 +437,18 @@ export class BoardData {
     if (!data?.session) return
     void data.session.then(stub => stub?.[Symbol.dispose](), () => {})
     data.session = undefined
+  }
+
+  #revoke(targetRef: string, error: unknown): void {
+    if (this.#disposed) return
+    const target = this.#target(targetRef)
+    target.accessGeneration++
+    target.wanted = target.applied = ++this.#clock
+    target.pending = []
+    target.changes = []
+    this.#forgetSession(targetRef)
+    for (const entry of this.#entriesOf(targetRef)) {
+      this.#set(entry, { status: 'error', code: codeOf(error), message: messageOf(error) })
+    }
   }
 }

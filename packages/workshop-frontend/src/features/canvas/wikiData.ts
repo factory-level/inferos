@@ -93,6 +93,7 @@ export class WikiData {
   #via?: InferOpsConnectionKind
   // Orders reads: a result older than the newest read of the same thing never lands.
   #clock = 0
+  #accessGeneration = 0
   #listRead = 0
   #structureRead = 0
   readonly #pageReads = new Map<string, number>()
@@ -138,24 +139,28 @@ export class WikiData {
       return { ok: false, code: 'CONFLICT', message: 'This section already has an edit that has not taken effect yet.' }
     }
     if (body === section.body) return { ok: false, code: 'UNCHANGED', message: 'Nothing changed.' }
+    const accessGeneration = this.#accessGeneration
     const edit: Edit = { slug, sectionId: section.id, body, expectedVersion: section.version, phase: 'proposing' }
     this.#putEdit(edit)
     try {
       const session = await this.#sessionOf()
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       if (!session) {
         this.#putEdit({ ...edit, phase: 'refused', code: NOT_CONNECTED.code, message: NOT_CONNECTED.message })
         return NOT_CONNECTED
       }
       await session.updateSection(section.id, body, section.version)
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       this.#putEdit({ ...edit, phase: 'awaiting', queued: ++this.#clock })
       return { ok: true }
     } catch (error) {
       const code = codeOf(error)
       const message = messageOf(error)
+      if (this.#failed(error) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
       this.#putEdit({ ...edit, phase: 'refused', code, message })
       return { ok: false, code, message }
     } finally {
-      if (!this.#disposed) void this.#readPage(slug)
+      if (!this.#disposed && accessGeneration === this.#accessGeneration) void this.#readPage(slug)
     }
   }
 
@@ -169,25 +174,29 @@ export class WikiData {
       return { ok: false, code: 'CONFLICT', message: 'This page already has a body edit that has not taken effect yet.' }
     }
     if (body === document.body) return { ok: false, code: 'UNCHANGED', message: 'Nothing changed.' }
+    const accessGeneration = this.#accessGeneration
     const edit: PageEdit = { slug: document.slug, title: document.title, documentId: document.id, body, expectedVersion: document.version, phase: 'proposing' }
     this.#putBodyEdit(edit)
     try {
       const session = await this.#sessionOf()
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       if (!session) {
         this.#putBodyEdit({ ...edit, phase: 'refused', code: NOT_CONNECTED.code, message: NOT_CONNECTED.message })
         return NOT_CONNECTED
       }
       await session.updateDocumentBody(document.id, body, document.version)
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       // Its approval may already have been logged (and correlated) while the proposal was answered.
       this.#putBodyEdit({ ...edit, actionId: this.#bodyEdits.get(edit.documentId)?.actionId, phase: 'awaiting', queued: ++this.#clock })
       return { ok: true }
     } catch (error) {
       const code = codeOf(error)
       const message = messageOf(error)
+      if (this.#failed(error) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
       this.#putBodyEdit({ ...edit, phase: 'refused', code, message })
       return { ok: false, code, message }
     } finally {
-      if (!this.#disposed) void this.#readPage(document.slug)
+      if (!this.#disposed && accessGeneration === this.#accessGeneration) void this.#readPage(document.slug)
     }
   }
 
@@ -300,8 +309,11 @@ export class WikiData {
   // Access to the whole Wiki changed: what was read under it is dropped, not shown as current, and
   // no read started before the loss may land after it.
   #lose(list: WikiListState): void {
+    this.#accessGeneration++
     this.#forgetSession()
     this.#pageReads.clear()
+    this.#edits.clear()
+    this.#bodyEdits.clear()
     this.#listRead = this.#structureRead = ++this.#clock
     this.#publish({ list, structure: { status: 'loading' }, pages: new Map() })
   }
