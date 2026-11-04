@@ -69,6 +69,7 @@ export const fakeWiki = (seed: { pages?: StoredPage[]; structure?: WikiStructure
   let structure = seed.structure ?? EMPTY_STRUCTURE
   const edits = new Map<string, { body: string; expectedVersion: number }>()
   const bodyEdits = new Map<string, { body: string; expectedVersion: number }>()
+  let searchDown = false
   const shown = (section: StoredSection): WikiSection => {
     const edit = edits.get(section.id)
     const live = edit !== undefined && edit.expectedVersion === section.version
@@ -110,6 +111,18 @@ export const fakeWiki = (seed: { pages?: StoredPage[]; structure?: WikiStructure
       if (edits.get(id)?.expectedVersion === stored.version) fail('CONFLICT', `Section ${stored.tag} already has an edit that has not taken effect yet.`)
       edits.set(id, { body, expectedVersion })
     }),
+    // The gatekeeper's answer shape: every query word in the section body, no score; `searchDown`
+    // fails it as a search that could not run.
+    searchWiki: vi.fn<InferOpsWikiSession['searchWiki']>(async query => {
+      if (searchDown) fail('UNAVAILABLE', 'InferMind Wiki search is unavailable right now, so this is not an empty result. Try again shortly.')
+      const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+      return sections.filter(s => words.every(w => s.body.toLowerCase().includes(w))).flatMap(s => {
+        const head = documents.find(d => d.id === s.documentId)
+        return head ? [{ sectionId: s.id, sectionVersion: s.version, tag: s.tag, documentId: head.id, documentSlug: head.slug,
+          documentTitle: head.title, snippet: s.body.replace(new RegExp(words.join('|'), 'gi'), m => `<b>${m}</b>`),
+          ...(edits.get(s.id)?.expectedVersion === s.version ? { pending: 'update' as const } : {}) }] : []
+      })
+    }),
     dispose: vi.fn<() => void>(),
     [Symbol.dispose]() { session.dispose() },
   }
@@ -136,5 +149,7 @@ export const fakeWiki = (seed: { pages?: StoredPage[]; structure?: WikiStructure
       documents = next.map(node => ({ body: '', version: 1, masterRole: null, ...documents.find(d => d.id === node.id), ...node }))
     },
     setStructure: (next: WikiStructure) => { structure = next },
+    /** Make every search fail as one that could not run. */
+    setSearchDown: (down: boolean) => { searchDown = down },
   }
 }

@@ -523,3 +523,52 @@ it('opens a slash-slug page from a page reference of the same Wiki', async () =>
   expect(pageBody().textContent).toContain('Page the on-call engineer.')
   expect(wiki.session.readDocument).toHaveBeenLastCalledWith('ops/incident-response')
 })
+
+// FAC-66: searching the Wiki through the connection's own sign-in.
+const searchForm = () => wikiArticle().querySelector<HTMLFormElement>('form[role="search"]')!
+const search = async (query: string) => {
+  await act(async () => setFieldValue(searchForm().querySelector('input')!, query))
+  await act(async () => searchForm().requestSubmit())
+  await settle()
+}
+const results = () => wikiArticle().querySelector<HTMLElement>('ul[aria-label="Search results"]')
+
+it('searches the Wiki and opens a result\'s page, showing its snippet as text with only the matched words marked', async () => {
+  await render(widget())
+  await search('  team  ')
+  expect(wiki.session.searchWiki).toHaveBeenCalledWith('team')
+  const hit = results()!.querySelector('button')!
+  expect(hit.getAttribute('aria-label')).toBe('Open Team handbook, section purpose')
+  // The section's own `<script>` is literal text; nothing from a snippet becomes an element but a mark.
+  expect(hit.querySelector('script, b')).toBeNull()
+  expect(hit.textContent).toContain('<script>alert(1)</script>')
+  expect([...hit.querySelectorAll('mark')].map(m => m.textContent)).toEqual(['team', 'raw'])
+  await click(button(wikiArticle(), 'Clear search'))
+  expect(results()).toBeNull()
+  await search('pair small')
+  await click(results()!.querySelector('button')!)
+  expect(button(pageNav(), 'Onboarding').getAttribute('aria-current')).toBe('page')
+  expect(section('first-week').textContent).toContain('Pair on one small issue.')
+})
+
+it('says when nothing readable matches, and never calls an unavailable search empty', async () => {
+  await render(widget())
+  await search('zebra')
+  expect(wikiArticle().textContent).toContain('No section you can read matches “zebra”.')
+  wiki.setSearchDown(true)
+  await search('team')
+  const alert = wikiArticle().querySelector('[role="alert"]')!
+  expect(alert.textContent).toContain('Search unavailable, so this is not an empty result')
+  expect(wikiArticle().textContent).not.toContain('No section you can read matches')
+  expect(results()).toBeNull()
+  wiki.setSearchDown(false)
+  await click(button(wikiArticle(), 'Try again'))
+  expect(results()!.querySelectorAll('li')).toHaveLength(1)
+})
+
+it('marks a result whose section has an edit of this connection waiting', async () => {
+  await render(widget())
+  await wiki.session.updateSection('s3', 'Shadow the on-call.', 1)
+  await search('pair')
+  expect(results()!.textContent).toContain('Edit pending')
+})
