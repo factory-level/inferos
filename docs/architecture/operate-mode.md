@@ -713,7 +713,11 @@ A workflow definition is the reusable description of a workflow (FAC-107, [workf
     - an InferOps `workflow:invoke` grant (D3's grant half; InferOps roles can't confer a non-read/write verb to a member);
     - parameters (N4: a run takes none);
     - event and control triggers beyond Scheduled Tasks;
-    - the UI.
+  - **The UI** (FAC-102 part 2):
+    - **Builders:** the Triggers panel (`WorkflowTriggersPanel`) gives each pinned trigger a "Run on request" editor (`TriggerControlEditor`). It sets the button's label and who may press it, chosen from `listCollaborators` by profile id, through `setTriggerControl`; a refusal shows in the server's words. It also lists the trigger's newest runs on request with who asked (`listWorkflowDeliveries`, the delivery's `invocation`).
+    - **Use collaborators:** the use view (`GadgetUseView`) shows `WorkflowRunControls` above the app: the controls `listTriggerControls` returns for them, each only its label as a button. It renders nothing when none lists them, or when the call fails.
+    - **What a press shows:** a press calls `invokeTrigger`. An accepted run shows "Run requested, not done yet". FAC-97's `ActionOutcome` has no requested outcome, so an accepted run is its `running` (handed to the trigger, in flight), never `succeeded`. A refusal, a rate refusal's retry time included, shows in the server's own words.
+    - **Tests:** `WorkflowTriggersPanel.test.tsx` and `WorkflowRunControls.test.tsx`.
   - **Tests:** `__tests__/workflow-invocation.test.ts` covers the control and its pin, admission, the one-time invocation, the Operator gaining nothing, tampered arguments over RPC and in a direct call, unlisted, missing and legacy triggers, a disabled trigger, the build gate, a second workspace, a repin or a control change dropping a waiting request, a moved pin refused at delivery, expiry, both run rates, and the invoker's view. The scheduler's `schedule-driver.test.ts` covers a requested run and a finished schedule's refusal.
 - **When the owner leaves or loses build.** Their unpublished definitions stay theirs and invisible to others, and a trigger pinned to one is refused at its next firing. A trigger pinned to a published revision keeps running: publishing made it the workspace's.
 - **Not built here.** Trigger and run records of their own (FAC-108 onwards; on-request runs are above), expiry of unsaved dynamic definitions, sharing an unpublished definition, and a UI (the separate PR).

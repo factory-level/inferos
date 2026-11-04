@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { LightningIcon } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
-import type { BoundHookInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
-import type { WorkflowDefinition, WorkflowDefinitionRef } from '@gadgets/workshop-shared/workflow-definition'
+import type { BoundHookInfo, CollaboratorInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
+import type { TriggerControl, WorkflowDefinition, WorkflowDefinitionRef } from '@gadgets/workshop-shared/workflow-definition'
 import { HookToggle } from '../../components/HookToggle'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import { reportIssue } from '../../errorReporting'
+import { TriggerControlEditor } from './TriggerControlEditor'
 import { WorkflowDefinitionsSection } from './WorkflowDefinitionsSection'
 
 type Props = {
@@ -28,6 +29,10 @@ type Loaded =
       definitions: WorkflowDefinition[]
       // Each hook's pinned definition revision, by hook id; absent when unpinned.
       pins: ReadonlyMap<number, WorkflowDefinitionRef>
+      // Each pinned hook's run-on-request control, by hook id; absent when it has none.
+      controls: ReadonlyMap<number, TriggerControl>
+      // Who a control can list: the workspace's collaborators.
+      collaborators: CollaboratorInfo[]
     }
 
 // The definition revision a trigger could run: the published one for the gadget it wakes.
@@ -63,15 +68,19 @@ export const WorkflowTriggersPanel = ({
   useEffect(() => {
     let cancelled = false
     const load = async () => {
-      const [hooks, definitions] = await Promise.all([overseer.listHooks(), overseer.listWorkflowDefinitions()])
+      const [hooks, definitions, controlList, collaborators] = await Promise.all([
+        overseer.listHooks(), overseer.listWorkflowDefinitions(), overseer.listTriggerControls(),
+        overseer.listCollaborators().catch(() => [] as CollaboratorInfo[]),
+      ])
       const refs = await Promise.all(hooks.map(h => overseer.getTriggerDefinition(h.id)))
       const pins = new Map<number, WorkflowDefinitionRef>()
       refs.forEach((ref, i) => { if (ref) pins.set(hooks[i]!.id, ref) })
-      return { hooks, definitions, pins }
+      const controls = new Map(controlList.map(control => [control.hookId, control]))
+      return { hooks, definitions, pins, controls, collaborators }
     }
     load()
-      .then(({ hooks, definitions, pins }) => {
-        if (!cancelled) setLoaded({ status: 'ready', hooks, definitions, pins })
+      .then(ready => {
+        if (!cancelled) setLoaded({ status: 'ready', ...ready })
       })
       .catch(err => {
         reportIssue('workflow-triggers.load', err)
@@ -175,10 +184,8 @@ export const WorkflowTriggersPanel = ({
                   const candidates = publishedFor(loaded.definitions, hook.gadgetId)
                     .filter(c => c.ref.definitionId !== pin?.definitionId || c.ref.revision !== pin?.revision)
                   return (
-                    <li
-                      key={hook.id}
-                      className={`flex items-center gap-3 px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}
-                    >
+                    <li key={hook.id} className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}>
+                    <div className="flex items-center gap-3">
                       <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-kumo-subtle">
                         <LightningIcon size={15} aria-hidden="true" />
                       </span>
@@ -215,6 +222,19 @@ export const WorkflowTriggersPanel = ({
                         disabled={toggling.has(hook.id)}
                         onToggle={enabled => handleToggle(hook.id, enabled)}
                       />
+                    </div>
+                    {pin && (
+                      <TriggerControlEditor
+                        // A saved or removed control remounts the editor with what the server kept.
+                        key={`${hook.id}:${JSON.stringify(loaded.controls.get(hook.id) ?? null)}`}
+                        overseer={overseer}
+                        hookId={hook.id}
+                        pin={pin}
+                        control={loaded.controls.get(hook.id) ?? null}
+                        collaborators={loaded.collaborators}
+                        onChanged={() => setReloadTick(t => t + 1)}
+                      />
+                    )}
                     </li>
                   )
                 })}
