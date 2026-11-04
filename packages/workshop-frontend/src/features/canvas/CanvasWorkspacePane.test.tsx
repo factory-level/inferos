@@ -227,6 +227,45 @@ it('names the exact target in a request handed to the agent', async () => {
   expect(onAskAgent.mock.calls[0]![0]).toContain('(target page:ops/node:side)')
 })
 
+// FAC-84: a prompt edit names what the controls edit: the canvas, its page revision and the target.
+const describeChange = async (text: string) => {
+  const area = inspector().querySelector('textarea')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(area, text)
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+it("hands the agent the selected target and the page revision with the person's own words", async () => {
+  const onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => {})
+  const { storage } = editable([{ ...twoSections, revision: '7' }])
+  await render(storage, DEFAULT_CANVAS_CATALOG, onAskAgent)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick('Side')
+  expect(button('Ask the agent')!.disabled).toBe(true)
+  await describeChange('Put the board here, full width.')
+  await act(async () => { button('Ask the agent')!.click() })
+  expect(onAskAgent).toHaveBeenCalledOnce()
+  const request = onAskAgent.mock.calls[0]![0]
+  expect(request).toContain('change the selected target page:ops/node:side: Put the board here, full width.')
+  expect(request).toContain('canvasId ops, expectedRevision 7, target page:ops/node:side')
+  expect(request).toContain('publish nothing')
+  // Sent, the box is empty again.
+  expect(inspector().querySelector('textarea')!.value).toBe('')
+})
+
+it('says so when the chat could not start, and keeps the words', async () => {
+  const onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => { throw new Error('offline') })
+  const { storage } = editable()
+  await render(storage, DEFAULT_CANVAS_CATALOG, onAskAgent)
+  await act(async () => { button('Edit layout')!.click() })
+  await describeChange('Rename it Today.')
+  await act(async () => { button('Ask the agent')!.click() })
+  expect(onAskAgent.mock.calls[0]![0]).toContain('target page:ops:')
+  expect(inspector().querySelector('[role="alert"]')?.textContent).toContain('Could not start the chat')
+  expect(inspector().querySelector('textarea')!.value).toBe('Rename it Today.')
+})
+
 // FAC-83: nested creation, movement and configuration through typed page operations.
 const nestedPage = (revision: string, extra: Partial<CanvasPage> = {}): CanvasPage => {
   const base = canvasPageFromDefinition(twoSections)

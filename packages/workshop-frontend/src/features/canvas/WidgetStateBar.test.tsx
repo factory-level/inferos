@@ -51,9 +51,9 @@ function fakeSession(overrides: Partial<Record<'getWidgetState' | 'transitionWid
   }
   return session
 }
-async function render(session: ReturnType<typeof fakeSession>) {
+async function render(session: ReturnType<typeof fakeSession>, onStateChange?: (state: string | null) => void) {
   await act(async () => {
-    root.render(<WidgetStateBar session={session as unknown as RpcStub<OperateSession>} widgetRef={REF} />)
+    root.render(<WidgetStateBar session={session as unknown as RpcStub<OperateSession>} widgetRef={REF} onStateChange={onStateChange} />)
   })
 }
 const buttons = () => [...container.querySelectorAll('button')].map(b => b.textContent)
@@ -105,4 +105,28 @@ it('reloads the latest state on a conflict instead of overwriting it', async () 
   expect(container.textContent).toContain('State: submitting')
   expect(buttons()).toEqual(['fail'])
   expect(container.querySelector('[role="status"]')?.textContent).toContain('It now shows the latest state.')
+})
+
+it('reports the state it shows, so the widget can be told, and none while it has none', async () => {
+  const heard: (string | null)[] = []
+  const getWidgetState = vi.fn<OperateSession['getWidgetState']>()
+    .mockResolvedValueOnce(VIEWING)
+    .mockResolvedValueOnce({ state: 'submitting', seq: 2, events: ['fail'] })
+  let conflict = false
+  const transitionWidget = vi.fn<OperateSession['transitionWidget']>(async () => {
+    if (conflict) throw new Error("WidgetStateError: WIDGET_STATE_CONFLICT: The widget's state changed. Read it again.")
+    return EDITING
+  })
+  await render(fakeSession({ getWidgetState, transitionWidget }), state => heard.push(state))
+  await act(async () => { button('edit').click() })
+  conflict = true
+  await act(async () => { button('cancel').click() })
+  // Loading, then each state shown: the move, and the latest state a conflict reloaded.
+  expect(heard).toEqual([null, 'viewing', 'editing', 'submitting'])
+
+  heard.length = 0
+  await render(fakeSession({
+    getWidgetState: async () => { throw new Error('WidgetStateError: WIDGET_HAS_NO_STATES: This widget declares no local states.') },
+  }), state => heard.push(state))
+  expect(heard.at(-1)).toBeNull()
 })

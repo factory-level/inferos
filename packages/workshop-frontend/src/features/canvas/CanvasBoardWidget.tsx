@@ -103,7 +103,11 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
         {state.message} The connection to this board is kept; it shows the board again once InferOps is turned back on.
       </p>}
       {state.status === 'error' && <div className="space-y-2">
-        <p role="alert" className="text-sm text-kumo-danger">Could not read the board: {state.message}</p>
+        <p role="alert" className="text-sm text-kumo-danger">
+          {state.code === 'UNAUTHORIZED' ? 'Sign in to InferOps again to read this board.'
+            : state.code === 'FORBIDDEN' ? `No access to this board: ${state.message}`
+              : `Could not read the board: ${state.message}`}
+        </p>
         <Button size="sm" onClick={refresh}>Try again</Button>
       </div>}
       {state.status === 'stale' && state.error && <p role="alert" className="mb-2 text-xs text-kumo-danger">Showing the last board read; refresh failed: {state.error}</p>}

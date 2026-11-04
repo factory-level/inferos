@@ -8,7 +8,7 @@ import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
-  stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers,
+  stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageR2Buckets, stageTiers,
   stageWorkerHost, stageWorkerName, resolveStageAdmins,
 } from "./stage-config.ts";
 import { STAGES, resolveStage, stageDefinitionProblems, type StageDefinition } from "./stages.ts";
@@ -133,6 +133,7 @@ test("resources are the stage's own, named stably and bound by id", () => {
   }
   assert.deepEqual(backend.r2_buckets, [{ binding: "BLUEPRINT_CONTENT", bucket_name: "inferos-prod-blueprint-content" }]);
   assert.equal(stageBucketName(stage, "BLUEPRINT_CONTENT"), "inferos-prod-blueprint-content");
+  assert.deepEqual(stageR2Buckets(stage, ALL_PACKAGES), ["inferos-prod-blueprint-content"]);
   assert.deepEqual(stageKvNamespaces(stage, ALL_PACKAGES).map((ns) => ns.title).toSorted(), [
     "inferos-prod-gatekeeper-context-context-collections",
     "inferos-prod-workshop-backend-avatars",

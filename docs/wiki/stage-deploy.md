@@ -107,7 +107,7 @@ A company's InferOS is deployed from its wrapper repository, at the InferOS revi
 ## Rollback and deletion
 
 - `pnpm exec wrangler rollback --name inferos-<stage>-<package>` returns one worker to an earlier version. It never undoes a Durable Object migration, which is why the deploy refuses destructive migrations unless `--allow-destructive-migrations` is passed.
-- `pnpm stage:delete <stage> --confirm <hostname>` deletes the stage's workers, router first, and with them every Durable Object (all users' Workshop data). KV namespaces and the bucket are kept; delete them in the dashboard if that is intended.
+- `pnpm stage:delete <stage> --confirm <hostname>` deletes the stage's workers, router first, and with them every Durable Object (all users' Workshop data). It prints the exact KV namespaces and R2 buckets retained. It performs no export or KV/R2 deletion. For a real stage, a person must export and delete only the printed KV/R2 names in the matching Cloudflare account.
 - Never change a stage's `workerPrefix` or `resourcePrefix` in `scripts/stage/stages.ts`: the next deploy would create a new, empty instance and abandon the old one.
 
 ## Limits

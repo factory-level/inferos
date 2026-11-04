@@ -1,8 +1,21 @@
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Imports an `.svg` as its text, as the archive build's loader does (`SVG_LOADER` in src/files.ts),
+ * where Vite would otherwise hand a gadget module a URL the sandboxed iframe could never load.
+ */
+const svgAsText = {
+  name: "svg-as-text",
+  enforce: "pre" as const,
+  load(id: string) {
+    return id.endsWith(".svg") ? `export default ${JSON.stringify(readFileSync(id, "utf8"))};` : null;
+  },
+};
 
 /**
  * Two projects, because the two kinds of test here need two environments.
@@ -31,6 +44,7 @@ export default defineConfig({
           ],
           environment: "jsdom",
         },
+        plugins: [svgAsText],
         resolve: {
           alias: [
             {
