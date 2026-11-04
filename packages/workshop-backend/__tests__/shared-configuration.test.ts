@@ -221,6 +221,7 @@ describe("a build session in a shared workspace", () => {
       () => overseer.getAgentSpawner(1 as never),
       () => overseer.setAgentSpawnerEnv(1 as never, { displayName: "agent", modelId: null, env: {} }, {}),
       () => overseer.newArtifactPublisherGatekeeper(),
+      () => overseer.setTriggerControl(1, null),
       () => overseer.acceptConnectionRequest("request", { gatekeeperId: 1 as never }),
     ];
     for (let call of calls) await expect(call()).rejects.toThrow(REFUSED);

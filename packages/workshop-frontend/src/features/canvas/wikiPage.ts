@@ -9,6 +9,7 @@ import { parseWikiDocumentUrl } from '@inferos/gatekeeper-inferops/src/resources
 import type { WikiDocument, WikiDocumentNode, WikiSection, WikiStructure, WikiStructurePage } from '@inferos/gatekeeper-inferops/src/types'
 import { authoredContent, composeDocumentText, embeddedReferences, masterStructureText } from '@inferos/gatekeeper-inferops/src/wiki'
 import { canonicalBoardRef } from './boardData'
+import { withServerWords } from './serverWords'
 
 /** One page in the tree, with the pages under it in order. */
 export type WikiTreeNode = { page: WikiDocumentNode; children: WikiTreeNode[] }
@@ -291,11 +292,11 @@ export const editErrorText = (edit: ProposedEdit, subject: 'section' | 'page' = 
     return edit.message ?? `Not saved: the ${subject} changed in InferMind before this edit was decided. The page shows the current text; edit it again.`
   }
   switch (edit.code) {
-    case 'STALE_REVISION': return `Not sent: the ${subject} changed since the page was read. The page was read again; edit the current text.`
+    case 'STALE_REVISION': return withServerWords(`Not sent: the ${subject} changed since the page was read. The page was read again; edit the current text.`, edit.message)
     case 'CONFLICT': return `Not sent: ${edit.message ?? `another edit of this ${subject} is waiting for a decision.`}`
     case 'FORBIDDEN': return `Not sent: ${edit.message ?? 'you cannot edit this Wiki.'}`
-    case 'NOT_FOUND': return `Not sent: the ${subject} is no longer in this Wiki.`
-    case 'DISABLED': return 'Not sent: InferOps is turned off for this deployment.'
+    case 'NOT_FOUND': return withServerWords(`Not sent: the ${subject} is no longer in this Wiki.`, edit.message)
+    case 'DISABLED': return withServerWords('Not sent: InferOps is turned off for this deployment.', edit.message)
     default: return `Not sent: ${edit.message ?? 'the edit could not be proposed.'}`
   }
 }

@@ -84,6 +84,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "sharing.test.ts",
   "shared-configuration.test.ts",
   "workflow-definitions.test.ts",
+  "workflow-invocation.test.ts",
   "user-directory.test.ts",
 ];
 

@@ -2,6 +2,7 @@
 import type { Board, Issue, IssueChanges, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
 import type { PendingMove, ProposalResult } from './boardData'
+import { withServerWords } from './serverWords'
 
 export const PRIORITY_LABELS: Record<Issue['priority'], string> = {
   urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low', none: 'No priority',
@@ -145,7 +146,7 @@ export const changedFields = (issue: Issue, fields: IssueFields): IssueChanges =
 
 /** What a refused create or edit tells the user: the gatekeeper's own message, except for a stale revision. */
 export const proposalErrorText = (result: Extract<ProposalResult, { ok: false }>): string =>
-  result.code === 'STALE_REVISION' ? 'This issue changed; refresh and try again.' : result.message
+  result.code === 'STALE_REVISION' ? withServerWords('This issue changed; refresh and try again.', result.message) : result.message
 
 /** A date as the board shows it, in UTC so the planned day does not shift with the viewer's zone. */
 export const formatTargetDate = (date: string): string => {
