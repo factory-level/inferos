@@ -33,6 +33,11 @@ bindings, blueprint `version`, and bundled `revision`. The build converts these 
 gzip-compressed Yjs `.gadget` representation used by uploaded blueprints and embeds it in the
 generated Worker module. No binary archive is committed.
 
+`blueprint.json` may also name a `kind`, `"app"`, `"widget"` or `"workflow"`: the kind every install
+of it takes, stored with the installed version's content as publishing stores it. Absent means an
+app. Only an app is offered as one of the deployment's standard output formats; a bundled widget or
+workflow is installed and listed among the featured blueprints, never promoted to a format.
+
 ### Libraries
 
 A blueprint may import the shared **gadget libraries** in `libraries/` (see [its
