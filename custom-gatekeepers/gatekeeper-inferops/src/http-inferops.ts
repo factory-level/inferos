@@ -54,7 +54,7 @@ import {
   type TableColumnRecord, type TableRead, type TableReadOptions, type TableRecordSchema,
   type TableRowRecord, type TableSummary, type WikiPageChanges, type WikiPageWrite,
   type WorkspaceMemberRecord, type WorkspaceMembersRead,
-  type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
+  type WikiSearchRecord, type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
   ActivityWindow, type HistoryEntryRecord,
 } from "./inferops-client";
@@ -406,6 +406,29 @@ function parseSection(value: unknown): WikiSectionRecord {
     version: int(section.version, "section.version"),
   };
 }
+
+/** The longest snippet `knowledge.search` returns, in code points. */
+const SNIPPET_MAX = 300;
+
+/** One `knowledge.search` hit; its `score` is dropped (decision 5), any other extra field ignored. */
+function parseSearchHit(value: unknown): WikiSearchRecord {
+  const hit = record(value, "hit");
+  const snippet = text(hit.snippet, "hit.snippet");
+  if ([...snippet].length > SNIPPET_MAX) throw new Malformed("hit.snippet is longer than the contract allows");
+  return {
+    sectionId: text(hit.sectionId, "hit.sectionId", UUID).toLowerCase(),
+    sectionVersion: int(hit.sectionVersion, "hit.sectionVersion"),
+    tag: text(hit.tag, "hit.tag"),
+    documentId: text(hit.documentId, "hit.documentId", UUID).toLowerCase(),
+    documentSlug: text(hit.documentSlug, "hit.documentSlug"),
+    documentTitle: text(hit.documentTitle, "hit.documentTitle"),
+    snippet,
+  };
+}
+
+/** Why a Wiki search failed when it could not run: never shown as "no results". */
+export const SEARCH_UNAVAILABLE =
+  "InferMind Wiki search is unavailable right now, so this is not an empty result. Try again shortly.";
 
 function parseRepo(value: unknown): RepoRecord {
   const repo = record(value, "repo");
@@ -1619,6 +1642,28 @@ export function openHttpInferOpsClient(
         const text = record(raw, "response").text;
         if (text !== null && typeof text !== "string") throw new Malformed("text is not a string or null");
         return text;
+      });
+    },
+
+    async searchWiki(query: string, limit: number): Promise<WikiSearchRecord[]> {
+      // `query` and `limit` only: InferOps refuses any other parameter, and its seed size and graph
+      // weight stay at its defaults (decision 4).
+      const params = new URLSearchParams({ query, limit: String(limit) });
+      let body: unknown;
+      try {
+        body = await knowledge("wiki.search", { method: "GET", path: `/knowledge/search?${params}` });
+      } catch (error) {
+        // A 404 is an InferOps without `knowledge.search`; it, a timeout (503 SEARCH_TIMEOUT), a
+        // rate limit (429) and an outage are all "search unavailable", never an empty list.
+        if (error instanceof InferOpsError && (error.code === "NOT_FOUND" || error.code === "UNAVAILABLE")) {
+          throw restated(error, "UNAVAILABLE", SEARCH_UNAVAILABLE);
+        }
+        throw error;
+      }
+      return parsed("wiki.search", body, raw => {
+        const hits = list(record(raw, "response").hits, "hits");
+        if (hits.length > limit) throw new Malformed("more hits than the limit");
+        return hits.map(parseSearchHit);
       });
     },
 

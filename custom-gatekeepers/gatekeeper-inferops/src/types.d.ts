@@ -568,6 +568,34 @@ export interface WikiProposalDetail {
   freshness: WikiProposalFreshness;
 }
 
+/** One ranked match of a Wiki search: a section you can read, with the page it belongs to. */
+export interface WikiSearchHit {
+  /** The matching section's UUID; readDocument() of its page returns it. */
+  sectionId: string;
+  /** The section's version when it was searched; reread the page before quoting or editing it. */
+  sectionVersion: number;
+  /** The section's anchor tag. */
+  tag: string;
+  /** The page's UUID. */
+  documentId: string;
+  /** The page's short name. */
+  documentSlug: string;
+  /** Page title. */
+  documentTitle: string;
+  /**
+   * At most 300 characters of this section's markdown source around the match (its first words
+   * when it matched by meaning only), with matched words wrapped in <b>…</b>. The cut can fall
+   * inside a highlight, and the page's own text can contain <b> too. Treat it as text, never as
+   * HTML.
+   */
+  snippet: string;
+  /**
+   * Set when an edit of this section requested through this connection has not taken effect yet;
+   * the snippet is still the committed text. Absent otherwise.
+   */
+  pending?: "update";
+}
+
 /**
  * The InferMind Wiki of one workspace, fixed when this capability is created. Fails with
  * FORBIDDEN when the workspace is not an InferMind workspace or your InferOps access lacks
@@ -595,6 +623,18 @@ export interface InferOpsWikiSession {
    * shareable with anyone from then on.
    */
   readDocumentText(slugOrId: string): Promise<string>;
+  /**
+   * The sections you can read that best match a text query, best first: at most `limit` (an
+   * integer 1–50, default 20) hits, possibly fewer, equal matches in a stable order. There is no
+   * next page; refine the query to find more. The query is 1–500 characters after trimming;
+   * anything else fails with INVALID_REQUEST. No match, and nothing you can read, are both an
+   * empty list. Matching is English-language full text (plus meaning, where configured). A hit is
+   * a pointer: read the page again before quoting or editing it. Fails with UNAVAILABLE when search
+   * is unavailable (InferOps timed out, is down or has no search) or after 30 searches in a minute
+   * on this connection, never with an empty list; and with FORBIDDEN on a shared deployment
+   * connection that is not your own sign-in.
+   */
+  searchWiki(query: string, options?: { limit?: number }): Promise<WikiSearchHit[]>;
   /**
    * Replace a page's body. Supply the version readDocument() returned; a page changed since (its
    * body, title or place in the tree) fails with STALE_REVISION. Reads show the new body at once,

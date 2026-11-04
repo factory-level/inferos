@@ -180,6 +180,11 @@ function sessionOrigin(env: InferLabSessionEnv): string | null {
   }
 }
 
+/** Wiki searches one account may run in any minute (decision 9). */
+export const WIKI_SEARCHES_PER_MINUTE = 30;
+const SEARCH_WINDOW_MS = 60_000;
+const SEARCH_WINDOW_KEY = "wiki-search-window";
+
 /** The account's per-account credential store. One object per connected account. */
 @validateRpc()
 export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
@@ -241,6 +246,23 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
     if (previous && origin) {
       await logoutInferLabSession(origin, previous.refreshToken, inferLabFetch(this.env));
     }
+  }
+
+  /**
+   * Admit one InferMind Wiki search for this account, across all its bindings (decision 9 of the
+   * knowledge read and search contract): at most `WIKI_SEARCHES_PER_MINUTE` in any 60 seconds.
+   * Returns null when admitted, or how many seconds until the next search may run. Counts
+   * searches, not results, and holds no query.
+   */
+  async admitWikiSearch(): Promise<number | null> {
+    const now = Date.now();
+    const recent = (this.ctx.storage.kv.get<number[]>(SEARCH_WINDOW_KEY) ?? [])
+      .filter(at => at > now - SEARCH_WINDOW_MS);
+    if (recent.length >= WIKI_SEARCHES_PER_MINUTE) {
+      return Math.max(1, Math.ceil((recent[0]! + SEARCH_WINDOW_MS - now) / 1000));
+    }
+    this.ctx.storage.kv.put(SEARCH_WINDOW_KEY, [...recent, now]);
+    return null;
   }
 
   /** Who connected, or null before a connect. */

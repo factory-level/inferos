@@ -7,7 +7,7 @@
 // never assumed: a proposal is not a save.
 import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
-import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
+import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSearchHit, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
 import { canonicalBoardRef, codeOf, messageOf, type ProposalResult } from './boardData'
 import { resolveInferOpsSession, type InferOpsConnectionKind } from './inferopsConnection'
 import { bodyEditActionTitle, isOpenEdit, pageText, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
@@ -59,6 +59,12 @@ export type WikiSnapshot = {
  * The agent's text of one page, or why it could not be read. `composed` when it was built here
  * from the page read (an account connection), rather than read as InferOps composes it.
  */
+/**
+ * A Wiki search's answer. `UNAVAILABLE` means the search could not run (InferOps timed out, is down,
+ * lacks search, or this connection searched too often), which is not the same as no match.
+ */
+export type WikiSearchResult = { ok: true; hits: WikiSearchHit[] } | { ok: false; code: string; message: string }
+
 export type AgentTextResult = { ok: true; text: string; composed?: true } | { ok: false; code: string; message: string }
 
 /** Nothing read yet; one object, so snapshots compare equal. */
@@ -228,6 +234,20 @@ export class WikiData {
    * view toggle must not do (owner decision, 2026-11-03). That text leaves out what only InferOps
    * adds: a Master's coverage block and embedded widgets' live text.
    */
+  /**
+   * Search the Wiki as this connection's sign-in can read it. The hits are held by the caller for
+   * this search only, never in the snapshot: a hit is a pointer, and opening its page reads it again.
+   */
+  async search(query: string): Promise<WikiSearchResult> {
+    try {
+      const session = await this.#sessionOf()
+      if (!session) return NOT_CONNECTED
+      return { ok: true, hits: await session.searchWiki(query) }
+    } catch (error) {
+      return { ok: false, code: codeOf(error), message: messageOf(error) }
+    }
+  }
+
   async readAgentText(slug: string): Promise<AgentTextResult> {
     try {
       const session = await this.#sessionOf()
