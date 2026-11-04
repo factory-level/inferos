@@ -165,3 +165,91 @@ export async function indexConsoleWidgets(previous: ConsoleWidgetIndexRecord,
   }
   return { ...record, blocked: null, widgets, pendingWithdraws: pending };
 }
+
+/**
+ * A withdrawal the index still owes, kept for the whole workspace rather than on a console, so one
+ * owed by a console since deleted is still retried and still reported (`ConsoleWidgetIndexReport.
+ * pendingWithdraws` lists every one). Keyed by `owedWithdrawalKey`. It records whose sign-in owed
+ * it: the alarm retries as that person, and the next publication or delete as whoever makes it.
+ */
+export type OwedWithdrawal = {
+  key: string;
+  /** The service workspace the version was listed in. */
+  workspaceId: string;
+  versionId: string;
+  /** The user (hex User DO id) whose publication or delete owed it. */
+  userId: string;
+  /** The last answer, in words for the builder. */
+  reason: string;
+  /** Tries so far; the alarm stops after `OWED_RETRY_CAP`, the next publication or delete still tries. */
+  attempts: number;
+  /** When the alarm may try again (epoch ms). */
+  nextAttemptAt: number;
+};
+
+/** The alarm's tries per owed withdrawal before only a publication or delete tries again. */
+export const OWED_RETRY_CAP = 8;
+
+/** The wait before the alarm's next try after `attempts` tries: a minute, doubling, at most six hours. */
+export function owedRetryDelay(attempts: number): number {
+  return Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 6 * 60 * 60 * 1000);
+}
+
+/** The storage key of one owed withdrawal. */
+export function owedWithdrawalKey(workspaceId: string, versionId: string): string {
+  return `${workspaceId}/${versionId}`;
+}
+
+/** Why an owed withdrawal can't be tried with a sign-in: it may not list widgets in that workspace. */
+export const OWED_NO_AUTHORITY =
+  "Still listed: this sign-in can't remove widgets from that InferOps workspace. Publish or delete a console as someone who can.";
+
+/**
+ * Tries each of `owed` once through `ports` (one person's own accounts): a version some published
+ * console lists again (`listed`) is no longer owed and is cleared without a call; one InferOps
+ * withdraws (or no longer holds) is cleared; any other answer, or a sign-in that may not act in its
+ * workspace, is kept with its reason and the next alarm time. Never throws.
+ */
+export async function retryOwedWithdrawals(owed: readonly OwedWithdrawal[], listed: ReadonlySet<string>,
+    ports: Pick<WidgetIndexPorts, "workspaces" | "withdraw">, now: number)
+    : Promise<{ cleared: string[]; kept: OwedWithdrawal[] }> {
+  let cleared: string[] = [];
+  let kept: OwedWithdrawal[] = [];
+  let workspaces: Awaited<ReturnType<WidgetIndexPorts["workspaces"]>> | null = null;
+  let keep = (item: OwedWithdrawal, reason: string) => {
+    let attempts = item.attempts + 1;
+    kept.push({ ...item, reason, attempts, nextAttemptAt: now + owedRetryDelay(attempts) });
+  };
+  for (let item of owed) {
+    if (listed.has(item.versionId)) {
+      cleared.push(item.key);
+      continue;
+    }
+    if (!workspaces) {
+      try {
+        workspaces = await ports.workspaces();
+      } catch {
+        for (let rest of owed.slice(owed.indexOf(item))) {
+          if (!listed.has(rest.versionId)) keep(rest, "Still listed: InferOps couldn't say where you may remove widgets. Tried again later.");
+          else cleared.push(rest.key);
+        }
+        return { cleared, kept };
+      }
+    }
+    let account = workspaces.find(workspace => workspace.workspaceId === item.workspaceId);
+    if (!account) {
+      keep(item, OWED_NO_AUTHORITY);
+      continue;
+    }
+    let { sourceId, sourceVersion } = pointer(item.versionId);
+    let outcome: WidgetIndexOutcome;
+    try {
+      outcome = await ports.withdraw(account.accountId, item.workspaceId, sourceId, sourceVersion);
+    } catch {
+      outcome = { status: "unavailable", reason: "InferOps couldn't be reached." };
+    }
+    if (outcome.status === "applied") cleared.push(item.key);
+    else keep(item, `Still listed: ${outcome.reason}`);
+  }
+  return { cleared, kept };
+}

@@ -235,6 +235,29 @@ describe("a console's widgets in InferOps' widget index", () => {
     expect((await space.getConsoleWidgetIndex(second.id))?.pendingWithdraws).toEqual([]);
   });
 
+  it("keeps a deleted console's failed withdrawal owed for the workspace, shows it, and retries it on the next publication", async () => {
+    const builder = await newUser("indexdeleted", ["operations"]);
+    fake.grantPublishConfiguration(builder.person, "operations");
+    const blueprintId = await publishWidget(builder.api, "Vans");
+    const { space, entry, screen } = await consoleSpace(builder, blueprintId);
+    const listing = await space.publishConsole(...await created(space, consoleOf(screen.id, [entry], "Floor")));
+    const other = await space.publishConsole(...await created(space, consoleOf((await screenWith(space, [])).id, [], "Desk")));
+    const key = `operations/${blueprintId}/1`;
+    expect(fake.widgetDefinitions.has(key)).toBe(true);
+
+    // InferOps is down when the only console listing it is deleted: the withdrawal is owed.
+    fake.failNextWidgetWrites = 1;
+    await space.deleteConsole(listing.id, listing.revision);
+    expect(fake.widgetDefinitions.has(key)).toBe(true);
+    expect((await space.getConsoleWidgetIndex(other.id))?.pendingWithdraws).toEqual([
+      { versionId: `${blueprintId}@1`, reason: expect.stringContaining("Still listed") }]);
+
+    // Any later publication in the workspace tries it again, as that person.
+    await space.publishConsole(other.id, other.revision);
+    expect(fake.widgetDefinitions.has(key)).toBe(false);
+    expect((await space.getConsoleWidgetIndex(other.id))?.pendingWithdraws).toEqual([]);
+  });
+
   it("gives the use role no way to read, choose or write the index", async () => {
     const builder = await newUser("indexowner", ["operations"]);
     fake.grantPublishConfiguration(builder.person, "operations");

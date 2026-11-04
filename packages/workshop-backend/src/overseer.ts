@@ -14,7 +14,7 @@ import {
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
 } from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
-import { emptyWidgetIndexRecord, indexConsoleWidgets, widgetIndexReport, type ConsoleWidgetIndexRecord } from "./console-widget-index";
+import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
 import { WIDGET_STATES_FILE, parseWidgetStates, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -1488,6 +1488,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Each console's place in the deployment's widget index (FAC-11; see console-widget-index.ts),
       // by console id; a deleted console's is kept while one of its withdrawals is pending.
       consoleWidgetIndex: collection<ConsoleWidgetIndexRecord>()({ primaryKey: "consoleId" }),
+      // Withdrawals the widget index still owes, for the whole workspace (a deleted console's
+      // included), retried on the next publication or delete and by the alarm.
+      widgetIndexOwed: collection<OwedWithdrawal>()({ primaryKey: "key" }),
       // An operate session workspace's host-board selections, by target; its selection requests,
       // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
@@ -2236,6 +2239,11 @@ class OverseerImpl implements AgentHooks {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
 
+    // Owed widget index withdrawals, each until its alarm tries run out (see console-widget-index.ts).
+    for (let owed of this.storage.widgetIndexOwed.list()) {
+      if (owed.attempts < OWED_RETRY_CAP) times.push(owed.nextAttemptAt);
+    }
+
     // Tool facets left pending: retried until each is deleted (see ToolLane.nextSweepTime).
     let toolSweepTime = this.toolLane.nextSweepTime();
     if (toolSweepTime !== undefined) {
@@ -2263,6 +2271,7 @@ class OverseerImpl implements AgentHooks {
     this.#inAlarmHandler = true;
     try {
       this.toolLane.sweep();
+      await this.#retryDueWidgetWithdrawals();
       do {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
@@ -2278,6 +2287,43 @@ class OverseerImpl implements AgentHooks {
       this.#agentKeepAliveTime = undefined;
       this.#updateAlarm();
     }
+  }
+
+  // The alarm's part in the widget index: each owed withdrawal that is due and has tries left is
+  // tried as the person whose publication or delete owed it, with their own sign-in. One that
+  // can't be is kept, with its reason, for the next try or the next publication or delete.
+  async #retryDueWidgetWithdrawals(): Promise<void> {
+    if (!getSharedConfigurationGatekeeper(this.env)) return;
+    let now = Date.now();
+    let due = [...this.storage.widgetIndexOwed.list()].filter(owed => owed.attempts < OWED_RETRY_CAP && owed.nextAttemptAt <= now);
+    if (due.length === 0) return;
+    let byUser = new Map<string, OwedWithdrawal[]>();
+    for (let owed of due) byUser.set(owed.userId, [...byUser.get(owed.userId) ?? [], owed]);
+    for (let [userId, owed] of byUser) {
+      let user = this.users.get(this.users.idFromString(userId));
+      let result = await retryOwedWithdrawals(owed, this.publishedWidgetVersions(), {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) => user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+      }, now);
+      this.storeOwedWithdrawals(result);
+    }
+  }
+
+  /** Every widget version a published console of this workspace lists. */
+  publishedWidgetVersions(exceptConsoleId?: string): Set<string> {
+    let versions = new Set<string>();
+    for (let stored of this.storage.consoles.list()) {
+      if (stored.id === exceptConsoleId) continue;
+      for (let entry of stored.published?.content.widgets ?? []) versions.add(consoleWidgetVersionId(entry));
+    }
+    return versions;
+  }
+
+  /** Records a retry of owed withdrawals: cleared ones go, kept ones are stored; reschedules the alarm. */
+  storeOwedWithdrawals(result: { cleared: string[]; kept: OwedWithdrawal[] }): void {
+    for (let key of result.cleared) this.storage.widgetIndexOwed.delete(key);
+    for (let owed of result.kept) this.storage.widgetIndexOwed.put(owed);
+    this.#updateAlarm();
   }
 
   #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
@@ -12976,11 +13022,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (!getSharedConfigurationGatekeeper(this.impl.env)) return;
     let storage = this.impl.storage;
     let previous = storage.consoleWidgetIndex.get(id) ?? emptyWidgetIndexRecord(id);
-    let listedElsewhere = new Set<string>();
-    for (let other of storage.consoles.list()) {
-      if (other.id === id) continue;
-      for (let entry of other.published?.content.widgets ?? []) listedElsewhere.add(consoleWidgetVersionId(entry));
-    }
+    let listedElsewhere = this.impl.publishedWidgetVersions(id);
     let user = this.#clientUser;
     let env = this.impl.env;
     let next = await indexConsoleWidgets(previous,
@@ -12996,16 +13038,35 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           return typeof description === "string" && description.trim() !== "" ? description : null;
         },
       });
-    // A deleted console's record is kept only while a withdrawal is still owed.
-    if (!published && next.pendingWithdraws.length === 0) storage.consoleWidgetIndex.delete(id);
-    else storage.consoleWidgetIndex.put(next);
+    // What this run couldn't withdraw is owed by the workspace, not the console, so a deleted
+    // console's is still retried. Then every other owed withdrawal is tried as this person.
+    let now = Date.now();
+    let target = next.target ?? previous.target;
+    let earlier = [...storage.widgetIndexOwed.list()];
+    let fresh = target ? next.pendingWithdraws.map((pending): OwedWithdrawal => ({
+      key: owedWithdrawalKey(target.workspaceId, pending.versionId), workspaceId: target.workspaceId,
+      versionId: pending.versionId, userId: this.clientUserId, reason: `Still listed: ${pending.reason}`,
+      attempts: 1, nextAttemptAt: now + owedRetryDelay(1),
+    })) : [];
+    let retried = await retryOwedWithdrawals(earlier.filter(owed => !fresh.some(item => item.key === owed.key)),
+      this.impl.publishedWidgetVersions(), {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) => user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+      }, now);
+    let stored = { ...next, pendingWithdraws: [] };
+    if (published) storage.consoleWidgetIndex.put(stored);
+    else storage.consoleWidgetIndex.delete(id);
+    this.impl.storeOwedWithdrawals({ cleared: retried.cleared, kept: [...retried.kept, ...fresh] });
   }
 
   // Where console `id` stands in the widget index; null for a console with none (see
   // ConsoleWidgetIndexReport). Build access only.
   async getConsoleWidgetIndex(id: string): Promise<ConsoleWidgetIndexReport | null> {
     let record = this.impl.storage.consoleWidgetIndex.get(id);
-    return record ? widgetIndexReport(record) : null;
+    if (!record) return null;
+    // Every withdrawal the workspace still owes, a deleted console's included, so none goes unseen.
+    let owed = [...this.impl.storage.widgetIndexOwed.list()].map(item => ({ versionId: item.versionId, reason: item.reason }));
+    return { ...widgetIndexReport(record), pendingWithdraws: owed };
   }
 
   // The InferOps workspaces this person may list a console's widgets in, asked freshly with their
