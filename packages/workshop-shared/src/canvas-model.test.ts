@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
-  CANVAS_MODEL_LIMITS, CanvasModelError, canvasDefinitionFromPage, canvasPageFromDefinition, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
+  CANVAS_MODEL_LIMITS, CanvasModelError, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
   resolveCanvasTarget, type CanvasModelErrorCode, type CanvasNode, type CanvasPage, type CanvasTarget,
 } from "./canvas-model";
 import rejected from "./canvas-model-fixtures/rejected.json";
@@ -238,6 +238,46 @@ describe("explicit targets", () => {
     for (const text of ["workspace", "page:other", "page:other/node:board-1", "page:page-triage/node:ghost", "page:page-triage/attachment:ghost"]) {
       expect(resolveCanvasTarget(page, parseCanvasTarget(text)!), text).toBeNull();
     }
+  });
+});
+
+describe("a target's path", () => {
+  const nested = parseCanvasPage(valid[1].page);
+  const triage = parseCanvasPage(valid[2].page);
+  const path = (page: CanvasPage, text: string) =>
+    canvasTargetPath(page, parseCanvasTarget(text)!)?.map(step => `${step.kind}:${formatCanvasTarget(step.target)}`);
+
+  test("runs from the workspace through every containing object to the target", () => {
+    expect(path(nested, "page:page-operations/node:gadget-1")).toEqual([
+      "workspace:workspace", "page:page:page-operations",
+      "object:page:page-operations/node:level-1", "object:page:page-operations/node:level-2",
+      "object:page:page-operations/node:level-3", "object:page:page-operations/node:level-4",
+      "widget:page:page-operations/node:gadget-1",
+    ]);
+    expect(path(nested, "page:page-operations/node:board-direct")).toEqual(
+      ["workspace:workspace", "page:page:page-operations", "widget:page:page-operations/node:board-direct"]);
+  });
+
+  test("ends an attachment's path at the node or page that holds it", () => {
+    expect(path(triage, "page:page-triage/attachment:link-completed")).toEqual([
+      "workspace:workspace", "page:page:page-triage", "object:page:page-triage/node:group-1",
+      "widget:page:page-triage/node:board-1", "attachment:page:page-triage/attachment:link-completed",
+    ]);
+    expect(path(triage, "page:page-triage/attachment:on-triaged")).toEqual(
+      ["workspace:workspace", "page:page:page-triage", "attachment:page:page-triage/attachment:on-triaged"]);
+  });
+
+  test("is the workspace alone for the workspace, and null for what the page doesn't hold", () => {
+    expect(path(triage, "workspace")).toEqual(["workspace:workspace"]);
+    for (const text of ["page:other", "page:page-triage/node:ghost", "page:page-triage/attachment:ghost"]) {
+      expect(canvasTargetPath(triage, parseCanvasTarget(text)!), text).toBeNull();
+    }
+  });
+
+  test("carries each step's own node, so a step is never another's", () => {
+    const steps = canvasTargetPath(triage, parseCanvasTarget("page:page-triage/node:board-1")!)!;
+    expect(steps.map(step => step.kind === "object" || step.kind === "widget" ? step.node.id : step.kind === "page" ? step.page.id : step.kind))
+      .toEqual(["workspace", "page-triage", "group-1", "board-1"]);
   });
 });
 

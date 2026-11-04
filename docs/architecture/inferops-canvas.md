@@ -34,7 +34,7 @@ covers:
   - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 
 # InferOps canvas and transactional widgets
@@ -120,7 +120,7 @@ Bootstrap writes `views/operations.json` with the configured target reference. `
 
 `@gadgets/workshop-shared/canvas-model` is schema version 2, proposed in [ADR 0014](../adr/0014-nested-canvas-model.md). **Only the canvas store uses it, and nothing calls those store methods outside tests.** Saved canvases, the operation engine, the renderer, consoles and the agent's tools all still use version 1, so no behavior has changed. `canvas.ts` only gained three exports for it (`CANVAS_ID`, `CANVAS_REVISION`, `parseCanvasWidget`).
 
-`parseCanvasPage` validates one page and `parseCanvasWorkspacePages` validates a page collection, including navigation targets. Both are pure, take no viewer and throw `CanvasModelError` with a stable `code` and a location `at` that holds only validated IDs and known field names. Accepting a page says its shape is sound and nothing about who may see what it references: a reference to another company's board parses, and is refused later, when it's resolved through a connection. `parseCanvasTarget`, `formatCanvasTarget` and `resolveCanvasTarget` handle explicit edit targets, which also authorize nothing.
+`parseCanvasPage` validates one page and `parseCanvasWorkspacePages` validates a page collection, including navigation targets. Both are pure, take no viewer and throw `CanvasModelError` with a stable `code` and a location `at` that holds only validated IDs and known field names. Accepting a page says its shape is sound and nothing about who may see what it references: a reference to another company's board parses, and is refused later, when it's resolved through a connection. `parseCanvasTarget`, `formatCanvasTarget` and `resolveCanvasTarget` handle explicit edit targets, which also authorize nothing. `canvasTargetPath` (FAC-82) gives a target's path for a breadcrumb: the workspace, the page, every object containing it, outermost first, then the target, with an attachment after the page or node that holds it; each step carries the target that selects it alone, and the path is null for a target the page doesn't hold.
 
 The fixtures in `src/canvas-model-fixtures/` are the executable statement of the rules: `valid.json`, `rejected.json` with each case's expected code and location, and `section-mapping.json` pairing version 1 definitions with their version 2 pages. `canvas-model.test.ts` runs them all, reads each mapped page back into the same version 1 definition, and checks malformed input only ever produces a `CanvasModelError`.
 
