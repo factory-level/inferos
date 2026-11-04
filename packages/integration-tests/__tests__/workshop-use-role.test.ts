@@ -96,6 +96,9 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
+  // The nested page is the builder's (FAC-83): a non-builder can neither read nor edit it.
+  getCanvasPage: ws => ws.getCanvasPage("view"),
+  editCanvasPage: ws => ws.editCanvasPage("view", "0", [{ type: "renamePage", title: "New" }]),
   listFlows: ws => ws.listFlows(),
   createFlow: ws => ws.createFlow({ title: "Flow", steps: ["view"] }),
   replaceFlow: ws => ws.replaceFlow("flow", "0", { title: "Flow", steps: ["view"] }),

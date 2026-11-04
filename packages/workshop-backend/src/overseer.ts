@@ -1,7 +1,7 @@
 import type { ActionApprovalCorrelation, OperateApprovalRequest, OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
 import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
-import type { CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import type { CanvasPage, CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
@@ -12698,6 +12698,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.#canvasStore().edit(id, expectedRevision, operations);
   }
   async deleteCanvas(id: string, expectedRevision: string): Promise<void> { this.#canvasStore().delete(id, expectedRevision); }
+  async getCanvasPage(id: string): Promise<CanvasPage | null> { return this.#canvasStore().getPage(id); }
+  async editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
+    return this.#canvasStore().editPage(id, expectedRevision, operations);
+  }
 
   #flowStore(): WorkspaceFlowStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -15191,6 +15195,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // The nested page is the builder's: a use session reads only published version 1 screens.
+  async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[]): Promise<CanvasPage> { this.#deny(); }
   async listFlows(): Promise<OperateFlow[]> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
@@ -15776,6 +15783,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[])
       : Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // The nested page is the builder's live draft: an operate session reads only what a console published.
+  async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[])
+      : Promise<CanvasPage> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent)
       : Promise<OperateFlow> { this.#deny(); }

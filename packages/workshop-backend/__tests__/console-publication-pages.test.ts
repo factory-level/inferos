@@ -4,7 +4,7 @@
 // would send an operator to a page the console doesn't show. Later saves stay draft. Over mock
 // Durable Object storage, with the real console and canvas stores.
 import { describe, expect, it } from "vitest";
-import { canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { canvasDefinitionProjection, canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import type { OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { WorkspaceCanvasStore } from "../src/canvas-store";
 import { CONSOLE_CHANGED, WorkspaceConsoleStore } from "../src/console-store";
@@ -74,6 +74,21 @@ describe("a published console's pages", () => {
 
     expect(consoles.page(draft.id, plain.id, "published")).toEqual(canvasPageFromDefinition(plain));
     expect(consoles.screen(draft.id, plain.id, "published")).toEqual(plain);
+  });
+
+  it("gives version 1 readers of a published nested screen its projection, never the row it replaced, and page readers the page", async () => {
+    const { canvases, consoles } = setUp();
+    const triage = canvases.create(screenContent("Triage"));
+    // Retitled as well as nested, so the stale row and the projection differ in content, not only revision.
+    const saved = canvases.savePage({ ...nested(canvases.getPage(triage.id)!, triage.id), title: "Triage, nested" }, triage.revision);
+    const draft = consoles.create(consoleOver(triage.id));
+
+    publish(consoles, draft.id, draft.revision);
+
+    const shown = consoles.screen(draft.id, triage.id, "published");
+    expect(shown).toEqual(canvasDefinitionProjection(saved));
+    expect(shown).not.toEqual(triage);
+    expect(consoles.page(draft.id, triage.id, "published")).toEqual(saved);
   });
 
   it("keeps a nested save made after publishing out of the published console", async () => {
