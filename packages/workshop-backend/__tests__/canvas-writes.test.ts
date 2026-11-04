@@ -1,7 +1,8 @@
 // Canvas writes (FAC-84): the builder's controls and the agent's canvas tools write through the same
-// functions, so both are held to FAC-44's `build`, asked freshly for the writer on every write: the
-// person at the controls, or the turn's initiator for the agent. Refused, nothing is written. Over
-// mock Durable Object storage, with the real store and the real shared-configuration check.
+// functions. The agent writes as its turn's initiator, whose FAC-44 `build` is asked freshly at every
+// write; refused, nothing is written. A person at the controls writes in a session FAC-44 checked
+// when it opened, and canvas drafts aren't re-checked in an open session, so that write asks nobody.
+// Over mock Durable Object storage, with the real store and the real shared-configuration check.
 import { describe, expect, it } from "vitest";
 import { SHARED_CONFIGURATION_REFUSED, type AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import type { CanvasContent } from "@gadgets/workshop-shared/canvas";
@@ -37,17 +38,26 @@ function workspace(opts: { holds: Record<string, boolean>; shared?: boolean; gat
 }
 
 describe("canvas writes", () => {
-  it("refuses the agent's edit for an initiator without build, as the controls' edit for that person, and writes nothing", async () => {
+  it("refuses the agent's edit and create for an initiator without build, and writes nothing", async () => {
     const { ws, asked } = workspace({ holds: { "user:builder": true } });
-    const page = await createCanvasAs(ws, "user:builder", CONTENT);
     const access = agentCanvasAccess(ws)!;
+    const page = await access.create(person("builder"), CONTENT);
     const rename = [{ type: "renamePage" as const, title: "Renamed" }];
 
     await expect(access.editPage(person("viewer"), page.id, page.revision, rename)).rejects.toThrow(SHARED_CONFIGURATION_REFUSED);
-    await expect(editCanvasPageAs(ws, "user:viewer", page.id, page.revision, rename)).rejects.toThrow(SHARED_CONFIGURATION_REFUSED);
     await expect(access.create(person("viewer"), CONTENT)).rejects.toThrow(SHARED_CONFIGURATION_REFUSED);
     expect(workspaceCanvasStore(ws).listPages()).toEqual([expect.objectContaining({ title: "Triage", revision: "0" })]);
-    expect(asked).toEqual(["user:builder build", "user:viewer build", "user:viewer build", "user:viewer build"]);
+    expect(asked).toEqual(["user:builder build", "user:viewer build", "user:viewer build"]);
+  });
+
+  it("doesn't re-check a person at the controls of an open session, whom FAC-44 checked at open", async () => {
+    // The authority says no now; the session was opened with build, and drafts aren't re-checked.
+    const { ws, asked } = workspace({ holds: {} });
+    const session = { kind: "session" as const, userId: "user:builder" };
+    const created = await createCanvasAs(ws, session, CONTENT);
+    const edited = await editCanvasPageAs(ws, session, created.id, created.revision, [{ type: "renamePage", title: "Renamed" }]);
+    expect(edited).toMatchObject({ title: "Renamed", revision: "1" });
+    expect(asked).toEqual([]);
   });
 
   it("applies the agent's edit for an initiator holding build, asking as that initiator each time", async () => {
