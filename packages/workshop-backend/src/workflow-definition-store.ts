@@ -1,9 +1,9 @@
 import type { AiChatAuthorInfo, WorkpieceId } from "@gadgets/workshop-shared/api";
 import {
   MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES, MAX_WORKSPACE_WORKFLOW_DEFINITIONS,
-  parseWorkflowDefinitionTitle,
-  type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
-  type WorkflowDefinitionRevision, type WorkflowDefinitionSave,
+  parseTriggerControlSettings, parseWorkflowDefinitionTitle,
+  type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
+  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 
@@ -17,6 +17,21 @@ export type StoredTriggerPin = WorkflowDefinitionRef & { hookId: number };
 
 /** A stored delivery, numbered so the oldest can be dropped. */
 export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
+
+/** A trigger's control: who may ask it to run now. Its revision is always the trigger's pin. */
+export type StoredTriggerControl = Omit<TriggerControl, "definition">;
+
+/**
+ * An admitted request to run a trigger, kept until the trigger's gatekeeper delivers it (or the
+ * request to it fails), so a delivery can name only an invocation this workspace minted.
+ */
+export type StoredWorkflowInvocation = WorkflowInvocation & { requestedBy: string };
+
+/** Most admitted requests one trigger may have waiting for delivery. */
+const MAX_WAITING_INVOCATIONS = 20;
+
+/** Refused, without saying which check failed, to anyone a trigger's control doesn't admit. */
+const CANNOT_RUN = "You can't run this trigger.";
 
 /** Refused, without saying whether the definition exists, to anyone it isn't visible to. */
 const NOT_FOUND = "Workflow definition not found.";
@@ -34,7 +49,8 @@ const NOT_FOUND = "Workflow definition not found.";
 export class WorkspaceWorkflowDefinitionStore {
   constructor(private durableStorage: DurableObjectStorage,
       private storage: Pick<OverseerStorage,
-          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId">) {}
+          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
+          "workflowTriggerControls" | "workflowInvocations">) {}
 
   /** The definitions `viewer` may see: their own in full, and others' published revision only. */
   list(viewer: string): WorkflowDefinition[] {
@@ -118,7 +134,9 @@ export class WorkspaceWorkflowDefinitionStore {
              ref: WorkflowDefinitionRef | null): void {
     this.durableStorage.transactionSync(() => {
       if (ref === null) {
+        // A control runs the pinned revision, so it goes with the pin.
         this.storage.workflowTriggerPins.delete(hookId);
+        this.storage.workflowTriggerControls.delete(hookId);
         return;
       }
       let view = this.get(viewer, ref.definitionId);
@@ -147,9 +165,19 @@ export class WorkspaceWorkflowDefinitionStore {
    */
   fire(hookId: number, hookGadgetId: WorkpieceId | null,
        headOf: (gadgetId: WorkpieceId) => string | undefined,
-       ownerCanBuild: (profileId: string) => boolean): WorkflowDefinitionDelivery | null {
+       ownerCanBuild: (profileId: string) => boolean,
+       invocationId?: string): WorkflowDefinitionDelivery | null {
+    // A delivery a person asked for names an invocation minted here for this trigger, not yet run;
+    // anything else starts nothing.
+    let invocation = invocationId === undefined ? undefined : this.storage.workflowInvocations.get(invocationId);
+    if (invocationId !== undefined && invocation?.hookId !== hookId) {
+      throw new Error("That run request is unknown or already ran.");
+    }
     let pin = this.storage.workflowTriggerPins.get(hookId);
-    if (!pin) return null;
+    if (!pin) {
+      if (invocation) throw new Error(CANNOT_RUN);
+      return null;
+    }
     let stored = this.storage.workflowDefinitions.get(pin.definitionId);
     let revision = stored?.revisions.find(r => r.revision === pin.revision);
     if (!stored || !revision) throw new Error("This trigger's workflow definition revision no longer exists.");
@@ -167,11 +195,88 @@ export class WorkspaceWorkflowDefinitionStore {
       let delivery: StoredWorkflowDelivery = {
         id, hookId, definitionId: pin.definitionId, revision: pin.revision,
         commitId: revision.source.commitId, at: new Date(),
+        ...(invocation ? { invocation: { id: invocation.id, requestedBy: invocation.requestedBy } } : {}),
       };
+      if (invocation) this.storage.workflowInvocations.delete(invocation.id);
       this.storage.workflowDeliveries.put(delivery);
       if (id >= MAX_WORKFLOW_DELIVERIES) this.storage.workflowDeliveries.delete(id - MAX_WORKFLOW_DELIVERIES);
       let { id: _, ...shown } = delivery;
       return shown;
+    });
+  }
+
+  /**
+   * Sets who may ask trigger `hookId` to run now, or removes its control with null. Only a pinned
+   * trigger can have one. `settings` is checked here and nothing else of it is kept.
+   */
+  setControl(caller: AiChatAuthorInfo, hookId: number, settings: unknown): TriggerControl | null {
+    return this.durableStorage.transactionSync(() => {
+      if (settings === null) {
+        this.storage.workflowTriggerControls.delete(hookId);
+        return null;
+      }
+      let pin = this.storage.workflowTriggerPins.get(hookId);
+      if (!pin) throw new Error("Only a trigger pinned to a workflow definition revision can have a control.");
+      let { label, invokers } = parseTriggerControlSettings(settings);
+      let stored: StoredTriggerControl = { hookId, label, invokers, configuredBy: caller, configuredAt: new Date() };
+      this.storage.workflowTriggerControls.put(stored);
+      return { ...stored, definition: { definitionId: pin.definitionId, revision: pin.revision } };
+    });
+  }
+
+  /**
+   * The controls of pinned triggers: every one for a builder (`viewer` null), or only those listing
+   * `viewer`, each showing `viewer` as its only invoker.
+   */
+  controls(viewer: string | null): TriggerControl[] {
+    let shown: TriggerControl[] = [];
+    for (let control of this.storage.workflowTriggerControls.list()) {
+      let pin = this.storage.workflowTriggerPins.get(control.hookId);
+      if (!pin || (viewer !== null && !control.invokers.includes(viewer))) continue;
+      shown.push({
+        ...control, invokers: viewer === null ? [...control.invokers] : [viewer],
+        definition: { definitionId: pin.definitionId, revision: pin.revision },
+      });
+    }
+    return shown;
+  }
+
+  /**
+   * Admits `profileId`'s request to run trigger `hookId` now: its control must list them and the
+   * trigger must still be pinned. Mints the invocation, which the trigger's delivery must name
+   * (`fire`). Every refusal reads the same, whether there's no control, no pin or no listing.
+   */
+  beginInvocation(profileId: string, hookId: number): WorkflowInvocation {
+    return this.durableStorage.transactionSync(() => {
+      let control = this.storage.workflowTriggerControls.get(hookId);
+      let pin = this.storage.workflowTriggerPins.get(hookId);
+      if (!control || !pin || !control.invokers.includes(profileId)) throw new Error(CANNOT_RUN);
+      let waiting = 0;
+      for (let invocation of this.storage.workflowInvocations.list()) if (invocation.hookId === hookId) waiting++;
+      if (waiting >= MAX_WAITING_INVOCATIONS) throw new Error("This trigger already has too many runs waiting to start.");
+      let invocation: StoredWorkflowInvocation = {
+        id: crypto.randomUUID(), hookId, definitionId: pin.definitionId, revision: pin.revision,
+        requestedAt: new Date(), requestedBy: profileId,
+      };
+      this.storage.workflowInvocations.put(invocation);
+      let { requestedBy: _, ...shown } = invocation;
+      return shown;
+    });
+  }
+
+  /** Forgets an invocation the trigger's gatekeeper didn't take, so it can never start a run. */
+  cancelInvocation(id: string): void {
+    this.storage.workflowInvocations.delete(id);
+  }
+
+  /** Forgets trigger `hookId`'s pin, control and waiting invocations (its hook is gone). */
+  forgetTrigger(hookId: number): void {
+    this.durableStorage.transactionSync(() => {
+      this.storage.workflowTriggerPins.delete(hookId);
+      this.storage.workflowTriggerControls.delete(hookId);
+      for (let invocation of this.storage.workflowInvocations.list()) {
+        if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
+      }
     });
   }
 

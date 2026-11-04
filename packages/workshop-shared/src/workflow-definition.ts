@@ -80,7 +80,77 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** The commit the revision named, and the gadget's head at firing (they are equal). */
   commitId: string;
   at: Date;
+  /**
+   * Present when a person asked for this run through the trigger's control (`invokeTrigger`): the
+   * invocation and who asked. Who asked is a record of the request, never authority: the run is
+   * the trigger's, with the gadget's own configured bindings.
+   */
+  invocation?: { id: string; requestedBy: string };
 };
+
+/** Most people one trigger control lists as allowed to run it. */
+export const MAX_TRIGGER_CONTROL_INVOKERS = 50;
+
+/** Longest trigger control label, in characters. */
+export const MAX_TRIGGER_CONTROL_LABEL_LENGTH = 80;
+
+/** Most invocations one workspace keeps; the oldest is dropped past it. */
+export const MAX_WORKFLOW_INVOCATIONS = 1000;
+
+/**
+ * What a builder sets on a pinned trigger so named people can ask it to run now: a label, and the
+ * profile ids of the people allowed to. Being listed lets a person start that trigger's run and
+ * nothing else (inferops ADR 0011 S6): they gain no access to the workflow, its bindings or its
+ * configuration, and supply nothing the run reads.
+ */
+export type TriggerControlSettings = {
+  /** 1 to `MAX_TRIGGER_CONTROL_LABEL_LENGTH` characters. */
+  label: string;
+  /** Profile ids, 1 to `MAX_TRIGGER_CONTROL_INVOKERS` of them. */
+  invokers: string[];
+};
+
+/** A trigger's control, as a builder sees it, or as one of its invokers sees it. */
+export type TriggerControl = {
+  hookId: number;
+  label: string;
+  /** The revision the trigger runs. */
+  definition: WorkflowDefinitionRef;
+  /** Who may run it. Shown to builders; an invoker sees only themselves. */
+  invokers: string[];
+  configuredBy: AiChatAuthorInfo;
+  configuredAt: Date;
+};
+
+/**
+ * A person's accepted request to run a trigger now. Server-minted: its id, the trigger and revision
+ * come from the control, never from the request.
+ */
+export type WorkflowInvocation = WorkflowDefinitionRef & {
+  id: string;
+  hookId: number;
+  requestedAt: Date;
+};
+
+/**
+ * Checks control settings and returns them normalized: the label trimmed, invokers deduplicated.
+ * Throws a `TypeError` naming the problem; nothing else is read from `settings`.
+ */
+export function parseTriggerControlSettings(settings: unknown): TriggerControlSettings {
+  if (typeof settings !== "object" || settings === null) throw new TypeError("A control needs a label and invokers.");
+  let { label, invokers } = settings as Record<string, unknown>;
+  if (typeof label !== "string" || !label.trim() || label.trim().length > MAX_TRIGGER_CONTROL_LABEL_LENGTH) {
+    throw new TypeError(`A control label is 1 to ${MAX_TRIGGER_CONTROL_LABEL_LENGTH} characters.`);
+  }
+  if (!Array.isArray(invokers) || invokers.some(id => typeof id !== "string" || !id || id.length > 128)) {
+    throw new TypeError("A control's invokers are profile ids.");
+  }
+  let unique = [...new Set(invokers as string[])];
+  if (unique.length === 0 || unique.length > MAX_TRIGGER_CONTROL_INVOKERS) {
+    throw new TypeError(`A control lists 1 to ${MAX_TRIGGER_CONTROL_INVOKERS} people who may run it.`);
+  }
+  return { label: label.trim(), invokers: unique };
+}
 
 /**
  * Checks a save's title and returns it trimmed. Throws a `TypeError` naming the problem.

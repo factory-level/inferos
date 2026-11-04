@@ -83,6 +83,7 @@ covers:
   - packages/workshop-shared/src/workflow-definition.ts
   - packages/workshop-backend/src/workflow-definition-store.ts
   - packages/workshop-backend/__tests__/workflow-definitions.test.ts
+  - packages/workshop-backend/__tests__/workflow-invocation.test.ts
   - packages/workshop-backend/__tests__/sharing.test.ts
   - packages/workshop-backend/__tests__/authz-generation.test.ts
   - packages/workshop-backend/__tests__/authz-generation-guard.test.ts
@@ -654,8 +655,29 @@ A workflow definition is the reusable description of a workflow (FAC-107, [workf
 - **Limits.** `MAX_WORKSPACE_WORKFLOW_DEFINITIONS` (32) per workspace and `MAX_WORKFLOW_DEFINITION_REVISIONS` (50) per definition; past either a save is refused, and a full definition is saved as a new one.
 - **Triggers reference, never copy.** `pinTriggerDefinition(hookId, ref)` pins a bound hook to `{definitionId, revision}` in `workflowTriggerPins`, keyed by hook; `null` clears it, and deleting the hook drops it. The revision must be one the caller may see (the published one, or their own saved one) and must be for the gadget the hook wakes. Several hooks may pin one revision. **A pin stays on its revision when the definition is republished**; moving it is another `pinTriggerDefinition`. In a shared workspace pinning takes `build` authority.
 - **Firing.** `startHook` of a pinned hook (`WorkspaceWorkflowDefinitionStore.fire`) refuses unless the revision still exists, the gadget's head is exactly the revision's commit ("The workflow changed since revision N was saved…", so what runs is what the revision names), and, for a revision that isn't the published one, its owner is the workspace owner or still a `build` collaborator. It never falls back to another revision or person. Otherwise it records the firing (`workflowDeliveries`: hook, definition, revision, commit, time; the newest `MAX_WORKFLOW_DELIVERIES`, 1,000, kept), listed by `listWorkflowDeliveries`. An unpinned hook fires as before.
+- **Running a trigger on request** (FAC-102, inferops [ADR 0011](https://github.com/factory-level/inferops/blob/develop/docs/agent/adr/0011-workflow-authority-envelopes.md) S5, S6, N1, N4). Invoking and executing are separate decisions.
+  - **The control.** `setTriggerControl(hookId, {label, invokers})` lets the named profile ids ask a *pinned* trigger to run now. It's stored in `workflowTriggerControls`, keyed by hook, with who configured it and when. It's build-only, and in a shared workspace takes `build` authority. Clearing the pin or deleting the hook removes it.
+  - **Listing controls.** `listTriggerControls()` shows every control to a build session. A use session sees only the controls listing its own profile, each showing only that profile.
+  - **Invoking.** `invokeTrigger(hookId)` is open to build and use sessions, refused in an operate session, and agents hold no Overseer. `invokeWorkflowTrigger` runs the checks in this order:
+    1. it refuses unless the hook is live (`requireLiveHook`) and its control lists the session's own profile (`clientProfileId`), refusing alike for no control, no pin and no listing;
+    2. it mints an invocation (`workflowInvocations`: a server-generated id, the hook, the pinned revision, who asked; at most 20 waiting per hook);
+    3. it calls the hook's gatekeeper `HookController.invoke({invocationId})`.
+    A gatekeeper without `invoke` is refused as "can't be run on request", and a refused call forgets the invocation.
+  - **The run is the trigger's own.** The gatekeeper delivers through `startHook({invocationId})`. `fire` accepts only an invocation minted for that hook and not yet delivered, consumes it, and records it on the delivery (`invocation: {id, requestedBy}`).
+    - So the run is the pinned revision, with the gadget's configured bindings and the connections they hold, as for any firing.
+    - The invoker gains nothing: no hook, pin, delivery or configuration method opens to them.
+    - Nothing they send reaches the run: `invokeTrigger` takes only the hook id, and the gatekeeper gets only the invocation id.
+    - Who asked is recorded beside the run as a claim, never used to authorize.
+  - **Scheduled Tasks** implement it (`ScheduleDriver.runRequested`): one extra delivery of an enabled schedule, with its own firing data, run id `request:<invocationId>` and `requested: true`. It takes no due slot, counts as no occurrence, changes no state and isn't retried. A finished schedule can't run.
+  - **Not built here:**
+    - an execution principal of the trigger's own (inferops ADR 0011 S1–S4, and inferos ADR 0011's server-held service-account credential): a run still uses whichever accounts the gadget's bindings were connected with, as every firing does today;
+    - an InferOps `workflow:invoke` grant (D3's grant half; InferOps roles can't confer a non-read/write verb to a member);
+    - parameters (N4: a run takes none);
+    - event and control triggers beyond Scheduled Tasks;
+    - the UI.
+  - **Tests:** `__tests__/workflow-invocation.test.ts` covers the control and its pin, admission, the one-time invocation, the Operator gaining nothing, tampered arguments, unlisted, missing and legacy triggers, a disabled trigger, the build gate and a second workspace. The scheduler's `schedule-driver.test.ts` covers a requested run and a finished schedule's refusal.
 - **When the owner leaves or loses build.** Their unpublished definitions stay theirs and invisible to others, and a trigger pinned to one is refused at its next firing. A trigger pinned to a published revision keeps running: publishing made it the workspace's.
-- **Not built here.** Trigger and run records of their own (FAC-108 onwards), expiry of unsaved dynamic definitions, sharing an unpublished definition, and a UI (the separate PR).
+- **Not built here.** Trigger and run records of their own (FAC-108 onwards; on-request runs are above), expiry of unsaved dynamic definitions, sharing an unpublished definition, and a UI (the separate PR).
 - `__tests__/workflow-definitions.test.ts` covers saving, owner-only visibility, the published-revision view, refusals of another person's and another workspace's definition, limits, two triggers on one revision, recorded firings, a pin staying put across a republish and moving explicitly, a changed gadget refused, an unpublished pin refused after its owner can't build while a published one runs, pin refusals, and the Overseer gates; `overseer-hooks.test.ts` covers `startHook` firing a pinned hook and refusing one whose code changed.
 
 ### Authorization generation

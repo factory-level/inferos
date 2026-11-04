@@ -25,6 +25,7 @@ type TestHooks = HookInitiator<ScheduleHookTarget> & {
   read(): Promise<{
     events: string[];
     callbackScheduleIds: string[];
+    firings: Array<Record<string, unknown>>;
     maxActiveCallbacks: number;
     disposedApprovalQueues: number;
     disposedCallbacks: number;
@@ -161,6 +162,45 @@ describe("ScheduleDriver", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     return reset();
+  });
+
+  // FAC-102: a person's admitted request to run a schedule now (HookController.invoke).
+  it("runs an enabled schedule once on request, naming the invocation, without touching its schedule", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("requested");
+    const now = Date.now();
+    await enableSchedule(driver, {
+      workspaceId: "workspace-a", scheduleId: "schedule-a",
+      spec: { kind: "interval", everyMs: 60_000, anchorMs: now },
+      title: "Refund sweep", description: "Issue approved refunds.", gadgetId,
+    }, now);
+    const before = await driver.getSchedule("workspace-a", "schedule-a");
+    await driver.runRequested("workspace-a", "schedule-a", "inv-1");
+    const { events, firings } = await testEnv.TEST_HOOKS.read();
+    expect(events.filter(e => !e.startsWith("dispose"))).toEqual(["start", "request:inv-1", "authorize", "callback:request:inv-1"]);
+    // The firing is the schedule's own data; nothing from the request but its id.
+    expect(firings).toEqual([{
+      scheduleId: "schedule-a", runId: "request:inv-1", scheduledTime: expect.any(Number),
+      actualTime: expect.any(Number), timeZone: "UTC", requested: true,
+    }]);
+    // No due slot was taken and no state changed.
+    expect(await driver.getSchedule("workspace-a", "schedule-a")).toEqual(before);
+  });
+
+  it("refuses a request for a schedule that isn't running, starting nothing", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("requested-missing");
+    await expect(driver.runRequested("workspace-a", "no-such-schedule", "inv-1"))
+      .rejects.toThrow("This scheduled task isn't running, so it can't be run now.");
+    const now = Date.now();
+    await enableSchedule(driver, {
+      workspaceId: "workspace-a", scheduleId: "done",
+      spec: { kind: "interval", everyMs: 60_000, anchorMs: now },
+      title: "Done", description: "Finished.", gadgetId,
+    }, now);
+    await updateSchedule(driver, "workspace-a", "done", stored => ({
+      ...stored, state: { ...stored.state, status: "completed", completedAt: now } as never,
+    }));
+    await expect(driver.runRequested("workspace-a", "done", "inv-2")).rejects.toThrow("isn't running");
+    expect((await testEnv.TEST_HOOKS.read()).events).toEqual([]);
   });
 
   it("stores capabilities separately and delivers through an alarm after reconstruction", async () => {

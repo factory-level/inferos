@@ -84,7 +84,10 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
     "getConsoleScreen" | "getConsoleWidget" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
-    "listWorkflowDefinitions";
+    "listWorkflowDefinitions" |
+    // A use collaborator listed on a trigger's control may run it, and sees only those controls
+    // (workflow-invocation.test.ts covers both, and that nothing else opens to them).
+    "listTriggerControls" | "invokeTrigger";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
@@ -100,6 +103,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
+  setTriggerControl: ws => ws.setTriggerControl(1, null),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
