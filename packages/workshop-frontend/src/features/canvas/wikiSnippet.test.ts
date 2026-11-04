@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { snippetParts } from './wikiSearch'
+import { snippetParts } from './wikiSnippet'
 
 it('reads only InferOps\' <b> markers, keeping every other character as text', () => {
   expect(snippetParts('The <b>release</b> <i>steps</i> &lt;b&gt;')).toEqual([

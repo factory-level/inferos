@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { Badge, Button, Input, Loader } from '@cloudflare/kumo'
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import type { WikiSearchResult } from './wikiData'
-import { snippetParts } from './wikiSearch'
+import { snippetParts } from './wikiSnippet'
 
 type Searched = { status: 'idle' } | { status: 'searching'; query: string } | { status: 'done'; query: string; result: WikiSearchResult }
 
