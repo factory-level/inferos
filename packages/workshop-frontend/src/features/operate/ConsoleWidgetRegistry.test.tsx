@@ -115,3 +115,17 @@ it('offers nothing to register while installs are being checked, or when the che
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not check')
   expect(button('Register widget')?.disabled).toBe(true)
 })
+
+it('says a registered widget whose install is gone, or is no longer a widget, can\'t be offered', () => {
+  // The kernel lists only current widget installs, so the registered install 3 is absent.
+  render([registered], undefined, false, ready(install(5, 'Queue', 1)))
+  const row = container.querySelector('[aria-label="Registered widgets"] li')!
+  expect(row.textContent).toContain('Can\'t be offered')
+  expect(row.textContent).toContain('no longer installed')
+  // Still installed, but now at another version than the one registered: a save refuses that too.
+  render([registered], undefined, false, ready(install(3, 'Status', 3)))
+  expect(container.querySelector('[aria-label="Registered widgets"] li')!.textContent).toContain('now runs bp3@3, not bp3@2')
+  // While the kernel's answer is still loading, nothing is claimed either way.
+  render([registered], undefined, false, { state: 'loading' })
+  expect(container.querySelector('[aria-label="Registered widgets"] li')!.textContent).not.toContain('Can\'t be offered')
+})

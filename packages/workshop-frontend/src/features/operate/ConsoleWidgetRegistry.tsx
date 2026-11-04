@@ -69,6 +69,14 @@ export const ConsoleWidgetRegistry = ({ widgets, published, candidates, hostBoar
           const live = publishedAs(entry)
           const candidate = entry.frozen ? undefined : described.find(item => item.gadgetId === entry.gadgetId)
           const offers = surfacesText(candidate?.surfaces ?? null)
+          // The kernel lists current widget installs only, each at the version it runs now, so a
+          // registered install it leaves out, or lists at another blueprint or version, is one a
+          // save would refuse too. Nothing is claimed until its answer has arrived.
+          const refusal = entry.frozen || candidates.state !== 'ready' ? null
+            : !candidate ? 'it is no longer installed in this workspace, or no longer a widget install.'
+            : candidate.blueprintId !== entry.blueprintId || candidate.version !== entry.version
+              ? `the install now runs ${candidate.blueprintId}@${candidate.version}, not ${entry.blueprintId}@${entry.version}.`
+            : candidate.refusal
           return <li key={entry.gadgetId} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
             <div className="min-w-0 space-y-0.5">
               <p className="truncate text-sm font-medium text-kumo-default">{entry.label}</p>
@@ -79,7 +87,7 @@ export const ConsoleWidgetRegistry = ({ widgets, published, candidates, hostBoar
                 {offers ? ` · ${offers}` : ''}
                 {live?.frozen ? ` · Operators run ${shortCommit(live.frozen.commitId)}` : ''}
               </p>
-              {candidate?.refusal && <p className="text-xs text-kumo-danger">Can't be offered: {candidate.refusal}</p>}
+              {refusal && <p className="text-xs text-kumo-danger">Can't be offered: {refusal}</p>}
             </div>
             <Button size="sm" variant="ghost" disabled={disabled} aria-label={`Remove ${entry.label}`}
               onClick={() => onChange(widgets.filter(item => item.gadgetId !== entry.gadgetId))}>Remove</Button>
