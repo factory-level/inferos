@@ -17,7 +17,8 @@ const state = vi.hoisted(() => ({
   workpieces: new Map() as Map<number, object>,
   getPage: vi.fn<(consoleId: string, screenId: string, source: string) => Promise<object | null>>(),
 }))
-state.overseer = { stub: { replaceConsole: state.replace, listConsoleWidgetCandidates: () => Promise.resolve([]), getConsolePage: state.getPage } }
+state.overseer = { stub: { replaceConsole: state.replace, listConsoleWidgetCandidates: () => Promise.resolve([]), getConsolePage: state.getPage,
+  getConsoleWidgetIndex: () => Promise.resolve(null), listConsoleWidgetIndexWorkspaces: () => Promise.resolve([]) } }
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ hostBoards: state.hostBoards, boundViews: state.boundViews }) }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({

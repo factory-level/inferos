@@ -8,10 +8,11 @@ import type { ConsoleEntry } from './consoles'
 const testState = vi.hoisted(() => ({
   publishConsole: vi.fn<(id: string, revision: string) => Promise<unknown>>(),
   invalidate: vi.fn<() => void>(),
+  workspaces: vi.fn<() => Promise<{ workspaceId: string; name: string }[]>>(),
 }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({
-  overseer: { stub: { publishConsole: testState.publishConsole } }, metadata: { id: 'w1', role: 'build' }, error: null,
+  overseer: { stub: { publishConsole: testState.publishConsole, listConsoleWidgetIndexWorkspaces: testState.workspaces } }, metadata: { id: 'w1', role: 'build' }, error: null,
 }) }))
 vi.mock('../../pages/inferops-canvas/useWorkspaceScreens', () => ({ invalidateWorkspaceScreens: testState.invalidate }))
 
@@ -27,7 +28,7 @@ const onClose = vi.fn<() => void>()
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  testState.publishConsole.mockReset(); testState.invalidate.mockClear(); onClose.mockClear()
+  testState.publishConsole.mockReset(); testState.invalidate.mockClear(); onClose.mockClear(); testState.workspaces.mockReset().mockResolvedValue([])
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
@@ -60,4 +61,22 @@ it('D-3: shows the generic message for any other refusal', async () => {
   expect(alertText()).toContain('Could not publish this console.')
   expect(document.body.textContent).not.toContain('Internal detail 1234')
   expect(onClose).not.toHaveBeenCalled()
+})
+
+it("D-widgets: tells the builder a console's widgets are listed for the company only when InferOps offers somewhere to list them", async () => {
+  const widget = { gadgetId: 9, blueprintId: 'bp', version: 1, label: 'Technicians', state: 'resettable' as const }
+  const withWidgets: ConsoleEntry = { ...entry, console: { ...entry.console, widgets: [widget] } }
+  const note = "listed for your company in InferOps"
+  testState.workspaces.mockResolvedValue([{ workspaceId: 'ws-ops', name: 'Operations' }])
+  await act(async () => root.render(<ConsolePublishDialog entry={withWidgets} onClose={onClose} />))
+  expect(document.body.textContent).toContain(note)
+  act(() => root.unmount()); root = createRoot(container)
+  testState.workspaces.mockResolvedValue([])
+  await act(async () => root.render(<ConsolePublishDialog entry={withWidgets} onClose={onClose} />))
+  expect(document.body.textContent).not.toContain(note)
+  act(() => root.unmount()); root = createRoot(container)
+  testState.workspaces.mockClear()
+  await act(async () => root.render(<ConsolePublishDialog entry={entry} onClose={onClose} />))
+  expect(testState.workspaces).not.toHaveBeenCalled()
+  expect(document.body.textContent).not.toContain(note)
 })

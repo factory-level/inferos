@@ -12,6 +12,7 @@ import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
 import { ConsolePlacedAppsNotice } from './ConsolePlacedAppsNotice'
 import { usePublishedConsolePlacements } from './usePublishedConsolePlacements'
+import { ConsoleWidgetIndex } from './ConsoleWidgetIndex'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 import { useConsoleWidgetCandidates } from './useConsoleWidgetCandidates'
 
@@ -85,6 +86,8 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
     </div>
     <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={widgetCandidates}
       hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!editable || saving} onChange={setWidgets} />
+    {overseer && <ConsoleWidgetIndex overseer={overseer.stub} consoleId={entry.console.id}
+      hasWidgets={(entry.console.published?.content.widgets ?? []).length > 0} editable={editable} />}
     {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={entry.console.published?.content.hostBoards}
       widgetCount={widgets.length + shownBoundViews.length} assistantOnly={entry.console.fullChat === 'only'} disabled={!editable || saving} onChange={setHostBoards} />}
     {boundViewsOn && <ConsoleBoundViewRegistry boundViews={shownBoundViews} published={entry.console.published?.content.boundViews}
