@@ -852,11 +852,11 @@ const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 // How many audited host-board reads an operate session workspace keeps (see host-boards.ts).
 const HOST_BOARD_READS_KEPT = 1000;
 
-async function opaqueExportActorId(id: string, exportSalt: string, alwaysHash = false): Promise<string> {
-  // Email-like account identifiers are reversible personal data. Hash them deterministically so
-  // repeated actors remain linkable within the export without exposing the address. The random
-  // export salt prevents the same email from being correlated across separate exports.
-  if (!alwaysHash && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return id;
+async function opaqueExportActorId(id: string, exportSalt: string, personal = false): Promise<string> {
+  // User and gadget author ids identify people, even when they are not email-shaped. Hash them
+  // deterministically so repeated actors remain linkable within this export, while the random
+  // salt prevents correlation across exports. Also hash email-shaped ids for other actor types.
+  if (!personal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return id;
   let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${exportSalt}:${id}`)));
   return `sha256:${digest.toHex()}`;
 }
@@ -12774,11 +12774,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           outcome: action ? actionOutcome(action) : "unknown",
           requestedBy: await exportRequester(storedRecord?.caller, actorIdSalt),
           requestedAt: entry.createdAt,
-          decidedBy: decidedBy ? {type: decidedBy.type, id: await opaqueExportActorId(decidedBy.id, actorIdSalt)} : undefined,
+          decidedBy: decidedBy ? {
+            type: decidedBy.type,
+            id: await opaqueExportActorId(
+              decidedBy.id,
+              actorIdSalt,
+              decidedBy.type === "user" || decidedBy.type === "gadget",
+            ),
+          } : undefined,
           decidedAt: action?.appliedAt ?? action?.lastAttempt?.at,
-          appliedRevision: typeof result?.appliedRevision === "string" ? result.appliedRevision : undefined,
-          createdIdentifier: typeof result?.createdIdentifier === "string" ? result.createdIdentifier : undefined,
-          runId: typeof result?.runId === "string" ? result.runId : undefined,
+          appliedRevision: typeof result?.appliedRevision === "string" && /^(0|[1-9][0-9]*)$/.test(result.appliedRevision)
+            ? result.appliedRevision : undefined,
+          createdIdentifier: typeof result?.createdIdentifier === "string" && /^[A-Z][A-Z0-9]{0,15}-[0-9]+$/.test(result.createdIdentifier)
+            ? result.createdIdentifier : undefined,
+          runId: typeof result?.runId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.runId)
+            ? result.runId : undefined,
         });
       }
       beforeId = page.nextBeforeId;
@@ -12835,7 +12845,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         triggers: "Hook descriptions, resource titles, and URLs are provider-controlled text and routing metadata.",
         triggerControls: "Labels and invoker/profile identity are user-authored or personal data.",
         widgetRegistry: "Refusal text and tool/state names are arbitrary gadget-authored strings.",
-        actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets; identities kept as opaque ids, names and emails withheld.",
+        actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets; personal actor ids are opaque, names and emails are withheld, and action references outside their strict formats are omitted.",
       },
     };
   }
