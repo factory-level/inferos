@@ -83,6 +83,8 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
     "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
     "getConsoleScreen" | "getConsoleWidget" |
+    // A published widget's frozen local states, checked as getConsoleWidget is (FAC-86, widget-state.test.ts).
+    "getConsoleWidgetStates" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
     "listWorkflowDefinitions";
 

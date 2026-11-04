@@ -4,6 +4,10 @@ import { openAiCommand } from './openai-plugin.js';
 import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
 import { localApiModels } from './local-api-models.js';
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
+import {
+  WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
+  type WidgetStateMachine, type WidgetStateSnapshot,
+} from '@gadgets/workshop-shared/widget-state';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -370,6 +374,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
       operateEvents: collection<OperateEventRecord>()({
         primaryKey: record => operateEventKey(record.seq),
       }),
+      // This person's running state of each console widget whose states persist per person
+      // (FAC-86, widget-state.ts), keyed by widgetStateKey(). Apart from the operate page: nothing
+      // here is read or written by dispatchOperateEvent(), nor this by it.
+      widgetStates: collection<StoredWidgetState>()({ primaryKey: "key" }),
     },
     singletons: {
       operateReadGeneration: "1",
@@ -428,6 +436,20 @@ function makeUserStorage(storage: DurableObjectStorage) {
       operatePage: <OperateSessionUpdate>{ seq: 0, state: INITIAL_OPERATE_PAGE },
     }
   });
+}
+
+/** One person's stored state of one console widget (see UserDurableObject.readWidgetState). */
+type StoredWidgetState = { key: string; state: string; seq: number; at: number };
+
+/** Most console widget states one person keeps; the least recently changed is dropped past it. */
+const MAX_STORED_WIDGET_STATES = 256;
+
+// A widget state key as widgetStateKey() makes it: bounded, printable, with no path tricks.
+function validWidgetStateKey(key: string): string {
+  if (typeof key !== "string" || key.length === 0 || key.length > 512 || [...key].some(c => c.charCodeAt(0) < 0x20)) {
+    throw new TypeError("Invalid widget state key.");
+  }
+  return key;
 }
 
 function operateEventKey(seq: number): string {
@@ -1214,6 +1236,44 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!record || record.chatId !== undefined) throw new Error("RUN_ALREADY_RESERVED");
       runs.put({...record, chatId});
     });
+  }
+
+  /**
+   * This person's state of the console widget `key` names, following `machine` (its published
+   * declaration, which the caller read through the person's own access): the stored state when the
+   * machine still declares it, else its initial state. Reads nothing of the operate page.
+   */
+  async readWidgetState(key: string, machine: WidgetStateMachine): Promise<WidgetStateSnapshot> {
+    let stored = this.storage.widgetStates.get(validWidgetStateKey(key));
+    let state = recoverWidgetState(machine, stored?.state);
+    return { state, seq: stored?.seq ?? 0, events: widgetEventsFrom(machine, state) };
+  }
+
+  /**
+   * Moves this person's state of console widget `key` by `event`, if `expectedSeq` is current and
+   * `machine` permits it; see OperateSession.transitionWidget(). It never touches the operate page:
+   * a widget's state changes only itself (FAC-86 criterion 1).
+   */
+  async transitionWidgetState(key: string, machine: WidgetStateMachine, event: string,
+                              expectedSeq: number): Promise<WidgetStateSnapshot> {
+    let current = await this.readWidgetState(key, machine);
+    if (expectedSeq !== current.seq) {
+      throw new WidgetStateError(WIDGET_STATE_ERROR_CODES.conflict, "The widget's state changed. Read it again.");
+    }
+    let state = applyWidgetTransition(machine, current.state, event);
+    let next: StoredWidgetState = { key, state, seq: current.seq + 1, at: Date.now() };
+    this.storage.widgetStates.put(next);
+    this.#pruneWidgetStates();
+    return { state, seq: next.seq, events: widgetEventsFrom(machine, state) };
+  }
+
+  // Keeps the newest MAX_STORED_WIDGET_STATES; an older widget then starts again at its initial state.
+  #pruneWidgetStates(): void {
+    let all = [...this.storage.widgetStates.list()];
+    if (all.length <= MAX_STORED_WIDGET_STATES) return;
+    for (let old of all.toSorted((a, b) => a.at - b.at).slice(0, all.length - MAX_STORED_WIDGET_STATES)) {
+      this.storage.widgetStates.delete(old.key);
+    }
   }
 
   /**

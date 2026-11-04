@@ -28,6 +28,7 @@ import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } 
 import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "./workflow-definition.js";
+import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
@@ -482,6 +483,24 @@ export interface OperateSession extends RpcTarget {
    * changes.
    */
   dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot>;
+
+  /**
+   * This person's state of the console widget `ref` names (FAC-86), following the local states its
+   * published revision froze (`Overseer.getConsoleWidgetStates`, read through the caller's own
+   * access): the stored state when the widget's states persist per person, else its initial state
+   * at the start of this connection. Rejects with `WIDGET_HAS_NO_STATES` for a widget that declares
+   * none, and as `getConsoleWidget` does for a widget the console doesn't offer at that revision.
+   */
+  getWidgetState(ref: OperateWidgetRef): Promise<WidgetStateSnapshot>;
+  /**
+   * Moves the widget's state by `event` if `expectedSeq` is its current `seq` and its declaration
+   * permits `event` from the current state, and returns the new state. **It never changes the
+   * operate page**: the page's sequence and state stay as they were (connecting a widget event to
+   * the page is an explicitly configured attachment, FAC-87). Rejects, changing nothing, with
+   * `WIDGET_UNKNOWN_EVENT`, `WIDGET_TRANSITION_NOT_PERMITTED` (naming the events the current state
+   * accepts), `WIDGET_STATE_CONFLICT` or `WIDGET_HAS_NO_STATES`.
+   */
+  transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
@@ -2729,6 +2748,13 @@ export interface Overseer extends RpcTarget {
    * Denied to the operate session.
    */
   getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * The local states (FAC-86) a widget a console offers declares, as published revision
+   * `revision` froze them, or null when it declares none. Checked as `getConsoleWidget` checks
+   * the widget. This is what an operate session's widget state follows; it grants nothing.
+   * Denied to the operate session.
+   */
+  getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<WidgetStateMachine | null>;
   /**
    * The spec a builder's preview of draft bound view `entryId` of console `consoleId` at `revision`
    * shows: its source's `view.json` at `commitId`, or else at the source's current commit, read

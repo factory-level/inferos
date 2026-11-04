@@ -1,3 +1,7 @@
+import {
+  WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, parseOperateWidgetRef, recoverWidgetState,
+  widgetEventsFrom, widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot,
+} from "@gadgets/workshop-shared/widget-state";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
 import { handleOperateAgui } from "./operate-agui.js";
@@ -963,6 +967,41 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
 
   async listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]> {
     return this.user().listOperateEvents(afterSeq, limit);
+  }
+
+  // Widget local states (FAC-86). The declaration is read from the published console through the
+  // person's own access on every call, never taken from the caller. A `person` widget's state lives
+  // in the person's user DO, a `session` one only on this connection; neither touches the page.
+  #sessionWidgetStates = new Map<string, { state: string; seq: number }>();
+
+  async #widgetMachine(ref: OperateWidgetRef): Promise<WidgetStateMachine> {
+    let checked = parseOperateWidgetRef(ref);
+    using workspace = await this.openConsoleWorkspace(checked.workspaceId);
+    let machine = await workspace.getConsoleWidgetStates(checked.consoleId, checked.revision, checked.gadgetId);
+    if (!machine) throw new WidgetStateError(WIDGET_STATE_ERROR_CODES.noStates, "This widget declares no local states.");
+    return machine;
+  }
+
+  async getWidgetState(ref: OperateWidgetRef): Promise<WidgetStateSnapshot> {
+    let machine = await this.#widgetMachine(ref);
+    let key = widgetStateKey(ref);
+    if (machine.persistence === "person") return this.user().readWidgetState(key, machine);
+    let held = this.#sessionWidgetStates.get(key);
+    let state = recoverWidgetState(machine, held?.state);
+    return { state, seq: held?.seq ?? 0, events: widgetEventsFrom(machine, state) };
+  }
+
+  async transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot> {
+    let machine = await this.#widgetMachine(ref);
+    let key = widgetStateKey(ref);
+    if (machine.persistence === "person") return this.user().transitionWidgetState(key, machine, event, expectedSeq);
+    let current = await this.getWidgetState(ref);
+    if (expectedSeq !== current.seq) {
+      throw new WidgetStateError(WIDGET_STATE_ERROR_CODES.conflict, "The widget's state changed. Read it again.");
+    }
+    let state = applyWidgetTransition(machine, current.state, event);
+    this.#sessionWidgetStates.set(key, { state, seq: current.seq + 1 });
+    return { state, seq: current.seq + 1, events: widgetEventsFrom(machine, state) };
   }
 
   // The recipient's copy is appended first: it is the one that matters, and if it is refused
