@@ -28,7 +28,10 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
-import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "./workflow-definition.js";
+import type {
+  TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowDefinitionSave, WorkflowInvocation,
+} from "./workflow-definition.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
@@ -2692,6 +2695,29 @@ export interface Overseer extends RpcTarget {
   getTriggerDefinition(hookId: number): Promise<WorkflowDefinitionRef | null>;
   /** The recorded firings of a definition the caller may see, oldest first. Build only. */
   listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]>;
+
+  /**
+   * Let the named people ask pinned trigger `hookId` to run now, or remove its control with null.
+   * The trigger must be pinned to a definition revision. Being listed gives a person that request
+   * and nothing else: no access to the workflow, its bindings or its configuration. Build only; in
+   * a shared workspace it also takes the deployment's `build` authority. Clearing the pin removes
+   * the control.
+   */
+  setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null>;
+  /**
+   * The trigger controls the caller may see: all of them with build access, and in a use session
+   * only those listing the caller (each showing only them as invoker). Refused in an operate session.
+   */
+  listTriggerControls(): Promise<TriggerControl[]>;
+  /**
+   * Ask pinned trigger `hookId` to run now, as its control allows (inferops ADR 0011 S6). The server
+   * checks that the trigger has a control listing the caller, is enabled and still pinned, and only
+   * then asks the trigger's gatekeeper to deliver it once. The run is the trigger's own: the gadget
+   * at the pinned revision with its configured bindings, never the caller's authority, and nothing
+   * the caller supplies reaches it. Refused for a trigger whose gatekeeper can't run on request.
+   * Open to build and use sessions; refused in an operate session, and agents hold no Overseer.
+   */
+  invokeTrigger(hookId: number): Promise<WorkflowInvocation>;
 
   /**
    * List this workspace's consoles: one operator role's menu of views over this workspace's
