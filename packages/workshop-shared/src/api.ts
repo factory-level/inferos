@@ -1,3 +1,4 @@
+import type { ActionResult } from "./action-outcome.js";
 import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-approval";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
@@ -2514,6 +2515,19 @@ export type ActionLogEntry = {
    * pending (or later rejected) so its reason and whether it may have happened survive a reload.
    */
   lastAttempt?: ActionAttempt;
+
+  /**
+   * Set while the action is pending with an approved apply in flight, so it reads as running and
+   * not as waiting for a decision (see `actionOutcome`). Absent otherwise.
+   */
+  applying?: true;
+
+  /**
+   * What the provider reported the apply produced (`ActionResult`), such as a created issue's key
+   * or the revision a write produced. Only on an approved action, and only when its gatekeeper
+   * returned one; an approved action without it still applied.
+   */
+  result?: ActionResult;
 } | {
   type: "observation";
   description: ObservationDescription;
