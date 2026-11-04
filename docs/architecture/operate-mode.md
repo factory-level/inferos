@@ -551,7 +551,13 @@ A widget may declare its own local states and transitions (FAC-86, [workspaces a
     - `WIDGET_STATE_CONFLICT` for a stale `expectedSeq`;
     - `WIDGET_HAS_NO_STATES` for a widget that declares none.
 - **It never changes the page.** A widget transition reads and writes only `widgetStates`, never `operatePage` or `operateEvents`, and a page event never touches a widget's state.
-  - **Not built here:** connecting a widget event to the page is an explicitly configured attachment (`canvas-model.ts`), which page states (FAC-87) will run. Outcome-driven transitions from a domain action would take FAC-97's `ActionOutcome`; console widgets have no domain actions today. The UI that shows a widget's state and offers its permitted events is a separate PR.
+- **In Operate (FAC-86 part 2).** `CanvasGadgetWidget` shows `WidgetStateBar` under a published console's frozen widget when it renders inside an operate session. The screen passes the console's `workspaceId` in `offeredBy`, from `ConsolePage`, `FlowScreen` and `ConsoleWidgetView`.
+  - The bar shows the state and only the events `getWidgetState` says it accepts from there.
+  - Pressing one calls `transitionWidget` with the snapshot's `seq`. It never dispatches an operate event.
+  - A refusal shows the server's words. On `WIDGET_STATE_CONFLICT` it reads the state again and says it now shows the latest; it never resends.
+  - A widget with no states (`WIDGET_HAS_NO_STATES`) shows no bar.
+  - `WidgetStateBar.test.tsx` covers these.
+  - **Not built here:** connecting a widget event to the page is an explicitly configured attachment (`canvas-model.ts`), which page states (FAC-87) will run. Outcome-driven transitions from a domain action would take FAC-97's `ActionOutcome`; console widgets have no domain actions today. 
 - **Tests.**
   - `workshop-shared/src/widget-state.test.ts`: parsing, its refusals, transitions and recovery.
   - `__tests__/widget-state.test.ts`: transitions leave the operate page and its log untouched, page events leave the widget alone, the refusals and their codes, recovery for the person, and a fresh start for another person and another revision.
@@ -719,7 +725,11 @@ A workflow definition is the reusable description of a workflow (FAC-107, [workf
     - an InferOps `workflow:invoke` grant (D3's grant half; InferOps roles can't confer a non-read/write verb to a member);
     - parameters (N4: a run takes none);
     - event and control triggers beyond Scheduled Tasks;
-    - the UI.
+  - **The UI** (FAC-102 part 2):
+    - **Builders:** the Triggers panel (`WorkflowTriggersPanel`) gives each pinned trigger a "Run on request" editor (`TriggerControlEditor`). It sets the button's label and who may press it, chosen from `listCollaborators` by profile id, through `setTriggerControl`; a refusal shows in the server's words. It also lists the trigger's newest runs on request with who asked (`listWorkflowDeliveries`, the delivery's `invocation`).
+    - **Use collaborators:** the use view (`GadgetUseView`) shows `WorkflowRunControls` above the app: the controls `listTriggerControls` returns for them, each only its label as a button. It renders nothing when none lists them, or when the call fails.
+    - **What a press shows:** a press calls `invokeTrigger`. An accepted run shows "Run requested, not done yet". FAC-97's `ActionOutcome` has no requested outcome, so an accepted run is its `running` (handed to the trigger, in flight), never `succeeded`. A refusal, a rate refusal's retry time included, shows in the server's own words.
+    - **Tests:** `WorkflowTriggersPanel.test.tsx` and `WorkflowRunControls.test.tsx`.
   - **Tests:** `__tests__/workflow-invocation.test.ts` covers the control and its pin, admission, the one-time invocation, the Operator gaining nothing, tampered arguments over RPC and in a direct call, unlisted, missing and legacy triggers, a disabled trigger, the build gate, a second workspace, a repin or a control change dropping a waiting request, a moved pin refused at delivery, expiry, both run rates, and the invoker's view. The scheduler's `schedule-driver.test.ts` covers a requested run and a finished schedule's refusal.
 - **When the owner leaves or loses build.** Their unpublished definitions stay theirs and invisible to others, and a trigger pinned to one is refused at its next firing. A trigger pinned to a published revision keeps running: publishing made it the workspace's.
 - **Not built here.** Trigger and run records of their own (FAC-108 onwards; on-request runs are above), expiry of unsaved dynamic definitions, sharing an unpublished definition, and a UI (the separate PR).

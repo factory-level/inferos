@@ -422,6 +422,21 @@ describe("publication against real commits", () => {
     });
   });
 
+  // FAC-86 (QA on #343): a widget's states.json is read with its commit, strictly as UTF-8.
+  it("parses a widget's states.json with its commit, and refuses one that isn't UTF-8 or doesn't parse", async () => {
+    await inOverseer("widget-states-read", async impl => {
+      const STATES = JSON.stringify({ version: 1, initial: "viewing", persistence: "person", states: ["viewing", "editing"],
+        transitions: [{ event: "edit", from: "viewing", to: "editing" }] });
+      let good = await commitBytes(impl, { "client.js": "", "server.js": "", "states.json": STATES });
+      let notUtf8 = await commitBytes(impl, { "client.js": "", "server.js": "", "states.json": NOT_UTF8 });
+      let invalid = await commitBytes(impl, { "client.js": "", "server.js": "", "states.json": "{\"version\": 2}" });
+      let commits = await impl.readSourceCommits([good.commit, notUtf8.commit, invalid.commit]);
+      expect(commits.get(good.commit)).toMatchObject({ states: JSON.parse(STATES), statesProblem: null });
+      expect(commits.get(notUtf8.commit)).toMatchObject({ states: null, statesProblem: "states.json is not UTF-8 text." });
+      expect(commits.get(invalid.commit)).toMatchObject({ states: null, statesProblem: expect.stringContaining("states.json") });
+    });
+  });
+
   it("classifies exactly as the full file map with strict view.json and tools.json did", async () => {
     await inOverseer("bound-view-classes", async impl => {
       const cases: Record<string, string | Uint8Array>[] = [

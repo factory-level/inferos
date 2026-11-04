@@ -1,5 +1,5 @@
 import type { ActionResult } from "./action-outcome.js";
-import type { CanvasPage } from "./canvas-model.js";
+import type { CanvasPage, CanvasPageOperation } from "./canvas-model.js";
 import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-approval";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
@@ -2672,6 +2672,18 @@ export interface Overseer extends RpcTarget {
   editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition>;
   /** Delete a definition at its expected revision with build access and both flags. Reimport creates a new identity. */
   deleteCanvas(id: string, expectedRevision: string): Promise<void>;
+  /**
+   * Read one canvas as its nested page (ADR 0014): objects, widgets and attachments by stable ID.
+   * Requires build access and both flags. It is the live draft, so the use role and an operate session
+   * are refused: they read only what a console published. A missing canvas reads as null.
+   */
+  getCanvasPage(id: string): Promise<CanvasPage | null>;
+  /**
+   * Compare the page revision and apply typed page operations atomically, with build access and both
+   * flags. A stale revision throws the canvas conflict error and writes nothing. Removing a node
+   * removes only its reference on the page, never a record it names.
+   */
+  editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage>;
 
   /**
    * List this workspace's flows: ordered lists of its canvases that an operate session runs one
