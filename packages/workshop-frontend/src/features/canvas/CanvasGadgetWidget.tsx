@@ -38,6 +38,8 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
   const consoleId = offeredBy?.consoleId
   const revision = offeredBy?.revision
   const isWidget = !!gadget?.frozenFor
+  // The widget a published revision offers (a frozen install); apps there have no local states.
+  const offeredWidget = offeredBy && isWidget ? offeredBy : undefined
   useEffect(() => {
     if (gadgetId === undefined) return
     const stub = consoleId === undefined || revision === undefined ? overseer.getGadget(gadgetId)
@@ -69,9 +71,9 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
   return <article ref={ref} aria-label={title} className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base shadow-md">
     <h3 className="truncate border-b border-kumo-line px-3 py-2 text-sm font-medium text-kumo-default">{title}</h3>
     {/* The widget's own state (FAC-86), only for a published console's frozen widget in Operate. */}
-    {offered?.workspaceId !== undefined && operate?.session && gadgetId !== undefined &&
+    {offeredWidget?.workspaceId !== undefined && operate?.session && gadgetId !== undefined &&
       <WidgetStateBar session={operate.session.stub}
-        widgetRef={{ workspaceId: offered.workspaceId, consoleId: offered.consoleId, revision: offered.revision, gadgetId }} />}
+        widgetRef={{ workspaceId: offeredWidget.workspaceId, consoleId: offeredWidget.consoleId, revision: offeredWidget.revision, gadgetId }} />}
     {gadget === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is no longer in the workspace. Remove it from the layout or choose another gadget.</p>
       : gadgetId === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is still a draft in a conversation. Accept the conversation's changes to show it here.</p>
       : refused ? <p role="status" className="p-4 text-sm text-kumo-subtle">{refused}</p>
