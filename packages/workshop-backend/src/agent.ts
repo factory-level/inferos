@@ -7,7 +7,8 @@ import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/g
 import { createWorkshopLogger } from "./observability";
 import { workspaceKindAllowsFile, workspaceKindContract, workspaceKindStarter } from "@gadgets/workshop-shared/workspace-kind";
 import type { OperateEvent, OperateRef, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
-import { CanvasConflictError, type CanvasCatalog, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
+import { CanvasConflictError, type CanvasCatalog, type CanvasContent } from "@gadgets/workshop-shared/canvas";
+import { parseCanvasTarget, resolveCanvasTarget, type CanvasPage, type CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import { Type, toToolDeclaration } from "@earendil-works/pi-ai";
 import type {
   AssistantMessage, ImageContent, Message, TSchema, TextContent, ThinkingContent, ToolCall, Usage,
@@ -826,15 +827,20 @@ export interface AgentHooks {
 }
 
 /**
- * The canvas tools' view of a workspace's saved canvases. It routes to the same store the builder
- * UI edits through, so the agent's edits obey the same revision checks and catalog limits.
+ * The canvas tools' view of a workspace's saved canvases (FAC-84). Its writes are the builder
+ * controls' own: the same overseer methods, the same typed page operations (FAC-83) at the same
+ * page revision, and the same `build` check, asked freshly for the turn's initiator on every write.
+ * It reaches only this workspace's pages and can't publish anything.
  */
 export interface AgentCanvasAccess {
   /** What the deployment offers for composition. */
   catalog: CanvasCatalog;
-  list(): CanvasDefinition[];
-  create(content: CanvasContent): CanvasDefinition;
-  edit(id: string, expectedRevision: string, operations: CanvasOperation[]): CanvasDefinition;
+  /** Every page of this workspace, nested parts and attachments included. */
+  listPages(): CanvasPage[];
+  /** Create a page as `initiator`, as the controls' `createCanvas` does. */
+  create(initiator: AiChatAuthorInfo, content: CanvasContent): Promise<CanvasPage>;
+  /** Apply page operations at the expected revision as `initiator`, as the controls' `editCanvasPage` does. */
+  editPage(initiator: AiChatAuthorInfo, id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage>;
 }
 
 // =======================================================================================
@@ -1243,18 +1249,22 @@ List the blueprints available to the user: their own published blueprints, their
 `.trim();
 
 let LIST_CANVASES_TOOL_DESCRIPTION = `
-List this workspace's canvases (saved screens that lay out widgets in sections) with their sections, widgets and current revisions, plus what this installation lets you place on them: enabled widget kinds, blueprints offered as widgets, and screen templates. Call this before \`editCanvas\`.
+List this workspace's canvases (saved pages: their nested objects, widgets and attachments, and current revisions), plus what this installation lets you place on them: enabled widget kinds, blueprints offered as widgets, and screen templates. Call this before \`editCanvas\`.
 `.trim();
 
 let EDIT_CANVAS_TOOL_DESCRIPTION = `
-Create a canvas or change one. Canvases are the user's screens: ordered sections (1–3 columns) of widgets. Edits apply immediately and the user sees them live.
+Create a canvas or change one. A canvas is one of the user's pages: \`children\` lists its top-level objects in order, and \`nodes\` holds every part. An object is \`{nodeType:"object", id, title, columns:1|2|3, children, attachments}\`, and its children are objects or widgets; a widget node is a widget (below) plus \`nodeType:"widget"\` and \`attachments\`. Edits apply immediately and the user sees them live. They are the same edits the canvas builder's controls make, checked the same way. Nothing here publishes: a published console keeps what it published until a person publishes it again.
 
-To create one, omit \`canvasId\` and pass \`title\`, optionally with \`templateId\` (from listCanvases) to start from a configured layout; any \`operations\` then apply to the new canvas. To change one, pass \`canvasId\` and the \`expectedRevision\` listCanvases (or your last edit) returned. A stale revision is rejected with the current one: re-list, then retry against the current content.
+To create one, omit \`canvasId\` and pass \`title\`, optionally with \`templateId\` (from listCanvases) to start from a configured layout; any \`operations\` then apply to the new canvas. To change one, pass \`canvasId\` and the \`expectedRevision\` listCanvases (or your last edit) returned. A stale revision is rejected with the current one: re-list, then retry against the current content. When the user's request names a target (\`page:<id>\`, \`page:<id>/node:<id>\` or \`page:<id>/attachment:<id>\`), pass it as \`target\` and change that part; an edit whose target isn't on the canvas is refused.
 
-\`operations\` (at most 32, applied atomically) are objects with a \`type\`:
-- \`{type:"addSection", index, section:{id, title, columns:1|2|3, widgets:[]}}\`
-- \`{type:"addWidget", sectionId, index, widget}\`, \`{type:"moveWidget", widgetId, sectionId, index}\`, \`{type:"removeWidget", widgetId}\`, \`{type:"configureWidget", widget}\`
-- \`{type:"rename", title}\`, \`{type:"configureSection", sectionId, title, columns}\`, \`{type:"moveSection", sectionId, index}\`, \`{type:"removeSection", sectionId}\`
+\`operations\` (at most 32, applied atomically) are objects with a \`type\`. A \`parent\` is the canvas's own id or an object's id:
+- \`{type:"renamePage", title}\`
+- \`{type:"addObject", parent, index, object:{id, title, columns:1|2|3}}\`, \`{type:"configureObject", nodeId, title, columns}\`
+- \`{type:"addWidget", parent, index, widget}\` (the parent must be an object), \`{type:"configureWidget", widget}\`
+- \`{type:"moveNode", nodeId, parent, index}\`, \`{type:"removeNode", nodeId}\` (removes what it contains too)
+- \`{type:"setAttachments", target, attachments}\`: replaces the attachments of the canvas (its id) or of one node. Keep the existing ones you aren't changing.
+
+An attachment is \`{id, version:1, on, effect}\`: when the node it's on has event \`on\` (a widget's completed action, such as \`action-completed\`, or an event an attachment raises), it runs one effect: \`{kind:"navigate", page}\` (another canvas's id), \`{kind:"raise-event", target, event}\` or \`{kind:"request-action", target, action}\` (an action the target widget's kind declares). An effect grants nothing: a requested action still goes through that widget's own approval.
 
 IDs are yours to choose (letters, digits, \`_\`, \`-\`; unique within the canvas). A widget is \`{id, kind, version:1, targetRef, size:"normal"|"wide"|"full", params}\`:
 - \`kind:"inferos.gadget"\`: shows a gadget from this workspace. \`targetRef\` is \`gadget:<gadgetId>\` (the id createGadget returned), \`params\` is \`{}\`. A gadget created in this chat appears once the user accepts the chat's changes.
@@ -1422,16 +1432,28 @@ function findEditPos(content: string, textToReplace: string): number {
 // Renders a JSON-structured tool result as the exact text the model sees. Used by both the live
 // tools and history replay so the two can never drift.
 /** A canvas as the canvas tools report it: its layout and revision, nothing else. */
-function summarizeCanvas(canvas: CanvasDefinition) {
-  return {
-    id: canvas.id,
-    title: canvas.title,
-    revision: canvas.revision,
-    sections: canvas.sections.map(({id, title, columns, widgets}) => ({
-      id, title, columns,
-      widgets: widgets.map(({id, kind, targetRef, size, params}) => ({id, kind, targetRef, size, params})),
-    })),
-  };
+/**
+ * Refuse a target that isn't on canvas `canvasId` as it is now. A target identifies what the user
+ * selected and authorizes nothing (`CanvasTarget`); this only stops an edit naming one canvas while
+ * changing another, or a part that's gone.
+ */
+function requireTargetOn(access: AgentCanvasAccess, canvasId: string, written: string): void {
+  let target = parseCanvasTarget(written);
+  if (!target || target.kind === "workspace") {
+    throw new Error(`"${written}" isn't a canvas target. Write page:<id>, page:<id>/node:<id> or page:<id>/attachment:<id>.`);
+  }
+  if (target.pageId !== canvasId) {
+    throw new Error(`Target ${written} is on another canvas than ${canvasId}. Change the canvas the target names.`);
+  }
+  let page = access.listPages().find(candidate => candidate.id === canvasId);
+  if (page && !resolveCanvasTarget(page, target)) {
+    throw new Error(`Target ${written} isn't on canvas ${canvasId} any more. Call listCanvases to see its current parts.`);
+  }
+}
+
+/** A page as the canvas tools show it: the saved configuration itself, without its schema version. */
+function summarizeCanvas({schemaVersion: _schemaVersion, ...page}: CanvasPage) {
+  return page;
 }
 
 function jsonToolResultText(value: unknown): string {
@@ -3809,7 +3831,7 @@ async function runAgentPass(
         try {
           let access = requireCanvasAccess();
           let output = jsonToolResultText({
-            canvases: access.list().map(summarizeCanvas),
+            canvases: access.listPages().map(summarizeCanvas),
             catalog: {
               widgetKinds: access.catalog.widgetKinds,
               blueprints: access.catalog.blueprints,
@@ -3835,6 +3857,10 @@ async function runAgentPass(
         expectedRevision: Type.Optional(Type.String({
           description: "The canvas revision your edit is based on. Required with canvasId.",
         })),
+        target: Type.Optional(Type.String({
+          description: "The selected target the user named (page:<id> or page:<id>/node:<id> or " +
+              "page:<id>/attachment:<id>), when they named one. It must be on the canvas you change.",
+        })),
         title: Type.Optional(Type.String({
           description: "Title for a new canvas. Required when creating without a template.",
         })),
@@ -3842,19 +3868,22 @@ async function runAgentPass(
           description: "Screen template to start a new canvas from (see listCanvases).",
         })),
         operations: Type.Array(Type.Object({type: Type.String()}, {additionalProperties: true}), {
-          description: "Edits to apply, in order. May be empty when creating.",
+          description: "Page operations to apply, in order. May be empty when creating.",
         }),
       }),
-      execute: async (toolCallId, {canvasId, expectedRevision, title, templateId, operations}) => {
+      execute: async (toolCallId, {canvasId, expectedRevision, target, title, templateId, operations}) => {
         try {
-          let store = requireCanvasAccess();
-          let {catalog} = store;
-          // The engine validates every operation's shape; this tool only routes them.
-          let ops = operations as CanvasOperation[];
-          let canvas: CanvasDefinition;
+          let access = requireCanvasAccess();
+          let {catalog} = access;
+          // The canvas engine validates every operation's shape; this tool only routes them.
+          let ops = operations as CanvasPageOperation[];
+          let page: CanvasPage;
           if (canvasId === undefined) {
             if (expectedRevision !== undefined) {
               throw new Error("expectedRevision applies only to an existing canvas (pass canvasId).");
+            }
+            if (target !== undefined) {
+              throw new Error("target applies only to an existing canvas (pass canvasId).");
             }
             let template = templateId === undefined ? undefined
                 : catalog.screens.find(screen => screen.id === templateId);
@@ -3863,18 +3892,19 @@ async function runAgentPass(
             }
             let content = template ? structuredClone(template.content) : {title: "", sections: []};
             if (title !== undefined) content.title = title;
-            canvas = store.create(content);
-            if (ops.length > 0) canvas = store.edit(canvas.id, canvas.revision, ops);
+            page = await access.create(initiator, content);
+            if (ops.length > 0) page = await access.editPage(initiator, page.id, page.revision, ops);
           } else {
             if (expectedRevision === undefined) {
               throw new Error("Pass expectedRevision (from listCanvases or your last edit) with canvasId.");
             }
             if (templateId !== undefined || title !== undefined) {
-              throw new Error("title and templateId apply only when creating; use a rename operation instead.");
+              throw new Error("title and templateId apply only when creating; use a renamePage operation instead.");
             }
-            canvas = store.edit(canvasId, expectedRevision, ops);
+            if (target !== undefined) requireTargetOn(access, canvasId, target);
+            page = await access.editPage(initiator, canvasId, expectedRevision, ops);
           }
-          let output = jsonToolResultText({success: true, canvas: summarizeCanvas(canvas)});
+          let output = jsonToolResultText({success: true, canvas: summarizeCanvas(page)});
           return toolResult(output, { output });
         } catch (error) {
           let message = error instanceof CanvasConflictError

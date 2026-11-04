@@ -37,12 +37,12 @@ import { ROOT, type StagingConfig } from "../preview/staging-config.ts";
 import { isAccessRedirect, runSmoke, smokeRequest } from "../preview/smoke.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageConfigDigest,
-  stageConfigFileName, stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages,
+  stageConfigFileName, stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageR2Buckets,
   stageTiers, stageWorkerHost, stageWorkerName,
 } from "./stage-config.ts";
 import { INFEROPS_GATEKEEPER } from "../dev-server-config.ts";
 import {
-  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending,
+  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending, STAGE_DELETE_DISCLOSURE,
 } from "./stage-resources.ts";
 import { resolveStage, type StageDefinition } from "./stages.ts";
 import {
@@ -507,7 +507,12 @@ async function remove(args: StageArgs): Promise<void> {
     if (result.status !== 0) console.error(`could not delete ${worker}:\n${result.stderr}`);
     else console.log(`deleted ${worker}`);
   }
-  console.log("KV namespaces and the R2 bucket are kept; delete them in the dashboard if intended.");
+  const retainedKv = stageKvNamespaces(stage, packages).map(({ title }) => title);
+  const retainedR2 = stageR2Buckets(stage, packages);
+  console.log(STAGE_DELETE_DISCLOSURE);
+  console.log(`Retained KV namespaces (${retainedKv.length}): ${retainedKv.join(", ") || "none"}`);
+  console.log(`Retained R2 buckets (${retainedR2.length}): ${retainedR2.join(", ") || "none"}`);
+  console.log("No KV or R2 deletion was attempted. For this real stage, a person must export and delete only the retained resource names above in the matching Cloudflare account; this command cannot perform Cloudflare storage deletion.");
 }
 
 async function main(argv: readonly string[]): Promise<void> {

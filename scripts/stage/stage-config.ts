@@ -54,6 +54,12 @@ export function stageBucketName(stage: StageDefinition, binding: string): string
   return `${stage.resourcePrefix}${kebab(binding)}`;
 }
 
+/** Every stage-prefixed R2 bucket, deduplicated when several packages bind it. */
+export function stageR2Buckets(stage: StageDefinition, packages: readonly PackageConfig[]): string[] {
+  return [...new Set(stagePackages(stage, packages).flatMap((pkg) =>
+    (pkg.config.r2_buckets ?? []).map(({ binding }) => stageBucketName(stage, binding))))];
+}
+
 /** One KV namespace a stage needs, before its id is known. */
 export interface StageKvNamespace {
   /** The package that binds it. */

@@ -300,10 +300,19 @@ const RESIDUAL_REQUIRE_PATTERN = /\b__require\b/u;
 const MODULE_COMMENT_PATTERN = /^\/\/ (.+)$/gmu;
 
 /**
- * The extensions TypeScript resolves as written: `./lib/blocks.ts` and `./data.json` name those
- * files and nothing else, where any other spelling is completed (see {@link resolveWithinFiles}).
+ * The extensions resolved as written: `./lib/blocks.ts`, `./data.json` and `./lib/mark.svg` name
+ * those files and nothing else, where any other spelling is completed (see
+ * {@link resolveWithinFiles}). An `.svg` is an asset the bundle inlines as its text (see
+ * {@link SVG_LOADER}), typed by an ambient `declare module "*.svg"` the blueprint ships.
  */
-const RESOLVED_AS_WRITTEN = /\.(?:ts|json)$/u;
+const RESOLVED_AS_WRITTEN = /\.(?:ts|json|svg)$/u;
+
+/**
+ * How a gadget module imports an SVG it owns: as the file's text, inlined into the bundle, since
+ * the sandboxed iframe can fetch nothing (its CSP allows only `data:` images). The file itself
+ * still ships in the archive beside the bundle, like any non-module file.
+ */
+const SVG_LOADER = { ".svg": "text" } as const;
 
 /**
  * The JavaScript extension TypeScript rewrites to a source one, i.e. `./lib/blocks.js` naming
@@ -453,6 +462,7 @@ async function bundleTypeScriptSources(
         external: [...entry.external],
         alias: { [PACKAGE_NAME]: packageDir },
         format: "esm",
+        loader: SVG_LOADER,
         platform: entry.platform,
         target: GADGET_TARGET,
         charset: "utf8",
