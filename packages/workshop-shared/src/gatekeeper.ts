@@ -1578,7 +1578,19 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
    * However, the overseer can also call enable() again in the future.
    */
   disable(): Promise<void>;
+
+  /**
+   * Optional: deliver this hook once now, because a person asked through its trigger's control and
+   * the overseer has already admitted the request (inferops ADR 0011 S6). Deliver it as an ordinary
+   * occurrence of the hook, passing `invocation` to `initiator.startHook()`, and take nothing else
+   * from the request: the occurrence's data is the gatekeeper's own. Throw when the hook can't run
+   * now (disabled, finished). A gatekeeper without it can't be run on request.
+   */
+  invoke?(invocation: HookInvocation): Promise<void>;
 }
+
+/** An admitted request to run a hook now (HookController.invoke); its id is the overseer's. */
+export type HookInvocation = { invocationId: string };
 
 /**
  * Object passed to HookController.enable(), used to inform the overseer when a hook event occurs.
@@ -1593,8 +1605,12 @@ export interface HookInitiator<Hook extends RpcTarget> extends WorkerEntrypoint 
    * actions resulting from this hook invocation. Most (but not necessarily all) hooks involve an
    * observation. Some hooks may even pass callbacks or interpret the return value in a way that
    * causes side effects, which should be registered as actions.
+   *
+   * `request` is the invocation from `HookController.invoke()` when this delivery is one a person
+   * asked for, and must be omitted otherwise. The overseer accepts only an invocation it admitted
+   * for this hook and not yet delivered.
    */
-  startHook(): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
+  startHook(request?: HookInvocation): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
 }
 
 /**

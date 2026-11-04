@@ -17,6 +17,7 @@
 //   have none, so their history is unknown.
 
 import type { NewIssueRequest, IssueChanges } from "./inferops-client";
+import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import type { Revision, WikiProposalSource } from "./types";
 
 /**
@@ -87,6 +88,8 @@ export type TransitionAction = ActionBase & {
   toStateId: string;
   toStateName: string;
   expectedRevision: Revision;
+  /** The issue's revision InferOps answered once the move applied; absent on records applied before it was kept. */
+  appliedRevision?: Revision;
 };
 
 /** A proposed new issue, with the state it lands in already resolved. */
@@ -322,4 +325,21 @@ export async function matchesFingerprint(scope: FingerprintScope, record: Action
     Promise<boolean> {
   if (record.fingerprint === undefined) return true;
   return record.fingerprint === await fingerprintOf(scope, record);
+}
+
+/**
+ * What an applied record reports to the overseer as its `ActionResult` (FAC-97): its kind and what
+ * InferOps answered when it applied, whichever of these the kind keeps: the created issue's key,
+ * the issue revision a move or edit produced, the queued run, the page version an edit produced, or
+ * the state an approved proposal is in. A field the record lacks (a record applied before it was
+ * kept) is left out rather than guessed.
+ */
+export function appliedResult(record: ActionRecord): ActionResult {
+  const result: ActionResult = { kind: record.kind ?? "transition" };
+  const fields = record as Partial<Record<"createdIdentifier" | "appliedRevision" | "runId" | "appliedVersion" | "approvedState", unknown>>;
+  for (const key of ["createdIdentifier", "appliedRevision", "runId", "appliedVersion", "approvedState"] as const) {
+    const value = fields[key];
+    if (typeof value === "string" || typeof value === "number") result[key] = value;
+  }
+  return result;
 }

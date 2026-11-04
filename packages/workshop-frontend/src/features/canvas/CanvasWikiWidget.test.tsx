@@ -482,7 +482,7 @@ it('says why a body edit was not sent, stale, conflicting or denied, keeping the
   await act(async () => setFieldValue(pageBody().querySelector('textarea')!, 'Mine'))
   await act(async () => pageBody().querySelector('form')!.requestSubmit())
   await settle()
-  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text.')
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text. The server said: Page operations is at version 4, not 3. Read it again.')
   expect(pageBody().querySelector('textarea')?.value).toBe('Mine')
   await click(button(pageBody(), 'Cancel'))
   expect(pageBody().textContent).toContain('Changed in InferMind meanwhile.')

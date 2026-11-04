@@ -183,6 +183,42 @@ export class ScheduleDriver extends DurableObject {
     logger.info("schedule disabled", { event: "schedule.disabled" });
   }
 
+  /**
+   * Deliver an enabled schedule once now, because a person asked through its trigger's control and
+   * the Workshop admitted the request (HookController.invoke). It's an extra delivery beside the
+   * schedule's own: it takes no due slot, consumes no occurrence count and changes no state, and it
+   * isn't retried. The firing is the schedule's own data with a run id from the invocation, and
+   * `startHook` names the invocation so the Workshop accepts it only once. A finished schedule
+   * (completed, expired or dead) can't run.
+   */
+  async runRequested(workspaceId: string, scheduleId: string, invocationId: string): Promise<void> {
+    await obsContext.with({ accountId: this.ctx.id.toString(), workspaceId, scheduleId, operation: "run-requested" },
+      () => this.#runRequested(workspaceId, scheduleId, invocationId));
+  }
+
+  async #runRequested(workspaceId: string, scheduleId: string, invocationId: string): Promise<void> {
+    if (this.#requireMetadata().revoked) throw new Error("This scheduled task's account was disconnected.");
+    const stored = this.#readSchedule(scheduleKey(workspaceId, scheduleId));
+    const runnable = stored && ["active", "retrying", "pending"].includes(stored.state.status);
+    const capabilities = runnable
+      ? this.ctx.storage.kv.get<StoredCapabilities>(capabilitiesKey(workspaceId, scheduleId)) : undefined;
+    if (!stored || !capabilities) throw new Error("This scheduled task isn't running, so it can't be run now.");
+    // @ts-expect-error Worker RPC promises are disposable even though the mapped type omits it.
+    using hookCall = capabilities.initiator.startHook({ invocationId });
+    // @ts-expect-error Worker RPC's mapped return type wraps the already-stubbed hook result.
+    const hookResult: HookResult = await hookCall;
+    const now = Date.now();
+    await hookResult.approvalQueue.authorizeObservation({
+      title: `Run scheduled task on request: ${stored.title}`,
+      description: `Deliver scheduled task ${scheduleId} once now, as a person asked, outside its schedule.`,
+    });
+    const firing: ScheduledFiring = {
+      scheduleId, runId: `request:${invocationId}`, scheduledTime: now, actualTime: now,
+      timeZone: timeZoneOf(stored.state), requested: true,
+    };
+    await hookResult.callback.onSchedule(firing);
+  }
+
   async getSchedule(workspaceId: string, scheduleId: string): Promise<StoredSchedule | undefined> {
     if (this.#requireMetadata().revoked) return undefined;
     return this.#readSchedule(scheduleKey(workspaceId, scheduleId));

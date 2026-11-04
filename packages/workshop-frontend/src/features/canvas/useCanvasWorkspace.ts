@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { applyCanvasOperations, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation } from '@gadgets/workshop-shared/canvas'
+import { withServerWords } from './serverWords'
 
 export type CanvasStorage = { kind: 'temporary' } | {
   kind: 'durable'
@@ -80,8 +81,9 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
       if (generation.current !== current) return false
       commit()
       return true
-    } catch {
-      if (generation.current === current) setError('Could not change the view. Check the fields, or reload to get the latest saved revision.')
+    } catch (error) {
+      if (generation.current === current) setError(withServerWords('Could not change the view. Check the fields, or reload to get the latest saved revision.',
+        error instanceof Error ? error.message : undefined))
       return false
     } finally {
       if (generation.current === current) { pending.current = false; setBusy(false) }
