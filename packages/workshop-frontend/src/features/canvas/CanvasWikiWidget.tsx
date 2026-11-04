@@ -12,6 +12,7 @@ import { WikiIssueEmbed } from './WikiIssueEmbed'
 import { WikiMarkdown } from './WikiMarkdown'
 import { WikiNavigation } from './WikiNavigation'
 import { WikiPageBody } from './WikiPageBody'
+import { WikiSearch } from './WikiSearch'
 import { WikiSection } from './WikiSection'
 import type { WikiStructureState } from './wikiData'
 import { authoredBody, bodyEditable, firstNavigationPage, generatedBlock, pageText, parseWikiReference, wikiNavigation } from './wikiPage'
@@ -41,7 +42,8 @@ const GeneratedBlock = ({ document, structure, onOpenPage }: {
  * body as Markdown, else its sections, then a Master's generated page list. A board or issue
  * reference that stands alone as a paragraph shows live through the scope's board adapter, only
  * where the workspace holds its own connection to that board; a page reference or `/wiki/<slug>`
- * link of the same Wiki opens that page. With `editable`, the body (or, for a page without one, each
+ * link of the same Wiki opens that page. A search over the sections the connection can read opens a
+ * result's page, read again then. With `editable`, the body (or, for a page without one, each
  * section) can be edited, the edit being a proposal through the approval path. The agent view shows
  * the page as an agent reads it.
  */
@@ -121,9 +123,13 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       {navigation && (list.status === 'ready' && list.documents.length === 0
         ? <p className="text-sm text-kumo-subtle">This Wiki has no pages you can open.</p>
         : <div className="flex flex-wrap gap-4">
-          <nav aria-label="Wiki pages" className="w-full min-w-0 @3xl:w-56 @3xl:shrink-0">
-            <WikiNavigation navigation={navigation} selected={slug} onSelect={setChosen} />
-          </nav>
+          <div className="w-full min-w-0 space-y-3 @3xl:w-56 @3xl:shrink-0">
+            <WikiSearch onOpenPage={setChosen} onSearch={query => data?.search(query)
+              ?? Promise.resolve({ ok: false, code: 'NOT_LOADED', message: 'The Wiki is not loaded.' })} />
+            <nav aria-label="Wiki pages">
+              <WikiNavigation navigation={navigation} selected={slug} onSelect={setChosen} />
+            </nav>
+          </div>
           <div className="min-w-0 flex-1 space-y-3">
             {slug === null && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the Wiki…</p>}
             {slug !== null && !listed && <p role="status" className="text-sm text-kumo-subtle">
