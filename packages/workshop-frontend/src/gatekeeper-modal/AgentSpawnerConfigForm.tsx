@@ -1,6 +1,7 @@
-import { Checkbox, Select } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, WorkpieceId, validateBindingName } from '@gadgets/workshop-shared/api'
-import { WorkshopInput } from '../components/WorkshopControls'
+import { Select } from '@cloudflare/kumo'
+import { AiChatAuthorInfo, MAX_INSTANCE_INSTRUCTIONS_LENGTH, WorkpieceId, validateBindingName } from '@gadgets/workshop-shared/api'
+import { WorkshopInput, WorkshopInputArea } from '../components/WorkshopControls'
+import { AgentBindingsField } from './AgentBindingsField'
 import { ConnectionConfigField } from './ConnectionConfigField'
 
 /**
@@ -53,31 +54,57 @@ export function spawnerEnvFromRows(rows: SpawnerEnvRow[]): Record<string, Workpi
   return env
 }
 
-export interface AgentSpawnerConfigFormProps {
+/**
+ * The rows for an existing agent's env: every entry it has, switched on under its current name,
+ * then each candidate it doesn't use, switched off. Targets outside the candidates keep the target
+ * id as their title, so nothing the agent can reach is hidden.
+ */
+export function rowsForAgentEnv(
+  env: Record<string, WorkpieceId>,
+  candidates: Omit<SpawnerEnvRow, 'enabled'>[],
+): SpawnerEnvRow[] {
+  const titles = new Map(candidates.map((c) => [c.target, c.targetTitle]))
+  const used = new Set(Object.values(env))
+  return [
+    ...Object.entries(env).map(([name, target]) => ({
+      target, name, enabled: true, targetTitle: titles.get(target) ?? `Workpiece ${target}`,
+    })),
+    ...candidates.filter((c) => !used.has(c.target)).map((c) => ({ ...c, enabled: false })),
+  ]
+}
+
+/** The agent's bindings, when the form edits them together with the rest. */
+interface AgentSpawnerEnvProps {
+  env: SpawnerEnvRow[]
+  envError: string | null
+  onEnvChange: (env: SpawnerEnvRow[]) => void
+}
+
+export type AgentSpawnerConfigFormProps = {
   availableModels: AiChatAuthorInfo[]
   displayName: string
   modelId: string | null
-  env: SpawnerEnvRow[]
-  envError: string | null
+  instructions: string
   onDisplayNameChange: (value: string) => void
   onModelIdChange: (id: string | null) => void
-  onEnvChange: (env: SpawnerEnvRow[]) => void
+  onInstructionsChange: (value: string) => void
+  /** Present when the form also edits the agent's bindings (creating one); absent when they are edited apart. */
+  bindings?: AgentSpawnerEnvProps
+  /** Why the model and instructions can't be changed here, which shows them read-only; absent when they can. */
+  lockedReason?: string
 }
 
 export function AgentSpawnerConfigForm({
   availableModels,
   displayName,
   modelId,
-  env,
-  envError,
+  instructions,
   onDisplayNameChange,
   onModelIdChange,
-  onEnvChange,
+  onInstructionsChange,
+  bindings,
+  lockedReason,
 }: AgentSpawnerConfigFormProps) {
-  const updateRow = (index: number, updates: Partial<SpawnerEnvRow>) => {
-    onEnvChange(env.map((row, i) => (i === index ? { ...row, ...updates } : row)))
-  }
-
   return (
     <section className="grid gap-4">
       <ConnectionConfigField
@@ -102,6 +129,7 @@ export function AgentSpawnerConfigForm({
           className="w-full text-sm [&_button]:!h-9"
           placeholder="Select a model"
           value={modelId}
+          disabled={lockedReason !== undefined}
           onValueChange={(v) => onModelIdChange(v as string | null)}
           renderValue={(id) => {
             if (id === null) return 'None (no agent)'
@@ -123,43 +151,28 @@ export function AgentSpawnerConfigForm({
       </ConnectionConfigField>
 
       <ConnectionConfigField
-        label="Agent bindings"
-        description="What spawned agents may use, and the names they see it under."
+        label="Instructions"
+        description="What this agent is for. It shapes how spawned agents work, never what they can reach."
       >
-        {env.length === 0 ? (
-          <p className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-            Nothing is available to offer spawned agents here. Create the agent from a gadget's
-            Connections tab to give it access to that gadget and its resources.
-          </p>
-        ) : (
-          <div className="grid gap-2">
-            {env.map((row, index) => (
-              <div key={`${row.target}:${index}`} className="flex items-center gap-2">
-                <Checkbox
-                  aria-label={`Give spawned agents access to ${row.targetTitle}`}
-                  checked={row.enabled}
-                  onCheckedChange={(checked) => updateRow(index, { enabled: checked === true })}
-                />
-                <WorkshopInput
-                  aria-label={`Binding name for ${row.targetTitle}`}
-                  value={row.name}
-                  disabled={!row.enabled}
-                  onChange={(e) => updateRow(index, { name: e.target.value })}
-                  className="!h-8 w-[180px] min-w-0 font-mono"
-                />
-                <span className="min-w-0 flex-1 truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                  {row.targetTitle}
-                </span>
-              </div>
-            ))}
-            {envError && (
-              <p className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-danger">
-                {envError}
-              </p>
-            )}
-          </div>
-        )}
+        <WorkshopInputArea
+          aria-label="Agent instructions"
+          placeholder="e.g. Triage new service enquiries and draft a reply for review."
+          value={instructions}
+          maxLength={MAX_INSTANCE_INSTRUCTIONS_LENGTH}
+          readOnly={lockedReason !== undefined}
+          onChange={(e) => onInstructionsChange(e.target.value)}
+          rows={4}
+          className="w-full"
+        />
       </ConnectionConfigField>
+
+      {lockedReason && (
+        <p className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+          {lockedReason}
+        </p>
+      )}
+
+      {bindings && <AgentBindingsField {...bindings} />}
     </section>
   )
 }

@@ -217,6 +217,7 @@ export default function GatekeeperModal({
 
   const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
   const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
+  const [spawnerInstructions, setSpawnerInstructions] = useState('')
   const [spawnerEnv, setSpawnerEnv] = useState<SpawnerEnvRow[]>([])
   const spawnerEnvError = validateSpawnerEnv(spawnerEnv)
 
@@ -365,6 +366,7 @@ export default function GatekeeperModal({
     setSelectedModelId(undefined)
     setSpawnerDisplayName('')
     setSpawnerModelId(null)
+    setSpawnerInstructions('')
     setSpawnerEnv(
       (spawnerEnvCandidatesRef.current ?? []).map(entry => ({ ...entry, enabled: true })))
 
@@ -687,6 +689,7 @@ export default function GatekeeperModal({
       displayName: spawnerDisplayName.trim(),
       modelId: spawnerModelId,
       env: spawnerEnvFromRows(spawnerEnv),
+      ...(spawnerInstructions.trim() ? { instructions: spawnerInstructions.trim() } : {}),
     }
 
     setCreating(true)
@@ -871,11 +874,11 @@ export default function GatekeeperModal({
                     availableModels={availableModels}
                     displayName={spawnerDisplayName}
                     modelId={spawnerModelId}
-                    env={spawnerEnv}
-                    envError={spawnerEnvError}
+                    instructions={spawnerInstructions}
                     onDisplayNameChange={setSpawnerDisplayName}
                     onModelIdChange={setSpawnerModelId}
-                    onEnvChange={setSpawnerEnv}
+                    onInstructionsChange={setSpawnerInstructions}
+                    bindings={{ env: spawnerEnv, envError: spawnerEnvError, onEnvChange: setSpawnerEnv }}
                   />
                 )}
               </div>

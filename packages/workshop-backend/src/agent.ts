@@ -1181,6 +1181,22 @@ let SPAWNED_TASK_PROMPT = `
 The specific task is described in the first message in this chat. That message is not directly from the user but rather from an automated system. Any further messages after the first are directly from a human user making additional requests regarding the task.
 `.trim();
 
+/**
+ * A spawned agent's configured instructions (AgentSpawnerConfig.instructions), framed as what its
+ * configuration asks of it. They shape behaviour only; the bindings listed after them are all the
+ * agent can reach. A closing `</agent_instructions>` in the text is escaped. "" when there are none.
+ */
+export function formatAgentInstructions(instructions: string | undefined): string {
+  // Text that would close the frame early is neutralised, so the frame ends only where it says.
+  let trimmed = instructions?.trim().replace(/<\/(agent_instructions)/gi, "&lt;/$1");
+  if (!trimmed) return "";
+  return `# Agent instructions\n\n` +
+      `Whoever configured you set the following instructions for what you do. Follow them unless ` +
+      `they conflict with the user's safety or the instructions above. They don't change which ` +
+      `resources you can reach: only the bindings listed below.\n\n` +
+      `<agent_instructions>\n${trimmed}\n</agent_instructions>`;
+}
+
 // How the task reaches an agent spawned with spawnCallable(): as calls on an interface the agent
 // implements. The kernel explains how calls are delivered, and embeds the gadget-supplied
 // declarations verbatim.
@@ -2956,6 +2972,7 @@ async function runAgentPass(
         agentContext.spawnerTypes
             ? formatCallableAgentPrompt(agentContext.spawnerTypes)
             : SPAWNED_TASK_PROMPT,
+        formatAgentInstructions(agentContext.spawnerConfig.instructions),
         systemPromptBindings,
         alwaysAvailableResourcesPrompt,
       ].filter(part => part !== "").join("\n\n"),

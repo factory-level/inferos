@@ -4,7 +4,7 @@
 // instead of staying on "Loading gatekeepers..." or showing "No gatekeepers yet".
 import { act, type ComponentType } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { LOAD_TIMEOUT_MS } from './loadTimeout'
 
 type Subscriber = { ready(): void }
@@ -30,7 +30,8 @@ import { Route } from './routes/gatekeepers'
 // The router plugin splits route components into a lazy wrapper; load it first so a render is
 // synchronous and fake timers start with the page's own timers.
 const Page = (Route as unknown as { options: { component: ComponentType & { preload?: () => Promise<void> } } }).options.component
-beforeAll(async () => { await Page.preload?.() })
+// Load the router's split chunk during module collection, before tests run and fake timers start.
+await Page.preload?.()
 // A subscription the test settles: `ready()` lists no accounts; never calling it is a hang.
 const subscription = (answer: 'ready' | 'hang') => (subscriber: Subscriber) => {
   if (answer === 'ready') queueMicrotask(() => subscriber.ready())

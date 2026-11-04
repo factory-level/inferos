@@ -2,7 +2,7 @@ import { Button } from '@cloudflare/kumo'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasOperation, CanvasSection, CanvasWidget } from '@gadgets/workshop-shared/canvas'
 import { CanvasBoardSummary } from './CanvasBoardSummary'
-import { gadgetIdOf, widgetSpanClass } from './canvasLayout'
+import { widgetLabel, widgetSpanClass } from './canvasLayout'
 
 export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, onEdit }: {
   widget: CanvasWidget
@@ -14,8 +14,7 @@ export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, onEdit
 }) => {
   const configure = (widget: CanvasWidget) => void onEdit([{ type: 'configureWidget', widget }])
   const noun = widget.kind === 'inferos.gadget' ? 'gadget' : widget.kind === 'inferops.wiki' ? 'Wiki' : 'board'
-  const label = widget.kind === 'inferos.gadget' ? `Gadget ${gadgets.get(gadgetIdOf(widget.targetRef))?.title ?? widget.targetRef}`
-    : widget.kind === 'inferops.wiki' ? `InferMind Wiki ${widget.targetRef}` : `Project board ${widget.targetRef}`
+  const label = widgetLabel(widget, gadgets)
   return <article className={`min-w-0 space-y-3 rounded-xl border border-kumo-line bg-kumo-base shadow-md p-4 ${widgetSpanClass(widget.size, section.columns)}`} aria-label={label}>
     {widget.kind === 'inferos.gadget'
       ? <div><h4 className="font-medium text-kumo-default">{label}</h4><p className="text-sm text-kumo-subtle">Shows the gadget's live interface outside edit mode.</p></div>

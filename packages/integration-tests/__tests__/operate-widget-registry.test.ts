@@ -1,7 +1,7 @@
 import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AuthenticatedApi, OperateSession, Overseer, PublicApi, WorkpieceId } from "@gadgets/workshop-shared/api";
-import type { ConsoleWidgetEntry, OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleWidgetVersionId, type ConsoleWidgetEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { diffFiles, type CodeContent } from "@gadgets/workshop-shared/code-change";
 import { startHarness, type Harness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
@@ -521,5 +521,74 @@ describe("a console's widget registry", () => {
     await commit(workspace, watched, gadgetId, toolsOnly, { ...toolsOnly, "tools.json": free });
     await expect(workspace.updateBlueprint(blueprint.id, { updateCode: true })).rejects.toThrow(
         /This gadget's tools\.json is not a valid tool list: tool "version"'s input\.q is a free string/);
+  });
+});
+
+// FAC-85: what a builder may register, said by the kernel. Each widget install of the workspace is
+// described with its stable version, what its current commit offers and, when a console can't offer
+// it, the reason the save would give; the editor offers only what this says a console can.
+describe("a workspace's widget candidates", () => {
+  it("describes each install with its stable version, what it offers, and why a console can't offer it", async () => {
+    const author = await signUp(publicApi, nextUsernames("candidateauthor")[0]!);
+    const widget = await publishWidget(author);
+    const s = await operationsSpace("candidate");
+    const visual = await s.space.installBlueprint(widget.blueprintId, {}, { version: 1, kind: "widget" });
+
+    // A callable widget with a UI declares a tool.
+    const workspace = await author.newGadget("widget");
+    const watched = await watch(workspace);
+    const gadget = workspace.createGadget("Tools", undefined, "TOOLS");
+    const toolsGadget = await gadget.getId();
+    const tools = JSON.stringify([{
+      name: "version", description: "The widget's version.", method: "version", effect: "read",
+      input: { type: "object", properties: {} }, output: { type: "string", maxLength: 16 },
+    }]);
+    await commit(workspace, watched, toolsGadget, {}, { ...widgetFiles("v1"), "tools.json": tools });
+    const toolsBlueprint = await gadget.createBlueprint("Tools");
+    await waitFor("the tools blueprint", () => reader.getBlueprintInfo(toolsBlueprint.id));
+    const callable = await s.space.installBlueprint(toolsBlueprint.id, {}, { version: 1, kind: "widget" });
+
+    // A version with a data contract is an install a console refuses.
+    const durableSpace = await author.newGadget("widget");
+    const durableWatched = await watch(durableSpace);
+    const durableGadget = durableSpace.createGadget("Durable", undefined, "DURABLE");
+    await commit(durableSpace, durableWatched, await durableGadget.getId(), {}, widgetFiles("v1"));
+    const durable = await durableGadget.createBlueprint("Durable", "", undefined, { dataContract: 1 });
+    await waitFor("the durable blueprint", () => reader.getBlueprintInfo(durable.id));
+    const durableInstall = await s.space.installBlueprint(durable.id, {}, { version: 1 });
+
+    const candidates = await waitFor("every install's head", async () => {
+      const listed = await s.space.listConsoleWidgetCandidates();
+      return listed.length === 3 && listed.every(c => c.commitId !== null) ? listed : null;
+    });
+    const byId = new Map(candidates.map(c => [c.gadgetId, c]));
+    expect(byId.get(visual)).toEqual({
+      gadgetId: visual, blueprintId: widget.blueprintId, version: 1,
+      versionId: consoleWidgetVersionId({ blueprintId: widget.blueprintId, version: 1 }),
+      commitId: await s.watched.head(visual), surfaces: { ui: true, tools: [] }, refusal: null,
+    });
+    expect(byId.get(callable)).toMatchObject({ surfaces: { ui: true, tools: ["version"] }, refusal: null });
+    expect(byId.get(durableInstall)?.refusal).toMatch(/data contract/);
+    expect(consoleWidgetVersionId({ blueprintId: "abc", version: 2 })).toBe("abc@2");
+
+    // Publishing makes frozen installs, which are never candidates; the published entry keeps the
+    // registered version's id across a republish, although each publication's frozen install is new.
+    const entry: ConsoleWidgetEntry = { gadgetId: visual, blueprintId: widget.blueprintId, version: 1, label: "Status", state: "resettable" };
+    const screen = await screenWith(s.space, [visual]);
+    const created = await s.space.createConsole(consoleOf(screen.id, [entry]));
+    const first = await s.space.publishConsole(created.id, created.revision);
+    const edited = await s.space.replaceConsole(first.id, first.revision, consoleOf(screen.id, [{ ...entry, label: "Status now" }]));
+    const second = await s.space.publishConsole(edited.id, edited.revision);
+    const [firstEntry] = first.published!.content.widgets!;
+    const [secondEntry] = second.published!.content.widgets!;
+    expect(secondEntry!.gadgetId).not.toBe(firstEntry!.gadgetId);
+    expect(consoleWidgetVersionId(secondEntry!)).toBe(byId.get(visual)!.versionId);
+    expect(consoleWidgetVersionId(firstEntry!)).toBe(consoleWidgetVersionId(secondEntry!));
+    expect((await s.space.listConsoleWidgetCandidates()).map(c => c.gadgetId).toSorted()).toEqual(
+        [visual, callable, durableInstall].toSorted());
+
+    // The use role has no such read: it is for builders.
+    using used = await s.operator.openGadget(s.spaceId);
+    await expect(used.listConsoleWidgetCandidates()).rejects.toThrow(/Unauthorized/);
   });
 });

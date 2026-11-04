@@ -1,7 +1,7 @@
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { consoleScreens, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
@@ -561,6 +561,45 @@ export class WorkspaceConsoleStore {
     let current = id === undefined ? undefined : this.storage.consoles.get(id);
     let merged = this.#inherit(content, current ?? undefined);
     return captureConsole(this.storage, { ...merged, id: "", revision: "", published: null }).commitIds;
+  }
+
+  // The workspace's widget installs: permanent, unfrozen gadgets installed from a widget blueprint.
+  #widgetInstalls() {
+    return Array.from(this.storage.gadgets.list()).flatMap(record =>
+      record.type === "gadget" && !record.pending && !record.frozenFor && record.installedFrom?.kind === "widget"
+        ? [{ record, installed: record.installedFrom }] : []);
+  }
+
+  /** The current commits `widgetCandidates` describes, to read first (see `SourceCommits`). */
+  widgetCandidateCommitIds(): string[] {
+    this.#requireEnabled();
+    return this.#widgetInstalls().flatMap(({ record }) => record.commitId ?? []);
+  }
+
+  /**
+   * Every widget install of this workspace as a console registry candidate (`ConsoleWidgetCandidate`),
+   * checked by `consoleWidgetRefusal` against `commits`, which `widgetCandidateCommitIds` names. An
+   * install that moved since they were read is refused with `CONSOLE_CHANGED`, as a save would be.
+   */
+  widgetCandidates(commits: SourceCommits): ConsoleWidgetCandidate[] {
+    this.#requireEnabled();
+    return this.#widgetInstalls().map(({ record, installed }) => {
+      let entry: ConsoleWidgetEntry = { gadgetId: record.id, blueprintId: installed.blueprintId,
+        version: installed.version, label: "", state: "resettable" };
+      let refusal: string | null;
+      try {
+        refusal = consoleWidgetRefusal(this.storage, entry, commits);
+      } catch (err) {
+        refusal = err instanceof Error ? err.message : String(err);
+      }
+      let commit = record.commitId === undefined ? undefined : commits.get(record.commitId);
+      let fileClass = commit?.classification.class;
+      let runs = fileClass === "visualWidget" || fileClass === "callableTools" || fileClass === "callableCombined";
+      return { gadgetId: record.id, blueprintId: entry.blueprintId, version: entry.version,
+        versionId: consoleWidgetVersionId(entry), commitId: record.commitId ?? null,
+        surfaces: runs ? { ui: fileClass !== "callableTools", tools: commit!.tools?.map(tool => tool.name) ?? [] } : null,
+        refusal };
+    });
   }
 
   list(): OperateConsole[] {

@@ -25,7 +25,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "./workflow-definition.js";
 import type {
@@ -2588,7 +2588,23 @@ export type AgentSpawnerConfig = {
    * agent reads these bindings with the spawner creator's authority.
    */
   env: Record<string, WorkpieceId>,
+
+  /**
+   * What spawned agents are for, written by whoever configures the agent: added to each spawned
+   * agent's system prompt, framed as its configured instructions. At most
+   * MAX_INSTANCE_INSTRUCTIONS_LENGTH characters. Behaviour only: it grants nothing. A spawned
+   * agent reaches exactly `env`, whatever the instructions say, and changing them never changes
+   * `env` (see Overseer.updateAgentSpawner). Absent on agents configured without instructions.
+   */
+  instructions?: string,
 };
+
+/**
+ * The parts of an agent spawner's configuration that describe its behaviour, which
+ * Overseer.updateAgentSpawner changes. `env` (what the agent can reach) is deliberately not one of
+ * them: it changes only through Overseer.setAgentSpawnerEnv.
+ */
+export type AgentSpawnerBehaviour = Partial<Pick<AgentSpawnerConfig, "displayName" | "modelId" | "instructions">>;
 
 /**
  * Interface to a workspace's Overseer, used to display the Gadget Workshop shell UI around that
@@ -2672,6 +2688,13 @@ export interface Overseer extends RpcTarget {
    * (see `publishedConsole()`). Creating, replacing, publishing and deleting need build access.
    */
   listConsoles(): Promise<OperateConsole[]>;
+  /**
+   * Every widget install of this workspace a console could register, each with its stable
+   * version, what its current commit offers and, when a console can't offer it now, the reason a
+   * save would refuse it (see `ConsoleWidgetCandidate`): the same checks `createConsole()` and
+   * `replaceConsole()` make. Build only, and needs both view flags, like `listConsoles()`.
+   */
+  listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]>;
   /** Create an unpublished console draft under a server-minted ID and revision zero. Its views must reference canvases of this workspace; limit 16 per workspace. */
   createConsole(content: OperateConsoleContent): Promise<OperateConsole>;
   /** Replace a console's draft at its expected revision. Operators keep the published revision until `publishConsole()`. */
@@ -3041,9 +3064,40 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Create a new gatekeeper for an agent spawner binding. This allows the gadget to
-   * programmatically spawn AI agents to complete tasks.
+   * programmatically spawn AI agents to complete tasks. The config may hold only
+   * AgentSpawnerConfig's fields and needs a name; the caller becomes the agent's creator.
    */
   newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>>;
+
+  /**
+   * Change an agent spawner's name, model or instructions, and nothing else: its `env` stays as it
+   * is, and any other field is refused. `expected` is the configuration the caller last read (from
+   * GatekeeperClient.getCreationSpec()); if the spawner has changed since, the update is refused, so
+   * two editors never overwrite each other unseen. Only the agent's creator may change its model or
+   * instructions, because spawned agents run on the creator's account and act with the creator's
+   * authority; anyone else with build access may change its name. Agents already spawned keep the
+   * configuration they started with. Returns the new configuration.
+   */
+  updateAgentSpawner(id: WorkpieceId, expected: AgentSpawnerConfig,
+      behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig>;
+
+  /**
+   * An agent spawner's saved configuration, and whether the caller created it (and so may change
+   * its model, instructions and env). For reopening an agent to edit it.
+   */
+  getAgentSpawner(id: WorkpieceId): Promise<{config: AgentSpawnerConfig, createdByYou: boolean}>;
+
+  /**
+   * Replace what an agent spawner's agents can reach: its `env`, validated as
+   * newAgentSpawnerGatekeeper validates it, and never including this spawner or another that
+   * reaches it, so an agent can't spawn itself. Kept apart from updateAgentSpawner so a capability
+   * change is always its own, explicit step. Only the agent's creator may make it, because spawned
+   * agents reach these bindings with the creator's authority. `expected` is as for
+   * updateAgentSpawner. Agents already spawned keep the bindings they started with. Returns the new
+   * configuration.
+   */
+  setAgentSpawnerEnv(id: WorkpieceId, expected: AgentSpawnerConfig,
+      env: Record<string, WorkpieceId>): Promise<AgentSpawnerConfig>;
 
   /**
    * Fetch one page of action history, newest first by id (creation order). "all" (the default)

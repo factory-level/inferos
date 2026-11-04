@@ -131,3 +131,88 @@ it('preloads board cards against the canvas scroll pane with a 200px margin and 
     expect(container.textContent).toContain('Not connected')
   } finally { lookup.mockRestore() }
 })
+
+// FAC-82: edit mode is a tree of the view and an inspector for the one selected target.
+const twoSections: CanvasDefinition = { ...saved, sections: [...saved.sections, { id: 'side', title: 'Side', columns: 1, widgets: [] }] }
+const editable = (views: CanvasDefinition[] = [twoSections]) => {
+  const api = { listCanvases: vi.fn<Overseer['listCanvases']>(async () => views), createCanvas: vi.fn<Overseer['createCanvas']>(),
+    editCanvas: vi.fn<Overseer['editCanvas']>(), deleteCanvas: vi.fn<Overseer['deleteCanvas']>() }
+  return { api, storage: { kind: 'durable', api } as CanvasStorage }
+}
+const tree = () => container.querySelector('[aria-label="Edit targets"]')!
+const pick = async (name: string) => {
+  const item = [...tree().querySelectorAll('button')].find(entry => entry.textContent === name)
+  if (!item) throw new Error(`No tree item ${name}`)
+  await act(async () => item.click())
+}
+const breadcrumb = () => container.querySelector('[aria-label="Editing"]')!.textContent
+const inspector = () => container.querySelector('[aria-label="Selected target"]')!
+
+it('shows the view as a tree, and says exactly which target the controls edit', async () => {
+  const { storage } = editable()
+  await render(storage)
+  await act(async () => { button('Edit layout')!.click() })
+  expect([...tree().querySelectorAll('button')].map(item => item.textContent)).toEqual(['Ops', 'Main', `Project board ${BOARD}`, 'Side'])
+  expect(breadcrumb()).toContain('Ops')
+  expect(breadcrumb()).toContain('page:ops')
+  await pick('Main')
+  expect(breadcrumb()).toContain('Workspace')
+  expect(breadcrumb()).toContain('Ops')
+  expect(breadcrumb()).toContain('Main')
+  expect(breadcrumb()).toContain('page:ops/node:main')
+  expect(tree().querySelector('[aria-current="true"]')?.textContent).toBe('Main')
+  // Only the selected section's controls are shown: none of Side's, and no widget's.
+  expect(inspector().textContent).toContain('Section')
+  expect([...container.querySelectorAll('button')].filter(item => item.textContent === 'Remove section')).toHaveLength(1)
+  expect(container.querySelector('[aria-label="Side"]')).toBeNull()
+  expect([...container.querySelectorAll('button')].some(item => item.textContent === 'Remove board')).toBe(false)
+})
+
+it('edits only the selected section, leaving its siblings and its widgets alone', async () => {
+  const { api, storage } = editable()
+  api.editCanvas.mockResolvedValue({ ...twoSections, revision: '1' })
+  await render(storage)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick('Main')
+  await act(async () => { button('1 column')!.click() })
+  expect(api.editCanvas).toHaveBeenCalledOnce()
+  expect(api.editCanvas).toHaveBeenCalledWith('ops', '0', [{ type: 'configureSection', sectionId: 'main', title: 'Main', columns: 1 }])
+})
+
+it('edits only the selected widget, and selects its section once the widget is removed', async () => {
+  const { api, storage } = editable()
+  api.editCanvas.mockResolvedValue({ ...twoSections, revision: '1', sections: [{ ...twoSections.sections[0]!, widgets: [] }, twoSections.sections[1]!] })
+  await render(storage)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick(`Project board ${BOARD}`)
+  expect(breadcrumb()).toContain('page:ops/node:b')
+  expect(breadcrumb()).toContain('Main')
+  expect([...container.querySelectorAll('button')].some(item => item.textContent === 'Remove section')).toBe(false)
+  await act(async () => { button('Remove board')!.click() })
+  expect(api.editCanvas).toHaveBeenCalledWith('ops', '0', [{ type: 'removeWidget', widgetId: 'b' }])
+  expect(breadcrumb()).toContain('page:ops/node:main')
+  expect(container.textContent).not.toContain('no longer on this view')
+})
+
+it('says so when the selected target is no longer on the view, and edits the view instead', async () => {
+  const { api, storage } = editable()
+  await render(storage)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick('Side')
+  api.listCanvases.mockResolvedValue([{ ...saved, revision: '3' }])
+  await act(async () => { button('Reload saved views')!.click() })
+  expect(container.querySelector('[role="status"][aria-label="Selection"]')?.textContent).toContain('no longer on this view')
+  expect(breadcrumb()).toContain('page:ops')
+  expect(breadcrumb()).not.toContain('node:side')
+})
+
+it('names the exact target in a request handed to the agent', async () => {
+  const onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => {})
+  const { storage } = editable()
+  await render(storage, { widgetKinds: ['inferos.gadget'],
+    blueprints: [{ blueprintId: 'inferops.kanban', label: 'InferOps Kanban', description: 'A project board.' }], screens: [] }, onAskAgent)
+  await act(async () => { button('Edit layout')!.click() })
+  await pick('Side')
+  await act(async () => { button('InferOps Kanban')!.click() })
+  expect(onAskAgent.mock.calls[0]![0]).toContain('(target page:ops/node:side)')
+})
