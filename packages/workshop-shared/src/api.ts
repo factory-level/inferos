@@ -3025,7 +3025,8 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Create a new gatekeeper for an agent spawner binding. This allows the gadget to
-   * programmatically spawn AI agents to complete tasks.
+   * programmatically spawn AI agents to complete tasks. The config may hold only
+   * AgentSpawnerConfig's fields and needs a name; the caller becomes the agent's creator.
    */
   newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>>;
 
@@ -3033,16 +3034,24 @@ export interface Overseer extends RpcTarget {
    * Change an agent spawner's name, model or instructions, and nothing else: its `env` stays as it
    * is, and any other field is refused. `expected` is the configuration the caller last read (from
    * GatekeeperClient.getCreationSpec()); if the spawner has changed since, the update is refused, so
-   * two editors never overwrite each other unseen. Only the agent's creator may change its model,
-   * because spawned agents run on the creator's account. Agents already spawned keep the
+   * two editors never overwrite each other unseen. Only the agent's creator may change its model or
+   * instructions, because spawned agents run on the creator's account and act with the creator's
+   * authority; anyone else with build access may change its name. Agents already spawned keep the
    * configuration they started with. Returns the new configuration.
    */
   updateAgentSpawner(id: WorkpieceId, expected: AgentSpawnerConfig,
       behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig>;
 
   /**
+   * An agent spawner's saved configuration, and whether the caller created it (and so may change
+   * its model, instructions and env). For reopening an agent to edit it.
+   */
+  getAgentSpawner(id: WorkpieceId): Promise<{config: AgentSpawnerConfig, createdByYou: boolean}>;
+
+  /**
    * Replace what an agent spawner's agents can reach: its `env`, validated as
-   * newAgentSpawnerGatekeeper validates it. Kept apart from updateAgentSpawner so a capability
+   * newAgentSpawnerGatekeeper validates it, and never including this spawner or another that
+   * reaches it, so an agent can't spawn itself. Kept apart from updateAgentSpawner so a capability
    * change is always its own, explicit step. Only the agent's creator may make it, because spawned
    * agents reach these bindings with the creator's authority. `expected` is as for
    * updateAgentSpawner. Agents already spawned keep the bindings they started with. Returns the new

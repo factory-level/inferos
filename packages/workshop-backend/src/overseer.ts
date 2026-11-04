@@ -337,6 +337,9 @@ function sameAgentSpawnerConfig(a: AgentSpawnerConfig, b: AgentSpawnerConfig): b
       (a.instructions ?? "") === (b.instructions ?? "") && envOf(a) === envOf(b);
 }
 
+// The settings an AgentSpawnerConfig has; create stores nothing else.
+const AGENT_SPAWNER_CONFIG_KEYS = ["displayName", "modelId", "env", "instructions"];
+
 // An agent's instructions are behaviour only, and bounded like the deployment-wide instructions.
 function validateAgentSpawnerInstructions(instructions: unknown): void {
   if (instructions === undefined) return;
@@ -6263,13 +6266,16 @@ class OverseerImpl implements AgentHooks {
   // gadget binding the spawner, which restarts the sessions it reaches, as binding does; whether
   // the env stays within each gadget's bindings is checked on every call (assertSpawnerCallScope).
   // Synchronous, so the compare, the write and the restart can't interleave with another request.
-  replaceAgentSpawnerConfig(id: WorkpieceId, expected: AgentSpawnerConfig, config: AgentSpawnerConfig,
+  // `change` is applied to the configuration read here, never to one read before an await.
+  replaceAgentSpawnerConfig(id: WorkpieceId, expected: AgentSpawnerConfig,
+      change: (current: AgentSpawnerConfig) => AgentSpawnerConfig,
       model?: {modelProvider?: string, modelName?: string, mock: boolean}): AgentSpawnerConfig {
     let record = this.storage.gatekeepers.get(id);
     if (record?.creationSpec?.type !== "agentSpawner") throw new Error(`Workpiece ${id} is not an agent.`);
     if (!sameAgentSpawnerConfig(record.creationSpec.config, expected)) {
       throw new Error("This agent was changed since you opened it. Reopen it and try again.");
     }
+    let config = change(record.creationSpec.config);
     let useScopeBefore = this.#accountRequiringUseScope();
     let creatorUserId = record.agentSpawnerCreatorUserId;
     let props: AgentSpawnerBindingProps = {
@@ -13508,6 +13514,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     await this.#requireSharedConfiguration("build", "shared");
+    // The RPC input is untyped at runtime: store only the settings an agent has.
+    for (let key of Object.keys(config)) {
+      if (!AGENT_SPAWNER_CONFIG_KEYS.includes(key)) {
+        throw new Error(`"${key}" is not an agent setting.`);
+      }
+    }
+    if (typeof config.displayName !== "string" || !config.displayName.trim()) {
+      throw new Error("An agent needs a name.");
+    }
     this.#validateAgentSpawnerEnv(config.env);
     validateAgentSpawnerInstructions(config.instructions);
 
@@ -13544,25 +13559,39 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     let record = this.#agentSpawnerRecord(id);
     let current = record.creationSpec.config;
-    let config: AgentSpawnerConfig = {...current};
-    if (behaviour.displayName !== undefined) {
-      if (typeof behaviour.displayName !== "string" || !behaviour.displayName.trim()) {
-        throw new Error("An agent needs a name.");
-      }
-      config.displayName = behaviour.displayName;
+    let {displayName, instructions, modelId} = behaviour;
+    if (displayName !== undefined && (typeof displayName !== "string" || !displayName.trim())) {
+      throw new Error("An agent needs a name.");
     }
-    if (behaviour.instructions !== undefined) {
-      validateAgentSpawnerInstructions(behaviour.instructions);
-      if (behaviour.instructions.trim()) config.instructions = behaviour.instructions;
-      else delete config.instructions;
+    if (instructions !== undefined) {
+      validateAgentSpawnerInstructions(instructions);
+      // Instructions decide what the creator's authority is used for, so they are the creator's.
+      if (instructions.trim() !== (current.instructions ?? "").trim()) {
+        this.#requireAgentSpawnerCreator(record, "instructions");
+      }
     }
     let model;
-    if (behaviour.modelId !== undefined && behaviour.modelId !== current.modelId) {
+    if (modelId !== undefined && modelId !== current.modelId) {
       this.#requireAgentSpawnerCreator(record, "model");
-      config.modelId = behaviour.modelId;
-      model = await this.#resolveAgentSpawnerModel(behaviour.modelId);
+      model = await this.#resolveAgentSpawnerModel(modelId);
     }
-    return this.impl.replaceAgentSpawnerConfig(id, expected, config, model);
+    return this.impl.replaceAgentSpawnerConfig(id, expected, latest => {
+      let config: AgentSpawnerConfig = {...latest};
+      if (displayName !== undefined) config.displayName = displayName;
+      if (modelId !== undefined) config.modelId = modelId;
+      if (instructions !== undefined) {
+        if (instructions.trim()) config.instructions = instructions;
+        else delete config.instructions;
+      }
+      return config;
+    }, model);
+  }
+
+  async getAgentSpawner(id: WorkpieceId)
+      : Promise<{config: AgentSpawnerConfig, createdByYou: boolean}> {
+    await this.#requireSharedConfiguration("build", "shared");
+    let record = this.#agentSpawnerRecord(id);
+    return {config: record.creationSpec.config, createdByYou: this.#isAgentSpawnerCreator(record)};
   }
 
   async setAgentSpawnerEnv(id: WorkpieceId, expected: AgentSpawnerConfig,
@@ -13570,9 +13599,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("build", "shared");
     let record = this.#agentSpawnerRecord(id);
     this.#requireAgentSpawnerCreator(record, "capabilities");
-    this.#validateAgentSpawnerEnv(env);
-    return this.impl.replaceAgentSpawnerConfig(
-        id, expected, {...record.creationSpec.config, env: {...env}});
+    this.#validateAgentSpawnerEnv(env, id);
+    return this.impl.replaceAgentSpawnerConfig(id, expected, latest => ({...latest, env: {...env}}));
   }
 
   // The stored record of agent spawner `id`, with its spec narrowed to the spawner's.
@@ -13588,19 +13616,31 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // authority, so only the creator may change what those are: another editor would otherwise
   // choose them under someone else's authority. Records from before creators were kept fall back
   // to the workspace owner, as spawning does.
-  #requireAgentSpawnerCreator(record: GatekeeperRecord, what: "model" | "capabilities"): void {
-    let creator = record.agentSpawnerCreatorUserId ?? this.impl.ownerId;
-    if (creator !== this.#clientUser.id.toString()) {
+  #requireAgentSpawnerCreator(record: GatekeeperRecord,
+      what: "model" | "capabilities" | "instructions"): void {
+    if (!this.#isAgentSpawnerCreator(record)) {
       throw new Error(`Only the person who created this agent can change its ${what}: its agents ` +
           `run with that person's account and authority.`);
     }
   }
 
+  // Whether the calling person created this agent (see #requireAgentSpawnerCreator).
+  #isAgentSpawnerCreator(record: GatekeeperRecord): boolean {
+    return (record.agentSpawnerCreatorUserId ?? this.impl.ownerId) === this.#clientUser.id.toString();
+  }
+
   // Validate a spawner's env: names must be valid binding names and targets must exist -- and must
   // not be gadgets still provisional to some chat, which belong to that chat's unaccepted proposal,
   // not (yet) to the workspace. (Spawn-time snapshotting tolerates targets deleted later; this just
-  // catches bad input.)
-  #validateAgentSpawnerEnv(env: Record<string, WorkpieceId>): void {
+  // catches bad input.) For an existing spawner `selfId`, no target may be it or reach it through
+  // other spawners' env, or each spawned agent could spawn the next without end. Env was fixed at
+  // creation before it became editable, when a spawner's own id didn't exist yet and every target
+  // it named was older, so stored spawner graphs are acyclic and need no spawn-depth backstop.
+  #validateAgentSpawnerEnv(env: Record<string, WorkpieceId>, selfId?: WorkpieceId): void {
+    if (selfId !== undefined && this.#agentSpawnerReaches(Object.values(env), selfId)) {
+      throw new Error("This agent's capabilities would let this agent spawn itself, directly or " +
+          "through other agents. Remove that agent from its capabilities.");
+    }
     for (let [name, target] of Object.entries(env)) {
       validateBindingName(name);
       if (name === GIT_BINDING_NAME) {
@@ -13623,6 +13663,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
             `which does not exist.`);
       }
     }
+  }
+
+  // Whether any of `targets` is spawner `selfId` or reaches it through spawners' env.
+  #agentSpawnerReaches(targets: WorkpieceId[], selfId: WorkpieceId): boolean {
+    let seen = new Set<WorkpieceId>();
+    let queue = [...targets];
+    while (queue.length) {
+      let target = queue.pop()!;
+      if (target === selfId) return true;
+      if (seen.has(target)) continue;
+      seen.add(target);
+      let spec = this.impl.storage.gatekeepers.get(target)?.creationSpec;
+      if (spec?.type === "agentSpawner") queue.push(...Object.values(spec.config.env ?? {}));
+    }
+    return false;
   }
 
   // The model provider and name a spawner's blueprint metadata records, from the calling user's
@@ -15268,6 +15323,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async updateAgentSpawner(_id: WorkpieceId, _expected: AgentSpawnerConfig,
       _behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig> { this.#deny(); }
+  async getAgentSpawner(_id: WorkpieceId)
+      : Promise<{config: AgentSpawnerConfig, createdByYou: boolean}> { this.#deny(); }
   async setAgentSpawnerEnv(_id: WorkpieceId, _expected: AgentSpawnerConfig,
       _env: Record<string, WorkpieceId>): Promise<AgentSpawnerConfig> { this.#deny(); }
   // Pending actions are queried eagerly for the badge; resolved history is demand-loaded. Return
@@ -15594,6 +15651,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   }
   async updateAgentSpawner(_id: WorkpieceId, _expected: AgentSpawnerConfig,
       _behaviour: AgentSpawnerBehaviour): Promise<AgentSpawnerConfig> { this.#deny(); }
+  async getAgentSpawner(_id: WorkpieceId)
+      : Promise<{config: AgentSpawnerConfig, createdByYou: boolean}> { this.#deny(); }
   async setAgentSpawnerEnv(_id: WorkpieceId, _expected: AgentSpawnerConfig,
       _env: Record<string, WorkpieceId>): Promise<AgentSpawnerConfig> { this.#deny(); }
   async listHooks(): Promise<BoundHookInfo[]> { this.#deny(); }

@@ -129,6 +129,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
     ws.newAgentSpawnerGatekeeper({ displayName: "Spawner", modelId: null, env: {} }),
   updateAgentSpawner: ws =>
     ws.updateAgentSpawner(1, { displayName: "Spawner", modelId: null, env: {} }, { instructions: "x" }),
+  getAgentSpawner: ws => ws.getAgentSpawner(1),
   setAgentSpawnerEnv: ws =>
     ws.setAgentSpawnerEnv(1, { displayName: "Spawner", modelId: null, env: {} }, {}),
   approveAction: ws => ws.approveAction(0),

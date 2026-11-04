@@ -88,13 +88,15 @@ An agent spawner is the workspace's configured agent. Its `AgentSpawnerConfig` i
 - **Behaviour and capability are separate operations, both needing `build`** (FAC-44's `requireSharedConfiguration`, as creating one does):
   - `Overseer.updateAgentSpawner(id, expected, behaviour)` changes the name, model or instructions. It refuses an `env` key, or any other key, so an edit can't carry a capability change.
   - `Overseer.setAgentSpawnerEnv(id, expected, env)` is the only way to change `env`, validated as at creation.
-- **Only the creator** may change the model or `env`: spawned agents run on the creator's account and reach their bindings with the creator's authority. Another `build` holder may change the name and instructions, and the creator stays the same.
-- **Stale edits:** both take the configuration the editor read (`expected`) and refuse if it has changed since.
+- **Only the creator** may change the model, the instructions or `env`: spawned agents run on the creator's account, act with the creator's authority, and reach their bindings with it, and the instructions decide what that authority is used for. Another `build` holder may change only the name, and the creator stays the same. `Overseer.getAgentSpawner(id)` returns the configuration and whether the caller created it. Who last changed an agent isn't recorded yet.
+- **No self-spawning:** `setAgentSpawnerEnv` refuses an `env` that names the agent itself, or another agent whose `env` reaches it through further agents. Before `env` became editable it was fixed at creation, when the agent's own id didn't exist and every agent it named was older, so stored configurations hold no such cycle and no spawn-depth cap is added. A gadget an agent can reach may still bind agents of its own: that is the gadget's code choosing to spawn, as before.
+- **Create** refuses any key that isn't an `AgentSpawnerConfig` field, and a blank name.
+- **Stale edits:** both take the configuration the editor read (`expected`) and refuse if it has changed since. The change is applied to the configuration read at the write, after any await.
 - **How a change takes effect:** the spawner's stub is rebuilt from the new configuration, keeping its creator, as the storage migration rebuilds it, and the running facet restarts onto it.
   - New spawns get the change. Agents already spawned keep the configuration they started with.
   - A widened `env` restarts the "use" sessions it reaches through a binding gadget, as binding does. Whether `env` stays within each calling gadget's bindings is still checked on every call (above).
-- **In the prompt:** a spawned agent's instructions are added to its system prompt as configured behaviour that grants nothing (`formatAgentInstructions`). The bindings listed after them are all it can reach.
-- **Tests:** `packages/workshop-backend/__tests__/agent-spawner-config.test.ts` covers reopening, behaviour edits leaving `env` alone, a refused capability change inside an edit, creator-only capability and model changes, stale edits, bounds, and the call-time scope check after an `env` change.
+- **In the prompt:** a spawned agent's instructions are added to its system prompt as configured behaviour that grants nothing (`formatAgentInstructions`), with any `</agent_instructions>` in the text escaped so it can't end the frame early. The bindings listed after them are all it can reach.
+- **Tests:** `packages/workshop-backend/__tests__/agent-spawner-config.test.ts` covers reopening, behaviour edits leaving `env` alone, a refused capability change inside an edit, creator-only capability, model and instruction changes, refused self-reference and cycles, stale edits, bounds, and the call-time scope check after an `env` change.
 
 ### Artifact revisions
 

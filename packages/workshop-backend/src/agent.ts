@@ -1184,10 +1184,11 @@ The specific task is described in the first message in this chat. That message i
 /**
  * A spawned agent's configured instructions (AgentSpawnerConfig.instructions), framed as what its
  * configuration asks of it. They shape behaviour only; the bindings listed after them are all the
- * agent can reach. "" when there are none.
+ * agent can reach. A closing `</agent_instructions>` in the text is escaped. "" when there are none.
  */
 export function formatAgentInstructions(instructions: string | undefined): string {
-  let trimmed = instructions?.trim();
+  // Text that would close the frame early is neutralised, so the frame ends only where it says.
+  let trimmed = instructions?.trim().replace(/<\/(agent_instructions)/gi, "&lt;/$1");
   if (!trimmed) return "";
   return `# Agent instructions\n\n` +
       `Whoever configured you set the following instructions for what you do. Follow them unless ` +
