@@ -150,6 +150,91 @@ export async function requireSharedConfiguration(
   }
 }
 
+// --- Canvas writes ---
+//
+// Every write to a workspace's saved canvases, whether a person's builder controls make it or the
+// agent's canvas tools do (FAC-84), goes through these functions and then the store's own revision
+// check and validation. There is no other write path, and none of them publishes: a published
+// console keeps its frozen copy until a person publishes it again. Only the `build` check differs
+// by writer (see `CanvasWriter`).
+
+/**
+ * Who makes a canvas write. A person at the builder's controls (`session`) writes in a session that
+ * FAC-44 checked for `build` when it opened, and canvas drafts aren't re-checked in an open session
+ * (operate-mode.md, Shared configuration). The agent (`agent`) writes as its turn's initiator, whose
+ * turn needn't come from an open session (a spawned agent's has none), so its `build` is asked
+ * freshly at every write. `userId` is the writer's user DO id.
+ */
+export type CanvasWriter = { kind: "session" | "agent"; userId: string };
+
+/** Refuse an agent writer without `build` in a shared workspace; a session writer was checked at open. */
+async function requireCanvasWriter(workspace: CanvasWorkspace, writer: CanvasWriter): Promise<void> {
+  if (writer.kind === "agent") await requireSharedConfiguration(workspace, writer.userId, "build", "shared");
+}
+
+/** What the canvas writes need of a workspace. */
+export type CanvasWorkspace = Parameters<typeof requireSharedConfiguration>[0] & {
+  ownerId?: string;
+  ctx: { storage: DurableObjectStorage };
+  storage: ReturnType<typeof makeOverseerStorage>;
+};
+
+/** The workspace's canvas store, refused once the workspace is deleted. */
+export function workspaceCanvasStore(workspace: CanvasWorkspace): WorkspaceCanvasStore {
+  if (!workspace.ownerId) throw new Error("Workspace has been deleted.");
+  return new WorkspaceCanvasStore(workspace.ctx.storage, workspace.storage, workspace.env);
+}
+
+/** Create a canvas as `writer`. */
+export async function createCanvasAs(workspace: CanvasWorkspace, writer: CanvasWriter,
+                                     content: CanvasContent): Promise<CanvasDefinition> {
+  await requireCanvasWriter(workspace, writer);
+  return workspaceCanvasStore(workspace).create(content);
+}
+
+/** Apply version 1 operations as `writer` (the builder's flat edits and undo). */
+export async function editCanvasAs(workspace: CanvasWorkspace, writer: CanvasWriter, id: string,
+                                   expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition> {
+  await requireCanvasWriter(workspace, writer);
+  return workspaceCanvasStore(workspace).edit(id, expectedRevision, operations);
+}
+
+/** Apply typed page operations (FAC-83) at the expected revision as `writer`. */
+export async function editCanvasPageAs(workspace: CanvasWorkspace, writer: CanvasWriter, id: string,
+                                       expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
+  await requireCanvasWriter(workspace, writer);
+  return workspaceCanvasStore(workspace).editPage(id, expectedRevision, operations);
+}
+
+/** Delete a canvas at the expected revision as `writer`. */
+export async function deleteCanvasAs(workspace: CanvasWorkspace, writer: CanvasWriter, id: string,
+                                     expectedRevision: string): Promise<void> {
+  await requireCanvasWriter(workspace, writer);
+  workspaceCanvasStore(workspace).delete(id, expectedRevision);
+}
+
+/**
+ * The agent's canvas tools' access, or null while saved canvases are off. It writes as the turn's
+ * initiator through the functions above, the controls' own, as an `agent` writer, so `build` is
+ * checked at every write; user DOs are named by user identifier, as `listAvailableBlueprints`
+ * resolves them.
+ */
+export function agentCanvasAccess(workspace: CanvasWorkspace): AgentCanvasAccess | null {
+  if (workspace.env.COMPOSABLE_VIEWS !== "true" || workspace.env.DURABLE_VIEWS !== "true") return null;
+  let writer = (initiator: AiChatAuthorInfo): CanvasWriter =>
+    ({ kind: "agent", userId: workspace.users.idFromName(initiator.id).toString() });
+  return {
+    catalog: readCanvasCatalog(workspace.env),
+    listPages: () => workspaceCanvasStore(workspace).listPages(),
+    create: async (initiator, content) => {
+      let created = await createCanvasAs(workspace, writer(initiator), content);
+      return workspaceCanvasStore(workspace).getPage(created.id)!;
+    },
+    editPage: (initiator, id, expectedRevision, operations) =>
+      editCanvasPageAs(workspace, writer(initiator), id, expectedRevision, operations),
+  };
+}
+
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore } from "cloudflare:workers";
 import agent from "agent.js";
@@ -10435,15 +10520,23 @@ class OverseerImpl implements AgentHooks {
   // bindings the blueprint's code expects the agent to wire up, for instantiation as a new gadget
   // by the agent's createGadget tool. Blueprint ids are bearer capabilities (like blueprint share
   // links), so possession of the id is sufficient to read it. Throws agent-readable errors.
-  getCanvasAccess(): AgentCanvasAccess | null {
-    if (this.env.COMPOSABLE_VIEWS !== "true" || this.env.DURABLE_VIEWS !== "true") return null;
-    let store = new WorkspaceCanvasStore(this.ctx.storage, this.storage, this.env);
-    return {
-      catalog: readCanvasCatalog(this.env),
-      list: () => store.list(),
-      create: content => store.create(content),
-      edit: (id, expectedRevision, operations) => store.edit(id, expectedRevision, operations),
-    };
+  getCanvasAccess(): AgentCanvasAccess | null { return agentCanvasAccess(this); }
+
+  // Canvas writes, for the builder's controls: see the module-level `createCanvasAs` and siblings.
+  canvasStore(): WorkspaceCanvasStore { return workspaceCanvasStore(this); }
+  createCanvasAs(writer: CanvasWriter, content: CanvasContent): Promise<CanvasDefinition> {
+    return createCanvasAs(this, writer, content);
+  }
+  editCanvasAs(writer: CanvasWriter, id: string, expectedRevision: string,
+               operations: CanvasOperation[]): Promise<CanvasDefinition> {
+    return editCanvasAs(this, writer, id, expectedRevision, operations);
+  }
+  editCanvasPageAs(writer: CanvasWriter, id: string, expectedRevision: string,
+                   operations: CanvasPageOperation[]): Promise<CanvasPage> {
+    return editCanvasPageAs(this, writer, id, expectedRevision, operations);
+  }
+  deleteCanvasAs(writer: CanvasWriter, id: string, expectedRevision: string): Promise<void> {
+    return deleteCanvasAs(this, writer, id, expectedRevision);
   }
 
   async fetchBlueprint(blueprintId: string)
@@ -12904,14 +12997,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async listCanvases(): Promise<CanvasDefinition[]> { return this.#canvasStore().list(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.#canvasStore().get(id); }
-  async createCanvas(content: CanvasContent): Promise<CanvasDefinition> { return this.#canvasStore().create(content); }
-  async editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition> {
-    return this.#canvasStore().edit(id, expectedRevision, operations);
+  // Writes go through the workspace's canvas write methods, the agent's too (see OverseerImpl), as
+  // a `session` writer: FAC-44 checked this session's build when it opened (see CanvasWriter).
+  get #canvasWriter(): CanvasWriter { return { kind: "session", userId: this.clientUserId }; }
+  async createCanvas(content: CanvasContent): Promise<CanvasDefinition> {
+    return this.impl.createCanvasAs(this.#canvasWriter, content);
   }
-  async deleteCanvas(id: string, expectedRevision: string): Promise<void> { this.#canvasStore().delete(id, expectedRevision); }
+  async editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition> {
+    return this.impl.editCanvasAs(this.#canvasWriter, id, expectedRevision, operations);
+  }
+  async deleteCanvas(id: string, expectedRevision: string): Promise<void> {
+    await this.impl.deleteCanvasAs(this.#canvasWriter, id, expectedRevision);
+  }
   async getCanvasPage(id: string): Promise<CanvasPage | null> { return this.#canvasStore().getPage(id); }
   async editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
-    return this.#canvasStore().editPage(id, expectedRevision, operations);
+    return this.impl.editCanvasPageAs(this.#canvasWriter, id, expectedRevision, operations);
   }
 
   #flowStore(): WorkspaceFlowStore {

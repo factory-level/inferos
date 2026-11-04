@@ -12,6 +12,9 @@ import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
 import { CONSOLE_SIZE_LIMITS, consoleToolsEnabled, WorkspaceConsoleStore, type FrozenInstalls, type SourceCommit, type SourceCommits } from "../src/console-store";
 import { makeOverseerStorage, type GadgetRecord } from "../src/overseer";
 import { makeMockStorage } from "./mock-storage";
+import * as Y from "yjs";
+import { parseBlueprintArchive } from "../src/blueprint-archive";
+import { BUNDLED_BLUEPRINTS } from "../src/generated/bundled-blueprints";
 
 const ON = { COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true", CONSOLE_TOOLS: "true" };
 const OFF = { COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true" };
@@ -403,6 +406,26 @@ describe("a widget's declared local states (FAC-86)", () => {
     let candidates = store.widgetCandidates(t.read(store.widgetCandidateCommitIds()));
     expect(candidates.map(c => [c.gadgetId, c.surfaces?.states])).toEqual(
       expect.arrayContaining([[5, ["viewing", "editing"]], [7, null]]));
+  });
+
+  // FAC-86 part 3: the bundled sample status widget, read as an install of it reads its files.
+  it("freeze the bundled sample status widget's states.json at publication", async () => {
+    let entry = BUNDLED_BLUEPRINTS.find(candidate => candidate.blueprintId === "inferos.status-widget")!;
+    let {content} = await parseBlueprintArchive(new Response(Uint8Array.from(atob(entry.archive), c => c.charCodeAt(0))).body!);
+    let doc = new Y.Doc();
+    Y.applyUpdateV2(doc, new Uint8Array(await new Response(content.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()));
+    let files = Object.fromEntries([...doc.getMap<Y.Text>().entries()].map(([path, text]) => [path, text.toString()]));
+    let commit = sourceCommit(files);
+    expect(commit.classification.class).toBe("visualWidget");
+    expect(commit.statesProblem).toBeNull();
+
+    let t = setup({ status: commit });
+    t.install(9, "status", entry.blueprintId);
+    t.screen("floor", [9]);
+    let saved = t.save(ON, t.content("floor", [{ ...t.entry(9), blueprintId: entry.blueprintId }]));
+    let frozen = t.publish(ON, saved.id, saved.revision).published!.content.widgets![0]!.frozen!;
+    expect(frozen.states).toEqual(parseWidgetStates(files["states.json"]!));
+    expect(frozen.states!.initial).toBe("idle");
   });
 
   it("refuse a widget whose states.json doesn't parse, naming why", () => {

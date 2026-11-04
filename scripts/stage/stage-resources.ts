@@ -1,6 +1,9 @@
 // Parsers for the Wrangler output `scripts/stage/stage.ts` reads back, kept pure so the tests can
 // feed them recorded output.
 
+/** Disclosure printed after stage deletion; Workers own the stage's Durable Object storage. */
+export const STAGE_DELETE_DISCLOSURE = "Worker deletion destroys this stage's Durable Object storage, including every workspace. Only the listed KV namespaces and R2 buckets are retained.";
+
 /** One KV namespace as `wrangler kv namespace list` reports it. */
 interface ListedNamespace {
   id?: unknown;

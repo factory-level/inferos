@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "initial": "idle",
+  "persistence": "person",
+  "states": ["idle", "working", "done", "failed"],
+  "transitions": [
+    { "event": "start", "from": "idle", "to": "working" },
+    { "event": "finish", "from": "working", "to": "done" },
+    { "event": "fail", "from": "working", "to": "failed" },
+    { "event": "retry", "from": "failed", "to": "working" },
+    { "event": "reset", "from": "done", "to": "idle" },
+    { "event": "reset", "from": "failed", "to": "idle" }
+  ]
+}

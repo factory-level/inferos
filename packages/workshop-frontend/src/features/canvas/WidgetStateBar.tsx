@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { OperateSession } from '@gadgets/workshop-shared/api'
 import {
@@ -24,9 +24,20 @@ const refusalOf = (err: unknown) => {
  * its published declaration accepts from there. Moving it changes the widget alone, never the
  * page. A refused event shows the server's words; a conflict (the state moved elsewhere) reloads
  * the latest state rather than overwriting it. A widget that declares no states shows nothing.
+ * `onStateChange` hears the state it shows (null while none is known), so the widget can be told.
  */
-export const WidgetStateBar = ({ session, widgetRef }: { session: RpcStub<OperateSession>; widgetRef: OperateWidgetRef }) => {
-  const [loaded, setLoaded] = useState<Loaded>({ status: 'loading' })
+export const WidgetStateBar = ({ session, widgetRef, onStateChange }: {
+  session: RpcStub<OperateSession>
+  widgetRef: OperateWidgetRef
+  onStateChange?: (state: string | null) => void
+}) => {
+  const [loaded, setLoadedState] = useState<Loaded>({ status: 'loading' })
+  const onStateChangeRef = useRef(onStateChange)
+  onStateChangeRef.current = onStateChange
+  const setLoaded = (next: Loaded) => {
+    setLoadedState(next)
+    onStateChangeRef.current?.(next.status === 'ready' ? next.snapshot.state : null)
+  }
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'refused' | 'reloaded'; message: string } | null>(null)
   const { workspaceId, consoleId, revision, gadgetId } = widgetRef
