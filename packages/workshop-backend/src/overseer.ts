@@ -46,7 +46,7 @@ import { consoleScreens, type ConsoleSource, type ConsoleWidgetCandidate, type H
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -851,6 +851,32 @@ const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 
 // How many audited host-board reads an operate session workspace keeps (see host-boards.ts).
 const HOST_BOARD_READS_KEPT = 1000;
+
+async function opaqueExportActorId(id: string, exportSalt: string, personal = false): Promise<string> {
+  // User and gadget author ids identify people, even when they are not email-shaped. Hash them
+  // deterministically so repeated actors remain linkable within this export, while the random
+  // salt prevents correlation across exports. Also hash email-shaped ids for other actor types.
+  if (!personal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return id;
+  let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${exportSalt}:${id}`)));
+  return `sha256:${digest.toHex()}`;
+}
+
+async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt: string)
+    : Promise<{type: "user" | "agent" | "gadget" | "system"; id: string} | undefined> {
+  if (!caller) return undefined;
+  switch (caller.from) {
+    case "agent":
+    case "user":
+      return caller.chatId === undefined ? undefined : {
+        type: caller.from,
+        id: await opaqueExportActorId(`chat:${caller.chatId}`, exportSalt, true),
+      };
+    case "gadget":
+      return caller.gadgetId === undefined ? undefined : {type: "gadget", id: String(caller.gadgetId)};
+    case "hook":
+      return {type: "system", id: "hook"};
+  }
+}
 
 export type ActionRecord = {
   id: number,
@@ -12691,6 +12717,141 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return new WorkspaceCanvasStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
   }
 
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> {
+    const ACTION_LOG_EXPORT_LIMIT = 500;
+    let canvases = (await this.listCanvases()).map(canvas => ({
+      id: canvas.id,
+      revision: canvas.revision,
+      schemaVersion: canvas.schemaVersion,
+      sections: canvas.sections.map(section => ({
+        id: section.id,
+        columns: section.columns,
+        widgets: section.widgets.map(widget => ({id: widget.id, kind: widget.kind, version: widget.version, size: widget.size})),
+      })),
+    }));
+    let consoles = await this.listConsoles();
+    let pages: WorkspaceRecordExport["pages"] = [];
+    for (let console of consoles) {
+      let screens: {source: ConsoleSource; ids: string[]}[] = [
+        {source: "draft", ids: console.views.flatMap(view => view.type === "screen" ? [view.screen] : view.screens)},
+      ];
+      if (console.published) {
+        let publishedScreens = console.published.screens?.map(screen => screen.id)
+            ?? console.published.content.views.flatMap(view => view.type === "screen" ? [view.screen] : view.screens);
+        screens.push({source: "published", ids: publishedScreens});
+      }
+      for (let {source, ids} of screens) {
+        for (let screenId of new Set(ids)) {
+          let page = await this.getConsolePage(console.id, screenId, source);
+          if (page) pages.push({consoleId: console.id, screenId, source, page: {
+            id: page.id,
+            revision: page.revision,
+            schemaVersion: page.schemaVersion,
+            nodeCount: page.nodes.length,
+            widgetCount: page.nodes.filter(node => node.nodeType === "widget").length,
+          }});
+        }
+      }
+    }
+
+    let actionLog: WorkspaceRecordExport["actionLog"] = [];
+    let beforeId: number | undefined;
+    let actionLogTruncated = false;
+    let actorIdSalt = crypto.getRandomValues(new Uint8Array(16)).toHex();
+    while (actionLog.length < ACTION_LOG_EXPORT_LIMIT) {
+      let page = await this.listActions({beforeId});
+      let room = ACTION_LOG_EXPORT_LIMIT - actionLog.length;
+      actionLogTruncated ||= page.entries.length > room;
+      for (let entry of page.entries.slice(0, room)) {
+        let action = entry.type === "action" ? entry : undefined;
+        let decidedBy = action?.resolvedBy;
+        let result = action?.result;
+        let storedRecord = this.impl.storage.actions.get(entry.id);
+        let gatekeeper = entry.gatekeeperId === undefined ? undefined : this.impl.storage.gatekeepers.get(entry.gatekeeperId);
+        actionLog.push({
+          id: entry.id,
+          gatekeeperId: entry.gatekeeperId,
+          gatekeeper: gatekeeperVendorId(gatekeeper) ?? null,
+          method: action?.description.actionKind?.tag ?? null,
+          outcome: action ? actionOutcome(action) : "unknown",
+          requestedBy: await exportRequester(storedRecord?.caller, actorIdSalt),
+          requestedAt: entry.createdAt,
+          decidedBy: decidedBy ? {
+            type: decidedBy.type,
+            id: await opaqueExportActorId(
+              decidedBy.id,
+              actorIdSalt,
+              decidedBy.type === "user" || decidedBy.type === "gadget",
+            ),
+          } : undefined,
+          decidedAt: action?.appliedAt ?? action?.lastAttempt?.at,
+          appliedRevision: typeof result?.appliedRevision === "string" && /^(0|[1-9][0-9]*)$/.test(result.appliedRevision)
+            ? result.appliedRevision : undefined,
+          createdIdentifier: typeof result?.createdIdentifier === "string" && /^[A-Z][A-Z0-9]{0,15}-[0-9]+$/.test(result.createdIdentifier)
+            ? result.createdIdentifier : undefined,
+          runId: typeof result?.runId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.runId)
+            ? result.runId : undefined,
+        });
+      }
+      beforeId = page.nextBeforeId;
+      if (actionLog.length >= ACTION_LOG_EXPORT_LIMIT) {
+        actionLogTruncated ||= beforeId !== undefined;
+        break;
+      }
+      if (actionLogTruncated || beforeId === undefined) break;
+    }
+
+    let workflowDefinitions = (await this.listWorkflowDefinitions()).map(definition => ({
+      id: definition.id,
+      revisions: definition.revisions.map(revision => ({
+        revision: revision.revision,
+        gadgetId: revision.source.gadgetId,
+        commitId: revision.source.commitId,
+        savedAt: revision.savedAt,
+      })),
+      published: definition.published ? {revision: definition.published.revision, at: definition.published.at} : null,
+    }));
+    let triggers = await Promise.all((await this.listHooks()).map(async hook => ({
+      hook: {id: hook.id, gatekeeperId: hook.gatekeeperId, gadgetId: hook.gadgetId, enabled: hook.enabled},
+      definition: await this.getTriggerDefinition(hook.id),
+    })));
+    let triggerControls = (await this.listTriggerControls()).map(control => ({
+      hookId: control.hookId,
+      definition: control.definition,
+      configuredAt: control.configuredAt,
+    }));
+    let widgetRegistry = (await this.listConsoleWidgetCandidates()).map(widget => ({
+      gadgetId: widget.gadgetId,
+      blueprintId: widget.blueprintId,
+      version: widget.version,
+      versionId: widget.versionId,
+      commitId: widget.commitId,
+      surfaces: widget.surfaces ? {ui: widget.surfaces.ui, toolCount: widget.surfaces.tools.length,
+        stateCount: widget.surfaces.states?.length ?? 0} : null,
+    }));
+
+    return {
+      canvases,
+      pages,
+      workflowDefinitions,
+      triggers,
+      triggerControls,
+      widgetRegistry,
+      actionLog,
+      actionLogLimit: ACTION_LOG_EXPORT_LIMIT,
+      actionLogTruncated,
+      withheld: {
+        canvases: "Authored titles, target references, and widget parameters may contain user text or secrets.",
+        pages: "Node titles, attachment text and effects, targets, and widget parameters may contain user text or secrets.",
+        workflowDefinitions: "Titles and owner identity are user-authored or personal data.",
+        triggers: "Hook descriptions, resource titles, and URLs are provider-controlled text and routing metadata.",
+        triggerControls: "Labels and invoker/profile identity are user-authored or personal data.",
+        widgetRegistry: "Refusal text and tool/state names are arbitrary gadget-authored strings.",
+        actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets; personal actor ids are opaque, names and emails are withheld, and action references outside their strict formats are omitted.",
+      },
+    };
+  }
+
   async listCanvases(): Promise<CanvasDefinition[]> { return this.#canvasStore().list(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.#canvasStore().get(id); }
   async createCanvas(content: CanvasContent): Promise<CanvasDefinition> { return this.#canvasStore().create(content); }
@@ -15193,6 +15354,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // sight. A screen is layout and references only: every board on it resolves through the
   // viewer's own connection, never this workspace's. A screen no published console shows reads as
   // missing.
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> {
     let store = this.#consoleStore();
     let shown = new Set(store.listPublished().flatMap(consoleScreens));
@@ -15700,6 +15862,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
     return this.owner.subscribeToConsoleLogs(subscriber);
   }
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> { return this.owner.listCanvases(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.owner.getCanvas(id); }
   async listFlows(): Promise<OperateFlow[]> { return this.owner.listFlows(); }

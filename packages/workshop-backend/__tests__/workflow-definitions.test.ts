@@ -258,6 +258,7 @@ describe("through the Overseer", () => {
     expect((await overseer.listWorkflowDefinitions()).map(d => d.id)).toEqual([live.id]);
     void draft;
     await expect(overseer.saveWorkflowDefinition({ title: "Mine", gadgetId: GADGET })).rejects.toThrow();
+    await expect(overseer.exportWorkspaceRecords()).rejects.toThrow();
     await expect(overseer.publishWorkflowDefinition(live.id, 1)).rejects.toThrow();
     await expect(overseer.pinTriggerDefinition(11, null)).rejects.toThrow();
   });

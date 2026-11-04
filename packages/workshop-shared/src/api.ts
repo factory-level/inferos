@@ -2653,6 +2653,8 @@ export type AgentSpawnerBehaviour = Partial<Pick<AgentSpawnerConfig, "displayNam
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
+  /** Export only the declared business collections; available to build/owner sessions only. */
+  exportWorkspaceRecords(): Promise<WorkspaceRecordExport>;
   /**
    * List stored composition definitions in this workspace. Requires both view flags. Build access
    * lists every one; the use role lists only the screens this workspace's published consoles show,
@@ -4010,6 +4012,34 @@ export type ActionHistoryPage = {
    * page reached the start of the history.
    */
   nextBeforeId?: number;
+};
+
+/**
+ * Portable allow-list of a workspace's declared business records. It intentionally contains no
+ * credentials, arbitrary Durable Object storage, or gadget-owned state. Pages are captured as
+ * console/screen snapshots because the page API is scoped to those references.
+ */
+export type WorkspaceRecordExport = {
+  /** Structural canvas projection; authored titles, targets and widget parameters are withheld. */
+  canvases: {id: string; revision: string; schemaVersion: number; sections: {id: string; columns: 1 | 2 | 3; widgets: {id: string; kind: string; version: number; size: string}[]}[]}[];
+  /** Console-referenced page projection; node labels, attachments, targets and parameters are withheld. */
+  pages: {consoleId: string; screenId: string; source: ConsoleSource; page: {id: string; revision: string; schemaVersion: number; nodeCount: number; widgetCount: number}}[];
+  /** Definition/revision references; titles and owner identity are withheld. */
+  workflowDefinitions: {id: string; revisions: {revision: number; gadgetId: WorkpieceId; commitId: string; savedAt: Date}[]; published: {revision: number; at: Date} | null}[];
+  /** Hook identifiers and pinned definition only; descriptions, URLs and display titles are withheld. */
+  triggers: {hook: {id: number; gatekeeperId: WorkpieceId; gadgetId: WorkpieceId; enabled: boolean}; definition: WorkflowDefinitionRef | null}[];
+  /** Control identifiers and reference only; labels, profile IDs and author identity are withheld. */
+  triggerControls: {hookId: number; definition?: WorkflowDefinitionRef; configuredAt?: Date}[];
+  /** Widget install references; refusal text and declared names are withheld. */
+  widgetRegistry: {gadgetId: WorkpieceId; blueprintId: string; version: number; versionId: string; commitId: string | null; surfaces: {ui: boolean; toolCount: number; stateCount: number} | null}[];
+  /** Allow-listed action audit entries; actor identities use opaque IDs without names or emails. */
+  actionLog: {id: number; gatekeeperId?: WorkpieceId; gatekeeper: string | null; method: string | null; outcome: import("./action-outcome.js").ActionOutcome; requestedBy?: {type: "user" | "agent" | "gadget" | "system"; id: string}; requestedAt: Date; decidedBy?: {type: AiChatAuthorInfo["type"]; id: string}; decidedAt?: Date; appliedRevision?: string; createdIdentifier?: string; runId?: string}[];
+  /** Maximum number of newest action entries included in `actionLog`. */
+  actionLogLimit: number;
+  /** True only when more history exists than `actionLogLimit`; consumers must report this. */
+  actionLogTruncated: boolean;
+  /** Fixed reasons for omissions across the collections, safe to show in an exported artifact. */
+  withheld: {canvases: string; pages: string; workflowDefinitions: string; triggers: string; triggerControls: string; widgetRegistry: string; actionLog: string};
 };
 
 /** Lightweight attribution for a chat participant or configured model. */
