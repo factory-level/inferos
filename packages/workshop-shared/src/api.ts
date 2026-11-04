@@ -3994,13 +3994,26 @@ export type ActionHistoryPage = {
  * console/screen snapshots because the page API is scoped to those references.
  */
 export type WorkspaceRecordExport = {
-  canvases: CanvasDefinition[];
-  pages: {consoleId: string; screenId: string; source: ConsoleSource; page: CanvasPage}[];
-  workflowDefinitions: WorkflowDefinition[];
-  triggers: {hook: BoundHookInfo; definition: WorkflowDefinitionRef | null}[];
-  triggerControls: TriggerControl[];
-  widgetRegistry: ConsoleWidgetCandidate[];
-  actionLog: ActionLogEntry[];
+  /** Structural canvas projection; authored titles, targets and widget parameters are withheld. */
+  canvases: {id: string; revision: string; schemaVersion: number; sections: {id: string; columns: 1 | 2 | 3; widgets: {id: string; kind: string; version: number; size: string}[]}[]}[];
+  /** Console-referenced page projection; node labels, attachments, targets and parameters are withheld. */
+  pages: {consoleId: string; screenId: string; source: ConsoleSource; page: {id: string; revision: string; schemaVersion: number; nodeCount: number; widgetCount: number}}[];
+  /** Definition/revision references; titles and owner identity are withheld. */
+  workflowDefinitions: {id: string; revisions: {revision: number; gadgetId: WorkpieceId; commitId: string; savedAt: Date}[]; published: {revision: number; at: Date} | null}[];
+  /** Hook identifiers and pinned definition only; descriptions, URLs and display titles are withheld. */
+  triggers: {hook: {id: number; gatekeeperId: WorkpieceId; gadgetId: WorkpieceId; enabled: boolean}; definition: WorkflowDefinitionRef | null}[];
+  /** Control identifiers and reference only; labels, profile IDs and author identity are withheld. */
+  triggerControls: {hookId: number; definition?: WorkflowDefinitionRef; configuredAt?: Date}[];
+  /** Widget install references; refusal text and declared names are withheld. */
+  widgetRegistry: {gadgetId: WorkpieceId; blueprintId: string; version: number; versionId: string; commitId: string | null; surfaces: {ui: boolean; toolCount: number; stateCount: number} | null}[];
+  /** Allow-listed action audit entries; no provider payloads, messages, errors, or descriptions. */
+  actionLog: {id: number; gatekeeperId?: WorkpieceId; gatekeeper: string | null; method: string | null; outcome: import("./action-outcome.js").ActionOutcome; requestedBy?: ActionRequester; requestedAt: Date; decidedBy?: {type: AiChatAuthorInfo["type"]; id: string; name: string}; decidedAt?: Date; appliedRevision?: string; createdIdentifier?: string; runId?: string}[];
+  /** Maximum number of newest action entries included in `actionLog`. */
+  actionLogLimit: number;
+  /** True only when more history exists than `actionLogLimit`; consumers must report this. */
+  actionLogTruncated: boolean;
+  /** Fixed reasons for omissions across the collections, safe to show in an exported artifact. */
+  withheld: {canvases: string; pages: string; workflowDefinitions: string; triggers: string; triggerControls: string; widgetRegistry: string; actionLog: string};
 };
 
 /** Lightweight attribution for a chat participant or configured model. */

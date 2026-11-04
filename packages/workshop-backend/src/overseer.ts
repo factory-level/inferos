@@ -46,12 +46,12 @@ import { consoleScreens, type ConsoleSource, type ConsoleWidgetCandidate, type H
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionRequester, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
-import { actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
+import { actionOutcome, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -12690,7 +12690,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> {
-    let canvases = await this.listCanvases();
+    const ACTION_LOG_EXPORT_LIMIT = 500;
+    let canvases = (await this.listCanvases()).map(canvas => ({
+      id: canvas.id,
+      revision: canvas.revision,
+      schemaVersion: canvas.schemaVersion,
+      sections: canvas.sections.map(section => ({
+        id: section.id,
+        columns: section.columns,
+        widgets: section.widgets.map(widget => ({id: widget.id, kind: widget.kind, version: widget.version, size: widget.size})),
+      })),
+    }));
     let consoles = await this.listConsoles();
     let pages: WorkspaceRecordExport["pages"] = [];
     for (let console of consoles) {
@@ -12705,30 +12715,93 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       for (let {source, ids} of screens) {
         for (let screenId of new Set(ids)) {
           let page = await this.getConsolePage(console.id, screenId, source);
-          if (page) pages.push({consoleId: console.id, screenId, source, page});
+          if (page) pages.push({consoleId: console.id, screenId, source, page: {
+            id: page.id,
+            revision: page.revision,
+            schemaVersion: page.schemaVersion,
+            nodeCount: page.nodes.length,
+            widgetCount: page.nodes.filter(node => node.nodeType === "widget").length,
+          }});
         }
       }
     }
 
-    let actionLog: ActionLogEntry[] = [];
+    let actionLog: WorkspaceRecordExport["actionLog"] = [];
     let beforeId: number | undefined;
-    do {
+    while (actionLog.length < ACTION_LOG_EXPORT_LIMIT) {
       let page = await this.listActions({beforeId});
-      actionLog.push(...page.entries);
+      for (let entry of page.entries.slice(0, ACTION_LOG_EXPORT_LIMIT - actionLog.length)) {
+        let action = entry.type === "action" ? entry : undefined;
+        let decidedBy = action?.resolvedBy;
+        let result = action?.result;
+        let gatekeeper = entry.gatekeeperId === undefined ? undefined : this.impl.storage.gatekeepers.get(entry.gatekeeperId);
+        actionLog.push({
+          id: entry.id,
+          gatekeeperId: entry.gatekeeperId,
+          gatekeeper: gatekeeperVendorId(gatekeeper) ?? null,
+          method: action?.description.actionKind?.tag ?? null,
+          outcome: action ? actionOutcome(action) : "unknown",
+          requestedBy: entry.requestedBy,
+          requestedAt: entry.createdAt,
+          decidedBy: decidedBy ? {type: decidedBy.type, id: decidedBy.id, name: decidedBy.name} : undefined,
+          decidedAt: action?.appliedAt ?? action?.lastAttempt?.at,
+          appliedRevision: typeof result?.appliedRevision === "string" ? result.appliedRevision : undefined,
+          createdIdentifier: typeof result?.createdIdentifier === "string" ? result.createdIdentifier : undefined,
+          runId: typeof result?.runId === "string" ? result.runId : undefined,
+        });
+      }
       beforeId = page.nextBeforeId;
-    } while (beforeId !== undefined);
+      if (beforeId === undefined) break;
+    }
+
+    let workflowDefinitions = (await this.listWorkflowDefinitions()).map(definition => ({
+      id: definition.id,
+      revisions: definition.revisions.map(revision => ({
+        revision: revision.revision,
+        gadgetId: revision.source.gadgetId,
+        commitId: revision.source.commitId,
+        savedAt: revision.savedAt,
+      })),
+      published: definition.published ? {revision: definition.published.revision, at: definition.published.at} : null,
+    }));
+    let triggers = await Promise.all((await this.listHooks()).map(async hook => ({
+      hook: {id: hook.id, gatekeeperId: hook.gatekeeperId, gadgetId: hook.gadgetId, enabled: hook.enabled},
+      definition: await this.getTriggerDefinition(hook.id),
+    })));
+    let triggerControls = (await this.listTriggerControls()).map(control => ({
+      hookId: control.hookId,
+      definition: control.definition,
+      configuredAt: control.configuredAt,
+    }));
+    let widgetRegistry = (await this.listConsoleWidgetCandidates()).map(widget => ({
+      gadgetId: widget.gadgetId,
+      blueprintId: widget.blueprintId,
+      version: widget.version,
+      versionId: widget.versionId,
+      commitId: widget.commitId,
+      surfaces: widget.surfaces ? {ui: widget.surfaces.ui, toolCount: widget.surfaces.tools.length,
+        stateCount: widget.surfaces.states?.length ?? 0} : null,
+    }));
 
     return {
       canvases,
       pages,
-      workflowDefinitions: await this.listWorkflowDefinitions(),
-      triggers: await Promise.all((await this.listHooks()).map(async hook => ({
-        hook,
-        definition: await this.getTriggerDefinition(hook.id),
-      }))),
-      triggerControls: await this.listTriggerControls(),
-      widgetRegistry: await this.listConsoleWidgetCandidates(),
+      workflowDefinitions,
+      triggers,
+      triggerControls,
+      widgetRegistry,
       actionLog,
+      actionLogLimit: ACTION_LOG_EXPORT_LIMIT,
+      actionLogTruncated: beforeId !== undefined,
+      withheld: {
+        canvases: "Authored titles, target references, and widget parameters may contain user text or secrets.",
+        pages: "Node titles, attachment text and effects, targets, and widget parameters may contain user text or secrets.",
+        workflowDefinitions: "Titles and owner identity are user-authored or personal data.",
+        triggers: "Hook descriptions, resource titles, and URLs are provider-controlled text and routing metadata.",
+        triggerControls: "Labels and invoker/profile identity are user-authored or personal data.",
+        widgetRegistry: "Refusal text and tool/state names are arbitrary gadget-authored strings.",
+        actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets.",
+      },
     };
   }
 

@@ -212,6 +212,34 @@ describe("listActions", () => {
   });
 });
 
+describe("exportWorkspaceRecords", () => {
+  it("projects provider payloads away and reports when the bounded history is truncated", async () => {
+    let storage = makeActionStorage();
+    const secret = "fake-provider-token-should-never-export";
+    for (let id = 0; id < 510; id++) putAction(storage, id, {state: "approved", appliedAt: new Date(FIXTURE_EPOCH + id + 1)});
+    let entry = storage.actions.get(509)!;
+    if (entry.type !== "action") throw new Error("fixture action missing");
+    storage.actions.put({...entry, result: {providerPayload: secret, appliedRevision: "rev-12", createdIdentifier: "ENG-7", runId: "run-8"},
+      lastAttempt: {outcome: "notApplied", message: `provider error echoed ${secret}`, at: new Date(FIXTURE_EPOCH + 2)}});
+    let client = await openFakeOverseer(storage, {impl: {
+      env: {COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true"},
+      frozenInstalls: () => ({create: () => { throw new Error("unused"); }, remove: () => {}}),
+      readSourceCommits: async () => new Map(),
+      workflowDefinitionStore: () => ({list: () => [], controls: () => [], pinOf: () => null}),
+    }});
+    using _client = client;
+
+    let exported = await client.exportWorkspaceRecords();
+    expect(exported.actionLog).toHaveLength(500);
+    expect(exported.actionLogTruncated).toBe(true);
+    expect(exported.actionLogLimit).toBe(500);
+    expect(JSON.stringify(exported)).not.toContain(secret);
+    expect(exported.actionLog[0]).toMatchObject({
+      appliedRevision: "rev-12", createdIdentifier: "ENG-7", runId: "run-8", method: "edit", outcome: "succeeded",
+    });
+  });
+});
+
 describe("listActions with the pending filter", () => {
   it("returns pendings of any type newest-first across gatekeepers, excluding resolved",
       async () => {
