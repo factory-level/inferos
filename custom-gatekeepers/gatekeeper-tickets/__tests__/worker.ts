@@ -139,7 +139,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   async apply(props: BindingProps, actionId: number): Promise<string | null> {
     try {
       const result = await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new NoGitCache()) as never);
-      return result?.failed.message ?? null;
+      return result && "failed" in result ? result.failed.message : null;
     } catch (error) {
       return messageOf(error);
     }
@@ -150,7 +150,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       Promise<ActionApplyFailure | { thrown: string } | null> {
     try {
       const result = await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new NoGitCache()) as never);
-      return result?.failed ?? null;
+      return result && "failed" in result ? result.failed : null;
     } catch (error) {
       return { thrown: messageOf(error) };
     }
