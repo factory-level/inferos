@@ -1,3 +1,4 @@
+import type { ActionResult } from "./action-outcome";
 import type { ApprovalEdit, ApprovalProposal } from "./operate-approval";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
@@ -807,6 +808,12 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
 
 /**
+ * A successful apply that reports what the provider produced (`ActionResult`), which the overseer
+ * keeps as the action's `result`. Returning nothing still means the apply succeeded.
+ */
+export type ActionApplied = { applied: { result: ActionResult } };
+
+/**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
  * says. Returned rather than thrown, because RPC carries only an error's message.
  */
@@ -1009,7 +1016,7 @@ export interface Gatekeeper<Session> extends DurableObject {
    * ignore this parameter (and can even omit the parameter from their `applyAction()`
    * declaration).
    */
-  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure }>;
+  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any

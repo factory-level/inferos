@@ -67,6 +67,10 @@
       "types": "./src/canvas-model.ts",
       "import": "./src/canvas-model.ts"
     },
+    "./action-outcome": {
+      "types": "./src/action-outcome.ts",
+      "import": "./src/action-outcome.ts"
+    },
     "./password-salt": {
       "types": "./src/password-salt.ts",
       "import": "./src/password-salt.ts"

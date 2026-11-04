@@ -2,7 +2,9 @@
 
 import { createLogger } from "@gadgets/observability/logger";
 import type { RpcStub } from "cloudflare:workers";
+import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import type {
+  ActionApplied,
   ActionApplyFailure,
   ActionDescription,
   ActionKind,
@@ -102,12 +104,15 @@ export class ActionOutcomeUnknownError extends Error {}
  * structured `applyAction` result instead of a thrown error, whose class RPC would lose:
  * `ActionApplyError` becomes a refusal known not applied, `ActionOutcomeUnknownError` an outcome
  * that may exist at the provider, and neither is retried. Any other error is rethrown unchanged
- * and stays retryable. Use it as the body of `applyAction`.
+ * and stays retryable. An apply that returns an `ActionResult` reports it as the applied result.
+ * Use it as the body of `applyAction`.
  */
-export async function applyActionOutcome(apply: () => Promise<void>)
-    : Promise<void | { failed: ActionApplyFailure }> {
+export async function applyActionOutcome(apply: () => Promise<void | ActionResult>)
+    : Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   try {
-    await apply();
+    const result = await apply();
+    // What the provider produced, when the apply reports it: the overseer keeps it as the action's result.
+    if (result) return { applied: { result } };
   } catch (error) {
     if (error instanceof ActionApplyError) {
       return { failed: { outcome: "notApplied", retryable: false, message: error.message } };

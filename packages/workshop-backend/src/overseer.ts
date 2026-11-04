@@ -48,7 +48,8 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -884,6 +885,8 @@ export type ActionRecord = {
   applyStartedAt?: Date;
   /** One explicit AG-UI conversation, persisted with its existing action rather than a second queue. */
   aguiApproval?: ActionApprovalCorrelation;
+  /** What the provider reported the apply produced (see ActionLogEntry.result); set only on approval. */
+  result?: ActionResult;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1226,6 +1229,8 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         resolvedBy: record.resolvedBy,
         autoApproved: record.autoApproved,
         ...(record.lastAttempt ? {lastAttempt: record.lastAttempt} : {}),
+        ...(record.state === "pending" && record.applyStartedAt ? {applying: true as const} : {}),
+        ...(record.state === "approved" && record.result ? {result: record.result} : {}),
       };
     case "bindHook":
       return {
@@ -6046,7 +6051,7 @@ class OverseerImpl implements AgentHooks {
       started.applyStartedAt = new Date();
       this.storage.actions.put(started);
     }
-    let result: void | {failed: ActionApplyFailure};
+    let result: void | {failed: ActionApplyFailure} | ActionApplied;
     try {
       result = await gatekeeper.applyAction(record.action,
           new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
@@ -6061,7 +6066,7 @@ class OverseerImpl implements AgentHooks {
     } finally {
       this.#approvingPublishers.delete(approvingKey);
     }
-    if (result?.failed) {
+    if (result && "failed" in result) {
       this.#recordUnsuccessfulApply(record, result.failed, resolvedBy, autoApproved);
       throw new Error(result.failed.message);
     }
@@ -6070,6 +6075,12 @@ class OverseerImpl implements AgentHooks {
     if (applied?.type === "action") Object.assign(record, applied);
     delete record.applyStartedAt;
     delete record.lastAttempt;
+    // The provider's own account of what it produced, kept only within ACTION_RESULT_LIMITS: one
+    // out of bounds is dropped (the action still applied), never stored or shown truncated.
+    const reported = result && "applied" in result ? result.applied?.result : undefined;
+    const problem = reported === undefined ? null : actionResultProblem(reported);
+    if (reported !== undefined && problem === null) record.result = reported;
+    else if (problem !== null) logger.warn("dropped an action result out of bounds", { event: "action.result.dropped", error: problem });
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
