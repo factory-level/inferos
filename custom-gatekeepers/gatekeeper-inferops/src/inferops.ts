@@ -137,7 +137,9 @@ import {
   assertCodingWorkbenchEnabled, assertRepoAllowlisted, codingRepoAllowlist, codingWorkbenchEnabled,
   whileCodingWorkbenchEnabled,
 } from "./coding-workbench";
-import { InferOpsCredentials, type InferOpsWorkspace, type WorkspaceProduct } from "./inferops-credentials";
+import {
+  InferOpsCredentials, WIKI_SEARCHES_PER_MINUTE, type InferOpsWorkspace, type WorkspaceProduct,
+} from "./inferops-credentials";
 import {
   assertTablesEnabled, describeTable, projectRows, tableReadOptions, tablesEnabled, whileTablesEnabled,
 } from "./table";
@@ -181,7 +183,7 @@ import type {
   InferOpsWorkflowPolicySession, Issue, IssueActivity, IssueChanges, ListRecordsOptions, NewIssue, Repo,
   WorkflowPolicyHead, WorkspaceMembers,
   Revision, Run, TableDescription, TableRecord, WikiDocument,
-  WikiDocumentNode, WikiProposal, WikiProposalDetail, WikiProposalState, WikiSection, WikiStructure,
+  WikiDocumentNode, WikiProposal, WikiProposalDetail, WikiProposalState, WikiSearchHit, WikiSection, WikiStructure,
 } from "./types";
 import type { NewIssueRequest, WikiSectionRecord } from "./inferops-client";
 import TYPES_CODE from "./types.txt";
@@ -1269,6 +1271,11 @@ type BindingParts = {
    * composed text). Unless given: excluding every current collaborator, through `observe`.
    */
   withhold?: (queue: RpcStub<ApprovalQueue>, description: ObservationDescription) => Promise<void>;
+  /**
+   * A Wiki's search throttle: null when a search may run, else the seconds until one may. Per
+   * connected account, across all its bindings (`InferOpsCredentials.admitWikiSearch`).
+   */
+  admitSearch?: () => Promise<number | null>;
 };
 
 /**
@@ -2790,8 +2797,28 @@ const MAX_PAGE_BODY = 200_000;
  * `target` is its scope, as for a project binding.
  */
 class WikiBinding extends ActionBinding {
+  readonly #admitSearch: BindingParts["admitSearch"];
+
   constructor(readonly target: WikiGatekeeperProps, parts: BindingParts) {
     super(parts, WIKI_SCOPE);
+    this.#admitSearch = parts.admitSearch;
+  }
+
+  /**
+   * Refuse a search this binding may not run: on the deployment's shared connection, which is no
+   * one's own sign-in (FORBIDDEN), or past the account's throttle (UNAVAILABLE, saying when to
+   * retry, distinct from an outage).
+   */
+  async admitSearch(): Promise<void> {
+    if (!this.target.connected && this.host !== DEMO_HOST) {
+      throw new InferOpsError("FORBIDDEN", SEARCH_NEEDS_OWN_SIGN_IN);
+    }
+    const retryAfter = await this.#admitSearch?.();
+    if (retryAfter != null) {
+      throw new InferOpsError("UNAVAILABLE",
+        `Too many Wiki searches on this connection: at most ${WIKI_SEARCHES_PER_MINUTE} a minute. ` +
+        `Try again in ${retryAfter} second${retryAfter === 1 ? "" : "s"}.`);
+    }
   }
 
   get host(): string {
@@ -2867,6 +2894,10 @@ const APPROVE_NOT_SHARED =
   "owner's InferOps sign-in. Approve from an unshared gadget.";
 
 /** Why the stopgap connection cannot approve a proposal (see `WikiBinding.approvalRefusal`). */
+/** Why the deployment's shared connection never searches a Wiki (contract: per-person identity). */
+const SEARCH_NEEDS_OWN_SIGN_IN =
+  "Searching the InferMind Wiki needs your own InferLab sign-in: this connection is shared.";
+
 const APPROVE_NEEDS_OWN_SIGN_IN =
   "Approving a Wiki proposal needs your own InferLab sign-in: this connection is shared and " +
   "approves as no one.";
@@ -2917,6 +2948,7 @@ export class InferOpsWikiGatekeeper
       store: new ActionStore(kv),
       client: clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId),
       observers: () => admittedObservers(kv),
+      admitSearch: () => credentialsOf(this.ctx.exports, accountId).admitWikiSearch(),
     });
   }
 
@@ -3284,6 +3316,42 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
         "structure and documentation coverage, with embedded widgets as their live text.",
     });
     return text;
+  }
+
+  /**
+   * `knowledge.search` for this Wiki's workspace, as this connection's own sign-in: only `query`
+   * and `limit` are sent, so no argument can widen the scope, and InferOps applies the person's row
+   * rules and lens before choosing candidates. Hits are passed on without `score`, a section with
+   * an edit pending here marked `pending: "update"` (its snippet still the committed text). A
+   * search that could not run is UNAVAILABLE, never an empty list.
+   *
+   * The answer reflects the owner's lens, which admitting a collaborator for the Wiki does not
+   * cover, so every collaborator is excluded from it. The observation keeps the query's first 100
+   * characters and the hits' page and section references, never their snippets (decision 8).
+   */
+  async searchWiki(query: string, options?: { limit?: number }): Promise<WikiSearchHit[]> {
+    const trimmed = typeof query === "string" ? query.trim() : "";
+    if (!trimmed || [...trimmed].length > 500) {
+      fail("INVALID_REQUEST", "query must be 1 to 500 characters after trimming.");
+    }
+    const limit = options?.limit ?? 20;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+      fail("INVALID_REQUEST", "limit must be a whole number from 1 to 50.");
+    }
+    const binding = this.#binding;
+    await binding.admitSearch();
+    const records = await binding.client.searchWiki(trimmed, limit);
+    const pending = new Set(binding.pendingEdits().flatMap(e => e.kind === "section-update" ? [e.sectionId] : []));
+    const hits: WikiSearchHit[] = records.map(hit => pending.has(hit.sectionId) ? { ...hit, pending: "update" } : hit);
+    const asked = [...trimmed].length > 100 ? `${[...trimmed].slice(0, 100).join("")}…` : trimmed;
+    const found = hits.map(hit => `${plainInline(hit.tag, 80)} in ${plainInline(hit.documentSlug, 80)}`);
+    await binding.observeWithheld(this.#queue, {
+      title: "Searched the InferMind Wiki",
+      description: `Searched the InferMind Wiki of ${binding.host} for "${plainInline(asked, 120)}": ` +
+        (found.length === 0 ? "no readable match." :
+          `${found.length} section${found.length === 1 ? "" : "s"}: ${found.join(", ")}.`),
+    });
+    return hits;
   }
 
   /** The page shown, with its pending edits, as InferOps' page contract composes it (wiki.ts). */
@@ -3717,6 +3785,7 @@ export class InferOpsAccountGatekeeper
       observers: () => this.#tracker.observerIds(),
       observe: (queue, description) => this.#observeSet(queue, key, description),
       withhold: (queue, description) => this.#observeWithheld(queue, description),
+      admitSearch: () => credentialsOf(this.ctx.exports, this.#account().accountId).admitWikiSearch(),
       account: { scope, label: scopeLabel(scope) },
     };
   }
