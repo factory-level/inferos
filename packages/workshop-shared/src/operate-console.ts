@@ -346,6 +346,12 @@ export type ConsolePublication = {
    * lists none. Operators run only these: a later edit to a flow reaches them through a republish.
    */
   flows?: OperateFlow[];
+  /**
+   * Each screen the publication copied, in the order the console shows them, with the revision of
+   * the page it froze (FAC-89): together with the frozen widget entries, the one set of page and
+   * widget versions operators get. Absent on publications made before it was recorded.
+   */
+  screens?: { id: string; revision: string }[];
 };
 
 /**
