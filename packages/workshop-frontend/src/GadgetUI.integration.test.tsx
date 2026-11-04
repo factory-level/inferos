@@ -188,6 +188,31 @@ describe('GadgetUI RPC recovery', () => {
     )
   })
 
+  // FAC-86: a console widget's frame is told its local state once it connects and on each change,
+  // and never told anything while no state is known.
+  it('tells a connected frame its widget state, and each change of it', async () => {
+    const gadget = fakeGadget('status', 'document.body.textContent = "status"')
+    // The state is known before the frame exists, so only the handshake can tell it.
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" widgetState="idle" />)
+    })
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const iframe = container.querySelector('iframe')!
+    const post = vi.spyOn(iframe.contentWindow!, 'postMessage')
+    const child = connectIframe(iframe)
+    await expect(child.read()).resolves.toBe('status')
+    expect(post).toHaveBeenCalledExactlyOnceWith({ type: 'widget-state', state: 'idle' }, '*')
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" widgetState="working" />)
+    })
+    expect(post).toHaveBeenLastCalledWith({ type: 'widget-state', state: 'working' }, '*')
+    const sent = post.mock.calls.length
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" widgetState={null} />)
+    })
+    expect(post).toHaveBeenCalledTimes(sent)
+  })
+
   it('keeps the iframe while redirecting calls to the replacement gadget client', async () => {
     const first = fakeGadget('first', 'document.body.textContent = "first"')
     await act(async () => {

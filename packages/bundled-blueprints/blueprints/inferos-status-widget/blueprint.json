@@ -1,0 +1,23 @@
+{
+  "$comment": "FAC-86's sample stateful widget: installs as a widget (kind), is never offered as an output format, and declares its local states in files/states.json. blueprintId is the install key: never rename it.",
+  "blueprintId": "inferos.status-widget",
+  "title": "Status Widget",
+  "description": "Use to show where one piece of work stands on an Operate console: idle, working, done or failed, with retry. A sample widget with local states; it reads and changes nothing outside itself.",
+  "output": {
+    "id": "status-widget",
+    "noun": "Status widget",
+    "plural": "Status widgets",
+    "icon": "listChecks"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "kind": "widget",
+  "revision": 1,
+  "created": "2026-11-04T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-11-04T00:00:00.000Z",
+  "bindings": {}
+}
