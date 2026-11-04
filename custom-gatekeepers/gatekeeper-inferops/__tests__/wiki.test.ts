@@ -274,6 +274,119 @@ describe("the structure and page text", () => {
   });
 });
 
+// FAC-66: searchWiki under the accepted knowledge read and search contract, over the mock's
+// plain full-text stand-in for `knowledge.search`.
+describe("search", () => {
+  const FIRST_WEEK = "61000000-0000-4000-8000-000000000004";
+
+  it("returns the matching sections best first, with their version and a capped snippet, as an observation", async () => {
+    const { hooks, session } = setup();
+    const hits = await session.searchWiki("  teammate ");
+    expect(hits).toEqual([{
+      sectionId: FIRST_WEEK, sectionVersion: 1, tag: "first-week", documentId: ONBOARDING,
+      documentSlug: "onboarding", documentTitle: "Onboarding", snippet: expect.stringContaining("<b>teammate</b>"),
+    }]);
+    expect(hits[0]).not.toHaveProperty("score");
+    expect([...hits[0]!.snippet].length).toBeLessThanOrEqual(300);
+    const log = await hooks.log();
+    expect(log.observations).toEqual(["Searched the InferMind Wiki"]);
+    // The query and the hit references, never the snippet.
+    expect(log.observationTexts.at(-1)).toContain('for "teammate": 1 section: first-week in onboarding.');
+    expect(log.observationTexts.at(-1)).not.toContain("pair with");
+    // Several matches come best first, at most `limit`; no match is an empty list.
+    const demo = await session.searchWiki("demo board");
+    expect(demo.length).toBeGreaterThan(1);
+    expect((await session.searchWiki("demo board", { limit: 1 }))).toEqual([demo[0]]);
+    expect(await session.searchWiki("zebra")).toEqual([]);
+    expect((await hooks.log()).observationTexts.at(-1)).toContain("no readable match.");
+  });
+
+  it("refuses a bad query or limit before searching, logging nothing", async () => {
+    const { hooks, session } = setup();
+    for (const [query, limit] of [
+      ["", undefined], ["   ", undefined], ["x".repeat(501), undefined],
+      ["teammate", 0], ["teammate", 51], ["teammate", 2.5],
+    ] as const) {
+      expect(await failure(session.searchWiki(query, limit === undefined ? undefined : { limit })), `${query.length}/${limit}`)
+        .toContain("INVALID_REQUEST");
+    }
+    // 500 characters after trimming are allowed.
+    expect(await session.searchWiki(` ${"x".repeat(500)} `)).toEqual([]);
+    expect((await hooks.log()).observations).toEqual(["Searched the InferMind Wiki"]);
+  });
+
+  it("keeps only the query's first 100 characters in the observation", async () => {
+    const { hooks, session } = setup();
+    const long = `teammate ${"y".repeat(150)}`;
+    await session.searchWiki(long);
+    const text = (await hooks.log()).observationTexts.at(-1)!;
+    expect(text).toContain(`"${long.slice(0, 100)}…"`);
+    expect(text).not.toContain(long.slice(0, 101));
+  });
+
+  it("marks a hit whose section has an edit pending here, keeping the committed snippet", async () => {
+    const { session } = setup();
+    await session.updateSection(FIRST_WEEK, "In your first week, shadow the on-call.", 1);
+    const [hit] = await session.searchWiki("teammate");
+    expect(hit).toMatchObject({ sectionId: FIRST_WEEK, pending: "update" });
+    expect(hit!.snippet).toContain("<b>teammate</b>");
+  });
+
+  it("reports a search that could not run as unavailable, never as an empty list", async () => {
+    const { hooks, mock, session } = setup();
+    await mock.searchWiki("warm up", 1);
+    await mock.setSearchUnavailable(true);
+    expect(await failure(session.searchWiki("teammate"))).toContain("UNAVAILABLE");
+    expect((await hooks.log()).observations).toEqual([]);
+    await mock.setSearchUnavailable(false);
+    expect(await session.searchWiki("teammate")).toHaveLength(1);
+  });
+
+  it("keeps an admitted collaborator out of every search, whose answer reflects the owner's lens", async () => {
+    const { props, hooks, session } = setup();
+    expect(await hooks.addWikiObserver(props, true)).toBeNull();
+    await session.searchWiki("teammate");
+    expect((await hooks.log()).excluded.at(-1)).toEqual(["observer-1"]);
+  });
+
+  it("allows 30 searches a minute per connected account, across its bindings, then says when to retry", async () => {
+    const accountId = crypto.randomUUID();
+    const first = setup(accountId);
+    for (let i = 0; i < 30; i++) await first.session.searchWiki("teammate");
+    // Another binding of the same account shares the budget.
+    const second = first.hooks.startWikiSession({ ...first.props });
+    const refused = await failure(second.searchWiki("teammate"));
+    expect(refused).toContain("UNAVAILABLE: Too many Wiki searches on this connection: at most 30 a minute. Try again in");
+    // Another account is unaffected.
+    expect(await setup().session.searchWiki("teammate")).toHaveLength(1);
+  });
+
+  it("never searches over the deployment's shared connection, sending nothing", async () => {
+    const stopgap = env as unknown as Record<string, string | undefined>;
+    const names = ["INFEROPS_BASE_URL", "INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG"];
+    const saved = names.map(name => stopgap[name]);
+    Object.assign(stopgap, {
+      INFEROPS_BASE_URL: "http://stopgap.test", INFEROPS_API_TOKEN: "iex_stopgap-for-search",
+      INFEROPS_WORKSPACE_ID: "90000000-0000-4000-8000-000000000001", INFEROPS_WORKSPACE_SLUG: "knowledge",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return Response.json({ hits: [] });
+    });
+    try {
+      const { props, hooks } = setup();
+      const shared = hooks.startWikiSession({ accountId: props.accountId, host: "acme.knowledge" });
+      expect(await failure(shared.searchWiki("teammate"))).toContain(
+        "FORBIDDEN: Searching the InferMind Wiki needs your own InferLab sign-in: this connection is shared.");
+      expect(calls).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+      names.forEach((name, i) => { stopgap[name] = saved[i]; });
+    }
+  });
+});
+
 describe("page body edits", () => {
   it("queue an approval, show at once as pendingBody, and write only on approval", async () => {
     const { props, hooks, mock, session } = setup();
