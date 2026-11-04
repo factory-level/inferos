@@ -188,8 +188,11 @@ describe("ScheduleDriver", () => {
 
   it("refuses a request for a schedule that isn't running, starting nothing", async () => {
     const driver = testEnv.SCHEDULE_DRIVER.getByName("requested-missing");
-    await expect(driver.runRequested("workspace-a", "no-such-schedule", "inv-1"))
-      .rejects.toThrow("This scheduled task isn't running, so it can't be run now.");
+    // Refusals are read in-process, as this file reads every driver refusal (rejectedMessage), so
+    // the rejection is the caller's to handle rather than one the RPC stub reports as unhandled.
+    expect(await runInDurableObject(driver, instance =>
+      rejectedMessage(() => instance.runRequested("workspace-a", "no-such-schedule", "inv-1"))))
+      .toBe("This scheduled task isn't running, so it can't be run now.");
     const now = Date.now();
     await enableSchedule(driver, {
       workspaceId: "workspace-a", scheduleId: "done",
@@ -199,7 +202,9 @@ describe("ScheduleDriver", () => {
     await updateSchedule(driver, "workspace-a", "done", stored => ({
       ...stored, state: { ...stored.state, status: "completed", completedAt: now } as never,
     }));
-    await expect(driver.runRequested("workspace-a", "done", "inv-2")).rejects.toThrow("isn't running");
+    expect(await runInDurableObject(driver, instance =>
+      rejectedMessage(() => instance.runRequested("workspace-a", "done", "inv-2"))))
+      .toBe("This scheduled task isn't running, so it can't be run now.");
     expect((await testEnv.TEST_HOOKS.read()).events).toEqual([]);
   });
 
