@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
-import { OverseerDurableObject } from "../src/overseer.js";
+import { OverseerDurableObject, makeOverseerStorage } from "../src/overseer.js";
+import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
+import { makeMockStorage } from "./mock-storage.js";
 
 vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
 
@@ -10,6 +12,8 @@ function makeOverseer(
     hook: { enabled: boolean; vendorId?: string; callback?: object } | null =
         { enabled: true, vendorId: "email" },
     legacyVendorId?: string,
+    workflowDefinitions?: WorkspaceWorkflowDefinitionStore,
+    gadgetHead?: string,
 ): OverseerDurableObject {
   let overseer = Object.create(OverseerDurableObject.prototype) as OverseerDurableObject;
   Object.assign(overseer, {
@@ -18,6 +22,13 @@ function makeOverseer(
       // The quarantine gate (see the dedicated pending-restart tests); no connection is blocked
       // in these fixtures.
       assertGatekeeperUsable: () => {},
+      // The workflow-definition pin check (workflow-definition-store.ts): no pin unless a test
+      // supplies a store, and an owner-only workspace.
+      getSharingManager: async () => ({ getEffectiveRole: () => undefined }),
+      getOwnerProfileId: async () => "owner-profile",
+      workflowDefinitionStore: () => workflowDefinitions ?? { fire: () => null },
+      getGadgetHead: () => gadgetHead,
+      defaultGadgetId: 3,
       storage: {
         boundHooks: { get: () => hook && ({ ...hook, gatekeeperId: 1 }) },
         gatekeepers: {
@@ -37,6 +48,24 @@ function makeOverseer(
 }
 
 describe("OverseerDurableObject.startHook", () => {
+  it("fires a hook pinned to a workflow definition only at that revision's code, recording it", async () => {
+    let durable = makeMockStorage();
+    let definitions = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
+    let head = "a".repeat(40);
+    let owner = { type: "user" as const, id: "owner-profile", name: "Owner" };
+    let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head);
+    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1 });
+    let config = async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG);
+    let hook = { enabled: true, vendorId: "email", callback: { deliver: async () => "ok" } };
+
+    await makeOverseer(config, hook, undefined, definitions, head).startHook(1);
+    expect(definitions.deliveries(owner.id, saved.id)).toMatchObject([{ hookId: 1, revision: 1, commitId: head }]);
+
+    await expect(makeOverseer(config, hook, undefined, definitions, "b".repeat(40)).startHook(1))
+      .rejects.toThrow("changed since revision 1");
+    expect(definitions.deliveries(owner.id, saved.id)).toHaveLength(1);
+  });
+
   it.each([
     ["ordinary", DEFAULT_ADMIN_CONFIG, "email"],
     ["ambient", {

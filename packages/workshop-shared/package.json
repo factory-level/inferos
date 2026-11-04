@@ -90,6 +90,10 @@
     "./operate-approval": {
       "types": "./src/operate-approval.ts",
       "import": "./src/operate-approval.ts"
+    },
+    "./workflow-definition": {
+      "types": "./src/workflow-definition.ts",
+      "import": "./src/workflow-definition.ts"
     }
   },
   "scripts": {

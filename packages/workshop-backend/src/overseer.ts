@@ -4,6 +4,8 @@ import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
+import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "@gadgets/workshop-shared/workflow-definition";
+import { WorkspaceWorkflowDefinitionStore, type StoredTriggerPin, type StoredWorkflowDefinition, type StoredWorkflowDelivery } from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
@@ -1386,6 +1388,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       nextGatekeeperId: 0,
 
       nextActionId: 0,
+
+      // The next workflow-definition delivery number (see workflow-definition-store.ts).
+      nextWorkflowDeliveryId: 0,
       nextChatId: 0,
       nextHookId: 0,
       nextAgentCallId: 0,
@@ -1420,6 +1425,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       canvasPages: collection<StoredCanvasPage>()({ primaryKey: record => record.page.id }),
       // Authored flows: ordered lists of this workspace's canvases (see flow-store.ts).
       flows: collection<OperateFlow>()({ primaryKey: "id" }),
+      // Saved and published workflow definitions, the triggers pinned to them, and the deliveries
+      // those triggers made (see workflow-definition-store.ts).
+      workflowDefinitions: collection<StoredWorkflowDefinition>()({ primaryKey: "id" }),
+      workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
+      workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
       consoles: collection<OperateConsole>()({ primaryKey: "id" }),
       // Each published console's screens as they were when it was published, keyed
@@ -3282,6 +3292,7 @@ class OverseerImpl implements AgentHooks {
       await record.controller.disable();
     }
     this.storage.boundHooks.delete(record.id);
+    this.storage.workflowTriggerPins.delete(record.id);
 
     stampBindHookAction(this.storage, record.actionId, false, {clearHookId: true});
   }
@@ -6243,6 +6254,7 @@ class OverseerImpl implements AgentHooks {
     for (let hook of Array.from(this.storage.boundHooks.list())) {
       if (hook.gatekeeperId !== id) continue;
       this.storage.boundHooks.delete(hook.id);
+      this.storage.workflowTriggerPins.delete(hook.id);
       stampBindHookAction(this.storage, hook.actionId, false, {clearHookId: true});
       if (hook.enabled) {
         this.ctx.waitUntil(hook.controller.disable().catch(error => {
@@ -11024,6 +11036,11 @@ class OverseerImpl implements AgentHooks {
     return sharing.listCollaborators().length > 0 || sharing.listShareLinkRecords().length > 0;
   }
 
+  /** This workspace's workflow definitions, their trigger pins and deliveries. */
+  workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
+    return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage);
+  }
+
   /** See the module-level `requireSharedConfiguration`. */
   async requireSharedConfiguration(userId: string, action: SharedConfigurationAction,
                                    scope: "always" | "shared"): Promise<void> {
@@ -12102,11 +12119,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         ambientGatekeeperMode(config, vendorId) === "disabled") {
       throw new Error("Gatekeeper is disabled.");
     }
+    // Who can still build here, for a trigger pinned to an unpublished definition revision.
+    let sharing = await this.impl.getSharingManager();
+    let ownerProfileId = await this.impl.getOwnerProfileId();
 
     // Re-read after the await: the KV read leaves the input gate open, so a disable/delete may
     // have landed while it was in flight, and issuing from the captured record would hand out a
     // firing on a dead hook (the enableHookRecord/disableHook idiom).
     record = requireLiveHook(this.impl, hookId);
+
+    // A trigger pinned to a workflow definition revision fires only that revision's code, and the
+    // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
+    this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
+        gadgetId => this.impl.getGadgetHead(gadgetId),
+        profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build");
 
     // Both returned capabilities revalidate the hook per call rather than trusting this moment:
     // they are held outside this DO (even across resets -- the stored callback is a persistent
@@ -12631,6 +12657,35 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.#flowStore().replace(id, expectedRevision, content);
   }
   async deleteFlow(id: string, expectedRevision: string): Promise<void> { this.#flowStore().delete(id, expectedRevision); }
+  // Workflow definitions: saving is building and publishing is publishing, each gated as such in a
+  // shared workspace; the store decides ownership and visibility (workflow-definition-store.ts).
+  async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> {
+    return this.impl.workflowDefinitionStore().list((await this.#getClientProfile()).id);
+  }
+  async saveWorkflowDefinition(input: WorkflowDefinitionSave): Promise<WorkflowDefinition> {
+    await this.#requireSharedConfiguration("build", "shared");
+    let profile = await this.#getClientProfile();
+    return this.impl.workflowDefinitionStore().save(profile, input, id => this.impl.getGadgetHead(id));
+  }
+  async publishWorkflowDefinition(id: string, revision: number): Promise<WorkflowDefinition> {
+    await this.#requireSharedConfiguration("publish", "shared");
+    let profile = await this.#getClientProfile();
+    return this.impl.workflowDefinitionStore().publish(profile, id, revision);
+  }
+  async pinTriggerDefinition(hookId: number, ref: WorkflowDefinitionRef | null): Promise<void> {
+    await this.#requireSharedConfiguration("build", "shared");
+    let profile = await this.#getClientProfile();
+    let hook = this.impl.storage.boundHooks.get(hookId);
+    if (!hook) throw new Error("No such hook.");
+    this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
+        hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
+  }
+  async getTriggerDefinition(hookId: number): Promise<WorkflowDefinitionRef | null> {
+    return this.impl.workflowDefinitionStore().pinOf(hookId);
+  }
+  async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
+    return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId);
+  }
 
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -15062,6 +15117,20 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // A use session sees published workflow definitions only, and changes nothing.
+  async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> {
+    return this.impl.workflowDefinitionStore().list(this.clientProfileId)
+        .filter(definition => definition.published !== null)
+        .map(definition => ({
+          ...definition,
+          revisions: definition.revisions.filter(r => r.revision === definition.published!.revision),
+        }));
+  }
+  async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
+  async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
+  async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
+  async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
+  async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   // An operator granted "use" reaches the published consoles of the workspace without Build,
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
@@ -15609,6 +15678,13 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent)
       : Promise<OperateFlow> { this.#deny(); }
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // An operate session is its owner's alone; workflow definitions are managed in Build.
+  async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> { this.#deny(); }
+  async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
+  async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
+  async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
+  async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
+  async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
       : Promise<OperateConsole> { this.#deny(); }

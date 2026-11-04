@@ -82,7 +82,9 @@ const allDenied = (calls: object) =>
 type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" |
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
     "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
-    "getConsoleScreen" | "getConsoleWidget";
+    "getConsoleScreen" | "getConsoleWidget" |
+    // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
+    "listWorkflowDefinitions";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
@@ -93,6 +95,11 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   createFlow: ws => ws.createFlow({ title: "Flow", steps: ["view"] }),
   replaceFlow: ws => ws.replaceFlow("flow", "0", { title: "Flow", steps: ["view"] }),
   deleteFlow: ws => ws.deleteFlow("flow", "0"),
+  saveWorkflowDefinition: ws => ws.saveWorkflowDefinition({ title: "Workflow", gadgetId: 1 }),
+  publishWorkflowDefinition: ws => ws.publishWorkflowDefinition("definition", 1),
+  pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
+  getTriggerDefinition: ws => ws.getTriggerDefinition(1),
+  listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
