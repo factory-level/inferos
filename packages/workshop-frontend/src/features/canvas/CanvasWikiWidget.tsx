@@ -112,7 +112,9 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       </p>}
       {list.status === 'error' && <div className="space-y-2">
         <p role="alert" className="text-sm text-kumo-danger">
-          {list.code === 'FORBIDDEN' || list.code === 'UNAUTHORIZED' ? 'No access to this Wiki' : 'Could not read the Wiki'}: {list.message}
+          {list.code === 'UNAUTHORIZED' ? 'Sign in to InferOps again to read this Wiki.'
+            : list.code === 'FORBIDDEN' ? `No access to this Wiki: ${list.message}`
+              : `Could not read the Wiki: ${list.message}`}
         </p>
         <Button size="sm" onClick={() => data?.refresh()}>Try again</Button>
       </div>}
