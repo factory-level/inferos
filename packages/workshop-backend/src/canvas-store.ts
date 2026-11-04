@@ -15,6 +15,21 @@ export interface StoredCanvasPage {
 }
 
 /**
+ * The page a `canvases` row currently stands for: its nested page while that page is based on the
+ * row's revision, otherwise the row by conversion. What the store's page reads and a console
+ * publication (FAC-89) both read. Reads never write.
+ */
+export function currentPage(storage: Pick<OverseerStorage, "canvasPages">, row: CanvasDefinition): CanvasPage {
+  return nestedPage(storage, row) ?? canvasPageFromDefinition(row);
+}
+
+/** The nested page that currently replaces `row`, if any: one based on the row's revision. */
+export function nestedPage(storage: Pick<OverseerStorage, "canvasPages">, row: Pick<CanvasDefinition, "id" | "revision">): CanvasPage | null {
+  const stored = storage.canvasPages.get(row.id);
+  return stored?.basedOnRevision === row.revision ? parseCanvasPage(stored.page) : null;
+}
+
+/**
  * Workspace-local composition persistence, reachable only through a build-capable Overseer session.
  *
  * `canvases` only ever holds version 1, because code before pages parses every row to list any of
@@ -84,24 +99,19 @@ export class WorkspaceCanvasStore {
 
   /** The nested page that currently replaces this row, if any. */
   #nestedPage(row: CanvasDefinition): CanvasPage | null {
-    const stored = this.storage.canvasPages.get(row.id);
-    return stored?.basedOnRevision === row.revision ? parseCanvasPage(stored.page) : null;
+    return nestedPage(this.storage, row);
   }
 
-  /** One page by ID: its nested page, or its version 1 row by conversion. Reads never write. */
+  /** One page by ID: its nested page, or its version 1 row by conversion (see `currentPage`). Reads never write. */
   getPage(id: string): CanvasPage | null {
     const row = this.get(id);
-    if (!row) return null;
-    return this.#nestedPage(row) ?? canvasPageFromDefinition(row);
+    return row ? currentPage(this.storage, row) : null;
   }
 
   /** Every page of this workspace. Reads never write. */
   listPages(): CanvasPage[] {
     this.#requireEnabled();
-    return Array.from(this.storage.canvases.list(), row => {
-      const parsed = parseCanvasDefinition(row);
-      return this.#nestedPage(parsed) ?? canvasPageFromDefinition(parsed);
-    });
+    return Array.from(this.storage.canvases.list(), row => currentPage(this.storage, parseCanvasDefinition(row)));
   }
 
   /**

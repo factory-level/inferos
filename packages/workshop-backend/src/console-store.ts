@@ -1,6 +1,8 @@
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
+import { canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { nestedPage } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
@@ -8,7 +10,7 @@ import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspac
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
-type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens" | "gadgets" | "flows">;
+type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows">;
 
 /**
  * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called
@@ -205,12 +207,36 @@ function viewRefusal(entry: BoundViewEntry, commit: SourceCommit): string | null
   return null;
 }
 
-/** The gadget ids `screen`'s `inferos.gadget` widgets reference. */
-function placedGadgets(screen: CanvasDefinition): WorkpieceId[] {
-  return screen.sections.flatMap(section => section.widgets.flatMap(widget => {
+/**
+ * The gadget ids the `inferos.gadget` widgets of screen `row` reference: its nested page's, at any
+ * depth, while one is current, otherwise its sections'. A row is read unparsed, as stored.
+ */
+function placedGadgets(storage: Pick<ConsoleStorage, "canvasPages">, row: CanvasDefinition): WorkpieceId[] {
+  let nested = nestedPage(storage, row);
+  let widgets = nested ? nested.nodes.flatMap(node => node.nodeType === "widget" ? [node] : [])
+    : row.sections.flatMap(section => section.widgets);
+  return widgets.flatMap(widget => {
     let match = widget.kind === "inferos.gadget" ? CANVAS_GADGET_REF.exec(widget.targetRef) : null;
     return match ? [Number(match[1])] : [];
-  }));
+  });
+}
+
+/** `page` with each placed gadget the map names replaced by its frozen install, at any depth. */
+function withFrozenNodes(page: CanvasPage, frozen: Map<WorkpieceId, WorkpieceId>): CanvasPage {
+  return { ...page, nodes: page.nodes.map(node => {
+    let match = node.nodeType === "widget" && node.kind === "inferos.gadget" ? CANVAS_GADGET_REF.exec(node.targetRef) : null;
+    let replacement = match ? frozen.get(Number(match[1])) : undefined;
+    return replacement === undefined ? node : { ...node, targetRef: `gadget:${replacement}` };
+  }) };
+}
+
+/**
+ * The revision of the page screen `screenId` stands for now: its current nested page's, otherwise
+ * its row's (a converted page keeps the row's revision). Null if there is no such screen.
+ */
+function screenRevision(storage: Pick<ConsoleStorage, "canvases" | "canvasPages">, screenId: string): string | null {
+  let row = storage.canvases.get(screenId);
+  return row ? (nestedPage(storage, row) ?? row).revision : null;
 }
 
 /** `screen` with each placed gadget the map names replaced by its frozen install. */
@@ -228,7 +254,7 @@ function withFrozenGadgets(screen: CanvasDefinition, frozen: Map<WorkpieceId, Wo
  * install (or frozen install) placed on a screen the console shows must be registered and, given
  * `commits`, have a UI. Other gadgets, such as installed apps, are placed as before.
  */
-function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets">, content: OperateConsoleContent,
+function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent,
     commits?: SourceCommits): void {
   let registered = new Set<WorkpieceId>();
   let noUi = new Set<WorkpieceId>();
@@ -245,11 +271,11 @@ function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets
   };
   for (let screenId of consoleScreens(content)) {
     let screen = storage.canvases.get(screenId);
-    let unregistered = screen && placedGadgets(screen).find(id => isWidget(id) && !registered.has(id));
+    let unregistered = screen && placedGadgets(storage, screen).find(id => isWidget(id) && !registered.has(id));
     if (unregistered !== undefined && unregistered !== null) {
       throw new Error(`Screen ${screenId} shows widget ${unregistered}, which the console's widget registry does not offer.`);
     }
-    let uiLess = screen && placedGadgets(screen).find(id => noUi.has(id));
+    let uiLess = screen && placedGadgets(storage, screen).find(id => noUi.has(id));
     if (uiLess !== undefined && uiLess !== null) {
       throw new Error(`Screen ${screenId} shows widget ${uiLess}, which has no UI; a console offers its tools only.`);
     }
@@ -260,7 +286,18 @@ function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets
  * A screen as a console published it: a copy of the canvas taken when the console was published,
  * so editing the canvas afterwards changes only the draft. Keyed by `consoleScreenKey`.
  */
-export type ConsoleScreenSnapshot = { consoleId: string; screenId: string; screen: CanvasDefinition };
+export type ConsoleScreenSnapshot = {
+  consoleId: string;
+  screenId: string;
+  /** The version 1 copy, for readers without pages: the screen's `canvases` row as it stood. */
+  screen: CanvasDefinition;
+  /**
+   * The nested page the publication froze (FAC-89), when one was current, with placed widget
+   * installs replaced by their frozen installs at any depth. Absent otherwise, and on snapshots
+   * taken before it was recorded: the page is then `screen` by conversion.
+   */
+  page?: CanvasPage;
+};
 
 /** The storage key of one published console screen. Ids never contain "/". */
 export function consoleScreenKey(consoleId: string, screenId: string): string {
@@ -301,9 +338,11 @@ export type ConsoleCapture = {
   }[];
   /** Every registered gadget's commit, each once: what the publication must read. */
   commitIds: string[];
+  /** Each screen the console shows, with the revision of the page it stands for (null if missing). */
+  screens: { id: string; revision: string | null }[];
 };
 
-function captureConsole(storage: Pick<ConsoleStorage, "gadgets">, stored: OperateConsole): ConsoleCapture {
+function captureConsole(storage: Pick<ConsoleStorage, "gadgets" | "canvases" | "canvasPages">, stored: OperateConsole): ConsoleCapture {
   let boards = new Map((stored.hostBoards ?? []).map(board => [board.requirement.name, board.id ?? null]));
   let source = (gadgetId: WorkpieceId) => {
     let record = storage.gadgets.get(gadgetId);
@@ -316,8 +355,10 @@ function captureConsole(storage: Pick<ConsoleStorage, "gadgets">, stored: Operat
     source: source(entry.gadgetId),
   }));
   let registered = [...stored.widgets ?? [], ...stored.boundViews ?? []].map(entry => source(entry.gadgetId).commitId);
+  // A page saved beside an unchanged row (a nested page) moves only the page's revision.
+  let screens = consoleScreens(stored).map(id => ({ id, revision: screenRevision(storage, id) }));
   return { revision: stored.revision, boundViews,
-    commitIds: [...new Set(registered.filter(commitId => commitId !== null))] };
+    commitIds: [...new Set(registered.filter(commitId => commitId !== null))], screens };
 }
 
 // The surfaces a published widget entry freezes from its source commit: whether it has a UI, and
@@ -344,6 +385,7 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
     frozen?: FrozenInstalls, commits?: SourceCommits): OperateConsole {
   let { id, revision, published: _, ...content } = stored;
   checkConsoleWidgets(storage, content, commits);
+  let screens = publishedPages(storage, content);
   let flows = publishedFlows(storage, content);
   let entries = content.widgets ?? [];
   if (entries.length > 0 && (!frozen || !commits)) throw new Error("This console's widgets cannot be published here.");
@@ -368,20 +410,42 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
     return { ...entry, gadgetId: made.id, frozen: { sourceGadgetId: source.id, commitId: made.commitId!, ...surfaces } };
   });
   dropPublishedScreens(storage, id);
-  for (let screenId of consoleScreens(content)) {
-    let screen = storage.canvases.get(screenId);
-    if (screen) storage.consoleScreens.put({ consoleId: id, screenId, screen: withFrozenGadgets(screen, frozenIds) });
+  for (let { screenId, row, page } of screens) {
+    storage.consoleScreens.put({ consoleId: id, screenId, screen: withFrozenGadgets(row, frozenIds),
+      ...(page ? { page: withFrozenNodes(page, frozenIds) } : {}) });
   }
   let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
     ...(content.boundViews === undefined ? {} : { boundViews }) };
   let result: OperateConsole = { ...stored,
-    published: { revision, publishedAt, content: publishedContent, ...(flows.length === 0 ? {} : { flows }) } };
+    published: { revision, publishedAt, content: publishedContent, ...(flows.length === 0 ? {} : { flows }),
+      screens: screens.map(({ screenId, row, page }) => ({ id: screenId, revision: (page ?? row).revision })) } };
   if (jsonBytes(result) > CONSOLE_SIZE_LIMITS.console) {
     throw new Error(`This console would be over ${CONSOLE_SIZE_LIMITS.console} bytes published.`);
   }
   storage.consoles.put(result);
   if (frozen) dropFrozenInstalls(storage, frozen, id, new Set(frozenIds.values()));
   return result;
+}
+
+// Each screen `content` shows that exists, with its row and the page it stands for now, for its
+// publication. Behavior on a page may navigate only to a page the console also shows, so an
+// operator is never sent to one the publication has no copy of; otherwise nothing is published.
+function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages">, content: OperateConsoleContent) {
+  let shown = new Set(consoleScreens(content));
+  return consoleScreens(content).flatMap(screenId => {
+    let row = storage.canvases.get(screenId);
+    if (!row) return [];
+    // Only a nested page has behavior; a version 1 row has none.
+    let page = nestedPage(storage, row);
+    for (let owner of page ? [page, ...page.nodes] : []) {
+      for (let attachment of owner.attachments) {
+        if (attachment.effect.kind === "navigate" && !shown.has(attachment.effect.page)) {
+          throw new Error(`Screen ${screenId} navigates to page ${attachment.effect.page}, which the console does not show.`);
+        }
+      }
+    }
+    return [{ screenId, row, page }];
+  });
 }
 
 // The flows `content` lists, each copied as it is now, for its publication. Each must still exist,
@@ -629,6 +693,22 @@ export class WorkspaceConsoleStore {
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
     if (source === "draft") return this.storage.canvases.get(screenId) ?? null;
     return this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
+  }
+
+  /**
+   * The page of one console's screen: as its publication froze it, or (for the draft) the page the
+   * screen stands for now (see `currentPage`). Null if that revision of the console doesn't show
+   * the screen. A publication made before pages were frozen gives its version 1 copy by conversion.
+   */
+  page(consoleId: string, screenId: string, source: ConsoleSource): CanvasPage | null {
+    let shown = this.get(consoleId, source);
+    if (!shown || !consoleScreens(shown).includes(screenId)) return null;
+    if (source === "draft") {
+      let row = this.storage.canvases.get(screenId);
+      return row ? nestedPage(this.storage, row) ?? canvasPageFromDefinition(row) : null;
+    }
+    let snapshot = this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId));
+    return snapshot ? snapshot.page ?? canvasPageFromDefinition(snapshot.screen) : null;
   }
 
   /**

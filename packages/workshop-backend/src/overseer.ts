@@ -1,6 +1,7 @@
 import type { ActionApprovalCorrelation, OperateApprovalRequest, OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
 import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
+import type { CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
@@ -12733,6 +12734,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     return this.#consoleStore().screen(consoleId, screenId, source);
   }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    return this.#consoleStore().page(consoleId, screenId, source);
+  }
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
     // Build access may already open any gadget, so its capability is the ordinary one.
@@ -15155,6 +15159,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     if (source !== "published") this.#deny();
     return this.#consoleStore().screen(consoleId, screenId, source);
   }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    if (source !== "published") this.#deny();
+    return this.#consoleStore().page(consoleId, screenId, source);
+  }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
       _model: ArtifactModelRequirement | null)
       : Promise<{manifest: ArtifactManifest, digest: ArtifactDigest, refusals: ArtifactRefusal[]}> { this.#deny(); }
@@ -15567,6 +15575,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   }
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     return this.owner.getConsoleScreen(consoleId, screenId, source);
+  }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    return this.owner.getConsolePage(consoleId, screenId, source);
   }
 
   // --- Allowed: the chat ---

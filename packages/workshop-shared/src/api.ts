@@ -1,3 +1,4 @@
+import type { CanvasPage } from "./canvas-model.js";
 import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-approval";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
@@ -2719,6 +2720,13 @@ export interface Overseer extends RpcTarget {
    * its `draft`, which needs build access. Null if that revision of the console doesn't show it.
    */
   getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null>;
+  /**
+   * Read the page of a screen of one console (FAC-89): as that console's publication froze it
+   * (nested objects, attachments and frozen widget installs included), or, for its `draft`, which
+   * needs build access, the page the screen stands for now. Null if that revision of the console
+   * doesn't show it. Operators get only what was published: a later save stays draft.
+   */
+  getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null>;
   /**
    * Open a widget a console offers, as its published revision `revision` offers it: `gadgetId` is
    * that revision's frozen install (see `ConsoleWidgetEntry`). This is how the use role reaches a
