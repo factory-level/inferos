@@ -4,12 +4,14 @@ import {
   Pencil,
   Trash,
   Blueprint,
+  Robot,
   Warning,
   X,
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { Overseer, GadgetClient, GadgetBindingInfo, BoundHookInfo, AuthenticatedApi, WorkpieceId } from '@gadgets/workshop-shared/api'
 import GatekeeperModal from './GatekeeperModal'
+import { AgentSettingsModal, type AgentBindingRef } from './gatekeeper-modal/AgentSettingsModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
 import { useVendorBranding } from './useVendorBranding'
@@ -54,6 +56,9 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
+  // Bindings that point at an agent (an agent-spawner gatekeeper), which can be reopened and edited.
+  const [agentBindings, setAgentBindings] = useState<AgentBindingRef[]>([])
+  const [agentTarget, setAgentTarget] = useState<AgentBindingRef | null>(null)
   const toasts = useKumoToastManager()
 
   const loadGatekeepers = async () => {
@@ -154,6 +159,30 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       ...bindings.map((b) => ({ target: b.target, targetTitle: b.resourceTitle, name: b.name })),
     ]
   }, [gadgetInfo, bindings])
+
+  // Agents carry no vendor, so only vendorless, permanent bindings are asked what they point at.
+  useEffect(() => {
+    let cancelled = false
+    const candidates = bindings.filter((b) => !b.vendorId && b.chatId === undefined)
+    Promise.all(candidates.map(async (b): Promise<AgentBindingRef | null> => {
+      const gk = await gadget.getBinding(b.name)
+      try {
+        const spec = await gk?.getCreationSpec()
+        return spec?.type === 'agentSpawner'
+          ? { name: b.name, gatekeeperId: b.target, title: b.resourceTitle }
+          : null
+      } catch {
+        return null
+      } finally {
+        gk?.[Symbol.dispose]()
+      }
+    })).then((found) => {
+      if (!cancelled) setAgentBindings(found.filter((a): a is AgentBindingRef => a !== null))
+    }).catch((err) => reportIssue('connections.agent-detect', err))
+    return () => {
+      cancelled = true
+    }
+  }, [gadget, bindings])
 
   const handleEditStart = (name: string) => {
     setEditingBinding(name)
@@ -332,6 +361,16 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                               <Pencil size={14} />
                             </WorkshopIconButton>
                           </Tooltip>
+                          {!isPending && agentBindings.some((a) => a.name === gk.name) && (
+                            <Tooltip content="Agent settings" asChild>
+                              <WorkshopIconButton
+                                onClick={() => setAgentTarget(agentBindings.find((a) => a.name === gk.name) ?? null)}
+                                aria-label="Agent settings"
+                              >
+                                <Robot size={14} />
+                              </WorkshopIconButton>
+                            </Tooltip>
+                          )}
                           {!isPending && (
                             <Tooltip content="Edit blueprint settings" asChild>
                               <WorkshopIconButton
@@ -474,6 +513,20 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
           } finally {
             gk[Symbol.dispose]()
           }
+        }}
+      />
+
+      <AgentSettingsModal
+        target={agentTarget}
+        overseer={overseer}
+        authenticatedApi={authenticatedApi}
+        // An agent is never offered to itself.
+        envCandidates={spawnerEnvCandidates.filter((c) => c.target !== agentTarget?.gatekeeperId)}
+        otherAgents={agentBindings.filter((a) => a.name !== agentTarget?.name)}
+        onClose={() => setAgentTarget(null)}
+        onSaved={() => {
+          void loadGatekeepers()
+          onConnectionsChange?.()
         }}
       />
 

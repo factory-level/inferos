@@ -11,9 +11,10 @@ covers:
   - packages/workshop-backend/src/artifact-publisher.ts
   - packages/workshop-backend/src/artifact-publisher-binding.d.ts
   - packages/gatekeeper-scheduler
+  - packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.tsx
   - packages/gatekeeper-context/src/agent-skill.ts
   - docs/blueprints.md
-updated: 2026-11-02
+updated: 2026-11-03
 ---
 
 # Reusable native agent authoring
@@ -96,7 +97,14 @@ An agent spawner is the workspace's configured agent. Its `AgentSpawnerConfig` i
   - New spawns get the change. Agents already spawned keep the configuration they started with.
   - A widened `env` restarts the "use" sessions it reaches through a binding gadget, as binding does. Whether `env` stays within each calling gadget's bindings is still checked on every call (above).
 - **In the prompt:** a spawned agent's instructions are added to its system prompt as configured behaviour that grants nothing (`formatAgentInstructions`), with any `</agent_instructions>` in the text escaped so it can't end the frame early. The bindings listed after them are all it can reach.
-- **Tests:** `packages/workshop-backend/__tests__/agent-spawner-config.test.ts` covers reopening, behaviour edits leaving `env` alone, a refused capability change inside an edit, creator-only capability, model and instruction changes, refused self-reference and cycles, stale edits, bounds, and the call-time scope check after an `env` change.
+- **In the UI:** a gadget's Connections tab shows an "Agent settings" button on each permanent binding to an agent. It finds them by asking each vendorless binding for its creation spec.
+  - `AgentSettingsModal` reopens the saved configuration through `getAgentSpawner`. Name, model and instructions save together through `updateAgentSpawner`, and only the fields that changed are sent.
+  - Capabilities sit in their own section with their own save (`setAgentSpawnerEnv`). It is offered the gadget and its bindings, never the agent itself or an agent that reaches it (`agentsReaching`).
+  - Someone who didn't create the agent sees its model, instructions and capabilities read-only, with the reason, and can change only its name.
+  - "Start from another agent" copies another of the gadget's agents' selection into the rows (`rowsFromOtherAgent`) for review. It saves nothing by itself. Named, shared capability bundles are not built.
+  - Server refusals, such as a stale edit or a creator-only change, are shown in the server's words.
+  - Creating an agent (`GatekeeperModal`) also takes instructions.
+- **Tests:** `packages/workshop-backend/__tests__/agent-spawner-config.test.ts` covers reopening, behaviour edits leaving `env` alone, a refused capability change inside an edit, creator-only capability, model and instruction changes, refused self-reference and cycles, stale edits, bounds, and the call-time scope check after an `env` change. `packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.test.tsx` covers the modal.
 
 ### Artifact revisions
 
