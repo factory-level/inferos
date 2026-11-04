@@ -101,6 +101,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
+  listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
   publishConsole: ws => ws.publishConsole("console", "0"),
@@ -134,6 +135,11 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   newAiModelGatekeeper: ws => ws.newAiModelGatekeeper("model"),
   newAgentSpawnerGatekeeper: ws =>
     ws.newAgentSpawnerGatekeeper({ displayName: "Spawner", modelId: null, env: {} }),
+  updateAgentSpawner: ws =>
+    ws.updateAgentSpawner(1, { displayName: "Spawner", modelId: null, env: {} }, { instructions: "x" }),
+  getAgentSpawner: ws => ws.getAgentSpawner(1),
+  setAgentSpawnerEnv: ws =>
+    ws.setAgentSpawnerEnv(1, { displayName: "Spawner", modelId: null, env: {} }, {}),
   approveAction: ws => ws.approveAction(0),
   operateApproval: ws => ws.operateApproval({actionId: 0, threadId: "hidden", runId: "hidden"}),
   rejectAction: ws => ws.rejectAction(0),

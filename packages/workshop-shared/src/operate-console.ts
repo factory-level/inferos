@@ -162,6 +162,45 @@ export type ConsoleWidgetEntry = {
   frozen?: ConsoleWidgetFreeze;
 };
 
+/**
+ * A registered widget's stable version: `<blueprintId>@<version>`. It is the same for a draft entry,
+ * the install it names and every publication of it, although each publication runs a new frozen
+ * install; `ConsoleWidgetFreeze.commitId` says which code a publication runs.
+ */
+export function consoleWidgetVersionId(widget: Pick<ConsoleWidgetEntry, "blueprintId" | "version">): string {
+  return `${widget.blueprintId}@${widget.version}`;
+}
+
+/**
+ * One widget install of a workspace, as a builder choosing what a console registers sees it: its
+ * stable version, what its current commit offers, and whether a console can offer it now. Frozen
+ * installs and gadgets that aren't widget installs are never candidates.
+ */
+export type ConsoleWidgetCandidate = {
+  /** The install, which a `ConsoleWidgetEntry` names to register it. */
+  gadgetId: WorkpieceId;
+  /** The blueprint the install came from. */
+  blueprintId: string;
+  /** The blueprint version it runs. */
+  version: number;
+  /** `consoleWidgetVersionId` of the two. */
+  versionId: string;
+  /** The install's current commit, or null if it has none yet. */
+  commitId: string | null;
+  /**
+   * What that commit offers a console: a UI (`client.js`) and the names of the tools its
+   * `tools.json` declares. Operators reach declared tools only while console tools are on
+   * (`CONSOLE_TOOLS`). Null when the commit is not a widget a console runs, or there is none.
+   */
+  surfaces: { ui: boolean; tools: string[] } | null;
+  /**
+   * Why a console cannot offer it now, as saving a console that registers it would refuse it; null
+   * when one can. Registering offers the widget only, and publishing still needs the deployment's
+   * shared-configuration authority.
+   */
+  refusal: string | null;
+};
+
 /** The one resource a host board requires: an InferOps board, read as a bounded snapshot. */
 export const HOST_BOARD_RESOURCE = "inferops-board";
 
