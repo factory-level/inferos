@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
+import { canvasPageFromDefinition } from '@gadgets/workshop-shared/canvas-model'
 import { CANVAS_REFRESH_MS, useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 
 let root: Root
@@ -16,6 +17,8 @@ const api = () => ({
   createCanvas: vi.fn<Overseer['createCanvas']>(async () => initial()),
   editCanvas: vi.fn<Overseer['editCanvas']>(async () => ({ ...initial(), revision: '1', title: 'Edited' })),
   deleteCanvas: vi.fn<Overseer['deleteCanvas']>(async () => {}),
+  getCanvasPage: vi.fn<Overseer['getCanvasPage']>(async () => canvasPageFromDefinition(initial())),
+  editCanvasPage: vi.fn<Overseer['editCanvasPage']>(),
 })
 const Probe = ({ storage, initialViewId = null }: { storage: CanvasStorage; initialViewId?: string | null }) => {
   canvas = useCanvasWorkspace(storage, initialViewId)
