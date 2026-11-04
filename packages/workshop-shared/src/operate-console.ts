@@ -1,4 +1,5 @@
 import type { WorkpieceId } from "./api.js";
+import type { WidgetIndexOutcome } from "./gatekeeper.js";
 import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
 import type { WidgetToolDeclaration } from "./widget-tools.js";
@@ -360,6 +361,28 @@ export type ConsolePublication = {
    * not listed. Absent on publications made before it was recorded.
    */
   apps?: ConsolePublishedApp[];
+};
+
+/**
+ * Where one console stands in the widget index of the deployment's shared-configuration service
+ * (FAC-11; InferOps' scoped index): which of its workspaces the console lists its widgets in, and
+ * what the service answered for each widget the live publication registers. Kept beside the
+ * console, never in its content, and read only with build access (`Overseer.getConsoleWidgetIndex`).
+ * Absent while the deployment names no such service.
+ */
+export type ConsoleWidgetIndexReport = {
+  /** The service workspace this console lists its widgets in, once chosen (or set because it was the only one). */
+  target: { workspaceId: string; name: string } | null;
+  /**
+   * Why the last publication or delete wrote nothing, in words for the builder: no sign-in, no
+   * workspace where they may, several to choose from, or a chosen one where they no longer may.
+   * Null when it wrote.
+   */
+  blocked: string | null;
+  /** Each widget version the live publication lists, with the service's last answer for it. */
+  widgets: { versionId: string; label: string; outcome: WidgetIndexOutcome }[];
+  /** Widget versions whose withdrawal was refused or failed, to try again on the next publication or delete. */
+  pendingWithdraws: { versionId: string; reason: string }[];
 };
 
 /**

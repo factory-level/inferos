@@ -84,6 +84,9 @@ import {
   type WikiStructureRecord, type WorkspaceMembersRead, PROPOSAL_APPROVE_REFUSED,
   type HistoryEntryRecord, toIssueActivity,
 } from "./inferops-client";
+
+/** Why the demo data lists no widget: it has no widget index. */
+const DEMO_NO_WIDGET_INDEX = "The demo data has no widget index.";
 import type { Issue, IssueActivity, Revision, RunResult, RunStatus, WikiProposalSource } from "./types";
 import { composeDocumentText, masterStructureText } from "./wiki";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound } from "./workflow-policy";
@@ -1096,6 +1099,9 @@ export function openInferOpsClient(
     listWorkspaceMembers: () => stub.listWorkspaceMembers(),
     // The demo data belongs to no company, so its account holds no company permission.
     holdsPermission: async () => false,
+    // The demo data has no widget index: nothing is listed, and nothing claims it was.
+    publishWidgetDefinition: async () => { throw new InferOpsError("UNAVAILABLE", DEMO_NO_WIDGET_INDEX); },
+    withdrawWidgetDefinition: async () => { throw new InferOpsError("UNAVAILABLE", DEMO_NO_WIDGET_INDEX); },
     readWorkflowPolicy: async projectKey => {
       const { projectId, body } = await stub.readWorkflowPolicy(projectKey);
       return readWorkflowPolicyAnswer(body, projectId);

@@ -9,7 +9,7 @@ import {
   type WidgetStateMachine, type WidgetStateSnapshot,
 } from '@gadgets/workshop-shared/widget-state';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -173,6 +173,16 @@ export async function holdsSharedConfiguration(
   if (scopes.size > 1) throw new Error(SHARED_CONFIGURATION_AMBIGUOUS);
   return holds;
 }
+
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, by a console
+// publication (see UserDurableObject.widgetIndexWorkspaces).
+type WidgetIndexAccountStub = Required<Pick<GatekeeperUser, "widgetIndexWorkspaces" | "registerWidget" | "withdrawWidget">>;
+
+/** A workspace in which the person may list widgets, with the account of theirs that may. */
+export type PersonWidgetIndexWorkspace = WidgetIndexWorkspace & { accountId: number };
+
+/** Why a widget index write was not sent: the account is not one of the person's own live ones. */
+const WIDGET_INDEX_NOT_YOURS = "Your InferOps sign-in for this workspace has expired or was removed. Sign in again.";
 
 /**
  * Vendor id of the Cloudflare gatekeeper (the suffix of GATEKEEPER_CLOUDFLARE, lowercased). The AI
@@ -2133,6 +2143,53 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let vendorId = getSharedConfigurationGatekeeper(this.env);
     if (!vendorId) return true;
     return holdsSharedConfiguration(this.#connectedAccountRecords(), vendorId, action);
+  }
+
+  /**
+   * The workspaces in which this person may list a console's widgets for their company (FAC-11),
+   * as the deployment's SHARED_CONFIGURATION_GATEKEEPER vendor answers through each of their own
+   * connected accounts with live credentials, each workspace once, with the first account that
+   * may. Empty when the deployment names no vendor. Throws when an account can't answer, so a
+   * publication reports that rather than choosing without it.
+   */
+  async widgetIndexWorkspaces(): Promise<PersonWidgetIndexWorkspace[]> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return [];
+    let found = new Map<string, PersonWidgetIndexWorkspace>();
+    for (let record of this.#connectedAccountRecords()) {
+      if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
+      let workspaces = await (record.account as unknown as WidgetIndexAccountStub).widgetIndexWorkspaces();
+      for (let workspace of workspaces) {
+        if (!found.has(workspace.workspaceId)) found.set(workspace.workspaceId, { ...workspace, accountId: record.id });
+      }
+    }
+    return [...found.values()];
+  }
+
+  /**
+   * Lists one widget version in `workspaceId` through this person's own account `accountId` of
+   * the SHARED_CONFIGURATION_GATEKEEPER vendor, answering as the service did. Refused, and never
+   * sent, for an account that isn't theirs, isn't that vendor's or has no live credentials.
+   */
+  async registerWidget(accountId: number, workspaceId: string, entry: WidgetIndexEntry): Promise<WidgetIndexOutcome> {
+    let account = this.#widgetIndexAccount(accountId);
+    if (!account) return { status: "refused", reason: WIDGET_INDEX_NOT_YOURS };
+    return account.registerWidget(workspaceId, entry);
+  }
+
+  /** Removes one widget version's listing, as `registerWidget` writes it. */
+  async withdrawWidget(accountId: number, workspaceId: string, sourceId: string, sourceVersion: number)
+      : Promise<WidgetIndexOutcome> {
+    let account = this.#widgetIndexAccount(accountId);
+    if (!account) return { status: "refused", reason: WIDGET_INDEX_NOT_YOURS };
+    return account.withdrawWidget(workspaceId, sourceId, sourceVersion);
+  }
+
+  #widgetIndexAccount(accountId: number): WidgetIndexAccountStub | null {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!vendorId || !record || record.vendorId !== vendorId || !areCredentialsValid(record)) return null;
+    return record.account as unknown as WidgetIndexAccountStub;
   }
 
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[])

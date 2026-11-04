@@ -23,3 +23,4 @@ Create records from [`0000-template.md`](0000-template.md).
 | [0013. The Dot runs on InferOps' conversation runtime, with OpenDots as a reference only](0013-dot-runtime.md) | proposed | 2026-11-03 |
 | [0014. The nested canvas model separates containment from behavior and passes nothing down the tree](0014-nested-canvas-model.md) | proposed | 2026-11-02 |
 | [0015. One InferOps account connection serves every board and Wiki the person can open](0015-inferops-account-connection.md) | accepted | 2026-11-03 |
+| [0016. A builder's own console publication lists its widgets in InferOps directly, not through the approval queue](0016-console-widget-index-writes.md) | proposed | 2026-11-04 |

@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIDGET_INDEX_FORBIDDEN, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
 import { PROPOSAL_APPROVE_REFUSED, inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
@@ -1525,5 +1525,56 @@ describe("Wiki proposals over HTTP", () => {
     const unproven = await placement.updateDocument("60000000-0000-4000-8000-000000000002", { body: "x" }, 2, "k").catch(e => e);
     expect(inferOpsErrorCode(unproven)).toBe("UNAVAILABLE");
     expect(writeStage(unproven)).toBeUndefined();
+  });
+});
+
+// The widget index (FAC-11 slice 2): `widget.publish` and `widget.withdraw` as the connection's
+// own person, in its own workspace, for the company, with nothing but the pointer and its words.
+describe("widget index writes", () => {
+  type Sent = { method: string; path: string; workspaceId: string | null; body: unknown };
+  const widgetIndex = (answer: (sent: Sent) => Response) => {
+    const sent: Sent[] = [];
+    const client = openHttpInferOpsClient(CONNECTION, (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init.headers);
+      const call = { method: init.method ?? "GET", path: url.pathname.replace("/api", "") + url.search,
+        workspaceId: headers.get("x-workspace-id"), body: init.body ? JSON.parse(String(init.body)) : undefined };
+      sent.push(call);
+      return answer(call);
+    }) as typeof fetch);
+    return { client, sent };
+  };
+  const ENTRY = { sourceId: "bp-1", sourceVersion: 2, title: "Free technicians", purpose: "Who is free" };
+
+  it("lists a widget version for the company, and withdraws it by its pointer", async () => {
+    const { client, sent } = widgetIndex(call => call.method === "PUT"
+      ? Response.json({ id: "d1", source: "inferos.blueprint", sourceId: "bp-1", sourceVersion: 2, digest: null,
+          title: "Free technicians", purpose: "Who is free", visibility: "company", publishedAt: "2026-11-04T00:00:00.000Z" })
+      : Response.json({ withdrawn: true }));
+    await client.publishWidgetDefinition(ENTRY);
+    expect(await client.withdrawWidgetDefinition("bp 1/x", 2)).toBe(true);
+    expect(sent).toEqual([
+      { method: "PUT", path: "/knowledge/widget-definitions", workspaceId: CONNECTION.workspaceId,
+        body: { source: "inferos.blueprint", sourceId: "bp-1", sourceVersion: 2, title: "Free technicians",
+                purpose: "Who is free", visibility: "company" } },
+      { method: "DELETE", path: "/knowledge/widget-definitions/bp%201%2Fx/2", workspaceId: CONNECTION.workspaceId, body: undefined },
+    ]);
+  });
+
+  it("refuses in its own words when InferOps refuses the permission, as a write that never took effect", async () => {
+    const { client } = widgetIndex(() => Response.json(
+      { error: { code: "FORBIDDEN", message: "Missing permission: configuration:publish" } }, { status: 403 }));
+    const refused = await client.publishWidgetDefinition(ENTRY).catch(e => e);
+    expect(inferOpsErrorCode(refused)).toBe("FORBIDDEN");
+    expect(refused.detail).toBe(WIDGET_INDEX_FORBIDDEN);
+    expect(writeStage(refused)).toBe("refused");
+  });
+
+  it("sends nothing for a definition InferOps would not take, and calls an answer for another version malformed", async () => {
+    const { client, sent } = widgetIndex(() => Response.json({ sourceId: "bp-other", sourceVersion: 2 }));
+    expect(inferOpsErrorCode(await client.publishWidgetDefinition({ ...ENTRY, title: "  " }).catch(e => e))).toBe("INVALID_REQUEST");
+    expect(inferOpsErrorCode(await client.withdrawWidgetDefinition("bp-1", 0).catch(e => e))).toBe("INVALID_REQUEST");
+    expect(sent).toEqual([]);
+    expect(inferOpsErrorCode(await client.publishWidgetDefinition(ENTRY).catch(e => e))).toBe("UNAVAILABLE");
   });
 });

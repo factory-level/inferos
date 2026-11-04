@@ -114,6 +114,10 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   setTriggerControl: ws => ws.setTriggerControl(1, null),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
+  // The widget index is read and written by a builder's own publication only (FAC-11).
+  getConsoleWidgetIndex: ws => ws.getConsoleWidgetIndex("console"),
+  listConsoleWidgetIndexWorkspaces: ws => ws.listConsoleWidgetIndexWorkspaces(),
+  setConsoleWidgetIndexTarget: ws => ws.setConsoleWidgetIndexTarget("console", null),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
   publishConsole: ws => ws.publishConsole("console", "0"),

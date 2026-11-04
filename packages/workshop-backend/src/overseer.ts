@@ -14,6 +14,7 @@ import {
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
 } from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
+import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
 import { WIDGET_STATES_FILE, parseWidgetStates, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -42,7 +43,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, type ConsoleSource, type ConsoleWidgetCandidate, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -50,7 +51,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -1569,6 +1570,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       consoleScreens: collection<ConsoleScreenSnapshot>()({
         primaryKey: record => consoleScreenKey(record.consoleId, record.screenId),
       }),
+      // Each console's place in the deployment's widget index (FAC-11; see console-widget-index.ts),
+      // by console id; a deleted console's is kept while one of its withdrawals is pending.
+      consoleWidgetIndex: collection<ConsoleWidgetIndexRecord>()({ primaryKey: "consoleId" }),
+      // Withdrawals the widget index still owes, for the whole workspace (a deleted console's
+      // included), retried on the next publication or delete and by the alarm.
+      widgetIndexOwed: collection<OwedWithdrawal>()({ primaryKey: "key" }),
       // An operate session workspace's host-board selections, by target; its selection requests,
       // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
@@ -2317,6 +2324,11 @@ class OverseerImpl implements AgentHooks {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
 
+    // Owed widget index withdrawals, each until its alarm tries run out (see console-widget-index.ts).
+    for (let owed of this.storage.widgetIndexOwed.list()) {
+      if (owed.attempts < OWED_RETRY_CAP) times.push(owed.nextAttemptAt);
+    }
+
     // Tool facets left pending: retried until each is deleted (see ToolLane.nextSweepTime).
     let toolSweepTime = this.toolLane.nextSweepTime();
     if (toolSweepTime !== undefined) {
@@ -2344,6 +2356,7 @@ class OverseerImpl implements AgentHooks {
     this.#inAlarmHandler = true;
     try {
       this.toolLane.sweep();
+      await this.#retryDueWidgetWithdrawals();
       do {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
@@ -2359,6 +2372,43 @@ class OverseerImpl implements AgentHooks {
       this.#agentKeepAliveTime = undefined;
       this.#updateAlarm();
     }
+  }
+
+  // The alarm's part in the widget index: each owed withdrawal that is due and has tries left is
+  // tried as the person whose publication or delete owed it, with their own sign-in. One that
+  // can't be is kept, with its reason, for the next try or the next publication or delete.
+  async #retryDueWidgetWithdrawals(): Promise<void> {
+    if (!getSharedConfigurationGatekeeper(this.env)) return;
+    let now = Date.now();
+    let due = [...this.storage.widgetIndexOwed.list()].filter(owed => owed.attempts < OWED_RETRY_CAP && owed.nextAttemptAt <= now);
+    if (due.length === 0) return;
+    let byUser = new Map<string, OwedWithdrawal[]>();
+    for (let owed of due) byUser.set(owed.userId, [...byUser.get(owed.userId) ?? [], owed]);
+    for (let [userId, owed] of byUser) {
+      let user = this.users.get(this.users.idFromString(userId));
+      let result = await retryOwedWithdrawals(owed, this.publishedWidgetVersions(), {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) => user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+      }, now);
+      this.storeOwedWithdrawals(result);
+    }
+  }
+
+  /** Every widget version a published console of this workspace lists. */
+  publishedWidgetVersions(exceptConsoleId?: string): Set<string> {
+    let versions = new Set<string>();
+    for (let stored of this.storage.consoles.list()) {
+      if (stored.id === exceptConsoleId) continue;
+      for (let entry of stored.published?.content.widgets ?? []) versions.add(consoleWidgetVersionId(entry));
+    }
+    return versions;
+  }
+
+  /** Records a retry of owed withdrawals: cleared ones go, kept ones are stored; reschedules the alarm. */
+  storeOwedWithdrawals(result: { cleared: string[]; kept: OwedWithdrawal[] }): void {
+    for (let key of result.cleared) this.storage.widgetIndexOwed.delete(key);
+    for (let owed of result.kept) this.storage.widgetIndexOwed.put(owed);
+    this.#updateAlarm();
   }
 
   #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
@@ -13045,10 +13095,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("publish", "shared");
     this.#consoleStore().delete(id, expectedRevision);
     this.impl.announceConsoleRevision(id, null);
+    await this.#indexConsoleWidgets(id, null);
   }
   // Publication captures the console and its sources, reads the captured commits, then publishes
   // in one transaction only if the capture still holds (see ConsoleCapture), each widget entry
-  // freezing its commit's surfaces and each bound view its spec.
+  // freezing its commit's surfaces and each bound view its spec. Then the published widgets are
+  // listed in the deployment's widget index as this person (see #indexConsoleWidgets).
   async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
     await this.#requireSharedConfiguration("publish", "shared");
     let store = this.#consoleStore();
@@ -13056,7 +13108,89 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let commits = await this.impl.readSourceCommits(capture.commitIds);
     let published = store.publish(id, expectedRevision, capture, commits);
     this.impl.announceConsoleRevision(id, published.revision);
+    await this.#indexConsoleWidgets(id, published);
     return published;
+  }
+
+  // Lists console `id`'s live publication's widgets in the widget index of the deployment's
+  // shared-configuration service, and withdraws versions no published console of this workspace
+  // lists any more, as this person, through their own connected account (FAC-11; see
+  // console-widget-index.ts). Only this build-role surface reaches it. A deployment naming no such
+  // service has no index, and nothing is written or recorded. The publication or delete has
+  // already happened: what the service answered is recorded for getConsoleWidgetIndex, never thrown.
+  async #indexConsoleWidgets(id: string, published: OperateConsole | null): Promise<void> {
+    if (!getSharedConfigurationGatekeeper(this.impl.env)) return;
+    let storage = this.impl.storage;
+    let previous = storage.consoleWidgetIndex.get(id) ?? emptyWidgetIndexRecord(id);
+    let listedElsewhere = this.impl.publishedWidgetVersions(id);
+    let user = this.#clientUser;
+    let env = this.impl.env;
+    let next = await indexConsoleWidgets(previous,
+      published?.published ? { revision: published.published.revision, widgets: published.published.content.widgets ?? [] } : null,
+      listedElsewhere, {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        register: (accountId, workspaceId, entry) => user.registerWidget(accountId, workspaceId, entry),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) =>
+          user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+        description: async blueprintId => {
+          let raw = await env.BLUEPRINTS.get(blueprintId);
+          let description = raw ? (JSON.parse(raw) as BlueprintKvRecord).metadata.description : undefined;
+          return typeof description === "string" && description.trim() !== "" ? description : null;
+        },
+      });
+    // What this run couldn't withdraw is owed by the workspace, not the console, so a deleted
+    // console's is still retried. Then every other owed withdrawal is tried as this person.
+    let now = Date.now();
+    let target = next.target ?? previous.target;
+    let earlier = [...storage.widgetIndexOwed.list()];
+    let fresh = target ? next.pendingWithdraws.map((pending): OwedWithdrawal => ({
+      key: owedWithdrawalKey(target.workspaceId, pending.versionId), workspaceId: target.workspaceId,
+      versionId: pending.versionId, userId: this.clientUserId, reason: `Still listed: ${pending.reason}`,
+      attempts: 1, nextAttemptAt: now + owedRetryDelay(1),
+    })) : [];
+    let retried = await retryOwedWithdrawals(earlier.filter(owed => !fresh.some(item => item.key === owed.key)),
+      this.impl.publishedWidgetVersions(), {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) => user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+      }, now);
+    let stored = { ...next, pendingWithdraws: [] };
+    if (published) storage.consoleWidgetIndex.put(stored);
+    else storage.consoleWidgetIndex.delete(id);
+    this.impl.storeOwedWithdrawals({ cleared: retried.cleared, kept: [...retried.kept, ...fresh] });
+  }
+
+  // Where console `id` stands in the widget index; null for a console with none (see
+  // ConsoleWidgetIndexReport). Build access only.
+  async getConsoleWidgetIndex(id: string): Promise<ConsoleWidgetIndexReport | null> {
+    let record = this.impl.storage.consoleWidgetIndex.get(id);
+    if (!record) return null;
+    // Every withdrawal the workspace still owes, a deleted console's included, so none goes unseen.
+    let owed = [...this.impl.storage.widgetIndexOwed.list()].map(item => ({ versionId: item.versionId, reason: item.reason }));
+    return { ...widgetIndexReport(record), pendingWithdraws: owed };
+  }
+
+  // The InferOps workspaces this person may list a console's widgets in, asked freshly with their
+  // own accounts: what a builder chooses a console's target from. Build access only.
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> {
+    if (!getSharedConfigurationGatekeeper(this.impl.env)) return [];
+    return (await this.#clientUser.widgetIndexWorkspaces()).map(({ workspaceId, name }) => ({ workspaceId, name }));
+  }
+
+  // Sets the workspace console `id` lists its widgets in, to one this person may list widgets in
+  // now, or clears it (null). The next publication writes there; nothing moves on its own.
+  async setConsoleWidgetIndexTarget(id: string, workspaceId: string | null): Promise<ConsoleWidgetIndexReport> {
+    await this.#requireSharedConfiguration("publish", "shared");
+    if (!this.#consoleStore().get(id, "draft")) throw new Error(`Console ${id} is not a console in this workspace.`);
+    let previous = this.impl.storage.consoleWidgetIndex.get(id) ?? emptyWidgetIndexRecord(id);
+    let target: ConsoleWidgetIndexRecord["target"] = null;
+    if (workspaceId !== null) {
+      let chosen = (await this.#clientUser.widgetIndexWorkspaces()).find(workspace => workspace.workspaceId === workspaceId);
+      if (!chosen) throw new Error("You can't publish shared configuration in that InferOps workspace.");
+      target = { workspaceId: chosen.workspaceId, name: chosen.name };
+    }
+    let next = { ...previous, target, blocked: null };
+    this.impl.storage.consoleWidgetIndex.put(next);
+    return widgetIndexReport(next);
   }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
     return this.#consoleStore().get(id, source);
@@ -15734,7 +15868,11 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
-  }
+  }  // The widget index is written by a builder's own publication only (FAC-11).
+  async getConsoleWidgetIndex(_consoleId: string): Promise<ConsoleWidgetIndexReport | null> { this.#deny(); }
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> { this.#deny(); }
+  async setConsoleWidgetIndexTarget(_consoleId: string, _workspaceId: string | null): Promise<ConsoleWidgetIndexReport> { this.#deny(); }
+
 
   // The capability checks the console context again on every call: the console must still offer
   // the widget at that published revision, and the caller's own operate session must still have
@@ -16134,6 +16272,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  // The widget index is written by a builder's own publication only (FAC-11).
+  async getConsoleWidgetIndex(_consoleId: string): Promise<ConsoleWidgetIndexReport | null> { this.#deny(); }
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> { this.#deny(); }
+  async setConsoleWidgetIndexTarget(_consoleId: string, _workspaceId: string | null): Promise<ConsoleWidgetIndexReport> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> { this.#deny(); }
   async listTree(_commitId: string): Promise<TreeNode[]> { this.#deny(); }
