@@ -19,7 +19,10 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
   const [activeId, setActiveId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [history, setHistory] = useState<Record<string, CanvasContent[]>>({})
+  // Each entry is the content before one of this page's own edits and the revision that edit
+  // produced: undo applies only while the view is still at that revision, so it never reverts an
+  // edit someone else (the chat agent, another tab) made since.
+  const [history, setHistory] = useState<Record<string, { content: CanvasContent; revision: string }[]>>({})
   const generation = useRef(0)
   const pending = useRef(false)
   const active = views.find(view => view.id === activeId) ?? null
@@ -115,8 +118,13 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
     const updated = api ? parseCanvasDefinition(await api.editCanvas(active.id, active.revision, operations)) : preview
     return () => {
       setViews(previous => previous.map(view => view.id === updated.id ? updated : view))
-      setHistory(previous => ({ ...previous, [active.id]: undo ? (previous[active.id] ?? []).slice(0, -1)
-        : [...(previous[active.id] ?? []), { title: active.title, sections: active.sections }].slice(-20) }))
+      setHistory(previous => {
+        const entries = previous[active.id] ?? []
+        if (!undo) return { ...previous, [active.id]: [...entries, { content: { title: active.title, sections: active.sections }, revision: updated.revision }].slice(-20) }
+        // The restore leaves the view as the edit before it left it, at a new revision.
+        const rest = entries.slice(0, -1)
+        return { ...previous, [active.id]: rest.length === 0 ? rest : [...rest.slice(0, -1), { ...rest.at(-1)!, revision: updated.revision }] }
+      })
     }
   })
 
@@ -129,9 +137,12 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
     }
   })
   const previous = active ? history[active.id]?.at(-1) : undefined
+  const canUndo = !!previous && previous.revision === active?.revision
   return { views, active, busy, error, create, importDefinition, edit, remove, reload,
     select: (id: string) => { if (!pending.current) { setActiveId(id); setError(null) } },
-    canUndo: !!previous,
-    undo: () => previous ? edit([{ type: 'restore', content: previous }], true) : Promise.resolve(false),
+    canUndo,
+    /** True when this page has an edit to undo but the view has changed since, so undo is refused. */
+    undoBlocked: !!previous && !canUndo,
+    undo: () => previous && canUndo ? edit([{ type: 'restore', content: previous.content }], true) : Promise.resolve(false),
   }
 }

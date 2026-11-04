@@ -2,17 +2,26 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, Input, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
-import type { CanvasCatalog, CanvasContent, CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
+import type { CanvasCatalog, CanvasContent, CanvasOperation, CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
+import { canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, type CanvasTarget } from '@gadgets/workshop-shared/canvas-model'
 import DeleteConfirmationDialog from '../../components/DeleteConfirmationDialog'
 import { CanvasBoardFullView } from './CanvasBoardFullView'
 import { CanvasMoveWidgetForm } from './CanvasMoveWidgetForm'
 import { CanvasSectionEditor } from './CanvasSectionEditor'
+import { CanvasTargetBreadcrumb } from './CanvasTargetBreadcrumb'
+import { CanvasTargetTree } from './CanvasTargetTree'
+import { CanvasWidgetCard } from './CanvasWidgetCard'
 import { CanvasView } from './CanvasView'
 import { exportCanvas } from './exportCanvas'
 import { useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 
 // Kumo's Select treats an empty value as unselected and shows nothing; ':' never starts a template ID.
 const BLANK_TEMPLATE = ':blank'
+
+// What the builder has selected on a view. `viewId` null means the view about to open (a blank view
+// just created opens on its section). A target's page is always the view on screen.
+type Selection = { viewId: string | null; target: CanvasTarget }
+const onView = (target: CanvasTarget, pageId: string): CanvasTarget => target.kind === 'workspace' ? target : { ...target, pageId }
 
 export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent, codingDispatch, wikiEditable }: {
   storage: CanvasStorage
@@ -46,6 +55,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   const scrollRoot = useRef<HTMLDivElement>(null)
   const [template, setTemplate] = useState(BLANK_TEMPLATE)
   const [editing, setEditing] = useState(false)
+  const [selection, setSelection] = useState<Selection | null>(null)
   const activeId = canvas.active?.id ?? null
   // The URL is the external system here: keep it naming the view on screen.
   useEffect(() => {
@@ -62,14 +72,43 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
   // A frozen install belongs to the console publication that made it, so it is never placed by hand.
   const acceptedGadgets = [...gadgets.values()].filter(gadget => gadget.chatId === undefined && !gadget.frozenFor).toSorted((a, b) => a.id - b.id)
 
+  // The saved model of the view on screen: what the store reads it as (FAC-81), so the tree and the
+  // breadcrumb show the page, objects and widgets the controls below edit.
+  const page = active ? canvasPageFromDefinition(active) : null
+  const pageTarget: CanvasTarget | null = page ? { kind: 'page', pageId: page.id } : null
+  const wanted = page && selection && (selection.viewId === page.id || selection.viewId === null) ? onView(selection.target, page.id) : pageTarget
+  const wantedPath = page && wanted ? canvasTargetPath(page, wanted) : null
+  // A selection the view no longer holds (removed elsewhere, or by a reload) falls back to the page,
+  // and says so rather than silently editing something else.
+  const selectionLost = !!wanted && wanted.kind !== 'page' && wantedPath === null
+  const path = wantedPath ?? (page && pageTarget ? canvasTargetPath(page, pageTarget) : null)
+  const selected = path?.at(-1)
+  const select = (target: CanvasTarget) => { if (active) setSelection({ viewId: active.id, target }) }
+  // An edit from the inspector that removes the selected section or widget selects what held it.
+  const editSelected = async (operations: CanvasOperation[]) => {
+    const success = await canvas.edit(operations)
+    const id = selected?.kind === 'object' || selected?.kind === 'widget' ? selected.node.id : null
+    if (success && id !== null && path && path.length > 1 && operations.some(operation =>
+      (operation.type === 'removeSection' && operation.sectionId === id) || (operation.type === 'removeWidget' && operation.widgetId === id))) {
+      select(path.at(-2)!.target)
+    }
+    return success
+  }
+  const sectionOf = (widgetId: string) => active?.sections.find(section => section.widgets.some(widget => widget.id === widgetId))
+
   const createForm = <div className="flex flex-wrap items-end gap-3">
     <form className="flex flex-wrap items-end gap-2" onSubmit={event => {
       event.preventDefault()
       const title = String(new FormData(event.currentTarget).get('title') ?? '').trim()
       const screen = catalog.screens.find(item => item.id === template)
+      const sectionId = crypto.randomUUID()
       const content: CanvasContent = screen ? { ...structuredClone(screen.content), title }
-        : { title, sections: [{ id: crypto.randomUUID(), title: 'Overview', columns: 2, widgets: [] }] }
-      void canvas.create(content).then(success => { if (success) setEditing(!screen) })
+        : { title, sections: [{ id: sectionId, title: 'Overview', columns: 2, widgets: [] }] }
+      void canvas.create(content).then(success => {
+        if (!success) return
+        setEditing(!screen)
+        setSelection(screen ? null : { viewId: null, target: { kind: 'node', pageId: '', nodeId: sectionId } })
+      })
     }}>
       <Input label="New view title" name="title" required maxLength={120} defaultValue="Operations" disabled={canvas.busy} />
       {catalog.screens.length > 0 && <Select label="Start from" value={template}
@@ -88,7 +127,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
     <div className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-kumo-line px-4 py-2">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2" role="group" aria-label="Choose a view">
         {canvas.views.map(view => <Button key={view.id} size="sm" disabled={canvas.busy} aria-pressed={active?.id === view.id}
-          onClick={() => canvas.select(view.id)}>{view.title}</Button>)}
+          onClick={() => { canvas.select(view.id); setSelection(null) }}>{view.title}</Button>)}
         {storage.kind === 'durable' && <Button size="sm" disabled={canvas.busy} onClick={() => void canvas.reload()}>Reload saved views</Button>}
       </div>
       <p role="status" className="text-xs text-kumo-subtle">
@@ -110,7 +149,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
           <CanvasView scrollRoot={scrollRoot} definition={active} gadgets={gadgets} overseer={overseer} onOpenWidget={onOpenWidgetChange} codingDispatch={codingDispatch}
             wikiEditable={wikiEditable} shownTitle={active.title} />
         </>)}
-      {active && editing && <div className="space-y-4">
+      {active && editing && <div className="@container space-y-4">
         {createForm}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-lg font-semibold text-kumo-default">{active.title}</h1>
@@ -120,29 +159,61 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
             <Button disabled={canvas.busy} onClick={() => setConfirmDelete(true)}>Delete view</Button>
           </div>
         </div>
-        <form key={`${active.id}:${active.title}`} className="flex flex-wrap items-end gap-2" onSubmit={event => {
-          event.preventDefault()
-          void canvas.edit([{ type: 'rename', title: String(new FormData(event.currentTarget).get('title') ?? '').trim() }])
-        }}>
-          <Input label="View title" name="title" defaultValue={active.title} required maxLength={120} disabled={canvas.busy} />
-          <Button type="submit" disabled={canvas.busy}>Rename view</Button>
-        </form>
-        {active.sections.map((section, index) => <CanvasSectionEditor key={section.id} section={section} busy={canvas.busy}
-          first={index === 0} gadgets={gadgets} acceptedGadgets={acceptedGadgets} onEdit={canvas.edit}
-          catalog={catalog} viewTitle={active.title} onAskAgent={onAskAgent}
-          onMoveUp={() => void canvas.edit([{ type: 'moveSection', sectionId: section.id, index: index - 1 }])} />)}
-        {active.sections.length > 1 && <CanvasMoveWidgetForm key={active.id} sections={active.sections} gadgets={gadgets}
-          busy={canvas.busy} onEdit={canvas.edit} />}
-        <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
-          event.preventDefault()
-          const form = event.currentTarget
-          const title = String(new FormData(form).get('section') ?? '').trim()
-          if (await canvas.edit([{ type: 'addSection', index: active.sections.length,
-            section: { id: crypto.randomUUID(), title, columns: 1, widgets: [] } }])) form.reset()
-        }}>
-          <Input label="New section title" name="section" required maxLength={120} disabled={canvas.busy} />
-          <Button type="submit" disabled={canvas.busy || active.sections.length >= 12}>Add section</Button>
-        </form>
+        {canvas.undoBlocked && <p className="text-xs text-kumo-subtle">Undo is off: this view changed since your last edit here, and undoing would revert that change too.</p>}
+        {selectionLost && <p role="status" aria-label="Selection" className="text-sm text-kumo-subtle">The selected item is no longer on this view, so the view itself is selected.</p>}
+        {path && page && selected && <div className="grid gap-4 @3xl:grid-cols-[minmax(12rem,16rem)_1fr]">
+          <CanvasTargetTree page={page} selected={formatCanvasTarget(selected.target)} gadgets={gadgets} onSelect={select} />
+          <section aria-label="Selected target" className="min-w-0 space-y-4">
+            <CanvasTargetBreadcrumb path={path} gadgets={gadgets} onSelect={select} />
+            {selected.kind === 'workspace' && <p className="text-sm text-kumo-subtle">The workspace's own settings aren't edited from a view.</p>}
+            {selected.kind === 'page' && <>
+              <p className="text-xs font-medium uppercase text-kumo-subtle">View</p>
+              <form key={`${active.id}:${active.title}`} className="flex flex-wrap items-end gap-2" onSubmit={event => {
+                event.preventDefault()
+                void canvas.edit([{ type: 'rename', title: String(new FormData(event.currentTarget).get('title') ?? '').trim() }])
+              }}>
+                <Input label="View title" name="title" defaultValue={active.title} required maxLength={120} disabled={canvas.busy} />
+                <Button type="submit" disabled={canvas.busy}>Rename view</Button>
+              </form>
+              {active.sections.length > 1 && <CanvasMoveWidgetForm key={active.id} sections={active.sections} gadgets={gadgets}
+                busy={canvas.busy} onEdit={canvas.edit} />}
+              <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
+                event.preventDefault()
+                const form = event.currentTarget
+                const title = String(new FormData(form).get('section') ?? '').trim()
+                if (await canvas.edit([{ type: 'addSection', index: active.sections.length,
+                  section: { id: crypto.randomUUID(), title, columns: 1, widgets: [] } }])) form.reset()
+              }}>
+                <Input label="New section title" name="section" required maxLength={120} disabled={canvas.busy} />
+                <Button type="submit" disabled={canvas.busy || active.sections.length >= 12}>Add section</Button>
+              </form>
+            </>}
+            {selected.kind === 'object' && (() => {
+              const index = active.sections.findIndex(section => section.id === selected.node.id)
+              const section = active.sections[index]
+              return section && <>
+                <p className="text-xs font-medium uppercase text-kumo-subtle">Section</p>
+                <CanvasSectionEditor key={section.id} section={section} busy={canvas.busy} first={index === 0} gadgets={gadgets}
+                  acceptedGadgets={acceptedGadgets} onEdit={editSelected} catalog={catalog} viewTitle={active.title} onAskAgent={onAskAgent}
+                  pageId={active.id} showWidgets={false}
+                  onMoveUp={() => void canvas.edit([{ type: 'moveSection', sectionId: section.id, index: index - 1 }])} />
+              </>
+            })()}
+            {selected.kind === 'widget' && (() => {
+              const section = sectionOf(selected.node.id)
+              const index = section?.widgets.findIndex(widget => widget.id === selected.node.id) ?? -1
+              return section && index >= 0 && <>
+                <p className="text-xs font-medium uppercase text-kumo-subtle">Widget</p>
+                <CanvasWidgetCard widget={section.widgets[index]!} section={section} index={index} busy={canvas.busy} gadgets={gadgets} onEdit={editSelected} />
+              </>
+            })()}
+            {selected.kind === 'attachment' && <>
+              <p className="text-xs font-medium uppercase text-kumo-subtle">Attachment</p>
+              <p className="text-sm text-kumo-default">On <code>{selected.attachment.on}</code>, {selected.attachment.effect.kind}.</p>
+              <p className="text-sm text-kumo-subtle">Attachments can't be edited here yet.</p>
+            </>}
+          </section>
+        </div>}
       </div>}
     </div>
     <DeleteConfirmationDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this view?"
