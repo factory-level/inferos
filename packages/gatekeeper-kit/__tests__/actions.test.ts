@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ApprovalQueue, GitCache } from "@gadgets/workshop-shared/gatekeeper";
+import type { GitCache } from "@gadgets/workshop-shared/gatekeeper";
 import type { RpcStub } from "cloudflare:workers";
 import {
   ActionApplyError,
@@ -30,9 +30,9 @@ type Sql = { sql: string; rows?: number };
 
 const presentation = { title: "Run SQL", description: "…", implementsRevert: false };
 
-// Keep recorded submissions typed to the real RPC signature.
+// Keep recorded submissions typed to the staging surface (`ActionSubmitter`), which ignores the receipt.
 function submitSpy() {
-  return vi.fn<ApprovalQueue["submitAction"]>(async () => {});
+  return vi.fn<ActionSubmitter["submitAction"]>(async () => {});
 }
 
 function fakeQueue(submitAction = submitSpy()): ActionSubmitter {
@@ -590,7 +590,7 @@ describe("stageAction", () => {
 
   it("rolls the record back when submission fails", async () => {
     const journal = new ActionJournal<Sql>(makeKv(), { namespace: "pending" });
-    const submitAction = vi.fn<ApprovalQueue["submitAction"]>(async () => {
+    const submitAction = vi.fn<ActionSubmitter["submitAction"]>(async () => {
       throw new Error("queue unavailable");
     });
 
@@ -603,7 +603,7 @@ describe("stageAction", () => {
   it("reports success when only the reply to an auto-approved submission was lost", async () => {
     // The overseer applied and retained the action inside submitAction, then the RPC rejected.
     const journal = new ActionJournal<Sql>(makeKv(), { namespace: "pending" });
-    const submitAction = vi.fn<ApprovalQueue["submitAction"]>(async submitted => {
+    const submitAction = vi.fn<ActionSubmitter["submitAction"]>(async submitted => {
       journal.retain(submitted);
       throw new Error("session torn down");
     });
@@ -614,7 +614,7 @@ describe("stageAction", () => {
 
   it("reports success when a non-retaining auto-approval consumed the record mid-submission", async () => {
     const journal = new ActionJournal<Sql>(makeKv(), { namespace: "pending" });
-    const submitAction = vi.fn<ApprovalQueue["submitAction"]>(async submitted => {
+    const submitAction = vi.fn<ActionSubmitter["submitAction"]>(async submitted => {
       journal.remove(submitted);
       throw new Error("session torn down");
     });
@@ -736,7 +736,7 @@ describe("defineActions", () => {
     const { actions, journal } = bind({
       apply: async () => { throw new Error("provider unreachable"); },
     });
-    const queue = fakeQueue(vi.fn<ApprovalQueue["submitAction"]>(async submitted => {
+    const queue = fakeQueue(vi.fn<ActionSubmitter["submitAction"]>(async submitted => {
       await actions.apply(submitted).catch(() => {});
       throw new Error("session torn down");
     }));
@@ -814,7 +814,7 @@ describe("defineActions", () => {
     const commits = ["abc"];
     const { actions } = bind({ describe: () => ({ ...presentation, pushedCommits: commits }) });
     const blocking = Promise.withResolvers<void>();
-    const submitAction = vi.fn<ApprovalQueue["submitAction"]>(async () => { await blocking.promise; });
+    const submitAction = vi.fn<ActionSubmitter["submitAction"]>(async () => { await blocking.promise; });
 
     const queue = fakeQueue(submitAction);
     const first = actions.submit(queue, "execute", { sql: "one" });

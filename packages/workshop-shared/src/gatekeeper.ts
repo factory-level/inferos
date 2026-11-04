@@ -1,4 +1,4 @@
-import type { ActionResult } from "./action-outcome";
+import type { ActionOutcome, ActionReceiptCode, ActionResult } from "./action-outcome";
 import type { ApprovalEdit, ApprovalProposal } from "./operate-approval";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
@@ -1137,6 +1137,39 @@ export interface SlashCommandProvider extends RpcTarget {
   ): Promise<SlashCommandResult>;
 }
 
+/** Where one submitted action stands, as its receipt reads it now (FAC-97). */
+export interface ActionReceiptStatus {
+  /** Where it stands (see `ActionOutcome`). Only `succeeded` means the work was done. */
+  outcome: ActionOutcome;
+  /** What the provider reported the apply produced, once `succeeded` and only when it reported something; bounded like the action log's `result`. */
+  result?: ActionResult;
+  /**
+   * Why it didn't simply succeed, once `failed` or `unknown`, or while `waiting` again after a
+   * refusal that may be retried: a fixed code (`ACTION_RECEIPT_CODES`).
+   */
+  code?: ActionReceiptCode;
+  /**
+   * With `code`, the kernel's own fixed sentence for it (`ACTION_RECEIPT_REASON`). Never the
+   * gatekeeper's or provider's text: that stays in the action log, for the people deciding actions.
+   */
+  reason?: string;
+}
+
+/**
+ * A receipt for one submitted action, returned by `ApprovalQueue.submitAction()` (FAC-97). It is
+ * passed by value: `actionId` is a plain string, and `status` is a function, which RPC passes as a
+ * callable stub. Holding that function is the only way to read the action's status, and it reads
+ * that one action, of the workspace and connection it was submitted through, and nothing else;
+ * there is no lookup by id. A gatekeeper may hand the receipt on to its caller, which can then tell
+ * a queued write from a done one, while simulation still shows the write as applied to its reads.
+ */
+export interface ActionReceipt {
+  /** An opaque id for showing and correlating the action. It names it; it doesn't grant reading it. */
+  actionId: string;
+  /** The action's status now. */
+  status(): Promise<ActionReceiptStatus>;
+}
+
 /**
  * Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
  * action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
@@ -1163,10 +1196,13 @@ export interface ApprovalQueue extends ObservationAuthorizer {
    * `description` describes the action in a way that can direct UI representation and policy
    * enforcement details.
    *
+   * It resolves to the action's receipt (`ActionReceipt`). A gatekeeper may ignore it, or return it
+   * to its caller so the caller can tell a queued write from a done one.
+   *
    * TODO: It would be nice if we can link this with the output gate so that if the submission
    *   does not complete, any SQL writes performed just before submit() are rolled back...
    */
-  submitAction(action: number, description: ActionDescription): Promise<void>;
+  submitAction(action: number, description: ActionDescription): Promise<ActionReceipt>;
 
   /**
    * Notifies the overseer that the gadget (or an agent) has requested to register a persistent

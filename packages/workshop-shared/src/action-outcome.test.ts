@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { ActionLogEntry } from "./api";
-import { ACTION_OUTCOME_TEXT, actionOutcome, actionResultProblem, type ActionOutcome } from "./action-outcome";
+import { ACTION_OUTCOME_TEXT, ACTION_RECEIPT_CODES, ACTION_RECEIPT_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome } from "./action-outcome";
 
 const at = new Date(0);
 // Whether wording claims the work was done, once negated phrases ("not applied yet") are set aside.
@@ -51,5 +51,22 @@ describe("a provider's result", () => {
     expect(actionResultProblem({ text: "x".repeat(513) })).toMatch(/text/);
     expect(actionResultProblem(Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`k${i}`, i])))).toMatch(/16/);
     expect(actionResultProblem({ n: Number.NaN })).toMatch(/n/);
+  });
+});
+
+describe("a write receipt's code (FAC-97)", () => {
+  test("maps gatekeepers' error codes to a fixed set, and everything else to PROVIDER_ERROR", () => {
+    expect(actionReceiptCode("STALE_REVISION")).toBe("STALE_REVISION");
+    expect(actionReceiptCode("WORKFLOW_MISMATCH")).toBe("INVALID");
+    expect(actionReceiptCode("UNAUTHORIZED")).toBe("FORBIDDEN");
+    expect(actionReceiptCode("RUN_ACTIVE")).toBe("CONFLICT");
+    expect(actionReceiptCode(undefined)).toBe("PROVIDER_ERROR");
+    expect(actionReceiptCode("SOMETHING_NEW")).toBe("PROVIDER_ERROR");
+    // An inherited name isn't a mapping.
+    expect(actionReceiptCode("constructor")).toBe("PROVIDER_ERROR");
+  });
+
+  test("gives every code exactly one fixed sentence", () => {
+    for (const code of ACTION_RECEIPT_CODES) expect(ACTION_RECEIPT_REASON[code]).toMatch(/^[A-Z].*\.$/);
   });
 });

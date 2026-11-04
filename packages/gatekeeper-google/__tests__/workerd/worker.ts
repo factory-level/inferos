@@ -3,7 +3,7 @@ import { GmailForwardSnapshotStore } from "../../src/gmail-state";
 import { GmailGatekeeperImpl, type GmailGatekeeperImplProps } from "../../src/gmail";
 import { GoogleChatGatekeeperImpl, type GoogleChatGatekeeperImplProps } from "../../src/chat";
 import { UserAccount, GoogleVerifier } from "../../src/google";
-import type { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { ActionKind, ResourceDescription, ActionReceipt } from "@gadgets/workshop-shared/gatekeeper";
 import {TestGitCache} from "../test-git-cache";
 import type {
   GmailComposeOptions, GmailDraftInput, GmailDraftPatch, GmailMessage, GmailReplyOptions,
@@ -109,7 +109,7 @@ class TestApprovalQueue extends RpcTarget {
     }
   }
 
-  async submitAction(actionId: number, description: unknown): Promise<void> {
+  async submitAction(actionId: number, description: unknown): Promise<ActionReceipt> {
     this.#submissions.push({actionId, description});
     if (this.#pausedSubmission) {
       this.#markSubmissionPaused?.();
@@ -120,6 +120,7 @@ class TestApprovalQueue extends RpcTarget {
       this.#releasePausedSubmission = undefined;
     }
     if (this.#rejection) throw new Error(this.#rejection);
+    return { actionId: `action-${actionId}`, status: async () => ({ outcome: "waiting" }) };
   }
 
   read() {

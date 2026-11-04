@@ -50,8 +50,8 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
-import { actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -6822,10 +6822,11 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Synchronous journal write for callers already inside a storage transaction. A caller resolves
-  // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here.
+  // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here. Returns
+  // the journal id it minted, which only an `ActionReceiptImpl` hands out (as a capability).
   submitActionNow(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
-      : void {
+      : number {
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
@@ -6903,6 +6904,7 @@ class OverseerImpl implements AgentHooks {
     if (willAutoApprove) {
       this.ctx.waitUntil(this.drainAutoApprovals(gatekeeperId));
     }
+    return actionId;
   }
 
   async bindHook<Hook extends RpcTarget>(
@@ -16458,6 +16460,36 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
   }));
 }
 
+// The receipt `ApprovalQueueImpl.submitAction` returns (FAC-97): the one way to read a submitted
+// action's status. Its `status` closes over that action's journal id and the connection it came
+// through, and reads only that record from this workspace's own journal; nothing takes an id from a
+// caller. So a receipt can't be forged or pointed at another gadget's, connection's or workspace's
+// action: reading one takes holding its `status` function, which RPC passes as a stub. What it says
+// about a refusal is a fixed code and the kernel's own fixed sentence for it, never the attempt's
+// message: provider text can name other people or carry secrets, and it stays in the action log for
+// the people deciding actions.
+function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): ActionReceipt {
+  return {
+    actionId: `action-${id}`,
+    status: async (): Promise<ActionReceiptStatus> => {
+      let record = impl.storage.actions.get(id);
+      if (record?.type !== "action" || record.gatekeeperId !== gatekeeperId) {
+        throw new Error("This action is no longer recorded in this workspace.");
+      }
+      let entry = actionRecordToLog(record) as Extract<ActionLogEntry, { type: "action" }>;
+      let outcome = actionOutcome(entry);
+      let attempt = entry.lastAttempt;
+      let refused = outcome === "failed" || outcome === "unknown" || outcome === "waiting";
+      let code = attempt && refused ? actionReceiptCode(attempt.code) : undefined;
+      return {
+        outcome,
+        ...(outcome === "succeeded" && entry.result ? { result: entry.result } : {}),
+        ...(code ? { code, reason: outcome === "unknown" ? ACTION_RECEIPT_UNKNOWN_REASON : ACTION_RECEIPT_REASON[code] } : {}),
+      };
+    },
+  };
+}
+
 @validateRpc()
 class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   // `hookId` is set only on the queue startHook returns with each firing: that queue is held by
@@ -16480,10 +16512,11 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
     return new GitCacheImpl(this.impl.gitCache, this.gatekeeperId);
   }
 
-  async submitAction(action: number, description: ActionDescription): Promise<void> {
+  async submitAction(action: number, description: ActionDescription): Promise<ActionReceipt> {
     await this.impl.resolveEnablerRoles();
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    let id = this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    return actionReceipt(this.impl, this.gatekeeperId, id);
   }
 
   bindHook<Hook extends RpcTarget>(
