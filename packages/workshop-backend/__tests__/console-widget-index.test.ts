@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { WidgetIndexEntry, WidgetIndexOutcome } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConsoleWidgetEntry } from "@gadgets/workshop-shared/operate-console";
-import { emptyWidgetIndexRecord, indexConsoleWidgets, widgetIndexPlan, WIDGET_INDEX_CHOOSE, WIDGET_INDEX_NO_WORKSPACE, type ConsoleWidgetIndexRecord, type WidgetIndexPorts } from "../src/console-widget-index";
+import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_NO_AUTHORITY, OWED_RETRY_CAP, owedRetryDelay, retryOwedWithdrawals, widgetIndexPlan, WIDGET_INDEX_CHOOSE, WIDGET_INDEX_NO_WORKSPACE, type ConsoleWidgetIndexRecord, type OwedWithdrawal, type WidgetIndexPorts } from "../src/console-widget-index";
 
 const entry = (blueprintId: string, version = 1, label = blueprintId): ConsoleWidgetEntry =>
   ({ gadgetId: 1, blueprintId, version, label, state: "resettable" });
@@ -112,5 +112,34 @@ describe("indexConsoleWidgets", () => {
     const next = await indexConsoleWidgets(start, { revision: "2", widgets: [] }, new Set(["a@1"]), p);
     expect(calls).toEqual([]);
     expect(next.pendingWithdraws).toEqual([]);
+  });
+});
+
+describe("retryOwedWithdrawals", () => {
+  const owed = (versionId: string, workspaceId = "ws-ops", attempts = 1): OwedWithdrawal =>
+    ({ key: `${workspaceId}/${versionId}`, workspaceId, versionId, userId: "u1", reason: "down", attempts, nextAttemptAt: 0 });
+
+  it("withdraws what it can as the given person, and clears a version a published console lists again without a call", async () => {
+    const { p, calls } = ports();
+    const result = await retryOwedWithdrawals([owed("a@1"), owed("b@2")], new Set(["b@2"]), p, 1000);
+    expect(calls).toEqual(["withdraw 7 ws-ops a@1"]);
+    expect(result).toEqual({ cleared: ["ws-ops/a@1", "ws-ops/b@2"], kept: [] });
+  });
+
+  it("keeps one InferOps refuses, or that this sign-in may not touch, with its reason and the next try", async () => {
+    const refused = await retryOwedWithdrawals([owed("a@1", "ws-ops", 2)], new Set(),
+      ports({ withdraw: { status: "refused", reason: "InferOps refused" } }).p, 1000);
+    expect(refused.kept).toEqual([{ ...owed("a@1", "ws-ops", 3), reason: "Still listed: InferOps refused", nextAttemptAt: 1000 + owedRetryDelay(3) }]);
+    const elsewhere = await retryOwedWithdrawals([owed("a@1", "ws-other")], new Set(), ports().p, 1000);
+    expect(elsewhere.kept[0]?.reason).toBe(OWED_NO_AUTHORITY);
+    const failing = await retryOwedWithdrawals([owed("a@1")], new Set(), ports({}, new Error("down")).p, 1000);
+    expect(failing.kept).toHaveLength(1);
+    expect(failing.cleared).toEqual([]);
+  });
+
+  it("backs off from a minute, doubling, to at most six hours, and the alarm stops at its cap", () => {
+    expect([1, 2, 3].map(owedRetryDelay)).toEqual([60_000, 120_000, 240_000]);
+    expect(owedRetryDelay(OWED_RETRY_CAP + 20)).toBe(6 * 60 * 60 * 1000);
+    expect(OWED_RETRY_CAP).toBeGreaterThan(0);
   });
 });
