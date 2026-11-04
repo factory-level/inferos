@@ -11,7 +11,7 @@ import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.j
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
-import { bundledBlueprintsManifestVersion, installBundledBlueprints } from './bundled-blueprints.js';
+import { bundledBlueprintsManifestVersion, installBundledBlueprints, isBundledFormat } from './bundled-blueprints.js';
 import { BUNDLED_BLUEPRINTS } from './generated/bundled-blueprints.js';
 import { isPublicationSelfApprovalAllowed } from './auth/config.js';
 import { assertPublicationFlagOn, byRequestedDesc, checkedReason, isPublishedAt, lastConfirmedAt, PUBLICATIONS_KEY, publicationFlagsOff, publicationStatus, serializePublicationSnapshot, withPublicationStatus, type PublicationFlagsOffSeenAt, type StoredPublicationRecord } from './publication.js';
@@ -176,7 +176,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // bundled set ever changes.
   async #promoteBundledFormats(): Promise<void> {
     let promoted = new Set(this.storage.promotedFormatBlueprints.get());
-    let pending = BUNDLED_BLUEPRINTS.filter(entry => !promoted.has(entry.blueprintId));
+    // Only an app is a format: a bundled widget or workflow is installed and listed, never offered.
+    let pending = BUNDLED_BLUEPRINTS
+        .filter(entry => isBundledFormat(entry) && !promoted.has(entry.blueprintId));
     if (pending.length === 0) return;
 
     let config = this.#config();

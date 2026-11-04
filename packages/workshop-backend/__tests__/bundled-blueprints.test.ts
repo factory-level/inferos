@@ -5,7 +5,9 @@ import { blueprintPublishRefusals, classifyGadgetFiles } from "@gadgets/workshop
 import {
   parseBlueprintArchive, parseBlueprintKvRecord, sanitizeBlueprintOutput, sanitizeWorkspaceKind,
 } from "../src/blueprint-archive.js";
-import { bundledBlueprintsManifestVersion, installBundledBlueprints } from "../src/bundled-blueprints.js";
+import {
+  bundledBlueprintsManifestVersion, installBundledBlueprints, isBundledFormat,
+} from "../src/bundled-blueprints.js";
 import { BUNDLED_BLUEPRINTS } from "../src/generated/bundled-blueprints.js";
 
 async function readBlueprintFile(
@@ -36,9 +38,11 @@ function exportsName(code: string, name: string): boolean {
 function makeEnv() {
   let kv = new Map<string, string>();
   let r2 = new Map<string, Uint8Array>();
+  let r2Metadata = new Map<string, Record<string, string> | undefined>();
   return {
     kv,
     r2,
+    r2Metadata,
     env: {
       BLUEPRINTS: {
         put: async (key: string, value: string) => { kv.set(key, value); },
@@ -46,7 +50,8 @@ function makeEnv() {
       BLUEPRINT_CONTENT: {
         // Deliberately strict: real R2 rejects a stream of unknown length, so accepting one here
         // would hide exactly the bug this stands in for.
-        put: async (key: string, value: unknown) => {
+        put: async (key: string, value: unknown, options?: {customMetadata?: Record<string, string>}) => {
+          r2Metadata.set(key, options?.customMetadata);
           if (!ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)) {
             throw new TypeError(
                 "Provided readable stream must have a known length " +
@@ -94,6 +99,40 @@ describe("bundled blueprints", () => {
     }
   });
 
+  // FAC-86: a bundled blueprint declares its kind, and every install of it takes that kind. The
+  // install reads the kind from the version's stored content (readBlueprintContent), so it is
+  // written there, as publishing writes it; content stored without one reads as an app.
+  it("stores each entry's kind with its content, so a bundled widget installs as a widget", async () => {
+    let base = BUNDLED_BLUEPRINTS[0]!;
+    let widget = {...base, blueprintId: "test.widget", kind: "widget" as const};
+    let app = {...base, blueprintId: "test.app"};
+    let {kv, r2Metadata, env} = makeEnv();
+
+    let installed = await installBundledBlueprints(env, [widget, app]);
+
+    expect(installed.map(info => [info.id, info.metadata.kind])).toEqual([["test.widget", "widget"], ["test.app", undefined]]);
+    let widgetRecord = parseBlueprintKvRecord(kv.get("test.widget")!);
+    expect(widgetRecord.metadata.kind).toBe("widget");
+    expect(r2Metadata.get(`test.widget/${widgetRecord.metadata.version}`)?.kind).toBe("widget");
+    // An app's record is what it always was; its content is stored as an app.
+    let appRecord = parseBlueprintKvRecord(kv.get("test.app")!);
+    expect(appRecord.metadata.kind).toBeUndefined();
+    expect(r2Metadata.get(`test.app/${appRecord.metadata.version}`)?.kind).toBe(DEFAULT_WORKSPACE_KIND);
+  });
+
+  it("offers only an app as a standard format, and reinstalls when an entry's kind changes", () => {
+    expect(isBundledFormat({})).toBe(true);
+    expect(isBundledFormat({kind: "app"})).toBe(true);
+    expect(isBundledFormat({kind: "widget"})).toBe(false);
+    expect(isBundledFormat({kind: "workflow"})).toBe(false);
+
+    let base = BUNDLED_BLUEPRINTS[0]!;
+    let before = bundledBlueprintsManifestVersion([base]);
+    expect(bundledBlueprintsManifestVersion([{...base, kind: "widget"}])).not.toBe(before);
+    // Existing app entries keep the version they had, so a deployment does not reinstall them.
+    expect(bundledBlueprintsManifestVersion([{...base}])).toBe(before);
+  });
+
   it("still republishes every bundled blueprint under the kind check", async () => {
     for (let entry of BUNDLED_BLUEPRINTS) {
       let archive = new Response(Uint8Array.fromBase64(entry.archive) as BufferSource).body!;
@@ -111,7 +150,7 @@ describe("bundled blueprints", () => {
   });
 
   it("ships print layouts for every standard output format", async () => {
-    for (let entry of BUNDLED_BLUEPRINTS) {
+    for (let entry of BUNDLED_BLUEPRINTS.filter(isBundledFormat)) {
       expect(await readBlueprintFile(entry, "client.js"), entry.blueprintId)
         .toContain("@media print");
     }
@@ -150,7 +189,7 @@ describe("bundled blueprints", () => {
       ],
     };
 
-    for (let entry of BUNDLED_BLUEPRINTS) {
+    for (let entry of BUNDLED_BLUEPRINTS.filter(isBundledFormat)) {
       let serverCode = await readBlueprintFile(entry, "server.js");
       expect(exportsName(serverCode, "ExportHandler"),
         `${entry.blueprintId}: server.js exports ExportHandler`).toBe(true);
