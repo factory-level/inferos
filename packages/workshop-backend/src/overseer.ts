@@ -5,11 +5,18 @@ import type { CanvasPage, CanvasPageOperation } from "@gadgets/workshop-shared/c
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
-import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "@gadgets/workshop-shared/workflow-definition";
-import { WorkspaceWorkflowDefinitionStore, type StoredTriggerPin, type StoredWorkflowDefinition, type StoredWorkflowDelivery } from "./workflow-definition-store";
+import type {
+  TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowDefinitionSave, WorkflowInvocation,
+} from "@gadgets/workshop-shared/workflow-definition";
+import {
+  WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
+  type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
+} from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
+import { WIDGET_STATES_FILE, parseWidgetStates, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
   isGadgetModule,
@@ -43,7 +50,8 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -879,6 +887,8 @@ export type ActionRecord = {
   applyStartedAt?: Date;
   /** One explicit AG-UI conversation, persisted with its existing action rather than a second queue. */
   aguiApproval?: ActionApprovalCorrelation;
+  /** What the provider reported the apply produced (see ActionLogEntry.result); set only on approval. */
+  result?: ActionResult;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1221,6 +1231,8 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         resolvedBy: record.resolvedBy,
         autoApproved: record.autoApproved,
         ...(record.lastAttempt ? {lastAttempt: record.lastAttempt} : {}),
+        ...(record.state === "pending" && record.applyStartedAt ? {applying: true as const} : {}),
+        ...(record.state === "approved" && record.result ? {result: record.result} : {}),
       };
     case "bindHook":
       return {
@@ -1392,6 +1404,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The next workflow-definition delivery number (see workflow-definition-store.ts).
       nextWorkflowDeliveryId: 0,
+      // The next on-request run record number (see workflow-definition-store.ts).
+      nextWorkflowInvocationLogId: 0,
       nextChatId: 0,
       nextHookId: 0,
       nextAgentCallId: 0,
@@ -1431,6 +1445,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowDefinitions: collection<StoredWorkflowDefinition>()({ primaryKey: "id" }),
       workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
+      // Who may ask a pinned trigger to run now, and the requests admitted but not yet delivered
+      // (FAC-102; see workflow-definition-store.ts).
+      workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),
+      workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
+      // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
+      workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
       consoles: collection<OperateConsole>()({ primaryKey: "id" }),
       // Each published console's screens as they were when it was published, keyed
@@ -3249,9 +3269,23 @@ class OverseerImpl implements AgentHooks {
       let files = await this.#classifiedFiles("widget", commitId);
       let classification = classifyGadgetFiles("widget", files);
       let callable = classification.class === "callableTools" || classification.class === "callableCombined";
+      // A widget's local states (FAC-86), read only when its commit declares them; a states.json
+      // that doesn't parse refuses the widget rather than this read (consoleWidgetRefusal).
+      let states: WidgetStateMachine | null = null;
+      let statesProblem: string | null = null;
+      if (files.has(WIDGET_STATES_FILE)) {
+        try {
+          let text = await this.gitStore.readCommitBlob(commitId, WIDGET_STATES_FILE, "text");
+          if (text === null) statesProblem = "states.json is missing.";
+          else states = parseWidgetStates(text);
+        } catch (error) {
+          statesProblem = error instanceof BlobTextError ? "states.json is not UTF-8 text."
+              : error instanceof Error ? error.message : String(error);
+        }
+      }
       commits.set(commitId, { classification,
         viewText: classification.class === "viewOnly" ? files.get(GADGET_VIEW_FILE) ?? null : null,
-        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null });
+        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null, states, statesProblem });
     }
     return commits;
   }
@@ -3293,7 +3327,7 @@ class OverseerImpl implements AgentHooks {
       await record.controller.disable();
     }
     this.storage.boundHooks.delete(record.id);
-    this.storage.workflowTriggerPins.delete(record.id);
+    this.workflowDefinitionStore().forgetTrigger(record.id);
 
     stampBindHookAction(this.storage, record.actionId, false, {clearHookId: true});
   }
@@ -6033,7 +6067,7 @@ class OverseerImpl implements AgentHooks {
       started.applyStartedAt = new Date();
       this.storage.actions.put(started);
     }
-    let result: void | {failed: ActionApplyFailure};
+    let result: void | {failed: ActionApplyFailure} | ActionApplied;
     try {
       result = await gatekeeper.applyAction(record.action,
           new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
@@ -6048,7 +6082,7 @@ class OverseerImpl implements AgentHooks {
     } finally {
       this.#approvingPublishers.delete(approvingKey);
     }
-    if (result?.failed) {
+    if (result && "failed" in result) {
       this.#recordUnsuccessfulApply(record, result.failed, resolvedBy, autoApproved);
       throw new Error(result.failed.message);
     }
@@ -6057,6 +6091,12 @@ class OverseerImpl implements AgentHooks {
     if (applied?.type === "action") Object.assign(record, applied);
     delete record.applyStartedAt;
     delete record.lastAttempt;
+    // The provider's own account of what it produced, kept only within ACTION_RESULT_LIMITS: one
+    // out of bounds is dropped (the action still applied), never stored or shown truncated.
+    const reported = result && "applied" in result ? result.applied?.result : undefined;
+    const problem = reported === undefined ? null : actionResultProblem(reported);
+    if (reported !== undefined && problem === null) record.result = reported;
+    else if (problem !== null) logger.warn("dropped an action result out of bounds", { event: "action.result.dropped", error: problem });
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -6255,7 +6295,7 @@ class OverseerImpl implements AgentHooks {
     for (let hook of Array.from(this.storage.boundHooks.list())) {
       if (hook.gatekeeperId !== id) continue;
       this.storage.boundHooks.delete(hook.id);
-      this.storage.workflowTriggerPins.delete(hook.id);
+      this.workflowDefinitionStore().forgetTrigger(hook.id);
       stampBindHookAction(this.storage, hook.actionId, false, {clearHookId: true});
       if (hook.enabled) {
         this.ctx.waitUntil(hook.controller.disable().catch(error => {
@@ -11038,6 +11078,11 @@ class OverseerImpl implements AgentHooks {
   }
 
   /** This workspace's workflow definitions, their trigger pins and deliveries. */
+  /** See invokeWorkflowTrigger. */
+  async invokeTrigger(profileId: string, hookId: number): Promise<WorkflowInvocation> {
+    return invokeWorkflowTrigger(this, profileId, hookId);
+  }
+
   workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
     return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage);
   }
@@ -12106,7 +12151,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
   }
 
-  async startHook(hookId: number): Promise<{
+  async startHook(hookId: number, request?: HookInvocation): Promise<{
     callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue
   }> {
     let record = requireLiveHook(this.impl, hookId);
@@ -12131,9 +12176,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // A trigger pinned to a workflow definition revision fires only that revision's code, and the
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
+    // A delivery a person asked for (invokeTrigger) names the invocation admitted for it; the store
+    // accepts only that, once, and records who asked as a claim beside the run.
     this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
-        profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build");
+        profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
+        typeof request?.invocationId === "string" ? request.invocationId : undefined);
 
     // Both returned capabilities revalidate the hook per call rather than trusting this moment:
     // they are held outside this DO (even across resets -- the stored callback is a persistent
@@ -12428,15 +12476,17 @@ type GatekeeperHookLoopbackProps = {
 export class GatekeeperHookLoopback
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps>
     implements HookInitiator<RpcTarget> {
-  startHook(): Promise<
+  startHook(request?: HookInvocation): Promise<
       {callback: NativeRpcStub<RpcTarget>, approvalQueue: NativeRpcStub<ApprovalQueue>}> {
     let ns = this.ctx.exports.OverseerDurableObject;
     let overseer: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
 
-    // Get an ApprovalQueue for this hook invocation from the overseer.
+    // Get an ApprovalQueue for this hook invocation from the overseer. Only the invocation id is
+    // passed on; the overseer decides whether it names a request it admitted for this hook.
+    let invocation = typeof request?.invocationId === "string" ? {invocationId: request.invocationId} : undefined;
     // @ts-ignore seems the RPC types aren't working here
-    return overseer.startHook(this.ctx.props.hookId);
+    return overseer.startHook(this.ctx.props.hookId, invocation);
   }
 }
 
@@ -12691,6 +12741,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
     return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId);
   }
+  // A control lets named people run a pinned trigger now; setting one is building. Running one is
+  // the listed person's own request, checked against the authenticated session's profile.
+  async setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null> {
+    await this.#requireSharedConfiguration("build", "shared");
+    if (!this.impl.storage.boundHooks.get(hookId)) throw new Error("No such hook.");
+    return this.impl.workflowDefinitionStore().setControl(await this.#getClientProfile(), hookId, settings);
+  }
+  async listTriggerControls(): Promise<TriggerControl[]> {
+    return this.impl.workflowDefinitionStore().controls(null);
+  }
+  async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
+    return this.impl.invokeTrigger(this.clientProfileId, hookId);
+  }
 
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -12737,6 +12800,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     return this.#consoleStore().screen(consoleId, screenId, source);
+  }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    return this.#consoleStore().page(consoleId, screenId, source);
+  }
+  async getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> {
+    return this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.states ?? null;
   }
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
@@ -15144,6 +15214,15 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
+  // configures nothing (FAC-102, inferops ADR 0011 S6).
+  async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async listTriggerControls(): Promise<TriggerControl[]> {
+    return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
+  }
+  async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
+    return this.impl.invokeTrigger(this.clientProfileId, hookId);
+  }
   // An operator granted "use" reaches the published consoles of the workspace without Build,
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
@@ -15162,6 +15241,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     if (source !== "published") this.#deny();
     return this.#consoleStore().screen(consoleId, screenId, source);
+  }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    if (source !== "published") this.#deny();
+    return this.#consoleStore().page(consoleId, screenId, source);
   }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
       _model: ArtifactModelRequirement | null)
@@ -15351,6 +15434,13 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // the widget at that published revision, and the caller's own operate session must still have
   // that console and revision open. So one kept from an older publication, from a console since
   // unpublished or deleted, or from a console the person has since left stops working.
+  // A published entry never changes, so its frozen states are what every check would read.
+  async getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> {
+    let states = this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.states ?? null;
+    await this.impl.consoleSessionCheck(this.#clientUser, consoleId, revision);
+    return states;
+  }
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     let ui = true;
     let check = async () => {
@@ -15576,6 +15666,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     return this.owner.getConsoleScreen(consoleId, screenId, source);
   }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    return this.owner.getConsolePage(consoleId, screenId, source);
+  }
 
   // --- Allowed: the chat ---
 
@@ -15703,6 +15796,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
+  async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
@@ -15725,6 +15821,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getConsoleWidgetStates(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> { this.#deny(); }
   async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
@@ -16284,6 +16382,33 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
 // quarantined connection refused on the hook routes: the enable that armed a hook may itself be
 // the widening that scheduled a restart, and a shrink-then-rewiden leaves stale firings pointing
 // at a connection pending re-verification (see #gatekeepersPendingRestart).
+/**
+ * Admit `profileId`'s request to run trigger `hookId` now, then ask the trigger's gatekeeper to
+ * deliver it once (Overseer.invokeTrigger). The hook must be live and the control must admit the
+ * caller first; the gatekeeper gets only the minted invocation id, and its delivery goes through
+ * startHook like any other, which runs the pinned revision with the gadget's own bindings. A
+ * gatekeeper that can't run on request, or refuses now, leaves no invocation behind.
+ */
+export async function invokeWorkflowTrigger(
+    impl: Pick<OverseerImpl, "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore">,
+    profileId: string, hookId: number): Promise<WorkflowInvocation> {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  let record = requireLiveHook(impl as OverseerImpl, hookId);
+  let store = impl.workflowDefinitionStore();
+  let invocation = store.beginInvocation(profileId, hookId);
+  try {
+    await (record.controller as unknown as HookController<RpcTarget>).invoke!({invocationId: invocation.id});
+  } catch (error) {
+    store.cancelInvocation(invocation.id);
+    let message = error instanceof Error ? error.message : String(error);
+    if (/does not implement|is not a function|undefined is not|no such method/i.test(message)) {
+      throw new Error("This trigger can't be run on request.", {cause: error});
+    }
+    throw error;
+  }
+  return invocation;
+}
+
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
   let record = impl.storage.boundHooks.get(hookId);
   if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");

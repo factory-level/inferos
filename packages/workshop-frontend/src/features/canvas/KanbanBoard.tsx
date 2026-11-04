@@ -7,6 +7,7 @@ import { KanbanCard } from './KanbanCard'
 import type { CodingControl } from './KanbanCodingForm'
 import { KanbanColumn } from './KanbanColumn'
 import { advanceDecisions, moveTargets, pendingMoveOf, startDecisions, stateOf, type ChangeDecision } from './kanbanBoard'
+import { withServerWords } from './serverWords'
 
 /** `embedded`: fixed-width columns that scroll sideways in the card's cell. `full`: columns share the width and the height. */
 export type KanbanLayout = 'embedded' | 'full'
@@ -186,7 +187,7 @@ export const KanbanBoard = ({ board, columns, pending, changes, awaiting, decide
     setAnnouncement(result.ok
       ? { tone: 'info', text: `${issue.identifier} → ${toState.name} proposed. It is applied in InferOps once approved.` }
       : { tone: 'error', text: result.code === 'STALE_REVISION'
-        ? `${issue.identifier} changed in InferOps since the board loaded. The board was re-read; try the move again.`
+        ? withServerWords(`${issue.identifier} changed in InferOps since the board loaded. The board was re-read; try the move again.`, result.message)
         : `${issue.identifier} was not moved: ${result.message}` })
   }
 

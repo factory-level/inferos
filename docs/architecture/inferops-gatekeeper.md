@@ -22,7 +22,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 
 # InferOps gatekeeper
@@ -316,9 +316,15 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   calls the data source with idempotency key `<facet instance id>:<action id>`; the data source
   rechecks scope, state, workflow and revision, and a replayed key returns the original result
   without writing again, so a create whose response was lost is retried into the same issue. An
-  applied create records the new identifier, an applied update the revision it produced, stored
-  after the success and outside the failure handling. `rejectAction` deletes the record, which ends
-  the simulation.
+  applied create records the new identifier, an applied move or update the revision it produced, stored
+  after the success and outside the failure handling. A success, and a replay of an action already
+  applied, returns `{applied: {result}}` (FAC-97): `appliedResult` in `actions.ts` reports the kind and
+  whichever of the created identifier, the produced revision, the queued run, the produced page
+  version or the approved proposal's state the record keeps, so the overseer keeps InferOps' own answer
+  as the action's result (see "Truthful outcomes" under [Operate mode](operate-mode.md#data-and-control-flow)). A
+  field a record applied before it was kept lacks is left out. `apply-outcomes.test.ts` ("what an
+  applied write reports") covers a move, an edit, a replay and a refusal reporting none.
+  `rejectAction` deletes the record, which ends the simulation.
 - **Apply outcomes** (MVP-12, `binding.applyOnce`, `apply-attempts.ts`). A failure is returned to
   the overseer as `{ failed: ActionApplyFailure }` with what it proves, never thrown:
   - *Known not applied* only when its stage proves it and no earlier attempt may have reached

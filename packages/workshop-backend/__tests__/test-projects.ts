@@ -27,6 +27,7 @@ export const UNIT_NODE: readonly string[] = [
   "canvas-catalog.test.ts",
   "canvas-store-page-edits.test.ts",
   "canvas-store-pages.test.ts",
+  "console-publication-pages.test.ts",
   "chat-attachment-pdf.test.ts",
   "chat-attachment-validation.test.ts",
   "chat-change-statuses.test.ts",
@@ -84,6 +85,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "sharing.test.ts",
   "shared-configuration.test.ts",
   "workflow-definitions.test.ts",
+  "workflow-invocation.test.ts",
   "user-directory.test.ts",
 ];
 
@@ -96,6 +98,7 @@ export const BACKEND: readonly string[] = [
   "agent-spawner-config.test.ts",
   "operate-agui.test.ts",
   "operate-flow-start.test.ts",
+  "widget-state.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
   "authorize-observation-flags.test.ts",

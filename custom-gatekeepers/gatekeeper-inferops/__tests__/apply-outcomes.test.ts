@@ -166,3 +166,31 @@ describe("reconcile-only writes", () => {
     expect(await mock.listRuns("DEMO")).toEqual([]);
   });
 });
+
+// FAC-97: a successful apply reports what InferOps answered, so the overseer can keep it as the
+// action's result; a replay of an applied action reports the same, and a refusal reports none.
+describe("what an applied write reports", () => {
+  it("reports a move with the revision InferOps answered, and again on a replay", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).transition(WORKING, "1");
+    const result = await hooks.appliedResult(props, 1);
+    expect(result).toEqual({ kind: "transition", appliedRevision: "2" });
+    expect(await mock.readIssue("DEMO", DEMO_1)).toMatchObject({ stateId: WORKING, revision: "2" });
+    // Applying an applied action again sends nothing and reports the same result.
+    expect(await hooks.appliedResult(props, 1)).toEqual(result);
+  });
+
+  it("reports an edit with the revision it produced", async () => {
+    const { props, hooks, session } = setup();
+    await session.openIssue(DEMO_1).update({ title: "Applied title" }, "1");
+    expect(await hooks.appliedResult(props, 1)).toEqual({ kind: "update", appliedRevision: "2" });
+  });
+
+  it("reports nothing applied for a refusal", async () => {
+    const { props, hooks, mock, session } = setup();
+    await session.openIssue(DEMO_1).transition(WORKING, "1");
+    await mock.transition("DEMO", DEMO_1, DONE, "1", "someone-else");
+    expect(await hooks.appliedResult(props, 1)).toBeNull();
+    expect(await hooks.getRaw(props, "action:1")).toMatchObject({ status: "failed" });
+  });
+});

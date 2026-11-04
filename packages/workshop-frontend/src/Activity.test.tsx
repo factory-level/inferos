@@ -175,3 +175,36 @@ describe('history', () => {
     expect(text).not.toContain('deny it')
   })
 })
+
+// FAC-97: one vocabulary for where an action stands. Queued is waiting, an apply in flight is
+// applying, and only an applied action says Applied, with what the provider reported.
+describe('outcomes', () => {
+  async function renderHistory(entries: Parameters<typeof entry>[]) {
+    const server = makeOverseer()
+    await view.render(<Activity overseer={server.overseer} restricted={false} view="history" onViewChange={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [] })
+    await server.resolvePage({ entries: entries.map(([id, more]) => entry(id, more)) })
+    flushFrames()
+    return document.body.textContent ?? ''
+  }
+
+  it('never reads a queued or applying action as applied', async () => {
+    const text = await renderHistory([[2, { applying: true }], [1, {}]])
+    expect(text).toContain('Applying, not done yet')
+    expect(text).toContain('Waiting for approval')
+    expect(text).not.toContain('Applied')
+    expect(text).not.toContain('Approved')
+  })
+
+  it('says Applied for an applied action, with the result the provider reported', async () => {
+    const text = await renderHistory([[1, { state: 'approved', appliedAt: new Date(1700000300000),
+      resolvedBy: { type: 'user', id: 'u', name: 'U' }, result: { createdIdentifier: 'ENG-7', appliedRevision: '2' } }]])
+    expect(text).toContain('Applied')
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')!.click() })
+    flushFrames()
+    const expanded = document.querySelector('[aria-label="What the provider reported"]')?.textContent ?? ''
+    expect(expanded).toContain('createdIdentifier:ENG-7')
+    expect(expanded).toContain('appliedRevision:2')
+  })
+})

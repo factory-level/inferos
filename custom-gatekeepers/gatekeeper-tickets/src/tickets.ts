@@ -14,7 +14,7 @@ import {
 } from "@gadgets/gatekeeper-kit/actions";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -330,7 +330,7 @@ export class TicketsQueueGatekeeper extends DurableObject<Cloudflare.Env, Bindin
    * the same classification after a restart. Any other error is rethrown and stays retryable.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     return applyActionOutcome(() => this.#actions().apply(actionId));
   }
 

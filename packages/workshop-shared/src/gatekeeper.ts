@@ -1,3 +1,4 @@
+import type { ActionResult } from "./action-outcome";
 import type { ApprovalEdit, ApprovalProposal } from "./operate-approval";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
@@ -807,6 +808,12 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
 
 /**
+ * A successful apply that reports what the provider produced (`ActionResult`), which the overseer
+ * keeps as the action's `result`. Returning nothing still means the apply succeeded.
+ */
+export type ActionApplied = { applied: { result: ActionResult } };
+
+/**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
  * says. Returned rather than thrown, because RPC carries only an error's message.
  */
@@ -1009,7 +1016,7 @@ export interface Gatekeeper<Session> extends DurableObject {
    * ignore this parameter (and can even omit the parameter from their `applyAction()`
    * declaration).
    */
-  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure }>;
+  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
@@ -1571,7 +1578,19 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
    * However, the overseer can also call enable() again in the future.
    */
   disable(): Promise<void>;
+
+  /**
+   * Optional: deliver this hook once now, because a person asked through its trigger's control and
+   * the overseer has already admitted the request (inferops ADR 0011 S6). Deliver it as an ordinary
+   * occurrence of the hook, passing `invocation` to `initiator.startHook()`, and take nothing else
+   * from the request: the occurrence's data is the gatekeeper's own. Throw when the hook can't run
+   * now (disabled, finished). A gatekeeper without it can't be run on request.
+   */
+  invoke?(invocation: HookInvocation): Promise<void>;
 }
+
+/** An admitted request to run a hook now (HookController.invoke); its id is the overseer's. */
+export type HookInvocation = { invocationId: string };
 
 /**
  * Object passed to HookController.enable(), used to inform the overseer when a hook event occurs.
@@ -1586,8 +1605,12 @@ export interface HookInitiator<Hook extends RpcTarget> extends WorkerEntrypoint 
    * actions resulting from this hook invocation. Most (but not necessarily all) hooks involve an
    * observation. Some hooks may even pass callbacks or interpret the return value in a way that
    * causes side effects, which should be registered as actions.
+   *
+   * `request` is the invocation from `HookController.invoke()` when this delivery is one a person
+   * asked for, and must be omitted otherwise. The overseer accepts only an invocation it admitted
+   * for this hook and not yet delivered.
    */
-  startHook(): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
+  startHook(request?: HookInvocation): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
 }
 
 /**
