@@ -51,7 +51,7 @@ import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeC
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
-import { actionOutcome, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
+import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -16460,14 +16460,14 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
   }));
 }
 
-/** Bound on a receipt's `reason`, the provider's or gatekeeper's words. */
-const RECEIPT_REASON_LIMIT = 512;
-
 // The receipt `ApprovalQueueImpl.submitAction` returns (FAC-97): the one way to read a submitted
 // action's status. Its `status` closes over that action's journal id and the connection it came
 // through, and reads only that record from this workspace's own journal; nothing takes an id from a
 // caller. So a receipt can't be forged or pointed at another gadget's, connection's or workspace's
-// action: reading one takes holding its `status` function, which RPC passes as a stub.
+// action: reading one takes holding its `status` function, which RPC passes as a stub. What it says
+// about a refusal is a fixed code and the kernel's own fixed sentence for it, never the attempt's
+// message: provider text can name other people or carry secrets, and it stays in the action log for
+// the people deciding actions.
 function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): ActionReceipt {
   return {
     actionId: `action-${id}`,
@@ -16478,12 +16478,13 @@ function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): Ac
       }
       let entry = actionRecordToLog(record) as Extract<ActionLogEntry, { type: "action" }>;
       let outcome = actionOutcome(entry);
-      let words = entry.lastAttempt?.message;
+      let attempt = entry.lastAttempt;
+      let refused = outcome === "failed" || outcome === "unknown" || outcome === "waiting";
+      let code = attempt && refused ? actionReceiptCode(attempt.code) : undefined;
       return {
         outcome,
         ...(outcome === "succeeded" && entry.result ? { result: entry.result } : {}),
-        ...(outcome !== "succeeded" && outcome !== "rejected" && words
-          ? { reason: words.slice(0, RECEIPT_REASON_LIMIT) } : {}),
+        ...(code ? { code, reason: outcome === "unknown" ? ACTION_RECEIPT_UNKNOWN_REASON : ACTION_RECEIPT_REASON[code] } : {}),
       };
     },
   };

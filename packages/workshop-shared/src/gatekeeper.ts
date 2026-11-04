@@ -1,4 +1,4 @@
-import type { ActionOutcome, ActionResult } from "./action-outcome";
+import type { ActionOutcome, ActionReceiptCode, ActionResult } from "./action-outcome";
 import type { ApprovalEdit, ApprovalProposal } from "./operate-approval";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
@@ -1144,8 +1144,13 @@ export interface ActionReceiptStatus {
   /** What the provider reported the apply produced, once `succeeded` and only when it reported something; bounded like the action log's `result`. */
   result?: ActionResult;
   /**
-   * The words the refusal or the uncertain attempt was given in, at most 512 characters: once
-   * `failed` or `unknown`, or while `waiting` again after a refusal that may be retried.
+   * Why it didn't simply succeed, once `failed` or `unknown`, or while `waiting` again after a
+   * refusal that may be retried: a fixed code (`ACTION_RECEIPT_CODES`).
+   */
+  code?: ActionReceiptCode;
+  /**
+   * With `code`, the kernel's own fixed sentence for it (`ACTION_RECEIPT_REASON`). Never the
+   * gatekeeper's or provider's text: that stays in the action log, for the people deciding actions.
    */
   reason?: string;
 }

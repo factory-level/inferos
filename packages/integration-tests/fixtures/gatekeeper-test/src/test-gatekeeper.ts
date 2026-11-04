@@ -204,14 +204,14 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
    * results in `STRUCTURED`: `retry` is an unknown outcome the adapter supports retrying,
    * `notApplied-retry` a refusal that may pass, and the `-unflagged` ones carry no `retryable`.
    */
-  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "thrown"): void {
-    this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome });
+  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "thrown", code?: string): void {
+    this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome, ...(code ? { code } : {}) });
   }
 
   /** Returns rather than throws, so consuming the failure commits. */
-  takeApplyFailure(label: string): { reason: string; outcome: ApplyFailureOutcome } | null {
+  takeApplyFailure(label: string): { reason: string; outcome: ApplyFailureOutcome; code?: string } | null {
     const key = `fail-next-apply:${label}`;
-    const failure = this.ctx.storage.kv.get<{ reason: string; outcome: ApplyFailureOutcome }>(key);
+    const failure = this.ctx.storage.kv.get<{ reason: string; outcome: ApplyFailureOutcome; code?: string }>(key);
     if (failure === undefined) return null;
     this.ctx.storage.kv.delete(key);
     return failure;
@@ -868,7 +868,7 @@ export class TestGatekeeper
 
   /** The kit's terminal failures reach the overseer as its structured result (applyActionOutcome). */
   async applyAction(action: number): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
-    let structured: { outcome: "unknown" | "notApplied"; retryable?: boolean; message: string } | undefined;
+    let structured: { outcome: "unknown" | "notApplied"; retryable?: boolean; message: string; code?: string } | undefined;
     const outcome = await applyActionOutcome(async () => {
       const state = control(this.ctx.exports);
       const { label } = this.ctx.props;
@@ -880,7 +880,7 @@ export class TestGatekeeper
       if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
       const result = failure && STRUCTURED[failure.outcome];
       if (failure && result) {
-        structured = { ...result, message: failure.reason };
+        structured = { ...result, message: failure.reason, ...(failure.code ? { code: failure.code } : {}) };
         return;
       }
       if (failure !== null) throw new Error(failure.reason);
@@ -1116,9 +1116,9 @@ export default {
     }
 
     // One-shot: the next applyAction() for `label` throws `reason` without applying.
-    // Body: {"label": "...", "reason": "...", "outcome"?: an ApplyFailureOutcome}
+    // Body: {"label": "...", "reason": "...", "outcome"?: an ApplyFailureOutcome, "code"?: the provider code a structured outcome reports}
     if (url.pathname === "/control/fail-next-apply" && req.method === "POST") {
-      const { label, reason, outcome } = body as Record<string, unknown>;
+      const { label, reason, outcome, code } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
@@ -1128,9 +1128,10 @@ export default {
       if (outcome !== undefined && (typeof outcome !== "string" || !outcomes.includes(outcome))) {
         return badRequest(`\`outcome\` must be one of ${outcomes.join(", ")} when present`);
       }
+      if (code !== undefined && typeof code !== "string") return badRequest("`code` must be a string when present");
       await control(ctx.exports).failNextApply(
           label, reason ?? "The test gatekeeper failed to apply this action.",
-          (outcome ?? "thrown") as ApplyFailureOutcome);
+          (outcome ?? "thrown") as ApplyFailureOutcome, code);
       return new Response(null, { status: 204 });
     }
 

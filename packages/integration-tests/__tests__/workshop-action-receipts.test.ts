@@ -1,10 +1,12 @@
 // Write receipts (FAC-97 part 2): a gatekeeper write can hand its caller the kernel's receipt
 // `{actionId, status()}`, so a gadget or agent can tell a queued write from a done one. The status
-// is the action log's own outcome (`actionOutcome`), its bounded result and the provider's words.
+// is the action log's own outcome (`actionOutcome`), its bounded result, and for a refusal a fixed code and
+// sentence: the provider's own text stays in the action log, for the people deciding actions.
 // The receipt is a capability: there is no lookup by id, so a caller reads only receipts it holds.
 // Over the integration-test gatekeeper, held as a gadget holds a session.
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
+import { ACTION_RECEIPT_REASON } from "@gadgets/workshop-shared/action-outcome";
 import type { Overseer } from "@gadgets/workshop-shared/api";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import { startTestGatekeeperHarness, TEST_VENDOR_ID, testControl, type Harness } from "../src/harness.js";
@@ -65,16 +67,34 @@ it("a queued write's receipt says waiting; after approval it says succeeded, wit
   // Simulation is unchanged: the queued write read as applied all along; the receipt is what tells.
 });
 
-it("a provider's refusal reads as failed with the provider's words; a person's rejection reads as rejected", async () => {
+it("a refusal reads as failed with a fixed code and sentence, never the provider's text; a person's rejection reads as rejected", async () => {
   using t = await setUp("receiptrefused");
   const refused = await t.session.writeValueWithReceipt(32);
-  await control("fail-next-apply", { label: t.label, reason: "STALE_REVISION: the issue changed since it was read.", outcome: "refused" });
-  await expect(t.ws.approveAction(await pendingIdFor(t.ws, 32))).rejects.toThrow("STALE_REVISION");
-  expect(await refused.status()).toEqual({ outcome: "failed", reason: "STALE_REVISION: the issue changed since it was read." });
+  // Provider text can name other people or carry secrets: none of it may reach the caller.
+  const leaky = "Refused for ops-lead@other-company.example: token sk_live_FAKE0123456789abcdef is not valid here.";
+  await control("fail-next-apply", { label: t.label, reason: leaky, outcome: "refused" });
+  await expect(t.ws.approveAction(await pendingIdFor(t.ws, 32))).rejects.toThrow("sk_live_FAKE");
+  const status = await refused.status();
+  expect(status).toEqual({ outcome: "failed", code: "PROVIDER_ERROR", reason: ACTION_RECEIPT_REASON.PROVIDER_ERROR });
+  expect(JSON.stringify(status)).not.toMatch(/sk_live_FAKE|other-company|ops-lead/);
+  // The people deciding actions still see the provider's words in the action log.
+  const entry = (await t.ws.listActions({ filter: "action" })).entries.find(e => e.description.title === "Set the test value to 32");
+  expect(entry).toMatchObject({ lastAttempt: { message: leaky } });
 
   const declined = await t.session.writeValueWithReceipt(33);
   await t.ws.rejectAction(await pendingIdFor(t.ws, 33));
   expect(await declined.status()).toEqual({ outcome: "rejected" });
+});
+
+it("a stale revision reads as STALE_REVISION with its fixed sentence", async () => {
+  using t = await setUp("receiptstale");
+  const stale = await t.session.writeValueWithReceipt(37);
+  await control("fail-next-apply", { label: t.label, reason: "Issue ENG-9 is at revision 5, not 4 (changed by someone@else.example).",
+    outcome: "notApplied-unflagged", code: "STALE_REVISION" });
+  await t.ws.approveAction(await pendingIdFor(t.ws, 37)).catch(() => {});
+  const status = await stale.status();
+  expect(status).toEqual({ outcome: "failed", code: "STALE_REVISION", reason: ACTION_RECEIPT_REASON.STALE_REVISION });
+  expect(JSON.stringify(status)).not.toMatch(/someone@else|ENG-9/);
 });
 
 it("an existing write that ignores the receipt works as before", async () => {

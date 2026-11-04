@@ -19,13 +19,31 @@ export interface WriteStatus {
   outcome: WriteOutcome;
   /** Once succeeded, what InferOps reported it produced, such as a created issue's key or the revision it wrote. */
   result?: Record<string, string | number | boolean | null>;
-  /** Once failed or unknown, or waiting again after a refusal that may be retried: InferOps' own words, at most 512 characters. */
+  /**
+   * Once failed or unknown, or waiting again after a refusal that may be retried, why:
+   * * STALE_REVISION: it changed since it was read; read it again first.
+   * * CONFLICT: another change to it hasn't taken effect yet.
+   * * NOT_FOUND: it no longer exists, or can't be reached.
+   * * FORBIDDEN: the change isn't permitted.
+   * * INVALID: the change wasn't accepted as made.
+   * * RATE_LIMITED, UNAVAILABLE: try again later.
+   * * PROVIDER_ERROR: InferOps refused it for another reason.
+   */
+  code?: WriteFailureCode;
+  /** With code, one fixed sentence explaining it. It never contains InferOps' own error text. */
   reason?: string;
 }
+
+/** Why a write didn't simply succeed (see WriteStatus.code). */
+export type WriteFailureCode =
+  | "STALE_REVISION" | "CONFLICT" | "NOT_FOUND" | "FORBIDDEN" | "INVALID" | "RATE_LIMITED" | "UNAVAILABLE"
+  | "PROVIDER_ERROR";
 
 /**
  * The receipt a write returns. Only its holder can read the write's status. A write that has
  * nothing to do (no change, or the same write already waiting) returns null instead.
+ * status() works only while the session that returned the receipt is open: after a reconnect or
+ * restart it fails, and a later outcome has to be read from the board itself.
  */
 export interface WriteReceipt {
   /** An id for showing and correlating this write. */
@@ -200,7 +218,8 @@ export interface InferOpsProjectSession {
   /**
    * Create an issue in this project. readBoard() shows it at once, marked pending "create", until
    * it exists. Proposing the same issue again while that create is still pending (from another
-   * tab, or a retry) joins it and queues nothing new. An empty or overlong field fails with
+   * tab, or a retry) joins it and queues nothing new: that call returns null, and the receipt stays
+   * with whoever proposed it first. An empty or overlong field fails with
    * INVALID_REQUEST; a state outside this project fails with INVALID_STATE.
    */
   createIssue(issue: NewIssue): Promise<WriteReceipt | null>;
