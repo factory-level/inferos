@@ -10,6 +10,7 @@ import { buildReturnHref } from './operateMode'
 import { consoleContentForSave, type ConsoleEntry } from './consoles'
 import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
+import { ConsolePlacedAppsNotice } from './ConsolePlacedAppsNotice'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 import { useConsoleWidgetCandidates } from './useConsoleWidgetCandidates'
 
@@ -66,6 +67,7 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       <h1 className="text-xl font-semibold text-kumo-default">Settings</h1>
       <p className="mt-1 text-sm text-kumo-subtle">{entry.console.title}</p>
     </div><Button variant="ghost" disabled={saving} onClick={onClose}>Done</Button></header>
+    <ConsolePlacedAppsNotice apps={entry.console.published?.apps} workpieces={workpieces} consoleTitle={entry.console.title} />
     <div className="space-y-5">
       <div><h2 className="text-sm font-medium text-kumo-default">User customization</h2>
         <p className="mt-1 text-sm text-kumo-subtle">Personal additions leave the shared pages unchanged. Pages can be reused across consoles. Settings save to the draft; operators get them when you publish.</p></div>
