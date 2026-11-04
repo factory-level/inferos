@@ -4811,14 +4811,17 @@ export type AiToolCall = {
   input: {
     canvasId?: string;
     expectedRevision?: string;
+    /** The written target the call named (`formatCanvasTarget`), if any (FAC-84). */
+    target?: string;
     title?: string;
     templateId?: string;
     /**
-     * The model's operations as sent, each carrying the remaining fields of its `CanvasOperation`
-     * variant. Typed by discriminant only: the canvas engine validates them, and a rejected call is
-     * logged with its input as received.
+     * The model's operations as sent, each carrying the remaining fields of its variant: typed page
+     * operations (`CanvasPageOperation`) since FAC-84, version 1 `CanvasOperation`s in older logs.
+     * Typed by discriminant only: the canvas engine validates them, and a rejected call is logged
+     * with its input as received.
      */
-    operations: {type: CanvasOperation["type"]}[];
+    operations: {type: CanvasOperation["type"] | CanvasPageOperation["type"]}[];
   };
   output?: string;
 } | {
