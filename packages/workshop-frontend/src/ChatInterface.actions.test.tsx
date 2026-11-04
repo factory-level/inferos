@@ -233,6 +233,22 @@ describe('apply attempts on the card', () => {
   })
 })
 
+// FAC-97: a card says Applied only once the provider applied it, and an apply in flight is not done.
+describe('outcomes on the card', () => {
+  it('says Applied for an applied action, never Approved', async () => {
+    await renderPendingCard(entry(1, { state: 'approved', resolvedBy: { type: 'user', id: 'u', name: 'U' } }))
+    expect(document.body.textContent).toContain('Applied')
+    expect(document.body.textContent).not.toContain('Approved')
+  })
+
+  it('says an approved action whose apply is in flight is applying, not done, and offers no second approval', async () => {
+    await renderPendingCard(entry(1, { applying: true }))
+    expect(document.body.textContent).toContain('Applying, not done yet')
+    expect(document.body.textContent).not.toContain('Applied')
+    expect([...document.querySelectorAll('button')].some(b => b.textContent === 'Approve' && !b.disabled)).toBe(false)
+  })
+})
+
 describe('restricted approval', () => {
   it('shows the notice and the full request on a pending card while restricted', async () => {
     await renderPendingCard(pendingLog(), { restricted: true })

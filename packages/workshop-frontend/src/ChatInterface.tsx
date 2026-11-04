@@ -3305,7 +3305,10 @@ function ChatInterface({
       );
     }
 
-    const isPending = state === "pending";
+    // An approved action whose apply is in flight is decided, not done: no second decision is
+    // offered, and it says it is applying until the provider answers (FAC-97).
+    const isApplying = state === "pending" && log.applying === true;
+    const isPending = state === "pending" && !isApplying;
     const isApproved = state === "approved";
     const isRejected = state === "rejected";
     const isFailed = state === "failed";
@@ -3319,7 +3322,9 @@ function ChatInterface({
     const showDescription = isPending || open;
     const metadata = log.resourceTitle;
     const stateLabel = isApproved
-      ? "Approved"
+      ? "Applied"
+      : isApplying
+        ? "Applying, not done yet"
       : isRejected
         // A denial does not undo an attempt that may already have applied.
         ? log.lastAttempt?.outcome === "unknown" ? "Denied, may have applied" : "Denied"

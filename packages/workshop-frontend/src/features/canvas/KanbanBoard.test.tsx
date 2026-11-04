@@ -262,7 +262,7 @@ it('keeps the form open with the reason when a proposal is refused: a stale revi
   await act(async () => button('Edit DEMO-1')!.click())
   await enter(field('Title'), 'Renamed')
   await submit()
-  expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('This issue changed; refresh and try again.')
+  expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('This issue changed; refresh and try again. The server said: DEMO-1 is at revision 2, not 1.')
   onUpdate.mockResolvedValueOnce({ ok: false, code: 'FORBIDDEN', message: 'The workflow policy does not allow this change.' })
   await submit()
   expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('The workflow policy does not allow this change.')

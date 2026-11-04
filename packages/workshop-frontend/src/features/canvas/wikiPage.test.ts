@@ -163,3 +163,11 @@ it('leaves a Master\'s documentation coverage block out of the agent text it com
   const quoted = '# Notes\n\nWe mark it with <!-- generated: documentation coverage --> today.'
   expect(agentTextShown(quoted)).toBe(quoted)
 })
+
+// FAC-97: the hints keep InferMind's own words beside them, when it gave some.
+it('keeps the server\'s words for a stale, missing or switched-off edit', () => {
+  for (const code of ['STALE_REVISION', 'NOT_FOUND', 'DISABLED'] as const) {
+    const text = editErrorText({ phase: 'refused', code, message: `Server says ${code}.` } as Parameters<typeof editErrorText>[0])
+    expect(text, code).toContain(`Server says ${code}.`)
+  }
+})
