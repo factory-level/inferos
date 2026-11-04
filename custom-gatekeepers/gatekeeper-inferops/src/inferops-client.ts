@@ -6,7 +6,7 @@
 import type {
   Board, Issue, IssueActivity, IssueActivityEntry, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
   WikiDocumentNode, WikiProposal, WikiProposalFreshness, WikiProposalSource, WikiProposalState,
-  WikiStructure,
+  WikiSearchHit, WikiStructure,
 } from "./types";
 import type { WorkflowHeadRecord } from "./workflow-policy";
 
@@ -152,6 +152,9 @@ export type WikiDocumentHead = Pick<WikiDocumentNode, "id" | "slug" | "title"> &
 
 /** The Wiki's structure as InferOps reports it, with page ids lowercased. */
 export type WikiStructureRecord = WikiStructure;
+
+/** One `knowledge.search` hit as InferOps returns it, without its `score` (decision 5). */
+export type WikiSearchRecord = Omit<WikiSearchHit, "pending">;
 
 /** What a body edit sends: the page's new markdown. */
 export type WikiPageChanges = { body: string };
@@ -377,6 +380,15 @@ export interface InferOpsClient {
    * to read.
    */
   readDocumentText(documentId: string): Promise<string | null>;
+
+  /**
+   * `knowledge.search` (`GET /knowledge/search`, `query` and `limit` only): the sections the account
+   * can read that best match `query`, best first, at most `limit`. InferOps applies its row rules
+   * and the InferMind lens before choosing candidates. An empty list means no readable match; a
+   * search that could not run (a timeout, an outage, an InferOps without the route, a rate limit)
+   * fails with UNAVAILABLE, never an empty list. The caller has already validated both arguments.
+   */
+  searchWiki(query: string, limit: number): Promise<WikiSearchRecord[]>;
 
   /**
    * Replace a page's body (InferMind `knowledge:write`), compare-and-swap on the page version: a
