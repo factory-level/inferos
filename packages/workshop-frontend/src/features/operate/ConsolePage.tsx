@@ -114,7 +114,7 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   else if (screenId !== null) {
     body = !screen ? <Notice>This screen is unavailable. It may have been removed.</Notice>
       : <CanvasView scrollRoot={main} definition={screen} gadgets={gadgets} overseer={overseer.stub} resourceScope={resourceScope}
-          offeredBy={run.source === 'published' ? { consoleId: run.consoleId, revision: run.revision } : undefined}
+          offeredBy={run.source === 'published' ? { consoleId: run.consoleId, revision: run.revision, workspaceId: run.workspaceId } : undefined}
           onOpenWidget={openBoard} />
   } else if (view.type === 'rollup') {
     body = <ConsoleRollup screenIds={view.screens} screens={entry.screens} gadgets={gadgets}
