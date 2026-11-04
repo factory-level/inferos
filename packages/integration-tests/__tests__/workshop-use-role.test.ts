@@ -82,7 +82,7 @@ const allDenied = (calls: object) =>
 type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" |
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
     "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
-    "getConsoleScreen" | "getConsoleWidget" |
+    "getConsoleScreen" | "getConsolePage" | "getConsoleWidget" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
     "listWorkflowDefinitions" |
     // A use collaborator listed on a trigger's control may run it, and sees only those controls

@@ -26,6 +26,7 @@ export const UNIT_NODE: readonly string[] = [
   "browser-export.test.ts",
   "canvas-catalog.test.ts",
   "canvas-store-pages.test.ts",
+  "console-publication-pages.test.ts",
   "chat-attachment-pdf.test.ts",
   "chat-attachment-validation.test.ts",
   "chat-change-statuses.test.ts",
