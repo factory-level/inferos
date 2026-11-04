@@ -14,6 +14,7 @@ import {
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
 } from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
+import { emptyWidgetIndexRecord, indexConsoleWidgets, widgetIndexReport, type ConsoleWidgetIndexRecord } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
 import { WIDGET_STATES_FILE, parseWidgetStates, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -42,7 +43,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, type ConsoleSource, type ConsoleWidgetCandidate, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -50,7 +51,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -1484,6 +1485,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       consoleScreens: collection<ConsoleScreenSnapshot>()({
         primaryKey: record => consoleScreenKey(record.consoleId, record.screenId),
       }),
+      // Each console's place in the deployment's widget index (FAC-11; see console-widget-index.ts),
+      // by console id; a deleted console's is kept while one of its withdrawals is pending.
+      consoleWidgetIndex: collection<ConsoleWidgetIndexRecord>()({ primaryKey: "consoleId" }),
       // An operate session workspace's host-board selections, by target; its selection requests,
       // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
@@ -12945,10 +12949,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("publish", "shared");
     this.#consoleStore().delete(id, expectedRevision);
     this.impl.announceConsoleRevision(id, null);
+    await this.#indexConsoleWidgets(id, null);
   }
   // Publication captures the console and its sources, reads the captured commits, then publishes
   // in one transaction only if the capture still holds (see ConsoleCapture), each widget entry
-  // freezing its commit's surfaces and each bound view its spec.
+  // freezing its commit's surfaces and each bound view its spec. Then the published widgets are
+  // listed in the deployment's widget index as this person (see #indexConsoleWidgets).
   async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
     await this.#requireSharedConfiguration("publish", "shared");
     let store = this.#consoleStore();
@@ -12956,7 +12962,74 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let commits = await this.impl.readSourceCommits(capture.commitIds);
     let published = store.publish(id, expectedRevision, capture, commits);
     this.impl.announceConsoleRevision(id, published.revision);
+    await this.#indexConsoleWidgets(id, published);
     return published;
+  }
+
+  // Lists console `id`'s live publication's widgets in the widget index of the deployment's
+  // shared-configuration service, and withdraws versions no published console of this workspace
+  // lists any more, as this person, through their own connected account (FAC-11; see
+  // console-widget-index.ts). Only this build-role surface reaches it. A deployment naming no such
+  // service has no index, and nothing is written or recorded. The publication or delete has
+  // already happened: what the service answered is recorded for getConsoleWidgetIndex, never thrown.
+  async #indexConsoleWidgets(id: string, published: OperateConsole | null): Promise<void> {
+    if (!getSharedConfigurationGatekeeper(this.impl.env)) return;
+    let storage = this.impl.storage;
+    let previous = storage.consoleWidgetIndex.get(id) ?? emptyWidgetIndexRecord(id);
+    let listedElsewhere = new Set<string>();
+    for (let other of storage.consoles.list()) {
+      if (other.id === id) continue;
+      for (let entry of other.published?.content.widgets ?? []) listedElsewhere.add(consoleWidgetVersionId(entry));
+    }
+    let user = this.#clientUser;
+    let env = this.impl.env;
+    let next = await indexConsoleWidgets(previous,
+      published?.published ? { revision: published.published.revision, widgets: published.published.content.widgets ?? [] } : null,
+      listedElsewhere, {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        register: (accountId, workspaceId, entry) => user.registerWidget(accountId, workspaceId, entry),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) =>
+          user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+        description: async blueprintId => {
+          let raw = await env.BLUEPRINTS.get(blueprintId);
+          let description = raw ? (JSON.parse(raw) as BlueprintKvRecord).metadata.description : undefined;
+          return typeof description === "string" && description.trim() !== "" ? description : null;
+        },
+      });
+    // A deleted console's record is kept only while a withdrawal is still owed.
+    if (!published && next.pendingWithdraws.length === 0) storage.consoleWidgetIndex.delete(id);
+    else storage.consoleWidgetIndex.put(next);
+  }
+
+  // Where console `id` stands in the widget index; null for a console with none (see
+  // ConsoleWidgetIndexReport). Build access only.
+  async getConsoleWidgetIndex(id: string): Promise<ConsoleWidgetIndexReport | null> {
+    let record = this.impl.storage.consoleWidgetIndex.get(id);
+    return record ? widgetIndexReport(record) : null;
+  }
+
+  // The InferOps workspaces this person may list a console's widgets in, asked freshly with their
+  // own accounts: what a builder chooses a console's target from. Build access only.
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> {
+    if (!getSharedConfigurationGatekeeper(this.impl.env)) return [];
+    return (await this.#clientUser.widgetIndexWorkspaces()).map(({ workspaceId, name }) => ({ workspaceId, name }));
+  }
+
+  // Sets the workspace console `id` lists its widgets in, to one this person may list widgets in
+  // now, or clears it (null). The next publication writes there; nothing moves on its own.
+  async setConsoleWidgetIndexTarget(id: string, workspaceId: string | null): Promise<ConsoleWidgetIndexReport> {
+    await this.#requireSharedConfiguration("publish", "shared");
+    if (!this.#consoleStore().get(id, "draft")) throw new Error(`Console ${id} is not a console in this workspace.`);
+    let previous = this.impl.storage.consoleWidgetIndex.get(id) ?? emptyWidgetIndexRecord(id);
+    let target: ConsoleWidgetIndexRecord["target"] = null;
+    if (workspaceId !== null) {
+      let chosen = (await this.#clientUser.widgetIndexWorkspaces()).find(workspace => workspace.workspaceId === workspaceId);
+      if (!chosen) throw new Error("You can't publish shared configuration in that InferOps workspace.");
+      target = { workspaceId: chosen.workspaceId, name: chosen.name };
+    }
+    let next = { ...previous, target, blocked: null };
+    this.impl.storage.consoleWidgetIndex.put(next);
+    return widgetIndexReport(next);
   }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
     return this.#consoleStore().get(id, source);
@@ -15634,7 +15707,11 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
-  }
+  }  // The widget index is written by a builder's own publication only (FAC-11).
+  async getConsoleWidgetIndex(_consoleId: string): Promise<ConsoleWidgetIndexReport | null> { this.#deny(); }
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> { this.#deny(); }
+  async setConsoleWidgetIndexTarget(_consoleId: string, _workspaceId: string | null): Promise<ConsoleWidgetIndexReport> { this.#deny(); }
+
 
   // The capability checks the console context again on every call: the console must still offer
   // the widget at that published revision, and the caller's own operate session must still have
@@ -16034,6 +16111,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  // The widget index is written by a builder's own publication only (FAC-11).
+  async getConsoleWidgetIndex(_consoleId: string): Promise<ConsoleWidgetIndexReport | null> { this.#deny(); }
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> { this.#deny(); }
+  async setConsoleWidgetIndexTarget(_consoleId: string, _workspaceId: string | null): Promise<ConsoleWidgetIndexReport> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> { this.#deny(); }
   async listTree(_commitId: string): Promise<TreeNode[]> { this.#deny(); }

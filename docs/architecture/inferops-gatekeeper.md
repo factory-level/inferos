@@ -197,6 +197,21 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `__tests__/account.test.ts` ("shared configuration authority") covers the request, an Operator,
   an Admin in a second workspace, another company's deployment and its own, a malformed setting, a
   refused workspace, an outage and malformed answers, and an account with no person.
+- **Widget index (FAC-11 slice 2).** `InferOpsAccount.widgetIndexWorkspaces()` lists the
+  connected person's workspaces where `configuration:publish` holds, asked as
+  `holdsSharedConfiguration` asks, in identity order. `registerWidget(workspaceId, entry)` and
+  `withdrawWidget(workspaceId, sourceId, sourceVersion)` write InferOps' `widget.publish`
+  (`PUT /knowledge/widget-definitions`, source `inferos.blueprint`, visibility `company`) and
+  `widget.withdraw` (`DELETE /knowledge/widget-definitions/:sourceId/:sourceVersion`) through
+  `InferOpsClient.publishWidgetDefinition` / `withdrawWidgetDefinition`, with the person's own
+  token in `workspaceId`, which must be one of theirs. An account without a connected person (the
+  stopgap bearer, demo data, a sign-in) writes nothing and answers `refused`. A 403 is
+  `WIDGET_INDEX_FORBIDDEN` (the gatekeeper's own words, not InferOps' message), a 400 or 422 an
+  invalid definition, anything else `unavailable`; a definition is checked before sending (id 1 to
+  128, version from 1, title 1 to 120, purpose 1 to 2000). The demo's mock has no index and answers
+  `unavailable`. Only the Workshop's build-role `publishConsole` and `deleteConsole` call them (see
+  [Operate mode](operate-mode.md#widget-index)), directly rather than as approved actions: the
+  divergence below.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there
@@ -755,6 +770,14 @@ A browser that InferLab's IP-allowlisting edge refuses cannot open central-auth'
 - **Google through the proxy.** Every forwarded request carries `x-inferos-authorize-origin: <authorize origin>`, set by the proxy, never taken from the browser. InferLab answers its Google edge on that origin when the origin is listed in its `auth.sso.proxyOrigins` (factory-level/inferops#2528; dev lists `https://auth.dev-os.factorylevel.dev`), so Google's redirect URI is `<authorize origin>/auth/oauth/callback/google`, which must also be registered on InferLab's Google client. The callback returns to the relative `/authorize?…` on this host, and the sign-in finishes as a persona one does. Against an InferLab without that change, or an origin it does not list, Google returns to InferLab's own hostname, which the edge refuses for most browsers. InferLab creates no account on a first Google sign-in, so the Google account must already be an InferLab user.
 - `__tests__/auth-proxy.test.ts` covers the origin and path allowlist (including the two Google legs and the other edge paths staying a 404), the edge and authorize-origin headers (a browser-sent authorize-origin header is replaced), header filtering, the cookie, Origin, Referer, Location and Set-Cookie rewrites, a relative `/logout` redirect staying on the authorize host, and a foreign `Origin` passing unchanged; `inferlab-login.test.ts` covers the popup going to the authorize origin's `/authorize` with `prompt=select_account` while the code is exchanged at the InferLab origin, and a malformed authorize origin turning sign-in off.
 ## Divergences from Design
+
+- **Widget index writes skip the approval queue** ([ADR 0016](../adr/0016-console-widget-index-writes.md),
+  proposed). The design has every gatekeeper write staged, approved and applied. A console
+  publication's `widget.publish` and `widget.withdraw` are written directly, as the publishing
+  person, from the build-role publication only: the person publishing is the person who would
+  approve. No gadget, agent, use-role or operate session reaches them; InferOps still decides
+  against the person's own grant, and InferOS reports what it answered. A companion `docs/human`
+  proposal asks for the design to name this exception.
 
 - The account session's `findBoards` returns the package's existing `BoardCandidate` (`tenant`,
   `workspace`, `projectKey`, `boardRef`, `title`, `reasons`), which the board session's `findBoards`

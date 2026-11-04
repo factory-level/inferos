@@ -27,7 +27,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
@@ -40,7 +40,7 @@ import type {
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -2824,6 +2824,28 @@ export interface Overseer extends RpcTarget {
    * Denied to the operate session.
    */
   getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * Where console `consoleId` stands in the deployment's widget index (FAC-11): the InferOps
+   * workspace it lists its widgets in, what InferOps answered for each widget its live publication
+   * registers, and any withdrawal still owed; null for a console with none, as while the
+   * deployment names no such service. Publishing and deleting a console write the index as the
+   * person doing it, with their own sign-in. Needs build access.
+   */
+  getConsoleWidgetIndex(consoleId: string): Promise<ConsoleWidgetIndexReport | null>;
+  /**
+   * The InferOps workspaces the caller may list a console's widgets in, asked freshly with their
+   * own sign-in: those where they hold InferOps' shared configuration `publish` permission. Empty
+   * while the deployment names no such service. Needs build access.
+   */
+  listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]>;
+  /**
+   * Sets the InferOps workspace console `consoleId` lists its widgets in, one of
+   * `listConsoleWidgetIndexWorkspaces`, or clears it (null); the next publication writes there, and
+   * nothing moves to another workspace on its own. Refused for a workspace the caller may not list
+   * widgets in. Needs build access and, in a shared workspace, the shared configuration `publish`
+   * permission.
+   */
+  setConsoleWidgetIndexTarget(consoleId: string, workspaceId: string | null): Promise<ConsoleWidgetIndexReport>;
   /**
    * The local states (FAC-86) a widget a console offers declares, as published revision
    * `revision` froze them, or null when it declares none. Checked as `getConsoleWidget` checks

@@ -98,6 +98,45 @@ export type SharedConfigurationAction = "build" | "publish";
 export type SharedConfigurationAnswer = { holds: boolean; scope: string | null };
 
 /**
+ * A workspace of the service in which the person may list widgets for their company (see
+ * `GatekeeperUser.widgetIndexWorkspaces`): for InferOps, one where they hold `configuration:publish`.
+ */
+export type WidgetIndexWorkspace = {
+  /** The service's workspace id. */
+  workspaceId: string;
+  /** The workspace's name, for a person choosing among several. */
+  name: string;
+};
+
+/**
+ * One published widget version to list in the service's widget index (FAC-11): a pointer and words
+ * only, never code, bindings, a connection or any record. For InferOps it is `widget.publish`'s
+ * input, with source `inferos.blueprint` and visibility `company`.
+ */
+export type WidgetIndexEntry = {
+  /** The Blueprint's id. */
+  sourceId: string;
+  /** The Blueprint version, from 1. */
+  sourceVersion: number;
+  /** The widget's name, as its console entry labels it. */
+  title: string;
+  /** What the widget is for, in plain words: what the service's retrieval ranks. */
+  purpose: string;
+};
+
+/**
+ * The service's answer to one widget index write, as it gave it. `applied` is a write it made live;
+ * `proposed` is one it took for someone else to confirm, never shown as done; `refused` carries the
+ * service's own words (for InferOps, a person without `configuration:publish`); `unavailable` is
+ * any failure that proves nothing. A withdraw reports whether a definition was there to remove.
+ */
+export type WidgetIndexOutcome =
+  | { status: "applied"; removed?: boolean }
+  | { status: "proposed"; reason: string }
+  | { status: "refused"; reason: string }
+  | { status: "unavailable"; reason: string };
+
+/**
  * Per-open context the Workshop passes to GatekeeperUser.startAppUi(). `isAdmin` is supplied fresh
  * each time rather than baked into the account, since a user's admin status can change over time.
  */
@@ -785,6 +824,29 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * there; throw when it can't be told, and the Workshop refuses.
    */
   holdsSharedConfiguration?(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer>;
+
+  /**
+   * The workspaces of the service in which the person behind this account may list widgets for
+   * their company, asked freshly with their own credentials (for InferOps, those where they hold
+   * `configuration:publish`), in the service's order. Called only on accounts of the vendor
+   * `SHARED_CONFIGURATION_GATEKEEPER` names, and only by the Workshop's own console publication,
+   * never by a gadget, agent or operate session. Empty for an account without a connected person.
+   */
+  widgetIndexWorkspaces?(): Promise<WidgetIndexWorkspace[]>;
+
+  /**
+   * Lists, or lists again, one published widget version in workspace `workspaceId` of the service,
+   * as the person behind this account with their own credentials, and answers as the service did
+   * (see `WidgetIndexOutcome`). The same entry written twice is one definition. `workspaceId` must
+   * be one of the person's own; any other is refused. Called as `widgetIndexWorkspaces` is.
+   */
+  registerWidget?(workspaceId: string, entry: WidgetIndexEntry): Promise<WidgetIndexOutcome>;
+
+  /**
+   * Removes one widget version's listing from workspace `workspaceId`, as `registerWidget` writes
+   * it; `applied` with `removed: false` when there was none. Called as `widgetIndexWorkspaces` is.
+   */
+  withdrawWidget?(workspaceId: string, sourceId: string, sourceVersion: number): Promise<WidgetIndexOutcome>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.

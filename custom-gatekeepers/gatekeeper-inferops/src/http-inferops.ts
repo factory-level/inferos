@@ -52,7 +52,7 @@ import {
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
   type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
   type TableColumnRecord, type TableRead, type TableReadOptions, type TableRecordSchema,
-  type TableRowRecord, type TableSummary, type WikiPageChanges, type WikiPageWrite,
+  type TableRowRecord, type TableSummary, type WidgetDefinitionWrite, type WikiPageChanges, type WikiPageWrite,
   type WorkspaceMemberRecord, type WorkspaceMembersRead,
   type WikiSearchRecord, type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
@@ -813,6 +813,40 @@ function restated(error: InferOpsError, code: InferOpsErrorCode, detail: string)
   return new InferOpsError(code, detail, error.facts);
 }
 
+/** What InferOps' refusal of a widget index write says: only `configuration:publish` lists a widget. */
+export const WIDGET_INDEX_FORBIDDEN =
+  "InferOps refused: listing widgets for your company needs the shared configuration publish permission in this workspace.";
+
+// A widget index write's own refusals: a 403 is the permission (any other cause reads the same, so
+// nothing tells them apart); a 400 or 422 is a definition InferOps would not take.
+function widgetIndexFailure(status: number): SendFailure | undefined {
+  if (status === 403) return { code: "FORBIDDEN", detail: WIDGET_INDEX_FORBIDDEN, refusal: true };
+  if (status === 400 || status === 422) {
+    return { code: "INVALID_REQUEST", detail: "InferOps would not take this widget definition.", refusal: true };
+  }
+  return undefined;
+}
+
+// A widget pointer InferOps accepts: an id of 1 to 128 characters and a version from 1.
+function checkWidgetPointer(sourceId: string, sourceVersion: number): void {
+  if (typeof sourceId !== "string" || sourceId.length < 1 || sourceId.length > 128) {
+    throw new InferOpsError("INVALID_REQUEST", "A widget's Blueprint id must be 1 to 128 characters.");
+  }
+  if (!Number.isSafeInteger(sourceVersion) || sourceVersion < 1) {
+    throw new InferOpsError("INVALID_REQUEST", "A widget's Blueprint version must be a positive integer.");
+  }
+}
+
+// A definition InferOps accepts: a pointer as above, a title of 1 to 120 characters and a purpose
+// of 1 to 2000, after trimming, as `widget.publish` checks them.
+function checkWidgetDefinition(entry: WidgetDefinitionWrite): void {
+  checkWidgetPointer(entry.sourceId, entry.sourceVersion);
+  const title = entry.title.trim().length;
+  const purpose = entry.purpose.trim().length;
+  if (title < 1 || title > 120) throw new InferOpsError("INVALID_REQUEST", "A widget's title must be 1 to 120 characters.");
+  if (purpose < 1 || purpose > 2000) throw new InferOpsError("INVALID_REQUEST", "A widget's purpose must be 1 to 2000 characters.");
+}
+
 /** The gatekeeper code for a failed response, from its status and InferOps error code. */
 function failureCode(status: number, code: string | null): InferOpsErrorCode {
   if (status === 401) return "UNAUTHORIZED";
@@ -1109,7 +1143,7 @@ export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: st
 type SendFailure = { code: InferOpsErrorCode; detail: string; refusal?: true };
 
 type Send = {
-  method: "GET" | "POST" | "PATCH"; path: string; body?: unknown; idempotencyKey?: string;
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"; path: string; body?: unknown; idempotencyKey?: string;
   /** A successful response may have no body (InferOps' answer for a missing Wiki item). */
   maybeEmpty?: boolean;
   /** Read a failed response before the shared mapping; undefined falls back to it. */
@@ -1847,6 +1881,33 @@ export function openHttpInferOpsClient(
         if (!decision) throw new Malformed(`decisions has no entry for the permission asked about`);
         return bool(decision.allowed, "decisions.allowed");
       });
+    },
+
+    async publishWidgetDefinition(entry: WidgetDefinitionWrite): Promise<void> {
+      await beforeSending(async () => checkWidgetDefinition(entry));
+      const response = await request("widget.publish", {
+        method: "PUT", path: "/knowledge/widget-definitions",
+        body: { source: "inferos.blueprint", sourceId: entry.sourceId, sourceVersion: entry.sourceVersion,
+                title: entry.title, purpose: entry.purpose, visibility: "company" },
+        failure: widgetIndexFailure,
+      });
+      parsed("widget.publish", response, raw => {
+        const definition = record(raw, "response");
+        if (text(definition.sourceId, "sourceId") !== entry.sourceId ||
+            int(definition.sourceVersion, "sourceVersion") !== entry.sourceVersion) {
+          throw new Malformed("another widget definition was returned");
+        }
+      });
+    },
+
+    async withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean> {
+      await beforeSending(async () => checkWidgetPointer(sourceId, sourceVersion));
+      const response = await request("widget.withdraw", {
+        method: "DELETE",
+        path: `/knowledge/widget-definitions/${encodeURIComponent(sourceId)}/${sourceVersion}`,
+        failure: widgetIndexFailure,
+      });
+      return parsed("widget.withdraw", response, raw => bool(record(raw, "response").withdrawn, "withdrawn"));
     },
 
     async listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead> {

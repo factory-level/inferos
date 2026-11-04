@@ -107,6 +107,7 @@ import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
+  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
@@ -1084,6 +1085,78 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     return { holds: false, scope };
   }
 
+  /**
+   * The workspaces in which the connected person may list widgets for their company: each of their
+   * workspaces where InferOps' `configuration:publish` holds, asked with their own token, in the
+   * order their identity lists them (FAC-11). Nothing for an account without a connected person, or
+   * a session in another company than `INFEROPS_COMPANY` names, as `holdsSharedConfiguration`.
+   */
+  async widgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> {
+    const identity = await this.#widgetIndexIdentity();
+    if (!identity) return [];
+    const found: WidgetIndexWorkspace[] = [];
+    for (const { workspaceId, workspaceName } of identity.workspaces) {
+      if (await this.#widgetIndexClient(identity.endpoint, workspaceId).holdsPermission("configuration:publish")) {
+        found.push({ workspaceId, name: workspaceName });
+      }
+    }
+    return found;
+  }
+
+  /** Lists one widget version in the person's own workspace `workspaceId`: `widget.publish`. */
+  async registerWidget(workspaceId: string, entry: WidgetIndexEntry): Promise<WidgetIndexOutcome> {
+    return this.#widgetIndexWrite(workspaceId, async client => {
+      await client.publishWidgetDefinition(entry);
+      return { status: "applied" };
+    });
+  }
+
+  /** Removes one widget version's listing from the person's own workspace: `widget.withdraw`. */
+  async withdrawWidget(workspaceId: string, sourceId: string, sourceVersion: number): Promise<WidgetIndexOutcome> {
+    return this.#widgetIndexWrite(workspaceId, async client => ({
+      status: "applied", removed: await client.withdrawWidgetDefinition(sourceId, sourceVersion),
+    }));
+  }
+
+  // The connected person's identity and the API endpoint, when this account can write the widget
+  // index at all: a connected person (never the stopgap bearer, a demo account or a sign-in) of the
+  // deployment's company.
+  async #widgetIndexIdentity() {
+    const endpoint = inferOpsApiEndpoint(this.env);
+    if (!this.ctx.props.connected || !endpoint) return null;
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return null;
+    return { endpoint, workspaces: identity.workspaces };
+  }
+
+  #widgetIndexClient(endpoint: NonNullable<ReturnType<typeof inferOpsApiEndpoint>>, workspaceId: string) {
+    return whileInferOpsEnabled(this.env, () =>
+      accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
+  }
+
+  // One widget index write as the connected person in `workspaceId`, which must be one of theirs,
+  // answered as InferOps answered: a refusal in the gatekeeper's own words for it, never a success.
+  async #widgetIndexWrite(workspaceId: string,
+      write: (client: InferOpsClient) => Promise<WidgetIndexOutcome>): Promise<WidgetIndexOutcome> {
+    const identity = await this.#widgetIndexIdentity();
+    if (!identity) return { status: "refused", reason: WIDGET_INDEX_NO_SIGN_IN };
+    if (!identity.workspaces.some(w => w.workspaceId === workspaceId)) {
+      return { status: "refused", reason: "That InferOps workspace isn't one of yours." };
+    }
+    try {
+      return await write(this.#widgetIndexClient(identity.endpoint, workspaceId));
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      const reason = error instanceof InferOpsError ? error.detail : "InferOps couldn't be reached.";
+      if (code === "FORBIDDEN" || code === "INVALID_REQUEST" || code === "NOT_FOUND" || code === "UNAUTHORIZED") {
+        return { status: "refused", reason };
+      }
+      return { status: "unavailable", reason };
+    }
+  }
+
   /** No grantable resource types, so nothing to authorize and no URL to return. */
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> {
     return {};
@@ -1095,6 +1168,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     return this.ctx.exports.InferOpsVerifier({ props: this.ctx.props });
   }
 }
+
+/** Why an account lists no widget: only a person's own InferOps sign-in may (FAC-11). */
+const WIDGET_INDEX_NO_SIGN_IN = "Sign in to InferOps as yourself to list this console's widgets for your company.";
 
 /** The verifier surface `addObserver` relies on; the overseer only hands it back to this vendor. */
 export interface InferOpsVerifierApi extends GatekeeperUserVerifier {
