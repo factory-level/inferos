@@ -30,7 +30,10 @@ import { Route } from './routes/gatekeepers'
 // The router plugin splits route components into a lazy wrapper; load it first so a render is
 // synchronous and fake timers start with the page's own timers.
 const Page = (Route as unknown as { options: { component: ComponentType & { preload?: () => Promise<void> } } }).options.component
-beforeAll(async () => { await Page.preload?.() })
+// Under the package's full parallel test run, Vite may be transforming other files while the
+// router's split chunk loads. Keep the allowance local to that preload instead of changing every
+// hook's timeout; the isolated import phase is under a second.
+beforeAll(async () => { await Page.preload?.() }, 30_000)
 // A subscription the test settles: `ready()` lists no accounts; never calling it is a hang.
 const subscription = (answer: 'ready' | 'hang') => (subscriber: Subscriber) => {
   if (answer === 'ready') queueMicrotask(() => subscriber.ready())
