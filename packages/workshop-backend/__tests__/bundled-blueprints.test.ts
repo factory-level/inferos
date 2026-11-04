@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { DEFAULT_WORKSPACE_KIND } from "@gadgets/workshop-shared/api";
+import { parseWidgetStates } from "@gadgets/workshop-shared/widget-state";
 import { blueprintPublishRefusals, classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
 import {
   parseBlueprintArchive, parseBlueprintKvRecord, sanitizeBlueprintOutput, sanitizeWorkspaceKind,
@@ -118,6 +119,28 @@ describe("bundled blueprints", () => {
     let appRecord = parseBlueprintKvRecord(kv.get("test.app")!);
     expect(appRecord.metadata.kind).toBeUndefined();
     expect(r2Metadata.get(`test.app/${appRecord.metadata.version}`)?.kind).toBe(DEFAULT_WORKSPACE_KIND);
+  });
+
+  // FAC-86 part 3: the sample stateful widget is bundled as a widget, so installing it makes a
+  // widget workspace, and its states and its mark travel in its archive.
+  it("installs the sample status widget as a widget, with its states and its bundled mark", async () => {
+    let entry = BUNDLED_BLUEPRINTS.find(candidate => candidate.blueprintId === "inferos.status-widget");
+    expect(entry?.kind).toBe("widget");
+    expect(isBundledFormat(entry!)).toBe(false);
+    let {kv, r2Metadata, env} = makeEnv();
+    await installBundledBlueprints(env, [entry!]);
+    let record = parseBlueprintKvRecord(kv.get(entry!.blueprintId)!);
+    expect(record.metadata.kind).toBe("widget");
+    expect(r2Metadata.get(`${entry!.blueprintId}/${record.metadata.version}`)?.kind).toBe("widget");
+
+    let states = parseWidgetStates(await readBlueprintFile(entry!, "states.json"));
+    expect(states.states).toEqual(["idle", "working", "done", "failed"]);
+    expect(states.transitions).toContainEqual({event: "retry", from: "failed", to: "working"});
+    // The mark is inlined into the bundle as the logo's own path, never fetched.
+    let client = await readBlueprintFile(entry!, "client.js");
+    expect(client).toContain("M32 8 52.8 20v24L32 56 11.2 44V20L32 8Z");
+    // Its one URL is the SVG namespace, which names and loads nothing.
+    expect(client.replaceAll("http://www.w3.org/2000/svg", "")).not.toMatch(/favicon\.svg|https?:\/\//u);
   });
 
   it("offers only an app as a standard format, and reinstalls when an entry's kind changes", () => {
