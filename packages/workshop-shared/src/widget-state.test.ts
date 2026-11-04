@@ -3,8 +3,8 @@
 // resumes only while the machine still declares it.
 import { describe, expect, it } from "vitest";
 import {
-  WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, parseWidgetStates, recoverWidgetState,
-  widgetEventsFrom, type WidgetStateMachine,
+  MAX_HELD_WIDGET_STATES, WIDGET_STATE_ERROR_CODES, WidgetStateError, WidgetStateMemory, applyWidgetTransition,
+  parseWidgetStates, recoverWidgetState, widgetEventsFrom, type WidgetStateMachine,
 } from "./widget-state";
 
 /** A request widget: view, edit, submit, then a result with retry and return paths. */
@@ -87,5 +87,23 @@ describe("a transition", () => {
     expect(recoverWidgetState(machine, "failed")).toBe("failed");
     expect(recoverWidgetState(machine, "gone")).toBe("viewing");
     expect(recoverWidgetState(machine, undefined)).toBe("viewing");
+  });
+});
+
+describe("session state in memory", () => {
+  const machine = parse(REQUEST) as WidgetStateMachine;
+
+  it("checks the seq and writes in one step, refusing a second transition at the same seq", () => {
+    let memory = new WidgetStateMemory();
+    expect(memory.transition("w", machine, "edit", 0)).toMatchObject({ state: "editing", seq: 1 });
+    expect(() => memory.transition("w", machine, "cancel", 0)).toThrow(WIDGET_STATE_ERROR_CODES.conflict);
+    expect(memory.read("w", machine)).toMatchObject({ state: "editing", seq: 1 });
+  });
+
+  it("holds at most MAX_HELD_WIDGET_STATES, dropping the least recently changed", () => {
+    let memory = new WidgetStateMemory();
+    for (let i = 0; i <= MAX_HELD_WIDGET_STATES; i++) memory.transition(`w${i}`, machine, "edit", 0);
+    expect(memory.read("w0", machine).state).toBe("viewing");
+    expect(memory.read(`w${MAX_HELD_WIDGET_STATES}`, machine).state).toBe("editing");
   });
 });

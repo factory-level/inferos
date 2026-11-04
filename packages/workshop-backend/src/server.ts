@@ -1,6 +1,6 @@
 import {
-  WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, parseOperateWidgetRef, recoverWidgetState,
-  widgetEventsFrom, widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot,
+  WIDGET_STATE_ERROR_CODES, WidgetStateError, WidgetStateMemory, parseOperateWidgetRef,
+  widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot,
 } from "@gadgets/workshop-shared/widget-state";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
@@ -720,7 +720,7 @@ type HostBoardRun = { workspaceId: string; entry: HostBoardEntry; sessionSeq: nu
 // Returned by getOperateSession(). The session's state lives in the user DO, which serializes every
 // dispatch; this capability only forwards to it, minting a fresh user-DO stub per call (see #user).
 @validateRpc()
-class OperateSessionImpl extends RpcTarget implements OperateSession {
+export class OperateSessionImpl extends RpcTarget implements OperateSession {
   constructor(private user: () => DurableObjectStub<UserDurableObject>,
       private openWorkspace: () => Promise<NativeRpcStub<Overseer>>,
       private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>,
@@ -799,8 +799,10 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     });
   }
 
-  // Plain data under the host boards' guard (see describeBoundView). A draft's spec is read through
-  // the caller's own build access to the console workspace, never through authored code.
+  /**
+   * Plain data under the host boards' guard (see describeBoundView). A draft's spec is read through
+   * the caller's own build access to the console workspace, never through authored code.
+   */
   async getConsoleBoundView(console: ConsoleRef, entryId: string, options: { commitId?: string } = {})
       : Promise<BoundViewDescription> {
     return describeBoundView(console, entryId, options, {
@@ -972,7 +974,7 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
   // Widget local states (FAC-86). The declaration is read from the published console through the
   // person's own access on every call, never taken from the caller. A `person` widget's state lives
   // in the person's user DO, a `session` one only on this connection; neither touches the page.
-  #sessionWidgetStates = new Map<string, { state: string; seq: number }>();
+  #sessionWidgetStates = new WidgetStateMemory();
 
   async #widgetMachine(ref: OperateWidgetRef): Promise<WidgetStateMachine> {
     let checked = parseOperateWidgetRef(ref);
@@ -986,27 +988,25 @@ class OperateSessionImpl extends RpcTarget implements OperateSession {
     let machine = await this.#widgetMachine(ref);
     let key = widgetStateKey(ref);
     if (machine.persistence === "person") return this.user().readWidgetState(key, machine);
-    let held = this.#sessionWidgetStates.get(key);
-    let state = recoverWidgetState(machine, held?.state);
-    return { state, seq: held?.seq ?? 0, events: widgetEventsFrom(machine, state) };
+    return this.#sessionWidgetStates.read(key, machine);
   }
 
+  /**
+   * The machine is loaded first; the session path then checks and writes with no await between
+   * (WidgetStateMemory.transition), and the person path does the same inside the user DO.
+   */
   async transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot> {
     let machine = await this.#widgetMachine(ref);
     let key = widgetStateKey(ref);
     if (machine.persistence === "person") return this.user().transitionWidgetState(key, machine, event, expectedSeq);
-    let current = await this.getWidgetState(ref);
-    if (expectedSeq !== current.seq) {
-      throw new WidgetStateError(WIDGET_STATE_ERROR_CODES.conflict, "The widget's state changed. Read it again.");
-    }
-    let state = applyWidgetTransition(machine, current.state, event);
-    this.#sessionWidgetStates.set(key, { state, seq: current.seq + 1 });
-    return { state, seq: current.seq + 1, events: widgetEventsFrom(machine, state) };
+    return this.#sessionWidgetStates.transition(key, machine, event, expectedSeq);
   }
 
-  // The recipient's copy is appended first: it is the one that matters, and if it is refused
-  // (an invalid note) nothing has been recorded anywhere. The two DOs can't be written atomically,
-  // so a failure recording the sender's copy leaves the delivered handover in place.
+  /**
+   * The recipient's copy is appended first: it is the one that matters, and if it is refused
+   * (an invalid note) nothing has been recorded anywhere. The two DOs can't be written atomically,
+   * so a failure recording the sender's copy leaves the delivered handover in place.
+   */
   async handOver(recipientId: string, note: string): Promise<OperateHandover> {
     let user = this.user();
     let { board } = (await user.getOperatePage()).state;

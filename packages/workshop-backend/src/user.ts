@@ -1244,6 +1244,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * machine still declares it, else its initial state. Reads nothing of the operate page.
    */
   async readWidgetState(key: string, machine: WidgetStateMachine): Promise<WidgetStateSnapshot> {
+    return this.#widgetState(key, machine);
+  }
+
+  #widgetState(key: string, machine: WidgetStateMachine): WidgetStateSnapshot {
     let stored = this.storage.widgetStates.get(validWidgetStateKey(key));
     let state = recoverWidgetState(machine, stored?.state);
     return { state, seq: stored?.seq ?? 0, events: widgetEventsFrom(machine, state) };
@@ -1256,7 +1260,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async transitionWidgetState(key: string, machine: WidgetStateMachine, event: string,
                               expectedSeq: number): Promise<WidgetStateSnapshot> {
-    let current = await this.readWidgetState(key, machine);
+    // One synchronous read, check and write: no await, so no other request interleaves.
+    let current = this.#widgetState(key, machine);
     if (expectedSeq !== current.seq) {
       throw new WidgetStateError(WIDGET_STATE_ERROR_CODES.conflict, "The widget's state changed. Read it again.");
     }

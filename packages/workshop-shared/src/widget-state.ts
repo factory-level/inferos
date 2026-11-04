@@ -203,6 +203,37 @@ export function recoverWidgetState(machine: WidgetStateMachine, stored: string |
   return stored !== undefined && machine.states.includes(stored) ? stored : machine.initial;
 }
 
+/** Most widget states one memory holds, as the user DO keeps: the oldest is dropped past it. */
+export const MAX_HELD_WIDGET_STATES = 256;
+
+/**
+ * Widget states held in memory, for `session` persistence (one operate session connection). Every
+ * method is synchronous, so a read, its `seq` check and the write happen with nothing between them.
+ */
+export class WidgetStateMemory {
+  #held = new Map<string, { state: string; seq: number }>();
+
+  /** The state of `key` under `machine`: the held one when the machine declares it, else initial. */
+  read(key: string, machine: WidgetStateMachine): WidgetStateSnapshot {
+    let held = this.#held.get(key);
+    let state = recoverWidgetState(machine, held?.state);
+    return { state, seq: held?.seq ?? 0, events: widgetEventsFrom(machine, state) };
+  }
+
+  /** Moves `key` by `event` if `expectedSeq` is current, in one synchronous step. */
+  transition(key: string, machine: WidgetStateMachine, event: string, expectedSeq: number): WidgetStateSnapshot {
+    let current = this.read(key, machine);
+    if (expectedSeq !== current.seq) {
+      throw new WidgetStateError(WIDGET_STATE_ERROR_CODES.conflict, "The widget's state changed. Read it again.");
+    }
+    let state = applyWidgetTransition(machine, current.state, event);
+    this.#held.delete(key);
+    this.#held.set(key, { state, seq: current.seq + 1 });
+    if (this.#held.size > MAX_HELD_WIDGET_STATES) this.#held.delete(this.#held.keys().next().value!);
+    return { state, seq: current.seq + 1, events: widgetEventsFrom(machine, state) };
+  }
+}
+
 function parseId(value: unknown, what: string): string {
   if (typeof value !== "string" || !ID.test(value)) {
     throw new Error(`${what} must be a lowercase id of letters, digits and dashes, starting with a letter, at most 40 characters.`);

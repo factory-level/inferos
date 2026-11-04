@@ -81,3 +81,36 @@ describe("a widget's local state", () => {
     expect((await env.TEST_USER.getByName(id).readWidgetState(republished, MACHINE)).state).toBe("viewing");
   });
 });
+
+// FAC-86 round 2 (r2 on #343): two transitions naming the same seq, run at once through the
+// operate session, while each awaits the published machine. Exactly one may win.
+describe("concurrent transitions", () => {
+  async function session(persistence: "person" | "session") {
+    let { OperateSessionImpl } = await import("../src/server.js");
+    let machine = { ...MACHINE, persistence };
+    let userStub = env.TEST_USER.getByName(crypto.randomUUID());
+    // The published machine arrives after a tick, as an RPC to the console's workspace would.
+    let workspace = {
+      getConsoleWidgetStates: async () => { await new Promise(resolve => setTimeout(resolve, 5)); return machine; },
+      [Symbol.dispose]: () => {},
+    };
+    let impl = new OperateSessionImpl(() => userStub as never, async () => ({}) as never,
+      async () => workspace as never, () => userStub as never, () => ({}) as never, {} as never);
+    return impl;
+  }
+
+  for (let persistence of ["session", "person"] as const) {
+    it(`let exactly one of two same-seq ${persistence} transitions succeed`, async () => {
+      let impl = await session(persistence);
+      let results = await Promise.allSettled([
+        impl.transitionWidget(REF, "edit", 0), impl.transitionWidget(REF, "edit", 0),
+      ]);
+      let won = results.filter(r => r.status === "fulfilled");
+      let lost = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      expect(won).toHaveLength(1);
+      expect(lost).toHaveLength(1);
+      expect(String(lost[0]!.reason?.message ?? lost[0]!.reason)).toContain(WIDGET_STATE_ERROR_CODES.conflict);
+      expect(await impl.getWidgetState(REF)).toMatchObject({ state: "editing", seq: 1 });
+    });
+  }
+});
