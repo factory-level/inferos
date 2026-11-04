@@ -2797,6 +2797,20 @@ export interface Overseer extends RpcTarget {
    */
   getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
   /**
+   * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
+   * `gadgetId` is the live app, with its own storage and bindings, never a copy (see
+   * `ConsolePublishedApp`). This is how the use role reaches an app a published console places,
+   * which `getGadget()` refuses it. It opens only while the app's current commit is the one
+   * published: once a builder changes the app, this refuses, saying a builder must publish the
+   * console again, and never offers the changed code instead. Every call on the returned capability
+   * checks that again, with the console still published at `revision` and open in the caller's
+   * operate session, so a capability kept from before the change, or from an older revision, stops
+   * working. Refused if the console is not published at `revision` or does not place the app there.
+   * Build access opens the app's mainline as `getGadget()` does, after the same placement check.
+   * Denied to the operate session.
+   */
+  getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
    * The local states (FAC-86) a widget a console offers declares, as published revision
    * `revision` froze them, or null when it declares none. Checked as `getConsoleWidget` checks
    * the widget. This is what an operate session's widget state follows; it grants nothing.
