@@ -12815,6 +12815,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Build access may already open any gadget, so its capability is the ordinary one.
     return this.getGadget(gadgetId);
   }
+  // Build access opens the app's mainline, as getGadget does; only the placement is checked, so a
+  // builder previewing a published console after changing the app still sees what they built.
+  async getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let shown = this.#consoleStore().get(consoleId, "published");
+    if (!shown || shown.revision !== revision || !shown.published?.apps?.some(app => app.gadgetId === gadgetId)) {
+      throw new Error(`Console ${consoleId} does not offer app ${gadgetId} at revision ${revision}.`);
+    }
+    return this.getGadget(gadgetId);
+  }
   // A pinned commit must be the source's current commit or one of its ancestors within
   // BOUND_VIEW_PIN_DEPTH commits of it (git log order), so another gadget's view, or one the
   // source's history no longer reaches, is refused; a preview pinned further back refreshes. It
@@ -15415,7 +15424,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
 
   // A widget install, registered or frozen, is offered only by a published console (see
-  // getConsoleWidget), never by membership in the workspace. Apps shared for use are unchanged.
+  // getConsoleWidget), never by membership in the workspace. So is an app a published console
+  // places (see getConsoleApp), which would otherwise run its mainline rather than the commit the
+  // console published. Other apps shared for use are unchanged.
   async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     let record = this.impl.getGadgetRecord(id);  // also validates it exists
     if (record.pending) {
@@ -15427,9 +15438,40 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     if (record.frozenFor || installed?.kind === "widget") {
       throw new Error(`Gadget ${id} is a widget; open it through the console that offers it.`);
     }
+    // Checked when the capability is minted and again on every call through it and through any
+    // capability it returns, so one minted while the app was only shared for use stops reaching its
+    // mainline as soon as a published console places it (the console is then the only way in).
+    let check = async () => {
+      if (this.#placedApp(id)) {
+        throw new Error(`Gadget ${id} is an app a published console places; open it through that console.`);
+      }
+    };
+    await check();
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new UseGadgetClientInterface(this.impl, id, this.clientUserId);
+    return new UseGadgetClientInterface(this.impl, id, this.clientUserId, check);
+  }
+
+  // Whether a published console places app `id` (see WorkspaceConsoleStore.placedByPublishedConsole).
+  // Consoles exist only while durable views are on; with them off there is no console to open it by.
+  #placedApp(id: WorkpieceId): boolean {
+    if (this.impl.env.COMPOSABLE_VIEWS !== "true" || this.impl.env.DURABLE_VIEWS !== "true") return false;
+    return this.#consoleStore().placedByPublishedConsole(id);
+  }
+
+  // The app as the console's published revision fenced it: the live gadget, opened only while its
+  // current commit is the published one. The capability checks again on every call, with the
+  // caller's operate session, so once a builder changes the app (or the console moves on, or the
+  // person leaves it) a kept capability stops working and says why. Never the app's mainline.
+  async getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let check = async () => {
+      this.#consoleStore().offeredApp(consoleId, revision, gadgetId);
+      await this.impl.consoleSessionCheck(this.#clientUser, consoleId, revision);
+    };
+    await check();
+    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
+    //     type system doesn't know this.
+    return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
   }
 
   // The capability checks the console context again on every call: the console must still offer
@@ -15826,6 +15868,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getConsoleWidgetStates(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<WidgetStateMachine | null> { this.#deny(); }
   async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> { this.#deny(); }
