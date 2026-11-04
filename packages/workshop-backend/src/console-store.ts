@@ -1,8 +1,8 @@
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
-import { nestedPage } from "./canvas-store";
+import { canvasDefinitionProjection, canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { nestedPage, readCanvasDefinition } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
@@ -469,7 +469,10 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   });
   dropPublishedScreens(storage, id);
   for (let { screenId, row, page } of screens) {
-    storage.consoleScreens.put({ consoleId: id, screenId, screen: withFrozenGadgets(row, frozenIds),
+    // The publication keeps the real nested page (FAC-89); `screen`, what a version 1 reader of the
+    // published console sees, is that page's projection (FAC-83), never the layout it replaced.
+    storage.consoleScreens.put({ consoleId: id, screenId,
+      screen: withFrozenGadgets(page ? canvasDefinitionProjection(page) : row, frozenIds),
       ...(page ? { page: withFrozenNodes(page, frozenIds) } : {}) });
   }
   let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
@@ -750,7 +753,7 @@ export class WorkspaceConsoleStore {
   screen(consoleId: string, screenId: string, source: ConsoleSource): CanvasDefinition | null {
     let shown = this.get(consoleId, source);
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
-    if (source === "draft") return this.storage.canvases.get(screenId) ?? null;
+    if (source === "draft") return readCanvasDefinition(this.storage, screenId);
     return this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
   }
 

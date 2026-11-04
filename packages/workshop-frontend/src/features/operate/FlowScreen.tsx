@@ -120,7 +120,8 @@ export const FlowScreen = ({ run, console: shown, onTitle, scrollRoot }: {
     overseer: sessionWorkspace.stub,
     unboundAction: (targetRef, retry) => <BoardConnectPrompt scope={sessionWorkspace.stub} targetRef={targetRef} onConnected={retry} />,
   } : undefined
-  const offeredBy = useRole && shown.open ? { consoleId: shown.open.consoleId, revision: shown.open.revision } : undefined
+  const offeredBy = useRole && shown.open
+    ? { consoleId: shown.open.consoleId, revision: shown.open.revision, workspaceId: run.workspaceId } : undefined
   return (
     <div className="mx-auto w-full max-w-6xl p-6">
       <CanvasView scrollRoot={scrollRoot} definition={step.definition} gadgets={gadgets} overseer={overseer.stub}

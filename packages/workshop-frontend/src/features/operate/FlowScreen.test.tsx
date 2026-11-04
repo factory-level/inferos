@@ -82,7 +82,7 @@ const readNothing = () => {
 it('U-1: draws the published copy from the open console, its frozen widgets and the session board scope', async () => {
   await render(shown())
   expect(doubles.canvas?.definition).toBe(PUBLISHED_COPY)
-  expect(doubles.canvas?.offeredBy).toEqual({ consoleId: 'c1', revision: '3' })
+  expect(doubles.canvas?.offeredBy).toEqual({ consoleId: 'c1', revision: '3', workspaceId: 'w1' })
   expect(doubles.canvas?.resourceScope?.overseer).toBe(SESSION.stub)
   expect(onTitle).toHaveBeenLastCalledWith('Triage (published)')
   expect(alert()).toBeUndefined()

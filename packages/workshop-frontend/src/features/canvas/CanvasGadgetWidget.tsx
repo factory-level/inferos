@@ -4,9 +4,14 @@ import type { GadgetClient, GadgetSummary, Overseer, WorkpieceId } from '@gadget
 import type { CanvasGadgetWidget as Widget } from '@gadgets/workshop-shared/canvas'
 import GadgetUI from '../../GadgetUI'
 import { useHasBeenOnScreen } from './useHasBeenOnScreen'
+import { WidgetStateBar } from './WidgetStateBar'
+import { useOperateSession } from '../operate/OperateSessionContext'
 
-/** The published console revision a screen is shown from; its widgets open through it. */
-export type CanvasConsoleRevision = { consoleId: string; revision: string }
+/**
+ * The published console revision a screen is shown from; its widgets open through it. With the
+ * console's `workspaceId`, inside an operate session, a widget declaring local states shows them.
+ */
+export type CanvasConsoleRevision = { consoleId: string; revision: string; workspaceId?: string }
 
 export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scrollRoot }: {
   widget: Widget
@@ -24,6 +29,7 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
   offeredBy?: CanvasConsoleRevision
 }) => {
   const ref = useRef<HTMLElement>(null)
+  const operate = useOperateSession()
   const visible = useHasBeenOnScreen(ref, false, scrollRoot)
   const [client, setClient] = useState<{ id: WorkpieceId; stub: RpcStub<GadgetClient> } | null>(null)
   // A draft belongs to its conversation until accepted, so it is never shown on a shared canvas.
@@ -62,6 +68,10 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
   const title = gadget?.title ?? 'Unavailable gadget'
   return <article ref={ref} aria-label={title} className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base shadow-md">
     <h3 className="truncate border-b border-kumo-line px-3 py-2 text-sm font-medium text-kumo-default">{title}</h3>
+    {/* The widget's own state (FAC-86), only for a published console's frozen widget in Operate. */}
+    {offered?.workspaceId !== undefined && operate?.session && gadgetId !== undefined &&
+      <WidgetStateBar session={operate.session.stub}
+        widgetRef={{ workspaceId: offered.workspaceId, consoleId: offered.consoleId, revision: offered.revision, gadgetId }} />}
     {gadget === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is no longer in the workspace. Remove it from the layout or choose another gadget.</p>
       : gadgetId === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is still a draft in a conversation. Accept the conversation's changes to show it here.</p>
       : refused ? <p role="status" className="p-4 text-sm text-kumo-subtle">{refused}</p>

@@ -46,7 +46,9 @@ check_keys() {
   fi
   local key
   for key in "$@"; do
-    if ! front_matter "$file" | grep -q "^$key:"; then
+    # Not `grep -q`: it exits at the first match, and under pipefail the SIGPIPE that awk then gets
+    # on a front matter over one output block (4 KiB) fails the check now and then.
+    if ! front_matter "$file" | grep "^$key:" >/dev/null; then
       error "$file: missing front matter key '$key'"
     fi
   done
