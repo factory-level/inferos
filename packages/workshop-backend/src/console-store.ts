@@ -5,10 +5,11 @@ import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOp
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
+import { readCanvasDefinition } from "./canvas-store";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
-type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "consoleScreens" | "gadgets" | "flows">;
+type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows">;
 
 /**
  * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called
@@ -228,7 +229,7 @@ function withFrozenGadgets(screen: CanvasDefinition, frozen: Map<WorkpieceId, Wo
  * install (or frozen install) placed on a screen the console shows must be registered and, given
  * `commits`, have a UI. Other gadgets, such as installed apps, are placed as before.
  */
-function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets">, content: OperateConsoleContent,
+function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent,
     commits?: SourceCommits): void {
   let registered = new Set<WorkpieceId>();
   let noUi = new Set<WorkpieceId>();
@@ -244,7 +245,7 @@ function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "gadgets
     return record?.type === "gadget" && (!!record.frozenFor || record.installedFrom?.kind === "widget");
   };
   for (let screenId of consoleScreens(content)) {
-    let screen = storage.canvases.get(screenId);
+    let screen = readCanvasDefinition(storage, screenId);
     let unregistered = screen && placedGadgets(screen).find(id => isWidget(id) && !registered.has(id));
     if (unregistered !== undefined && unregistered !== null) {
       throw new Error(`Screen ${screenId} shows widget ${unregistered}, which the console's widget registry does not offer.`);
@@ -369,7 +370,7 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   });
   dropPublishedScreens(storage, id);
   for (let screenId of consoleScreens(content)) {
-    let screen = storage.canvases.get(screenId);
+    let screen = readCanvasDefinition(storage, screenId);
     if (screen) storage.consoleScreens.put({ consoleId: id, screenId, screen: withFrozenGadgets(screen, frozenIds) });
   }
   let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
@@ -627,7 +628,7 @@ export class WorkspaceConsoleStore {
   screen(consoleId: string, screenId: string, source: ConsoleSource): CanvasDefinition | null {
     let shown = this.get(consoleId, source);
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
-    if (source === "draft") return this.storage.canvases.get(screenId) ?? null;
+    if (source === "draft") return readCanvasDefinition(this.storage, screenId);
     return this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
   }
 

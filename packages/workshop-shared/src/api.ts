@@ -25,6 +25,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
+import type { CanvasPage, CanvasPageOperation } from "./canvas-model.js";
 import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "./workflow-definition.js";
@@ -2635,6 +2636,18 @@ export interface Overseer extends RpcTarget {
   editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition>;
   /** Delete a definition at its expected revision with build access and both flags. Reimport creates a new identity. */
   deleteCanvas(id: string, expectedRevision: string): Promise<void>;
+  /**
+   * Read one canvas as its nested page (ADR 0014): objects, widgets and attachments by stable ID.
+   * Requires build access and both flags; the use role is refused, since its screens are published
+   * version 1 copies. A missing canvas reads as null.
+   */
+  getCanvasPage(id: string): Promise<CanvasPage | null>;
+  /**
+   * Compare the page revision and apply typed page operations atomically, with build access and both
+   * flags. A stale revision throws the canvas conflict error and writes nothing. Removing a node
+   * removes only its reference on the page, never a record it names.
+   */
+  editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage>;
 
   /**
    * List this workspace's flows: ordered lists of its canvases that an operate session runs one

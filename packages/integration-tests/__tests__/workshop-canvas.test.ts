@@ -256,3 +256,48 @@ it("keeps a private Kanban view with a live board reference through stale edits,
     await harness.server.close(); network.uninstall(); expect(network.getUnmockedCalls()).toEqual([]);
   }
 });
+
+it("edits nested pages over RPC: parts keep their IDs across a reconnect, a stale edit is refused, and only a builder may", async () => {
+  const network = new NetworkInterceptor(); network.install();
+  const harness = await startHarness({ gatekeepers: [], patchWorkshop(config) {
+    config.vars = { ...config.vars, COMPOSABLE_VIEWS: 'true', DURABLE_VIEWS: 'true' };
+  } });
+  try {
+    using api = connect(harness.url);
+    using owner = await signUp(api, "pageowner");
+    using builder = await signUp(api, "pagebuilder");
+    using viewer = await signUp(api, "pageviewer");
+    using workspace = await owner.newGadget();
+    const workspaceId = (await workspace.getMetadata()).id;
+    const board: CanvasWidget = { id: "eng", kind: "inferops.project-board", version: 1,
+      targetRef: "inferops://acme.operations/project/board/ENG", size: "wide", params: { workflow: "software", showCompleted: false } };
+    const created = await workspace.createCanvas({ title: "Operations", sections: [{ id: "work", title: "Work", columns: 2, widgets: [board] }] });
+    const page = await workspace.editCanvasPage(created.id, created.revision, [
+      { type: "addObject", parent: "work", index: 0, object: { id: "inner", title: "Inner", columns: 1 } },
+      { type: "moveNode", nodeId: "eng", parent: "inner", index: 0 },
+    ]);
+    expect(page.revision).toBe("1");
+    // A stale edit is refused with the server's words, and the newer page stays.
+    await expect(workspace.editCanvasPage(created.id, created.revision, [{ type: "renamePage", title: "Stale" }]))
+      .rejects.toThrow(/Canvas changed/);
+    // A version 1 reader sees the current layout, flattened.
+    expect((await workspace.getCanvas(created.id))?.sections.map(s => s.widgets.map(w => w.id))).toEqual([["eng"]]);
+
+    using reconnectedApi = connect(harness.url);
+    using reconnected = await logIn(reconnectedApi, "pageowner");
+    using again = await reconnected.openGadget(workspaceId);
+    expect(await again.getCanvasPage(created.id)).toEqual(page);
+
+    using buildSession = await builder.openGadget(workspaceId, (await workspace.createShareLink("build", "page builder")).key);
+    const removed = await buildSession.editCanvasPage(created.id, page.revision, [{ type: "removeNode", nodeId: "inner" }]);
+    expect(removed.nodes.map(node => node.id)).toEqual(["work"]);
+
+    using useSession = await viewer.openGadget(workspaceId, (await workspace.createShareLink("use", "UI only")).key);
+    await expect(useSession.getCanvasPage(created.id)).rejects.toThrow(/Unauthorized/);
+    await expect(useSession.editCanvasPage(created.id, removed.revision, [{ type: "renamePage", title: "Denied" }])).rejects.toThrow(/Unauthorized/);
+    expect(await workspace.getCanvasPage(created.id)).toEqual(removed);
+  } finally {
+    // Nothing here reaches InferOps: removing the board removed only its reference.
+    await harness.server.close(); network.uninstall(); expect(network.getUnmockedCalls()).toEqual([]);
+  }
+});
