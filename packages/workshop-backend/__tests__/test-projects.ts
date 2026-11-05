@@ -23,6 +23,8 @@ export const UNIT_NODE: readonly string[] = [
   "auto-approval.test.ts",
   "blueprint-data-contract.test.ts",
   "blueprint-version-bindings.test.ts",
+  "authored-widget-build.test.ts",
+  "authored-widget-build-runtime.test.ts",
   "browser-export.test.ts",
   "canvas-catalog.test.ts",
   "action-receipt-scope.test.ts",
@@ -78,6 +80,7 @@ export const UNIT_NODE: readonly string[] = [
  * several replace modules with `vi.mock`, which a shared graph would leak into the next file.
  */
 export const WORKERD_LIGHT: readonly string[] = [
+  "authored-widget-publication.test.ts",
   "access.test.ts",
   "action-log-pagination.test.ts",
   "operate-approval.test.ts",
@@ -106,6 +109,7 @@ export const BACKEND: readonly string[] = [
   "widget-state.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
+  "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",
   "authz-generation.test.ts",
   "chat-changes.test.ts",

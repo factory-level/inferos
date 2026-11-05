@@ -11,11 +11,16 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/server");
-		durableNamespaces: "UserDurableObject" | "OverseerDurableObject" | "AdminSettings" | "PendingLogin" | "UserDirectoryDurableObject" | "SubjectPresenceDurableObject";
+		durableNamespaces: "UserDurableObject" | "OverseerDurableObject" | "AdminSettings" | "PendingLogin" | "UserDirectoryDurableObject" | "SubjectPresenceDurableObject" | "AuthoredWidgetBuildDurableObject";
 	}
 	interface Env extends __BaseEnv_Env {}
 }
 interface Env extends __BaseEnv_Env {}
+
+declare module "*.wasm" {
+	const value: WebAssembly.Module;
+	export default value;
+}
 
 // Begin runtime types
 /*! *****************************************************************************

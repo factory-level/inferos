@@ -23,6 +23,8 @@ declare global {
        */
       INFEROPS_BOUND_VIEWS?: string;
       INFEROPS_ENABLED?: string;
+      /** Enables isolated compilation of authored React/Refine widgets at publication time. Off unless exactly `true`. */
+      AUTHORED_WIDGET_BUILD_ENABLED?: string;
       /**
        * Console tools (console-store.ts `consoleToolsEnabled`): "true" lets console publication
        * snapshot callable widgets' tools. Off by default, and set only in test harnesses: it must
@@ -137,4 +139,9 @@ declare global {
       DAILY_AGENT_TURN_LIMIT?: string;
     }
   }
+}
+
+declare module "*.wasm" {
+  const module: WebAssembly.Module;
+  export default module;
 }

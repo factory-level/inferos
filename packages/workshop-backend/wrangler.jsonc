@@ -48,6 +48,15 @@
     "command": "pnpm run build:worker",
     "watch_dir": "src"
   },
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": [
+        "**/*.wasm"
+      ],
+      "fallthrough": false
+    }
+  ],
   "migrations": [
     {
       "tag": "v0",
@@ -78,6 +87,12 @@
       "tag": "v4",
       "new_sqlite_classes": [
         "SubjectPresenceDurableObject"
+      ]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": [
+        "AuthoredWidgetBuildDurableObject"
       ]
     }
   ]

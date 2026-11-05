@@ -14,6 +14,13 @@ export type WorkshopObservabilityFields = {
   durableObjectId: string;
   durationMs: number;
   eventName: string;
+  /** Bytes in the fixed compile dependency closure. */
+  dependencyBytes: number;
+  /** The lockfile hash for the reviewed compile dependency closure. */
+  dependencyLockHash: string;
+  /** Bytes in the pinned esbuild wasm module. */
+  wasmBytes: number;
+  event: string;
   executionId: string;
   failureCount: number;
   gadgetId: string;

@@ -91,6 +91,7 @@ import { chatChangeStatuses, foldProposedChanges, type ChangeBatch } from "./age
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { blueprintSnapshotFiles, blueprintVersionKeys, blueprintVersionMetadata, checkDataContract, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings, sanitizeBlueprintOutput, writeBlueprintVersionBindings } from "./blueprint-archive";
 import { assertUpgradeCompatible, createBlueprintBindings, readBlueprintVersionToInstall } from "./blueprint-install";
+import { compileAuthoredWidgetPublication } from "./authored-widget-publication.js";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from "./agent-spawner-binding";
@@ -9614,6 +9615,24 @@ class OverseerImpl implements AgentHooks {
     throw new Error("This gadget has no code to publish. Accept some code first.");
   }
 
+  /** Compile an authored widget into a child commit when the opt-in feature flag is enabled. */
+  async compileAuthoredWidgetCommit(sourceCommitId: string): Promise<string> {
+    return compileAuthoredWidgetPublication({
+      enabled: this.env.AUTHORED_WIDGET_BUILD_ENABLED === "true",
+      sourceCommitId,
+      gitStore: this.gitStore,
+      builds: this.ctx.exports.AuthoredWidgetBuildDurableObject,
+      author: () => this.#ownerCommitIdentity(),
+      onFailure: durationMs => {
+        this.logger.warn("authored widget publication build refused", {
+          event: "authored_widget.publication.build_refused",
+          durationMs,
+          outcome: "error",
+        });
+      },
+    });
+  }
+
   // Create a minimal Yjs doc snapshot (no edit history) of the given commit's files, for a
   // blueprint archive. Returns a gzip-compressed Yjs V2 encoded state update. The snapshot
   // always uses the unnamed root "" (the canonical archive root), regardless of which root holds
@@ -15346,6 +15365,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("publish", "shared");
     let record = this.impl.storage.blueprints.get(blueprintId);
     if (!record) throw new Error("No such blueprint.");
+    let startingVersion = record.metadata.version;
+    let startingCommitId = record.commitId;
     if (options.dataContract !== undefined && !options.updateCode) {
       throw new Error("A data contract is declared only with a new version (updateCode).");
     }
@@ -15355,30 +15376,27 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("At least one update option must be provided.");
     }
 
-    if (options.title !== undefined) {
-      record.metadata.title = options.title;
-    }
-    if (options.description !== undefined) {
-      record.metadata.description = options.description;
-    }
-
     let codeSnapshot: Uint8Array | undefined;
+    let bindings: Record<string, BlueprintBinding> | undefined;
+    let nextCommitId: string | undefined;
+    let nextKind: WorkspaceKind | undefined;
+    let nextVersion = record.metadata.version;
+    let nextDataContract = record.metadata.dataContract;
     if (options.updateCode || options.updateBindings) {
       // Re-collect binding metadata from the source gadget (validates annotations). Records
       // written before multi-gadget support carry no gadgetId; they export the default gadget.
       let gadgetId = this.impl.resolveGadgetId(record.gadgetId);
-      record.metadata.bindings = this.impl.collectBindingMetadata(gadgetId);
+      bindings = this.impl.collectBindingMetadata(gadgetId);
       if (options.updateCode) {
         let commitId = await this.impl.assertPublishableCommit(
             this.impl.getGadgetRecord(gadgetId).commitId);
         await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
-        record.commitId = commitId;
-        delete record.codeVersion;
-        record.metadata.version++;
-        record.metadata.kind = this.impl.storage.kind.get();
+        commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+        nextCommitId = commitId;
+        nextKind = this.impl.storage.kind.get();
+        nextVersion++;
         // Each version declares its own contract; one published without is unknown.
-        if (dataContract !== undefined) record.metadata.dataContract = dataContract;
-        else delete record.metadata.dataContract;
+        nextDataContract = dataContract;
         codeSnapshot = await this.impl.snapshotCode(commitId);
       }
     }
@@ -15386,6 +15404,31 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let screenshot = options.screenshot === undefined
       ? undefined
       : options.screenshot === null ? null : validateBlueprintScreenshotUpload(options.screenshot);
+
+    // Defer record mutation until compile, snapshot and upload validation have succeeded.
+    if (nextCommitId !== undefined) {
+      // Compilation and snapshotting both await other work. Another publish may finish during
+      // either await, so compare immediately before mutation to keep a published version immutable.
+      let current = this.impl.storage.blueprints.get(blueprintId);
+      if (!current || current.metadata.version !== startingVersion ||
+          current.commitId !== startingCommitId) {
+        throw new Error("The Blueprint changed while building; publish again.");
+      }
+      // Preserve metadata-only changes that landed while this build was pending. Apply only
+      // this publish's requested fields to the freshly read record below.
+      record = current;
+    }
+    if (options.title !== undefined) record.metadata.title = options.title;
+    if (options.description !== undefined) record.metadata.description = options.description;
+    if (bindings !== undefined) record.metadata.bindings = bindings;
+    if (nextCommitId !== undefined) {
+      record.commitId = nextCommitId;
+      delete record.codeVersion;
+      record.metadata.version = nextVersion;
+      record.metadata.kind = nextKind!;
+      if (nextDataContract !== undefined) record.metadata.dataContract = nextDataContract;
+      else delete record.metadata.dataContract;
+    }
 
     record.metadata.lastUpdated = new Date();
 
@@ -16593,6 +16636,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     let commitId = await this.impl.assertPublishableCommit(
         this.impl.getGadgetRecord(this.id).commitId);
     await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
+    commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
     let now = new Date();
 
     let metadata: BlueprintMetadata = {
