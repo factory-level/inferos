@@ -47,6 +47,8 @@ it.skipIf(!existsSync(chrome))("Gadget CSP prevents running widgets from reachin
     const img = document.createElement('img'); img.src = ${JSON.stringify(target)}; document.body.append(img);
     const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = ${JSON.stringify(target)}; document.head.append(link);
     const style = document.createElement('style'); style.textContent = '@import url(${target}/imported.css);'; document.head.append(style);
+    const cssomStyle = document.createElement('style'); document.head.append(cssomStyle);
+    try { cssomStyle.sheet?.insertRule('@import url(${target}/cssom-import.css);'); } catch {}
     try { new WebSocket(${JSON.stringify(target.replace("http:", "ws:"))}); } catch {}
     try { new EventSource(${JSON.stringify(target)}); } catch {}
     window.open(${JSON.stringify(target)});
