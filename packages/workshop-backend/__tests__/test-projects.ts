@@ -62,6 +62,7 @@ export const UNIT_NODE: readonly string[] = [
   "operate-agui-lifecycle.test.ts",
   "operate-session.test.ts",
   "operate-flow-navigation.test.ts",
+  "handover-delivery.test.ts",
   "publication.test.ts",
   "raw-sources.test.ts",
   "site-logo.test.ts",

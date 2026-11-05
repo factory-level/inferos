@@ -108,6 +108,10 @@ it("drops a person's page when they sign in to another company, and never restor
   await selectIssue(bob, bob.accountId);
   const bobLog = await types(bob.session);
 
+  // Her open tab's capability on the operate chat's workspace, held across the switch.
+  const heldWorkspace = await alice.session.getWorkspace();
+  expect(await heldWorkspace.listChats()).toEqual([]);
+
   // Alice signs in to InferOps as her globex person instead.
   await alice.api.disconnectAccount(alice.accountId);
   const globexAccount = await signInAs(alice.api, aliceGlobex);
@@ -115,6 +119,12 @@ it("drops a person's page when they sign in to another company, and never restor
   // Nothing of acme's page is listed or applied: a write at acme's seq is a conflict, and the
   // page the next write lands on is the fresh one.
   expect(await types(alice.session)).toEqual(["companyChanged"]);
+  // The held capability is revoked, not just barred from re-opening: listing, history and running
+  // the chat are all refused.
+  for (const call of [() => heldWorkspace.listChats(), () => heldWorkspace.getChatHistory(1),
+    () => heldWorkspace.newChat("Carry on", null)]) {
+    await expect(call()).rejects.toThrow();
+  }
   await expect(alice.session.dispatch({ type: "closeIssue" }, selected.seq)).rejects.toSatisfy(
     (caught: unknown) => getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.conflict);
   const inGlobex = await alice.session.dispatch({ type: "setChatOpen", open: false }, selected.seq + 1);

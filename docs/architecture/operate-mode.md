@@ -2,6 +2,8 @@
 title: Operate mode
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md
 covers:
+  - packages/workshop-backend/src/handover-delivery.ts
+  - packages/workshop-backend/__tests__/handover-delivery.test.ts
   - packages/workshop-backend/__tests__/personal-state-partition.test.ts
   - packages/integration-tests/__tests__/operate-company-switch.test.ts
   - packages/workshop-backend/src/console-widget-index.ts
@@ -612,11 +614,20 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
   - a kernel-only `companyChanged` event returns the page to `INITIAL_OPERATE_PAGE`;
   - `presentationFloorSeq` moves to that event, so earlier entries are kept in storage but never listed again;
   - `presentationEpoch` rises, which makes an open connection drop its session widget states;
-  - **the operate session workspace is retired.** That workspace holds the operate chat, its history and its agent's context. It moves from `gadgets` to `retiredOperateWorkspaces`, kept and never deleted, and the next claim starts a fresh one. `Overseer.open` refuses an operate session workspace to its own owner once it is no longer their recorded session (`workspaceNotFound`), so the former company's chat is never opened or sent to an agent again.
+  - **the operate session workspace is retired.** That workspace holds the operate chat, its history and its agent's context. It moves from `gadgets` to `retiredOperateWorkspaces`, kept and never deleted, and the next claim starts a fresh one.
   
   A client still holding the old page writes at a stale seq and is refused as a conflict. A dispatched `companyChanged` is refused (`invalidEvent`).
+- **Revoking the retired workspace.** Retirement revokes what is already held on the workspace, not only later opens:
+  - **The user DO asks first.** Before the gate lets any call through, it asks each retired workspace not yet revoked to retire itself (`Overseer.retireOperateSession(ownerId)`, reached only from Worker code holding the namespace), and records each that has. It then reads the company again, since it may have changed meanwhile. One that can't be reached refuses the person's call with `companyUnavailable`, and is asked again on the next call.
+  - **The workspace marks itself.** `OverseerImpl.retireOperateSession` sets the persisted `operateSessionRetired` mark, an authorization input watched like `operateSession`, so it raises the generation. It cancels every running agent turn and schedules the access restart, which drops every connection, held capability and subscription within about 100 ms.
+  - **Held capabilities refuse.** Until the restart, every `OperateOverseerInterface` call (the chat list, its history, a new chat or message, a subscription, the action log and every other allowed call) checks the mark first. It refuses with "This operate session has ended. Reload to start a new one.", which names nothing.
+  - **Opening refuses.** `Overseer.open` refuses a retired workspace, and one that is no longer the owner's recorded session, with `workspaceNotFound`.
+  - **No agent work starts or resumes.** A turn already running is cancelled at retirement. An agent turn the restart interrupted is not resumed in a retired workspace: `#resumeInterruptedAgents` drops its record, reports the chat's turn as "Agent stopped: this operate session has ended.", and drains no pending agent call. `OverseerImpl.startAgent` starts no turn there either, whether it was asked for through a held capability or by the alarm draining a pending call; it reports the turn the same way.
 - **State from before FAC-88.** When no company is recorded yet, any state there (a moved page, a widget state, a claimed workspace) can't be shown to belong to the company first read, so it is dropped exactly as on a switch. A person with none just records the company.
-- **Handovers stay in one company.** `OperateSession.handOver` compares the sender's and the recipient's `currentPresentationCompany()`. When they differ, it is refused with `recipientUnavailable`, as if there were no one else, so a board, a sender's name and a note never cross companies.
+- **Handovers stay in one company.** A board, a sender's name and a note never cross companies:
+  - **The check.** `OperateSession.handOver` reads the sender's `currentPresentationCompany()` and delivers the handover with it (`deliverHandover`, `handover-delivery.ts`) to the recipient's own `UserDurableObject.receiveHandover`. The recipient resolves their company, then compares it with the sender's and appends the handover in one synchronous step (`#appendOperateEvent`), so a switch can't land between the check and the append.
+  - **A mismatch** is refused with `recipientUnavailable` and nothing is appended. A recipient whose company can't be told is reported to the sender as `recipientUnavailable` too, as if there were no one else.
+  - **No other route in.** `dispatchOperateEvent` refuses `handoverReceived` from anyone, so only `receiveHandover` records one.
 - **The policy is reset, never restore.** Switching back to a former company starts afresh too. Connecting an account in a company, or disconnecting the last one, also changes the company, and the state resets the same way.
 - **A republish.** Its policy is unchanged and is now stated as the reset policy:
   - **Widgets** run a new frozen install at the new revision, so every widget starts again at `initial` (see [Widget local states](#widget-local-states)).
@@ -629,17 +640,27 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
     - a company that can't be told, and a dispatched `companyChanged`;
     - state from before any company was recorded, dropped;
     - a fresh operate session workspace in each company, the old one never listed or handed back;
+    - a handover refused for a recipient in another company, including a switch that lands while the recipient's company is being read, and never dispatched;
     - `presentationCompanyOf`.
+  - `__tests__/authz-generation.test.ts` ("a retired operate session workspace"):
+    - the owner's held capability refuses listing, history, a new chat, a message, a subscription and the action log;
+    - the restart is scheduled;
+    - no later open gets it back;
+    - nobody but the owner retires it.
+    
+    It also measures the mark's rise with the other inputs. `authz-generation-guard.test.ts` lists the mark as a watched input.
+  - `__tests__/handover-delivery.test.ts`: the sender sees `recipientUnavailable` for a recipient in another company or one whose company can't be told; other failures pass on.
   - `integration-tests/__tests__/operate-company-switch.test.ts`: the real gatekeeper and connect flow.
     - Alice selects an issue in acme, then signs in to InferOps as a person of another company.
     - She sees only `companyChanged`, has a write at acme's seq refused, and gets a fresh operate workspace; acme's is refused by its id.
+    - The operate workspace capability she held across the switch refuses listing, history and a new chat.
     - Bob's handover from acme is refused while she is in the other company.
     - Back in acme she starts afresh, again with a fresh workspace, and Bob's handover then reaches her.
     - Bob is untouched throughout.
   - `integration-tests/__tests__/operate-two-person-conflict.test.ts`: after Alice's approved transition commits, Bob's next read through his own board shows it, and his page log is still only his own `openBoard`.
 - **Not covered.**
   - A person's own unshared workspaces are theirs in any company.
-  - A recipient who changes company between the handover's check and its delivery isn't caught.
+  - **The open tab's own stub.** The Operate page holds its workspace stub (`useSessionWorkspace`) until the restart drops the connection. Its reconnect then opens the fresh workspace; nothing in the UI says why the chat is empty.
 
 ### Callable widget tools
 

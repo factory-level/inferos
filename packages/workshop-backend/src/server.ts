@@ -9,6 +9,7 @@ import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, Rp
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { checkFlowDestination } from './flow-navigation.js';
+import { deliverHandover } from './handover-delivery.js';
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type OperateConsole, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
 import { boundViewsEnabled, describeBoundView } from "./console-store.js";
@@ -1065,11 +1066,10 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     let profile = recipientId === sender.id ? null : await recipient.whoamiIfExists();
     if (!profile) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
     // A handover names a board, the sender and a note, all of the sender's company (FAC-88): it
-    // reaches only someone working in that company, and is refused as if there were no one else.
-    let [fromCompany, toCompany] = await Promise.all([
-      user.currentPresentationCompany(), recipient.currentPresentationCompany(),
-    ]);
-    if (fromCompany !== toCompany) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
+    // reaches only someone working in that company now, which the recipient's own DO decides in
+    // the same step as the append (receiveHandover); otherwise it is refused as if there were no
+    // one else, and nothing is appended anywhere.
+    let fromCompany = await user.currentPresentationCompany();
     let handover: OperateHandover = {
       id: crypto.randomUUID(),
       from: { id: sender.id, name: sender.name },
@@ -1078,7 +1078,7 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
       issueId: board.issueId,
       note,
     };
-    await recipient.dispatchOperateEvent({ type: "handoverReceived", handover }, null, "person");
+    await deliverHandover(recipient, handover, fromCompany);
     await user.dispatchOperateEvent({ type: "handoverSent", handover }, null, "person");
     return handover;
   }

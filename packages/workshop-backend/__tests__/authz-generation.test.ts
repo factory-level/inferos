@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES } from "@gadgets/workshop-shared/api";
 import type { OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
@@ -278,6 +279,21 @@ const ROWS: Row[] = [
     drive: ({ instance }) => openAsOwner(instance, true),
   },
   {
+    input: "operate session retired (FAC-88, not in the §4.1 table)",
+    // The retired mark, then the access restart it schedules.
+    writes: 2,
+    setup: async ({ instance }) => { await openAsOwner(instance, true); },
+    drive: async ({ instance, aborts }) => {
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(true);
+      // Idempotent: a second retirement writes nothing more.
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(true);
+      // Nobody but the owner retires it.
+      expect(await instance.retireOperateSession("someone-else")).toBe(false);
+      await scheduler.wait(150);
+      expect(aborts).toEqual(["This operate session has ended."]);
+    },
+  },
+  {
     input: "workspace deleted (deleteSelf)",
     // deleteSelf's own bump, then the access restart it schedules.
     writes: 2,
@@ -431,5 +447,53 @@ describe("authorization generation", () => {
     }, name);
 
     expect(seen).toEqual([0, 1, 2, 3, 3, 4]);
+  });
+});
+
+// FAC-88: an operate session workspace its owner's company change retired. A capability the owner
+// already holds refuses every call from the moment it is retired (the access restart then drops
+// it), the refusal names nothing, and no later open, the owner's own included, gets it back.
+describe("a retired operate session workspace", () => {
+  const ENDED = "This operate session has ended. Reload to start a new one.";
+
+  it("refuses the owner's held capability: listing, history and running the chat", async () => {
+    await withOverseer(async ({ instance, aborts }) => {
+      let held = await openAsOwner(instance, true);
+      expect(await held.listChats()).toEqual([]);
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(true);
+      for (let call of [
+        () => held.listChats(),
+        () => held.getChatHistory(1),
+        () => held.newChat("Carry on", null),
+        () => held.sendChatMessage(1, "Carry on", null),
+        () => held.subscribeToChat(new NativeRpcStub({}) as never),
+        () => held.listActions(),
+      ]) {
+        let refusal = await call().then(() => "accepted", (error: unknown) => String((error as Error).message));
+        expect(refusal).toBe(ENDED);
+      }
+      await scheduler.wait(150);
+      expect(aborts).toEqual(["This operate session has ended."]);
+    });
+  });
+
+  it("is never opened again, by its owner or anyone", async () => {
+    await withOverseer(async ({ instance }) => {
+      await openAsOwner(instance, true);
+      await instance.retireOperateSession(OWNER_USER_ID);
+      for (let asOperateSession of [true, false]) {
+        let code = await openAsOwner(instance, asOperateSession).then(() => "opened", getOpenGadgetErrorCode);
+        expect(code).toBe(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+      }
+    });
+  });
+
+  it("is a no-op for anyone but its owner, and for a workspace that isn't an operate session", async () => {
+    await withOverseer(async ({ instance }) => {
+      await openAsOwner(instance);
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(false);
+      expect(await instance.retireOperateSession("someone-else")).toBe(false);
+      expect(await openAsOwner(instance)).toBeDefined();
+    });
   });
 });

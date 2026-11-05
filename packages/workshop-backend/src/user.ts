@@ -10,7 +10,7 @@ import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
   type WidgetStateMachine, type WidgetStateSnapshot,
 } from '@gadgets/workshop-shared/widget-state';
-import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
+import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -424,8 +424,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // here is read or written by dispatchOperateEvent(), nor this by it.
       widgetStates: collection<StoredWidgetState>()({ primaryKey: "key" }),
       // Operate session workspaces a company change retired (FAC-88, #resetPresentationState):
-      // kept, never listed or opened again, for offboarding and retention to find.
-      retiredOperateWorkspaces: collection<{ id: string; retiredAt: number }>()({ primaryKey: "id" }),
+      // kept, never listed or opened again, for offboarding and retention to find; `revoked` once
+      // the workspace itself has revoked what was held on it (#revokeRetiredWorkspaces).
+      retiredOperateWorkspaces: collection<RetiredOperateWorkspace>()({ primaryKey: "id" }),
     },
     singletons: {
       operateReadGeneration: "1",
@@ -495,6 +496,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
     }
   });
 }
+
+/** An operate session workspace a company change retired (FAC-88; UserDurableObject storage). */
+type RetiredOperateWorkspace = { id: string; retiredAt: number; revoked: boolean };
 
 /** One person's stored state of one console widget (see UserDurableObject.readWidgetState). */
 type StoredWidgetState = { key: string; state: string; seq: number; at: number };
@@ -1265,20 +1269,59 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * can't be told, rather than show state that may be another's.
    */
   async #enterPresentationCompany(): Promise<void> {
-    let company: string;
-    try {
-      company = await this.presentationCompanyReader();
-    } catch (err) {
-      if (getOperateSessionErrorCode(err) === OPERATE_SESSION_ERROR_CODES.companyUnavailable) throw err;
-      throw Object.assign(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.companyUnavailable), { cause: err });
+    for (;;) {
+      let company: string;
+      try {
+        company = await this.presentationCompanyReader();
+      } catch (err) {
+        if (getOperateSessionErrorCode(err) === OPERATE_SESSION_ERROR_CODES.companyUnavailable) throw err;
+        throw Object.assign(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.companyUnavailable), { cause: err });
+      }
+      // Synchronous from here: no other request interleaves between the comparison and the reset,
+      // and, once nothing is left to revoke, the caller's own read or write follows with no await.
+      let stored = this.storage.presentationCompany.get();
+      if (stored !== company) {
+        this.storage.presentationCompany.put(company);
+        if (stored !== null || this.#holdsPresentationState()) this.#resetPresentationState();
+      }
+      let pending = [...this.storage.retiredOperateWorkspaces.list()].filter(retired => !retired.revoked);
+      if (pending.length === 0) return;
+      // A retired workspace's held capabilities are revoked before anything else is served, then
+      // the company is read again, since it may have changed while that was awaited.
+      await this.#revokeRetiredWorkspaces(pending);
     }
-    // Synchronous from here: no other request interleaves between the comparison and the reset,
-    // and the caller's own read or write follows with no await either.
-    let stored = this.storage.presentationCompany.get();
-    if (stored === company) return;
-    this.storage.presentationCompany.put(company);
-    if (stored === null && !this.#holdsPresentationState()) return;
-    this.#resetPresentationState();
+  }
+
+  // Asks each retired operate session workspace to retire itself (Overseer.retireOperateSession),
+  // which revokes every capability held on it, and records each that has. One that can't be told
+  // refuses the person's call with `companyUnavailable`, and is asked again on the next.
+  async #revokeRetiredWorkspaces(pending: RetiredOperateWorkspace[]): Promise<void> {
+    let overseers = this.ctx.exports.OverseerDurableObject;
+    let ownerId = this.ctx.id.toString();
+    for (let retired of pending) {
+      let id;
+      try {
+        id = overseers.idFromString(retired.id);
+      } catch {
+        // Not an object id, so no object exists to hold anything.
+        this.storage.retiredOperateWorkspaces.put({ ...retired, revoked: true });
+        continue;
+      }
+      try {
+        if (!await overseers.get(id).retireOperateSession(ownerId)) {
+          logger.warn("retired operate session workspace refused its retirement", {
+            event: "operate.workspace.retire.refused", workspaceId: retired.id,
+          });
+        }
+      } catch (err) {
+        logger.warn("retired operate session workspace could not be revoked", {
+          event: "operate.workspace.retire.failed", workspaceId: retired.id, error: err,
+        });
+        throw Object.assign(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.companyUnavailable), { cause: err });
+      }
+      let current = this.storage.retiredOperateWorkspaces.get(retired.id);
+      if (current) this.storage.retiredOperateWorkspaces.put({ ...current, revoked: true });
+    }
   }
 
   // Whether anything a company's presentation state is made of is stored: a page that has moved,
@@ -1311,7 +1354,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (workspaceId !== null) {
       let workspace = this.storage.gadgets.get(workspaceId);
       if (workspace) {
-        this.storage.retiredOperateWorkspaces.put({ id: workspaceId, retiredAt: Date.now() });
+        this.storage.retiredOperateWorkspaces.put({ id: workspaceId, retiredAt: Date.now(), revoked: false });
         this.storage.gadgets.delete(workspaceId);
       }
       this.storage.operateSessionWorkspaceId.put(null);
@@ -1467,13 +1510,38 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         (event.type === "navigateFlow" || event.type === "backFlow" || event.type === "setFlowPageState")) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
     }
-    // Only the kernel resets a page for a company change (#enterPresentationCompany), whoever asks.
-    if (event.type === "companyChanged") {
+    // Only the kernel resets a page for a company change (#enterPresentationCompany), and only
+    // receiveHandover() records a received handover, after checking its company; whoever asks.
+    if (event.type === "companyChanged" || event.type === "handoverReceived") {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
     }
     // A write lands only on the current company's page: a client holding the former company's
     // page writes at a seq that is no longer current, and is refused as a conflict.
     await this.#enterPresentationCompany();
+    return this.#appendOperateEvent(event, expectedSeq, actor);
+  }
+
+  /**
+   * Records a handover from a person who works in `senderCompany` (FAC-88; the sender's
+   * currentPresentationCompany, which OperateSessionImpl.handOver reads). This person's own company
+   * is resolved first, then compared and the handover appended in one synchronous step, so a switch
+   * between the sender's check and the append can't land it in another company's page: on a
+   * mismatch it is refused with `recipientUnavailable` and nothing is appended. A company that can't
+   * be told refuses with `companyUnavailable`, which the sender sees as `recipientUnavailable`.
+   */
+  async receiveHandover(handover: OperateHandover, senderCompany: string): Promise<OperateSessionSnapshot> {
+    await this.#enterPresentationCompany();
+    if ((this.storage.presentationCompany.get() ?? "") !== senderCompany) {
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
+    }
+    return this.#appendOperateEvent({ type: "handoverReceived", handover }, null, "person");
+  }
+
+  // Applies and appends one event, synchronously: the seq check, the reducer, the log entry and the
+  // page snapshot happen with no await, so nothing interleaves with them or with the caller's
+  // checks just before.
+  #appendOperateEvent(event: OperateEvent, expectedSeq: number | null,
+                      actor: OperateEventActor): OperateSessionSnapshot {
     let current = this.#operatePage();
     if (expectedSeq !== null && expectedSeq !== current.seq) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);

@@ -200,6 +200,56 @@ describe("one person in two companies", () => {
   });
 });
 
+describe("a handover", () => {
+  const HANDOVER = {
+    id: "h1", from: { id: "alice", name: "Alice" }, to: { id: "bob", name: "Bob" },
+    boardRef: BOARD.boardRef, issueId: null, note: "Yours",
+  };
+
+  it("is refused, appending nothing, when the recipient now works in another company", async () => {
+    // The sender read company A; the recipient switched to B before the handover arrived.
+    let company = { now: "tenant-b" };
+    let recipient = await person(company);
+    await recipient.dispatchOperateEvent({ type: "setChatOpen", open: false }, 0, "person");
+    let before = await recipient.listOperateEvents(0, 50);
+    expect(await code(recipient.receiveHandover(HANDOVER, "tenant-a"))).toBe(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
+    expect(await recipient.listOperateEvents(0, 50)).toEqual(before);
+    expect((await recipient.getOperatePage()).state.handovers).toEqual([]);
+  });
+
+  it("compares the company it resolves in the same step as the append, whenever the switch lands", async () => {
+    // The recipient's company read is held open; the switch to B lands while it is pending, so
+    // the company compared, and the page appended to, are B's: the handover from A is refused.
+    let company = { now: "tenant-a" };
+    let recipient = await person(company);
+    await recipient.getOperatePage();
+    let release!: () => void;
+    let held = new Promise<void>(resolve => { release = resolve; });
+    await runInDurableObject(recipient, (instance: UserDurableObject) => {
+      instance.presentationCompanyReader = async () => { await held; return company.now; };
+    });
+    let delivery = code(recipient.receiveHandover(HANDOVER, "tenant-a"));
+    company.now = "tenant-b";
+    release();
+    expect(await delivery).toBe(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
+    expect((await recipient.listOperateEvents(0, 50)).map(record => record.event.type)).toEqual(["companyChanged"]);
+  });
+
+  it("is appended for a recipient in the sender's company", async () => {
+    let recipient = await person({ now: "tenant-a" });
+    let page = await recipient.receiveHandover(HANDOVER, "tenant-a");
+    expect(page.state.handovers.map(handover => handover.id)).toEqual(["h1"]);
+  });
+
+  it("is never dispatched: only receiveHandover records one", async () => {
+    let recipient = await person({ now: "tenant-a" });
+    for (let actor of ["person", "agent"] as const) {
+      expect(await code(recipient.dispatchOperateEvent({ type: "handoverReceived", handover: HANDOVER }, null, actor)))
+        .toBe(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    }
+  });
+});
+
 describe("business records stay shared", () => {
   it("holds only a board reference on each page, so both read the same board live", async () => {
     let company = { now: "tenant-a" };
