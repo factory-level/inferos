@@ -3,8 +3,10 @@
  * removes only that wrapper's disposable Miniflare state directory after an authoritative
  * InferOps offboarding check.
  */
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
+import { exportGadgetState, type GadgetStateAllowList, type WorkspaceGadgets } from "./gadget-state.ts";
 
 export interface OffboardingStatus {
   tenantId: string;
@@ -31,8 +33,18 @@ export interface CompanyStorageBindings {
   r2: ReadonlyMap<string, ObjectStore>;
   /** Workspace ids map to the Overseer RPC client, never raw DO storage. */
   workspaces: ReadonlyMap<string, { exportWorkspaceRecords(): Promise<unknown> }>;
-  /** Other DO ids are inventory only; arbitrary gadget state is intentionally omitted. */
+  /**
+   * Durable Object ids of every class but the Overseer: platform and gatekeeper objects, inventory
+   * only. Gadget state isn't here: a gadget is a facet of its workspace's Overseer (see gadgetState).
+   */
   gadgetDurableObjects: { namespace: string; ids: readonly string[] }[];
+  /**
+   * Where the company's persisted Overseer state is, and the gadget allow-list. Read after
+   * `closeRuntime`, through `exportGadgetState`. Omitted means gadget state isn't exported.
+   */
+  gadgetState?: { durableObjectDirectory: string; allowList: GadgetStateAllowList; scratchDirectory: string };
+  /** Stops the local runtime, so its persisted state is complete before gadget state is read. */
+  closeRuntime?: () => Promise<void>;
 }
 
 export interface StorageResourceNames {
@@ -83,13 +95,15 @@ async function listR2(store: ObjectStore): Promise<{ key: string; size: number; 
 
 /** Read all company-prefixed KV/R2 objects, then invoke the allow-listed kernel export per workspace. */
 export async function exportCompanyStorage({
-  tenantId, prefix, resources, bindings, outputDirectory,
+  tenantId, prefix, resources, bindings, outputDirectory, salt = randomBytes(16).toString("hex"),
 }: {
   tenantId: string;
   prefix: string;
   resources: StorageResourceNames;
   bindings: CompanyStorageBindings;
   outputDirectory: string;
+  /** Salts this export's hashes; random by default, so two exports can't be correlated. */
+  salt?: string;
 }): Promise<Record<string, unknown>> {
   if (!/[/:_-]$/.test(prefix)) throw new Error("Company resource prefix must end with a namespace delimiter (:, /, _, or -)");
   const exportKv = new Set(resources.exportKv ?? []);
@@ -130,12 +144,19 @@ export async function exportCompanyStorage({
   }
 
   const workspaces: Record<string, unknown>[] = [];
+  const workspaceGadgets = new Map<string, { id: number | string; facet: string; blueprintId: string | null }[]>();
   for (const [id, workspace] of [...bindings.workspaces].toSorted(([a], [b]) => a.localeCompare(b))) {
-    workspaces.push({ id, records: await workspace.exportWorkspaceRecords() });
+    const records = await workspace.exportWorkspaceRecords();
+    workspaces.push({ id, records });
+    workspaceGadgets.set(id, listedGadgets(id, records));
   }
   const gadgetDurableObjects = bindings.gadgetDurableObjects.map(({ namespace, ids }) => ({
-    namespace, ids: ids.toSorted(), note: "not exported: arbitrary gadget state",
+    namespace, ids: ids.toSorted(), note: "not exported: platform and gatekeeper objects, not gadget state",
   }));
+  await bindings.closeRuntime?.();
+  const gadgetState = bindings.gadgetState
+    ? await exportGadgetState({ ...bindings.gadgetState, workspaces: workspaceGadgets as WorkspaceGadgets, salt })
+    : null;
 
   const document = {
     format: "inferos-company-storage-export-v1",
@@ -146,12 +167,53 @@ export async function exportCompanyStorage({
     withheld,
     workspaces,
     gadgetDurableObjects,
+    gadgetState,
   };
-  const serialized = JSON.stringify(document, null, 2) + "\n";
+  const withDigest = { ...document, structureDigest: structureDigest(document) };
+  const serialized = JSON.stringify(withDigest, null, 2) + "\n";
   if (SECRET_TEXT.test(serialized)) throw new Error("Export contains a credential-shaped value; refusing to write it");
   mkdirSync(outputDirectory, { recursive: true });
   writeFileSync(resolve(outputDirectory, `company-${tenantId}-export.json`), serialized, { flag: "wx", mode: 0o600 });
-  return document;
+  return withDigest;
+}
+
+/** The gadgets the kernel listed for a workspace, checked strictly: a malformed list exports nothing. */
+function listedGadgets(workspaceId: string, records: unknown): { id: number | string; facet: string; blueprintId: string | null }[] {
+  const gadgets = (records as { gadgets?: unknown } | null)?.gadgets;
+  if (gadgets === undefined) return [];
+  if (!Array.isArray(gadgets) || gadgets.some(gadget => !gadget || typeof gadget !== "object" ||
+      !(typeof gadget.id === "number" || typeof gadget.id === "string") ||
+      typeof gadget.facet !== "string" || !/^gadget[0-9]*$/.test(gadget.facet) ||
+      !(gadget.blueprintId === null || typeof gadget.blueprintId === "string"))) {
+    throw new Error(`Workspace ${workspaceId} returned a malformed gadget list`);
+  }
+  return gadgets;
+}
+
+/**
+ * A digest of the export's structure and data that's stable across reruns: the creation time is
+ * left out, and every salted hash is replaced by its order of first appearance, so the same data
+ * gives the same digest though each export salts afresh, and which entries share an actor still
+ * counts. Keys are sorted, so field order doesn't matter.
+ */
+export function structureDigest(document: Record<string, unknown>): string {
+  const { createdAt: _createdAt, structureDigest: _digest, ...rest } = document;
+  const ordinals = new Map<string, number>();
+  const canonical = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return value.replace(/sha256:[0-9a-f]{64}/g, hash => {
+        if (!ordinals.has(hash)) ordinals.set(hash, ordinals.size + 1);
+        return `sha256:#${ordinals.get(hash)}`;
+      });
+    }
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value instanceof Date) return value.toISOString();
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.keys(value).toSorted().map(key => [key, canonical((value as Record<string, unknown>)[key])]));
+    }
+    return value;
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(canonical(rest))).digest("hex")}`;
 }
 
 /** Authoritative gate used by the CLI and its injectable local proof. */

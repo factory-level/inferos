@@ -83,7 +83,7 @@ test("Miniflare export is allow-listed and delimiter-bounded; purge is gated and
     assert.equal((document.r2 as unknown[]).length, 1);
     assert.match(text, /not on export allow-list/);
     assert.match(text, /ARCHIVE/);
-    assert.match(text, /not exported: arbitrary gadget state/);
+    assert.match(text, /not exported: platform and gatekeeper objects, not gadget state/);
     assert.doesNotMatch(text, /opaque credential value/);
     assert.doesNotMatch(text, /acme2/);
     assert.match(text, /workspace-a/);

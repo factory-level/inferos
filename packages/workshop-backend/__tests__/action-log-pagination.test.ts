@@ -259,6 +259,32 @@ describe("exportWorkspaceRecords", () => {
     expect(secondById.get(2)?.decidedBy?.id).not.toBe(byId.get(2)?.decidedBy?.id);
   });
 
+  it("lists each gadget's facet and blueprint for the storage export, and nothing a person wrote (FAC-162)", async () => {
+    let storage = makeActionStorage();
+    storage.defaultGadgetId.put(1);
+    storage.gadgets.put({type: "gadget", id: 1, title: "Private Gadget Title", created: new Date(FIXTURE_EPOCH),
+      bindingName: "tracker", installedFrom: {blueprintId: "vote-tracker", version: 3, kind: "app"}} as never);
+    storage.gadgets.put({type: "gadget", id: 4, title: "Scratch Notes By A Person", created: new Date(FIXTURE_EPOCH),
+      bindingName: "notes"} as never);
+    let client = await openFakeOverseer(storage, {impl: {
+      env: {COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true"},
+      frozenInstalls: () => ({create: () => { throw new Error("unused"); }, remove: () => {}}),
+      readSourceCommits: async () => new Map(),
+      workflowDefinitionStore: () => ({list: () => [], controls: () => [], pinOf: () => null}),
+    }});
+
+    let exported = await client.exportWorkspaceRecords();
+    expect(exported.gadgets).toEqual([
+      {id: 1, facet: "gadget", blueprintId: "vote-tracker"},
+      {id: 4, facet: "gadget4", blueprintId: null},
+    ]);
+    let serialized = JSON.stringify(exported.gadgets);
+    expect(serialized).not.toContain("Private Gadget Title");
+    expect(serialized).not.toContain("Scratch Notes");
+    expect(serialized).not.toContain('"tracker"');
+    expect(exported.withheld.gadgets).toContain("Titles and binding names");
+  });
+
   it("reports truncation when the final page straddles the export limit", async () => {
     let storage = makeActionStorage();
     for (let id = 0; id < 505; id++) putAction(storage, id, {state: "approved"});

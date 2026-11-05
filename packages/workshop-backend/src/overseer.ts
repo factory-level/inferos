@@ -938,6 +938,15 @@ const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 // How many audited host-board reads an operate session workspace keeps (see host-boards.ts).
 const HOST_BOARD_READS_KEPT = 1000;
 
+/**
+ * The name of the Durable Object facet that holds a gadget's storage: `gadget` for the workspace's
+ * default gadget, `gadget<id>` for any other. The local company storage export reads facets by this
+ * name, so it must stay the one definition.
+ */
+export function gadgetFacetNameFor(defaultGadgetId: WorkpieceId | undefined, id: WorkpieceId): string {
+  return defaultGadgetId === id ? "gadget" : `gadget${id}`;
+}
+
 async function opaqueExportActorId(id: string, exportSalt: string, personal = false): Promise<string> {
   // User and gadget author ids identify people, even when they are not email-shaped. Hash them
   // deterministically so repeated actors remain linkable within this export, while the random
@@ -2881,7 +2890,7 @@ class OverseerImpl implements AgentHooks {
   // keeps the legacy name "gadget"; all others get `gadget${id}` (collision-free with
   // `gatekeeper${id}` thanks to the shared workpiece counter).
   gadgetFacetName(id: WorkpieceId): string {
-    return this.defaultGadgetId === id ? "gadget" : `gadget${id}`;
+    return gadgetFacetNameFor(this.defaultGadgetId, id);
   }
 
   // Resolve an agent tool's optional workpiece reference. Absent means the workspace's default
@@ -12973,6 +12982,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         stateCount: widget.surfaces.states?.length ?? 0} : null,
     }));
 
+    let defaultGadgetId = this.impl.storage.defaultGadgetId.get();
+    let gadgets = [...this.impl.storage.gadgets.list()]
+        .filter((record): record is GadgetRecord => record.type === "gadget")
+        .map(record => ({id: record.id, facet: gadgetFacetNameFor(defaultGadgetId, record.id),
+          blueprintId: record.installedFrom?.blueprintId ?? null}))
+        .toSorted((a, b) => Number(a.id) - Number(b.id));
+
     return {
       canvases,
       pages,
@@ -12980,6 +12996,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       triggers,
       triggerControls,
       widgetRegistry,
+      gadgets,
       actionLog,
       actionLogLimit: ACTION_LOG_EXPORT_LIMIT,
       actionLogTruncated,
@@ -12990,6 +13007,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         triggers: "Hook descriptions, resource titles, and URLs are provider-controlled text and routing metadata.",
         triggerControls: "Labels and invoker/profile identity are user-authored or personal data.",
         widgetRegistry: "Refusal text and tool/state names are arbitrary gadget-authored strings.",
+        gadgets: "Titles and binding names are user-authored; the gadgets' own storage is exported separately, through each blueprint's allow-list.",
         actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets; personal actor ids are opaque, names and emails are withheld, and action references outside their strict formats are omitted.",
       },
     };
