@@ -15,6 +15,9 @@ export const describeAgentEvent = (event: OperateEvent, titleOf: (ref: OperateRe
     case 'startFlow': return `started ${event.title}`
     case 'goToStep': return `moved the flow to step ${event.index + 1}`
     case 'exitFlow': return 'left the flow'
+    case 'navigateFlow': return `moved the flow to ${event.to}`
+    case 'backFlow': return 'went back a page in the flow'
+    case 'setFlowPageState': return `set the page to ${event.state}`
     case 'reviewApproval': return 'opened an approval for review'
     case 'approvalResolved': return `reported an approval ${event.outcome}`
     case 'openConsole': return `opened ${event.title}`

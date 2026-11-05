@@ -1316,6 +1316,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (actor === "agent" && event.type === "startFlow") {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
     }
+    // Nor to move between a flow's named pages (FAC-87): only the person path re-checks each
+    // destination page against what the caller may open (OperateSessionImpl.#checkFlowNavigation),
+    // so an agent's navigation is refused here until it gets that check too.
+    if (actor === "agent" &&
+        (event.type === "navigateFlow" || event.type === "backFlow" || event.type === "setFlowPageState")) {
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    }
     let current = this.#operatePage();
     if (expectedSeq !== null && expectedSeq !== current.seq) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);

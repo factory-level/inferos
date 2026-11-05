@@ -8,12 +8,13 @@ import { handleOperateAgui } from "./operate-agui.js";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
+import { checkFlowDestination } from './flow-navigation.js';
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type OperateConsole, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
 import { boundViewsEnabled, describeBoundView } from "./console-store.js";
 import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
 import type { OperateFlowContent } from '@gadgets/workshop-shared/operate-flow';
-import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
+import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateFlowPage, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import {
@@ -704,12 +705,21 @@ async function checkFlowStart(event: Extract<OperateEvent, { type: "startFlow" }
     if (!flow) continue;
     found = true;
     if (flow.title === event.title && flow.steps.length === event.steps.length &&
-        flow.steps.every((step, index) => step === event.steps[index])) {
+        flow.steps.every((step, index) => step === event.steps[index]) &&
+        sameFlowPages(flow.pages, event.pages)) {
       return;
     }
   }
   throw createOperateSessionError(found
       ? OPERATE_SESSION_ERROR_CODES.invalidEvent : OPERATE_SESSION_ERROR_CODES.flowUnavailable);
+}
+
+// Whether two flows name the same pages, states and routes, in order (both naming none counts).
+function sameFlowPages(a: OperateFlowPage[] | undefined, b: OperateFlowPage[] | undefined): boolean {
+  let canon = (pages: OperateFlowPage[] | undefined) => pages === undefined ? undefined
+    : JSON.stringify(pages.map(page => [page.name, page.states ?? null,
+        (page.routes ?? null)?.map(route => [route.label, route.to]) ?? null]));
+  return canon(a) === canon(b);
 }
 
 // The caller's console context, re-read through their own access: their session must show the
@@ -933,6 +943,29 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     });
   }
 
+  // A navigateFlow or backFlow moves to another of the run's pages, all checked against an
+  // authoritative definition when the run started (#checkFlowStart). The destination's screen is
+  // checked again now, through the caller's own access to the run's workspace, so a page whose
+  // screen was removed, or that their access no longer shows (a use-role session sees published
+  // screens only), is refused with `flowPageUnavailable`, and any other failure of that read with
+  // the retryable `flowNavigationFailed` (see checkFlowDestination). Whether the move is a route of the current
+  // page is the reducer's to say (invalidEvent), at the same `expectedSeq`.
+  async #checkFlowNavigation(event: OperateEvent, expectedSeq: number): Promise<void> {
+    if (event.type !== "navigateFlow" && event.type !== "backFlow") return;
+    let page = await this.user().getOperatePage();
+    if (page.seq !== expectedSeq) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);
+    let run = page.state.flow;
+    if (!run?.pages) return;
+    let index = event.type === "navigateFlow"
+      ? run.pages.findIndex(candidate => candidate.name === event.to) : run.history?.at(-1);
+    if (index === undefined || index < 0) return;
+    let screen = run.steps[index]!;
+    await checkFlowDestination(async () => {
+      using workspace = await this.openConsoleWorkspace(run.workspaceId);
+      return workspace.getCanvas(screen);
+    });
+  }
+
   async subscribe(subscriber: RpcStub<(update: OperateSessionUpdate) => void>)
       : Promise<RpcStub<{}>> {
     return this.user().subscribeOperateSession(subscriber);
@@ -964,6 +997,7 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     }
     await this.#checkConsoleEvent(event);
     await this.#checkFlowStart(event, expectedSeq);
+    await this.#checkFlowNavigation(event, expectedSeq);
     if (event.type === "openBoard") (await this.#reachBoard(event.board))[Symbol.dispose]();
     return this.user().dispatchOperateEvent(event, expectedSeq, "person");
   }
