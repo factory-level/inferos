@@ -10,7 +10,8 @@ export interface AuthoredWidgetBuildResult {
   clientBytes: number;
 }
 
-/** Isolated per-build Durable Object. Its termination cannot reset or block a workspace Overseer. */
+/** Per-build Durable Object in the Worker. It separates the compile call path from the Overseer,
+ * but objects on one Worker can still share an isolate, memory and thread. */
 export class AuthoredWidgetBuildDurableObject extends DurableObject {
   /** Compile validated source to a self-contained client module, refusing every invalid input. */
   async compile(authoredFiles: Readonly<Record<string, string>>): Promise<AuthoredWidgetBuildResult> {

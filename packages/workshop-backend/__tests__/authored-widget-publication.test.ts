@@ -74,7 +74,7 @@ describe("authored widget publication commit boundary", () => {
   });
 
   it.each([
-    ["throws", async () => { throw new Error("worker terminated"); }],
+    ["fails to compile", async () => { throw new Error("worker terminated"); }],
     ["resets", async () => { throw new Error("Durable Object reset"); }],
     ["misses the deadline", () => new Promise<{clientJs: string}>(() => {})],
   ])("refuses when the build DO %s and does not write a commit", async (_failure, compile) => {
@@ -90,10 +90,26 @@ describe("authored widget publication commit boundary", () => {
       author: async () => ({ name: "test", email: "test@example.com" }) as never,
       onFailure: () => { refusalEvents++; }, timeoutMs: 5,
     });
-    await expect(run()).rejects.toThrow("Build failed: it ran out of resources; try fewer or smaller files.");
+    if (_failure === "fails to compile") {
+      await expect(run()).rejects.toThrow("Build failed: the widget could not be compiled.");
+    } else {
+      await expect(run()).rejects.toThrow("Build failed: it ran out of resources; try fewer or smaller files.");
+    }
     expect(refusalEvents).toBe(1);
     expect(writes).toBe(0);
   });
+
+  it.each(["Invalid TypeScript syntax.", "Unapproved package import."]) (
+    "preserves the fixed, source-free validation refusal %s", async message => {
+      const run = compileAuthoredWidgetPublication({
+        enabled: true, sourceCommitId: "source-commit",
+        gitStore: { readCommitFiles: async () => new Map(source), writeFilesAsCommit: async () => "unused" } as never,
+        builds: { newUniqueId: () => "build-id", get: () => ({ compile: async () => { throw new Error(message); } }) },
+        author: async () => ({ name: "test", email: "test@example.com" }) as never,
+        onFailure: () => {},
+      });
+      await expect(run).rejects.toThrow(message);
+    });
 
   it("stores original sources and compiled client.js in a child commit", async () => {
     const test = harness(async files => {

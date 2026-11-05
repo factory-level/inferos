@@ -153,4 +153,60 @@ describe("authored widget publication through the Overseer client", () => {
       expect(elapsed).toBeLessThan(500);
     });
   });
+
+  it("refuses a concurrent code publish that would overwrite the same version", async () => {
+    await withClient(async (impl, client) => {
+      const sourceCommit = await impl.gitStore.writeFilesAsCommit(
+        new Map([["client.tsx", "export default function Widget(){ return <div/> }"]]), {
+          parents: [], author: {name: "Owner", email: "owner@example.com"},
+          message: "widget source", timestamp: new Date(1_700_000_000_000),
+        });
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(1_700_000_000_000),
+        bindingName: "widget", commitId: sourceCommit, bindings: {},
+      });
+      impl.compileAuthoredWidgetCommit = async (commitId: string) => commitId;
+
+      const versions = new Map<number, string>();
+      impl.snapshotCode = async (commitId: string) => new TextEncoder().encode(commitId);
+      impl.propagateBlueprint = async (record: any, snapshot: Uint8Array) => {
+        impl.storage.blueprints.put(record);
+        versions.set(record.metadata.version, new TextDecoder().decode(snapshot));
+      };
+
+      const gadget = await client.getGadget(1);
+      const blueprint = await gadget.createBlueprint();
+
+      let releaseBuilds!: () => void;
+      const buildsReleased = new Promise<void>(resolve => { releaseBuilds = resolve; });
+      let bothBuildsStarted!: () => void;
+      const buildsStarted = new Promise<void>(resolve => { bothBuildsStarted = resolve; });
+      let buildCount = 0;
+      impl.compileAuthoredWidgetCommit = async () => {
+        const build = ++buildCount;
+        if (build === 2) bothBuildsStarted();
+        await buildsReleased;
+        return `compiled-${build}`;
+      };
+
+      const first = client.updateBlueprint(blueprint.id, {updateCode: true});
+      const second = client.updateBlueprint(blueprint.id, {updateCode: true});
+      await buildsStarted;
+      releaseBuilds();
+
+      const outcomes = await Promise.allSettled([first, second]);
+      expect(outcomes.filter(outcome => outcome.status === "fulfilled")).toHaveLength(1);
+      expect(outcomes.filter(outcome => outcome.status === "rejected")).toHaveLength(1);
+      expect(outcomes.find(outcome => outcome.status === "rejected")).toMatchObject({
+        reason: expect.objectContaining({
+          message: "The Blueprint changed while building; publish again.",
+        }),
+      });
+
+      const record = impl.storage.blueprints.get(blueprint.id);
+      expect(record?.metadata.version).toBe(2);
+      expect(record?.commitId).toBe("compiled-1");
+      expect(versions).toEqual(new Map([[1, sourceCommit], [2, "compiled-1"]]));
+    });
+  });
 });

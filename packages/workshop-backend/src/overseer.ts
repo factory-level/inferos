@@ -15339,6 +15339,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("publish", "shared");
     let record = this.impl.storage.blueprints.get(blueprintId);
     if (!record) throw new Error("No such blueprint.");
+    let startingVersion = record.metadata.version;
+    let startingCommitId = record.commitId;
     if (options.dataContract !== undefined && !options.updateCode) {
       throw new Error("A data contract is declared only with a new version (updateCode).");
     }
@@ -15378,6 +15380,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : options.screenshot === null ? null : validateBlueprintScreenshotUpload(options.screenshot);
 
     // Defer record mutation until compile, snapshot and upload validation have succeeded.
+    if (nextCommitId !== undefined) {
+      // Compilation and snapshotting both await other work. Another publish may finish during
+      // either await, so compare immediately before mutation to keep a published version immutable.
+      let current = this.impl.storage.blueprints.get(blueprintId);
+      if (!current || current.metadata.version !== startingVersion ||
+          current.commitId !== startingCommitId) {
+        throw new Error("The Blueprint changed while building; publish again.");
+      }
+    }
     if (options.title !== undefined) record.metadata.title = options.title;
     if (options.description !== undefined) record.metadata.description = options.description;
     if (bindings !== undefined) record.metadata.bindings = bindings;

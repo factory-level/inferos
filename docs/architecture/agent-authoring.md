@@ -9,6 +9,7 @@ covers:
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/workshop-backend/src/authored-widget-build.ts
   - packages/workshop-backend/src/authored-widget-build-runtime.ts
+  - packages/workshop-backend/src/authored-widget-build-compiler.ts
   - packages/workshop-backend/scripts/build-authored-widget-dependencies.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
@@ -52,20 +53,27 @@ forms, and forces Refine telemetry off in the emitted artifact. Source checks fo
 network globals provide author feedback only; they are not a security boundary. The focused
 real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
 specific outbound request APIs from the production frame; it does not establish a general egress
-guarantee. Compilation caps source size, file size and file count, and stops an esbuild build after 10 seconds. The build-input hash includes the
-full transitive package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including
-peer-specific snapshots. The compile core remains runner-agnostic; it does not add an editor-time
-runner or runtime egress boundary.
+guarantee. Compilation caps source size, file size and file count, and stops waiting for an esbuild
+build after 10 seconds. This deadline cannot preempt synchronous WASM work; a timed-out build may
+continue until the Durable Object is reset. The build-input hash includes the full transitive
+package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including peer-specific
+snapshots. The compile core remains runner-agnostic; it does not add an editor-time runner or runtime
+egress boundary.
 
 At Blueprint publication, `createBlueprint()` and `updateBlueprint({updateCode: true})` can opt into
 the Worker-side compiler with `AUTHORED_WIDGET_BUILD_ENABLED="true"`; the flag is off unless it is
-exactly `true`. The existing Worker hosts an isolated `AuthoredWidgetBuildDurableObject` for each
-build. That object lazy-loads the pinned wasm compiler and generated dependency closure, then returns
-only the compiled client module and byte/duration measurements. A failed or timed-out build refuses
-publication before the stored Blueprint record is changed. The successful source plus `client.js`
-is stored as a child GitStore commit, leaving the editable gadget head unchanged. Cloudflare
-per-build CPU reporting is not exposed through this Worker runtime path, and the deployed memory
-headroom remains unmeasured until a person runs the dev measurement; keep the flag off until then.
+exactly `true`. Each build gets an `AuthoredWidgetBuildDurableObject`, but Durable Objects in the
+same Worker may share an isolate, memory and thread. The object lazy-loads the pinned wasm compiler
+and generated dependency closure, then returns only the compiled client module and byte/duration
+measurements. A failed or timed-out build refuses publication before the stored Blueprint record is
+changed. The deadline bounds the caller's wait, not synchronous WASM execution; work may continue
+until a DO reset. The successful source plus `client.js` is stored as a child GitStore commit,
+leaving the editable gadget head unchanged. `build:worker` also runs
+`build-bundled-blueprints.ts`. The closure generator resolves production package conditions to match
+the minified Worker build. The current dry-run bundle is recorded in the FAC-8 #362 PR; Cloudflare
+allows 64 MiB uncompressed per Worker, and the reported gzip size is informational. Per-build CPU
+reporting is not exposed through this Worker runtime path, and deployed memory headroom and continued
+work after timeout remain unmeasured; keep the flag off until those measurements are available.
 
 ### Native operations available today
 

@@ -1,4 +1,5 @@
 import type { GitStore } from "./git-store.js";
+import type { AuthoredWidgetBuildResult } from "./authored-widget-build.js";
 import { validateAuthoredWidgetPreflight } from "./authored-widget-preflight.js";
 
 /** Minimal build namespace contract used by the authored-widget publication boundary. */
@@ -12,7 +13,7 @@ export interface AuthoredWidgetBuildNamespace {
 /** Build RPC contract consumed by publication. */
 export interface AuthoredWidgetBuildStub {
   /** Compile the bounded authored TSX/CSS source map. */
-  compile(files: Readonly<Record<string, string>>): Promise<{ clientJs: string }>;
+  compile(files: Readonly<Record<string, string>>): Promise<Pick<AuthoredWidgetBuildResult, "clientJs">>;
 }
 
 /** Dependencies for compiling and storing an authored widget publication commit. */
@@ -50,9 +51,18 @@ export async function compileAuthoredWidgetPublication(
         timeout = setTimeout(() => reject(new Error("build deadline")), options.timeoutMs ?? 15_000);
       }),
     ]).finally(() => { if (timeout !== undefined) clearTimeout(timeout); });
-  } catch {
+  } catch (error) {
     onFailure(Math.round(performance.now() - startedAt));
-    throw new Error("Build failed: it ran out of resources; try fewer or smaller files.");
+    let message = error instanceof Error ? error.message : "";
+    if (message === "build deadline" || message === "Build timed out." ||
+        /Durable Object.*(?:reset|terminated)|(?:reset|terminated).*Durable Object/iu.test(message)) {
+      throw new Error("Build failed: it ran out of resources; try fewer or smaller files.", { cause: error });
+    }
+    if (message === "Invalid TypeScript syntax." || message === "Unapproved package import." ||
+        message.startsWith("Authored widget refused:")) {
+      throw new Error(message, { cause: error });
+    }
+    throw new Error("Build failed: the widget could not be compiled.", { cause: error });
   }
 
   files.set("client.js", result.clientJs);
