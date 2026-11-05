@@ -1,8 +1,16 @@
-import { MAX_OPERATE_FLOW_STEPS, MAX_OPERATE_FLOW_TITLE_LENGTH } from "./operate-session.js";
+import {
+  MAX_OPERATE_FLOW_STEPS, MAX_OPERATE_FLOW_TITLE_LENGTH, OperateEventError, parseOperateFlowPages,
+  type OperateFlowPage,
+} from "./operate-session.js";
+
+/** Re-exported from operate-session.ts, where a run holds them: the limits on a flow's pages. */
+export { MAX_OPERATE_FLOW_PAGE_STATES, MAX_OPERATE_FLOW_ROUTES } from "./operate-session.js";
 
 // An authored flow: an ordered list of one workspace's screens (canvas ids), stored in that
 // workspace. Running one copies its steps into the runner's operate session (see `startFlow` in
-// operate-session.ts); the flow itself holds references and order only.
+// operate-session.ts); the flow itself holds references and order only. A flow may also name its
+// pages (FAC-87), saying where each one leads; it then runs by those routes instead of in order.
+// A flow stored before then has no `pages` and is read and run exactly as it was.
 
 /** Most flows one workspace stores. */
 export const MAX_WORKSPACE_FLOWS = 32;
@@ -13,6 +21,11 @@ export type OperateFlowContent = {
   title: string;
   /** Canvas ids of this workspace, in the order they are shown. 1 to `MAX_OPERATE_FLOW_STEPS`. */
   steps: string[];
+  /**
+   * Optional: one page per step, at the same position, naming it and saying where it leads (see
+   * `OperateFlowPage`). Omitted, the flow is the ordered list of `steps`.
+   */
+  pages?: OperateFlowPage[];
 };
 
 /** A stored flow. */
@@ -27,7 +40,8 @@ const STEP_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /**
  * Checks a flow's content against its limits and returns a trimmed copy. Throws a `TypeError`
- * naming the first problem. It does not check that the steps exist; the store does.
+ * naming the first problem. With `pages`, every route must lead to a page of the flow (see
+ * `parseOperateFlowPages`). It does not check that the steps exist; the store does.
  */
 export function parseOperateFlowContent(content: OperateFlowContent): OperateFlowContent {
   let title = content.title.trim();
@@ -40,5 +54,11 @@ export function parseOperateFlowContent(content: OperateFlowContent): OperateFlo
   if (!content.steps.every(step => STEP_ID.test(step))) {
     throw new TypeError("A flow step must be a canvas id.");
   }
-  return { title, steps: [...content.steps] };
+  if (content.pages === undefined) return { title, steps: [...content.steps] };
+  try {
+    return { title, steps: [...content.steps], pages: parseOperateFlowPages(content.pages, content.steps) };
+  } catch (error) {
+    if (error instanceof OperateEventError) throw new TypeError(error.message, { cause: error });
+    throw error;
+  }
 }

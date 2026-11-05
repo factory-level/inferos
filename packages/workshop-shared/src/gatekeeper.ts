@@ -826,6 +826,17 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   holdsSharedConfiguration?(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer>;
 
   /**
+   * The company the person behind this account works in, for this deployment: the same scope
+   * `holdsSharedConfiguration` answers within (for InferOps, the session's tenant id), or null when
+   * the account speaks for none here (no connected person, or another company's session). Read from
+   * what the account already holds, without asking the service anything. The Workshop keeps each
+   * person's presentation state (the operate page, widget local states) for one company and drops it
+   * when this changes (FAC-88). Called only on accounts of the vendor `SHARED_CONFIGURATION_GATEKEEPER`
+   * names, credentials expired or not; throw when it can't be told, and the Workshop refuses.
+   */
+  presentationCompany?(): Promise<string | null>;
+
+  /**
    * The workspaces of the service in which the person behind this account may list widgets for
    * their company, asked freshly with their own credentials (for InferOps, those where they hold
    * `configuration:publish`), in the service's order. Called only on accounts of the vendor

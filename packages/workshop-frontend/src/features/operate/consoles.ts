@@ -123,6 +123,22 @@ export const unshownSteps = (flow: OperateFlow, shown: readonly string[]): strin
   flow.steps.filter(step => !shown.includes(step))
 
 /**
+ * The `startFlow` event for one of a workspace's flows: its title and steps, and its pages when it
+ * names them, exactly as stored or frozen, since the kernel starts only a copy equal to its source.
+ */
+export const startFlowEvent = (workspaceId: string, flow: OperateFlow): OperateEvent => ({
+  type: 'startFlow', workspaceId, flowId: flow.id, title: flow.title, steps: flow.steps,
+  ...(flow.pages === undefined ? {} : { pages: flow.pages }),
+})
+
+/** How long a flow is, as its list shows it: steps for a flow in order, pages for one that branches. */
+export const flowLength = (flow: OperateFlow): string => {
+  const count = flow.steps.length
+  return flow.pages === undefined ? `${count} ${count === 1 ? 'step' : 'steps'}`
+    : `${count} ${count === 1 ? 'page' : 'pages'}, branching`
+}
+
+/**
  * The text to show for a console save or publish refused by the kernel: its own message when it is
  * about one of the console's flows (it names only the builder's own workspace data) or is the
  * deployment's shared-configuration refusal, otherwise `fallback`.

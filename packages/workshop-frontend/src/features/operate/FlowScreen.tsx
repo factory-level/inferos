@@ -2,7 +2,7 @@ import { useEffect, useState, type RefObject } from 'react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { parseCanvasDefinition, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { consoleScreens } from '@gadgets/workshop-shared/operate-console'
-import type { OperateConsoleRun, OperateFlowRun } from '@gadgets/workshop-shared/operate-session'
+import type { OperateConsoleRun, OperateFlowPage, OperateFlowRun } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { CanvasView, type CanvasResourceScope } from '../canvas/CanvasView'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
@@ -29,6 +29,12 @@ export type FlowConsole = {
   sessionWorkspace: SessionWorkspace | null
 }
 
+// Whether a published flow still names the pages a run copied (both naming none counts), compared
+// as the kernel compares them when the run starts.
+const canonPages = (pages: OperateFlowPage[] | undefined) => pages === undefined ? undefined
+  : JSON.stringify(pages.map(page => [page.name, page.states ?? null, page.routes?.map(route => [route.label, route.to]) ?? null]))
+const samePages = (a: OperateFlowPage[] | undefined, b: OperateFlowPage[] | undefined) => canonPages(a) === canonPages(b)
+
 type Step = { status: 'loading' } | { status: 'unavailable'; reason: string } | { status: 'ready'; definition: CanvasDefinition }
 
 /**
@@ -47,7 +53,7 @@ const publishedStep = (run: OperateFlowRun, { open, entry, loading }: FlowConsol
   const snapshot = entry.console.published?.flows?.find(flow => flow.id === run.flowId)
   if (!snapshot) return { status: 'unavailable', reason: NOT_OPEN }
   if (snapshot.title !== run.title || snapshot.steps.length !== run.steps.length ||
-      snapshot.steps.some((step, index) => step !== run.steps[index])) {
+      snapshot.steps.some((step, index) => step !== run.steps[index]) || !samePages(snapshot.pages, run.pages)) {
     return { status: 'unavailable', reason: CHANGED }
   }
   const screenId = run.steps[run.index]!

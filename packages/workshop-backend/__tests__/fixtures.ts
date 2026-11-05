@@ -92,6 +92,9 @@ export async function openFakeOverseer(
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
       joinSession: () => () => {},
+      // Subscriptions register their closers for a retirement (FAC-88); none is retired here.
+      trackStream: () => ({ untrack() {} }),
+      isRetiredOperateSession: () => false,
       joinPresence: () => () => {},
       joinOutputsFanout: () => () => {},
       ensureObserver: async () => {},

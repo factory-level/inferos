@@ -526,7 +526,8 @@ function publishedFlows(storage: Pick<OverseerStorage, "flows">, content: Operat
     if (!flow) throw new Error(`Console flow ${id} is not a flow in this workspace`);
     let outside = flow.steps.find(step => !screens.has(step));
     if (outside) throw new Error(`Console flow "${flow.title}" has step ${outside}, which the console does not show`);
-    return { id: flow.id, revision: flow.revision, title: flow.title, steps: [...flow.steps] };
+    return { id: flow.id, revision: flow.revision, title: flow.title, steps: [...flow.steps],
+      ...(flow.pages === undefined ? {} : { pages: structuredClone(flow.pages) }) };
   });
 }
 

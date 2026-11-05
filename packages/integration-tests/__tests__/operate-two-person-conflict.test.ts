@@ -220,6 +220,14 @@ it("two people stage the same revision: one approval commits once, the stale one
   expect(fake.commits.at(-1)).toMatchObject({ operation: "transition", issueId: issue.id, person: alice.username });
   const won = fake.issue("ENG-2");
   expect(won).toMatchObject({ stateId: aliceTarget!.id, revision: String(Number(r) + 1) });
+  // FAC-88: the business record is shared, never copied into anyone's presentation state, so Bob's
+  // next read through his own board shows Alice's change, while his page is still his own: at the
+  // seq his openBoard left it, which Alice's approval never moved.
+  {
+    using bobIssue = await bobBoard.openIssue(issue.id);
+    expect(await bobIssue.read()).toMatchObject({ stateId: aliceTarget!.id, revision: won.revision });
+  }
+  expect((await bob.session.listEvents(0, 50)).map(record => record.event.type)).toEqual(["openBoard"]);
 
   // Bob's approval, still bound to r, is refused by InferOps: failed and not applied, with no
   // second write and Alice's state kept.

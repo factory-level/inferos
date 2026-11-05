@@ -1086,6 +1086,22 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   }
 
   /**
+   * The company the connected person works in here (FAC-88): their session's tenant id, as
+   * `holdsSharedConfiguration` scopes its answer, read from the identity stored at connect without
+   * asking InferOps anything. Null for an account without a connected person (demo data, a
+   * sign-in) and for a session in a company `INFEROPS_COMPANY` doesn't admit; a malformed
+   * `INFEROPS_COMPANY` throws, so the Workshop refuses rather than guessing.
+   */
+  async presentationCompany(): Promise<string | null> {
+    if (!this.ctx.props.connected) return null;
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return null;
+    return identity.tenantId.toLowerCase();
+  }
+
+  /**
    * The workspaces in which the connected person may list widgets for their company: each of their
    * workspaces where InferOps' `configuration:publish` holds, asked with their own token, in the
    * order their identity lists them (FAC-11). Nothing for an account without a connected person, or
