@@ -129,6 +129,14 @@ declare global {
       // Minimum connected-account balance (USD) to proceed via BYOK. Defaults to
       // MINIMUM_CLOUDFLARE_BALANCE.
       MINIMUM_CLOUDFLARE_BALANCE?: string;
+
+      // Comma-separated platform model ids to offer, in order; the first is the default
+      // (model-allowlist.ts). Unset offers every suggested model.
+      MODEL_ALLOWLIST?: string;
+
+      // Agent turns each workspace owner may start per UTC day, when the Cloudflare limits flow is
+      // off (usage-checker.ts). Unset or not a positive integer means no cap.
+      DAILY_AGENT_TURN_LIMIT?: string;
     }
   }
 }

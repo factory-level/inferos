@@ -252,3 +252,68 @@ describe("UserDurableObject hidden gateway models", () => {
     expect(context.aiModel?.profile.id).toBe(first.id);
   }));
 });
+
+describe("UserDurableObject under MODEL_ALLOWLIST (FAC-152)", () => {
+  // One invocation per test, since the bounded gateway env is only set on this instance.
+  function inBoundedUser<T>(f: (user: UserDurableObject) => Promise<T>) {
+    const stub = env.TEST_USER.getByName(`user-models-${++userCounter}`);
+    return runInDurableObject(stub, user => {
+      const impl = user as unknown as { env: Cloudflare.Env };
+      impl.env = {
+        ...impl.env,
+        CF_AI_GATEWAY: "platform-gateway",
+        CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+        CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+        CF_AI_GATEWAY_PROVIDERS: "anthropic",
+        MODEL_ALLOWLIST: "claude-haiku-5-5",
+      };
+      return f(user);
+    });
+  }
+  const platformRouted = (model: string): AiModelConfig => ({ provider: "anthropic", model, apiToken: "" });
+
+  it("refuses to store a platform-routed model the allowlist leaves out", () => inBoundedUser(async user => {
+    await expect(user.addModel({ ...PROFILE, id: "my-opus" }, platformRouted("claude-opus-5-5")))
+        .rejects.toThrow("doesn't offer the model \"claude-opus-5-5\"");
+    await expect(user.addModel({ ...PROFILE, id: "claude-opus-5-5" }, platformRouted("claude-opus-5-5")))
+        .rejects.toThrow("doesn't offer");
+    await expect(user.addModel({ ...PROFILE, id: "my-haiku" }, platformRouted("Claude-Haiku-5-5")))
+        .rejects.toThrow("doesn't offer");
+    expect(await user.listModels()).not.toContainEqual(expect.objectContaining({ id: "my-opus" }));
+  }));
+
+  it("refuses a stored one already there when a chat resolves it", () => inBoundedUser(async user => {
+    const storage = (user as unknown as { storage: { aiModels: { put(record: unknown): void } } }).storage;
+    storage.aiModels.put({ profile: { ...PROFILE, id: "old-opus" }, config: platformRouted("claude-opus-5-5") });
+    // Resolution still finds it, so the turn gate (checkPlatformTurn) is what refuses it, uncounted.
+    expect((await user.getChatContext("old-opus")).aiModel?.config.model).toBe("claude-opus-5-5");
+  }));
+
+  it("still stores the listed model by hand, and a person's own-key model", () => inBoundedUser(async user => {
+    await user.addModel({ ...PROFILE, id: "my-haiku" }, platformRouted("claude-haiku-5-5"));
+    await user.addModel({ ...PROFILE, id: "my-own-opus" },
+        { provider: "anthropic", model: "claude-opus-5-5", apiToken: "sk-own-test-key", billing: "api-key" });
+    const ids = (await user.listModels()).map(model => model.id);
+    expect(ids).toEqual(expect.arrayContaining(["claude-haiku-5-5", "my-haiku", "my-own-opus"]));
+  }));
+});
+
+describe("UserDurableObject under MODEL_ALLOWLIST with the Cloudflare limits flow on (FAC-152)", () => {
+  it("saves an unlisted model a person's own gateway may pay for, leaving the turn gate to decide", async () => {
+    const stub = env.TEST_USER.getByName(`user-models-${++userCounter}`);
+    await runInDurableObject(stub, async user => {
+      const impl = user as unknown as { env: Cloudflare.Env };
+      impl.env = {
+        ...impl.env,
+        CF_AI_GATEWAY: "platform-gateway",
+        CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+        CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+        CF_AI_GATEWAY_PROVIDERS: "anthropic",
+        MODEL_ALLOWLIST: "claude-haiku-5-5",
+        ENABLE_CLOUDFLARE_LIMITS: "true",
+      };
+      await user.addModel({ ...PROFILE, id: "my-byok-opus" }, { provider: "anthropic", model: "claude-opus-5-5", apiToken: "" });
+      expect((await user.listModels()).map(model => model.id)).toContain("my-byok-opus");
+    });
+  });
+});

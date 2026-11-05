@@ -4,7 +4,10 @@ design: https://github.com/factory-level/inferops/blob/develop/docs/human/journe
 covers:
   - scripts/stage
   - scripts/preview/staging-config.ts
-updated: 2026-11-04
+  - packages/workshop-backend/src/model-allowlist.ts
+  - packages/workshop-backend/src/ai-gateway.ts
+  - packages/workshop-backend/src/ai-gateway-billing/limits/usage-checker.ts
+updated: 2026-11-05
 ---
 
 # Persistent stage deploys
@@ -37,6 +40,30 @@ updated: 2026-11-04
   - **Proven by dry run only.** `wrapper-stage.test.ts` covers the derivation, strict parsing, reserved slugs, prefix and hostname overlap, the ownership check and the gitlink parse; `stage-config.test.ts` the `--wrapper` arguments. No wrapper deployment has been made.
 - `scripts/stage/stage-config.test.ts` and `stage-resources.test.ts` cover the configs built from the real packages, the stage definitions (including the authorize origin's rules and which workers get a custom domain), secret redaction in the plan (the backend's and the edge secret), edge-secret validation and the Wrangler output parsers. The runbook is [deploy a persistent stage](../wiki/stage-deploy.md); the decision is [ADR 0009](../adr/0009-persistent-stage-deploys.md) (proposed).
 
+## Agent models and bounds
+
+A stage offers no agent model until it has a model source. On a stage that's the platform AI Gateway: `CF_AI_GATEWAY`, `CF_AI_GATEWAY_ACCOUNT_ID` and `CF_AI_GATEWAY_PROVIDERS`, uploaded as backend secrets by `resolveAiGateway`, with the provider's key stored in that gateway, never in InferOS. Without them, the only models are ones a person adds with their own key, so the picker shows "No agent". The local developer key (`localApiModels`) never reaches a stage, because a stage never sets `DEV`.
+
+A stage's optional `agents` (`stages.ts`) bounds the platform's own models, as two plain backend vars (`backendVars`):
+
+- **`MODEL_ALLOWLIST`** (`model-allowlist.ts`): the model ids offered, in order. `AiGatewayConfig.getModelList` and `localApiModels` offer only those, so the first is the default for anyone with no stored choice. `resolveModel` refuses the rest, so a stored choice can't reach a costlier model.
+  - **It bounds what the platform pays for, not only what it offers.** `AiGatewayConfig.offersModel` checks the model a platform-gateway request names: an allowlisted id, matched exactly, listed in `SUGGESTED_MODELS` under the request's own provider. The platform's quick model, which titles chats, is the one exception.
+  - **It applies exactly when the platform pays; BYOK is exempt.** A turn routed to a person's own funded Cloudflare gateway (BYOK, which only the Cloudflare limits flow offers) is neither allowlisted nor counted. Neither is a model on a person's own key (`billing: "api-key"`) or ChatGPT plan. A platform-funded turn is allowlisted, and capped as below.
+  - **Three places check it.**
+    - `getModelViaGateway` (`ai-models.ts`), the only route to the platform gateway, refuses any other model, whatever record it came from, including a hand-added model with no `billing`. It fails closed.
+    - The turn gate (`checkPlatformTurn` → `checkUsageAndBalance`, `usage-checker.ts`) resolves the routing first, then refuses a platform-funded turn on such a model before counting it, with the code `model_not_offered`: "This environment doesn't offer the model "…". Choose one it offers." A funded connection with no route to its gateway, a broken token or an unreachable connection all count as the platform's, so they're refused rather than falling back to the platform with the model.
+    - `User.#putModel` refuses to save such a model when the Cloudflare limits flow is off, since then only the platform can run it. With the flow on, which gateway pays is only known at the turn, so the model is saved and the turn gate decides.
+- **`DAILY_AGENT_TURN_LIMIT`** (`usage-checker.ts`, `model-allowlist.ts`): agent turns each workspace owner may start per UTC day, while the Cloudflare limits flow is off. It counts gateway turns and the local developer key (`drawsOnPlatformAllowance`), never a person's own key or plan, and a refused turn isn't counted. The chat shows "This environment allows N agent turns a day, and they're used up. They reset at midnight UTC." with the code `daily_turn_limit`, so no top-up dialog opens. The turn's trace records the same code.
+  - **Gadget model bindings.** A binding's calls come from Gadget code, not agent turns, so the cap can't count them. Under the cap, a binding on the platform's models is refused (`modelBindingRefusal`): when it's made (`newAiModelGatekeeper`), and when it starts a session (`LanguageModelGatekeeper.startSession`), so one made before the cap was set is refused too, including an older binding on the local developer key, recognised by its key. A binding on a person's own key or plan is unaffected. No bundled blueprint binds a model.
+
+`dev` sets `models: ["claude-haiku-5-5"]` and `dailyTurnLimit: 40`; `prod` sets neither. `stageDefinitionProblems` refuses an empty model list, an id that couldn't be a comma-separated var, and a cap that isn't a positive integer.
+
+**Neither is a dollar bound.** That's the spend limit on the key the gateway stores, set with the provider. The cap counts turns, and a turn can make many model calls; there's no per-turn step cap.
+
+Claude Haiku 5.5 isn't in pi's bundled catalog, so `SUGGESTED_MODELS` states its window (200,000) and output limit (16,000) conservatively.
+
+**Evidence, local only:** `workshop-backend/__tests__/model-bounds.test.ts`, the allowlist cases in `ai-models.test.ts` and `user-models.test.ts`, the stage-config tests, and a local `pnpm dev-server` with `MODEL_ALLOWLIST=claude-haiku-5-5` and `DAILY_AGENT_TURN_LIMIT=2`. There the picker offered only "Claude Haiku 5.5 (local API key)", two turns were answered, and the third was refused with the message above. Not shown on a deployed stage.
+
 ## Divergences from Design
 
 - There is no design document for stages; the owner's stated intent (two Zero-Trust instances wired to InferLab dev and prod, deployed from a workstation) is recorded in [ADR 0009](../adr/0009-persistent-stage-deploys.md), which is proposed. The cloud-parity requirements in [local development](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md) remain the nearest design.
@@ -47,4 +74,5 @@ updated: 2026-11-04
 ## Open Questions
 
 - Whether stages should move to CI (dev on merge, prod on approved dispatch) once the first deploys are accepted.
-- Whether a stage should configure an AI Gateway or stay bring-your-own-key.
+- Whether `prod` should configure an AI Gateway or stay bring-your-own-key. `dev` is meant to use one, bounded as above.
+- Whether a turn needs its own step or token cap, beyond each call's output limit.

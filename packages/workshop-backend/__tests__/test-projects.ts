@@ -54,6 +54,7 @@ export const UNIT_NODE: readonly string[] = [
   "host-board-account.test.ts",
   "limits.test.ts",
   "message-format-refs.test.ts",
+  "model-bounds.test.ts",
   "mock-storage.test.ts",
   "open-gadget-errors.test.ts",
   "operate-console.test.ts",

@@ -21,6 +21,7 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
 import { traceChat } from "./agent-tracing.js";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
+import { modelBindingRefusal, modelNotOfferedMessage } from "./model-allowlist.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 import { openAiBridgeRequest } from './openai-plugin.js';
 import { errorSchema, isOpenAiPluginEnabled } from '@gadgets/assistant-plugin-openai/protocol';
@@ -518,6 +519,9 @@ function getModelViaGateway(
   initiator: AiChatAuthorInfo,
   options: ModelRoutingOptions,
 ): ModelHandle {
+  // MODEL_ALLOWLIST bounds what the platform pays for, so it's checked on the model this request
+  // names, whatever record it came from (a hand-added one included), and fails closed.
+  if (!gwConfig.offersModel(config)) throw new Error(modelNotOfferedMessage(config.model));
   const metadata = buildMetadata(initiator, options.metadata);
   const binding = gwConfig.bindingFor(config.provider);
   // No binding means either the provider can't ride one or the deployment has none; the second
@@ -736,6 +740,8 @@ export type LanguageModelGatekeeperProps = {
   config: AiModelConfig,
   initiator: AiChatAuthorInfo,
   metadata?: GatewayMetadataContext,
+  /** Whether the model is the local developer key (a managed model); unset on older bindings. */
+  managed?: boolean,
 };
 
 export class LanguageModelGatekeeper
@@ -768,6 +774,10 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
+    // A binding made before the daily cap was set is refused here, as a new one is when it's made.
+    let refusal = modelBindingRefusal(this.env,
+        { config: this.ctx.props.config, profile: { managed: this.ctx.props.managed } });
+    if (refusal) throw new Error(refusal);
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
     });
