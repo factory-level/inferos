@@ -46,6 +46,10 @@ describe("authored widget publication commit boundary", () => {
       "client.tsx": "export default function Widget(){ return <div/> }",
       [`${"a".repeat(509)}.tsx`]: "export {};",
     }],
+    ["overlong multibyte source paths", {
+      "client.tsx": "export default function Widget(){ return <div/> }",
+      [`${"é".repeat(300)}.tsx`]: "export {};",
+    }],
     ...["\0", "\x01", "\x1f", "\x7f", "\u0080", "\u009f"].map((control, index) => [
       `control character ${index}`,
       {
@@ -171,6 +175,28 @@ describe("authored widget publication commit boundary", () => {
     expect(test.written?.options).toMatchObject({
       parents: ["source-commit"], message: "Build authored widget for publication",
     });
+  });
+
+  it("accepts a multibyte source path at the 512 UTF-8 byte boundary", async () => {
+    let calls = 0;
+    const run = compileAuthoredWidgetPublication({
+      enabled: true, sourceCommitId: "source-commit",
+      gitStore: {
+        readCommitFiles: async () => new Map([
+          ["client.tsx", "export default function Widget(){ return <div/> }"],
+          [`${"é".repeat(254)}.tsx`, "export {};"],
+        ]),
+        writeFilesAsCommit: async () => "compiled-commit",
+      } as never,
+      builds: { newUniqueId: () => "build-id", get: () => ({ compile: async () => {
+        calls++;
+        return {clientJs: "compiled", durationMs: 1, clientBytes: 8};
+      } }) },
+      author: async () => ({ name: "test", email: "test@example.com" }) as never,
+      onFailure: () => {},
+    });
+    await expect(run).resolves.toBe("compiled-commit");
+    expect(calls).toBe(1);
   });
 
   it("keeps safe companion files and sends only the .tsx and .css sources to the build", async () => {

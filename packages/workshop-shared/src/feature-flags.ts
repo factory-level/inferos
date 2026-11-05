@@ -12,6 +12,8 @@ export const UI_FEATURE_FLAGS = [
   { key: "chat-layout-thread", dev: false, default: false },
   { key: "chat-layout-copilot", dev: false, default: false },
   { key: "openai-chatgpt-plan-usage", dev: false, default: false },
+  // Authored-widget compilation is deployment-owned and stays off in local development by default.
+  { key: "authored-widgets", dev: false, default: false },
   // Operate mode: the Build ↔ Operate toggle (Operate is the InferOps Canvas), the workspace kind
   // switch, and kind-specific canvas tiles. Also needs composable views to be enabled.
   { key: "operate-mode", dev: true, default: false },

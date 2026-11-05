@@ -3,9 +3,12 @@ title: Reusable native agent authoring
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md
 covers:
   - packages/workshop-shared/src/api.ts
+  - packages/workshop-shared/src/feature-flags.ts
   - packages/workshop-shared/src/agent-artifact.ts
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
   - packages/workshop-backend/src/overseer.ts
+  - packages/workshop-backend/src/authored-widget-publication.ts
+  - packages/workshop-backend/src/feature-flags.ts
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/workshop-backend/src/authored-widget-build.ts
   - packages/workshop-backend/src/authored-widget-build-runtime.ts
@@ -190,3 +193,16 @@ Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/
 ## Evidence
 
 See the [source ledger](../wiki/research-sources.md) for sibling repository revisions and official references.
+
+### Authored-widget draft preview
+
+The UI receives the deployment-owned `authored-widgets` flag, resolved from
+`AUTHORED_WIDGET_BUILD_ENABLED` and never from Flagship. `Overseer.previewAuthoredWidget(gadgetId,
+chatId)` is a build-session capability. It materializes pending chat code changes, requires the chat
+to own the gadget's draft, checks every draft path, and compiles only TSX/CSS sources through the
+same isolated build Durable Object used by publication. It returns
+`{jsCode, measurements: {durationMs, clientBytes}}`; it creates no commit, Blueprint record, R2
+object or binding change. Use-role and operate sessions, including agent callers, are denied. A
+disabled flag refuses before reading draft files or allocating a build object. Preview waits at most
+15 seconds and returns no JavaScript larger than 2 MiB. These limits bound the caller and response;
+a timed-out synchronous WASM build may continue until its build object resets.

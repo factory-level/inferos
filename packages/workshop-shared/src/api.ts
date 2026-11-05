@@ -2375,6 +2375,14 @@ export type UiBundle = {
   // libraries should be loaded.
 };
 
+/** Compiled authored-widget preview output; measurements contain no source text. */
+export type AuthoredWidgetPreview = {
+  /** Compiled client module returned to the authoring UI. */
+  jsCode: string;
+  /** Bounded compiler measurements for this preview. */
+  measurements: { durationMs: number; clientBytes: number };
+};
+
 /**
  * A git author/committer identity, as recorded in commits in a workspace's git object store.
  * Derived from the committing user's profile: the display name becomes `name` and the profile ID
@@ -2655,6 +2663,8 @@ export type AgentSpawnerBehaviour = Partial<Pick<AgentSpawnerConfig, "displayNam
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
+  /** Compile one chat's authored-widget draft without changing workspace state; build sessions only. */
+  previewAuthoredWidget(gadgetId: WorkpieceId, chatId: number): Promise<AuthoredWidgetPreview>;
   /** Export only the declared business collections; available to build/owner sessions only. */
   exportWorkspaceRecords(): Promise<WorkspaceRecordExport>;
   /**

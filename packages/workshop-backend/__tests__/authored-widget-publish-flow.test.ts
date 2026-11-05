@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Overseer } from "@gadgets/workshop-shared/api";
@@ -12,7 +12,7 @@ declare module "cloudflare:workers" {
 
 let nextId = 0;
 
-async function withClient<T>(run: (impl: any, client: Overseer) => Promise<T>): Promise<T> {
+async function withClient<T>(run: (impl: any, client: Overseer, instance: OverseerDurableObject) => Promise<T>): Promise<T> {
   const stub = env.TEST_OVERSEER.getByName(`authored-widget-flow-${++nextId}`);
   return runInDurableObject(stub, async instance => {
     const impl = (instance as unknown as {impl: any}).impl;
@@ -51,11 +51,83 @@ async function withClient<T>(run: (impl: any, client: Overseer) => Promise<T>): 
     };
     const client = await instance.open(
       ownerId, "owner-profile", new NativeRpcStub<() => void>(() => {}));
-    return run(impl, client);
+    return run(impl, client, instance);
   });
 }
 
 describe("authored widget publication through the Overseer client", () => {
+  it("builds a chat draft without changing its gadget head or published state", async () => {
+    await withClient(async (impl, client) => {
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget", bindings: {},
+      });
+      impl.storage.chatMeta.put({ id: 51, title: "Draft", started: new Date(0), lastActive: new Date(0) });
+      impl.checkChatExistsAndMaterializeChanges = vi.fn();
+      impl.readGadgetFiles = vi.fn(async () => new Map([
+        ["client.tsx", "export default function Widget(){ return <div/> }"],
+      ]));
+      impl.authoredWidgetBuildNamespace = {
+        newUniqueId: () => "preview-build",
+        get: () => ({ compile: async () => ({ clientJs: "compiled preview", durationMs: 7, clientBytes: 16 }) }),
+      };
+      const writeCommit = vi.spyOn(impl.gitStore, "writeFilesAsCommit");
+      const r2Write = vi.spyOn(impl.env.BLUEPRINT_CONTENT, "put");
+      const gadgetBefore = structuredClone(impl.storage.gadgets.get(1));
+      const blueprintsBefore = [...impl.storage.blueprints.list()];
+
+      const result = await client.previewAuthoredWidget(1, 51);
+
+      expect(result.jsCode.length).toBeGreaterThan(0);
+      expect(result.measurements.durationMs).toBeGreaterThanOrEqual(0);
+      expect(result.measurements.clientBytes).toBe(new TextEncoder().encode(result.jsCode).byteLength);
+      expect(impl.checkChatExistsAndMaterializeChanges).toHaveBeenCalledWith(51);
+      expect(writeCommit).not.toHaveBeenCalled();
+      expect(r2Write).not.toHaveBeenCalled();
+      expect(impl.storage.gadgets.get(1)).toEqual(gadgetBefore);
+      expect([...impl.storage.blueprints.list()]).toEqual(blueprintsBefore);
+    });
+  });
+
+  it("rejects an unsafe draft path before allocating a build object", async () => {
+    await withClient(async (impl, client) => {
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget", bindings: {},
+      });
+      impl.storage.chatMeta.put({ id: 51, title: "Draft", started: new Date(0), lastActive: new Date(0) });
+      impl.checkChatExistsAndMaterializeChanges = vi.fn();
+      impl.readGadgetFiles = vi.fn(async () => new Map([
+        ["client.tsx", "export default function Widget(){ return <div/> }"],
+        ["notes/../private.ts", "private"],
+      ]));
+      const newUniqueId = vi.fn(() => "preview-build");
+      impl.authoredWidgetBuildNamespace = {
+        newUniqueId,
+        get: () => { throw new Error("must not allocate a build object"); },
+      };
+
+      await expect(client.previewAuthoredWidget(1, 51)).rejects.toThrow("Invalid source path.");
+      expect(newUniqueId).not.toHaveBeenCalled();
+    });
+  });
+
+  it("denies preview when disabled, to use-role collaborators, and to operate sessions", async () => {
+    await withClient(async (impl, client, instance) => {
+      await expect(client.previewAuthoredWidget(1, 1)).rejects.toThrow("Authored widget preview is disabled.");
+
+      impl.getSharingManager = async () => ({}) as never;
+      impl.authorizeCollaborator = async () => "use";
+      let useClient = await instance.open(
+        impl.users.newUniqueId().toString(), "collaborator-profile", new NativeRpcStub<() => void>(() => {}));
+      await expect(useClient.previewAuthoredWidget(1, 1)).rejects.toThrow("Unauthorized");
+
+      let operateClient = await instance.open(
+        impl.ownerId, "owner-profile", new NativeRpcStub<() => void>(() => {}), undefined, undefined, true);
+      await expect(operateClient.previewAuthoredWidget(1, 1)).rejects.toThrow("Unauthorized: an operate session");
+    });
+  });
+
   it("refuses create/update on build errors without changing the published version", async () => {
     await withClient(async (impl, client) => {
       const sourceCommit = await impl.gitStore.writeFilesAsCommit(
