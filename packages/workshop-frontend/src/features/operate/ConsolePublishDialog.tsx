@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, Dialog } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
@@ -23,6 +23,19 @@ export const ConsolePublishDialog = ({ entry, onClose }: {
   const [publishing, setPublishing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const ready = !!overseer && !!metadata && metadata.role !== 'use' && !accessError
+  // Whether publishing lists the console's widgets for the company (FAC-11): only when it registers
+  // some and InferOps offers the publisher a workspace to list them in. Unknown reads as no note.
+  const hasWidgets = (entry.console.widgets ?? []).length > 0
+  const stub = overseer?.stub
+  const [listsForCompany, setListsForCompany] = useState(false)
+  useEffect(() => {
+    if (!stub || !ready || !hasWidgets) return
+    let current = true
+    stub.listConsoleWidgetIndexWorkspaces().then(
+      workspaces => { if (current) setListsForCompany(workspaces.length > 0) },
+      () => { if (current) setListsForCompany(false) })
+    return () => { current = false }
+  }, [stub, ready, hasWidgets])
   const publish = async () => {
     if (!overseer || !ready || publishing) return
     setPublishing(true); setError(null)
@@ -41,6 +54,9 @@ export const ConsolePublishDialog = ({ entry, onClose }: {
       <Dialog.Description className="text-sm text-kumo-subtle">
         Operators will use this version, its screens and its flows as they are now. Anyone with it open moves to it when they next navigate. Later edits stay in the draft until you publish again.
       </Dialog.Description>
+      {listsForCompany && hasWidgets && <p className="text-sm text-kumo-subtle">
+        Its widgets&apos; names and a short purpose are also listed for your company in InferOps, so people can find them. Console settings show what InferOps answered.
+      </p>}
       {accessError && <p role="alert" className="text-sm text-kumo-danger">This console's workspace can't be opened. You may no longer have access to it.</p>}
       {error && <p role="alert" className="text-sm text-kumo-danger">{error}</p>}
       <div className="flex justify-end gap-2">
