@@ -19,6 +19,8 @@ covers:
   - packages/workshop-backend/src/artifact-publisher-binding.d.ts
   - packages/gatekeeper-scheduler
   - packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.tsx
+  - packages/workshop-frontend/src/features/authoring
+  - packages/workshop-frontend/src/editorTabs.ts
   - packages/gatekeeper-context/src/agent-skill.ts
   - packages/bundled-blueprints/src/authoring-compiler.ts
   - packages/bundled-blueprints/__tests__/authoring-compiler.test.ts
@@ -206,3 +208,39 @@ object or binding change. Use-role and operate sessions, including agent callers
 disabled flag refuses before reading draft files or allocating a build object. Preview waits at most
 15 seconds and returns no JavaScript larger than 2 MiB. These limits bound the caller and response;
 a timed-out synchronous WASM build may continue until its build object resets.
+
+### Authoring UI (FAC-8)
+
+The Workshop shows authoring only while `authored-widgets` is on; with it off, the editor's tabs
+(`rightTabs` in `editorTabs.ts`) and everything else are unchanged. The author edits the widget's
+TSX and CSS in the existing **Code** tab. They are the gadget's own files, in the chat's draft and
+then its commits, so closing and reopening the editor shows the same source, and the compiled
+`client.js` that publication adds lives only in the child commit.
+
+- **Build preview.** With the flag on, a gadget with an app view gets a **Build preview** tab (also in
+  the mobile pane menu). `AuthoredWidgetPreview` calls `previewAuthoredWidget(gadgetId, chatId)` for
+  the chat whose draft changes the selected gadget, and builds again on every code change and on
+  **Rebuild**. Without such a chat it says there is nothing to preview and builds nothing. A refusal
+  (`Invalid source path.`, a compile refusal, a disabled flag) is shown in the server's words with
+  **Try again**; a denial (`Unauthorized: …`) says the viewer can't build a preview and offers no
+  retry. A late answer for a chat or code version no longer shown is ignored.
+- **The frame.** The preview makes no frame of its own: it runs through the existing `GadgetUI`
+  host, given a stand-in client whose UI bundle is the built module and whose connection is a mock
+  server, so the module runs in the same sandboxed Gadget frame and handshake as any gadget UI, React
+  stays inside it, and the frame-producer and message-listener audit in `boundView/static.test.ts`
+  is unchanged. The mock server never reaches `connectToGadget`: every method the widget calls is
+  listed by name under the frame and answers `undefined`. The preview is handed only
+  `previewAuthoredWidget`, so it can't reach a real binding or change any state. The build's
+  duration and size are shown with it.
+- **Register.** A version is registered through the existing blueprint dialog (`BlueprintModal`):
+  `createBlueprint` or `updateBlueprint({updateCode})` runs the publication build, with the gadget's
+  declared connections and their annotations as the binding requirements. A build refusal is the
+  publish result, announced as an alert in the server's words, and the form stays open.
+- **Place.** Each install of the version (`installBlueprint`) is its own gadget with its own
+  bindings. A console registers each install separately under its own name
+  (`ConsoleWidgetRegistry`), and shows for each only the surfaces the kernel's
+  `listConsoleWidgetCandidates` declares for its commit.
+
+`AuthoredWidgetPreview.test.tsx`, `editorTabs.test.ts`, `BlueprintModal.test.tsx` and
+`ConsoleWidgetRegistry.test.tsx` cover these. Params and events beyond the declared bindings and
+`tools.json` tools are FAC-11's semantic catalog, not this UI.
