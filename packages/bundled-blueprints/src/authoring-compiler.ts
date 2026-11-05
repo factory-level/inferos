@@ -468,7 +468,7 @@ export function hashAllowedLockEntries(lockfile: string): string {
     }
   };
   for (const rootGroup of roots) for (const root of rootGroup) visit(root);
-  return sha256([...closure].sort().map(name => {
+  return sha256([...closure].toSorted().map(name => {
     const packageId = name.slice(0, name.indexOf("(") < 0 ? name.length : name.indexOf("("));
     return `${name}\n${selectedPackages.get(packageId)}\n${selectedSnapshots.get(name)}`;
   }).join("\n"));
