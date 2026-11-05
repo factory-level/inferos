@@ -5,6 +5,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  createOpenGadgetError, getOperateSessionErrorCode, OPEN_GADGET_ERROR_CODES, OPERATE_SESSION_ERROR_CODES,
+} from "@gadgets/workshop-shared/api";
+import { checkFlowDestination } from "../src/flow-navigation";
+import {
   MAX_OPERATE_FLOW_PAGE_STATES,
   MAX_OPERATE_FLOW_ROUTES,
   parseOperateFlowContent,
@@ -98,6 +102,28 @@ describe("a flow with named pages", () => {
     }
   });
 
+  it("caps back history: past the cap the oldest moves are dropped, and back stops at the floor", () => {
+    // Start on intake, then alternate review and intake, 40 moves: indexes 0,1,0,1,... are left.
+    let state = run();
+    let left: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      left.push(state.flow!.index);
+      state = applyOperateEvent(state, { type: "navigateFlow", to: i % 2 === 0 ? "review" : "intake" });
+      expect(state.flow!.history!.length).toBeLessThanOrEqual(MAX_OPERATE_FLOW_HISTORY);
+    }
+    const kept = left.slice(-MAX_OPERATE_FLOW_HISTORY);
+    expect(state.flow!.history).toEqual(kept);
+    // Back walks exactly the kept moves, newest first, and never past them to a dropped one.
+    let visited: number[] = [];
+    for (let i = 0; i < MAX_OPERATE_FLOW_HISTORY; i++) {
+      state = applyOperateEvent(state, { type: "backFlow" });
+      visited.push(state.flow!.index);
+    }
+    expect(visited).toEqual(kept.toReversed());
+    expect(state.flow!.history).toEqual([]);
+    expect(() => applyOperateEvent(state, { type: "backFlow" })).toThrow("There is no earlier page to go back to.");
+  });
+
   it("keeps back history bounded, dropping the oldest page", () => {
     let state = run({ type: "navigateFlow", to: "review" });
     for (let i = 0; i < MAX_OPERATE_FLOW_HISTORY + 5; i++) {
@@ -150,5 +176,32 @@ describe("widget transitions stay apart from page navigation", () => {
     }));
     expect(applyWidgetTransition(machine, "open", "submit")).toBe("sent");
     expect(() => applyWidgetTransition(machine, "open", "review")).toThrow(); // a page name is no widget event
+  });
+});
+
+describe("checking a navigation's destination on the server", () => {
+  const code = async (read: () => Promise<unknown>) => {
+    try { await checkFlowDestination(read); return "accepted"; } catch (error) { return getOperateSessionErrorCode(error); }
+  };
+  const { flowNavigationFailed, flowPageUnavailable } = OPERATE_SESSION_ERROR_CODES;
+
+  it("accepts a screen the caller can read", async () => {
+    expect(await code(async () => ({ id: "scr-review" }))).toBe("accepted");
+  });
+
+  it("refuses a missing screen or a refused workspace as no longer available", async () => {
+    expect(await code(async () => null)).toBe(flowPageUnavailable);
+    for (const refusal of Object.values(OPEN_GADGET_ERROR_CODES)) {
+      expect(await code(async () => { throw createOpenGadgetError(refusal); })).toBe(flowPageUnavailable);
+    }
+  });
+
+  it("refuses any other failure as transient, so it can be retried, naming nothing", async () => {
+    for (const failure of [new Error("Network connection lost."), new TypeError("stub disposed"), "boom"]) {
+      let message = "";
+      try { await checkFlowDestination(async () => { throw failure; }); } catch (error) { message = (error as Error).message; }
+      expect(await code(async () => { throw failure; })).toBe(flowNavigationFailed);
+      expect(message).toBe("Couldn't move to that page of the flow just now. Try again.");
+    }
   });
 });
