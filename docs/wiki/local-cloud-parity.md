@@ -1,6 +1,6 @@
 ---
 title: Local development and Cloudflare parity
-updated: 2026-11-01
+updated: 2026-11-05
 ---
 
 # Local development and Cloudflare parity
@@ -48,6 +48,34 @@ Local state is `.wrangler/state` under the checkout; `reset` names it, requires 
 To develop against a real InferOps instead of the gatekeeper's demo data, run the test backend the gatekeeper is pinned to: `pnpm local inferops up` (the pinned inferops revision from source, seeded, on this stack's port + 10000, no bootstrap and no cloud credential), then `pnpm local start --inferops` for per-person sign-in as a reserved persona on the `GROK` board, or `pnpm local start --inferops --stopgap` for the ambient account on the acme `ENG` board. `pnpm local inferops verify` proves both paths headless, `eval "$(pnpm -s local inferops env --stopgap)"` exports what `inferops-live.test.ts` needs, and `pnpm local inferops down` stops it. The architecture page's [InferOps test backend](../architecture/local-development.md#inferops-test-backend) section has the rules.
 
 Use synthetic settings and fixture accounts. A general upgrade, migration rollback or state-recovery command is not yet supplied. The [verification ledger](local-verification-evidence.md) distinguishes clean-pin proofs from earlier source overlays and records the exact scope of each result.
+
+## Restart keeps InferOS state (API only)
+
+This shows that InferOS keeps a workspace, its board widget and a pending approval across its own restart while the pinned InferOps API stays up. It is the API alone: no InferOps web clients and no worker, so Operate cards, webhook delivery and the email lane are not part of it. The full integrated stack is a separate proof.
+
+**Host rule.** Start each step only with load under 8 and at least 12 GB free (`.factory/openrig/bin/heavy-run` in inferops waits for both). While it runs, check free memory every 30 seconds (`MemAvailable` in `/proc/meminfo`) and stop only if it drops under 8 GB; load spikes alone are not a reason to stop. Record the peak load and the lowest free memory.
+
+From a clean shell (`env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 bash`) in a `pnpm wt` worktree:
+
+```bash
+pnpm -s local inferops up --json      # the pinned API on this stack's port + 10000, fresh database inferos_<port>
+pnpm -s local inferops verify --json  # health, the stopgap identity and per-person sign-in on GROK all pass
+pnpm local start --inferops           # terminal 1; per-person sign-in on inferops://grokbot.operations/project/board/GROK
+```
+
+1. Sign in, create a workspace, embed the GROK board widget and move one issue (for example GROK-2 to In Progress). Leave the approval it creates pending. Note the workspace URL.
+2. `pnpm local stop`, then `pnpm local start --inferops` again. Keep the API running.
+3. Open the same workspace URL.
+
+**Expected:** the same workspace, the widget showing the issue in its new column, and exactly one pending review for the move. Then stop everything with `pnpm local stop` and `pnpm -s local inferops down --purge`.
+
+**Recorded run (2026-11-05, local).**
+- **Revisions:** InferOS `32d0d35b3d3290f1d63269bcdfd142b76d3099a4`, InferOps API pin `f9b3bf540e193d6f9d309ca4c9420170f9b011bc`.
+- **Setup:** the API on 18810 with a fresh `inferos_8810`; `verify` passed.
+- **State:** workspace "InferOps Kanban" with the Grokbot QA Board GROK widget, and GROK-2 moved to In Progress, leaving one pending approval, "Move GROK-2 to In Progress".
+- **Result after the restart:** that workspace, the widget with GROK-2 In Progress, and the same single pending review.
+- **Host:** started at load 6.93 with 18.8 GB available. Free memory never went under 13 GB, and load peaked at 25.92 (30-second samples). Earlier attempts under a stop-at-load-10 rule were halted at loads of 12.56, 11.64 and 13.18, which is why the rule above stops on memory only.
+- **Not covered:** the web clients, the worker, the full integrated stack, CI and a deployed journey. No model call, no email and no approval decision were made.
 
 ## Parity matrix
 
