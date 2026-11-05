@@ -14,6 +14,7 @@ covers:
   - packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.tsx
   - packages/gatekeeper-context/src/agent-skill.ts
   - packages/bundled-blueprints/src/authoring-compiler.ts
+  - packages/bundled-blueprints/__tests__/authoring-compiler.test.ts
   - docs/blueprints.md
 updated: 2026-11-05
 ---
@@ -40,14 +41,17 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 | `packages/bundled-blueprints/src/authoring-compiler.ts` | Node-only compiler for future authored React/Refine widgets; deterministic artifacts and build-time input refusals. |
 | `docs/blueprints.md` | Portable code and binding requirements. |
 
-### Authored widget compiler (FAC-8, slice 1a)
+### Authored widget compiler (FAC-8, slice 1b)
 
 `compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
 React/Refine dependency set. It rejects external CSS references, unsupported source and import
 forms, and forces Refine telemetry off in the emitted artifact. Source checks for browser and
 network globals provide author feedback only; they are not a security boundary. The eventual
-runtime boundary is the Gadget frame and its content policy. Slice 1a does not add the editor-time
-runner, a runtime egress test, or a build timeout/file-count cap; those belong to slice 1b.
+runtime boundary is the Gadget frame and its content policy. Compilation caps source size, file
+size and file count, and stops an esbuild build after 10 seconds. The build-input hash includes the
+full transitive package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including
+peer-specific snapshots. The compile core remains runner-agnostic; it does not add an editor-time
+runner or runtime egress boundary.
 
 ### Native operations available today
 

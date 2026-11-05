@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   compileAuthoredWidget,
   compileAuthoredWidgetRevision,
+  hashAllowedLockEntries,
 } from "../src/authoring-compiler.ts";
+import { readFile } from "node:fs/promises";
 
 describe("compileAuthoredWidget", () => {
   it.each([
@@ -26,6 +28,8 @@ describe("compileAuthoredWidget", () => {
     ["font-face src", `@font-face { font-family: Remote; src: url(https://example.com/font.woff2); }`],
     ["escaped url()", `.icon { background-image: \\75 rl(https://example.com/icon.svg); }`],
     ["comment-split url()", `.icon { background-image: u/**/rl(https://example.com/icon.svg); }`],
+    ["image() string URL", `.icon { background-image: image("https://example.com/icon.svg"); }`],
+    ["escaped @import", `@\\69mport url(https://example.com/remote.css);`],
   ])("refuses CSS external references written as %s", async (_case, css) => {
     await expect(compileAuthoredWidget({
       "client.tsx": `import "./widget.css"; export default () => null;`,
@@ -38,6 +42,36 @@ describe("compileAuthoredWidget", () => {
       "client.tsx": "export default () => null",
       "unused\u0001.tsx": "export const value = 1",
     })).rejects.toThrow(/control characters/u);
+  });
+
+  it("fails closed when source exceeds per-file or file-count caps", async () => {
+    await expect(compileAuthoredWidget({
+      "client.tsx": `export default () => null;`,
+      "large.css": "a{}".padEnd(256 * 1024 + 1, " "),
+    })).rejects.toThrow(/exceeds 262144 bytes/u);
+    const tooManyFiles = Object.fromEntries([
+      ["client.tsx", "export default () => null;"],
+      ...Array.from({ length: 100 }, (_, index) => [`extra-${index}.tsx`, "export const x = 1"]),
+    ]);
+    await expect(compileAuthoredWidget(tooManyFiles)).rejects.toThrow(/exceeds 100 files/u);
+  });
+
+  it("hashes the full locked dependency snapshot closure", async () => {
+    const lockfile = await readFile(new URL("../../../pnpm-lock.yaml", import.meta.url), "utf8");
+    const baseline = hashAllowedLockEntries(lockfile);
+    const changedTransitiveSnapshot = lockfile.replace(
+      "  scheduler@0.27.0: {}",
+      "  scheduler@0.27.0:\n    resolution: {integrity: sha512-mutated-transitive-snapshot}",
+    );
+    expect(changedTransitiveSnapshot).not.toBe(lockfile);
+    expect(hashAllowedLockEntries(changedTransitiveSnapshot)).not.toBe(baseline);
+
+    const changedPeerRootPackage = lockfile.replace(
+      /(^  react-dom@19\.2\.8:\n    resolution: \{integrity: )([^}]+)(\})/mu,
+      "$1sha512-mutated-peer-root$3",
+    );
+    expect(changedPeerRootPackage).not.toBe(lockfile);
+    expect(hashAllowedLockEntries(changedPeerRootPackage)).not.toBe(baseline);
   });
 
   it("does not accept authored package manifests or unsupported source files", async () => {
