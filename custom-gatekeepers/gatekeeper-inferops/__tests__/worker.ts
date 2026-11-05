@@ -432,10 +432,10 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   /** The account's answer to the Workshop's workflow:invoke question (FAC-102), or its failure message. */
-  async holdsWorkflowInvoke(props: AccountProps): Promise<{ holds: boolean; scope: string | null } | string> {
+  async holdsWorkflowInvoke(props: AccountProps, resourceUrl: string): Promise<{ holds: boolean; scope: string | null } | string> {
     const account = this.#account(props) as unknown as Required<Pick<GatekeeperUser, "holdsWorkflowInvoke">>;
     try {
-      return { ...await account.holdsWorkflowInvoke() };
+      return { ...await account.holdsWorkflowInvoke(resourceUrl) };
     } catch (error) {
       return String(error instanceof Error ? error.message : error);
     }

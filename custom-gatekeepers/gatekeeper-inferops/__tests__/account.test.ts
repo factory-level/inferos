@@ -1943,42 +1943,70 @@ const permissionQuestions = () => inferlab.apiCalls.filter(c => c.path.startsWit
 const invokeAnswer = (holds: boolean, scope: string | null) => ({ holds, scope });
 
 describe("workflow:invoke authority (FAC-102)", () => {
+  // The workflow's board: its connection's target InferOps workspace is acme.operations (OPS).
+  const OPS_BOARD = BOARD_URL;
 
-  it("asks exactly workflow:invoke with the person's own token, and a person without it is a no", async () => {
-    const account = await connect("operator without invoke");
-    expect(await hooks().holdsWorkflowInvoke(account)).toEqual(invokeAnswer(false, "t1"));
+  it("asks exactly workflow:invoke, with the person's own token, in the board's workspace only", async () => {
+    inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
+    inferlab.memberships.add(SALES);
+    inferlab.workflowInvokers.add(OPS);
+    const account = await connect("operator with invoke");
+    expect(await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toEqual(invokeAnswer(true, "t1"));
     expect(permissionQuestions().map(c => [c.method, c.path, c.workspaceId])).toEqual([
       ["GET", "/auth/permissions?permissions=workflow%3Ainvoke", OPS],
     ]);
     expect(permissionQuestions().every(c => c.issuer === inferlab.test)).toBe(true);
-  });
-
-  it("is a yes where any of the session's workspaces' grants holds it, and isn't shared configuration", async () => {
-    inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
-    inferlab.memberships.add(SALES);
-    inferlab.workflowInvokers.add(SALES);
-    const account = await connect("operator with invoke");
-    expect(await hooks().holdsWorkflowInvoke(account)).toEqual(invokeAnswer(true, "t1"));
-    expect(permissionQuestions().map(c => c.workspaceId)).toEqual([OPS, SALES]);
     // Holding it is no Admin authority.
     expect(await hooks().holdsSharedConfiguration(account, "build")).toEqual(invokeAnswer(false, "t1"));
+  });
+
+  it("refuses on a deny in the board's workspace, whatever an InferMind or other workspace grant says (QA 3d)", async () => {
+    inferlab.workspaces.push({ workspaceId: MIND, workspaceName: "Mind", product: "infermind" },
+                            { workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
+    inferlab.memberships.add(MIND);
+    inferlab.memberships.add(SALES);
+    inferlab.workflowInvokers.add(MIND);
+    inferlab.workflowInvokers.add(SALES);
+    const account = await connect("denied in operations");
+    expect(await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toEqual(invokeAnswer(false, "t1"));
+    expect(permissionQuestions().map(c => c.workspaceId)).toEqual([OPS]);
+  });
+
+  it("refuses, asking nothing, a board in a workspace that isn't one of the person's InferOps workspaces", async () => {
+    inferlab.workspaces.push({ workspaceId: MIND, workspaceName: "Mind", product: "infermind" });
+    inferlab.memberships.add(MIND);
+    inferlab.workflowInvokers.add(MIND);
+    const account = await connect("knowledge only");
+    const before = permissionQuestions().length;
+    for (const url of ["inferops://acme.mind/project/board/DEMO", "inferops://acme.sales/project/board/DEMO", "not a board"]) {
+      expect(await hooks().holdsWorkflowInvoke(account, url)).toEqual(invokeAnswer(false, "t1"));
+    }
+    expect(permissionQuestions().length).toBe(before);
   });
 
   it("fails rather than guessing on an outage or an answer about another permission", async () => {
     const account = await connect("unsure invoker");
     inferlab.permissionsAnswer = () => new Response("down", { status: 502 });
-    expect(typeof await hooks().holdsWorkflowInvoke(account)).toBe("string");
+    expect(typeof await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toBe("string");
     inferlab.permissionsAnswer = () => Response.json({
       decisions: [{ permission: "configuration:build", allowed: true, reason: "role-allow" }],
     });
-    expect(typeof await hooks().holdsWorkflowInvoke(account)).toBe("string");
+    expect(typeof await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toBe("string");
   });
 
   it("answers for nothing without a connected person, and asks nobody", async () => {
     const before = permissionQuestions().length;
     expect(await hooks().holdsWorkflowInvoke(
-      { accountId: "00000000-0000-4000-8000-0000000000fe", connected: false })).toEqual(invokeAnswer(false, null));
+      { accountId: "00000000-0000-4000-8000-0000000000fe", connected: false }, OPS_BOARD)).toEqual(invokeAnswer(false, null));
     expect(permissionQuestions().length).toBe(before);
+  });
+
+  it("leaves shared configuration as it was: a yes from any workspace of the company (FAC-44)", async () => {
+    inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
+    inferlab.memberships.add(SALES);
+    inferlab.configurationAdmin.add(SALES);
+    const account = await connect("admin in sales");
+    expect(await hooks().holdsSharedConfiguration(account, "publish")).toEqual(invokeAnswer(true, "t1"));
   });
 });
 

@@ -201,10 +201,13 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   UNAUTHORIZED, and InferOps refusing a revoked key fails the call: there is no fallback to anyone's
   token, the stopgap connection or the mock. `account.test.ts` ("system credentials") covers the
   check, the refusals, the host, rotation, forgetting and revocation.
-- **Running workflows (FAC-102).** `InferOpsAccount.holdsWorkflowInvoke()` answers whether the
-  person may ask a configured system workflow to run, asking InferOps' `workflow:invoke` exactly as
-  the shared-configuration question asks (the same company scope, refusals and private
-  `#holdsInCompany` loop). The Workshop asks it before admitting an on-request run (see
+- **Running workflows (FAC-102).** `InferOpsAccount.holdsWorkflowInvoke(resourceUrl)` answers whether
+  the person may ask a configured system workflow to run against that board: InferOps'
+  `workflow:invoke`, asked in the board host's own workspace only, resolved among the person's own
+  InferOps workspaces (`resolveWorkspace(slug, "inferops")`). An InferMind or other workspace's
+  grant never counts, and a board outside the person's InferOps workspaces is a no, asking nothing
+  (the manager, 2026-11-05). The company scope and its refusals are the shared-configuration
+  question's, which still takes a yes from any workspace. The Workshop asks it before admitting an on-request run (see
   [Operate mode](operate-mode.md)). A yes isn't shared configuration and grants nothing of the
   workflow's.
   Only an Admin's grant (`owner`, `admin`) holds those permissions, and a grant deny removes either

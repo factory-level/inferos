@@ -327,7 +327,17 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
 });
 
 // The harness for the invoker's own grant: a pinned trigger whose control lists OPERATOR.
-async function invokeSession(mayInvoke?: () => Promise<boolean>) {
+const OPS_BOARD = "inferops://acme.operations/project/board/OPS";
+const SALES_BOARD = "inferops://acme.sales/project/board/SALES";
+/** The connections the harness's gadget can bind: two InferOps boards and a mail account. */
+const CONNECTIONS: Record<number, { vendorId: string; resourceUrl: string }> = {
+  50: { vendorId: "inferops", resourceUrl: OPS_BOARD },
+  51: { vendorId: "inferops", resourceUrl: SALES_BOARD },
+  60: { vendorId: "mail", resourceUrl: "mail://ops" },
+};
+
+async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolean>,
+                             bindings: [string, { target: number }][] = [["BOARD", { target: 50 }]]) {
   let { store } = pinned();
   store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
   let invoke = vi.fn(async () => {});
@@ -340,21 +350,27 @@ async function invokeSession(mayInvoke?: () => Promise<boolean>) {
     getGadgetHead: headOf,
     defaultGadgetId: GADGET,
     assertGatekeeperUsable: () => {},
+    getGadgetRecord: () => ({}),
+    visibleBindings: () => bindings,
     storage: Object.assign(makeOverseerStorage(makeMockStorage()), {
       containsRestrictedData: { get: () => false },
       title: { get: () => "Test Workspace" },
       operateSession: { get: () => false },
       boundHooks: { get: (id: number) => (id === HOOK ? hook : undefined), list: () => [hook] },
-      gatekeepers: { get: () => undefined },
+      gatekeepers: {
+        get: (id: number) => CONNECTIONS[id] && {
+          creationSpec: { type: "gatekeeper", typeUrlPattern: "x", ...CONNECTIONS[id] },
+        },
+      },
     }),
     users: {
       idFromString: (id: string) => id,
       get: (id: string) => ({
         whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
         holdsSharedConfiguration: async () => true,
-        holdsWorkflowInvoke: async () => {
-          askedInvoke.push(id);
-          return mayInvoke ? mayInvoke() : true;
+        holdsWorkflowInvoke: async (resourceUrl: string) => {
+          askedInvoke.push(`${id} ${resourceUrl}`);
+          return mayInvoke ? mayInvoke(resourceUrl) : true;
         },
       }),
     },
@@ -367,13 +383,35 @@ async function invokeSession(mayInvoke?: () => Promise<boolean>) {
 }
 
 describe("the invoker's own InferOps grant (workflow:invoke, inferops ADR 0011 D3)", () => {
+  it("asks about the workflow's own InferOps board, read from its connection's record, nothing else", async () => {
+    let { overseer, askedInvoke } = await invokeSession(async () => true,
+        [["BOARD", { target: 50 }], ["MAIL", { target: 60 }]]);
+    await overseer.invokeTrigger(HOOK);
+    expect(askedInvoke).toEqual([`viewer-id ${OPS_BOARD}`]);
+  });
+
+  it("refuses a workflow with no InferOps connection to scope it, asking nothing", async () => {
+    let { overseer, invoke, askedInvoke } = await invokeSession(async () => true, [["MAIL", { target: 60 }]]);
+    await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    expect(askedInvoke).toEqual([]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("needs a yes for every InferOps board the workflow acts on", async () => {
+    let { overseer, invoke, askedInvoke } = await invokeSession(async url => url === OPS_BOARD,
+        [["OPS", { target: 50 }], ["SALES", { target: 51 }]]);
+    await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    expect(askedInvoke).toEqual([`viewer-id ${OPS_BOARD}`, `viewer-id ${SALES_BOARD}`]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
 
   it("refuses a listed Operator who doesn't hold it, before anything is minted or handed on", async () => {
     let { overseer, store, invoke, askedInvoke } = await invokeSession(async () => false);
     await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
     expect(invoke).not.toHaveBeenCalled();
     // Asked about the person in this session, with their own account.
-    expect(askedInvoke).toEqual(["viewer-id"]);
+    expect(askedInvoke).toEqual([`viewer-id ${OPS_BOARD}`]);
     // Nothing was minted: the per-person rate still has all its runs.
     for (let i = 0; i < 3; i++) store.beginInvocation(OPERATOR, HOOK);
   });

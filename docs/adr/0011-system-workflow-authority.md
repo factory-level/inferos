@@ -6,7 +6,7 @@ date: 2026-11-02
 
 # 0011. Configured system work uses its assigned principal, apart from each person's token
 
-**Status note (2026-11-05):** built in part under the manager's default for FAC-102 (option C, a run-scoped worker), awaiting Calvin's acceptance; this record stays proposed. The kernel half is in place (see [Operate mode](../architecture/operate-mode.md), "Assigned runs"): a trigger assignment, a run-scoped worker whose only binding is the assigned connection, and a system session through `GatekeeperVendor.getSystemGatekeeperClass`. Who may assign is interim on the deployment's `publish` authority (an Admin's). The gatekeeper's credential store and the UI are separate changes.
+**Status note (2026-11-05):** built in part under the manager's default for FAC-102 (option C, a run-scoped worker), awaiting Calvin's acceptance; this record stays proposed. Invoking (inferops ADR 0011 D3's grant half) is built: `workflow:invoke` is checked in the connection's target InferOps workspace only (manager, 2026-11-05), through the person's own token; no other workspace's grant counts. The kernel half of execution is in place (see [Operate mode](../architecture/operate-mode.md), "Assigned runs"): a trigger assignment, a run-scoped worker whose only binding is the assigned connection, and a system session through `GatekeeperVendor.getSystemGatekeeperClass`. Who may assign is interim on the deployment's `publish` authority (an Admin's). The gatekeeper's credential store and the UI are separate changes.
 
 ## Context
 
