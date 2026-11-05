@@ -681,6 +681,17 @@ describe("#374 round 4: every route that removes the assigned binding retires th
     expect(made.aborted).toEqual([]);
   });
 
+  // Intended (lead, 2026-11-05): an assignment is tied to the connection, not the binding's name,
+  // and a run's env takes the names bound when it loads.
+  it("keeps it when the binding is renamed but still targets the assigned connection", () => {
+    let made = assignedWithRun();
+    made.setBindings([["BOARD", { target: INFEROPS }]]);
+    retireUnboundAssignments(made.impl);
+    expect(made.store.assignmentOf(HOOK)?.credentialRef).toBe(made.assignment.credentialRef);
+    expect(made.aborted).toEqual([]);
+    expect(made.forget).not.toHaveBeenCalled();
+  });
+
   it("retires it when the binding to the assigned connection is unbound", async () => {
     let made = assignedWithRun();
     made.setBindings([["MAIL", { target: 60 }]]);
