@@ -16,8 +16,11 @@ archives into, and `pnpm import:bundled-blueprint` (the same package) writes int
 The Node-only `@gadgets/bundled-blueprints/authoring-compiler` entry compiles an in-memory file map
 with `client.tsx`, optional local `.tsx` modules, and `.css` files into one self-contained client
 module. It uses a server-owned React/Refine dependency allow-list and rejects authored manifests,
-unsupported paths or syntax, dynamic imports, unapproved packages, and build-time network or
-credential APIs. It does not execute authored code or write source or artifacts to disk.
+unsupported paths or syntax, dynamic imports, unapproved packages, and CSS network or external asset
+references. Refine telemetry is forcibly disabled in the compiled app. The denied-global checks
+give authors early feedback; they are not a security boundary. The runtime boundary is the Gadget
+frame and its content policy, which the later editor/runtime slice must enforce. The compiler does
+not execute authored code or write source or artifacts to disk.
 
 `compileAuthoredWidget` returns a frozen, content-hashed artifact with source and lock hashes,
 compiler versions, build duration, raw and data-URL-encoded sizes. Callers keep editable source

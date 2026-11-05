@@ -19,6 +19,27 @@ describe("compileAuthoredWidget", () => {
     await expect(compileAuthoredWidget({ "client.tsx": source })).rejects.toThrow();
   });
 
+  it.each([
+    ["@import", `@import url(https://example.com/remote.css);`],
+    ["url()", `.icon { background-image: url(https://example.com/icon.svg); }`],
+    ["image-set()", `.icon { background-image: image-set(url(local.png) 1x); }`],
+    ["font-face src", `@font-face { font-family: Remote; src: url(https://example.com/font.woff2); }`],
+    ["escaped url()", `.icon { background-image: \\75 rl(https://example.com/icon.svg); }`],
+    ["comment-split url()", `.icon { background-image: u/**/rl(https://example.com/icon.svg); }`],
+  ])("refuses CSS external references written as %s", async (_case, css) => {
+    await expect(compileAuthoredWidget({
+      "client.tsx": `import "./widget.css"; export default () => null;`,
+      "widget.css": css,
+    })).rejects.toThrow(/CSS/u);
+  });
+
+  it("rejects control characters in source paths", async () => {
+    await expect(compileAuthoredWidget({
+      "client.tsx": "export default () => null",
+      "unused\u0001.tsx": "export const value = 1",
+    })).rejects.toThrow(/control characters/u);
+  });
+
   it("does not accept authored package manifests or unsupported source files", async () => {
     await expect(compileAuthoredWidget({
       "client.tsx": "export default () => null",
@@ -74,6 +95,8 @@ describe("compileAuthoredWidget", () => {
     expect(first.clientJs).not.toContain("sourceMappingURL");
     expect(first.clientJs).not.toContain("sourcesContent");
     expect(first.clientJs).not.toContain("/home/factorylevel/");
+    expect(first.clientJs).not.toContain("telemetry.refine.dev");
+    expect(first.clientJs).not.toMatch(/(?:^|[^\w$.])__require\b|(?<![\w$.])require\s*\(/u);
     expect(first.sourceHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
     expect(first.dependencyLockHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
     expect(first.dependencyLockBytes).toBeGreaterThan(0);
@@ -82,6 +105,17 @@ describe("compileAuthoredWidget", () => {
       "@refinedev/core": "5.0.12",
       react: "19.2.8",
     });
+  });
+
+  it("forces Refine telemetry off even if authored options request it", async () => {
+    const artifact = await compileAuthoredWidget({
+      "client.tsx": `import { Refine } from "@refinedev/core";
+        export default function App() {
+          return <Refine options={{ disableTelemetry: false }} />;
+        }`,
+    });
+
+    expect(artifact.clientJs).not.toContain("telemetry.refine.dev");
   });
 
   it("fails without changing an already selected artifact when source compilation fails", async () => {
