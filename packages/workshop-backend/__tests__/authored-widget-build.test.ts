@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   validateAuthoredWidgetSources,
+  maximumSourcePathBytes,
   withBuildDeadline,
 } from "../src/authored-widget-validation.js";
 
@@ -34,6 +35,14 @@ describe("authored widget publication input", () => {
       "client.tsx": 'import Panel from "./components/Panel"; export default function Widget(){ return <Panel/> }',
       "components/Panel.tsx": "export default function Panel(){ return <div/> }",
     })).toHaveProperty("size", 2);
+  });
+
+  it("accepts source paths at the byte limit and refuses paths one byte over", () => {
+    const atLimit = `${"a".repeat(maximumSourcePathBytes - ".tsx".length)}.tsx`;
+    expect(validateAuthoredWidgetSources({ ...valid, [atLimit]: "export {};" })).toHaveProperty("size", 2);
+    const overLimit = `${"a".repeat(maximumSourcePathBytes + 1 - ".tsx".length)}.tsx`;
+    expect(() => validateAuthoredWidgetSources({ ...valid, [overLimit]: "export {};" }))
+      .toThrow("Invalid source path.");
   });
 
 });

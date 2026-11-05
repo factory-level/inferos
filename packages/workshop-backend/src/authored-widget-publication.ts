@@ -9,6 +9,7 @@ const sourceFreeValidationMessages = new Set([
   "Dynamic import refused.",
   "import.meta refused.",
   "External CSS resources are not allowed.",
+  "Invalid source path.",
 ]);
 
 /** Minimal build namespace contract used by the authored-widget publication boundary. */

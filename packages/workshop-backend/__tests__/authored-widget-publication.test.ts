@@ -42,6 +42,10 @@ describe("authored widget publication commit boundary", () => {
 
   it.each([
     ["unapproved imports", { "client.tsx": 'import fs from "node:fs"; export default function Widget(){ return <div/> }' }],
+    ["overlong source paths", {
+      "client.tsx": "export default function Widget(){ return <div/> }",
+      [`${"a".repeat(509)}.tsx`]: "export {};",
+    }],
     ["too many files", Object.fromEntries([
       ["client.tsx", "export default function Widget(){ return <div/> }"],
       ...Array.from({length: 100}, (_, index) => [`extra-${index}.tsx`, "export {};" ]),
@@ -106,6 +110,7 @@ describe("authored widget publication commit boundary", () => {
     "Dynamic import refused.",
     "import.meta refused.",
     "External CSS resources are not allowed.",
+    "Invalid source path.",
   ]) (
     "preserves the fixed, source-free validation refusal %s", async message => {
       const run = compileAuthoredWidgetPublication({
