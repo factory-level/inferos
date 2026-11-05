@@ -706,6 +706,12 @@ export const OPERATE_SESSION_ERROR_CODES = {
    * removed, or isn't one their access shows (FAC-87). It names no page and no workspace.
    */
   flowPageUnavailable: "OPERATE_SESSION_FLOW_PAGE_UNAVAILABLE",
+  /**
+   * A flow navigation couldn't check its destination page just now (the workspace was unreachable,
+   * or the read failed for another reason), so it didn't move. Transient: try again. Like
+   * `flowPageUnavailable`, it names no page and no workspace.
+   */
+  flowNavigationFailed: "OPERATE_SESSION_FLOW_NAVIGATION_FAILED",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -722,6 +728,8 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
       "longer available to you. Reload the console.",
   [OPERATE_SESSION_ERROR_CODES.flowPageUnavailable]:
       "That page of the flow isn't available to you any more. Go back, or leave the flow.",
+  [OPERATE_SESSION_ERROR_CODES.flowNavigationFailed]:
+      "Couldn't move to that page of the flow just now. Try again.",
   [OPERATE_SESSION_ERROR_CODES.boardUnavailable]:
       "That board is not connected for you here, or is no longer available to you. Connect it or " +
       "choose another board.",

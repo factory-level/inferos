@@ -8,6 +8,7 @@ import { handleOperateAgui } from "./operate-agui.js";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
+import { checkFlowDestination } from './flow-navigation.js';
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch, type ConsoleRef, type HostBoardEntry, type OperateConsole, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
 import { boundViewsEnabled, describeBoundView } from "./console-store.js";
@@ -945,7 +946,8 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   // authoritative definition when the run started (#checkFlowStart). The destination's screen is
   // checked again now, through the caller's own access to the run's workspace, so a page whose
   // screen was removed, or that their access no longer shows (a use-role session sees published
-  // screens only), is refused with `flowPageUnavailable`. Whether the move is a route of the current
+  // screens only), is refused with `flowPageUnavailable`, and any other failure of that read with
+  // the retryable `flowNavigationFailed` (see checkFlowDestination). Whether the move is a route of the current
   // page is the reducer's to say (invalidEvent), at the same `expectedSeq`.
   async #checkFlowNavigation(event: OperateEvent, expectedSeq: number): Promise<void> {
     if (event.type !== "navigateFlow" && event.type !== "backFlow") return;
@@ -957,14 +959,10 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
       ? run.pages.findIndex(candidate => candidate.name === event.to) : run.history?.at(-1);
     if (index === undefined || index < 0) return;
     let screen = run.steps[index]!;
-    let openable = false;
-    try {
+    await checkFlowDestination(async () => {
       using workspace = await this.openConsoleWorkspace(run.workspaceId);
-      openable = (await workspace.getCanvas(screen)) !== null;
-    } catch {
-      // Unreachable, like a screen the caller can't open.
-    }
-    if (!openable) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.flowPageUnavailable);
+      return workspace.getCanvas(screen);
+    });
   }
 
   async subscribe(subscriber: RpcStub<(update: OperateSessionUpdate) => void>)
