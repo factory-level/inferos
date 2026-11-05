@@ -6,6 +6,7 @@ import type { AuthoredWidgetBuildDurableObject } from "../src/authored-widget-bu
 import type { OverseerDurableObject } from "../src/overseer.js";
 import { readBlueprintVersionToInstall } from "../src/blueprint-install.js";
 import { blueprintVersionMetadata } from "../src/blueprint-archive.js";
+import { compileAuthoredWidgetSources } from "../src/authored-widget-publication.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -19,43 +20,48 @@ let nextId = 0;
 async function withClient<T>(run: (impl: any, client: Overseer, instance: OverseerDurableObject) => Promise<T>): Promise<T> {
   const stub = env.TEST_OVERSEER.getByName(`authored-widget-flow-${++nextId}`);
   return runInDurableObject(stub, async instance => {
-    const impl = (instance as unknown as {impl: any}).impl;
-    const ownerId = impl.users.newUniqueId().toString();
-    impl.ownerId = ownerId;
-    impl.defaultGadgetId = 1;
-    impl.storage.defaultGadgetId.put(1);
-    impl.ensureAmbientCapsules = async () => {};
-    impl.markOutputsDirty = () => {};
-    impl.requireSharedConfiguration = async () => {};
-    impl.recordGadgetAnalytics = () => {};
-    const owner = impl.users.idFromString(ownerId);
-    impl.users.get = () => ({
-      id: owner,
-      whoami: async () => ({id: "owner-profile", name: "Owner"}),
-    });
-    const index = new Map<string, string>();
-    const versions = new Map<string, {body: Uint8Array, metadata?: Record<string, string>}>();
-    impl.env = {
-      ...impl.env,
-      BLUEPRINTS: {
-        get: async (key: string) => index.get(key) ?? null,
-        put: async (key: string, value: string) => { index.set(key, value); },
-        delete: async (key: string) => { index.delete(key); },
-      },
-      BLUEPRINT_CONTENT: {
-        put: async (key: string, body: Uint8Array, options?: {customMetadata?: Record<string, string>}) => {
-          versions.set(key, {body: new Uint8Array(body), metadata: options?.customMetadata});
+      const impl = (instance as unknown as {impl: any}).impl;
+      const ownerId = impl.users.newUniqueId().toString();
+      impl.ownerId = ownerId;
+      impl.defaultGadgetId = 1;
+      impl.storage.defaultGadgetId.put(1);
+      impl.ensureAmbientCapsules = async () => {};
+      impl.markOutputsDirty = () => {};
+      impl.requireSharedConfiguration = async () => {};
+      impl.recordGadgetAnalytics = () => {};
+      const owner = impl.users.idFromString(ownerId);
+      impl.users.get = () => ({
+        id: owner,
+        whoami: async () => ({id: "owner-profile", name: "Owner"}),
+      });
+      const index = new Map<string, string>();
+      const versions = new Map<string, {body: Uint8Array, metadata?: Record<string, string>}>();
+      impl.env = {
+        ...impl.env,
+        BLUEPRINTS: {
+          get: async (key: string) => index.get(key) ?? null,
+          put: async (key: string, value: string) => { index.set(key, value); },
+          delete: async (key: string) => { index.delete(key); },
         },
-        get: async (key: string) => {
-          const item = versions.get(key);
-          return item ? {body: new Response(item.body).body, customMetadata: item.metadata} : null;
+        BLUEPRINT_CONTENT: {
+          put: async (key: string, body: Uint8Array, options?: {customMetadata?: Record<string, string>}) => {
+            versions.set(key, {body: new Uint8Array(body), metadata: options?.customMetadata});
+          },
+          get: async (key: string) => {
+            const item = versions.get(key);
+            return item ? {body: new Response(item.body).body, customMetadata: item.metadata} : null;
+          },
+          delete: async (key: string) => { versions.delete(key); },
         },
-        delete: async (key: string) => { versions.delete(key); },
-      },
-    };
-    const client = await instance.open(
-      ownerId, "owner-profile", new NativeRpcStub<() => void>(() => {}));
-    return run(impl, client, instance);
+      };
+      const transport = new NativeRpcStub<() => void>(() => {});
+      const client = await instance.open(ownerId, "owner-profile", transport);
+      try {
+        return await run(impl, client, instance);
+      } finally {
+        client[Symbol.dispose]();
+        transport[Symbol.dispose]();
+      }
   });
 }
 
@@ -110,6 +116,33 @@ describe("authored widget publication through the Overseer client", () => {
         jsCode: expect.stringContaining("workerd preview"),
         measurements: { clientBytes: expect.any(Number), durationMs: expect.any(Number) },
       });
+    });
+  }, 30_000);
+
+  it.each([
+    ["invalid TSX", "export default function {", "Invalid TypeScript syntax."],
+    ["node import", 'import fs from "node:fs"; export default function Widget(){ return null }', "Unapproved package import."],
+    ["non-literal dynamic import", "const name = './x'; void import(name); export default function Widget(){ return null }", "Dynamic import refused."],
+    ["eval", 'eval("1"); export default function Widget(){ return null }', "Dynamic code loading refused."],
+    ["Function constructor", 'new Function("return 1")(); export default function Widget(){ return null }', "Denied global."],
+    ["require", 'require("react"); export default function Widget(){ return null }', "Dynamic code loading refused."],
+    ["import.meta", "const url = import.meta.url; export default function Widget(){ return null }", "import.meta refused."],
+    ...["Bun", "Deno", "EventSource", "Function", "global", "globalThis", "localStorage", "navigator",
+      "self", "sessionStorage", "WebSocket", "window", "XMLHttpRequest", "fetch", "process"]
+      .map(name => [`${name} global`, `${name}; export default function Widget(){ return null }`, "Denied global."]),
+    ["denied member", "globalThis['fetch']('/private'); export default function Widget(){ return null }", "Denied global."],
+    ["document defaultView", "document.defaultView; export default function Widget(){ return null }", "Denied global."],
+    ["computed document defaultView", "document['defaultView']; export default function Widget(){ return null }", "Denied global."],
+    ["document computed member", "const key = 'cookie'; document[key]; export default function Widget(){ return null }", "Denied global."],
+    ["missing default export", "export const Widget = () => null", "Missing default component export."],
+  ])("refuses %s in the real workerd build Durable Object", async (_label, source, message) => {
+    const stub = env.TEST_AUTHORED_WIDGET_BUILD.get(env.TEST_AUTHORED_WIDGET_BUILD.newUniqueId());
+    await runInDurableObject(stub, async build => {
+      await expect(compileAuthoredWidgetSources({
+        sources: { "client.tsx": source },
+        builds: { newUniqueId: () => "local-build", get: () => build },
+        onFailure: () => {},
+      })).rejects.toThrow(message);
     });
   }, 30_000);
 

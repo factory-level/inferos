@@ -13,7 +13,9 @@ const sourceFreeValidationMessages = new Set([
   "Unapproved package import.",
   "Denied global.",
   "Dynamic import refused.",
+  "Dynamic code loading refused.",
   "import.meta refused.",
+  "Missing default component export.",
   "External CSS resources are not allowed.",
   "Invalid source path.",
 ]);

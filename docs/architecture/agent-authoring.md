@@ -210,3 +210,9 @@ object or binding change. Use-role and operate sessions, including agent callers
 disabled flag refuses before reading draft files or allocating a build object. Preview waits at most
 15 seconds and returns no JavaScript larger than 2 MiB. These limits bound the caller and response;
 a timed-out synchronous WASM build may continue until its build object resets.
+
+The shared build checks parse each TSX source before bundling and refuse denied globals, dynamic
+imports, dynamic code loading, `import.meta`, unapproved package imports, invalid syntax and a
+missing default component export. These checks provide early feedback and defense in depth; they
+are not the sandbox boundary. Isolation and the reviewed dependency closure remain the security
+boundary for authored code.

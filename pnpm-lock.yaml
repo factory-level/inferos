@@ -1135,6 +1135,9 @@ importers:
 
   packages/workshop-backend:
     dependencies:
+      acorn:
+        specifier: 8.18.0
+        version: 8.18.0
       '@ag-ui/core':
         specifier: 1.0.2
         version: 1.0.2(zod@4.6.5)
