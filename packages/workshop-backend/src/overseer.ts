@@ -6,9 +6,15 @@ import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@g
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
+  TriggerAssignment, TriggerAssignmentSettings,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation,
 } from "@gadgets/workshop-shared/workflow-definition";
+import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import {
+  SystemRunRegistry, openSystemRunSession, runAssignedDelivery, systemGatekeeperFacetName,
+  type AssignedDelivery, type SystemRunHost,
+} from "./system-run.js";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
@@ -51,7 +57,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -991,6 +997,8 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
       return caller.gadgetId === undefined ? undefined : {type: "gadget", id: String(caller.gadgetId)};
     case "hook":
       return {type: "system", id: "hook"};
+    case "systemRun":
+      return {type: "system", id: `systemRun:${caller.hookId}`};
   }
 }
 
@@ -1343,7 +1351,8 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // Only the kind of caller leaves the server, never its chat or gadget id. Records persisted
   // before callers were tracked have no `caller`, so their entries carry no `requestedBy`.
   const from = (record.caller as GatekeeperCaller | undefined)?.from;
-  const requestedBy = from === "user" ? "person" : from;
+  // A trigger's assigned run (FAC-102) is the trigger's automation, like any other hook firing.
+  const requestedBy = from === "user" ? "person" : from === "systemRun" ? "hook" : from;
 
   switch (record.type) {
     case "observation":
@@ -1594,6 +1603,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Who may ask a pinned trigger to run now, and the requests admitted but not yet delivered
       // (FAC-102; see workflow-definition-store.ts).
       workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),
+      // Which service account an assigned trigger's on-request runs execute as (FAC-102).
+      workflowTriggerAssignments: collection<TriggerAssignment>()({ primaryKey: "hookId" }),
       workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
       // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
       workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
@@ -6570,8 +6581,46 @@ class OverseerImpl implements AgentHooks {
     return config;
   }
 
+  /** The admitted, assigned runs in flight (FAC-102; see system-run.ts). */
+  systemRuns = new SystemRunRegistry();
+
+  // What system-run.ts needs of this workspace, bound to it.
+  #systemRunHost(): SystemRunHost {
+    return {
+      systemRuns: this.systemRuns,
+      assignmentOf: hookId => this.workflowDefinitionStore().assignmentOf(hookId),
+      liveHookGadget: hookId => {
+        let gadgetId = requireLiveHook(this, hookId).gadgetId ?? this.defaultGadgetId;
+        if (gadgetId === undefined) throw new Error("This trigger wakes no gadget.");
+        return gadgetId;
+      },
+      bindingsOf: gadgetId => this.visibleBindings(this.getGadgetRecord(gadgetId)),
+      makeLoopback: (gatekeeperId, caller) => this.makeBindingLoopback({type: "gatekeeper", id: gatekeeperId}, caller),
+      readModules: async commitId => {
+        let modules: Record<string, string> = {};
+        for (let [file, content] of await this.gitStore.readCommitFiles(commitId)) {
+          if (isGadgetModule(file)) modules[file] = content;
+        }
+        return modules;
+      },
+      loadWorker: code => this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null}),
+      vendorIdOf: gatekeeperId => gatekeeperVendorId(this.storage.gatekeepers.get(gatekeeperId)),
+      vendor: vendorId => buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
+          Pick<GatekeeperVendor, "getSystemGatekeeperClass"> | undefined,
+      facet: (name, cls) => this.ctx.facets.get(name, async () => ({class: cls})) as Fetcher<Gatekeeper<any>>,
+      openSession: (gatekeeperId, facet, caller) => this.openGatekeeperSession(gatekeeperId, facet, caller),
+    };
+  }
+
+  /** Runs one admitted delivery of an assigned trigger (FAC-102; see system-run.ts). */
+  runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
+    return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args);
+  }
+
   // Open the session behind a binding loopback.
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+    // A run-scoped worker's binding: only the assigned connection's system session (FAC-102).
+    if (caller.from === "systemRun") return openSystemRunSession(this.#systemRunHost(), target, caller);
     // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
     // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
     if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
@@ -6730,7 +6779,8 @@ class OverseerImpl implements AgentHooks {
     try {
       if (caller.from === "agent") {
         this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
-      } else if (caller.from !== "hook" && caller.chatId !== undefined && this.ownerId) {
+      } else if (caller.from !== "hook" && caller.from !== "systemRun" && caller.chatId !== undefined &&
+                 this.ownerId) {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
         this.addChatMessages(caller.chatId, this.gadgetAuthorFor(userMeta.profile),
@@ -11400,6 +11450,12 @@ class OverseerImpl implements AgentHooks {
   }
 
   /** This workspace's workflow definitions, their trigger pins and deliveries. */
+  /** See setWorkflowTriggerAssignment. */
+  setTriggerAssignment(caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null)
+      : TriggerAssignment | null {
+    return setWorkflowTriggerAssignment(this, caller, hookId, settings);
+  }
+
   /** See invokeWorkflowTrigger. */
   async invokeTrigger(userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
     return invokeWorkflowTrigger(this, userId, profileId, hookId);
@@ -12532,10 +12588,23 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
     // A delivery a person asked for (invokeTrigger) names the invocation admitted for it; the store
     // accepts only that, once, and records who asked as a claim beside the run.
-    this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
+    let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
         profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
         typeof request?.invocationId === "string" ? request.invocationId : undefined);
+
+    // An admitted request for an assigned trigger runs as its service account (FAC-102), in a
+    // run-scoped worker, never through the gadget's own callback and the bindings people connected.
+    if (delivery?.invocation && delivery.executedAs) {
+      let caller: GatekeeperCaller = {from: "systemRun", hookId, deliveryId: delivery.deliveryId};
+      return {
+        callback: makeSystemRunCallback(this.impl, hookId, {
+          deliveryId: delivery.deliveryId, commitId: delivery.commitId,
+          credentialRef: delivery.executedAs.credentialRef,
+        }),
+        approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, caller, hookId),
+      };
+    }
 
     // Both returned capabilities revalidate the hook per call rather than trusting this moment:
     // they are held outside this DO (even across resets -- the stored callback is a persistent
@@ -12732,6 +12801,13 @@ type GatekeeperCaller = {
   chatId?: number;
 } | {
   from: "hook";
+} | {
+  // An admitted, assigned run of a pinned trigger (FAC-102): the run-scoped worker's only binding
+  // carries this, set server-side in its loopback props, so no gadget, agent or client can claim it.
+  // Its sessions act as the trigger's assigned service account (see runAssignedDelivery).
+  from: "systemRun";
+  hookId: number;
+  deliveryId: number;
 };
 
 type GatekeeperLoopbackProps = {
@@ -13255,6 +13331,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async listTriggerControls(): Promise<TriggerControl[]> {
     return this.impl.workflowDefinitionStore().controls(null);
+  }
+  // Assigning a service account decides what runs act as, so it takes the deployment's publish
+  // authority (an Admin's), the interim rule until inferops ADR 0011 D1's workflow:assign is decided.
+  async setTriggerAssignment(hookId: number, settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> {
+    await this.#requireSharedConfiguration("publish", "always");
+    return this.impl.setTriggerAssignment(await this.#getClientProfile(), hookId, settings);
+  }
+  async getTriggerAssignment(hookId: number): Promise<TriggerAssignment | null> {
+    return this.impl.workflowDefinitionStore().assignmentOf(hookId);
   }
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
     return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
@@ -15857,6 +15942,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
   // configures nothing (FAC-102, inferops ADR 0011 S6).
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignment | null> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> {
     return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
   }
@@ -16488,6 +16575,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignment | null> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
   async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
@@ -17081,6 +17170,47 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
 // the widening that scheduled a restart, and a shrink-then-rewiden leaves stale firings pointing
 // at a connection pending re-verification (see #gatekeepersPendingRestart).
 /**
+ * Assigns pinned trigger `hookId`'s on-request runs to the service account the connection
+ * `settings.gatekeeperId` provisions for a fresh credential reference, or removes it (FAC-102,
+ * inferops ADR 0011 S1). The connection must be one the trigger's gadget binds, of the vendor the
+ * deployment names in SHARED_CONFIGURATION_GATEKEEPER; without one named there is nothing to assign
+ * to. A change drops runs waiting to start and ends the old reference's system facet. Callers check
+ * the role and authority first.
+ */
+export function setWorkflowTriggerAssignment(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "defaultGadgetId" | "workflowDefinitionStore" |
+        "visibleBindings" | "getGadgetRecord">,
+    caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null): TriggerAssignment | null {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  let record = impl.storage.boundHooks.get(hookId);
+  if (!record) throw new Error("No such hook.");
+  let store = impl.workflowDefinitionStore();
+  let previous = store.assignmentOf(hookId);
+  let gatekeeperId: number | null = null;
+  if (settings !== null) {
+    let requested = typeof settings === "object" ? (settings as {gatekeeperId?: unknown}).gatekeeperId : undefined;
+    if (typeof requested !== "number" || !Number.isSafeInteger(requested)) {
+      throw new TypeError("An assignment names the connection by its id.");
+    }
+    gatekeeperId = requested;
+    let vendor = getSharedConfigurationGatekeeper(impl.env);
+    if (!vendor) throw new Error("This deployment names no service whose accounts can run workflows.");
+    let gadgetId = record.gadgetId ?? impl.defaultGadgetId;
+    let bound = gadgetId !== undefined &&
+        impl.visibleBindings(impl.getGadgetRecord(gadgetId)).some(([, edge]) => edge.target === gatekeeperId);
+    if (!bound || gatekeeperVendorId(impl.storage.gatekeepers.get(gatekeeperId)) !== vendor) {
+      throw new Error(`Assign a ${vendor} connection that this trigger's gadget uses.`);
+    }
+  }
+  let assignment = store.setAssignment(caller, hookId, gatekeeperId);
+  if (previous && previous.credentialRef !== assignment?.credentialRef) {
+    impl.ctx.facets.abort(systemGatekeeperFacetName(previous.credentialRef),
+        new Error("The trigger's assignment changed."));
+  }
+  return assignment;
+}
+
+/**
  * Admit `profileId`'s request to run trigger `hookId` now, then ask the trigger's gatekeeper to
  * deliver it once (Overseer.invokeTrigger). The hook must be live, the person (`userId`) must hold
  * InferOps' `workflow:invoke` through their own account where the deployment names that authority
@@ -17131,6 +17261,33 @@ function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
 // firing as independent stubs (the bindHook contract permits hooks to pass and return them) and
 // are not re-checked per call. That is deliberate: the holder is a gatekeeper bound by the session
 // contract, and this is a guard against a stale firing by mistake, not a revocable membrane.
+// The callback startHook returns for an admitted, assigned delivery (FAC-102): any call on it runs
+// the delivery once in its run-scoped worker (OverseerImpl.runAssignedDelivery), as its `WorkflowRun`
+// entrypoint's method of the same name (`run` when the callback itself is called). A second call is
+// refused, so a stored callback is no standing route to the service account.
+function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
+    delivery: {deliveryId: number; commitId: string; credentialRef: string}): NativeRpcStub<RpcTarget> {
+  let used = false;
+  let once = (method: string | null, args: unknown[]) => {
+    if (used) throw new Error("This run already started.");
+    used = true;
+    return impl.runAssignedDelivery(hookId, delivery, method, args);
+  };
+  // TODO: Same workerd bug as makeHookFiringCallback: wrap the Proxy in a stub manually.
+  return new NativeRpcStub(new Proxy((() => {}) as unknown as RpcTarget, {
+    async apply(_target, _thisArg, args: unknown[]) {
+      return once(null, args);
+    },
+    get(_target, prop) {
+      if (typeof prop === "symbol" || prop === "then") return undefined;
+      return async (...args: unknown[]) => once(prop, args);
+    },
+    getPrototypeOf() {
+      return RpcTarget.prototype;
+    },
+  }));
+}
+
 function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcStub<RpcTarget> {
   // The proxy target must be callable for the `apply` trap to ever fire (a Proxy over a
   // non-callable target is itself non-callable), and the bindHook contract allows the bound

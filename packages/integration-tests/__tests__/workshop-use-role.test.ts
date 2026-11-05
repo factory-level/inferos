@@ -112,6 +112,9 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
   setTriggerControl: ws => ws.setTriggerControl(1, null),
+  // Choosing what a trigger's runs execute as is building, and Admin-only (FAC-102).
+  setTriggerAssignment: ws => ws.setTriggerAssignment(1, null),
+  getTriggerAssignment: ws => ws.getTriggerAssignment(1),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
   // The widget index is read and written by a builder's own publication only (FAC-11).

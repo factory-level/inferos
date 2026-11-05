@@ -620,6 +620,21 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * RPC stubs cannot report optional-method presence.
    */
   createAccount?(): Promise<Fetcher<GatekeeperUser>>;
+
+  /**
+   * The gatekeeper class a configured system workflow's run executes through (FAC-102, inferops
+   * ADR 0011 S1-S4, inferos ADR 0011): sessions of it act as the service account provisioned for
+   * `credentialRef`, a reference the Workshop minted for one trigger assignment, never as any
+   * person. The class's props carry only the reference; the credential itself stays inside this
+   * vendor, server-side, and never reaches the Workshop, a gadget, an agent or a log. A session
+   * whose reference has nothing provisioned, or whose credential the service refuses, fails its
+   * calls rather than falling back to another credential.
+   *
+   * Kernel-only: the Workshop calls it from its own server-side run of an admitted invocation, and
+   * vendors are reachable only through the deployment's service bindings. Absent on vendors with
+   * no system credentials; the Workshop then refuses such a run.
+   */
+  getSystemGatekeeperClass?(credentialRef: string): Promise<DurableObjectClass<Gatekeeper<any>>>;
 }
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {

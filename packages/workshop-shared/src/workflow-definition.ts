@@ -86,7 +86,35 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
    * the trigger's, with the gadget's own configured bindings.
    */
   invocation?: { id: string; requestedBy: string };
+  /**
+   * Present when the run executed as the trigger's assigned service account (FAC-102,
+   * `TriggerAssignment`): the assignment's credential reference. The service records the account
+   * as the actor; `invocation.requestedBy` stays a claim beside it.
+   */
+  executedAs?: { credentialRef: string };
 };
+
+/**
+ * Who a pinned trigger's on-request runs execute as (FAC-102, inferops ADR 0011 S1): the service
+ * account provisioned in one of the gadget's connections for `credentialRef`, never the invoker,
+ * the builder or any person. Stored apart from the definition, so a new revision can't change it
+ * and it can't change a revision. Builders only.
+ */
+export type TriggerAssignment = {
+  hookId: number;
+  /** The connection (a gatekeeper the trigger's gadget binds) whose system credential runs it. */
+  gatekeeperId: number;
+  /**
+   * The Workshop-minted reference the connection's vendor keys the service account's credential
+   * by. Provisioning names it; it isn't a secret and grants nothing.
+   */
+  credentialRef: string;
+  assignedBy: AiChatAuthorInfo;
+  assignedAt: Date;
+};
+
+/** What a builder sets to assign a trigger's runs: the connection whose system credential runs it. */
+export type TriggerAssignmentSettings = { gatekeeperId: number };
 
 /** Most people one trigger control lists as allowed to run it. */
 export const MAX_TRIGGER_CONTROL_INVOKERS = 50;

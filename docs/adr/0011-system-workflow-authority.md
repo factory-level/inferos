@@ -6,6 +6,8 @@ date: 2026-11-02
 
 # 0011. Configured system work uses its assigned principal, apart from each person's token
 
+**Status note (2026-11-05):** built in part under the manager's default for FAC-102 (option C, a run-scoped worker), awaiting Calvin's acceptance; this record stays proposed. The kernel half is in place (see [Operate mode](../architecture/operate-mode.md), "Assigned runs"): a trigger assignment, a run-scoped worker whose only binding is the assigned connection, and a system session through `GatekeeperVendor.getSystemGatekeeperClass`. Who may assign is interim on the deployment's `publish` authority (an Admin's). The gatekeeper's credential store and the UI are separate changes.
+
 ## Context
 
 [ADR 0004](0004-inferops-gatekeeper-user-authority.md) has the InferOps gatekeeper act with each person's own token, and leaves unattended work open. The design has a second context: a predefined system workflow runs with the authority assigned to it and its permitted trigger ([agent operations](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/agent-operations.md)).

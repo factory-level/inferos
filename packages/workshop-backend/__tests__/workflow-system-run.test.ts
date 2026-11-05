@@ -1,0 +1,399 @@
+// Assigned runs of configured system workflows (FAC-102, inferops ADR 0011 S1-S4, inferos ADR 0011):
+// an admitted request for a trigger assigned to a service account runs the pinned commit in a fresh,
+// run-scoped worker whose only bindings reach the assigned connection, and that connection's
+// sessions open on its vendor's system class for the assignment, never a person's facet. Nothing
+// falls back: anything else a run asks for is refused, and a session outlives no run.
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
+import { OverseerDurableObject, makeOverseerStorage, setWorkflowTriggerAssignment } from "../src/overseer.js";
+import {
+  SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
+  SystemRunRegistry, openSystemRunSession, runAssignedDelivery, systemGatekeeperFacetName,
+  type SystemRunCaller, type SystemRunHost,
+} from "../src/system-run.js";
+import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
+import { openFakeOverseer } from "./fixtures.js";
+import { makeMockStorage } from "./mock-storage.js";
+
+vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
+
+const HOOK = 11;
+const GADGET = 3;
+const INFEROPS = 50;
+const commit = (n: number) => n.toString(16).padStart(40, "0");
+const ADA = { type: "user" as const, id: "ada-profile", name: "Ada" };
+
+/** A host for system-run.ts with one assigned trigger and recording doubles. */
+function host(opts: {
+  bindings?: [string, { target: number }][];
+  vendor?: SystemRunHost["vendor"];
+  entry?: Record<string, (...a: unknown[]) => Promise<unknown>>;
+} = {}) {
+  let assignment: { hookId: number; gatekeeperId: number; credentialRef: string } | null = {
+    hookId: HOOK, gatekeeperId: INFEROPS, credentialRef: "ref-1",
+  };
+  let loaded: { mainModule: string; modules: Record<string, string>; env: Record<string, unknown> }[] = [];
+  let loopbacks: [number, SystemRunCaller][] = [];
+  let sessions: [number, string, SystemRunCaller][] = [];
+  let facets = new Map<string, unknown>();
+  let duringRun: (() => Promise<void>) | undefined;
+  let systemClass = { name: "SystemClass" } as unknown as DurableObjectClass<any>;
+  let h: SystemRunHost & { setAssignment(a: typeof assignment): void; whileRunning(f: () => Promise<void>): void } = {
+    systemRuns: new SystemRunRegistry(),
+    assignmentOf: () => assignment && { ...assignment, assignedBy: ADA, assignedAt: new Date(0) },
+    liveHookGadget: () => GADGET,
+    bindingsOf: () => opts.bindings ?? [
+      ["INFEROPS", { target: INFEROPS }], ["MAIL", { target: 60 }], ["BOARD", { target: INFEROPS }], ["TABLES", { target: 70 }],
+    ],
+    makeLoopback: (gatekeeperId, caller) => {
+      loopbacks.push([gatekeeperId, caller]);
+      return { loopback: gatekeeperId };
+    },
+    readModules: async commitId => ({ "server.js": `// ${commitId}` }),
+    loadWorker: code => {
+      loaded.push(code);
+      let entry = opts.entry ?? {
+        run: async (...args: unknown[]) => {
+          if (duringRun) await duringRun();
+          return { ran: args };
+        },
+      };
+      return { getEntrypoint: (name: string) => (name === "WorkflowRun" ? entry : undefined) };
+    },
+    vendorIdOf: id => (id === INFEROPS ? "inferops" : "mail"),
+    vendor: opts.vendor ?? (id => (id === "inferops" ? { getSystemGatekeeperClass: async () => systemClass } : undefined)),
+    facet: (name, cls) => {
+      facets.set(name, cls);
+      return { facet: name } as unknown as Fetcher<any>;
+    },
+    openSession: async (gatekeeperId, facet, caller) => {
+      sessions.push([gatekeeperId, (facet as unknown as { facet: string }).facet, caller]);
+      return { session: gatekeeperId };
+    },
+    setAssignment: a => { assignment = a; },
+    whileRunning: f => { duringRun = f; },
+  };
+  return { h, loaded, loopbacks, sessions, facets, systemClass };
+}
+
+const DELIVERY = { deliveryId: 7, commitId: commit(1), credentialRef: "ref-1" };
+const CALLER: SystemRunCaller = { from: "systemRun", hookId: HOOK, deliveryId: 7 };
+
+describe("a run-scoped worker", () => {
+  it("loads the delivery's commit with only the bindings to the assigned connection, each as the run", async () => {
+    let { h, loaded, loopbacks } = host();
+    await expect(runAssignedDelivery(h, HOOK, DELIVERY, null, ["firing"])).resolves.toEqual({ ran: ["firing"] });
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].mainModule).toBe("server.js");
+    expect(loaded[0].modules).toEqual({ "server.js": `// ${commit(1)}` });
+    // Only the assigned connection's names: no GADGET, GIT, or any other binding of the gadget.
+    expect(Object.keys(loaded[0].env).toSorted()).toEqual(["BOARD", "INFEROPS"]);
+    expect(loopbacks).toEqual([[INFEROPS, CALLER], [INFEROPS, CALLER]]);
+  });
+
+  it("calls the named WorkflowRun method, and ends the run whatever it does", async () => {
+    let onSchedule = vi.fn(async () => { throw new Error("the workflow failed"); });
+    let { h } = host({ entry: { onSchedule } });
+    await expect(runAssignedDelivery(h, HOOK, DELIVERY, "onSchedule", [{ id: 1 }])).rejects.toThrow("the workflow failed");
+    expect(onSchedule).toHaveBeenCalledWith({ id: 1 });
+    expect(h.systemRuns.has(DELIVERY.deliveryId)).toBe(false);
+  });
+
+  it("refuses a run whose assignment changed, a delivery already running, and a gadget no longer bound", async () => {
+    let changed = host();
+    changed.h.setAssignment({ hookId: HOOK, gatekeeperId: INFEROPS, credentialRef: "ref-2" });
+    await expect(runAssignedDelivery(changed.h, HOOK, DELIVERY, null, [])).rejects.toThrow(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+    expect(changed.loaded).toEqual([]);
+
+    let removed = host();
+    removed.h.setAssignment(null);
+    await expect(runAssignedDelivery(removed.h, HOOK, DELIVERY, null, [])).rejects.toThrow(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+
+    let twice = host();
+    twice.h.systemRuns.begin(DELIVERY.deliveryId, { hookId: HOOK, gatekeeperId: INFEROPS, credentialRef: "ref-1" });
+    await expect(runAssignedDelivery(twice.h, HOOK, DELIVERY, null, [])).rejects.toThrow("This run already started.");
+
+    let unbound = host({ bindings: [["MAIL", { target: 60 }]] });
+    await expect(runAssignedDelivery(unbound.h, HOOK, DELIVERY, null, [])).rejects.toThrow("no longer binds");
+    expect(unbound.loaded).toEqual([]);
+  });
+});
+
+describe("a run's sessions", () => {
+  it("open only while the run runs, on the vendor's system class for the assignment, never the connection's own facet", async () => {
+    let made = host();
+    let opened: unknown;
+    made.h.whileRunning(async () => { opened = await openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER); });
+    await runAssignedDelivery(made.h, HOOK, DELIVERY, null, []);
+    expect(opened).toEqual({ session: INFEROPS });
+    expect(made.sessions).toEqual([[INFEROPS, systemGatekeeperFacetName("ref-1"), CALLER]]);
+    expect(made.facets.get(systemGatekeeperFacetName("ref-1"))).toBe(made.systemClass);
+    // After the run, the same binding reaches nothing.
+    await expect(openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER)).rejects.toThrow(SYSTEM_RUN_ENDED);
+  });
+
+  it("refuse another connection, a gadget, git, another delivery and another hook", async () => {
+    let made = host();
+    let attempts: string[] = [];
+    made.h.whileRunning(async () => {
+      for (let [target, caller] of [
+        [{ type: "gatekeeper", id: 60 }, CALLER],
+        [{ type: "gadget", id: GADGET }, CALLER],
+        [{ type: "git" }, CALLER],
+        [{ type: "gatekeeper", id: INFEROPS }, { ...CALLER, deliveryId: 8 }],
+        [{ type: "gatekeeper", id: INFEROPS }, { ...CALLER, hookId: 12 }],
+      ] as const) {
+        attempts.push(await openSystemRunSession(made.h, target, caller).then(() => "opened", (e: Error) => e.message));
+      }
+    });
+    await runAssignedDelivery(made.h, HOOK, DELIVERY, null, []);
+    expect(attempts).toEqual([
+      SYSTEM_RUN_WRONG_CONNECTION, SYSTEM_RUN_WRONG_CONNECTION, SYSTEM_RUN_WRONG_CONNECTION,
+      SYSTEM_RUN_ENDED, SYSTEM_RUN_ENDED,
+    ]);
+    expect(made.sessions).toEqual([]);
+  });
+
+  it("refuse when the vendor has no system credentials, or can't give the class", async () => {
+    for (let vendor of [
+      () => undefined,
+      () => ({}),
+      () => ({ getSystemGatekeeperClass: async () => { throw new Error("nothing provisioned"); } }),
+    ] as SystemRunHost["vendor"][]) {
+      let made = host({ vendor });
+      let attempt: string | undefined;
+      made.h.whileRunning(async () => {
+        attempt = await openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER)
+          .then(() => "opened", (e: Error) => e.message);
+      });
+      await runAssignedDelivery(made.h, HOOK, DELIVERY, null, []);
+      expect(attempt).toBe(SYSTEM_RUN_UNSUPPORTED);
+      expect(made.sessions).toEqual([]);
+    }
+  });
+
+  it("refuse when the assignment changes while the class is being fetched", async () => {
+    let made = host({
+      vendor: () => ({
+        getSystemGatekeeperClass: async () => {
+          made.h.setAssignment({ hookId: HOOK, gatekeeperId: INFEROPS, credentialRef: "ref-2" });
+          return {} as DurableObjectClass<any>;
+        },
+      }),
+    });
+    let attempt: string | undefined;
+    made.h.whileRunning(async () => {
+      attempt = await openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER)
+        .then(() => "opened", (e: Error) => e.message);
+    });
+    await runAssignedDelivery(made.h, HOOK, DELIVERY, null, []);
+    expect(attempt).toBe(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+    expect(made.sessions).toEqual([]);
+  });
+});
+
+/** A store with one published definition pinned to HOOK and a control listing OPERATOR. */
+function pinnedStore() {
+  let durable = makeMockStorage();
+  let storage = makeOverseerStorage(durable);
+  let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, () => commit(1));
+  store.publish(ADA, saved.id, 1);
+  store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
+  store.setControl(ADA, HOOK, { label: "Refund", invokers: ["operator"] });
+  return { store, saved };
+}
+const headOf = () => commit(1);
+const everyoneBuilds = () => true;
+
+describe("an assignment", () => {
+  it("is only for a pinned trigger, gets a fresh reference each time, and goes with the pin or the hook", () => {
+    let { store, saved } = pinnedStore();
+    expect(() => store.setAssignment(ADA, 99, INFEROPS)).toThrow("Only a trigger pinned");
+    let first = store.setAssignment(ADA, HOOK, INFEROPS);
+    let second = store.setAssignment(ADA, HOOK, INFEROPS);
+    expect(first?.credentialRef).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second?.credentialRef).not.toBe(first?.credentialRef);
+    expect(store.assignmentOf(HOOK)?.credentialRef).toBe(second?.credentialRef);
+    store.pinTrigger(ADA.id, HOOK, GADGET, null);
+    expect(store.assignmentOf(HOOK)).toBeNull();
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
+    store.setAssignment(ADA, HOOK, INFEROPS);
+    store.forgetTrigger(HOOK);
+    expect(store.assignmentOf(HOOK)).toBeNull();
+  });
+
+  it("drops runs waiting to start when it changes, so a run never executes under another assignment", () => {
+    let { store } = pinnedStore();
+    let waiting = store.beginInvocation("operator", HOOK);
+    store.setAssignment(ADA, HOOK, INFEROPS);
+    expect(() => store.fire(HOOK, GADGET, headOf, everyoneBuilds, waiting.id)).toThrow("unknown or already ran");
+  });
+
+  it("is recorded on an on-request delivery as what it executed as, and never on a scheduled one", () => {
+    let { store } = pinnedStore();
+    let assignment = store.setAssignment(ADA, HOOK, INFEROPS)!;
+    let requested = store.fire(HOOK, GADGET, headOf, everyoneBuilds, store.beginInvocation("operator", HOOK).id);
+    expect(requested?.executedAs).toEqual({ credentialRef: assignment.credentialRef });
+    expect(requested?.invocation?.requestedBy).toBe("operator");
+    expect(store.fire(HOOK, GADGET, headOf, everyoneBuilds)?.executedAs).toBeUndefined();
+  });
+});
+
+/** An Overseer whose startHook fires HOOK from `store`, with a recording runAssignedDelivery. */
+function overseerFor(store: WorkspaceWorkflowDefinitionStore) {
+  let gadgetCallback = { onSchedule: vi.fn(async () => "gadget's own") };
+  let runSpy = vi.fn(async (..._args: unknown[]) => "as the service account");
+  let overseer = Object.create(OverseerDurableObject.prototype) as OverseerDurableObject;
+  Object.assign(overseer, {
+    env: { BLUEPRINTS: { get: async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG) } },
+    impl: {
+      assertGatekeeperUsable: () => {},
+      getSharingManager: async () => ({ getEffectiveRole: () => undefined }),
+      getOwnerProfileId: async () => ADA.id,
+      workflowDefinitionStore: () => store,
+      getGadgetHead: headOf,
+      defaultGadgetId: GADGET,
+      runAssignedDelivery: runSpy,
+      storage: {
+        boundHooks: { get: () => ({ id: HOOK, enabled: true, vendorId: "scheduler", gatekeeperId: 1, gadgetId: GADGET, callback: gadgetCallback }) },
+        gatekeepers: { get: () => undefined },
+      },
+    },
+  });
+  return { overseer, gadgetCallback, runSpy };
+}
+
+describe("startHook for a trigger with an assignment", () => {
+  it("runs an admitted request as the assignment, once, and never through the gadget's own callback", async () => {
+    let { store } = pinnedStore();
+    let assignment = store.setAssignment(ADA, HOOK, INFEROPS)!;
+    let { overseer, gadgetCallback, runSpy } = overseerFor(store);
+    let invocation = store.beginInvocation("operator", HOOK);
+    let { callback } = await overseer.startHook(HOOK, { invocationId: invocation.id });
+    await expect((callback as any).onSchedule({ runId: "x" })).resolves.toBe("as the service account");
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    expect(runSpy).toHaveBeenCalledWith(HOOK,
+        expect.objectContaining({ commitId: commit(1), credentialRef: assignment.credentialRef }),
+        "onSchedule", [{ runId: "x" }]);
+    // A stored callback is no standing route to the service account.
+    // Awaited directly (as overseer-hooks.test.ts does): an RPC rejection handled late reads as unhandled.
+    let refusal: unknown;
+    try { await (callback as any).onSchedule({ runId: "y" }); } catch (error) { refusal = error; }
+    expect(String(refusal)).toMatch("This run already started.");
+    expect(runSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a scheduled firing on the gadget's own callback, as before", async () => {
+    let { store } = pinnedStore();
+    store.setAssignment(ADA, HOOK, INFEROPS);
+    let { overseer, gadgetCallback, runSpy } = overseerFor(store);
+    let { callback } = await overseer.startHook(HOOK);
+    await expect((callback as any).onSchedule({ runId: "s" })).resolves.toBe("gadget's own");
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).toHaveBeenCalled();
+  });
+
+  it("keeps an unassigned trigger's request on the gadget's own callback, as before", async () => {
+    let { store } = pinnedStore();
+    let { overseer, gadgetCallback, runSpy } = overseerFor(store);
+    let { callback } = await overseer.startHook(HOOK, { invocationId: store.beginInvocation("operator", HOOK).id });
+    await expect((callback as any).onSchedule({ runId: "r" })).resolves.toBe("gadget's own");
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).toHaveBeenCalled();
+  });
+});
+
+/** An Overseer impl for assignments: HOOK wakes GADGET, which binds INFEROPS (inferops) and 60 (mail). */
+function assignmentImpl(env: Record<string, string>) {
+  let { store } = pinnedStore();
+  let aborted: string[] = [];
+  let impl = {
+    env,
+    defaultGadgetId: GADGET,
+    workflowDefinitionStore: () => store,
+    getGadgetRecord: () => ({}),
+    visibleBindings: () => [["INFEROPS", { target: INFEROPS }], ["MAIL", { target: 60 }]],
+    ctx: { id: { toString: () => "overseer-id" }, facets: { abort: (name: string) => { aborted.push(name); } } },
+    storage: {
+      containsRestrictedData: { get: () => false },
+      title: { get: () => "Test Workspace" },
+      operateSession: { get: () => false },
+      boundHooks: { get: (id: number) => (id === HOOK ? { id: HOOK, gadgetId: GADGET } : undefined) },
+      gatekeepers: {
+        get: (id: number) => ({
+          creationSpec: { type: "gatekeeper", vendorId: id === INFEROPS ? "InferOps" : "mail", resourceUrl: "x", typeUrlPattern: "x" },
+        }),
+      },
+    },
+  };
+  return { impl: impl as unknown as Parameters<typeof setWorkflowTriggerAssignment>[0], store, aborted };
+}
+
+describe("assigning a trigger", () => {
+  const GATED = { SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
+
+  it("takes only a connection the trigger's gadget binds, of the deployment's named vendor", () => {
+    let { impl, store } = assignmentImpl(GATED);
+    expect(() => setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: 60 })).toThrow("Assign a inferops connection");
+    expect(() => setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: 99 })).toThrow("Assign a inferops connection");
+    expect(() => setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: "50" } as never)).toThrow("by its id");
+    expect(() => setWorkflowTriggerAssignment(impl, ADA, 99, { gatekeeperId: INFEROPS })).toThrow("No such hook.");
+    expect(store.assignmentOf(HOOK)).toBeNull();
+    expect(setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })).toMatchObject({ hookId: HOOK, gatekeeperId: INFEROPS });
+  });
+
+  it("refuses where the deployment names no vendor for it", () => {
+    let { impl } = assignmentImpl({});
+    expect(() => setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })).toThrow("names no service");
+  });
+
+  it("ends the old reference's system facet when it changes or goes", () => {
+    let { impl, aborted } = assignmentImpl(GATED);
+    let first = setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    let second = setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    setWorkflowTriggerAssignment(impl, ADA, HOOK, null);
+    expect(aborted).toEqual([systemGatekeeperFacetName(first.credentialRef), systemGatekeeperFacetName(second.credentialRef)]);
+  });
+});
+
+/** A session over assignmentImpl whose person holds (or not) the deployment's publish authority. */
+async function assignmentSession(role: "build" | "use", holdsPublish: boolean) {
+  let { impl, store } = assignmentImpl({ SHARED_CONFIGURATION_GATEKEEPER: "inferops" });
+  let asked: string[] = [];
+  let full = Object.assign(impl as object, {
+    isSharedConfiguration: async () => true,
+    assertGatekeeperUsable: () => {},
+    setTriggerAssignment(this: never, caller: typeof ADA, hookId: number, settings: { gatekeeperId: number } | null) {
+      return setWorkflowTriggerAssignment(this, caller, hookId, settings);
+    },
+    users: {
+      idFromString: (id: string) => id,
+      get: () => ({
+        whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
+        holdsSharedConfiguration: async (action: string) => { asked.push(action); return action === "publish" ? holdsPublish : true; },
+      }),
+    },
+  });
+  let overseer = await openFakeOverseer({}, { role, impl: full });
+  return { overseer, store, asked };
+}
+
+describe("who may assign", () => {
+
+  it("is a builder holding the deployment's publish authority (an Admin's), asked every time", async () => {
+    let admin = await assignmentSession("build", true);
+    await expect(admin.overseer.setTriggerAssignment(HOOK, { gatekeeperId: INFEROPS })).resolves.toMatchObject({ gatekeeperId: INFEROPS });
+    expect(admin.asked).toContain("publish");
+    let builder = await assignmentSession("build", false);
+    await expect(builder.overseer.setTriggerAssignment(HOOK, { gatekeeperId: INFEROPS })).rejects.toThrow();
+    expect(builder.store.assignmentOf(HOOK)).toBeNull();
+  });
+
+  it("is never a use collaborator, who can't read an assignment either", async () => {
+    let user = await assignmentSession("use", true);
+    await expect(user.overseer.setTriggerAssignment(HOOK, { gatekeeperId: INFEROPS })).rejects.toThrow();
+    await expect(user.overseer.getTriggerAssignment(HOOK)).rejects.toThrow();
+    expect(user.store.assignmentOf(HOOK)).toBeNull();
+  });
+});

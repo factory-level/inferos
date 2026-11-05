@@ -3,7 +3,7 @@ import {
   MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES, MAX_WORKFLOW_INVOCATIONS,
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
   WORKFLOW_INVOCATION_TTL_MS, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
-  type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
+  type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
   type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
@@ -55,7 +55,7 @@ export class WorkspaceWorkflowDefinitionStore {
       private storage: Pick<OverseerStorage,
           "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
-          "nextWorkflowInvocationLogId">) {}
+          "nextWorkflowInvocationLogId" | "workflowTriggerAssignments">) {}
 
   /** The definitions `viewer` may see: their own in full, and others' published revision only. */
   list(viewer: string): WorkflowDefinition[] {
@@ -141,9 +141,10 @@ export class WorkspaceWorkflowDefinitionStore {
       // A waiting request was admitted for the revision pinned then: any pin change drops it.
       this.#dropInvocations(hookId);
       if (ref === null) {
-        // A control runs the pinned revision, so it goes with the pin.
+        // A control and an assignment run the pinned revision, so they go with the pin.
         this.storage.workflowTriggerPins.delete(hookId);
         this.storage.workflowTriggerControls.delete(hookId);
+        this.storage.workflowTriggerAssignments.delete(hookId);
         return;
       }
       let view = this.get(viewer, ref.definitionId);
@@ -173,7 +174,7 @@ export class WorkspaceWorkflowDefinitionStore {
   fire(hookId: number, hookGadgetId: WorkpieceId | null,
        headOf: (gadgetId: WorkpieceId) => string | undefined,
        ownerCanBuild: (profileId: string) => boolean,
-       invocationId?: string): WorkflowDefinitionDelivery | null {
+       invocationId?: string): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
     // A delivery a person asked for names an invocation minted here for this trigger, not yet run;
     // anything else starts nothing.
     let invocation = invocationId === undefined ? undefined : this.storage.workflowInvocations.get(invocationId);
@@ -208,17 +209,50 @@ export class WorkspaceWorkflowDefinitionStore {
     return this.durableStorage.transactionSync(() => {
       let id = this.storage.nextWorkflowDeliveryId.get();
       this.storage.nextWorkflowDeliveryId.put(id + 1);
+      // A request runs as the trigger's assigned service account, when it has one (FAC-102).
+      let assignment = invocation ? this.storage.workflowTriggerAssignments.get(hookId) : undefined;
       let delivery: StoredWorkflowDelivery = {
         id, hookId, definitionId: pin.definitionId, revision: pin.revision,
         commitId: revision.source.commitId, at: new Date(),
         ...(invocation ? { invocation: { id: invocation.id, requestedBy: invocation.requestedBy } } : {}),
+        ...(assignment ? { executedAs: { credentialRef: assignment.credentialRef } } : {}),
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
       this.storage.workflowDeliveries.put(delivery);
       if (id >= MAX_WORKFLOW_DELIVERIES) this.storage.workflowDeliveries.delete(id - MAX_WORKFLOW_DELIVERIES);
       let { id: _, ...shown } = delivery;
-      return shown;
+      return { ...shown, deliveryId: id };
     });
+  }
+
+  /**
+   * Assigns trigger `hookId`'s on-request runs to the service account provisioned for a fresh
+   * credential reference in connection `gatekeeperId`, or removes the assignment with null. Only a
+   * pinned trigger can have one. Requests waiting were admitted for the assignment as it was, so
+   * any change drops them. The caller checks the connection (overseer.ts); this keeps the record.
+   */
+  setAssignment(caller: AiChatAuthorInfo, hookId: number, gatekeeperId: number | null): TriggerAssignment | null {
+    return this.durableStorage.transactionSync(() => {
+      this.#dropInvocations(hookId);
+      if (gatekeeperId === null) {
+        this.storage.workflowTriggerAssignments.delete(hookId);
+        return null;
+      }
+      if (!this.storage.workflowTriggerPins.get(hookId)) {
+        throw new Error("Only a trigger pinned to a workflow definition revision can be assigned.");
+      }
+      let stored: TriggerAssignment = {
+        hookId, gatekeeperId, credentialRef: crypto.randomUUID(), assignedBy: caller, assignedAt: new Date(),
+      };
+      this.storage.workflowTriggerAssignments.put(stored);
+      return { ...stored };
+    });
+  }
+
+  /** The assignment of trigger `hookId`, or null. */
+  assignmentOf(hookId: number): TriggerAssignment | null {
+    let stored = this.storage.workflowTriggerAssignments.get(hookId);
+    return stored ? { ...stored } : null;
   }
 
   /**
@@ -321,11 +355,12 @@ export class WorkspaceWorkflowDefinitionStore {
     this.storage.workflowInvocations.delete(id);
   }
 
-  /** Forgets trigger `hookId`'s pin, control and waiting invocations (its hook is gone). */
+  /** Forgets trigger `hookId`'s pin, control, assignment and waiting invocations (its hook is gone). */
   forgetTrigger(hookId: number): void {
     this.durableStorage.transactionSync(() => {
       this.storage.workflowTriggerPins.delete(hookId);
       this.storage.workflowTriggerControls.delete(hookId);
+      this.storage.workflowTriggerAssignments.delete(hookId);
       for (let invocation of this.storage.workflowInvocations.list()) {
         if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
       }

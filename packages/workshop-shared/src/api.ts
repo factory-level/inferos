@@ -30,6 +30,7 @@ import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } 
 import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
+  TriggerAssignment, TriggerAssignmentSettings,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation,
 } from "./workflow-definition.js";
@@ -2768,6 +2769,19 @@ export interface Overseer extends RpcTarget {
    * only those listing the caller (each showing only them as invoker). Refused in an operate session.
    */
   listTriggerControls(): Promise<TriggerControl[]>;
+  /**
+   * Assign pinned trigger `hookId`'s runs on request to the service account provisioned in one of
+   * its gadget's connections (FAC-102, inferops ADR 0011 S1), or remove the assignment with null.
+   * The connection must be of the vendor the deployment names in `SHARED_CONFIGURATION_GATEKEEPER`.
+   * An assigned trigger's admitted runs load the pinned commit in a fresh worker whose only binding
+   * is that connection, acting as the service account; nothing else of the gadget's reaches it.
+   * Changing or removing it drops runs waiting to start. Build only, and it also takes the
+   * deployment's `publish` authority (interim, until ADR 0011 D1's `workflow:assign` is decided).
+   * Clearing the pin removes it.
+   */
+  setTriggerAssignment(hookId: number, settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null>;
+  /** The assignment of trigger `hookId`, or null. Build only. */
+  getTriggerAssignment(hookId: number): Promise<TriggerAssignment | null>;
   /**
    * Ask pinned trigger `hookId` to run now, as its control allows (inferops ADR 0011 S6). The server
    * checks that the trigger has a control listing the caller, is enabled and still pinned, and only
