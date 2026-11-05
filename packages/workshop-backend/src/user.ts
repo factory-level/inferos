@@ -159,13 +159,14 @@ export async function holdsSharedConfiguration(
 }
 
 /**
- * Whether `vendorId` says the person may ask a configured system workflow to run here (FAC-102,
- * InferOps' `workflow:invoke`), asked and combined exactly as `holdsSharedConfiguration` is: live
- * accounts of that vendor only, one scope, a yes from any account in it, and a failed answer refuses.
+ * Whether `vendorId` says the person may ask a configured system workflow to run against the
+ * resource `resourceUrl` (FAC-102, InferOps' `workflow:invoke`, in that resource's own workspace
+ * only), combined as `holdsSharedConfiguration` is: live accounts of that vendor, one scope, a yes
+ * from any of them about that resource, and a failed answer refuses.
  */
 export async function holdsWorkflowInvoke(
-    records: Iterable<ConnectedAccountRecord>, vendorId: string): Promise<boolean> {
-  return holdsDeploymentAuthority(records, vendorId, account => account.holdsWorkflowInvoke(),
+    records: Iterable<ConnectedAccountRecord>, vendorId: string, resourceUrl: string): Promise<boolean> {
+  return holdsDeploymentAuthority(records, vendorId, account => account.holdsWorkflowInvoke(resourceUrl),
       "Couldn't check whether you may run workflows. Try again.");
 }
 
@@ -2440,12 +2441,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /**
    * Whether this person may ask a configured system workflow to run (FAC-102), as the deployment's
    * SHARED_CONFIGURATION_GATEKEEPER vendor decides it through their own connected accounts (the
-   * module-level `holdsWorkflowInvoke`). The Overseer asks only when the deployment names a vendor.
+   * module-level `holdsWorkflowInvoke`), about the resource `resourceUrl` only. The Overseer asks
+   * only when the deployment names a vendor, once per connection the workflow acts through.
    */
-  async holdsWorkflowInvoke(): Promise<boolean> {
+  async holdsWorkflowInvoke(resourceUrl: string): Promise<boolean> {
     let vendorId = getSharedConfigurationGatekeeper(this.env);
     if (!vendorId) return true;
-    return holdsWorkflowInvoke(this.#connectedAccountRecords(), vendorId);
+    if (typeof resourceUrl !== "string" || !resourceUrl) return false;
+    return holdsWorkflowInvoke(this.#connectedAccountRecords(), vendorId, resourceUrl);
   }
 
   /**

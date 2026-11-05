@@ -297,6 +297,10 @@ describe("requireSharedConfiguration", () => {
   });
 });
 
+/** The boards the accounts' workflow:invoke question was asked about. */
+const askedBoards: string[] = [];
+const BOARD = "inferops://acme.operations/project/board/OPS";
+
 /** What one account answers: a company-scoped answer, or a failure. */
 type AccountAnswer = { holds: unknown; scope: string | null } | Error;
 const COMPANY_A = "company-a";
@@ -312,7 +316,8 @@ const account = (id: number, answer: AccountAnswer, extra: Partial<AccountRecord
       if (answer instanceof Error) throw answer;
       return answer;
     },
-    holdsWorkflowInvoke: async () => {
+    holdsWorkflowInvoke: async (resourceUrl: string) => {
+      askedBoards.push(resourceUrl);
       if (answer instanceof Error) throw answer;
       return answer;
     },
@@ -369,17 +374,23 @@ describe("the person's own accounts", () => {
 });
 
 describe("workflow:invoke through the person's own accounts (FAC-102)", () => {
+  it("asks each account about the workflow's board only", async () => {
+    askedBoards.length = 0;
+    await holdsWorkflowInvoke([account(1, yes(COMPANY_A))], "inferops", BOARD);
+    expect(askedBoards).toEqual([BOARD]);
+  });
+
   it("combines answers exactly as shared configuration does", async () => {
-    expect(await holdsWorkflowInvoke([], "inferops")).toBe(false);
-    expect(await holdsWorkflowInvoke([account(1, no(COMPANY_A)), account(2, yes(COMPANY_A))], "inferops")).toBe(true);
-    expect(await holdsWorkflowInvoke([account(1, yes(COMPANY_A), { credentialsExpired: true })], "inferops")).toBe(false);
-    expect(await holdsWorkflowInvoke([account(1, { holds: true, scope: null })], "inferops")).toBe(false);
-    await expect(holdsWorkflowInvoke([account(1, yes(COMPANY_A)), account(2, no(COMPANY_B))], "inferops"))
+    expect(await holdsWorkflowInvoke([], "inferops", BOARD)).toBe(false);
+    expect(await holdsWorkflowInvoke([account(1, no(COMPANY_A)), account(2, yes(COMPANY_A))], "inferops", BOARD)).toBe(true);
+    expect(await holdsWorkflowInvoke([account(1, yes(COMPANY_A), { credentialsExpired: true })], "inferops", BOARD)).toBe(false);
+    expect(await holdsWorkflowInvoke([account(1, { holds: true, scope: null })], "inferops", BOARD)).toBe(false);
+    await expect(holdsWorkflowInvoke([account(1, yes(COMPANY_A)), account(2, no(COMPANY_B))], "inferops", BOARD))
       .rejects.toThrow("more than one organization");
   });
 
   it("refuses with its own words when an account can't answer", async () => {
-    await expect(holdsWorkflowInvoke([account(1, new Error("down")), account(2, yes(COMPANY_A))], "inferops"))
+    await expect(holdsWorkflowInvoke([account(1, new Error("down")), account(2, yes(COMPANY_A))], "inferops", BOARD))
       .rejects.toThrow("Couldn't check whether you may run workflows. Try again.");
   });
 });

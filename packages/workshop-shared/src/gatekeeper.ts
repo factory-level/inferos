@@ -857,16 +857,19 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   holdsSharedConfiguration?(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer>;
 
   /**
-   * Whether the person behind this account may ask a configured system workflow in this deployment
-   * to run (FAC-102, inferops ADR 0011 S6 and D3), as the service this account signs in to decides
-   * it, freshly, with the person's own credentials, within the same scope as
-   * `holdsSharedConfiguration`. Invoking isn't executing: a yes gives the person nothing of the
-   * workflow's, and who may run a particular trigger is still that trigger's own control. Called
-   * only on accounts of the vendor `SHARED_CONFIGURATION_GATEKEEPER` names. Answer `holds: false`
-   * when the person holds no such grant there; throw when it can't be told, and the Workshop
-   * refuses.
+   * Whether the person behind this account may ask a configured system workflow to run against the
+   * resource `resourceUrl` names (FAC-102, inferops ADR 0011 S6 and D3), as the service this account
+   * signs in to decides it, freshly, with the person's own credentials, in that resource's own
+   * workspace only: no other workspace's grant counts (the manager, 2026-11-05). The Workshop passes
+   * the resource of the workflow's connection, read from the connection's own record. Invoking isn't
+   * executing: a yes gives the person nothing of the workflow's, and who may run a particular
+   * trigger is still that trigger's own control. Called only on accounts of the vendor
+   * `SHARED_CONFIGURATION_GATEKEEPER` names, within the same company scope as
+   * `holdsSharedConfiguration`. Answer `holds: false` when the person holds no such grant there, or
+   * the resource isn't in one of their workspaces of that service; throw when it can't be told, and
+   * the Workshop refuses.
    */
-  holdsWorkflowInvoke?(): Promise<SharedConfigurationAnswer>;
+  holdsWorkflowInvoke?(resourceUrl: string): Promise<SharedConfigurationAnswer>;
 
   /**
    * The company the person behind this account works in, for this deployment: the same scope
