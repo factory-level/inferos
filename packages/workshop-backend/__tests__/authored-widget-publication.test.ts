@@ -41,6 +41,39 @@ describe("authored widget publication commit boundary", () => {
   });
 
   it.each([
+    ["unapproved imports", { "client.tsx": 'import fs from "node:fs"; export default function Widget(){ return <div/> }' }],
+    ["too many files", Object.fromEntries([
+      ["client.tsx", "export default function Widget(){ return <div/> }"],
+      ...Array.from({length: 100}, (_, index) => [`extra-${index}.tsx`, "export {};" ]),
+    ])],
+  ])("rejects %s before allocating or calling the build DO", async (_case, authoredFiles) => {
+    let getCalls = 0;
+    let compileCalls = 0;
+    const run = () => compileAuthoredWidgetPublication({
+      enabled: true,
+      sourceCommitId: "source-commit",
+      gitStore: {
+        readCommitFiles: async () => new Map([
+          ...Object.entries(authoredFiles), ["notes.json", "{}"],
+        ]),
+        writeFilesAsCommit: async () => { throw new Error("must not write"); },
+      } as never,
+      builds: {
+        newUniqueId: () => "build-id",
+        get: () => {
+          getCalls++;
+          return { compile: async () => { compileCalls++; return {clientJs: ""}; } };
+        },
+      },
+      author: async () => ({ name: "test", email: "test@example.com" }) as never,
+      onFailure: () => {},
+    });
+    await expect(run()).rejects.toThrow();
+    expect(getCalls).toBe(0);
+    expect(compileCalls).toBe(0);
+  });
+
+  it.each([
     ["throws", async () => { throw new Error("worker terminated"); }],
     ["resets", async () => { throw new Error("Durable Object reset"); }],
     ["misses the deadline", () => new Promise<{clientJs: string}>(() => {})],

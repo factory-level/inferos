@@ -23,7 +23,7 @@ describe("authored widget publication input", () => {
   });
 
   it("refuses when the build deadline expires", async () => {
-    const operation = new Promise<number>(resolve => setTimeout(() => resolve(1), 20));
+    const operation = new Promise<number>(() => {});
     await expect(withBuildDeadline(operation, 0)).rejects.toThrow("compile timeout");
   });
 

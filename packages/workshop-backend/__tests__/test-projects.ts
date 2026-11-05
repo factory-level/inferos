@@ -107,6 +107,7 @@ export const BACKEND: readonly string[] = [
   "widget-state.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
+  "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",
   "authz-generation.test.ts",
   "chat-changes.test.ts",

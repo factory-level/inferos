@@ -1,4 +1,5 @@
 import type { GitStore } from "./git-store.js";
+import { validateAuthoredWidgetPreflight } from "./authored-widget-preflight.js";
 
 /** Minimal build namespace contract used by the authored-widget publication boundary. */
 export interface AuthoredWidgetBuildNamespace {
@@ -33,9 +34,12 @@ export async function compileAuthoredWidgetPublication(
   let files = await gitStore.readCommitFiles(sourceCommitId);
   if (!files.has("client.tsx")) return sourceCommitId;
 
-  let build = builds.get(builds.newUniqueId());
   let authoredSources = Object.fromEntries([...files].filter(([path]) =>
     path.endsWith(".tsx") || path.endsWith(".css")));
+  // Reject malformed, oversized or unapproved source before allocating/calling the build DO.
+  // The isolated compiler repeats validation so callers cannot bypass its own boundary.
+  validateAuthoredWidgetPreflight(authoredSources);
+  let build = builds.get(builds.newUniqueId());
   let startedAt = performance.now();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let result: { clientJs: string };
