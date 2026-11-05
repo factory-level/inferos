@@ -2,12 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Overseer } from "@gadgets/workshop-shared/api";
+import type { AuthoredWidgetBuildDurableObject } from "../src/authored-widget-build.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import { readBlueprintVersionToInstall } from "../src/blueprint-install.js";
 import { blueprintVersionMetadata } from "../src/blueprint-archive.js";
 
 declare module "cloudflare:workers" {
-  interface ProvidedEnv { TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>; }
+  interface ProvidedEnv {
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+    TEST_AUTHORED_WIDGET_BUILD: DurableObjectNamespace<AuthoredWidgetBuildDurableObject>;
+  }
 }
 
 let nextId = 0;
@@ -88,6 +92,26 @@ describe("authored widget publication through the Overseer client", () => {
       expect([...impl.storage.blueprints.list()]).toEqual(blueprintsBefore);
     });
   });
+
+  it("compiles a minimal draft through the real build Durable Object in workerd", async () => {
+    await withClient(async (impl, client) => {
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+      impl.authoredWidgetBuildNamespace = env.TEST_AUTHORED_WIDGET_BUILD;
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget", bindings: {},
+      });
+      impl.storage.chatMeta.put({ id: 51, title: "Draft", started: new Date(0), lastActive: new Date(0) });
+      impl.checkChatExistsAndMaterializeChanges = vi.fn();
+      impl.readGadgetFiles = vi.fn(async () => new Map([
+        ["client.tsx", "export default function Widget(){ return <div>workerd preview</div> }"],
+      ]));
+
+      await expect(client.previewAuthoredWidget(1, 51)).resolves.toMatchObject({
+        jsCode: expect.stringContaining("workerd preview"),
+        measurements: { clientBytes: expect.any(Number), durationMs: expect.any(Number) },
+      });
+    });
+  }, 30_000);
 
   it("rejects an unsafe draft path before allocating a build object", async () => {
     await withClient(async (impl, client) => {

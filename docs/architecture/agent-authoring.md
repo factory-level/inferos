@@ -13,6 +13,8 @@ covers:
   - packages/workshop-backend/src/authored-widget-build.ts
   - packages/workshop-backend/src/authored-widget-build-runtime.ts
   - packages/workshop-backend/src/authored-widget-build-compiler.ts
+  - packages/workshop-backend/src/authored-widget-preflight.ts
+  - packages/workshop-backend/src/authored-widget-validation.ts
   - packages/workshop-backend/scripts/build-authored-widget-dependencies.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
@@ -53,9 +55,11 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 ### Authored widget compiler (FAC-8)
 
 `compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
-React/Refine dependency set. It rejects external CSS references, unsupported source and import
-forms, and forces Refine telemetry off in the emitted artifact. Source checks for browser and
-network globals provide author feedback only; they are not a security boundary. The focused
+React/Refine dependency set using esbuild-WASM. The Worker and build Durable Object do not load the
+TypeScript compiler package. Esbuild parses TSX and the virtual filesystem plugin limits imports to
+the reviewed dependency closure; the input validator rejects external CSS references. Refine
+telemetry is forced off in the emitted artifact. Source checks for browser and network globals
+provide author feedback only; they are not a security boundary. The focused
 real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
 specific outbound request APIs from the production frame; it does not establish a general egress
 guarantee. Compilation caps source size, file size and file count, and stops waiting for an esbuild

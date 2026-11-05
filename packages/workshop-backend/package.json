@@ -32,7 +32,6 @@
     "isomorphic-git": "^1.42.2",
     "jose": "^6.2.12",
     "pako": "^3.0.2",
-    "typescript6": "catalog:",
     "yjs": "^13.6.33",
     "zod": "catalog:"
   },
