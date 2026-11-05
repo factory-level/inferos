@@ -57,12 +57,20 @@ export function getDailyAgentTurnCap(env: Pick<Cloudflare.Env, "DAILY_AGENT_TURN
  * daily cap, a binding on the platform's models is refused: its calls come from Gadget code, not an
  * agent turn, so the cap can't count them. A binding on a person's own key or plan is theirs to pay
  * for. Checked when a binding is made and again when it starts a session, so one made before the
- * cap was set is refused too.
+ * cap was set is refused too. A binding made before bindings recorded `managed` is recognised as
+ * the local developer key by its key.
  */
 export function modelBindingRefusal(env: Cloudflare.Env,
-    model: { config: { billing?: string }, profile: { managed?: boolean } }): string | null {
+    model: { config: { billing?: string, apiToken?: string }, profile: { managed?: boolean } }): string | null {
   if (getDailyAgentTurnCap(env) === null || isCloudflareLimitsEnabled(env)) return null;
-  if (!drawsOnPlatformAllowance(env, model)) return null;
+  const managed = model.profile.managed === true || usesLocalDeveloperKey(env, model.config);
+  if (!drawsOnPlatformAllowance(env, { config: model.config, profile: { managed } })) return null;
   return "This environment caps agent turns a day, so a Gadget can't use the platform's models. " +
       "Bind a model on your own key instead.";
+}
+
+/** Whether a model config runs on the local developer key (`localApiModels`), which only `DEV` offers. */
+function usesLocalDeveloperKey(env: Cloudflare.Env, config: { billing?: string, apiToken?: string }): boolean {
+  return Boolean(env.DEV) && Boolean(env.ANTHROPIC_API_KEY) && config.billing === "api-key" &&
+      config.apiToken === env.ANTHROPIC_API_KEY;
 }

@@ -72,9 +72,11 @@ function unlimitedResult(): UsageCheckResult {
 export async function checkUsageAndBalance(
   env: Cloudflare.Env,
   userStub: DurableObjectStub<UserDurableObject>,
+  platformModel?: AiModelConfig,
 ): Promise<UsageCheckResult> {
   if (!isCloudflareLimitsEnabled(env)) {
-    return checkDailyTurnCap(env, userStub);
+    // No person's gateway can pay here, so the platform funds the turn.
+    return platformModelRefusal(env, platformModel) ?? checkDailyTurnCap(env, userStub);
   }
 
   const limit = getDailyLlmCallLimit(env);
@@ -95,8 +97,12 @@ export async function checkUsageAndBalance(
     byokRouting = { accountId: conn.accountId, apiKey: conn.accessToken };
   }
 
-  // Connected + funded -> bill their gateway; don't touch the daily free-tier counter.
+  // Connected + funded -> bill their gateway; don't touch the daily free-tier counter. The model
+  // allowlist doesn't apply when there's a route to their gateway; without one, getModel would fall
+  // through to the platform's, so it does.
   if (hasUserToken && hasMinimumBalance(balance, minimumBalance)) {
+    const refusal = byokRouting ? null : platformModelRefusal(env, platformModel);
+    if (refusal) return refusal;
     return {
       allowed: true,
       shouldUseByok: true,
@@ -109,8 +115,11 @@ export async function checkUsageAndBalance(
     };
   }
 
-  // Otherwise draw on the platform free tier. consumeDailyLlmCall() only increments while within
-  // the limit (it no-ops once `used >= limit`), so a blocked request never counts.
+  // Otherwise draw on the platform free tier: a model the allowlist doesn't offer is refused before
+  // anything is counted. consumeDailyLlmCall() only increments while within the limit (it no-ops
+  // once `used >= limit`), so a blocked request never counts.
+  const refusal = platformModelRefusal(env, platformModel);
+  if (refusal) return refusal;
   const quota = await userStub.consumeDailyLlmCall(limit);
 
   const decision = canProceedWithRequest({
@@ -134,27 +143,36 @@ export async function checkUsageAndBalance(
 }
 
 /**
- * The gate for a turn that draws on the platform's allowance (see drawsOnPlatformAllowance): a
- * gateway-routed model MODEL_ALLOWLIST doesn't offer is refused first, without counting the turn,
- * so a hand-added record can't reach a costlier model; otherwise checkUsageAndBalance decides. The
- * refusal holds even where the turn might have billed the person's own gateway, which only the
- * check after it could tell: an allowlist is for a deployment that bounds its platform's models.
+ * The gate for a turn that draws on the platform's allowance (see drawsOnPlatformAllowance). It's
+ * checkUsageAndBalance with the turn's model, so MODEL_ALLOWLIST applies exactly when the platform
+ * would fund the turn: a gateway-routed model it doesn't offer is refused there, before anything is
+ * counted, with the code `model_not_offered`. A turn routed to the person's own funded gateway is
+ * neither allowlisted nor counted. A connection that can't be resolved counts as no connection, so
+ * the turn is the platform's, and allowlisted.
  */
 export async function checkPlatformTurn(
   env: Cloudflare.Env,
   model: { config: AiModelConfig },
   userStub: DurableObjectStub<UserDurableObject>,
 ): Promise<UsageCheckResult> {
+  return checkUsageAndBalance(env, userStub, model.config);
+}
+
+/**
+ * The refusal for a turn the platform's gateway would fund on a model MODEL_ALLOWLIST doesn't
+ * offer, or null. Only a model with no `billing` rides the platform gateway; one on a person's own
+ * key or plan never does.
+ */
+function platformModelRefusal(env: Cloudflare.Env, config: AiModelConfig | undefined): UsageCheckResult | null {
+  if (!config || config.billing !== undefined) return null;
   const gateway = getAiGatewayConfig(env);
-  if (gateway && model.config.billing === undefined && !gateway.offersModel(model.config)) {
-    return {
-      ...unlimitedResult(),
-      allowed: false,
-      reason: modelNotOfferedMessage(model.config.model),
-      errorCode: "model_not_offered",
-    };
-  }
-  return checkUsageAndBalance(env, userStub);
+  if (!gateway || gateway.offersModel(config)) return null;
+  return {
+    ...unlimitedResult(),
+    allowed: false,
+    reason: modelNotOfferedMessage(config.model),
+    errorCode: "model_not_offered",
+  };
 }
 
 /**

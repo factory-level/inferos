@@ -211,3 +211,80 @@ describe("Gadget model bindings on a capped deployment", () => {
     expect(modelBindingRefusal({ ...capped, ENABLE_CLOUDFLARE_LIMITS: "true" } as Cloudflare.Env, platform)).toBeNull();
   });
 });
+
+describe("the turn gate with the Cloudflare limits flow on, where a person's own gateway can pay", () => {
+  const env = gatewayEnv({ MODEL_ALLOWLIST: "claude-haiku-5-5", ENABLE_CLOUDFLARE_LIMITS: "true" });
+  const unlisted = { config: { provider: "anthropic" as const, model: "claude-opus-5-5", apiToken: "" } };
+  const listed = { config: { provider: "anthropic" as const, model: "claude-haiku-5-5", apiToken: "" } };
+
+  /** A user object whose own Cloudflare connection is funded, unfunded, broken, failing or absent (no network). */
+  function personWith(connection: "funded" | "unfunded" | "broken-token" | "unreachable" | "none") {
+    const user = counter();
+    return Object.assign(user, {
+      async getCloudflareGatekeeperAccount() {
+        if (connection === "none") return null;
+        if (connection === "unreachable") throw new Error("connection store unreachable");
+        return {
+          getUsableAccessToken: async () => connection === "broken-token" ? null : "byok-test-token-not-real",
+          [Symbol.dispose]() {},
+        };
+      },
+      async getCloudflareBilling() {
+        return {
+          accountId: "their-account",
+          accountName: "Their account",
+          creditsRemaining: connection === "unfunded" ? 0 : 50,
+          creditsUpdatedAt: Date.now(),
+        };
+      },
+      async setCloudflareAccountSelection() {},
+      async updateCloudflareCredits() {},
+    });
+  }
+
+  it("lets an unlisted model run on the person's funded gateway, uncounted", async () => {
+    const user = personWith("funded");
+    const result = await checkPlatformTurn(env, unlisted, user as never);
+    expect(result).toMatchObject({ allowed: true, shouldUseByok: true, byokRouting: { accountId: "their-account" } });
+    expect(user.used).toBe(0);
+  });
+
+  it("refuses the same model, uncounted, when the platform would pay", async () => {
+    for (const connection of ["none", "unfunded"] as const) {
+      const user = personWith(connection);
+      expect(await checkPlatformTurn(env, unlisted, user as never), connection)
+          .toMatchObject({ allowed: false, errorCode: "model_not_offered", shouldUseByok: false });
+      expect(user.used, connection).toBe(0);
+    }
+  });
+
+  it("never falls back to the platform with an unlisted model when the person's gateway is broken", async () => {
+    for (const connection of ["broken-token", "unreachable"] as const) {
+      const user = personWith(connection);
+      const result = await checkPlatformTurn(env, unlisted, user as never);
+      expect(result, connection).toMatchObject({ allowed: false, errorCode: "model_not_offered" });
+      expect(result.byokRouting, connection).toBeUndefined();
+      expect(user.used, connection).toBe(0);
+    }
+  });
+
+  it("still counts an offered model on the platform, and lets it ride a funded gateway uncounted", async () => {
+    const platform = personWith("none");
+    expect((await checkPlatformTurn(env, listed, platform as never)).allowed).toBe(true);
+    expect(platform.used).toBe(1);
+    const funded = personWith("funded");
+    expect((await checkPlatformTurn(env, listed, funded as never)).shouldUseByok).toBe(true);
+    expect(funded.used).toBe(0);
+  });
+});
+
+describe("an older Gadget binding on the local developer key", () => {
+  const capped = { DEV: true, ANTHROPIC_API_KEY: "local-test-key-not-real", DAILY_AGENT_TURN_LIMIT: "40" } as unknown as Cloudflare.Env;
+  it("is refused under the cap even without the managed mark, by its key", () => {
+    const old = { config: { provider: "anthropic", billing: "api-key", apiToken: "local-test-key-not-real" }, profile: {} };
+    expect(modelBindingRefusal(capped, old)).toMatch(/can't use the platform's models/);
+    const own = { config: { provider: "anthropic", billing: "api-key", apiToken: "sk-own-test-key" }, profile: {} };
+    expect(modelBindingRefusal(capped, own)).toBeNull();
+    expect(modelBindingRefusal({ ...capped, DEV: false } as Cloudflare.Env, old)).toBeNull();
+  });
+});

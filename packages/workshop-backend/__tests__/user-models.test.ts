@@ -297,3 +297,23 @@ describe("UserDurableObject under MODEL_ALLOWLIST (FAC-152)", () => {
     expect(ids).toEqual(expect.arrayContaining(["claude-haiku-5-5", "my-haiku", "my-own-opus"]));
   }));
 });
+
+describe("UserDurableObject under MODEL_ALLOWLIST with the Cloudflare limits flow on (FAC-152)", () => {
+  it("saves an unlisted model a person's own gateway may pay for, leaving the turn gate to decide", async () => {
+    const stub = env.TEST_USER.getByName(`user-models-${++userCounter}`);
+    await runInDurableObject(stub, async user => {
+      const impl = user as unknown as { env: Cloudflare.Env };
+      impl.env = {
+        ...impl.env,
+        CF_AI_GATEWAY: "platform-gateway",
+        CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+        CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+        CF_AI_GATEWAY_PROVIDERS: "anthropic",
+        MODEL_ALLOWLIST: "claude-haiku-5-5",
+        ENABLE_CLOUDFLARE_LIMITS: "true",
+      };
+      await user.addModel({ ...PROFILE, id: "my-byok-opus" }, { provider: "anthropic", model: "claude-opus-5-5", apiToken: "" });
+      expect((await user.listModels()).map(model => model.id)).toContain("my-byok-opus");
+    });
+  });
+});
