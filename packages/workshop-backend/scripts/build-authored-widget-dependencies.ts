@@ -7,6 +7,7 @@ import { hashAllowedLockEntries } from "@gadgets/bundled-blueprints/authoring-co
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputPath = path.join(backendRoot, "src/generated/authored-widget-dependencies.ts");
 const expectedDependencyLockHash = "sha256:739200a86fa17075822839986caa4dddde847579aad8e35181e78b81fe63966d";
+const nodeEnvDefine = ["process", "env", "NODE_ENV"].join(".");
 const dependencyLockHash = hashAllowedLockEntries(
   await readFile(path.resolve(backendRoot, "../../pnpm-lock.yaml"), "utf8"),
 );
@@ -24,7 +25,7 @@ const result = await build({
   absWorkingDir: backendRoot,
   stdin: { contents: fixture, resolveDir: backendRoot, sourcefile: "__dependency_roots__.tsx", loader: "tsx" },
   bundle: true,
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { [nodeEnvDefine]: '"production"' },
   format: "esm",
   metafile: true,
   minify: false,

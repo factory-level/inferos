@@ -1219,6 +1219,12 @@
             "SubjectPresenceDurableObject"
           ],
           "tag": "v4"
+        },
+        {
+          "new_sqlite_classes": [
+            "AuthoredWidgetBuildDurableObject"
+          ],
+          "tag": "v5"
         }
       ],
       "modules": [
