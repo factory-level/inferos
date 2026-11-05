@@ -49,6 +49,26 @@ Dev InferLab's WAF lets the stage through only when the InferOps side and this s
 4. **Rotate.** Change both values and redeploy both sides. Requests are refused between the two deploys.
 5. **Remove.** Leaving the variable out does not delete the value, because a deploy without it keeps the previous version's secret. Delete it with `pnpm exec wrangler secret delete INFEROPS_EDGE_SECRET --name inferos-dev-gatekeeper-inferops`.
 
+## Agents on dev
+
+`dev` offers one model, Claude Haiku 5.5, with 40 agent turns per workspace owner per UTC day (`agents` in `scripts/stage/stages.ts`). It still needs a model source, which takes a person's steps:
+
+1. **Store the key in the gateway.** In the Cloudflare dashboard, AI Gateway, open or create the gateway in the stage's account. Add the Anthropic key to its stored provider keys. The key never goes in `.stage-dev.vars`, a stage secret or the repository.
+2. **Bound the spend.** In the Anthropic console, set the monthly spend limit on that key's workspace. It's the only dollar bound: InferOS counts turns, not dollars.
+3. **Name the gateway.** Add to `.stage-dev.vars`: `CF_AI_GATEWAY=<gateway name>`, `CF_AI_GATEWAY_ACCOUNT_ID=<account id>` and `CF_AI_GATEWAY_PROVIDERS=anthropic`. If the gateway is in the stage's own account, the `WORKERS_AI` binding carries requests and `CF_AI_GATEWAY_API_TOKEN` isn't needed. If it's in another account, add `CF_AI_GATEWAY_USE_BINDING=false` and a `CF_AI_GATEWAY_API_TOKEN` with Run and Read permission.
+4. **Rehearse.** `pnpm stage:deploy dev --dry-run`. The backend's secrets line should name `CF_AI_GATEWAY`, `CF_AI_GATEWAY_ACCOUNT_ID` and `CF_AI_GATEWAY_PROVIDERS`, with no value. Its vars should list `MODEL_ALLOWLIST` and `DAILY_AGENT_TURN_LIMIT`; the plan prints names, not values.
+5. **Deploy and accept.** `pnpm stage:deploy dev`, then sign in as a tester seat and send a chat message. The picker should offer only Claude Haiku 5.5.
+
+### How a tester seat signs in
+
+1. Open `https://dev-os.factorylevel.dev`. **Cloudflare Access** asks for an email: use the address its Allow policy names for this tester. A one-time code goes to that mailbox.
+2. Choose **Sign in with InferLab**. The persona page (`auth.dev-os.factorylevel.dev`) lists the reserved test seats. Pick one: `owner@grokbot.inferlab.dev`, `power@grokbot.inferlab.dev` or `operate@grokbot.inferlab.dev`. No password or secret is involved.
+3. **Your InferOS account is that email.** A different seat, or a seat whose address changed, is a different account, with its own empty list of workspaces, not lost ones. Check `/profile` to see which you're in. To switch seats, sign out of InferOS, open `https://auth.dev-os.factorylevel.dev/logout?return=/`, then sign in again.
+
+When the day's turns are used up, the chat says so and when they reset. Nothing else changes.
+
+On dev, a Gadget can't bind the platform's model, since the daily cap can't count a binding's calls: binding one is refused with a message saying so. A model a person adds on their own key can still be bound. A hand-added model that would run on the platform's gateway must be one dev offers.
+
 ## A company's own InferOS, from its wrapper
 
 A company's InferOS is deployed from its wrapper repository, at the InferOS revision the wrapper pins, with the same deploy as the persistent stages. Nothing below has been run against a real account yet; the dry run and the tests are the proof so far.
