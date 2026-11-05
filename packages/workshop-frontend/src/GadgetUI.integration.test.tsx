@@ -188,8 +188,8 @@ describe('GadgetUI RPC recovery', () => {
     )
   })
 
-  it('keeps the generated Gadget frame opaque and denies outbound resource requests', async () => {
-    const gadget = fakeGadget('network-isolation', 'document.body.textContent = "isolated"')
+  it('keeps the generated Gadget frame opaque and denies tested outbound request APIs', async () => {
+    const gadget = fakeGadget('request-probes', 'document.body.textContent = "request probes"')
     await act(async () => {
       root.render(<GadgetUI gadget={gadget.stub} height="100px" />)
     })

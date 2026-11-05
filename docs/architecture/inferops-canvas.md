@@ -6,7 +6,7 @@ covers:
   - packages/workshop-frontend/src/features/workspace-kind
   - packages/workshop-frontend/src/FeatureFlagsContext.tsx
   - packages/workshop-frontend/src/GadgetUI.tsx
-  - packages/workshop-frontend/src/GadgetUI.network-isolation.test.ts
+  - packages/workshop-frontend/src/GadgetUI.request-probes.test.ts
   - packages/workshop-frontend/src/GadgetEditor.tsx
   - packages/workshop-frontend/src/features/canvas
   - packages/workshop-frontend/src/pages/inferops-canvas
@@ -69,6 +69,8 @@ InferOS hosts sandboxed Gadgets and human participant presence; these are not an
 Current board widget freshness is 60 seconds. The InferOps board hook pauses polling when the document is hidden and merges revisions while protecting pending changes. Existing personal pins have their own RLS boundary. InferOS frontend changes must follow frontend-conventions and reuse Kumo/@gadgets/ui.
 
 The workspace editor keeps its app, Code, and Connections controls in the right pane. While that pane is closed, the pane is `inert` and hidden from assistive technology; its resize handle is also inert and excluded from keyboard navigation. The split handle remains keyboard-adjustable while the pane is open.
+
+`GadgetUI.request-probes.test.ts` exercises selected outbound request APIs from the production Gadget frame against a local listener and verifies an outer-page positive control. It covers fetch, XHR, beacon, image and stylesheet requests, CSS `@import` and CSSOM imports, WebSocket, EventSource, and `data:` / `blob:` workers. Preconnect and DNS prefetch are not covered by this test.
 
 ## Divergences from Design
 

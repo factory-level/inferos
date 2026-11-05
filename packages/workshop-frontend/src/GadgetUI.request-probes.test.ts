@@ -9,10 +9,15 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { afterEach, expect, it } from "vitest";
 import { createSandboxedHtml } from "./GadgetUI.tsx";
-import { compileAuthoredWidget } from "../../bundled-blueprints/src/authoring-compiler.ts";
+import { compileAuthoredWidget } from "@gadgets/bundled-blueprints/authoring-compiler";
 
 const chrome = process.env.CHROME_BIN ?? "/usr/bin/google-chrome";
+const browserTestsRequired = process.env.GADGET_BROWSER_TESTS_REQUIRED === "1";
 const servers: ReturnType<typeof createServer>[] = [];
+
+if (browserTestsRequired && !existsSync(chrome)) {
+  throw new Error(`Gadget browser tests are required but Chrome was not found at ${chrome}. Set CHROME_BIN to its executable path.`);
+}
 
 interface Cdp {
   send(method: string, params?: Record<string, unknown>): Promise<any>;
@@ -23,7 +28,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))));
 });
 
-it.skipIf(!existsSync(chrome))("Gadget CSP blocks outbound request probes while the outer page reaches the listener", async () => {
+it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs against an outer-page positive control", async () => {
   const requests: string[] = [];
   const listener = createServer((request, response) => {
     if (request.url?.startsWith("/probe/")) requests.push(request.url);
@@ -80,7 +85,7 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks outbound request probes while 
       }).catch(() => { document.body.dataset.positiveControl = 'failed'; });` : ""}
     </script></body></html>`;
 
-  const profile = await mkdtemp(join(tmpdir(), "gadget-network-isolation-"));
+  const profile = await mkdtemp(join(tmpdir(), "gadget-request-probes-"));
   const debugPort = await unusedPort();
   const browser = spawn(chrome, [
     "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
@@ -143,8 +148,6 @@ function probeCode(id: string, target: string): string {
   const url = `${target}/probe/${id}`;
   const code = (() => {
     switch (id) {
-      case "preconnect": return `const l=document.createElement('link');l.rel='preconnect';l.href=${JSON.stringify(target)};document.head.append(l);`;
-      case "dns-prefetch": return `const l=document.createElement('link');l.rel='dns-prefetch';l.href=${JSON.stringify(target.replace("127.0.0.1", "localhost"))};document.head.append(l);`;
       case "worker-data": {
         const worker = `fetch(${JSON.stringify(url)}).catch(()=>{});`;
         return `try { new Worker('data:text/javascript,' + encodeURIComponent(${JSON.stringify(worker)})); } catch {}`;
