@@ -15,6 +15,9 @@ export const describeAgentEvent = (event: OperateEvent, titleOf: (ref: OperateRe
     case 'startFlow': return `started ${event.title}`
     case 'goToStep': return `moved the flow to step ${event.index + 1}`
     case 'exitFlow': return 'left the flow'
+    case 'navigateFlow': return `moved the flow to ${event.to}`
+    case 'backFlow': return 'went back a page in the flow'
+    case 'setFlowPageState': return `set the page to ${event.state}`
     case 'reviewApproval': return 'opened an approval for review'
     case 'approvalResolved': return `reported an approval ${event.outcome}`
     case 'openConsole': return `opened ${event.title}`
@@ -30,6 +33,8 @@ export const describeAgentEvent = (event: OperateEvent, titleOf: (ref: OperateRe
     case 'handoverReceived': return `received a handover from ${event.handover.from.name}`
     case 'handoverSent': return `handed the board to ${event.handover.to.name}`
     case 'dismissHandover': return 'dismissed a handover'
+    // Recorded by the kernel only, when the person's company changes (FAC-88).
+    case 'companyChanged': return 'started afresh in another company'
   }
 }
 

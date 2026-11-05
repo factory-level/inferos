@@ -75,3 +75,38 @@ describe("subject roster", () => {
     });
   });
 });
+
+// FAC-88: when a person's company changes, their user DO takes them out of the former subject's
+// presence (SubjectPresenceDurableObject.leaveAll): every one of their joins ends at once, their
+// subscribers receive nothing more, and everyone else sees them leave.
+describe("leaving every join of one person", () => {
+  it("ends all of the person's joins synchronously, and nothing more reaches them", () => {
+    const roster = new SubjectRoster();
+    const watcher = new Mirror();
+    roster.join(person("watcher"), null, watcher);
+    const firstTab = new Mirror();
+    const secondTab = new Mirror();
+    roster.join(person("alice"), null, firstTab);
+    roster.join(person("alice"), "ENG-2", secondTab);
+
+    roster.leaveAll("alice");
+    expect(firstTab.disposed).toBe(true);
+    expect(secondTab.disposed).toBe(true);
+    expect(watcher.people()).toEqual([["watcher", null]]);
+
+    // Later changes on the subject reach only those still there.
+    const before = [firstTab.people(), secondTab.people()];
+    roster.join(person("bob"), "ENG-3", new Mirror());
+    expect([firstTab.people(), secondTab.people()]).toEqual(before);
+    expect(watcher.people()).toEqual([["watcher", null], ["bob", "ENG-3"]]);
+  });
+
+  it("leaves other people, and a person with no joins, alone", () => {
+    const roster = new SubjectRoster();
+    const bob = new Mirror();
+    roster.join(person("bob"), null, bob);
+    roster.leaveAll("alice");
+    expect(bob.disposed).toBe(false);
+    expect(roster.participants.map(p => p.user.id)).toEqual(["bob"]);
+  });
+});

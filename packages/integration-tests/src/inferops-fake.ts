@@ -198,6 +198,12 @@ export type FakePerson = {
   knowledge: "write" | "read" | "none";
   /** The workspaces in which the person holds `configuration:publish` (an Admin's grant); none by default. */
   publishesConfiguration: Set<WorkspaceSlug>;
+  /**
+   * The tenant (company) the token exchange names as the person's: `tenant-acme` unless a test
+   * puts the person in another company. Only the exchange's identity reads it; the workspaces and
+   * their data stay acme's.
+   */
+  tenantId?: string;
 };
 
 /** One widget definition InferOps holds (`widget.publish`), keyed by workspace, Blueprint id and version. */
@@ -575,7 +581,7 @@ export class InferOpsFake {
           refreshToken: session.refresh,
           user: {
             id: person.userId, email: person.email, emailVerified: true, name: person.email,
-            tenantId: "tenant-acme",
+            tenantId: person.tenantId ?? "tenant-acme",
             workspaces: [...person.workspaces].map(slug => ({
               workspaceId: WORKSPACES[slug].id, workspaceName: WORKSPACES[slug].name,
               product: WORKSPACES[slug].product, role: "member", deniedPermissions: [],

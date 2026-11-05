@@ -78,6 +78,12 @@ const INPUTS: { input: string; storageKey: string; change: (s: Storage) => void;
     change: s => s.operateSession.put(true),
     rewrite: s => s.operateSession.put(true),
   },
+  {
+    input: "operateSessionRetired",
+    storageKey: "operateSessionRetired",
+    change: s => s.operateSessionRetired.put(true),
+    rewrite: s => s.operateSessionRetired.put(true),
+  },
 ];
 
 // The generation's own key is guarded the same way: only the helper writes it.

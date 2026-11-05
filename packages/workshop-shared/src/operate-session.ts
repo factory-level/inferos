@@ -26,6 +26,96 @@ export const MAX_OPERATE_FLOW_STEPS = 32;
 /** Longest flow title a session holds. */
 export const MAX_OPERATE_FLOW_TITLE_LENGTH = 120;
 
+/** Most routes one flow page offers. */
+export const MAX_OPERATE_FLOW_ROUTES = 8;
+
+/** Most states one flow page declares. */
+export const MAX_OPERATE_FLOW_PAGE_STATES = 8;
+
+/** Longest route label a flow page shows. */
+export const MAX_OPERATE_FLOW_ROUTE_LABEL_LENGTH = 60;
+
+/** Most pages a run remembers for going back; moving on from one more drops the oldest. */
+export const MAX_OPERATE_FLOW_HISTORY = 32;
+
+/**
+ * A flow page name or page state: lowercase, starting with a letter, at most 40 characters. It
+ * names a page within its own flow only; it is never a canvas id, and no page may share a name
+ * with one of its flow's screens.
+ */
+export const OPERATE_FLOW_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+
+/**
+ * Page navigation: one way out of a flow page, to another named page of the same flow (or back to
+ * itself, to retry). It is a separate thing from a widget's local transition
+ * (`WidgetTransition` in widget-state.ts), which moves one widget between its own states and never
+ * changes the page.
+ */
+export type OperateFlowRoute = {
+  /** What the way out is called where it is offered. 1 to `MAX_OPERATE_FLOW_ROUTE_LABEL_LENGTH` characters. */
+  label: string;
+  /** The `name` of the destination page in the same flow. */
+  to: string;
+};
+
+/**
+ * What a flow says about one of its pages, beside the screen its `steps` lists at the same
+ * position. A flow that names its pages moves by their routes and back through its history,
+ * branching, retrying and returning, instead of stepping through `steps` in order.
+ */
+export type OperateFlowPage = {
+  /** Unique within the flow; see `OPERATE_FLOW_NAME`. */
+  name: string;
+  /**
+   * The page's own states, the first being the one it starts in each time it is reached. Up to
+   * `MAX_OPERATE_FLOW_PAGE_STATES`, unique, each matching `OPERATE_FLOW_NAME`. Omitted: none.
+   */
+  states?: string[];
+  /** Where the page leads, up to `MAX_OPERATE_FLOW_ROUTES`. Omitted: nowhere, an end page. */
+  routes?: OperateFlowRoute[];
+};
+
+/**
+ * Checks a flow's `pages` against its `steps` and returns a copy, or throws an `OperateEventError`
+ * naming the first problem: one page per step, unique names that are not screen ids, and routes
+ * that each lead to a page of this flow. Shared by the flow store and the session reducer, so a
+ * flow is held to the same rules when it is saved and when it starts.
+ */
+export function parseOperateFlowPages(pages: OperateFlowPage[], steps: string[]): OperateFlowPage[] {
+  if (pages.length !== steps.length) throw new OperateEventError("A flow must name exactly one page per step.");
+  let names = new Set<string>();
+  for (let page of pages) {
+    if (!OPERATE_FLOW_NAME.test(page.name) || steps.includes(page.name) || names.has(page.name)) {
+      throw new OperateEventError(
+          "A flow page needs a unique lowercase name (a letter first) that is not one of its screens.");
+    }
+    names.add(page.name);
+  }
+  return pages.map(page => {
+    let states = page.states ?? [];
+    if (states.length > MAX_OPERATE_FLOW_PAGE_STATES || new Set(states).size !== states.length ||
+        !states.every(state => OPERATE_FLOW_NAME.test(state))) {
+      throw new OperateEventError(
+          `A flow page may declare up to ${MAX_OPERATE_FLOW_PAGE_STATES} unique lowercase states.`);
+    }
+    let routes = page.routes ?? [];
+    if (routes.length > MAX_OPERATE_FLOW_ROUTES) {
+      throw new OperateEventError(`A flow page may offer up to ${MAX_OPERATE_FLOW_ROUTES} routes.`);
+    }
+    for (let route of routes) {
+      if (route.label.length === 0 || route.label.length > MAX_OPERATE_FLOW_ROUTE_LABEL_LENGTH) {
+        throw new OperateEventError(`A route label must be 1-${MAX_OPERATE_FLOW_ROUTE_LABEL_LENGTH} characters.`);
+      }
+      if (!names.has(route.to)) throw new OperateEventError("A route must lead to a page of the same flow.");
+    }
+    return {
+      name: page.name,
+      ...(page.states === undefined ? {} : { states: [...states] }),
+      ...(page.routes === undefined ? {} : { routes: routes.map(({ label, to }) => ({ label, to })) }),
+    };
+  });
+}
+
 /**
  * An approval named by the page: one entry of a workspace's action log. Action ids count up per
  * workspace (`ActionLogEntry.id`), so the workspace is part of the name. Naming an approval grants
@@ -69,6 +159,15 @@ export type OperateFlowRun = {
   steps: string[];
   /** The step being shown: an index into `steps`. */
   index: number;
+  /**
+   * Present only when the flow names its pages (FAC-87): the pages, copied in with the steps.
+   * Such a run moves by `navigateFlow` and `backFlow`, never by `goToStep`.
+   */
+  pages?: OperateFlowPage[];
+  /** With `pages`: the indexes of the pages left to reach this one, oldest first, for `backFlow`. */
+  history?: number[];
+  /** With `pages`: the current page's state, or null where the page declares none. */
+  pageState?: string | null;
 };
 
 /**
@@ -202,10 +301,23 @@ export type OperateEvent =
   | { type: "setChatOpen"; open: boolean }
   /** Present a focused app workspace as the app or as its chat. */
   | { type: "setAppPresentation"; presentation: OperateAppPresentation }
-  /** Start running a flow at its first step, replacing any flow already running. */
-  | { type: "startFlow"; workspaceId: string; flowId: string; title: string; steps: string[] }
-  /** Show another step of the running flow. */
+  /**
+   * Start running a flow at its first step, replacing any flow already running. `pages`, when the
+   * flow names them, is copied in with the steps.
+   */
+  | { type: "startFlow"; workspaceId: string; flowId: string; title: string; steps: string[];
+      pages?: OperateFlowPage[] }
+  /** Show another step of the running flow. Refused for a flow that names its pages. */
   | { type: "goToStep"; index: number }
+  /**
+   * Follow one of the current page's routes to the page named `to`, remembering this one for
+   * `backFlow`. The page arrives in its first state. Only for a flow that names its pages.
+   */
+  | { type: "navigateFlow"; to: string }
+  /** Return to the page the run last left, in its first state. Refused with nothing to go back to. */
+  | { type: "backFlow" }
+  /** Put the current page in another of its declared states. */
+  | { type: "setFlowPageState"; state: string }
   /** Stop running the flow and return to the working set. */
   | { type: "exitFlow" }
   /**
@@ -258,7 +370,14 @@ export type OperateEvent =
    */
   | { type: "handoverSent"; handover: OperateHandover }
   /** Remove a received handover from `handovers`. Opening its board is a separate `openBoard`. */
-  | { type: "dismissHandover"; id: string };
+  | { type: "dismissHandover"; id: string }
+  /**
+   * The person now works in another company (FAC-88), appended by the kernel only, as the first
+   * entry of a log it has emptied; a dispatch that sends it is refused. Returns the page to
+   * `INITIAL_OPERATE_PAGE`: nothing of the former company's page (selection, flow position,
+   * handovers) is kept. Recorded with the actor `person`.
+   */
+  | { type: "companyChanged" };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -357,6 +476,12 @@ function checkTitle(title: string): void {
   }
 }
 
+function requireFlowPages(state: OperatePageState): { flow: OperateFlowRun; pages: OperateFlowPage[] } {
+  if (!state.flow) throw new OperateEventError("No flow is running in this session.");
+  if (!state.flow.pages) throw new OperateEventError("This flow has no named pages.");
+  return { flow: state.flow, pages: state.flow.pages };
+}
+
 function requireConsole(state: OperatePageState): OperateConsoleRun {
   if (!state.console) throw new OperateEventError("No console is open in this session.");
   return state.console;
@@ -436,10 +561,16 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
         throw new OperateEventError(
             `A flow title must be 1-${MAX_OPERATE_FLOW_TITLE_LENGTH} characters.`);
       }
-      return { ...state, flow: { workspaceId, flowId, title, steps: [...steps], index: 0 } };
+      if (event.pages === undefined) {
+        return { ...state, flow: { workspaceId, flowId, title, steps: [...steps], index: 0 } };
+      }
+      let pages = parseOperateFlowPages(event.pages, steps);
+      return { ...state, flow: { workspaceId, flowId, title, steps: [...steps], index: 0, pages, history: [],
+        pageState: pages[0]!.states?.[0] ?? null } };
     }
     case "goToStep": {
       if (!state.flow) throw new OperateEventError("No flow is running in this session.");
+      if (state.flow.pages) throw new OperateEventError("This flow moves by its pages' routes.");
       if (!Number.isInteger(event.index) || event.index < 0 ||
           event.index >= state.flow.steps.length) {
         throw new OperateEventError("That step is not part of the running flow.");
@@ -449,6 +580,30 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
     case "exitFlow": {
       if (!state.flow) throw new OperateEventError("No flow is running in this session.");
       return { ...state, flow: null };
+    }
+    case "navigateFlow": {
+      let { flow, pages } = requireFlowPages(state);
+      if (!pages[flow.index]!.routes?.some(route => route.to === event.to)) {
+        throw new OperateEventError("This page doesn't lead there.");
+      }
+      let index = pages.findIndex(page => page.name === event.to);
+      let history = [...(flow.history ?? []), flow.index].slice(-MAX_OPERATE_FLOW_HISTORY);
+      return { ...state, flow: { ...flow, index, history, pageState: pages[index]!.states?.[0] ?? null } };
+    }
+    case "backFlow": {
+      let { flow, pages } = requireFlowPages(state);
+      let history = flow.history ?? [];
+      let index = history.at(-1);
+      if (index === undefined) throw new OperateEventError("There is no earlier page to go back to.");
+      return { ...state, flow: { ...flow, index, history: history.slice(0, -1),
+        pageState: pages[index]!.states?.[0] ?? null } };
+    }
+    case "setFlowPageState": {
+      let { flow, pages } = requireFlowPages(state);
+      if (!pages[flow.index]!.states?.includes(event.state)) {
+        throw new OperateEventError("That is not one of this page's states.");
+      }
+      return { ...state, flow: { ...flow, pageState: event.state } };
     }
     case "reviewApproval": {
       checkApproval(event.approval);
@@ -543,6 +698,8 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
       }
       return { ...state, handovers };
     }
+    case "companyChanged":
+      return INITIAL_OPERATE_PAGE;
   }
 }
 

@@ -2,6 +2,10 @@
 title: Operate mode
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md
 covers:
+  - packages/workshop-backend/src/handover-delivery.ts
+  - packages/workshop-backend/__tests__/handover-delivery.test.ts
+  - packages/workshop-backend/__tests__/personal-state-partition.test.ts
+  - packages/integration-tests/__tests__/operate-company-switch.test.ts
   - packages/workshop-backend/src/console-widget-index.ts
   - packages/workshop-backend/__tests__/console-widget-index.test.ts
   - packages/integration-tests/__tests__/operate-console-widget-index.test.ts
@@ -110,6 +114,8 @@ covers:
   - packages/workshop-frontend/src/features/chat/activity/toolCallLabels.ts
   - packages/integration-tests/__tests__/operate-console-flows.test.ts
   - packages/workshop-backend/__tests__/operate-flow-start.test.ts
+  - packages/workshop-backend/__tests__/operate-flow-navigation.test.ts
+  - packages/workshop-backend/src/flow-navigation.ts
 updated: 2026-11-05
 ---
 
@@ -326,7 +332,7 @@ No widget write, approval, new role or UI is involved.
 | `packages/workshop-shared/src/operate-session.ts` | The page state machine: `OperatePageState`, `OperateEvent`, `OperateRef`, and the pure `applyOperateEvent` / `replayOperateEvents`. Shared so the kernel, clients and the operate agent derive the same page from the same log. |
 | `packages/workshop-shared/src/api.ts` | The `OperateSession` capability, `AuthenticatedApi.getOperateSession()`, `OperateSessionUpdate`, and the coded `OPERATE_SESSION_ERROR_CODES` (`conflict`, `invalidEvent`, `consoleChanged`, `boardUnavailable`). |
 | `packages/workshop-backend/src/user.ts` | Session state in the user Durable Object: the `operateEvents` log, the `operatePage` snapshot, and `operateSessionWorkspaceId`. `dispatchOperateEvent`, `subscribeOperateSession`, `noticeConsoleRevision`, `listOperateEvents`, `claimOperateSessionWorkspace`, and the read-only `operateSessionWorkspaceId()`, which a console workspace checks a console tool caller against. |
-| `packages/workshop-shared/src/operate-flow.ts` | An authored flow (`OperateFlow`: title and ordered canvas ids) and `parseOperateFlowContent`, which checks its limits. |
+| `packages/workshop-shared/src/operate-flow.ts` | An authored flow (`OperateFlow`: title, ordered canvas ids and, optionally, named pages with states and routes) and `parseOperateFlowContent`, which checks its limits. |
 | `packages/workshop-backend/src/flow-store.ts` | `WorkspaceFlowStore`: a workspace's flows in its Overseer, behind `Overseer.listFlows` / `createFlow` / `replaceFlow` / `deleteFlow`. |
 | `packages/workshop-shared/src/operate-console.ts` | An authored console (`OperateConsole`: a draft of title, a view menu of `rollup` and `screen` views over canvas ids, a `fullChat` setting and optional `customization` flags, plus its `published` revision or null), `ConsoleSource` (`published` or `draft`), `publishedConsole`, which projects the published revision as operators see it, `parseOperateConsoleContent`, which checks its limits, `consoleScreens`, `consoleEventMismatch`, which checks a console navigation event against the revision a session opened, and `ConsoleWidgetCandidate` and `consoleWidgetVersionId` (see [Candidates and stable versions](#console-widget-registry)). |
 | `packages/workshop-shared/src/widget-tools.ts` | A callable widget's `tools.json` schema and its pure checks: `parseWidgetTools`, `widgetToolValueProblem`, `plainJsonProblem`, `parseToolEnvelope`, `WIDGET_TOOL_LIMITS`, `RESERVED_TOOL_METHODS` and `RESERVED_TOOL_MODULES`, which the kernel's console tool listing and calls use (see [console tool discovery and invocation](#console-tool-discovery-and-invocation)). |
@@ -404,9 +410,11 @@ Locally, "never sent" means the interceptor recorded nothing in the Overseer's i
 
 A session can run a **flow**: `startFlow` copies an ordered list of one workspace's screen ids into the page state (`flow`), `goToStep` moves the index within it, and `exitFlow` clears it. While `flow` is set the page is meant to show only that step (the full-canvas state); the working set and focus are untouched, so they return on exit. Because the steps are copied in, the reducer validates a step from the event alone and a run is unaffected by later edits to the flow it started from.
 
+**Named pages, branching and back (FAC-87).** A flow may also name its pages (`pages`: one `OperateFlowPage` per step, at the same position). A page has a flow-local `name` (lowercase, a letter first, at most 40 characters, unique, and never one of the flow's screen ids), up to 8 page-local `states` (the first is the state it arrives in), and up to 8 `routes`, each a `label` and the `to` name of a page of the same flow. Routes may lead back to an earlier page or to the page itself, so a flow branches, retries and returns instead of running as a wizard. `parseOperateFlowPages` holds a flow to these rules both when it is saved (`parseOperateFlowContent`) and when it starts (`startFlow`). A run of such a flow copies `pages` with the steps and adds `history` (the page indexes left, oldest first, at most 32; moving on from one more drops the oldest) and `pageState`. It moves only by `navigateFlow` (one of the current page's routes, by page name) and `backFlow` (the last page in `history`); each arrival starts the page in its first state, and `setFlowPageState` picks another of the current page's declared states. `goToStep` is refused for it. A route's `to` is a page name, not a canvas id and not a widget event: page navigation and a widget's local transitions (FAC-86, `applyWidgetTransition`) are separate types with separate validators, and neither accepts the other's targets. A flow stored without `pages` is read, published and run exactly as before, and its run has none of the new fields. In the client, `FlowEditor` authors the pages, states and routes, and `FlowPage` offers the current page's routes and Back, shows the path taken, and shows a `flowPageUnavailable` or `flowNavigationFailed` refusal in place in the session's words, offering to try the latter again; see [Flows that branch](inferops-canvas.md#operate-session-page) in the canvas doc.
+
 Flows are authored per workspace and stored in its Overseer (`flows` collection), next to the canvases whose ids are a flow's steps. The flow methods need build access and both view flags, exactly like the canvas methods, and the use-role capability denies them. A flow is saved only over canvases that exist in that workspace, in the author's order; a step may repeat. Replacing or deleting compares the revision and rejects a stale one with the canvas conflict error. The store never touches a session: a client reads a flow and dispatches `startFlow` with its title and steps, and a step whose canvas was deleted later is for the client to show as unavailable.
 
-The session capability checks every person's `startFlow` before dispatching (`OperateSessionImpl.#checkFlowStart`, through `checkFlowStart`), against the page at the event's `expectedSeq` (a stale one is a `conflict`). Its flow must be defined by an authoritative source, each read through the caller's own access: first the published console the page has open, if it is over the event's workspace and still at the revision opened (`getConsole(id, "published")`, its frozen `published.flows`); then the caller's own flows in the event's workspace (`listFlows`, which owner and build access can call and the use role cannot). With neither the start is refused with `flowUnavailable`; otherwise its `title` and `steps` (order and length) must equal one definition found, or it is refused with `invalidEvent`. So an owner or builder can start their current stored definition even while an older published copy of it is open, and a use-role operator only the copy the open console froze. The event is never rewritten: the log holds what the client sent, and a running flow keeps the steps it copied whatever is edited or republished later (whether a run should move to a newer revision is not decided). `UserDurableObject.dispatchOperateEvent` refuses every `startFlow` whose actor is `agent` with `invalidEvent` before applying anything, so no path, the operate agent's `operatePage` included, records an agent's start. `integration-tests/__tests__/operate-console-flows.test.ts` and `workshop-backend/__tests__/operate-flow-start.test.ts` cover these refusals, each leaving the sessions, event logs, flow store and published console unchanged.
+The session capability checks every person's `startFlow` before dispatching (`OperateSessionImpl.#checkFlowStart`, through `checkFlowStart`), against the page at the event's `expectedSeq` (a stale one is a `conflict`). Its flow must be defined by an authoritative source, each read through the caller's own access: first the published console the page has open, if it is over the event's workspace and still at the revision opened (`getConsole(id, "published")`, its frozen `published.flows`); then the caller's own flows in the event's workspace (`listFlows`, which owner and build access can call and the use role cannot). With neither the start is refused with `flowUnavailable`; otherwise its `title`, `steps` (order and length) and `pages` (names, states and routes, in order; both absent counts) must equal one definition found, or it is refused with `invalidEvent`. So an owner or builder can start their current stored definition even while an older published copy of it is open, and a use-role operator only the copy the open console froze. The event is never rewritten: the log holds what the client sent, and a running flow keeps the steps it copied whatever is edited or republished later (whether a run should move to a newer revision is not decided). `UserDurableObject.dispatchOperateEvent` refuses every `startFlow` whose actor is `agent` with `invalidEvent` before applying anything, so no path, the operate agent's `operatePage` included, records an agent's start. `integration-tests/__tests__/operate-console-flows.test.ts` and `workshop-backend/__tests__/operate-flow-start.test.ts` cover these refusals, each leaving the sessions, event logs, flow store and published console unchanged. A person's `navigateFlow` or `backFlow` is checked as well (`OperateSessionImpl.#checkFlowNavigation`), at the same `expectedSeq`: the destination page's screen is read again through the caller's own access to the run's workspace (`getCanvas`, which for the use role shows only published screens), and a screen that was removed or that their access no longer shows (the read returns nothing, or the workspace refuses them with a coded open failure: not found, access denied, share links disabled) is refused with `flowPageUnavailable`; any other failure of that read (an unreachable workspace, a failed call) is refused with the retryable `flowNavigationFailed` (`checkFlowDestination` in `flow-navigation.ts`). Neither message names a page or a workspace, and neither moves the run. Whether the move is one of the current page's routes is the reducer's to decide (`invalidEvent`). `dispatchOperateEvent` refuses `navigateFlow`, `backFlow` and `setFlowPageState` from the `agent` actor, since only the person path makes that check; the agent's `operatePage` offers none of them.
 
 A session can have a **console** open. `openConsole` copies the console's workspace, id, title, `source` (`published`, or `draft` for a builder's preview), revision, `fullChat` setting and a starting view id into the page state (`console`), so later events are checked from the event alone, like a flow's steps. A run stored before consoles were published reads as the published one at no revision (`UserDurableObject` fills it in), so its next checked navigation is refused once. `openView` shows another view and `showScreen` opens a screen from it (`null` returns to the view), and `closeConsole` closes the console. `showHome` returns to the mosaic, clearing focus and any running flow as well as the console and setting `presentation` back to `canvas`, while keeping the working set, subject and approval state; the operate agent may send it. The page's `presentation` is `canvas` or `chat`. `openConsole` sets it to `chat` when the console's `fullChat` is `default` or `only`, and `setPresentation` is rejected when the console's setting is `off` (no full chat) or `only` (no canvas). The reducer does not check view or screen ids against the stored console; the session capability does, before dispatching (above). A view or screen that stops resolving after it was opened, because the console was edited later, is for the client to show as unavailable.
 
@@ -428,7 +436,7 @@ Reading is wider than for flows: `listConsoles` is also allowed to the use role 
 
 A screen's board references are resolved under the viewer's own authority. For a build-role viewer that is the console workspace's connection, verified against their own account at `open()`, as on any canvas. The use role is denied `getGatekeeperByResourceUrl` and `getGatekeeperById`, so an operator never reads through the console owner's connection. An operator resolves the same `inferops://` reference in their own operate session's workspace instead (`OperateSession.getWorkspace()`, whose capability allows `getGatekeeperByResourceUrl` and `newGatekeeper`): a connection exists there only if the operator created it with `newGatekeeper` from their own connected InferOps account, through `User.getGatekeeperClassFor`, where the gatekeeper resolves the reference's workspace among that person's InferOps workspaces and checks their own access to the project. So scope is bound to the operator's capability, never to the URI or the console. Reads are recorded as observations, and proposed writes queue for approval, in that session workspace. With no such connection the lookup is null; with no InferOps account, or one InferOps refuses the project, no connection can be made (the refusal reads like a missing project), and the operator gets nothing of the owner's. `integration-tests/__tests__/operate-use-role-boards.test.ts` covers an operator reading the console's screen and their own board with their own token, an operator with no account and one without the project, and an unchanged build collaborator.
 
-A console may also list **flows** (`flows`: up to 32 unique ids of its workspace's flows, in order; absent and `[]` both mean none, and a replace that omits it keeps the saved list, as for host boards and bound views). Saving a draft requires each to exist. Publishing (`publishConsoleRecord`, through `publishedFlows`) re-reads each, requires every step to be a screen the console shows, and copies `{id, revision, title, steps}` into the publication (`ConsolePublication.flows`); otherwise nothing is published. The copy changes only by a republish. It reaches the use role inside the published console from `listConsoles` and `getConsole`, so no flow method is opened to it: `listFlows` and every flow write stay denied. The console page offers the frozen flows of the published revision the session opened (`ConsoleFlows`), sending each copy's title and steps exactly. Builders choose a console's flows in console setup (`ConsoleFlowRegistry`, see [Operate canvas](inferops-canvas.md)). Because a save re-checks the list it keeps, a save that omits `flows` is refused once a flow the console lists has been deleted, so it must be removed first.
+A console may also list **flows** (`flows`: up to 32 unique ids of its workspace's flows, in order; absent and `[]` both mean none, and a replace that omits it keeps the saved list, as for host boards and bound views). Saving a draft requires each to exist. Publishing (`publishConsoleRecord`, through `publishedFlows`) re-reads each, requires every step to be a screen the console shows, and copies `{id, revision, title, steps}`, with `pages` when the flow names them, into the publication (`ConsolePublication.flows`); otherwise nothing is published. The copy changes only by a republish. It reaches the use role inside the published console from `listConsoles` and `getConsole`, so no flow method is opened to it: `listFlows` and every flow write stay denied. The console page offers the frozen flows of the published revision the session opened (`ConsoleFlows`), sending each copy's title, steps and pages exactly. Builders choose a console's flows in console setup (`ConsoleFlowRegistry`, see [Operate canvas](inferops-canvas.md)). Because a save re-checks the list it keeps, a save that omits `flows` is refused once a flow the console lists has been deleted, so it must be removed first.
 
 A console may also carry `customization`: four independent booleans for personal shareable screens, custom widgets, application tools and custom skills. The parser requires every flag to be a boolean and keeps a definition with no field as it is; clients treat absence as all disabled (`DEFAULT_CONSOLE_CUSTOMIZATION`). They are opt-in policy settings, not capability grants, and are changed only through the build-only console writes with their revision check. Creating and sharing personal extensions is separate work, and the flags do not enable authoring in the operate-only session workspace.
 
@@ -577,6 +585,102 @@ A widget may declare its own local states and transitions (FAC-86, [workspaces a
   - `workshop-shared/src/widget-state.test.ts`: parsing, its refusals, transitions and recovery.
   - `__tests__/widget-state.test.ts`: transitions leave the operate page and its log untouched, page events leave the widget alone, the refusals and their codes, recovery for the person, and a fresh start for another person and another revision.
   - `__tests__/console-tool-surfaces.test.ts`: the freeze, the candidate surface, an invalid `states.json` refused, and the console-tools switch.
+
+### Personal presentation state, by person and company
+
+FAC-88. A person's presentation state is theirs alone, and it belongs to the company they work in. Business records stay canonical and shared: they are never copied into this state.
+
+- **What it covers.** Everything here lives in the person's own user DO (`idFromName` of their InferOS identity), so it is never shared between people:
+  - **the operate page:** its selection (`focus`, `board` with its `issueId`), the console run, and a flow's position (FAC-87: `index`, `history`, `pageState`);
+  - **the page's event log;**
+  - **person-persisted widget states** (`widgetStates`).
+  
+  Session-persisted widget states live only on one operate session connection (`WidgetStateMemory` in `OperateSessionImpl`).
+- **Selecting whose state is read.** No RPC takes a person id. A widget reference (`OperateWidgetRef`) names a console and an install, so the same reference read by another person gives that person's own state. The page holds references (a board's `boardRef`, an issue id), never an entity, so every read of the record goes to InferOps through the reader's own connection.
+- **The company.** It comes from the person's own connected accounts of the vendor `SHARED_CONFIGURATION_GATEKEEPER` names, and never from a caller:
+  - **How it's read.** `presentationCompanyOf` in `user.ts` asks each account's `GatekeeperUser.presentationCompany()`. For InferOps that is the tenant id of the session stored at connect, read without a request, and null for a session `INFEROPS_COMPANY` doesn't admit.
+  - **Expired credentials** still count, so an expiry doesn't drop the page.
+  - **Several companies:** accounts in several companies form one combined partition of their own.
+  - **No vendor set** (local development, wrappers): the deployment has one partition, since it belongs to one company (FAC-160).
+  - **Can't be told:** any account that can't answer refuses the read or write with `OPERATE_SESSION_COMPANY_UNAVAILABLE`, rather than show state that may be another company's.
+- **A company switch.** Every user-DO method that reads or writes the page, a widget state or the operate session workspace runs `#enterPresentationCompany()` first:
+  - `getOperatePage`, `dispatchOperateEvent`, `subscribeOperateSession`, `listOperateEvents` and `listOperateSubjectEvents`;
+  - `readWidgetState` and `transitionWidgetState`;
+  - `claimOperateSessionWorkspace` and `operateSessionWorkspaceId`;
+  - `presentationEpoch` and `currentPresentationCompany`.
+  
+  That covers the person's, the operate agent's and a handover's paths. When the company differs from the recorded one, `#resetPresentationState()` does all of the following in one synchronous step:
+  - every stored widget state is deleted;
+  - a kernel-only `companyChanged` event returns the page to `INITIAL_OPERATE_PAGE`;
+  - `presentationFloorSeq` moves to that event, so earlier entries are kept in storage but never listed again;
+  - `presentationEpoch` rises, which makes an open connection drop its session widget states;
+  - **the operate session workspace is retired.** That workspace holds the operate chat, its history and its agent's context. It moves from `gadgets` to `retiredOperateWorkspaces`, kept and never deleted, and the next claim starts a fresh one.
+  
+  A client still holding the old page writes at a stale seq and is refused as a conflict. A dispatched `companyChanged` is refused (`invalidEvent`).
+- **Revoking the retired workspace.** Retirement revokes what is already held on the workspace, not only later opens:
+  - **The user DO asks first.** Before the gate lets any call through, it asks each retired workspace not yet revoked to retire itself (`Overseer.retireOperateSession(ownerId)`, reached only from Worker code holding the namespace), and records each that has. It then reads the company again, since it may have changed meanwhile. One that can't be reached refuses the person's call with `companyUnavailable`, and is asked again on the next call.
+  - **The workspace marks itself.** `OverseerImpl.retireOperateSession` sets the persisted `operateSessionRetired` mark, an authorization input watched like `operateSession`, so it raises the generation. It cancels every running agent turn and schedules the access restart, which drops every connection, held capability and subscription within about 100 ms.
+  - **Held capabilities refuse.** Until the restart, every `OperateOverseerInterface` call (the chat list, its history, a new chat or message, a subscription, the action log and every other allowed call) checks the mark first. It refuses with "This operate session has ended. Reload to start a new one.", which names nothing.
+  - **Opening refuses.** `Overseer.open` refuses a retired workspace, and one that is no longer the owner's recorded session, with `workspaceNotFound`.
+  - **No agent work starts or resumes.** A turn already running is cancelled at retirement. An agent turn the restart interrupted is not resumed in a retired workspace: `#resumeInterruptedAgents` drops its record, reports the chat's turn as "Agent stopped: this operate session has ended.", and drains no pending agent call. `OverseerImpl.startAgent` starts no turn there either, whether it was asked for through a held capability or by the alarm draining a pending call; it reports the turn the same way.
+- **Every open stream ends at the switch, before anything else is served.** No stream is left to the access restart, which stays only as the backstop. The workspace's streams end before `retireOperateSession` returns, and the user DO's gate waits for that, and for the presence eviction, before serving anything.
+  - **In the retired workspace:** each subscribe site registers its own idempotent unsubscribe with `OverseerImpl.trackStream` and removes it when it ends. `retireOperateSession` calls `closeAllStreams()` first, synchronously, before anything else. Each closer removes its storage subscribers and disposes its subscriber stub, so no later write in the workspace reaches it. The streams covered:
+    - chat, including the AG-UI operate streams, which subscribe to it (`subscribeToChat`);
+    - the action log (`subscribeToActions`);
+    - workspace metadata (`subscribeToMetadata`);
+    - workspace presence (`addPresenceSubscriber`);
+    - the workpiece list (`subscribeToWorkpieces`);
+    - console logs (`subscribeToConsoleLogs`);
+    - host-board selection (`subscribeHostBoardSelection`).
+  - **Subject presence on the former board:** `#resetPresentationState` records the board the page showed (`retiredSubjectPresence`). The gate then calls `SubjectPresenceDurableObject.leaveAll(personId)` for it before serving anything. Every join of that person ends synchronously, their subscribers get nothing more, and others see them leave. A presence DO that can't be reached refuses the call with `companyUnavailable`, and is tried again on the next.
+  - **Kept, because it carries only the current company:** the operate page stream (`OperateSession.subscribe`, the user DO's `subscribeOperateSession`). From the switch on, its subscribers get the reset page and then only the new company's page. Nothing they received before the switch is sent again.
+  - **Nothing to close:**
+    - the InferOps gatekeeper's board sessions stream nothing (no `subscribe` in `gatekeeper-inferops`);
+    - hooks can't be authored in an operate workspace;
+    - `subscribeConnectedAccounts` lists the person's own accounts, whatever their company.
+- **State from before FAC-88.** When no company is recorded yet, any state there (a moved page, a widget state, a claimed workspace) can't be shown to belong to the company first read, so it is dropped exactly as on a switch. A person with none just records the company.
+- **Handovers stay in one company.** A board, a sender's name and a note never cross companies:
+  - **The check.** `OperateSession.handOver` reads the sender's `currentPresentationCompany()` and delivers the handover with it (`deliverHandover`, `handover-delivery.ts`) to the recipient's own `UserDurableObject.receiveHandover`. The recipient resolves their company, then compares it with the sender's and appends the handover in one synchronous step (`#appendOperateEvent`), so a switch can't land between the check and the append.
+  - **A mismatch** is refused with `recipientUnavailable` and nothing is appended. A recipient whose company can't be told is reported to the sender as `recipientUnavailable` too, as if there were no one else.
+  - **No other route in.** `dispatchOperateEvent` refuses `handoverReceived` from anyone, so only `receiveHandover` records one.
+- **The policy is reset, never restore.** Switching back to a former company starts afresh too. Connecting an account in a company, or disconnecting the last one, also changes the company, and the state resets the same way.
+- **A republish.** Its policy is unchanged and is now stated as the reset policy:
+  - **Widgets** run a new frozen install at the new revision, so every widget starts again at `initial` (see [Widget local states](#widget-local-states)).
+  - **A running flow** keeps its pinned revision. The runner says "This console has changed since the flow started…" and the person exits and starts it again, at its first page.
+- **Tests.**
+  - `__tests__/personal-state-partition.test.ts`:
+    - two people in one company, whose page, flow and widget moves leave each other's alone;
+    - B reading A's widget reference gets B's own;
+    - one person switching companies and back, including an agent's write and a stale write;
+    - a company that can't be told, and a dispatched `companyChanged`;
+    - state from before any company was recorded, dropped;
+    - a fresh operate session workspace in each company, the old one never listed or handed back;
+    - a handover refused for a recipient in another company, including a switch that lands while the recipient's company is being read, and never dispatched;
+    - `presentationCompanyOf`.
+  - `__tests__/authz-generation.test.ts` ("a retired operate session workspace"):
+    - the owner's held capability refuses listing, history, a new chat, a message, a subscription and the action log;
+    - the restart is scheduled;
+    - no later open gets it back;
+    - nobody but the owner retires it.
+    
+    It also measures the mark's rise with the other inputs. `authz-generation-guard.test.ts` lists the mark as a watched input.
+  - The same file, one test per stream kind: an open chat, action, workpiece, presence, console-log, host-board selection or metadata stream is registered while open, gone once `retireOperateSession` returns, and its subscriber released. Where the test can cause one, a write or log after retirement reaches nobody.
+  - `__tests__/subject-presence.test.ts` ("leaving every join of one person"): every join of the person ends at once, and nothing later reaches them.
+  - `personal-state-partition` ("streams a company switch ends or keeps"):
+    - the page stream carries only the reset page and the new company's page after the switch;
+    - the person is taken out of the former board's presence, and a later join there doesn't reach them.
+  - `__tests__/handover-delivery.test.ts`: the sender sees `recipientUnavailable` for a recipient in another company or one whose company can't be told; other failures pass on.
+  - `integration-tests/__tests__/operate-company-switch.test.ts`: the real gatekeeper and connect flow.
+    - Alice selects an issue in acme, then signs in to InferOps as a person of another company.
+    - She sees only `companyChanged`, has a write at acme's seq refused, and gets a fresh operate workspace; acme's is refused by its id.
+    - The operate workspace capability she held across the switch refuses listing, history and a new chat.
+    - Bob's handover from acme is refused while she is in the other company.
+    - Back in acme she starts afresh, again with a fresh workspace, and Bob's handover then reaches her.
+    - Bob is untouched throughout.
+  - `integration-tests/__tests__/operate-two-person-conflict.test.ts`: after Alice's approved transition commits, Bob's next read through his own board shows it, and his page log is still only his own `openBoard`.
+- **Not covered.**
+  - A person's own unshared workspaces are theirs in any company.
+  - **The open tab's own stub.** The Operate page holds its workspace stub (`useSessionWorkspace`) until the restart drops the connection. Its reconnect then opens the fresh workspace; nothing in the UI says why the chat is empty.
 
 ### Callable widget tools
 
