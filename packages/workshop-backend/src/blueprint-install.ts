@@ -52,6 +52,7 @@ export async function readBlueprintVersionToInstall(
   }
   let install: BlueprintInstall = {blueprintId, version, kind: content.kind};
   if (content.dataContract !== undefined) install.dataContract = content.dataContract;
+  if (content.authoredWidgetBuild) install.authoredWidgetBuild = true;
   return {kvRecord, code: content.code, install, bindings};
 }
 

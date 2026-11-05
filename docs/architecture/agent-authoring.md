@@ -91,6 +91,14 @@ allows 64 MiB uncompressed per Worker, and the reported gzip size is information
 reporting is not exposed through this Worker runtime path, and deployed memory headroom and continued
 work after timeout remain unmeasured; keep the flag off until those measurements are available.
 
+For a Widget-kind Blueprint, publication validates the compiled child commit after a successful
+authored build, so its generated `client.js` supplies the UI. The missing-server check is waived only
+when that child contains `client.js`, its source commit contains `client.tsx` and no `server.js`, and
+the child itself has no `server.js`. A source with `server.js` still follows the regular Widget
+rules, including the server requirement for `tools.json`. When the build flag is off, the source
+commit is validated with the existing rules unchanged; non-authored Widgets and failed builds do
+not receive the waiver.
+
 ### Native operations available today
 
 | Operation | Existing API | What it does not do |

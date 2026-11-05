@@ -157,10 +157,12 @@ export function checkDataContract(value: number | undefined): number | undefined
  * an upgrade compares that contract, even after the blueprint moves on.
  */
 export function blueprintVersionMetadata(
-    kind: WorkspaceKind | undefined, dataContract: number | undefined): Record<string, string> {
+    kind: WorkspaceKind | undefined, dataContract: number | undefined,
+    authoredWidgetBuild?: boolean): Record<string, string> {
   return {
     kind: kind ?? DEFAULT_WORKSPACE_KIND,
     ...(dataContract !== undefined ? {dataContract: String(dataContract)} : {}),
+    ...(authoredWidgetBuild ? {authoredWidgetBuild: "true"} : {}),
   };
 }
 
@@ -216,7 +218,7 @@ export async function readBlueprintContent(
   env: Pick<Cloudflare.Env, 'BLUEPRINT_CONTENT'>,
   blueprintId: string,
   version: number,
-): Promise<{code: Uint8Array, kind: WorkspaceKind, dataContract?: number} | null> {
+): Promise<{code: Uint8Array, kind: WorkspaceKind, dataContract?: number, authoredWidgetBuild?: true} | null> {
   let r2Object = await env.BLUEPRINT_CONTENT.get(`${blueprintId}/${version}`);
   if (!r2Object) {
     return null;
@@ -234,7 +236,13 @@ export async function readBlueprintContent(
 
   let decompressed = r2Object.body.pipeThrough(new DecompressionStream("gzip"));
   let code = new Uint8Array(await new Response(decompressed).arrayBuffer());
-  return dataContract !== undefined ? {code, kind, dataContract} : {code, kind};
+  return {
+    code,
+    kind,
+    ...(dataContract !== undefined ? {dataContract} : {}),
+    ...(kind === "widget" && r2Object.customMetadata?.authoredWidgetBuild === "true"
+      ? {authoredWidgetBuild: true as const} : {}),
+  };
 }
 
 /** The files in a blueprint code snapshot, by name. Archives always use the doc's unnamed root. */
