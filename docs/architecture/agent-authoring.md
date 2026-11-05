@@ -7,6 +7,10 @@ covers:
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
   - packages/workshop-backend/src/overseer.ts
   - packages/workshop-backend/src/blueprint-archive.ts
+  - packages/workshop-backend/src/authored-widget-build.ts
+  - packages/workshop-backend/src/authored-widget-build-runtime.ts
+  - packages/workshop-backend/src/authored-widget-build-compiler.ts
+  - packages/workshop-backend/scripts/build-authored-widget-dependencies.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
   - packages/workshop-backend/src/artifact-publisher-binding.d.ts
@@ -41,7 +45,7 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 | `packages/bundled-blueprints/src/authoring-compiler.ts` | Node-only compiler for future authored React/Refine widgets; deterministic artifacts and build-time input refusals. |
 | `docs/blueprints.md` | Portable code and binding requirements. |
 
-### Authored widget compiler (FAC-8, slice 1b)
+### Authored widget compiler (FAC-8)
 
 `compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
 React/Refine dependency set. It rejects external CSS references, unsupported source and import
@@ -49,10 +53,36 @@ forms, and forces Refine telemetry off in the emitted artifact. Source checks fo
 network globals provide author feedback only; they are not a security boundary. The focused
 real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
 specific outbound request APIs from the production frame; it does not establish a general egress
-guarantee. Compilation caps source size, file size and file count, and stops an esbuild build after 10 seconds. The build-input hash includes the
-full transitive package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including
-peer-specific snapshots. The compile core remains runner-agnostic; it does not add an editor-time
-runner or runtime egress boundary.
+guarantee. Compilation caps source size, file size and file count, and stops waiting for an esbuild
+build after 10 seconds. Source paths are limited to 512 UTF-8 bytes and reject traversal, absolute
+paths, controls, backslashes, and ambiguous Unicode separators or format characters; source size
+is limited to 1 MiB, each file to 256 KiB, and the tree to 100 files. This deadline cannot preempt
+synchronous WASM work; a timed-out build may continue until the Durable Object is reset. The
+build-input hash includes the full transitive
+package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including peer-specific
+snapshots. The compile core remains runner-agnostic; it does not add an editor-time runner or runtime
+egress boundary.
+
+At Blueprint publication, `createBlueprint()` and `updateBlueprint({updateCode: true})` can opt into
+the Worker-side compiler with `AUTHORED_WIDGET_BUILD_ENABLED="true"`; the flag is off unless it is
+exactly `true`. Each build gets an `AuthoredWidgetBuildDurableObject`, but Durable Objects in the
+same Worker may share an isolate, memory and thread. The object lazy-loads the pinned wasm compiler
+and generated dependency closure, then returns only the compiled client module and byte/duration
+measurements. A failed or timed-out build refuses publication before the stored Blueprint record is
+changed. The deadline bounds the caller's wait, not synchronous WASM execution; work may continue
+until a DO reset. Before any file is chosen as a source, every path in the published commit
+must pass the same structural path rule. Only `.tsx` and `.css` files become compiler sources; safe
+auxiliary files are retained unchanged regardless of type (for example `server.ts`, `README.md`,
+`.svg`, `.js`, `.json`, `package.json`, or files with no extension). Auxiliary files are not sent to
+the compiler. Paths ending in a dot or space and directory paths also refuse publication with
+`Invalid source path.` before a build object is allocated. The successful source plus `client.js` is
+stored as a child GitStore commit,
+leaving the editable gadget head unchanged. `build:worker` also runs
+`build-bundled-blueprints.ts`. The closure generator resolves production package conditions to match
+the minified Worker build. The current dry-run bundle is recorded in the FAC-8 #362 PR; Cloudflare
+allows 64 MiB uncompressed per Worker, and the reported gzip size is informational. Per-build CPU
+reporting is not exposed through this Worker runtime path, and deployed memory headroom and continued
+work after timeout remain unmeasured; keep the flag off until those measurements are available.
 
 ### Native operations available today
 

@@ -1177,6 +1177,9 @@ importers:
       diff3:
         specifier: 0.0.3
         version: 0.0.3
+      esbuild-wasm:
+        specifier: 0.28.2
+        version: 0.28.2
       isomorphic-git:
         specifier: ^1.42.2
         version: 1.42.2
@@ -1186,6 +1189,9 @@ importers:
       pako:
         specifier: ^3.0.2
         version: 3.0.2
+      typescript6:
+        specifier: 'catalog:'
+        version: typescript@6.0.3
       yjs:
         specifier: ^13.6.33
         version: 13.6.33
@@ -1205,6 +1211,12 @@ importers:
       '@gadgets/scripts':
         specifier: workspace:*
         version: link:../../scripts
+      '@refinedev/core':
+        specifier: 5.0.12
+        version: 5.0.12(@tanstack/react-query@5.105.3(@types/react@19.2.18)(react@19.2.8))(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@tanstack/react-query':
+        specifier: 5.105.3
+        version: 5.105.3(@types/react@19.2.18)(react@19.2.8)
       '@types/pako':
         specifier: ^3.0.0
         version: 3.0.0
@@ -1217,6 +1229,12 @@ importers:
       esbuild:
         specifier: ^0.28.2
         version: 0.28.2
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
+      react-dom:
+        specifier: 19.2.8
+        version: 19.2.8(react@19.2.8)
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -4194,6 +4212,11 @@ packages:
   es-object-atoms@1.1.2:
     resolution: {integrity: sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==}
     engines: {node: '>= 0.4'}
+
+  esbuild-wasm@0.28.2:
+    resolution: {integrity: sha512-GccVwhv3mmOUVQHCQm2Ox/rby8n/EqUwvZxE6Pjfikrq/lWw9g9WX/u9EykWnpot3Ko6j426DgQdea2xWKIAQA==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   esbuild@0.28.1:
     resolution: {integrity: sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==}
@@ -8492,6 +8515,8 @@ snapshots:
   es-object-atoms@1.1.2:
     dependencies:
       es-errors: 1.3.0
+
+  esbuild-wasm@0.28.2: {}
 
   esbuild@0.28.1:
     optionalDependencies:
