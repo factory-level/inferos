@@ -1,7 +1,7 @@
 import { Button, Checkbox } from '@cloudflare/kumo'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateFlow } from '@gadgets/workshop-shared/operate-flow'
-import { orderConsoleFlows, unshownSteps } from './consoles'
+import { flowLength, orderConsoleFlows, unshownSteps } from './consoles'
 
 /**
  * Which of the workspace's flows a console offers its employees, as a builder chooses them. A flow
@@ -46,7 +46,7 @@ export const ConsoleFlowRegistry = ({ flows, selected, published, shownScreens, 
           const unshown = [...new Set(unshownSteps(flow, shownScreens))]
           const note = checked ? publishedNote(flow) : null
           return <li key={flow.id} className="space-y-1 px-4 py-3">
-            <Checkbox label={`${flow.title} · ${flow.steps.length} ${flow.steps.length === 1 ? 'step' : 'steps'}`}
+            <Checkbox label={`${flow.title} · ${flowLength(flow)}`}
               checked={checked} disabled={disabled} onCheckedChange={value => toggle(flow.id, value === true)} />
             {unshown.length > 0 && <p className="text-xs text-kumo-subtle">
               Uses {unshown.map(titleOf).join(', ')}, which this console doesn't show. Add it to a view, or leave this flow out.

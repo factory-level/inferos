@@ -6,6 +6,7 @@ import type { OperateFlow, OperateFlowContent } from '@gadgets/workshop-shared/o
 import { useAuthenticatedApi } from '../../AuthContext'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import { invalidateWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
+import { flowLength, startFlowEvent } from './consoles'
 import { FlowEditor } from './FlowEditor'
 import { useOperateSession } from './OperateSessionContext'
 
@@ -44,7 +45,7 @@ export const WorkspaceFlows = ({ workspaceId, screens, flows }: {
     }
   }
   const start = (flow: OperateFlow) => {
-    operate?.dispatch({ type: 'startFlow', workspaceId, flowId: flow.id, title: flow.title, steps: flow.steps })
+    operate?.dispatch(startFlowEvent(workspaceId, flow))
       // The Operate page shows these tools instead of the running flow while its address asks for them.
       .then(() => void navigate({ to: '/inferops-canvas', search: {} }),
         caught => { console.error('Failed to start the flow:', caught); setError('Could not start the flow.') })
@@ -60,7 +61,7 @@ export const WorkspaceFlows = ({ workspaceId, screens, flows }: {
         : <div key={flow.id} className="flex flex-wrap items-center gap-2 rounded-xl bg-kumo-elevated px-4 py-2.5">
             <div className="min-w-0 flex-1">
               <p className="m-0 truncate text-[14px] leading-5 font-medium text-kumo-default">{flow.title}</p>
-              <p className="m-0 text-[12px] leading-4 text-kumo-subtle">Flow · {flow.steps.length} {flow.steps.length === 1 ? 'step' : 'steps'}</p>
+              <p className="m-0 text-[12px] leading-4 text-kumo-subtle">Flow · {flowLength(flow)}</p>
             </div>
             {operate && <WorkshopButton tone="primary" aria-label={`Start ${flow.title}`} onClick={() => start(flow)}>
               <PlayIcon size={12} aria-hidden className="mr-1" />Start
