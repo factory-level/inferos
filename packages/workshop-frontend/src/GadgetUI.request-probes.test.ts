@@ -96,7 +96,9 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
   let cdp: Cdp | undefined;
   let stage = "starting Chrome";
   try {
-    await waitFor(async () => fetch(`http://127.0.0.1:${debugPort}/json/version`).then(response => response.ok));
+    await waitFor(async () => fetch(`http://127.0.0.1:${debugPort}/json/version`, {
+      signal: AbortSignal.timeout(500),
+    }).then(response => response.ok), 30_000);
     stage = "opening CDP target";
     const page = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: "PUT" }).then(response => response.json()) as { webSocketDebuggerUrl: string };
     cdp = await connect(page.webSocketDebuggerUrl);
@@ -142,7 +144,7 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
     }
     await rm(profile, { recursive: true, force: true }).catch(() => {});
   }
-}, 30_000);
+}, 180_000);
 
 function probeCode(id: string, target: string): string {
   const url = `${target}/probe/${id}`;
@@ -198,16 +200,18 @@ async function evaluate<T = boolean>(cdp: Cdp, expression: string): Promise<T> {
   return result.result.value as T;
 }
 
-async function waitFor(condition: () => Promise<boolean>): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
+async function waitFor(condition: () => Promise<boolean>, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     try {
       if (await condition()) return;
     } catch {
       // The DevTools port is polled while Chrome starts and can refuse early requests.
     }
-    await new Promise(resolve => setTimeout(resolve, 50));
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) await new Promise(resolve => setTimeout(resolve, Math.min(50, remainingMs)));
   }
-  throw new Error("Timed out waiting for browser probe state.");
+  throw new Error(`Timed out waiting ${timeoutMs}ms for browser probe state.`);
 }
 
 async function settle(requests: string[], minimumMs: number): Promise<void> {
