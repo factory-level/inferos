@@ -11965,6 +11965,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     if (operateSession && !isOwner) {
       throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
     }
+    // Nor does its owner open it once it is no longer their recorded operate session: a company
+    // change retires it (FAC-88), and its chat stays with the company it was held in.
+    if (operateSession && isOwner) {
+      let owner = this.impl.users.get(this.impl.users.idFromString(userId));
+      if (await owner.operateSessionWorkspaceId() !== this.ctx.id.toString()) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+      }
+    }
 
     // Cache the owner's profileId in memory when the owner opens.
     if (isOwner) {

@@ -1063,6 +1063,12 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     let recipient = this.otherUser(recipientId);
     let profile = recipientId === sender.id ? null : await recipient.whoamiIfExists();
     if (!profile) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
+    // A handover names a board, the sender and a note, all of the sender's company (FAC-88): it
+    // reaches only someone working in that company, and is refused as if there were no one else.
+    let [fromCompany, toCompany] = await Promise.all([
+      user.currentPresentationCompany(), recipient.currentPresentationCompany(),
+    ]);
+    if (fromCompany !== toCompany) throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
     let handover: OperateHandover = {
       id: crypto.randomUUID(),
       from: { id: sender.id, name: sender.name },

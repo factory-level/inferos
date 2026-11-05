@@ -129,6 +129,49 @@ describe("one person in two companies", () => {
     expect((await user.transitionWidgetState(KEY, MACHINE, "edit", 0)).state).toBe("editing");
   });
 
+  it("drops state from before any company was recorded, rather than give it to the first one read", async () => {
+    let company = { now: "tenant-x" };
+    let user = await person(company);
+    await workOn(user);
+    let workspace = await user.claimOperateSessionWorkspace("legacy-ws");
+    // As a user DO from before FAC-88: the state is there, and no company is recorded beside it.
+    await runInDurableObject(user, (instance: UserDurableObject) => {
+      (instance as unknown as { storage: { presentationCompany: { put(v: null): void } } })
+        .storage.presentationCompany.put(null);
+    });
+    company.now = "tenant-y";
+    expect((await user.getOperatePage()).state).toEqual(INITIAL_OPERATE_PAGE);
+    expect((await user.readWidgetState(KEY, MACHINE)).state).toBe("viewing");
+    expect((await user.listOperateEvents(0, 50)).map(record => record.event.type)).toEqual(["companyChanged"]);
+    expect(await user.operateSessionWorkspaceId()).toBeNull();
+    expect(await user.claimOperateSessionWorkspace("fresh-ws")).not.toBe(workspace);
+  });
+
+  it("starts a fresh operate session workspace in each company, and never hands back the old one", async () => {
+    let company = { now: "tenant-a" };
+    let user = await person(company);
+    expect(await user.claimOperateSessionWorkspace("ws-a")).toBe("ws-a");
+    expect(await user.claimOperateSessionWorkspace("unused")).toBe("ws-a");
+    company.now = "tenant-b";
+    // The chat and its agent's context belong to company A's workspace: company B gets a new one.
+    expect(await user.operateSessionWorkspaceId()).toBeNull();
+    expect(await user.claimOperateSessionWorkspace("ws-b")).toBe("ws-b");
+    // Retired, the old one is neither listed nor the session's, also after switching back.
+    company.now = "tenant-a";
+    expect(await user.claimOperateSessionWorkspace("ws-a2")).toBe("ws-a2");
+    let listed = (await user.listGadgets()).map(gadget => gadget.id);
+    for (let id of ["ws-a", "ws-b", "ws-a2"]) expect(listed).not.toContain(id);
+    expect(await user.getGadget("ws-a")).toBeFalsy();
+  });
+
+  it("names the company a handover compares, after moving to it", async () => {
+    let company = { now: "tenant-a" };
+    let user = await person(company);
+    expect(await user.currentPresentationCompany()).toBe("tenant-a");
+    company.now = "tenant-b";
+    expect(await user.currentPresentationCompany()).toBe("tenant-b");
+  });
+
   it("keeps the state while the company stays the same", async () => {
     let company = { now: "tenant-a" };
     let user = await person(company);

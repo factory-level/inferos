@@ -601,13 +601,22 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
   - **Several companies:** accounts in several companies form one combined partition of their own.
   - **No vendor set** (local development, wrappers): the deployment has one partition, since it belongs to one company (FAC-160).
   - **Can't be told:** any account that can't answer refuses the read or write with `OPERATE_SESSION_COMPANY_UNAVAILABLE`, rather than show state that may be another company's.
-- **A company switch.** Every user-DO method that reads or writes the page or a widget state runs `#enterPresentationCompany()` first: `getOperatePage`, `dispatchOperateEvent`, `subscribeOperateSession`, `listOperateEvents`, `listOperateSubjectEvents`, `readWidgetState`, `transitionWidgetState` and `presentationEpoch`. That covers the person's, the operate agent's and a handover's paths. When the company differs from the recorded one, in one synchronous step:
+- **A company switch.** Every user-DO method that reads or writes the page, a widget state or the operate session workspace runs `#enterPresentationCompany()` first:
+  - `getOperatePage`, `dispatchOperateEvent`, `subscribeOperateSession`, `listOperateEvents` and `listOperateSubjectEvents`;
+  - `readWidgetState` and `transitionWidgetState`;
+  - `claimOperateSessionWorkspace` and `operateSessionWorkspaceId`;
+  - `presentationEpoch` and `currentPresentationCompany`.
+  
+  That covers the person's, the operate agent's and a handover's paths. When the company differs from the recorded one, `#resetPresentationState()` does all of the following in one synchronous step:
   - every stored widget state is deleted;
   - a kernel-only `companyChanged` event returns the page to `INITIAL_OPERATE_PAGE`;
   - `presentationFloorSeq` moves to that event, so earlier entries are kept in storage but never listed again;
-  - `presentationEpoch` rises, which makes an open connection drop its session widget states.
+  - `presentationEpoch` rises, which makes an open connection drop its session widget states;
+  - **the operate session workspace is retired.** That workspace holds the operate chat, its history and its agent's context. It moves from `gadgets` to `retiredOperateWorkspaces`, kept and never deleted, and the next claim starts a fresh one. `Overseer.open` refuses an operate session workspace to its own owner once it is no longer their recorded session (`workspaceNotFound`), so the former company's chat is never opened or sent to an agent again.
   
-  A client still holding the old page writes at a stale seq and is refused as a conflict. A dispatched `companyChanged` is refused (`invalidEvent`). The first company recorded keeps whatever is there.
+  A client still holding the old page writes at a stale seq and is refused as a conflict. A dispatched `companyChanged` is refused (`invalidEvent`).
+- **State from before FAC-88.** When no company is recorded yet, any state there (a moved page, a widget state, a claimed workspace) can't be shown to belong to the company first read, so it is dropped exactly as on a switch. A person with none just records the company.
+- **Handovers stay in one company.** `OperateSession.handOver` compares the sender's and the recipient's `currentPresentationCompany()`. When they differ, it is refused with `recipientUnavailable`, as if there were no one else, so a board, a sender's name and a note never cross companies.
 - **The policy is reset, never restore.** Switching back to a former company starts afresh too. Connecting an account in a company, or disconnecting the last one, also changes the company, and the state resets the same way.
 - **A republish.** Its policy is unchanged and is now stated as the reset policy:
   - **Widgets** run a new frozen install at the new revision, so every widget starts again at `initial` (see [Widget local states](#widget-local-states)).
@@ -618,13 +627,19 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
     - B reading A's widget reference gets B's own;
     - one person switching companies and back, including an agent's write and a stale write;
     - a company that can't be told, and a dispatched `companyChanged`;
+    - state from before any company was recorded, dropped;
+    - a fresh operate session workspace in each company, the old one never listed or handed back;
     - `presentationCompanyOf`.
-  - `integration-tests/__tests__/operate-company-switch.test.ts`: the real gatekeeper and connect flow. Alice selects an issue in acme, signs in to InferOps as a person of another company, sees only `companyChanged`, has a write at acme's seq refused, and starts afresh back in acme. Bob, in acme throughout, is untouched.
+  - `integration-tests/__tests__/operate-company-switch.test.ts`: the real gatekeeper and connect flow.
+    - Alice selects an issue in acme, then signs in to InferOps as a person of another company.
+    - She sees only `companyChanged`, has a write at acme's seq refused, and gets a fresh operate workspace; acme's is refused by its id.
+    - Bob's handover from acme is refused while she is in the other company.
+    - Back in acme she starts afresh, again with a fresh workspace, and Bob's handover then reaches her.
+    - Bob is untouched throughout.
   - `integration-tests/__tests__/operate-two-person-conflict.test.ts`: after Alice's approved transition commits, Bob's next read through his own board shows it, and his page log is still only his own `openBoard`.
 - **Not covered.**
-  - The operate session's own workspace (`operateSessionWorkspaceId`: the operate chat and its history) is kept across a company switch.
-  - A handover from a person of another company is not refused here.
   - A person's own unshared workspaces are theirs in any company.
+  - A recipient who changes company between the handover's check and its delivery isn't caught.
 
 ### Callable widget tools
 

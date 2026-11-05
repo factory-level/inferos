@@ -121,13 +121,26 @@ it("drops a person's page when they sign in to another company, and never restor
   expect(inGlobex.state.board).toBeNull();
   expect(inGlobex.state.focus).toBeNull();
 
-  // Back to acme: a fresh start, not acme's page restored.
+  // The operate chat's workspace is a fresh one too, and acme's can't be opened again by its id.
+  const globexWorkspace = (await (await alice.session.getWorkspace()).getMetadata()).id;
+  expect(globexWorkspace).not.toBe(alice.workspaceId);
+  await expect(alice.api.openGadget(alice.workspaceId)).rejects.toThrow();
+
+  // Bob, in acme, can't hand his acme board over to Alice while she works in globex.
+  await expect(bob.session.handOver(aliceName!, "Yours")).rejects.toSatisfy(
+    (caught: unknown) => getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.recipientUnavailable);
+
+  // Back to acme: a fresh start, not acme's page or chat restored.
   await alice.api.disconnectAccount(globexAccount);
   await signInAs(alice.api, aliceAcme);
   expect(await types(alice.session)).toEqual(["companyChanged"]);
   const back = await alice.session.dispatch({ type: "setChatOpen", open: true }, inGlobex.seq + 1);
   expect(back.state.board).toBeNull();
+  const acmeAgain = (await (await alice.session.getWorkspace()).getMetadata()).id;
+  expect([alice.workspaceId, globexWorkspace]).not.toContain(acmeAgain);
 
-  // Bob, in acme throughout, was never touched.
+  // Bob, in acme throughout, was never touched, and his handover now reaches Alice.
   expect(await types(bob.session)).toEqual(bobLog);
+  await bob.session.handOver(aliceName!, "Yours");
+  expect(await types(alice.session)).toEqual(["companyChanged", "setChatOpen", "handoverReceived"]);
 });

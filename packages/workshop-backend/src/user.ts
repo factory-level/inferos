@@ -423,6 +423,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // (FAC-86, widget-state.ts), keyed by widgetStateKey(). Apart from the operate page: nothing
       // here is read or written by dispatchOperateEvent(), nor this by it.
       widgetStates: collection<StoredWidgetState>()({ primaryKey: "key" }),
+      // Operate session workspaces a company change retired (FAC-88, #resetPresentationState):
+      // kept, never listed or opened again, for offboarding and retention to find.
+      retiredOperateWorkspaces: collection<{ id: string; retiredAt: number }>()({ primaryKey: "id" }),
     },
     singletons: {
       operateReadGeneration: "1",
@@ -1208,6 +1211,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * candidate costs nothing.
    */
   async claimOperateSessionWorkspace(candidateId: string): Promise<string> {
+    // A company change first retires the former company's workspace (FAC-88).
+    await this.#enterPresentationCompany();
     let existing = this.storage.operateSessionWorkspaceId.get();
     if (existing && this.storage.gadgets.get(existing)) return existing;
     this.storage.gadgets.put({ id: candidateId, title: "Operate session", created: new Date() });
@@ -1221,6 +1226,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * a console tool call names against it.
    */
   async operateSessionWorkspaceId(): Promise<string | null> {
+    await this.#enterPresentationCompany();
     let existing = this.storage.operateSessionWorkspaceId.get();
     return existing && this.storage.gadgets.get(existing) ? existing : null;
   }
@@ -1250,12 +1256,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     presentationCompanyOf(this.#connectedAccountRecords(), getSharedConfigurationGatekeeper(this.env));
 
   /**
-   * Every read or write of the operate page or of a widget state comes through here first (FAC-88).
-   * When the person's company differs from the one their presentation state belongs to, that state
-   * is dropped before anything reads it: every widget state is deleted, and the page returns to its
-   * initial state through a `companyChanged` entry, below which the log is never listed again.
-   * Switching back restores nothing. The first company recorded keeps what is there. Refuses with
-   * `companyUnavailable` when the company can't be told, rather than show state that may be another's.
+   * Every read or write of the operate page, of a widget state or of the operate session workspace
+   * comes through here first (FAC-88). When the person's company differs from the one their
+   * presentation state belongs to, that state is dropped before anything reads it (see
+   * #resetPresentationState). Switching back restores nothing. State from before any company was
+   * recorded can't be shown to belong to the first one read, so it is dropped the same way; a
+   * person with none just records the company. Refuses with `companyUnavailable` when the company
+   * can't be told, rather than show state that may be another's.
    */
   async #enterPresentationCompany(): Promise<void> {
     let company: string;
@@ -1270,7 +1277,26 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let stored = this.storage.presentationCompany.get();
     if (stored === company) return;
     this.storage.presentationCompany.put(company);
-    if (stored === null) return;
+    if (stored === null && !this.#holdsPresentationState()) return;
+    this.#resetPresentationState();
+  }
+
+  // Whether anything a company's presentation state is made of is stored: a page that has moved,
+  // a widget state, or a claimed operate session workspace.
+  #holdsPresentationState(): boolean {
+    return this.storage.operatePage.get().seq > 0 ||
+      [...this.storage.widgetStates.list({ limit: 1 })].length > 0 ||
+      this.storage.operateSessionWorkspaceId.get() !== null;
+  }
+
+  // Drops the presentation state of the company the person no longer works in, in one synchronous
+  // step: every widget state is deleted; the page returns to its initial state through a
+  // `companyChanged` entry, below which the log is never listed again; the epoch rises, so a
+  // connection drops its session widget states; and the operate session workspace (the operate
+  // chat, its history and its agent's context) is retired, so the next claim starts a fresh one.
+  // A retired workspace is kept, never deleted: it is unlisted, and Overseer.open refuses it,
+  // since it is no longer this person's recorded operate session.
+  #resetPresentationState(): void {
     // The keys first, so nothing is deleted while the listing is still being read.
     let widgetKeys = Array.from(this.storage.widgetStates.list(), widget => widget.key);
     for (let key of widgetKeys) this.storage.widgetStates.delete(key);
@@ -1281,6 +1307,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.presentationFloorSeq.put(record.seq);
     this.storage.presentationEpoch.put(this.storage.presentationEpoch.get() + 1);
     this.storage.operatePage.put({ seq: record.seq, state: INITIAL_OPERATE_PAGE, record });
+    let workspaceId = this.storage.operateSessionWorkspaceId.get();
+    if (workspaceId !== null) {
+      let workspace = this.storage.gadgets.get(workspaceId);
+      if (workspace) {
+        this.storage.retiredOperateWorkspaces.put({ id: workspaceId, retiredAt: Date.now() });
+        this.storage.gadgets.delete(workspaceId);
+      }
+      this.storage.operateSessionWorkspaceId.put(null);
+    }
+  }
+
+  /**
+   * The company the person's presentation state belongs to now, after moving to it (see
+   * #enterPresentationCompany): "" for a deployment with one partition. Only the kernel compares
+   * it, as a handover does; it is never sent to a client.
+   */
+  async currentPresentationCompany(): Promise<string> {
+    await this.#enterPresentationCompany();
+    return this.storage.presentationCompany.get() ?? "";
   }
 
   /**

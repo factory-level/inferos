@@ -48,6 +48,9 @@ async function withOverseer(fn: (h: Harness) => Promise<void>, name?: string): P
         deleteGadget: async () => {},
         recordSharedGadgetOpen: async () => {},
         ensureGadgetRegistered: async () => {},
+        // The owner's recorded operate session is this workspace, as claimOperateSessionWorkspace
+        // records it before the session first opens it (FAC-88: Overseer.open checks it).
+        operateSessionWorkspaceId: async () => stub.id.toString(),
       }),
       getByName: (email: string) => ({
         id: { toString: () => `${email}-user-id` },
