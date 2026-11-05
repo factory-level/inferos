@@ -232,14 +232,14 @@ export default {
           headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(5_000),
         });
         const body = await response.json().catch(() => null) as { status?: unknown; checks?: unknown } | null;
-        const ready = response.status === 200 && body?.status === "ok";
+        const ready = response.status === 200 && (body?.status === "ok" || body?.status === "degraded");
         const checks = Array.isArray(body?.checks) ? body.checks.flatMap((item) => {
           if (!item || typeof item !== "object") return [];
           const check = item as { name?: unknown; status?: unknown };
           return typeof check.name === "string" && typeof check.status === "string"
             ? [{ name: check.name, status: check.status }] : [];
         }) : [];
-        return Response.json({ status: ready ? "ok" : "down", checks }, { status: ready ? 200 : 503 });
+        return Response.json({ status: ready ? body?.status : "down", checks }, { status: ready ? 200 : 503 });
       } catch {
         return Response.json({ status: "down", checks: [{ name: "inferops-api", status: "unreachable" }] }, { status: 503 });
       }

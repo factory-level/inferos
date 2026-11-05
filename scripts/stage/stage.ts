@@ -72,6 +72,8 @@ const USAGE = "Usage: stage.ts <config|deploy|delete> <stage | --wrapper <dir>> 
   "[--inferops-sha <full-sha>] " +
   "[--allow-destructive-migrations] [--skip-smoke] [--confirm <hostname>]";
 const GATEKEEPER_CONCURRENCY = 8;
+const FULL_SHA = /^[a-f0-9]{40}$/;
+const RELEASE_TAG = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 /** Parse argv (without the node and script paths). Throws the usage on anything unexpected. */
 export function parseStageArgs(argv: readonly string[]): StageArgs {
@@ -95,8 +97,20 @@ export function parseStageArgs(argv: readonly string[]): StageArgs {
     else throw new Error(`unknown argument: ${arg}\n${USAGE}`);
   }
   if (Boolean(args.stage) === Boolean(args.wrapper)) throw new Error(`name a stage or --wrapper <dir>, not both or neither\n${USAGE}`);
+  if (args.inferopsSha !== undefined && !FULL_SHA.test(args.inferopsSha)) throw new Error("--inferops-sha must be a full 40-character commit SHA");
   if (args.wrapper && args.allowDirty) throw new Error("a wrapper deploys only from a clean tree; --allow-dirty is for the dev stage");
   return args;
+}
+
+/** Resolve the public deployed release tag to its commit after refreshing local tags. */
+export function resolveInferOpsReleaseTag(inferopsRoot: string, tag: string): string {
+  if (!RELEASE_TAG.test(tag)) throw new Error(`InferOps /status version ${JSON.stringify(tag)} is not a release tag`);
+  const fetched = spawnSync("git", ["-C", inferopsRoot, "fetch", "--tags"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (fetched.status !== 0) throw new Error(`could not fetch InferOps release tags from ${inferopsRoot}`);
+  const resolved = spawnSync("git", ["-C", inferopsRoot, "rev-list", "-n", "1", tag], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const sha = resolved.stdout.trim();
+  if (resolved.status !== 0 || !FULL_SHA.test(sha)) throw new Error(`InferOps release tag ${tag} does not resolve to a commit in ${inferopsRoot}`);
+  return sha;
 }
 
 /** What a run deploys: a persistent stage, or a wrapper's own. */
@@ -408,17 +422,23 @@ async function checkedInferOpsRevision(prepared: Prepared, args: StageArgs): Pro
   const pin = contract.compatibility?.provider?.revision;
   if (typeof pin !== "string" || !/^[a-f0-9]{40}$/.test(pin)) throw new Error("InferOps connection.json has no full provider revision pin");
   let sha = args.inferopsSha;
-  if (sha !== undefined && !/^[a-f0-9]{40}$/.test(sha)) throw new Error("--inferops-sha must be a full 40-character commit SHA");
   if (!sha) {
     const headers: Record<string, string> = process.env.INFEROPS_EDGE_SECRET ? { "x-inferos-edge": process.env.INFEROPS_EDGE_SECRET } : {};
+    let tag: string | undefined;
     try {
       const response = await smokeRequest(new URL("/status", prepared.stage.inferops.baseUrl), { headers, timeoutMs: 10_000 });
-      const body = JSON.parse(response.body) as Record<string, unknown>;
-      const candidate = body.gitSha ?? body.revision ?? body.sha;
-      if (response.status === 200 && typeof candidate === "string" && /^[a-f0-9]{40}$/.test(candidate)) sha = candidate;
-    } catch { /* Explicit fallback is required until InferOps P1 publishes a SHA. */ }
+      if (response.status === 200) {
+        const body = JSON.parse(response.body) as Record<string, unknown>;
+        if (typeof body.version === "string") tag = body.version;
+      }
+    } catch { /* Explicit fallback is required when the deployed release tag is unavailable. */ }
+    if (tag) {
+      const common = execFileSync("git", ["-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
+      const inferopsRoot = process.env.INFEROPS_REPO ?? join(dirname(dirname(common)), "inferops");
+      sha = resolveInferOpsReleaseTag(inferopsRoot, tag);
+    }
   }
-  if (!sha) throw new Error("InferOps /status did not report a full git SHA; retry with --inferops-sha <full-sha>");
+  if (!sha) throw new Error("InferOps /status did not report a deployed release tag; retry with --inferops-sha <full-sha>");
   const common = execFileSync("git", ["-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
   const inferopsRoot = process.env.INFEROPS_REPO ?? join(dirname(dirname(common)), "inferops");
   const exists = spawnSync("git", ["-C", inferopsRoot, "cat-file", "-e", `${sha}^{commit}`], { stdio: "ignore" });

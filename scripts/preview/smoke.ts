@@ -382,14 +382,15 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
       const response = await send(at("/gatekeeper/inferops/health/ready"));
       let body: { status?: unknown; checks?: unknown } | null = null;
       try { body = JSON.parse(response.body) as { status?: unknown; checks?: unknown }; } catch { /* reported below */ }
-      const down = Array.isArray(body?.checks) ? body.checks.flatMap(item => {
+      const degraded = Array.isArray(body?.checks) ? body.checks.flatMap(item => {
         if (!item || typeof item !== "object") return [];
-        const check = item as { name?: unknown; status?: unknown };
-        return typeof check.name === "string" && check.status !== "ok" ? [check.name] : [];
+        const componentCheck = item as { name?: unknown; status?: unknown };
+        return typeof componentCheck.name === "string" && componentCheck.status !== "ok" ? [componentCheck.name] : [];
       }) : [];
-      const ok = response.status === 200 && body?.status === "ok";
+      const ok = response.status === 200 && (body?.status === "ok" || body?.status === "degraded");
       return { name: "inferops-readiness", ok, status: response.status,
-        detail: ok ? "InferOps readiness is ok" : `InferOps readiness failed${down.length ? `: ${down.join(", ")}` : ` (HTTP ${response.status})`}` };
+        detail: ok ? degraded.length ? `InferOps is ready with degraded components: ${degraded.join(", ")}` : "InferOps readiness is ok"
+          : `InferOps readiness failed${degraded.length ? `: ${degraded.join(", ")}` : ` (HTTP ${response.status})`}` };
     });
   }
   if (options.connectUrls.length === 0) {

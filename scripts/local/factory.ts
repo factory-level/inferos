@@ -400,23 +400,36 @@ async function inferosHealth(config: FactoryConfig, deps: FactoryDeps): Promise<
 }
 
 /**
- * `/health/ready` answers 200 even while Postgres is down; the body's `status` is the verdict. A body
- * without one (an older API) is judged by the HTTP status alone.
+ * `/health/ready` answers 200 even while Postgres is down; the body's `status` is the verdict.
  */
 function readyBodyOk(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
   const status = body && typeof body === "object" ? (body as { status?: unknown }).status : undefined;
-  return status === undefined || (typeof status === "string" && /^(?:ok|up|ready)$/.test(status));
+  return typeof status === "string" && /^(?:ok|up|ready|degraded)$/.test(status);
+}
+
+function degradedReadinessParts(body: unknown): string[] {
+  if (!body || typeof body !== "object") return [];
+  const checks = (body as { checks?: unknown }).checks;
+  if (!Array.isArray(checks)) return [];
+  return checks.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const check = item as { name?: unknown; status?: unknown };
+    return typeof check.name === "string" && check.status !== "ok" ? [check.name] : [];
+  });
 }
 
 async function inferopsHealth(config: FactoryConfig, deps: FactoryDeps): Promise<Check> {
   const url = `${config.inferopsUrl}/health/ready`;
   const { status, body } = await getJson(url, deps);
   const ready = status === 200 && readyBodyOk(body);
+  const degraded = body && typeof body === "object" && (body as { status?: unknown }).status === "degraded"
+    ? degradedReadinessParts(body) : [];
   const configured = config.inferopsMode === "image" ? `image ${config.inferopsImage} on database ${config.inferopsDb}`
     : config.inferopsMode === "checkout" ? `checkout ${config.inferopsDir}` : "the pinned test backend (pnpm local inferops up, scripts/local/inferops.ts)";
   return {
     name: "service:inferops", status: ready ? "READY" : "FAIL",
-    detail: ready ? `${url} answered 200 (${configured})`
+    detail: ready ? `${url} answered 200${degraded.length ? `; degraded components: ${degraded.join(", ")}` : ""} (${configured})`
       : `${url} ${status === null ? "did not answer" : status === 200 ? "answered 200 but not ready" : `answered ${status}`}; ${configured}`,
     health: { url, status, body },
   };
@@ -538,10 +551,12 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
   const auth = await getJson(`${inferops}/auth/public-config`, deps);
   const mode = auth.body && typeof auth.body === "object" ? (auth.body as { mode?: unknown }).mode : undefined;
   const healthy = ready.status === 200 && readyBodyOk(ready.body);
+  const degraded = ready.body && typeof ready.body === "object" && (ready.body as { status?: unknown }).status === "degraded"
+    ? degradedReadinessParts(ready.body) : [];
   checks.push({
     name: "stage:inferops", status: healthy && mode === "stub" ? "READY" : "FAIL",
     detail: !healthy ? `${readinessUrl} ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
-      : mode === "stub" ? `${readinessUrl} answered 200; auth mode stub (persona sign-in, no password)`
+      : mode === "stub" ? `${readinessUrl} answered 200${degraded.length ? `; degraded components: ${degraded.join(", ")}` : ""}; auth mode stub (persona sign-in, no password)`
         : `${inferops} is healthy but its auth mode is ${String(mode)}; a loopback stage's personas sign in only in stub mode`,
     health: { url: readinessUrl, status: ready.status, body: ready.body, authMode: mode ?? null },
   });
@@ -563,13 +578,15 @@ async function remoteInferlabCheck(target: StageTarget, fetchStage: typeof fetch
   const ready = await getJson(readinessUrl, { ...deps, fetchImpl: fetchStage });
   const mode = await inferlabAuthMode(inferops, deps.fetchImpl);
   const healthy = ready.status === 200 && readyBodyOk(ready.body);
+  const degraded = ready.body && typeof ready.body === "object" && (ready.body as { status?: unknown }).status === "degraded"
+    ? degradedReadinessParts(ready.body) : [];
   return {
     authMode: mode,
     check: {
       name: "stage:inferops", status: healthy && mode !== null ? "READY" : "FAIL",
       detail: !healthy ? `${readinessUrl} ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
         : mode === null ? `${inferops}/auth/public-config names no auth mode, so the smoke's credential set is unknown`
-        : `${readinessUrl} answered 200; auth mode ${mode} (${mode === "stub" ? "persona sign-in, no password" : "persona password required"})`,
+        : `${readinessUrl} answered 200${degraded.length ? `; degraded components: ${degraded.join(", ")}` : ""}; auth mode ${mode} (${mode === "stub" ? "persona sign-in, no password" : "persona password required"})`,
       health: { url: readinessUrl, status: ready.status, body: ready.body, authMode: mode },
     },
   };

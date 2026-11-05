@@ -28,7 +28,7 @@ const behaviour = {
   /** The app shell's Cross-Origin-Opener-Policy, as the frontend's `_headers` sets it, or none. */
   openerPolicy: "same-origin" as string | null,
   /** The bound InferOps gatekeeper's sanitized readiness response. */
-  inferopsReady: true,
+  inferopsReadiness: "ok" as "ok" | "degraded" | "down" | "unreadable",
 };
 const seen: { path: string; method: string; headers: IncomingMessage["headers"] }[] = [];
 
@@ -56,9 +56,14 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
   if (path === "/gatekeeper/inferops/health/ready") {
-    const checks = behaviour.inferopsReady ? [{ name: "database", status: "ok" }] : [{ name: "database", status: "down" }];
-    res.writeHead(behaviour.inferopsReady ? 200 : 503, { "content-type": "application/json" })
-      .end(JSON.stringify({ status: behaviour.inferopsReady ? "ok" : "down", checks }));
+    if (behaviour.inferopsReadiness === "unreadable") {
+      res.writeHead(200, { "content-type": "text/plain" }).end("not json");
+      return;
+    }
+    const status = behaviour.inferopsReadiness;
+    const checks = [{ name: "database", status: status === "ok" ? "ok" : "down" }];
+    res.writeHead(status === "down" ? 503 : 200, { "content-type": "application/json" })
+      .end(JSON.stringify({ status, checks }));
     return;
   }
   if (path.startsWith("/gatekeeper/inferops/")) {
@@ -130,13 +135,35 @@ describe("runSmoke against a fake deployment", () => {
   });
 
   it("reports the failed InferOps component from its readiness endpoint", async () => {
-    behaviour.inferopsReady = false;
+    behaviour.inferopsReadiness = "down";
     try {
       const report = await runSmoke(options());
       assert.equal(report.ok, false);
       assert.match(checkNamed(report, "inferops-readiness").detail, /database/);
     } finally {
-      behaviour.inferopsReady = true;
+      behaviour.inferopsReadiness = "ok";
+    }
+  });
+
+  it("accepts degraded readiness and names its optional component", async () => {
+    behaviour.inferopsReadiness = "degraded";
+    try {
+      const report = await runSmoke(options());
+      assert.equal(report.ok, true);
+      assert.match(checkNamed(report, "inferops-readiness").detail, /ready with degraded components: database/);
+    } finally {
+      behaviour.inferopsReadiness = "ok";
+    }
+  });
+
+  it("rejects an unreadable readiness body", async () => {
+    behaviour.inferopsReadiness = "unreadable";
+    try {
+      const report = await runSmoke(options());
+      assert.equal(report.ok, false);
+      assert.match(checkNamed(report, "inferops-readiness").detail, /failed/);
+    } finally {
+      behaviour.inferopsReadiness = "ok";
     }
   });
 
