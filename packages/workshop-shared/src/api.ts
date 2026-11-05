@@ -701,6 +701,11 @@ export const OPERATE_SESSION_ERROR_CODES = {
   recipientUnavailable: "OPERATE_SESSION_RECIPIENT_UNAVAILABLE",
   /** The flow named is in neither the open published console nor the caller's own flows. */
   flowUnavailable: "OPERATE_SESSION_FLOW_UNAVAILABLE",
+  /**
+   * A flow navigation's destination page is one the caller can no longer open: its screen was
+   * removed, or isn't one their access shows (FAC-87). It names no page and no workspace.
+   */
+  flowPageUnavailable: "OPERATE_SESSION_FLOW_PAGE_UNAVAILABLE",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -715,6 +720,8 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
   [OPERATE_SESSION_ERROR_CODES.consoleChanged]:
       "That view or screen is not part of the console as it is now saved, or the console is no " +
       "longer available to you. Reload the console.",
+  [OPERATE_SESSION_ERROR_CODES.flowPageUnavailable]:
+      "That page of the flow isn't available to you any more. Go back, or leave the flow.",
   [OPERATE_SESSION_ERROR_CODES.boardUnavailable]:
       "That board is not connected for you here, or is no longer available to you. Connect it or " +
       "choose another board.",
