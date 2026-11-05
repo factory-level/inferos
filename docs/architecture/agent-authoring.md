@@ -13,8 +13,9 @@ covers:
   - packages/gatekeeper-scheduler
   - packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.tsx
   - packages/gatekeeper-context/src/agent-skill.ts
+  - packages/bundled-blueprints/src/authoring-compiler.ts
   - docs/blueprints.md
-updated: 2026-11-03
+updated: 2026-11-05
 ---
 
 # Reusable native agent authoring
@@ -36,7 +37,17 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 | `packages/workshop-backend/src/blueprint-archive.ts` | `.gadget` archive format v1 encode and decode. |
 | `packages/gatekeeper-scheduler` | Persistent workspace callbacks. |
 | `packages/gatekeeper-context/src/agent-skill.ts` | Context Library skills advertised to agents. |
+| `packages/bundled-blueprints/src/authoring-compiler.ts` | Node-only compiler for future authored React/Refine widgets; deterministic artifacts and build-time input refusals. |
 | `docs/blueprints.md` | Portable code and binding requirements. |
+
+### Authored widget compiler (FAC-8, slice 1a)
+
+`compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
+React/Refine dependency set. It rejects external CSS references, unsupported source and import
+forms, and forces Refine telemetry off in the emitted artifact. Source checks for browser and
+network globals provide author feedback only; they are not a security boundary. The eventual
+runtime boundary is the Gadget frame and its content policy. Slice 1a does not add the editor-time
+runner, a runtime egress test, or a build timeout/file-count cap; those belong to slice 1b.
 
 ### Native operations available today
 
