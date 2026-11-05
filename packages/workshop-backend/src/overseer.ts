@@ -15396,6 +15396,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           current.commitId !== startingCommitId) {
         throw new Error("The Blueprint changed while building; publish again.");
       }
+      // Preserve metadata-only changes that landed while this build was pending. Apply only
+      // this publish's requested fields to the freshly read record below.
+      record = current;
     }
     if (options.title !== undefined) record.metadata.title = options.title;
     if (options.description !== undefined) record.metadata.description = options.description;

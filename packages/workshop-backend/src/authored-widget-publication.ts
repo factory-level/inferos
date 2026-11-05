@@ -2,6 +2,15 @@ import type { GitStore } from "./git-store.js";
 import type { AuthoredWidgetBuildResult } from "./authored-widget-build.js";
 import { validateAuthoredWidgetPreflight } from "./authored-widget-preflight.js";
 
+const sourceFreeValidationMessages = new Set([
+  "Invalid TypeScript syntax.",
+  "Unapproved package import.",
+  "Denied global.",
+  "Dynamic import refused.",
+  "import.meta refused.",
+  "External CSS resources are not allowed.",
+]);
+
 /** Minimal build namespace contract used by the authored-widget publication boundary. */
 export interface AuthoredWidgetBuildNamespace {
   /** Return an isolated build stub for one publication attempt. */
@@ -58,8 +67,7 @@ export async function compileAuthoredWidgetPublication(
         /Durable Object.*(?:reset|terminated)|(?:reset|terminated).*Durable Object/iu.test(message)) {
       throw new Error("Build failed: it ran out of resources; try fewer or smaller files.", { cause: error });
     }
-    if (message === "Invalid TypeScript syntax." || message === "Unapproved package import." ||
-        message.startsWith("Authored widget refused:")) {
+    if (sourceFreeValidationMessages.has(message) || message.startsWith("Authored widget refused:")) {
       throw new Error(message, { cause: error });
     }
     throw new Error("Build failed: the widget could not be compiled.", { cause: error });

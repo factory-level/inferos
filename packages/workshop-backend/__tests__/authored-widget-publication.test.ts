@@ -99,7 +99,14 @@ describe("authored widget publication commit boundary", () => {
     expect(writes).toBe(0);
   });
 
-  it.each(["Invalid TypeScript syntax.", "Unapproved package import."]) (
+  it.each([
+    "Invalid TypeScript syntax.",
+    "Unapproved package import.",
+    "Denied global.",
+    "Dynamic import refused.",
+    "import.meta refused.",
+    "External CSS resources are not allowed.",
+  ]) (
     "preserves the fixed, source-free validation refusal %s", async message => {
       const run = compileAuthoredWidgetPublication({
         enabled: true, sourceCommitId: "source-commit",

@@ -209,4 +209,50 @@ describe("authored widget publication through the Overseer client", () => {
       expect(versions).toEqual(new Map([[1, sourceCommit], [2, "compiled-1"]]));
     });
   });
+
+  it("preserves metadata edits made while a code publish is building", async () => {
+    await withClient(async (impl, client) => {
+      const sourceCommit = await impl.gitStore.writeFilesAsCommit(
+        new Map([["client.tsx", "export default function Widget(){ return <div/> }"]]), {
+          parents: [], author: {name: "Owner", email: "owner@example.com"},
+          message: "widget source", timestamp: new Date(1_700_000_000_000),
+        });
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(1_700_000_000_000),
+        bindingName: "widget", commitId: sourceCommit, bindings: {},
+      });
+      impl.compileAuthoredWidgetCommit = async (commitId: string) => commitId;
+      impl.snapshotCode = async (commitId: string) => new TextEncoder().encode(commitId);
+      const versions = new Map<number, string>();
+      impl.propagateBlueprint = async (record: any, snapshot: Uint8Array) => {
+        impl.storage.blueprints.put(record);
+        versions.set(record.metadata.version, new TextDecoder().decode(snapshot));
+      };
+
+      const gadget = await client.getGadget(1);
+      const blueprint = await gadget.createBlueprint("published", "initial description");
+
+      let releaseBuild!: () => void;
+      const buildReleased = new Promise<void>(resolve => { releaseBuild = resolve; });
+      let buildStarted!: () => void;
+      const started = new Promise<void>(resolve => { buildStarted = resolve; });
+      impl.compileAuthoredWidgetCommit = async () => {
+        buildStarted();
+        await buildReleased;
+        return "compiled-next";
+      };
+
+      const publishing = client.updateBlueprint(blueprint.id, {updateCode: true});
+      await started;
+      await client.updateBlueprint(blueprint.id, {title: "edited during build"});
+      releaseBuild();
+      await publishing;
+
+      expect(impl.storage.blueprints.get(blueprint.id)).toMatchObject({
+        commitId: "compiled-next",
+        metadata: {title: "edited during build", version: 2},
+      });
+      expect(versions.get(2)).toBe("compiled-next");
+    });
+  });
 });
