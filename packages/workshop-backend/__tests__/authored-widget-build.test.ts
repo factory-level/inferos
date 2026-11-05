@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isValidAuthoredWidgetSourcePath } from "../src/authored-widget-path.js";
 import {
   validateAuthoredWidgetSources,
   maximumSourcePathBytes,
@@ -43,6 +44,20 @@ describe("authored widget publication input", () => {
     const overLimit = `${"a".repeat(maximumSourcePathBytes + 1 - ".tsx".length)}.tsx`;
     expect(() => validateAuthoredWidgetSources({ ...valid, [overLimit]: "export {};" }))
       .toThrow("Invalid source path.");
+  });
+
+  it("applies the shared path grammar to every authored source path", () => {
+    for (const path of [
+      "../client.tsx", "/client.tsx", "folder\\client.tsx", "folder//client.tsx",
+      "folder/./client.tsx", "folder/../client.tsx", "package.json", "folder/package.json",
+      "client.js", "release..tsx", "C:/client.tsx", "C:\\client.tsx", "\\\\server\\share\\client.tsx",
+      "bad\0name.tsx", "bad\x01name.tsx",
+      "bad\x1fname.tsx", "bad\x7fname.tsx", "bad\u0080name.tsx", "bad\u009fname.tsx",
+      "folder/", "bad\uFF0Fname.tsx", "bad\u2215name.tsx", "bad\u2044name.tsx",
+      "bad\u2024name.tsx", "bad\u202Ename.tsx", "bad\u200Bname.tsx", "bad\u2066name.tsx",
+    ]) expect(isValidAuthoredWidgetSourcePath(path), path).toBe(false);
+    expect(isValidAuthoredWidgetSourcePath("client.tsx")).toBe(true);
+    expect(isValidAuthoredWidgetSourcePath("components/Widget.css")).toBe(true);
   });
 
 });

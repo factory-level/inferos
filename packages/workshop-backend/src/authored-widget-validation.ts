@@ -1,10 +1,10 @@
 import ts from "typescript6";
+import { isValidAuthoredWidgetSourcePath } from "./authored-widget-path.js";
+export { maximumSourcePathBytes } from "./authored-widget-path.js";
 
 const maximumSourceBytes = 1024 * 1024;
 const maximumSourceFileBytes = 256 * 1024;
 const maximumSourceFiles = 100;
-/** Keep authored paths comfortably below GitStore and object-store key limits. */
-export const maximumSourcePathBytes = 512;
 /** Package imports available to authored widgets in the reviewed build closure. */
 export const allowedAuthoredWidgetImports = new Set([
   "@refinedev/core", "@tanstack/react-query", "react", "react-dom/client", "react/jsx-runtime",
@@ -33,13 +33,7 @@ export function validateAuthoredWidgetSources(input: Readonly<Record<string, str
   const files = new Map<string, string>();
   let totalBytes = 0;
   for (const [path, source] of Object.entries(input)) {
-    if (new TextEncoder().encode(path).byteLength > maximumSourcePathBytes || [...path].some(character => {
-      const codePoint = character.codePointAt(0)!;
-      return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
-    }) || path.startsWith("/") || path.includes("\\") ||
-        path.split("/").some(part => part === "" || part === "." || part === "..") ||
-        path === "package.json" || path.endsWith("/package.json") ||
-        (!path.endsWith(".tsx") && !path.endsWith(".css"))) throw new Error("Invalid source path.");
+    if (!isValidAuthoredWidgetSourcePath(path)) throw new Error("Invalid source path.");
     if (typeof source !== "string") throw new Error("Expected UTF-8 source text.");
     const bytes = new TextEncoder().encode(source).byteLength;
     if (bytes > maximumSourceFileBytes || files.size >= maximumSourceFiles ||

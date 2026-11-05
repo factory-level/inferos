@@ -46,6 +46,34 @@ describe("authored widget publication commit boundary", () => {
       "client.tsx": "export default function Widget(){ return <div/> }",
       [`${"a".repeat(509)}.tsx`]: "export {};",
     }],
+    ...["\0", "\x01", "\x1f", "\x7f", "\u0080", "\u009f"].map((control, index) => [
+      `control character ${index}`,
+      {
+        "client.tsx": "export default function Widget(){ return <div/> }",
+        [`bad${control}name.tsx`]: "export {};",
+      },
+    ]),
+    ...[
+      ["backslash", "folder\\widget.tsx"],
+      ["absolute path", "/widget.tsx"],
+      ["Windows drive path", "C:/widget.tsx"],
+      ["parent traversal", "../widget.tsx"],
+      ["double dot in name", "release..tsx"],
+      ["current-directory segment", "folder/./widget.tsx"],
+      ["parent-directory segment", "folder/../widget.tsx"],
+      ["empty path segment", "folder//widget.tsx"],
+      ["fullwidth slash", "folder／widget.tsx"],
+      ["division slash", "folder∕widget.tsx"],
+      ["fraction slash", "folder⁄widget.tsx"],
+      ["bidi override", "folder\u202Ewidget.tsx"],
+      ["zero-width space", "folder\u200Bwidget.tsx"],
+    ].map(([label, path]) => [
+      `${label} path`,
+      {
+        "client.tsx": "export default function Widget(){ return <div/> }",
+        [path]: "export {};",
+      },
+    ]),
     ["too many files", Object.fromEntries([
       ["client.tsx", "export default function Widget(){ return <div/> }"],
       ...Array.from({length: 100}, (_, index) => [`extra-${index}.tsx`, "export {};" ]),
@@ -72,7 +100,10 @@ describe("authored widget publication commit boundary", () => {
       author: async () => ({ name: "test", email: "test@example.com" }) as never,
       onFailure: () => {},
     });
-    await expect(run()).rejects.toThrow();
+    const refusal = expect(run()).rejects;
+    if (String(_case).includes("path") || String(_case).includes("character")) {
+      await refusal.toThrow("Invalid source path.");
+    } else await refusal.toThrow();
     expect(getCalls).toBe(0);
     expect(compileCalls).toBe(0);
   });

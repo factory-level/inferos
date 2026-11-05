@@ -54,9 +54,11 @@ network globals provide author feedback only; they are not a security boundary. 
 real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
 specific outbound request APIs from the production frame; it does not establish a general egress
 guarantee. Compilation caps source size, file size and file count, and stops waiting for an esbuild
-build after 10 seconds. Source paths are limited to 512 UTF-8 bytes, source size to 1 MiB, each
-file to 256 KiB, and the tree to 100 files. This deadline cannot preempt synchronous WASM work; a
-timed-out build may continue until the Durable Object is reset. The build-input hash includes the full transitive
+build after 10 seconds. Source paths are limited to 512 UTF-8 bytes and reject traversal, absolute
+paths, controls, backslashes, and ambiguous Unicode separators or format characters; source size
+is limited to 1 MiB, each file to 256 KiB, and the tree to 100 files. This deadline cannot preempt
+synchronous WASM work; a timed-out build may continue until the Durable Object is reset. The
+build-input hash includes the full transitive
 package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including peer-specific
 snapshots. The compile core remains runner-agnostic; it does not add an editor-time runner or runtime
 egress boundary.
