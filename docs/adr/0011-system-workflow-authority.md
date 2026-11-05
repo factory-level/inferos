@@ -6,6 +6,8 @@ date: 2026-11-02
 
 # 0011. Configured system work uses its assigned principal, apart from each person's token
 
+**Status note (2026-11-05):** this record stays proposed. Invoking (inferops ADR 0011 D3's grant half) is built: `workflow:invoke` is checked in the connection's target InferOps workspace only (manager, 2026-11-05), through the person's own token; no other workspace's grant counts.
+
 ## Context
 
 [ADR 0004](0004-inferops-gatekeeper-user-authority.md) has the InferOps gatekeeper act with each person's own token, and leaves unattended work open. The design has a second context: a predefined system workflow runs with the authority assigned to it and its permitted trigger ([agent operations](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/agent-operations.md)).

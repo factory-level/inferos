@@ -135,18 +135,36 @@ export const WORKFLOW_INVOKE_REFUSED =
   "You don't have permission to run workflows here. Ask an Admin for it.";
 
 /**
- * Refuses unless the deployment's shared-configuration authority says the user may ask a
- * configured system workflow to run (FAC-102, InferOps' `workflow:invoke`, inferops ADR 0011 D3),
- * asked freshly through their own connected account. Where the deployment names no such authority
- * there is nothing to ask, as for shared configuration. It admits nothing alone: the trigger's own
- * control must list the person too.
+ * Refuses unless the deployment's shared-configuration authority says the user may ask trigger
+ * `hookId`'s workflow to run (FAC-102, InferOps' `workflow:invoke`, inferops ADR 0011 D3), asked
+ * freshly through their own connected account in the workspace of each connection of that vendor the
+ * trigger's gadget binds, read from the connection's own record, never from the request; every one
+ * must say yes, and a workflow with none is refused, since nothing scopes the question (the manager,
+ * 2026-11-05). Where the deployment names no such authority there is nothing to ask, as for shared
+ * configuration. It admits nothing alone: the trigger's own control must list the person too.
  */
 export async function requireWorkflowInvoke(
-    workspace: { env: Cloudflare.Env; users: DurableObjectNamespace<UserDurableObject> },
-    userId: string): Promise<void> {
-  if (!getSharedConfigurationGatekeeper(workspace.env)) return;
+    workspace: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
+    userId: string, hookId: number): Promise<void> {
+  let vendorId = getSharedConfigurationGatekeeper(workspace.env);
+  if (!vendorId) return;
+  let hook = workspace.storage.boundHooks.get(hookId);
+  let gadgetId = hook ? hook.gadgetId ?? workspace.defaultGadgetId : undefined;
+  let boards = new Set<string>();
+  if (gadgetId !== undefined) {
+    for (let [, edge] of workspace.visibleBindings(workspace.getGadgetRecord(gadgetId))) {
+      let record = workspace.storage.gatekeepers.get(edge.target);
+      let spec = record?.creationSpec;
+      if (gatekeeperVendorId(record) === vendorId && spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string") {
+        boards.add(spec.resourceUrl);
+      }
+    }
+  }
+  if (boards.size === 0) throw new Error(WORKFLOW_INVOKE_REFUSED);
   let user = workspace.users.get(workspace.users.idFromString(userId));
-  if (!(await user.holdsWorkflowInvoke())) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  for (let resourceUrl of boards) {
+    if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  }
 }
 
 /**
@@ -17089,13 +17107,14 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
  * gatekeeper that can't run on request, or refuses now, leaves no invocation behind.
  */
 export async function invokeWorkflowTrigger(
-    impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore">,
+    impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
   // The person's own InferOps grant (workflow:invoke), asked freshly at every request, so a removed
   // grant stops the next run. Before anything is minted or handed on.
-  await requireWorkflowInvoke(impl, userId);
+  await requireWorkflowInvoke(impl, userId, hookId);
   // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
   let store = impl.workflowDefinitionStore();
