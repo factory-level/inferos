@@ -344,6 +344,9 @@ async function main(argv: string[]): Promise<void> {
   const token = process.env.INFEROPS_OFFBOARDING_TOKEN ?? "";
   const result = await purgeLocalCompany({ tenantId: manifest.tenantId, stateDirectory: verifyPinnedPath(manifest.pins.stateDirectory),
     wrapperRoot: manifest.wrapperRoot, apply: parsed.apply,
+    // Again after InferOps' status round-trip, right before the delete: a path swapped while that
+    // request was out would otherwise lead the delete into another wrapper's state.
+    beforeDelete: async () => { verifyPinnedPath(manifest.pins.stateDirectory); },
     readStatus: parsed.apply
       ? httpStatusReader(manifest.inferopsBaseUrl, token)
       : async () => { throw new Error("Offboarding status is read only during --apply"); } });

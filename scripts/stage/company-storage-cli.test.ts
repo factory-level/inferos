@@ -3,8 +3,11 @@
 // (as the InferOS backend declares it, reached through ctx.exports) whose gadget facets a real
 // Miniflare seeded, and a wrapper whose start hangs.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -133,6 +136,63 @@ for (const { label, swap } of [
     assert.deepEqual(readdirSync(join(sibling, ".wrangler", "state")), ["marker"]);
   });
 }
+
+/**
+ * Runs `purge-local --apply` against a local stand-in for InferOps' offboarding status that reports
+ * the company purgeable, after running `duringStatus`: the status round-trip is the wait between
+ * the CLI's checks and its delete.
+ */
+async function purgeLocal(dir: string, duringStatus: () => void) {
+  const server = createServer((request, response) => {
+    duringStatus();
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ tenantId: TENANT, protected: false, state: "offboarded",
+      offboardedAt: "2026-01-01T00:00:00.000Z", purgeAfter: "2026-02-01T00:00:00.000Z" }));
+  });
+  await new Promise<void>(listening => server.listen(0, "127.0.0.1", listening));
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    manifest.inferopsBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+    const child = spawn(process.execPath, [cli, "purge-local", "--manifest", join(dir, "manifest.json"), "--apply"], {
+      // A fictional bearer for the local stand-in; nothing real is reached.
+      env: { ...process.env, INFEROPS_OFFBOARDING_TOKEN: "fictional-local-status-token" },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    const [status] = await once(child, "exit") as [number | null];
+    return { status, stdout, stderr };
+  } finally {
+    server.close();
+  }
+}
+
+test("purge-local deletes its own wrapper's state once InferOps says the company is purgeable", async () => {
+  const dir = wrapper("purge-own");
+  writeFileSync(join(dir, ".wrangler", "state", "own"), "own state");
+  const run = await purgeLocal(dir, () => {});
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /local-purge-applied/);
+  assert.ok(!existsSync(join(dir, ".wrangler", "state")));
+});
+
+test("purge-local refuses, deleting nothing, if a state path component is swapped during the status check", async () => {
+  const sibling = wrapper("purge-sibling");
+  writeFileSync(join(sibling, ".wrangler", "state", "marker"), "sibling state");
+  const dir = wrapper("purge-swapped");
+  writeFileSync(join(dir, ".wrangler", "state", "own"), "own state");
+  const run = await purgeLocal(dir, () => {
+    // After every check before the request: .wrangler now leads to the sibling's.
+    renameSync(join(dir, ".wrangler"), join(dir, ".wrangler-checked"));
+    symlinkSync(join(sibling, ".wrangler"), join(dir, ".wrangler"), "dir");
+  });
+  assert.equal(run.status, 1, run.stdout);
+  assert.match(run.stderr, /stateDirectory changed since it was checked.*nothing was started/s);
+  assert.deepEqual(readdirSync(join(sibling, ".wrangler", "state")), ["marker"], "the sibling's state is untouched");
+  assert.deepEqual(readdirSync(join(dir, ".wrangler-checked", "state")), ["own"], "nothing was deleted");
+});
 
 test("a hung start fails within --timeout-ms and leaves nothing running", () => {
   // A build command no other test or stack runs, so finding it afterwards means it leaked.
