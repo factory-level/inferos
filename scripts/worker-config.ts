@@ -24,9 +24,9 @@ export const CAPNWEB_VALIDATE_BUILD: WranglerBuild = {
   watch_dir: "src",
 };
 
-/** A Wrangler module rule. Only the Text rules this repo uses are modelled. */
+/** A Wrangler module rule. */
 export interface ModuleRule {
-  type: "Text";
+  type: "Text" | "CompiledWasm";
   globs: string[];
   fallthrough: boolean;
 }

@@ -7,6 +7,9 @@ covers:
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
   - packages/workshop-backend/src/overseer.ts
   - packages/workshop-backend/src/blueprint-archive.ts
+  - packages/workshop-backend/src/authored-widget-build.ts
+  - packages/workshop-backend/src/authored-widget-build-runtime.ts
+  - packages/workshop-backend/scripts/build-authored-widget-dependencies.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
   - packages/workshop-backend/src/artifact-publisher-binding.d.ts
@@ -41,7 +44,7 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 | `packages/bundled-blueprints/src/authoring-compiler.ts` | Node-only compiler for future authored React/Refine widgets; deterministic artifacts and build-time input refusals. |
 | `docs/blueprints.md` | Portable code and binding requirements. |
 
-### Authored widget compiler (FAC-8, slice 1b)
+### Authored widget compiler (FAC-8)
 
 `compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
 React/Refine dependency set. It rejects external CSS references, unsupported source and import
@@ -52,6 +55,16 @@ size and file count, and stops an esbuild build after 10 seconds. The build-inpu
 full transitive package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including
 peer-specific snapshots. The compile core remains runner-agnostic; it does not add an editor-time
 runner or runtime egress boundary.
+
+At Blueprint publication, `createBlueprint()` and `updateBlueprint({updateCode: true})` can opt into
+the Worker-side compiler with `AUTHORED_WIDGET_BUILD_ENABLED="true"`; the flag is off unless it is
+exactly `true`. The existing Worker hosts an isolated `AuthoredWidgetBuildDurableObject` for each
+build. That object lazy-loads the pinned wasm compiler and generated dependency closure, then returns
+only the compiled client module and byte/duration measurements. A failed or timed-out build refuses
+publication before the stored Blueprint record is changed. The successful source plus `client.js`
+is stored as a child GitStore commit, leaving the editable gadget head unchanged. Cloudflare
+per-build CPU reporting is not exposed through this Worker runtime path, and the deployed memory
+headroom remains unmeasured until a person runs the dev measurement; keep the flag off until then.
 
 ### Native operations available today
 
