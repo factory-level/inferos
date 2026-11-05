@@ -184,6 +184,23 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   it asks InferOps' `GET /auth/permissions?permissions=configuration:<build|publish>` with the
   person's own token in each workspace stored at connect, in order, through
   `InferOpsClient.holdsPermission`, and says yes at the first workspace whose decision allows it.
+- **System credentials (FAC-102, inferos ADR 0011).** A configured system workflow's run acts as an
+  InferOps service account, never a person. `GatekeeperVendor.provisionSystemCredential(credentialRef,
+  {resourceUrl}, key)` (kernel-only: the Workshop relays an Admin's key once and keeps nothing) asks
+  InferOps with the key itself which workspaces it lists (`GET /workspaces`) and who it is there
+  (`readCallerPrincipal`, `GET /auth/me`), and stores it only for a **service account** in this
+  deployment's company whose workspaces include the board host's; anything else is refused with the
+  one fixed "The key wasn't accepted.", never saying why or repeating the key. It's stored in
+  `InferOpsSystemCredentials` (one Durable Object per credential reference, migration `v8`, apart
+  from people's `InferOpsCredentials`) with the workspace id and host it was checked for; storing
+  again rotates it and `forgetSystemCredential` deletes it. `getSystemGatekeeperClass(credentialRef,
+  {resourceUrl})` returns the project-board gatekeeper class with `systemCredentialRef` in its props
+  (never the key); boards only. Such a binding's client (`systemClient`) reads its authority per
+  request from the store, sends the key as `Authorization: Bearer` (InferOps routes an `iex_` key to
+  its service-account lane), and only for the host it was checked for. With nothing stored it's
+  UNAUTHORIZED, and InferOps refusing a revoked key fails the call: there is no fallback to anyone's
+  token, the stopgap connection or the mock. `account.test.ts` ("system credentials") covers the
+  check, the refusals, the host, rotation, forgetting and revocation.
 - **Running workflows (FAC-102).** `InferOpsAccount.holdsWorkflowInvoke()` answers whether the
   person may ask a configured system workflow to run, asking InferOps' `workflow:invoke` exactly as
   the shared-configuration question asks (the same company scope, refusals and private

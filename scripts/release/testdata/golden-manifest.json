@@ -526,6 +526,12 @@
             "InferOpsAccountGatekeeper"
           ],
           "tag": "v7"
+        },
+        {
+          "new_sqlite_classes": [
+            "InferOpsSystemCredentials"
+          ],
+          "tag": "v8"
         }
       ],
       "modules": [

@@ -31,7 +31,7 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsAccountGatekeeper, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsSystemCredentials, InferOpsAccountGatekeeper, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
   InferOpsWorkflowPolicyGatekeeper,
 } from "../src/inferops.js";
@@ -505,6 +505,40 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Whether the account's own `getGatekeeperClassFor` reports `url` as mock data. */
   async mockOf(props: AccountProps, url: string): Promise<boolean> {
     return (await this.#account(props).getGatekeeperClassFor(url)).mock === true;
+  }
+
+  // --- System credentials (FAC-102): the vendor's kernel-only methods, as the Workshop calls them.
+
+  #vendor() {
+    return (this.ctx.exports as unknown as SignInExports).GatekeeperVendor({}) as unknown as
+        Required<Pick<import("../src/inferops.js").GatekeeperVendor,
+          "provisionSystemCredential" | "forgetSystemCredential" | "getSystemGatekeeperClass">>;
+  }
+
+  /** Provisions `key` for `credentialRef` and board `url`; the failure message, or null. */
+  async provisionSystem(credentialRef: string, url: string, key: string): Promise<string | null> {
+    try {
+      await this.#vendor().provisionSystemCredential(credentialRef, { resourceUrl: url }, key);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Forgets the key stored for `credentialRef`. */
+  async forgetSystem(credentialRef: string): Promise<void> {
+    await this.#vendor().forgetSystemCredential(credentialRef);
+  }
+
+  /** Binds `url` through the vendor's system class for `credentialRef`; the failure message, or null. */
+  async bindSystem(name: string, credentialRef: string, url: string): Promise<string | null> {
+    try {
+      const cls = await this.#vendor().getSystemGatekeeperClass(credentialRef, { resourceUrl: url });
+      this.#minted.set(name, cls as unknown as DurableObjectClass<InferOpsProjectGatekeeper>);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
   }
 
   /** Binds `url` through the account's own `getGatekeeperClassFor`; the failure message, or null. */
