@@ -188,6 +188,43 @@ describe('GadgetUI RPC recovery', () => {
     )
   })
 
+  it('keeps the generated Gadget frame opaque and denies tested outbound request APIs', async () => {
+    const gadget = fakeGadget('request-probes', 'document.body.textContent = "request probes"')
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" />)
+    })
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const iframe = container.querySelector('iframe')!
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts allow-popups allow-popups-to-escape-sandbox')
+    expect(iframe.srcdoc).toContain("default-src 'none'")
+    expect(iframe.srcdoc).toContain("connect-src 'none'")
+    expect(iframe.srcdoc).toContain('img-src data:; media-src data:;')
+    expect(iframe.srcdoc).toContain("object-src 'none'; base-uri 'none'; form-action 'none'")
+  })
+
+  it('ignores messages that do not come from the declared Gadget frame', async () => {
+    const gadget = fakeGadget('message-source', 'document.body.textContent = "isolated"')
+    const onConsoleLog = vi.fn<() => void>()
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" onConsoleLog={onConsoleLog} />)
+    })
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', {
+        data: { type: 'console', level: 'error', message: ['spoofed'] },
+        origin: 'null',
+        source: window,
+      }))
+      window.dispatchEvent(new MessageEvent('message', {
+        data: 'handshake',
+        origin: 'null',
+        source: window,
+      }))
+    })
+    expect(onConsoleLog).not.toHaveBeenCalled()
+    expect(gadget.connectToGadget).not.toHaveBeenCalled()
+  })
+
   // FAC-86: a console widget's frame is told its local state once it connects and on each change,
   // and never told anything while no state is known.
   it('tells a connected frame its widget state, and each change of it', async () => {
