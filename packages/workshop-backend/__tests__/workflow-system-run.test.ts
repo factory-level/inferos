@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
   OverseerDurableObject, PROVISION_REFUSED, makeOverseerStorage, provisionWorkflowTriggerCredential,
-  retireAssignmentsUsing, retireTriggerAssignment, setWorkflowTriggerAssignment,
+  retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments, setWorkflowTriggerAssignment,
 } from "../src/overseer.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
@@ -359,6 +359,7 @@ function assignmentImpl(env: Record<string, string>) {
       title: { get: () => "Test Workspace" },
       operateSession: { get: () => false },
       boundHooks: { get: (id: number) => (id === HOOK ? { id: HOOK, gadgetId: GADGET } : undefined) },
+      gadgets: { get: (id: number) => (id === GADGET ? { id: GADGET, type: "gadget" } : undefined) },
       gatekeepers: {
         get: (id: number) => ({
           creationSpec: { type: "gatekeeper", vendorId: id === INFEROPS ? "InferOps" : "mail", resourceUrl: "x", typeUrlPattern: "x" },
@@ -651,5 +652,57 @@ describe("#374 round 3: the assigned connection and what a session hands out", (
     expect(store.assignmentOf(HOOK)).toBeNull();
     expect(aborted).toEqual([systemGatekeeperFacetName(assignment.credentialRef, 7)]);
     await vi.waitFor(() => expect(forget).toHaveBeenCalledWith(assignment.credentialRef));
+  });
+});
+
+describe("#374 round 4: every route that removes the assigned binding retires the assignment", () => {
+  /** An assigned trigger with a run in flight, whose gadget's bindings and records a route can change. */
+  function assignedWithRun() {
+    let forget = vi.fn(async (_ref: string) => {});
+    let made = provisionImpl({ forgetSystemCredential: forget });
+    let assignment = setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    made.running(assignment.credentialRef);
+    let impl = made.impl as unknown as Record<string, unknown> & { storage: Record<string, { get: (id: number) => unknown }> };
+    let setBindings = (bindings: [string, { target: number }][]) => { impl.visibleBindings = () => bindings; };
+    return { ...made, impl: made.impl, raw: impl, assignment, forget, setBindings };
+  }
+  async function expectRetired(made: ReturnType<typeof assignedWithRun>) {
+    retireUnboundAssignments(made.impl);
+    expect(made.store.assignmentOf(HOOK)).toBeNull();
+    // Its running delivery's facet is aborted, so every capability a session handed out dies.
+    expect(made.aborted).toEqual([systemGatekeeperFacetName(made.assignment.credentialRef, 7)]);
+    await vi.waitFor(() => expect(made.forget).toHaveBeenCalledWith(made.assignment.credentialRef));
+  }
+
+  it("keeps an assignment whose connection is still bound", () => {
+    let made = assignedWithRun();
+    retireUnboundAssignments(made.impl);
+    expect(made.store.assignmentOf(HOOK)?.credentialRef).toBe(made.assignment.credentialRef);
+    expect(made.aborted).toEqual([]);
+  });
+
+  it("retires it when the binding to the assigned connection is unbound", async () => {
+    let made = assignedWithRun();
+    made.setBindings([["MAIL", { target: 60 }]]);
+    await expectRetired(made);
+  });
+
+  it("retires it when the binding's name is rebound to another connection", async () => {
+    let made = assignedWithRun();
+    made.setBindings([["INFEROPS", { target: 60 }], ["MAIL", { target: 60 }]]);
+    await expectRetired(made);
+  });
+
+  it("retires it when the trigger's gadget is deleted", async () => {
+    let made = assignedWithRun();
+    made.raw.getGadgetRecord = () => { throw new Error("No such workpiece: 3"); };
+    made.raw.storage.gadgets = { get: () => undefined };
+    await expectRetired(made);
+  });
+
+  it("retires it when the trigger's hook is gone", async () => {
+    let made = assignedWithRun();
+    made.raw.storage.boundHooks = { get: () => undefined };
+    await expectRetired(made);
   });
 });

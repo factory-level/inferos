@@ -7466,6 +7466,9 @@ class OverseerImpl implements AgentHooks {
       this.ctx.facets.abort(this.gadgetFacetName(id),
           new Error("Gadget restarted due to code update."));
     }
+    // Every change to binding edges comes through here: an assignment whose connection is no
+    // longer bound is retired now, with its running deliveries' facets (#374 round 4).
+    retireUnboundAssignments(this);
     this.bumpLastActive();
     return codeVersion;
   }
@@ -17278,6 +17281,28 @@ export function retireTriggerAssignment(
     impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">, hookId: number): void {
   let previous = impl.workflowDefinitionStore().assignmentOf(hookId);
   if (previous) retireAssignment(impl, previous);
+}
+
+/**
+ * Retires and removes every assignment that no longer has its connection (#374 round 4): its hook
+ * or its trigger's gadget is gone, or the gadget no longer binds the assigned connection (an unbind,
+ * a rebind of the name to another connection, a merge that dropped the edge). Called from
+ * `bumpVersion`, which every change to a gadget's binding edges goes through.
+ */
+export function retireUnboundAssignments(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "defaultGadgetId" | "workflowDefinitionStore" |
+        "visibleBindings" | "getGadgetRecord">): void {
+  let store = impl.workflowDefinitionStore();
+  for (let assignment of store.assignments()) {
+    let hook = impl.storage.boundHooks.get(assignment.hookId);
+    let gadgetId = hook ? hook.gadgetId ?? impl.defaultGadgetId : undefined;
+    let gadget = gadgetId === undefined ? undefined : impl.storage.gadgets.get(gadgetId);
+    let bound = gadget !== undefined && gadget.type === "gadget" &&
+        impl.visibleBindings(impl.getGadgetRecord(gadgetId!)).some(([, edge]) => edge.target === assignment.gatekeeperId);
+    if (bound) continue;
+    retireAssignment(impl, assignment);
+    store.removeAssignment(assignment.hookId);
+  }
 }
 
 /**

@@ -263,6 +263,11 @@ export class WorkspaceWorkflowDefinitionStore {
     });
   }
 
+  /** Every assignment. */
+  assignments(): TriggerAssignment[] {
+    return Array.from(this.storage.workflowTriggerAssignments.list(), stored => ({ ...stored }));
+  }
+
   /** The assignments whose runs use connection `gatekeeperId`. */
   assignmentsUsing(gatekeeperId: number): TriggerAssignment[] {
     let found: TriggerAssignment[] = [];
