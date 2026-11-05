@@ -96,6 +96,7 @@ describe("compileAuthoredWidget", () => {
     expect(first.clientJs).not.toContain("sourcesContent");
     expect(first.clientJs).not.toContain("/home/factorylevel/");
     expect(first.clientJs).not.toContain("telemetry.refine.dev");
+    expect(first.clientJs).toContain("useRouterMisuseWarning");
     expect(first.clientJs).not.toMatch(/(?:^|[^\w$.])__require\b|(?<![\w$.])require\s*\(/u);
     expect(first.sourceHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
     expect(first.dependencyLockHash).toMatch(/^sha256:[a-f0-9]{64}$/u);

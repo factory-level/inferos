@@ -385,13 +385,11 @@ function authoredSourcesPlugin(files: Map<string, string>) {
 function stripRefineTelemetry(source: string): string {
   // @refinedev/core is exact-pinned. Fail closed if its bundled module shape changes.
   const telemetryStart = source.indexOf("// src/components/telemetry/index.tsx");
-  const refineStart = source.indexOf("// src/components/containers/refine/index.tsx", telemetryStart + 1);
-  if (telemetryStart < 0 || refineStart < 0) {
+  const nextModuleStart = source.indexOf("// src/definitions/helpers/check-router-prop-misuse/index.ts", telemetryStart + 1);
+  if (telemetryStart < 0 || nextModuleStart < 0) {
     throw new Error("Authored widget compile refused: pinned Refine telemetry module was not found.");
   }
-  let stripped = source.slice(0, telemetryStart) + source.slice(refineStart);
-  stripped = stripped.replace(/^import React39 from "react";\s*$/mu, "");
-  stripped = stripped.replace(/^import \{ useContext as useContext26 \} from "react";\s*$/mu, "");
+  let stripped = source.slice(0, telemetryStart) + source.slice(nextModuleStart);
   const telemetryMount = "!disableTelemetryWithDefault && /* @__PURE__ */ React41.createElement(Telemetry, null)";
   if (!stripped.includes(telemetryMount)) {
     throw new Error("Authored widget compile refused: pinned Refine telemetry mount was not found.");
