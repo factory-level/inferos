@@ -8,7 +8,9 @@
 //     daily counter is consumed and, once exhausted, the request is blocked.
 
 import { canProceedWithRequest, hasMinimumBalance, LimitWindowKind } from "@gadgets/workshop-shared/limits";
-import { CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
+import type { AiModelConfig, CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
+import { getAiGatewayConfig } from "../../ai-gateway.js";
+import { getDailyAgentTurnCap, modelNotOfferedMessage } from "../../model-allowlist.js";
 import { isCloudflareLimitsEnabled, getMinimumCloudflareBalance } from "../config.js";
 import { getDailyLlmCallLimit } from "./config.js";
 import { getConnectionStatus, resolveConnection, ByokGatewayRouting } from "../cloudflare/connection-service.js";
@@ -21,9 +23,10 @@ export interface UsageCheckResult {
   reason?: string;
   /**
    * The chat error code when blocked. Unset means `usage_limit`, which offers adding credits; the
-   * plain daily cap uses `daily_turn_limit`, because there's nothing to top up.
+   * plain daily cap uses `daily_turn_limit`, because there's nothing to top up, and a model the
+   * allowlist doesn't offer uses `model_not_offered`.
    */
-  errorCode?: "daily_turn_limit";
+  errorCode?: "daily_turn_limit" | "model_not_offered";
   /** Whether to serve the request using the user's own gateway/keys rather than the platform's. */
   shouldUseByok: boolean;
   /** Whether the user is within their free-tier limit. */
@@ -131,24 +134,27 @@ export async function checkUsageAndBalance(
 }
 
 /**
- * Whether a turn on this model draws on the platform's allowance, so it's checked and counted: a
- * gateway model always; the local developer key (a managed model) only under the plain daily cap,
- * so a stage's bound can be tried locally. A person's own key or plan never does.
+ * The gate for a turn that draws on the platform's allowance (see drawsOnPlatformAllowance): a
+ * gateway-routed model MODEL_ALLOWLIST doesn't offer is refused first, without counting the turn,
+ * so a hand-added record can't reach a costlier model; otherwise checkUsageAndBalance decides. The
+ * refusal holds even where the turn might have billed the person's own gateway, which only the
+ * check after it could tell: an allowlist is for a deployment that bounds its platform's models.
  */
-export function drawsOnPlatformAllowance(env: Cloudflare.Env,
-    model: { config: { billing?: string }, profile: { managed?: boolean } }): boolean {
-  if (model.config.billing === undefined) return true;
-  return model.profile.managed === true && !isCloudflareLimitsEnabled(env);
-}
-
-/**
- * The cap from DAILY_AGENT_TURN_LIMIT, or null when unset or not a positive integer. It applies
- * only while the Cloudflare limits flow is off, which has its own allowance and top-up.
- */
-export function getDailyAgentTurnCap(env: Pick<Cloudflare.Env, "DAILY_AGENT_TURN_LIMIT">): number | null {
-  const raw = env.DAILY_AGENT_TURN_LIMIT?.trim();
-  if (!raw || !/^[1-9][0-9]*$/.test(raw)) return null;
-  return Number.parseInt(raw, 10);
+export async function checkPlatformTurn(
+  env: Cloudflare.Env,
+  model: { config: AiModelConfig },
+  userStub: DurableObjectStub<UserDurableObject>,
+): Promise<UsageCheckResult> {
+  const gateway = getAiGatewayConfig(env);
+  if (gateway && model.config.billing === undefined && !gateway.offersModel(model.config)) {
+    return {
+      ...unlimitedResult(),
+      allowed: false,
+      reason: modelNotOfferedMessage(model.config.model),
+      errorCode: "model_not_offered",
+    };
+  }
+  return checkUsageAndBalance(env, userStub);
 }
 
 /**

@@ -67,6 +67,8 @@ Dev InferLab's WAF lets the stage through only when the InferOps side and this s
 
 When the day's turns are used up, the chat says so and when they reset. Nothing else changes.
 
+On dev, a Gadget can't bind the platform's model, since the daily cap can't count a binding's calls: binding one is refused with a message saying so. A model a person adds on their own key can still be bound. A hand-added model that would run on the platform's gateway must be one dev offers.
+
 ## A company's own InferOS, from its wrapper
 
 A company's InferOS is deployed from its wrapper repository, at the InferOS revision the wrapper pins, with the same deploy as the persistent stages. Nothing below has been run against a real account yet; the dry run and the tests are the proof so far.

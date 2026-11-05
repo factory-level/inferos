@@ -13,7 +13,7 @@ covers:
   - assistant-plugins/openai
   - scripts/openai-companion.ts
   - scripts/local-secrets.ts
-updated: 2026-11-03
+updated: 2026-11-05
 ---
 
 # Personal ChatGPT connection
@@ -32,7 +32,7 @@ No Cloudflare-hosted connection exists. The bridge accepts only a `127.0.0.1` UR
 | `scripts/openai-companion.ts` | Starts the companion on an ephemeral loopback port with a random bridge secret and waits for its authenticated health check. |
 | `scripts/local-secrets.ts` | Appends local secrets (the bridge secret, `ANTHROPIC_API_KEY`) to the backend's gitignored, owner-only `.dev.vars` and removes only that addition on exit. |
 | `packages/workshop-backend/src/openai-plugin.ts` | `openAiBridgeRequest` (fixed loopback URL, bearer secret, owner header, no redirects) and `OpenAiAssistantPluginApiImpl`, the per-user RPC capability that validates every companion reply. |
-| `packages/workshop-backend/src/ai-models.ts` | `getModel` routes a `billing: 'chatgpt-plan'` model through the bridge's `/responses` endpoint, with retries and cache retention off and the plan's structured errors kept on the handle. `billing: 'api-key'` goes direct to the provider. |
+| `packages/workshop-backend/src/ai-models.ts` | `getModel` routes a `billing: 'chatgpt-plan'` model through the bridge's `/responses` endpoint, with retries and cache retention off and the plan's structured errors kept on the handle. `billing: 'api-key'` goes direct to the provider. A model with neither runs on the platform gateway, which refuses any model `MODEL_ALLOWLIST` doesn't offer (see [stage model bounds](stage-deploy.md#agent-models-and-bounds)). |
 | `packages/workshop-backend/src/local-api-models.ts` | `localApiModels`: managed Anthropic models from the local key, only when the deployment is `DEV`, limited and ordered by `MODEL_ALLOWLIST` when it's set (see [stage model bounds](stage-deploy.md#agent-models-and-bounds)). The key is never returned to the browser. |
 | `packages/workshop-backend/src/user.ts` | Model storage and validation for plan models, and the disconnected-only fallback in `#getChatContext`. |
 | `packages/workshop-backend/src/feature-flags.ts` | Resolves the `openai-chatgpt-plan-usage` UI flag from the deployment switch rather than from Flagship. |
