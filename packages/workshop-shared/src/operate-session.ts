@@ -370,7 +370,14 @@ export type OperateEvent =
    */
   | { type: "handoverSent"; handover: OperateHandover }
   /** Remove a received handover from `handovers`. Opening its board is a separate `openBoard`. */
-  | { type: "dismissHandover"; id: string };
+  | { type: "dismissHandover"; id: string }
+  /**
+   * The person now works in another company (FAC-88), appended by the kernel only, as the first
+   * entry of a log it has emptied; a dispatch that sends it is refused. Returns the page to
+   * `INITIAL_OPERATE_PAGE`: nothing of the former company's page (selection, flow position,
+   * handovers) is kept. Recorded with the actor `person`.
+   */
+  | { type: "companyChanged" };
 
 /** Who appended an event to a session. */
 export type OperateEventActor = "person" | "agent";
@@ -691,6 +698,8 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
       }
       return { ...state, handovers };
     }
+    case "companyChanged":
+      return INITIAL_OPERATE_PAGE;
   }
 }
 

@@ -33,6 +33,8 @@ export const describeAgentEvent = (event: OperateEvent, titleOf: (ref: OperateRe
     case 'handoverReceived': return `received a handover from ${event.handover.from.name}`
     case 'handoverSent': return `handed the board to ${event.handover.to.name}`
     case 'dismissHandover': return 'dismissed a handover'
+    // Recorded by the kernel only, when the person's company changes (FAC-88).
+    case 'companyChanged': return 'started afresh in another company'
   }
 }
 
