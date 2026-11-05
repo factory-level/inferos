@@ -4,6 +4,7 @@ import type { AuthoredWidgetBuildResult } from "./authored-widget-build.js";
 import {
   allowedAuthoredWidgetImports as allowedImports,
   resolveSourcePath,
+  validateAuthoredWidgetCode,
   validateAuthoredWidgetSources as validateSources,
   withBuildDeadline,
 } from "./authored-widget-validation.js";
@@ -32,6 +33,7 @@ export async function compileAuthoredWidgetWithWasm(authoredFiles: Readonly<Reco
     try {
       initializePromise ??= initialize({ wasmModule, worker: false });
       await initializePromise;
+      await withBuildDeadline(validateAuthoredWidgetCode(files), deadlineMs);
       const result = await withBuildDeadline(build({
           bundle: true,
           entryPoints: ["__gadget_entry__.tsx"],
@@ -63,6 +65,9 @@ export async function compileAuthoredWidgetWithWasm(authoredFiles: Readonly<Reco
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (message === "compile timeout") throw new Error("Build timed out.", { cause: error });
+      if (["Invalid TypeScript syntax.", "Unapproved package import.", "Denied global.",
+        "Dynamic import refused.", "Dynamic code loading refused.", "import.meta refused.",
+        "Missing default component export."].includes(message)) throw error;
       if (message.includes("Dependency outside the reviewed closure")) {
         throw new Error("Authored widget refused: dependency outside the reviewed closure.", { cause: error });
       }

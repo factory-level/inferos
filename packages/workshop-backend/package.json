@@ -24,6 +24,7 @@
     "@gadgets/observability": "workspace:*",
     "@gadgets/typed-storage": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
+    "acorn": "8.18.0",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:",
     "diff": "catalog:",

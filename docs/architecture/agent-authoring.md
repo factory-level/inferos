@@ -213,6 +213,12 @@ disabled flag refuses before reading draft files or allocating a build object. P
 15 seconds and returns no JavaScript larger than 2 MiB. These limits bound the caller and response;
 a timed-out synchronous WASM build may continue until its build object resets.
 
+The shared build checks parse each TSX source before bundling and refuse denied globals, dynamic
+imports, dynamic code loading, `import.meta`, unapproved package imports, invalid syntax and a
+missing default component export. These checks provide early feedback and defense in depth; they
+are not the sandbox boundary. Isolation and the reviewed dependency closure remain the security
+boundary for authored code.
+
 ### Authoring UI (FAC-8)
 
 The Workshop shows authoring only while `authored-widgets` is on; with it off, the editor's tabs
@@ -239,11 +245,18 @@ then its commits, so closing and reopening the editor shows the same source, and
 - **Register.** A version is registered through the existing blueprint dialog (`BlueprintModal`):
   `createBlueprint` or `updateBlueprint({updateCode})` runs the publication build, with the gadget's
   declared connections and their annotations as the binding requirements. A build refusal is the
-  publish result, announced as an alert in the server's words, and the form stays open.
+  publish result: on Create it is announced as an alert in the server's words and the form stays
+  open; on **Update code** it is an error toast in the server's words.
 - **Place.** Each install of the version (`installBlueprint`) is its own gadget with its own
   bindings. A console registers each install separately under its own name
   (`ConsoleWidgetRegistry`), and shows for each only the surfaces the kernel's
-  `listConsoleWidgetCandidates` declares for its commit.
+  `listConsoleWidgetCandidates` declares for its commit. Only installs of a **Widget**-kind version
+  are console candidates, and today an authored widget can't be published as one:
+  `assertPublishableKind` checks the source commit, which has `client.tsx` rather than `client.js`
+  and no `server.js`, so it refuses ("A Widget needs a UI, but this gadget has no client.js…"). An
+  authored widget is therefore registered as an App, and its installs run the compiled `client.js`
+  as apps; placing them as console widgets waits on that kernel check. In the authoring workspace
+  the accepted gadget's App tab has no `client.js` to show; Build preview and installs show it.
 
 `AuthoredWidgetPreview.test.tsx`, `editorTabs.test.ts`, `BlueprintModal.test.tsx` and
 `ConsoleWidgetRegistry.test.tsx` cover these. Params and events beyond the declared bindings and

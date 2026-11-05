@@ -32,6 +32,6 @@ function validateImportSpecifiers(source: string): void {
   for (const match of source.matchAll(imports)) {
     const specifier = match[1] ?? match[2];
     if (specifier.startsWith(".") || allowedImports.has(specifier)) continue;
-    throw new Error("Import is not approved.");
+    throw new Error("Unapproved package import.");
   }
 }
