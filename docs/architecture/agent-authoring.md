@@ -49,8 +49,7 @@ forms, and forces Refine telemetry off in the emitted artifact. Source checks fo
 network globals provide author feedback only; they are not a security boundary. The focused
 real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
 specific outbound request APIs from the production frame; it does not establish a general egress
-guarantee. Compilation caps source size, file size and file count, and stops an esbuild build after
-10 seconds. The build-input hash includes the
+guarantee. Compilation caps source size, file size and file count, and stops an esbuild build after 10 seconds. The build-input hash includes the
 full transitive package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including
 peer-specific snapshots. The compile core remains runner-agnostic; it does not add an editor-time
 runner or runtime egress boundary.
