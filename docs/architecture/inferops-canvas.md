@@ -6,6 +6,7 @@ covers:
   - packages/workshop-frontend/src/features/workspace-kind
   - packages/workshop-frontend/src/FeatureFlagsContext.tsx
   - packages/workshop-frontend/src/GadgetUI.tsx
+  - packages/workshop-frontend/src/GadgetUI.network-isolation.test.ts
   - packages/workshop-frontend/src/GadgetEditor.tsx
   - packages/workshop-frontend/src/features/canvas
   - packages/workshop-frontend/src/pages/inferops-canvas
